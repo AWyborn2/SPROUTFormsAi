@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - main
+      - 'claude/**'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-check:
+    name: Typecheck · build · schema
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck all packages
+        run: pnpm -r typecheck
+
+      - name: Build all packages
+        run: pnpm -r build
+
+      - name: Test api (PDF pipeline golden files)
+        run: pnpm --filter @formai/api test
+
+      - name: Smoke-test compiled API boots under plain node
+        # Guards the deploy runtime specifically: `apps/api/dist` must be able
+        # to boot with `node` (no tsx/ts-node), which requires @formai/db and
+        # @formai/shared's own dist/ output to resolve correctly too — a class
+        # of bug typecheck/tests alone won't catch, since both resolve
+        # workspace packages back to live source (see the `development`
+        # export condition in their package.json).
+        run: |
+          node apps/api/dist/index.js &
+          pid=$!
+          for i in $(seq 1 20); do
+            if curl -sSf -o /dev/null http://localhost:8787/health; then
+              echo "API booted and responded to /health"
+              kill "$pid"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "::error::API did not respond to /health within 10s"
+          kill "$pid" 2>/dev/null || true
+          exit 1
+
+      - name: Verify Drizzle migrations are up to date
+        run: |
+          pnpm --filter @formai/db generate
+          if ! git diff --exit-code -- packages/db/drizzle; then
+            echo "::error::Drizzle schema changed but migrations were not regenerated. Run 'pnpm db:generate' and commit the result."
+            exit 1
+          fi
