@@ -1,0 +1,58 @@
+The merge is resolved. Verify you actually have PR #21 before doing anything else:
+
+    git log --oneline -1        # expect the merge of 0548818 / "Merge pull request #21"
+    git status                  # clean, no merge in progress
+
+Confirm these exist — they only ship with PR #21. If any are missing, stop and say so:
+
+    apps/api/src/routes/invites.ts
+    apps/api/src/routes/dashboard.ts
+    apps/web/src/screens/invite/InviteScreen.tsx
+    packages/db/drizzle/0003_invites.sql
+    TestPDFS/HSET-FRM-011 Toolbox Talk Record print-only.pdf
+
+Confirm the journal has all four entries in order (0000, 0001_replit_auth,
+0002_magical_jack_murdock, 0003_invites):
+
+    cat packages/db/drizzle/meta/_journal.json
+
+## Migrate
+
+Your earlier diagnosis and journal fix were correct — the DB has 0000 and 0001
+recorded and `users.replit_user_id` is in place, which is exactly what this
+journal expects. No baselining, no reset.
+
+    pnpm install
+    pnpm db:migrate     # must apply ONLY 0002_magical_jack_murdock and 0003_invites
+
+If it tries to run 0001_replit_auth, STOP — the journal is wrong, don't force it.
+
+Verify:
+
+    select column_name from information_schema.columns
+    where table_schema='public' and table_name='invites' order by column_name;
+    -- expect: accepted_at, accepted_by_user_id, created_at, email, expires_at,
+    --         id, org_id, role, token
+
+    select to_regclass('public.fill_links');   -- must be non-null
+
+## Build and deploy
+
+    pnpm -r build
+
+Then deploy. Report build or boot errors rather than working around them.
+
+## Then run the acceptance test
+
+Run Step 6 (Parts 1–4) from the earlier instructions: the PDF import journey,
+the flat-PDF AI path, persistence, and invites.
+
+The single most important evidence: **the actual field names the review screen
+shows** after uploading
+`TestPDFS/1784033476341_HSET-FRM-006 Pre-Shift Information fillable.pdf`.
+List them verbatim. If you see "Facility inspection checklist" or any field not
+in the uploaded document, the fixture path is still live — stop and report it.
+That is the exact bug this release exists to fix.
+
+Report what you observe, including anything that fails. Do not describe a step as
+working if it did not.

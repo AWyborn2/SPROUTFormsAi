@@ -1,0 +1,18 @@
+/* Sprout & Spark — Elevation & shadow tokens
+   Soft, low, diffuse — premium & calm. Shadows tinted with ink (not pure black). */
+
+:root {
+  --shadow-xs:    0 1px 2px rgba(24, 27, 25, 0.05);
+  --shadow-sm:    0 1px 3px rgba(24, 27, 25, 0.06), 0 1px 2px -1px rgba(24, 27, 25, 0.05);
+  --shadow-md:    0 4px 12px -2px rgba(24, 27, 25, 0.08), 0 2px 6px -2px rgba(24, 27, 25, 0.05);
+  --shadow-lg:    0 12px 28px -8px rgba(24, 27, 25, 0.12), 0 4px 12px -6px rgba(24, 27, 25, 0.06);
+  --shadow-xl:    0 24px 56px -12px rgba(24, 27, 25, 0.16), 0 8px 20px -10px rgba(24, 27, 25, 0.08);
+  --shadow-inner: inset 0 1px 2px rgba(24, 27, 25, 0.06);
+  --shadow-focus: 0 0 0 3px var(--focus-ring);
+
+  /* Semantic */
+  --elevation-card:    var(--shadow-sm);
+  --elevation-raised:  var(--shadow-md);
+  --elevation-popover: var(--shadow-lg);
+  --elevation-modal:   var(--shadow-xl);
+}

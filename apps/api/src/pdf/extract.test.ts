@@ -1,0 +1,114 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { AnthropicMessage } from './extract.js';
+import { EXTRACTION_MAX_TOKENS, extractForm, parseExtractionResponse } from './extract.js';
+import { EXTRACT_TOOL_NAME } from './tool-schema.js';
+import { makeAcroFormPdf, makeFlatPdf } from './test-pdfs.js';
+
+/** The structured extraction a dense checklist should yield. */
+const CHECKLIST_RESULT = {
+  fields: [
+    { label: 'Site name', type: 'text', confidence: 0.98 },
+    { label: 'Inspection date', type: 'date', confidence: 0.96 },
+    {
+      label: 'Inspection items',
+      type: 'repeating_group',
+      confidence: 0.72,
+      note: 'Repeating table detected',
+      columns: [
+        { key: 'item', label: 'Item', type: 'text' },
+        { key: 'pass', label: 'Pass', type: 'boolean_yes_no' },
+        { key: 'fail', label: 'Fail', type: 'boolean_yes_no' },
+        { key: 'comments', label: 'Comments', type: 'text' },
+      ],
+    },
+    {
+      label: 'Inspector signature',
+      type: 'text',
+      confidence: 0.58,
+      note: 'Detected as text — most likely a signature field',
+    },
+  ],
+  designNotes: ['Repeating "Inspection items" table detected — extracted as columns.'],
+};
+
+function toolUseResponse(): AnthropicMessage {
+  return {
+    content: [
+      { type: 'tool_use', name: EXTRACT_TOOL_NAME, input: CHECKLIST_RESULT },
+    ],
+  };
+}
+
+function jsonFenceResponse(): AnthropicMessage {
+  return {
+    content: [
+      {
+        type: 'text',
+        text:
+          'Here are the fields I found:\n\n```json\n' +
+          JSON.stringify(CHECKLIST_RESULT, null, 2) +
+          '\n```\n',
+      },
+    ],
+  };
+}
+
+describe('extractForm — AcroForm path', () => {
+  it('reads fillable fields deterministically with zero AI calls', async () => {
+    const pdf = await makeAcroFormPdf();
+    const create = vi.fn();
+    const anthropic = { messages: { create } };
+
+    const result = await extractForm(pdf, { fileName: 'acro.pdf', anthropic });
+
+    expect(create).not.toHaveBeenCalled(); // the differentiator: no AI on AcroForms
+    expect(result.path).toBe('acroform');
+    const labels = result.fields.map((f) => f.label);
+    expect(labels).toContain('full_name');
+    expect(labels).toContain('agree_terms');
+    expect(labels).toContain('category');
+    const category = result.fields.find((f) => f.label === 'category');
+    expect(category?.type).toBe('dropdown');
+    expect(category?.options).toEqual(['Goods supplier', 'Services contractor']);
+    expect(result.fields.every((f) => f.confidence === 1)).toBe(true);
+  });
+});
+
+describe('extractForm — flat PDF AI path', () => {
+  it('extracts via the tool_use block, sizing max_tokens for dense forms', async () => {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(toolUseResponse());
+    const anthropic = { messages: { create } };
+
+    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const params = create.mock.calls[0]![0] as { max_tokens: number; tool_choice: unknown };
+    expect(params.max_tokens).toBeGreaterThanOrEqual(EXTRACTION_MAX_TOKENS);
+    expect(params.tool_choice).toEqual({ type: 'tool', name: EXTRACT_TOOL_NAME });
+
+    expect(result.path).toBe('ai');
+    const repeating = result.fields.find((f) => f.type === 'repeating_group');
+    expect(repeating?.columns?.map((c) => c.key)).toEqual(['item', 'pass', 'fail', 'comments']);
+    const sig = result.fields.find((f) => f.label === 'Inspector signature');
+    expect(sig?.confidence).toBeLessThan(0.65); // low-confidence, needs manual review
+    expect(result.designNotes.length).toBeGreaterThan(0);
+  });
+
+  it('falls back to a ```json fence when tool_choice returns text', async () => {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(jsonFenceResponse());
+    const anthropic = { messages: { create } };
+
+    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic });
+
+    expect(result.path).toBe('ai');
+    expect(result.fields).toHaveLength(CHECKLIST_RESULT.fields.length);
+    expect(result.fields.find((f) => f.type === 'repeating_group')).toBeTruthy();
+  });
+
+  it('errors when neither a tool_use block nor JSON is present', () => {
+    const message: AnthropicMessage = { content: [{ type: 'text', text: 'I could not read this.' }] };
+    expect(() => parseExtractionResponse(message)).toThrow(/extraction_failed/);
+  });
+});

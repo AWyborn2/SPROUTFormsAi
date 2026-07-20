@@ -1,0 +1,39 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+build/
+*.tsbuildinfo
+
+# env / secrets
+.env
+.env.local
+.env.*.local
+
+# drizzle
+packages/db/drizzle/meta/_journal.json.bak
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# editor / os
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.claude/
+
+# design reference bundle (source of truth, not app source)
+High fidelity app prototype.zip
+project/
+
+# local scratch PDFs for manual pipeline testing
+TestPDFS/
+
+# vite / test
+apps/web/.vite/
+coverage/

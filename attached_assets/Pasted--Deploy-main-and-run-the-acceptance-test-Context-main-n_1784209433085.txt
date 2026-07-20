@@ -1,0 +1,181 @@
+# Deploy `main` and run the acceptance test
+
+Context: `main` now includes PR #21 (merge `0548818`). It wires the PDF import wizard, round-trip export, approve/reject, dashboard, builder, org settings, token-bound invites, public fill links, and mobile submissions to the real API. It also adds a migration (`0003_invites`) and **repairs the migration journal**, which is the one part that can go wrong. Work through the steps in order.
+
+**Do not run `drizzle-kit push` at any point.** Pushing is how the database and the journal drifted apart in the first place (see Step 2). Use `migrate` only.
+
+---
+
+## Step 1 — Pull and install
+
+```bash
+git checkout main && git pull
+pnpm install
+```
+
+## Step 2 — Diagnose the database BEFORE migrating (read-only — do not skip)
+
+The previous Replit Auth change added `packages/db/drizzle/0001_replit_auth.sql` but never recorded it in `drizzle/meta/_journal.json`, which suggests the schema may have been applied with `drizzle-kit push` rather than `migrate`. The journal has since been repaired and now asserts that `0001_replit_auth` ran. If the database disagrees, `drizzle-kit migrate` will try to run it again and **fail on this line**, which has no `IF EXISTS` guard and cannot be re-run:
+
+```sql
+ALTER TABLE "users" RENAME COLUMN "workos_user_id" TO "replit_user_id";
+```
+
+Run these three read-only queries against the deployment database and report the output before changing anything:
+
+```sql
+-- A. What does drizzle think it has applied?
+select id, hash, created_at from drizzle.__drizzle_migrations order by created_at;
+
+-- B. What shape is the users table actually in?
+select column_name from information_schema.columns
+where table_schema = 'public' and table_name = 'users' order by column_name;
+
+-- C. Which of the newer tables already exist?
+select to_regclass('public.fill_links') as fill_links,
+       to_regclass('public.invites')    as invites;
+```
+
+Then match the result to one of these cases:
+
+| Query B shows | Query A's newest `created_at` | Case |
+|---|---|---|
+| `workos_user_id` | `1784040966081` (or table absent) | **Case 1 — clean** |
+| `replit_user_id` | `< 1784184000000`, or the `drizzle` schema doesn't exist | **Case 2 — drifted** |
+| `replit_user_id` | `>= 1784184377810` | **Case 3 — already current** |
+
+## Step 3 — Migrate, according to the case
+
+### Case 1 — clean (the database is still WorkOS-shaped and properly tracked)
+
+Nothing special. Run:
+
+```bash
+pnpm db:migrate
+```
+
+This applies `0001_replit_auth`, `0002` (fill_links), and `0003_invites` in order.
+
+### Case 2 — drifted (schema is ahead of what drizzle recorded)
+
+This is the case the repaired journal is designed for, and it needs a decision. **Ask the human which they want — do not choose.**
+
+**Option A — reset the database (recommended if the data is disposable).** This app is still in first-production-test, so the data is most likely throwaway forms and submissions. Cleanest and fully deterministic:
+
+```sql
+-- DESTRUCTIVE: deletes all application data. Confirm with the human first.
+drop schema public cascade;
+create schema public;
+drop schema if exists drizzle cascade;
+```
+
+```bash
+pnpm db:migrate   # replays 0000 → 0003 from scratch
+```
+
+**Option B — baseline the tracking table (keeps the data).** Tell drizzle that everything up to `0002` is already applied, so `migrate` only runs `0003_invites`. Drizzle decides what to apply by comparing `created_at`, so the row below is what makes it skip the earlier ones.
+
+First confirm from Query C that `fill_links` already exists. If it does **not**, this option is wrong — the database is missing `0002` and you should use Option A or apply `0002_magical_jack_murdock.sql` by hand first.
+
+```sql
+create schema if not exists drizzle;
+create table if not exists drizzle.__drizzle_migrations (
+  id serial primary key,
+  hash text not null,
+  created_at bigint
+);
+
+-- Marks 0000..0002 as applied. Hashes are the real sha256 of each file, so
+-- they stay correct if anything later verifies them.
+insert into drizzle.__drizzle_migrations (hash, created_at) values
+  ('b806f8d7f482d37c323369d46dee5ddee446dbf09d722b85da36e54492700e3d', 1784040966081),
+  ('b638b8a9d509b02d6fedf41f6289be94591367edeefd25dae2d6e8073afa8f4a', 1784184000000),
+  ('d79eac6561c213ba4c6635e1fd9beec2c67ee4c1ea96605eec647b6918f61b0b', 1784184377810);
+```
+
+```bash
+pnpm db:migrate   # should now apply ONLY 0003_invites
+```
+
+### Case 3 — already current
+
+Only `0003_invites` should be outstanding. Run `pnpm db:migrate` and confirm it applies exactly that one.
+
+### Verify (all cases)
+
+```sql
+select column_name from information_schema.columns
+where table_schema = 'public' and table_name = 'invites' order by column_name;
+-- expect: accepted_at, accepted_by_user_id, created_at, email, expires_at,
+--         id, org_id, role, token
+```
+
+## Step 4 — Secrets
+
+Set these in the deployment's Secrets (not in code, not in `.replit`):
+
+| Secret | Required? | What happens if unset |
+|---|---|---|
+| `DATABASE_URL` | **Yes** | Every data route answers 503. |
+| `SESSION_SECRET` | **Yes** | The API refuses to boot in production while this is at its dev default. Use a long random string. |
+| `ANTHROPIC_API_KEY` | **Yes, for the test below** | AcroForm PDFs still import; flat/scanned ones fail with a clear 422. Part 2 of the acceptance test needs this. |
+| `RESEND_API_KEY` | Optional | Invites still persist; the UI honestly reports the email wasn't sent. |
+| `RESEND_FROM_EMAIL` | Optional | Defaults to Resend's shared onboarding sender, which is unverified — set a verified sender for real delivery. |
+
+`WEB_ORIGIN` is already set to `https://sproutformsai.replit.app` in `.replit`. `STORAGE_PROVIDER` defaults to `replit`, which is correct here — object storage is injected by the platform.
+
+## Step 5 — Build and deploy
+
+```bash
+pnpm -r build
+```
+
+Then deploy (the `[deployment]` block already runs the API on 8000 and serves the web build on 5000). Report any build or boot errors rather than working around them.
+
+---
+
+## Step 6 — The acceptance test (the actual point of this deploy)
+
+This exact journey failed in the first production test — a PDF upload silently produced hardcoded fixture data — and it has never been re-run. **Nothing about this release is proven until it passes.** Report what you actually observe, including any step that fails; do not summarise it as working if it isn't.
+
+### Part 1 — AcroForm PDF (the deterministic path)
+
+1. Sign in to `https://sproutformsai.replit.app`.
+2. Go to **PDF import** and upload `TestPDFS/1784033476341_HSET-FRM-006 Pre-Shift Information fillable.pdf` from the repo.
+3. **The critical check:** the review screen must show **that PDF's real fields**. If you see a "Facility inspection checklist" or any field not in the uploaded document, the fixture path is still live — stop and report it.
+4. Confirm the browser network tab shows `POST /api/pdf/upload` followed by `POST /api/pdf/extract`. Real extraction makes both calls.
+5. Publish. The form name should default to the PDF's filename, not a hardcoded name.
+6. Confirm the new form appears in the **Form library**.
+7. Open the form, fill it in, and submit.
+8. Open the submission and click **Export filled PDF**. Download it and open it — the values must appear on the original layout.
+
+### Part 2 — flat PDF (the AI path)
+
+Repeat steps 2–5 with `TestPDFS/HSET-FRM-011 Toolbox Talk Record print-only.pdf`. This file deliberately has **no AcroForm fields**, so it must route through Claude extraction.
+
+- Expected: the review screen shows fields recognised from the printed form (site/project, date, presenter, topic, the tick boxes, the attendance table).
+- With `ANTHROPIC_API_KEY` unset, the expected result is a clear "AI extraction isn't configured" error — **not** a hang, and **not** fake results. Either outcome is a valid report; a hang or fabricated fields is a bug.
+- Note: **Export filled PDF** is expected to be disabled for this form. The AI path emits no field positions, so there's nothing to overlay values onto. That's intentional, not a defect.
+
+### Part 3 — persistence
+
+Hard-reload after the above and confirm the form, the submission, and its status all survive. Approve the submission, reload, and confirm the status stuck and the action appears in the **Audit log**.
+
+### Part 4 — invites (new, worth a look)
+
+1. Invite someone from **Team**. They should appear immediately with status `invited`.
+2. Reload — they must still be there. (They're a row in `invites`, with no user account yet.)
+3. If Resend is configured, the email should carry an `/invite/<token>` link. Opening that link logged out must show the org name and an invite prompt — **not** a redirect loop to `/login`.
+4. Revoking the invite from Team must make that link stop working.
+
+---
+
+## Report back
+
+For each part: what you did, what you saw, and whether it matched. Include the actual field names the review screen showed in Part 1 — that's the single most important piece of evidence, because it's what proves the app is reading the uploaded file rather than a fixture.
+
+## Known-good context (don't "fix" these)
+
+- **Export filled PDF is disabled for AI-extracted forms** — by design, as above.
+- **The Billing screen still shows fixture data** — Stripe isn't live; explicitly out of scope.
+- **`users.email` for signed-in users looks like `username@replit.user`** — Replit Auth doesn't expose real email addresses, so the app synthesises one. This is exactly why invites are token-based and never match on email. Do not "improve" this by matching invites to users by email address; that would let anyone claim an invited role by registering a username.

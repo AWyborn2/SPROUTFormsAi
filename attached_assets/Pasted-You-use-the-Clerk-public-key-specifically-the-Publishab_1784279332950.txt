@@ -1,0 +1,39 @@
+You use the Clerk public key (specifically the Publishable Key and the JWT Verification Key) in different parts of your application infrastructure.
+Here is exactly where each key must be placed:
+## 1. Where to Use the Publishable Key (pk_...)
+The Publishable Key handles client-side security and is safe to expose to browsers.
+
+* In your Frontend Environment File: Place it in your .env.local, .env, or production environment settings.
+* Inside Frontend Framework Wrappers: Pass it directly to the root provider component of your frontend application.
+
+## Frontend Example (Next.js / React)
+
+# .env.local
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
+
+import { ClerkProvider } from '@clerk/nextjs'
+export default function RootLayout({ children }) {
+  return (
+    // The SDK automatically looks for NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+    <ClerkProvider> 
+      <html>{children}</html>
+    </ClerkProvider>
+  )
+}
+
+## 2. Where to Use the JWT Verification Key (CLERK_JWT_KEY)
+The backend public key (PEM format) is used strictly on your backend servers.
+
+* In your Backend Environment File: Save it as CLERK_JWT_KEY in your private server environment variables.
+* Inside API Middleware / Guard Gateways: Pass it to your server-side auth middleware to decode and verify user session tokens locally.
+* In Microservices: If you have multiple services (e.g., Python, Go, Node.js APIs), every service uses this same key to safely read user data from incoming session headers without making API calls back to Clerk.
+
+## Quick Checklist
+
+| Key Type | Used In | Purpose | Exposure Level |
+|---|---|---|---|
+| Publishable Key (pk_...) | Browser / Frontend | Loads UI components and signs users in | Public (Visible to users) |
+| JWT Verification Key (PEM block) | API / Backend Server | Verifies session tokens securely without network delay | Secret (Server-side only) |
+
+To give you the exact environment variable names and code setup, what frontend framework (e.g., React, Vue, Next.js) and backend language (e.g., Node.js, Python, Go) are you currently using?
+

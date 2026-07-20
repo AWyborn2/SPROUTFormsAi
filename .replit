@@ -1,0 +1,94 @@
+modules = ["nodejs-20", "postgresql-16"]
+[agent]
+expertMode = true
+stack = "BEST_EFFORT_FALLBACK"
+integrations = ["javascript_log_in_with_replit:2.0.0"]
+
+[nix]
+channel = "stable-25_05"
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Backend API"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Backend API"
+mode = "sequential"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "API_PORT=8000 pnpm dev:api"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm dev:web"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow]]
+name = "Install Packages"
+mode = "sequential"
+author = 42981719
+
+[[workflows.workflow.tasks]]
+task = "packager.installForAll"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 5001
+externalPort = 3000
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
+
+[[ports]]
+localPort = 23636
+externalPort = 3001
+
+[deployment]
+deploymentTarget = "autoscale"
+run = ["bash", "-c", "API_PORT=8000 pnpm --filter @formai/api start & pnpm --filter @formai/web preview --host 0.0.0.0 --port 5000"]
+build = ["bash", "-c", "pnpm -r build"]
+
+[userenv]
+
+[userenv.shared]
+
+[userenv.production]
+WEB_ORIGIN = "https://sproutformsai.replit.app"
+
+[userenv.development]
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 120000
+
+[objectStorage]
+defaultBucketID = "replit-objstore-74ec84cf-31b8-4609-9dfe-ddde44a2d841"

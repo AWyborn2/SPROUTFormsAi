@@ -1,0 +1,165 @@
+/* ============================================================
+   Sprout & Spark — Color
+   Anchors: #253439 slate · #7c898b sage · #181b19 ink · #fff · #6ec792 green
+   Cool green-grey neutral ramp + fresh green accent ramp.
+   Light theme on :root; dark theme on [data-theme="dark"].
+   ============================================================ */
+
+:root {
+  /* ---- Raw brand values (never change) ---- */
+  --brand-slate: #253439;
+  --brand-sage:  #7c898b;
+  --brand-ink:   #181b19;
+  --brand-white: #ffffff;
+  --brand-green: #6ec792;
+
+  /* ---- Neutral ramp (cool green-grey) ---- */
+  --neutral-0:   #ffffff;
+  --neutral-25:  #fafbfb;
+  --neutral-50:  #f6f7f7;
+  --neutral-100: #eceeee;
+  --neutral-200: #dbdfdf;
+  --neutral-300: #c1c8c8;
+  --neutral-400: #9aa4a4;
+  --neutral-500: #7c898b;  /* brand sage */
+  --neutral-600: #5e6a6c;
+  --neutral-700: #45504f;
+  --neutral-800: #2f3a3a;
+  --neutral-850: #253439;  /* brand slate */
+  --neutral-900: #1e2726;
+  --neutral-950: #181b19;  /* brand ink */
+
+  /* ---- Green accent ramp (brand green sits at 400) ---- */
+  --green-50:  #eef8f2;
+  --green-100: #d6efe0;
+  --green-200: #aee0c4;
+  --green-300: #8fd6ad;
+  --green-400: #6ec792;  /* brand green */
+  --green-500: #4fb27b;
+  --green-600: #3a9c66;
+  --green-700: #2f7d53;
+  --green-800: #285f41;
+  --green-900: #1f3d2c;
+
+  /* ---- Status ramps (muted, grounded) ---- */
+  --amber-50:  #fbf1e0;
+  --amber-500: #c98a2b;
+  --amber-700: #8a5c13;
+  --red-50:    #fbeceb;
+  --red-500:   #c0483f;
+  --red-700:   #8c2c24;
+  --blue-50:   #e9f1f6;
+  --blue-500:  #3f6f8f;
+  --blue-700:  #2b5069;
+
+  /* ============================================================
+     SEMANTIC ALIASES — reference these in components
+     ============================================================ */
+
+  /* Surfaces */
+  --surface-page:         var(--neutral-25);
+  --surface-card:         var(--neutral-0);
+  --surface-sunken:       var(--neutral-50);
+  --surface-raised:       var(--neutral-0);
+  --surface-hover:        var(--neutral-50);
+  --surface-inverse:      var(--brand-slate);
+  --surface-inverse-deep: var(--brand-ink);
+  --surface-accent-soft:  var(--green-50);
+  --surface-overlay:      rgba(24, 27, 25, 0.44);
+
+  /* Text */
+  --text-primary:    var(--brand-ink);
+  --text-secondary:  var(--neutral-700);
+  --text-tertiary:   var(--neutral-500);
+  --text-disabled:   var(--neutral-400);
+  --text-inverse:    var(--brand-white);
+  --text-brand:      var(--brand-slate);
+  --text-accent:     var(--green-700);
+  --text-link:       var(--green-700);
+  --text-link-hover: var(--green-800);
+
+  /* Borders */
+  --border-subtle:  var(--neutral-100);
+  --border-default: var(--neutral-200);
+  --border-strong:  var(--neutral-300);
+  --border-inverse: rgba(255, 255, 255, 0.16);
+  --border-accent:  var(--green-400);
+
+  /* Accent (green) — interactive fills */
+  --accent:          var(--green-600);
+  --accent-hover:    var(--green-700);
+  --accent-active:   var(--green-800);
+  --accent-contrast: var(--brand-white);
+  --accent-ring:     rgba(110, 199, 146, 0.45);
+
+  /* Solid (slate) — primary neutral fills */
+  --solid:          var(--brand-slate);
+  --solid-hover:    var(--neutral-900);
+  --solid-active:   var(--brand-ink);
+  --solid-contrast: var(--brand-white);
+
+  /* Status */
+  --success:      var(--green-600);
+  --success-soft: var(--green-50);
+  --success-text: var(--green-800);
+  --warning:      var(--amber-500);
+  --warning-soft: var(--amber-50);
+  --warning-text: var(--amber-700);
+  --danger:       var(--red-500);
+  --danger-soft:  var(--red-50);
+  --danger-text:  var(--red-700);
+  --info:         var(--blue-500);
+  --info-soft:    var(--blue-50);
+  --info-text:    var(--blue-700);
+
+  /* Focus */
+  --focus-ring: var(--accent-ring);
+}
+
+/* ============================================================
+   DARK THEME — deep ink surfaces, brighter green accent
+   Apply with <html data-theme="dark"> or on any scoped element.
+   ============================================================ */
+[data-theme="dark"] {
+  --surface-page:         var(--brand-ink);
+  --surface-card:         var(--neutral-900);
+  --surface-sunken:       #14181a;
+  --surface-raised:       var(--neutral-800);
+  --surface-hover:        rgba(255, 255, 255, 0.04);
+  --surface-inverse:      var(--neutral-50);
+  --surface-inverse-deep: var(--neutral-0);
+  --surface-accent-soft:  rgba(110, 199, 146, 0.12);
+  --surface-overlay:      rgba(0, 0, 0, 0.6);
+
+  --text-primary:    var(--neutral-50);
+  --text-secondary:  var(--neutral-300);
+  --text-tertiary:   var(--neutral-400);
+  --text-disabled:   var(--neutral-600);
+  --text-inverse:    var(--brand-ink);
+  --text-brand:      var(--neutral-50);
+  --text-accent:     var(--green-300);
+  --text-link:       var(--green-300);
+  --text-link-hover: var(--green-200);
+
+  --border-subtle:  rgba(255, 255, 255, 0.08);
+  --border-default: rgba(255, 255, 255, 0.14);
+  --border-strong:  rgba(255, 255, 255, 0.24);
+  --border-inverse: rgba(0, 0, 0, 0.2);
+  --border-accent:  var(--green-500);
+
+  --accent:          var(--green-400);
+  --accent-hover:    var(--green-300);
+  --accent-active:   var(--green-200);
+  --accent-contrast: var(--brand-ink);
+  --accent-ring:     rgba(110, 199, 146, 0.40);
+
+  --solid:          var(--neutral-50);
+  --solid-hover:    var(--neutral-0);
+  --solid-active:   var(--neutral-200);
+  --solid-contrast: var(--brand-ink);
+
+  --success-text: var(--green-300);
+  --warning-text: #e8b866;
+  --danger-text:  #e59089;
+  --info-text:    #9dc3dc;
+}

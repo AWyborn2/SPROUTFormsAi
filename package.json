@@ -1,0 +1,31 @@
+{
+  "name": "formai-enterprise",
+  "version": "0.0.0",
+  "private": true,
+  "description": "FormAI Enterprise — multi-tenant B2B forms platform (PDF-to-form conversion + drag-and-drop builder)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.26.1",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "dev": "pnpm -r --parallel dev",
+    "dev:web": "pnpm --filter @formai/web dev",
+    "dev:api": "pnpm --filter @formai/api dev",
+    "db:generate": "pnpm --filter @formai/db generate",
+    "db:migrate": "pnpm --filter @formai/db migrate",
+    "format": "prettier --write \"**/*.{ts,tsx,css,json,md}\""
+  },
+  "devDependencies": {
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

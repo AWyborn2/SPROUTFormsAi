@@ -1,0 +1,7 @@
+- [Replit port and pnpm setup quirks](replit-port-and-pnpm-setup.md) — API must run on 8000 (8787 not an allowed port); pnpm pin/build-script quirks and their fixes.
+- [Replit Auth migration](replit-auth-migration.md) — WorkOS fully replaced by Replit Auth; session seal/unseal kept in replit-auth.ts, workos.ts is now a shim re-export for test compat.
+- [Backend API workflow fix](backend-api-workflow.md) — Backend API workflow was self-referencing (task called workflow.run "Backend API" instead of shell.exec); fixed via configureWorkflow.
+- [Replit OIDC auth](replit-oidc-auth.md) — full OIDC (openid-client v6) replaced auth_with_repl_site; PKCE state sealed into _oidc cookie, fai_session issued after callback.
+- [Custom auth / Clerk removed](clerk-auth-setup.md) — Clerk fully removed; bcryptjs email+password auth; Backend API workflow must use configureWorkflow with no waitForPort.
+- [Drizzle migration journal ordering pitfall](drizzle-migration-journal-order.md) — journal written before SQL = migration recorded but DDL never executed; fix by applying ALTER TABLE directly via psql.
+- [Replit Object Storage sidecar pattern](replit-object-storage-sidecar.md) — SDK uses local sidecar at :1106, NOT a REPLIT_DEFAULT_BUCKET_URL env var; guard with REPLIT_CLUSTER instead.

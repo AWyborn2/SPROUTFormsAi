@@ -1,0 +1,158 @@
+/* ============================================================
+   FormAI — app-local additions
+   Ported from the prototype's inline <style> block: keyboard-critical
+   focus ring, .kbd badges, motion keyframes, and interaction helpers.
+   ============================================================ */
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  font-family: var(--font-body);
+  color: var(--text-primary);
+  background: var(--surface-page);
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-heading);
+  font-weight: 700;
+  letter-spacing: -0.021em;
+}
+h5,
+h6 {
+  font-family: var(--font-heading);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Visible focus everywhere — functionally required for keyboard use. */
+*:focus-visible {
+  outline: 2.5px solid var(--brand-green);
+  outline-offset: 2px;
+  border-radius: 5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Keyboard hint badges. */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  font-family: 'Apple Symbols', 'Segoe UI Symbol', var(--font-mono), system-ui;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--surface-card);
+  border: 1px solid var(--border-default);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  line-height: 1;
+}
+.kbd-dark {
+  color: rgba(255, 255, 255, 0.82);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-bottom-width: 2px;
+}
+
+/* Thin scrollbars. */
+.fai-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--neutral-300) transparent;
+}
+.fai-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.fai-scroll::-webkit-scrollbar-thumb {
+  background: var(--neutral-300);
+  border-radius: 99px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+.fai-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--neutral-400);
+  background-clip: content-box;
+}
+
+/* Motion keyframes. */
+@keyframes faiFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes faiRise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes faiPop {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes faiToast {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes faiScan {
+  0% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(2200%);
+  }
+}
+@keyframes faiSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.fai-fade {
+  animation: faiFade var(--duration-base) var(--ease-standard);
+}
+.fai-rise {
+  animation: faiRise var(--duration-slow) var(--ease-entrance);
+}
+
+a {
+  color: var(--text-link);
+}
+a:hover {
+  color: var(--text-link-hover);
+}

@@ -1,0 +1,23 @@
+/* ============================================================
+   Sprout & Spark — Motion
+   Calm and grounded: smooth ease-outs, no bounce.
+   ============================================================ */
+
+:root {
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);      /* @kind other */
+  --ease-entrance: cubic-bezier(0.16, 1, 0.3, 1);   /* @kind other */
+  --ease-exit:     cubic-bezier(0.4, 0, 1, 1);      /* @kind other */
+  --ease-in-out:   cubic-bezier(0.65, 0, 0.35, 1);  /* @kind other */
+
+  --duration-instant: 80ms;   /* @kind other */
+  --duration-fast:    140ms;  /* @kind other */
+  --duration-base:    220ms;  /* @kind other */
+  --duration-slow:    340ms;  /* @kind other */
+  --duration-slower:  520ms;  /* @kind other */
+
+  --transition-colors: color var(--duration-fast) var(--ease-standard),
+                       background-color var(--duration-fast) var(--ease-standard),
+                       border-color var(--duration-fast) var(--ease-standard),
+                       box-shadow var(--duration-fast) var(--ease-standard);
+  --transition-transform: transform var(--duration-base) var(--ease-standard);
+}
