@@ -11,7 +11,7 @@ export const EXTRACT_TOOL_NAME = 'extract_form_fields';
 export const extractFormFieldsTool = {
   name: EXTRACT_TOOL_NAME,
   description:
-    'Return every input field found in the form. Extract repeating tables ONCE as a repeating_group with its columns — never enumerate blank paper rows. Distinguish boolean_yes_no from checkbox, and give checkbox_group a selectionType. Include a confidence score in [0,1] for every field, and add designNotes for anything a human reviewer should double-check.',
+    'Return every input field found in the form. Extract repeating tables ONCE as a repeating_group with its columns — never enumerate blank paper rows. But when a table has PRE-PRINTED item labels in its rows (a fixed-item checklist, e.g. "Engine oil level", "Park brake"), also emit those labels in order as fixedRows; the item/label column must still be the FIRST columns entry (type text). Distinguish boolean_yes_no from checkbox, and give checkbox_group a selectionType. Include a confidence score in [0,1] for every field, and add designNotes for anything a human reviewer should double-check.',
   input_schema: {
     type: 'object',
     properties: {
@@ -62,6 +62,12 @@ export const extractFormFieldsTool = {
                 },
                 required: ['key', 'label', 'type'],
               },
+            },
+            fixedRows: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'For repeating_group only — the pre-printed item labels of a fixed-item checklist table, in row order. Omit for tables with genuinely blank entry rows. When present, the item/label column must still appear as the FIRST columns entry (type text).',
             },
             note: {
               type: 'string',

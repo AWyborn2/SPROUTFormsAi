@@ -112,3 +112,105 @@ describe('extractForm — flat PDF AI path', () => {
     expect(() => parseExtractionResponse(message)).toThrow(/extraction_failed/);
   });
 });
+
+describe('extractForm — fixedRows normalization', () => {
+  const FIXED_ROWS = ['Engine oil level', 'Coolant level', 'Park brake'];
+
+  function fixedRowsResponse(field: Record<string, unknown>): AnthropicMessage {
+    return {
+      content: [
+        {
+          type: 'tool_use',
+          name: EXTRACT_TOOL_NAME,
+          input: { fields: [field], designNotes: [] },
+        },
+      ],
+    };
+  }
+
+  it('maps fixedRows through in order for a checklist table', async () => {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(
+      fixedRowsResponse({
+        label: 'Pre-start checks',
+        type: 'repeating_group',
+        confidence: 0.9,
+        fixedRows: FIXED_ROWS,
+        columns: [
+          { key: 'item', label: 'Item', type: 'text' },
+          { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+        ],
+      }),
+    );
+
+    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+
+    expect(result.fields[0]?.fixedRows).toEqual(FIXED_ROWS);
+  });
+
+  it('normalizes an absent fixedRows to undefined', async () => {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(toolUseResponse());
+
+    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+
+    expect(result.fields.every((f) => f.fixedRows === undefined)).toBe(true);
+  });
+
+  it('normalizes an empty fixedRows array to undefined', async () => {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(
+      fixedRowsResponse({
+        label: 'Open entry table',
+        type: 'repeating_group',
+        confidence: 0.85,
+        fixedRows: [],
+        columns: [{ key: 'item', label: 'Item', type: 'text' }],
+      }),
+    );
+
+    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+
+    expect(result.fields[0]?.fixedRows).toBeUndefined();
+  });
+
+  it('prepends a synthetic text label column when columns[0] is not text', async () => {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(
+      fixedRowsResponse({
+        label: 'Pre-start checks',
+        type: 'repeating_group',
+        confidence: 0.9,
+        fixedRows: FIXED_ROWS,
+        columns: [
+          { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+          { key: 'comments', label: 'Comments', type: 'text' },
+        ],
+      }),
+    );
+
+    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+
+    const columns = result.fields[0]?.columns;
+    expect(columns?.[0]).toEqual({ key: 'item', label: 'Item', type: 'text' });
+    expect(columns?.map((c) => c.key)).toEqual(['item', 'ok', 'comments']);
+    expect(result.fields[0]?.fixedRows).toEqual(FIXED_ROWS);
+  });
+
+  it('prepends a synthetic label column when fixedRows arrives with no columns at all', async () => {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(
+      fixedRowsResponse({
+        label: 'Pre-start checks',
+        type: 'repeating_group',
+        confidence: 0.9,
+        fixedRows: FIXED_ROWS,
+      }),
+    );
+
+    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+
+    expect(result.fields[0]?.columns?.[0]).toEqual({ key: 'item', label: 'Item', type: 'text' });
+    expect(result.fields[0]?.fixedRows).toEqual(FIXED_ROWS);
+  });
+});

@@ -58,7 +58,10 @@ export interface ExtractOptions {
 const EXTRACTION_PROMPT =
   'This PDF is a form. Extract every input field a person would fill in, in reading order, ' +
   'by calling the extract_form_fields tool. Extract any repeating table once as a repeating_group ' +
-  'with its columns — do not list blank rows. If a line looks like plain text but is really a ' +
+  'with its columns — do not list blank rows. However, if a table’s rows carry PRE-PRINTED item ' +
+  'labels (a fixed-item checklist such as "Engine oil level", "Park brake"), those are not blank ' +
+  'rows: emit the item labels in order as fixedRows, and still list the item/label column as the ' +
+  'FIRST columns entry (type text). If a line looks like plain text but is really a ' +
   'signature, still classify it and add a note. Give every field a confidence score.';
 
 /** Read the widget rectangle of an AcroForm field into PDF point space. */
@@ -182,7 +185,20 @@ function toColumns(raw: unknown): RepeatingColumn[] | undefined {
     }));
 }
 
+/** Ordered fixed checklist item labels; empty / non-array → absent. */
+function toFixedRows(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  return raw.map(String);
+}
+
 function normalizeField(raw: Record<string, unknown>, index: number): ExtractedField {
+  const fixedRows = toFixedRows(raw.fixedRows);
+  let columns = toColumns(raw.columns);
+  // KTD1 invariant: a fixed-row checklist's labels live in the FIRST column,
+  // which must be text. Guard against the model omitting it.
+  if (fixedRows && columns?.[0]?.type !== 'text') {
+    columns = [{ key: 'item', label: 'Item', type: 'text' }, ...(columns ?? [])];
+  }
   return {
     id: `ai_${index + 1}`,
     label: String(raw.label ?? `Field ${index + 1}`),
@@ -194,7 +210,8 @@ function normalizeField(raw: Record<string, unknown>, index: number): ExtractedF
     ...(raw.selectionType === 'single' || raw.selectionType === 'multiple'
       ? { selectionType: raw.selectionType }
       : {}),
-    ...(toColumns(raw.columns) ? { columns: toColumns(raw.columns) } : {}),
+    ...(columns ? { columns } : {}),
+    ...(fixedRows ? { fixedRows } : {}),
     ...(typeof raw.note === 'string' ? { note: raw.note } : {}),
   };
 }

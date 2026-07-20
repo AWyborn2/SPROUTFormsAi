@@ -85,6 +85,14 @@ export interface FormField {
   /** For repeating_group — the column shape, extracted once. */
   columns?: RepeatingColumn[];
 
+  /**
+   * For repeating_group — ordered pre-printed item labels of a fixed-item
+   * checklist table (e.g. "Engine oil level"). The labels live in the FIRST
+   * column (always text); absent for open row-entry tables. Never an empty
+   * array (normalized to undefined).
+   */
+  fixedRows?: string[];
+
   /** For PDF-imported fields — round-trip render anchor. */
   sourcePosition?: SourcePosition;
 
