@@ -6,9 +6,15 @@ import { FORM_FONTS, GOOGLE_FONT_FAMILIES } from '@formai/shared';
 import { BrandMark } from '../../components/BrandMark.js';
 import { fontStack } from '../../lib/branding.js';
 import { ensureFontLoaded } from '../../lib/font-loader.js';
-import { useUpdateOrg, useUploadOrgLogo } from '../../lib/data/hooks.js';
+import { useInviteMember, useUpdateOrg, useUploadOrgLogo } from '../../lib/data/hooks.js';
 import { LogoValidationError, prepareLogoUpload } from '../../lib/logo-image.js';
 import { useOnboarding } from '../../lib/onboarding.js';
+import {
+  summarizeInviteResults,
+  toRoleName,
+  type InviteResult,
+  type InviteSettled,
+} from '../../lib/onboarding-routing.js';
 import { Stepper } from './Stepper.js';
 
 type ColorKey = 'primaryColor' | 'secondaryColor' | 'accentColor';
@@ -65,14 +71,17 @@ function parseColor(input: string): string | null {
 export function BrandingScreen() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { orgName, branding, setBranding, brandStyle } = useOnboarding();
+  const { orgName, branding, invites, setBranding, brandStyle } = useOnboarding();
   const updateOrg = useUpdateOrg();
+  const inviteMember = useInviteMember();
   const uploadLogo = useUploadOrgLogo();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [logoError, setLogoError] = useState<string | null>(null);
   const [logoName, setLogoName] = useState<string | null>(null);
+  const [finishing, setFinishing] = useState(false);
+  const [inviteResults, setInviteResults] = useState<InviteResult[] | null>(null);
 
-  const orgInitial = (orgName.trim()[0] ?? 'M').toUpperCase();
+  const orgInitial = (orgName.trim()[0] ?? '?').toUpperCase();
 
   // The live preview renders `var(--org-font)`, which only names the family —
   // load it whenever the selection changes (including on resume, where the
@@ -111,20 +120,50 @@ export function BrandingScreen() {
   };
 
   /**
-   * Persist the wizard's choices via `PATCH /org`, then enter the app. An
-   * empty name is dropped so we never overwrite the auto-provisioned org
-   * name with ''; on failure we stay on this step so the user can retry.
+   * Persist the wizard's choices and stamp onboarding complete via `PATCH /org`,
+   * then send the Step 1 invite rows. An empty name is dropped so we never
+   * overwrite the auto-provisioned org name with ''; if the save itself fails we
+   * stay on this step so the user can retry.
+   *
+   * Invites are best-effort and deliberately do not gate completion — a seat
+   * limit or a bad address must not trap someone in the wizard. Because the
+   * Step 1 rows are off-screen by now, the per-email outcome renders here
+   * before the transition to the app.
    */
-  const finishSetup = () => {
+  const finishSetup = async () => {
+    setFinishing(true);
     const name = orgName.trim();
-    updateOrg.mutate(name ? { name, branding } : { branding }, {
-      onSuccess: () => navigate('/app'),
-      onError: () =>
-        toast({
-          variant: 'danger',
-          message: 'Could not save your organisation settings — try again.',
-        }),
-    });
+    const payload = { branding, onboardingComplete: true as const };
+    try {
+      await updateOrg.mutateAsync(name ? { name, ...payload } : payload);
+    } catch {
+      setFinishing(false);
+      toast({
+        variant: 'danger',
+        message: 'Could not save your organisation settings — try again.',
+      });
+      return;
+    }
+
+    const rows = invites.filter((inv) => inv.email.trim());
+    if (rows.length === 0) {
+      navigate('/app');
+      return;
+    }
+
+    const settled = await Promise.all(
+      rows.map(async (inv): Promise<InviteSettled> => {
+        const email = inv.email.trim();
+        try {
+          const value = await inviteMember.mutateAsync({ email, role: toRoleName(inv.role) });
+          return { email, ok: true, value: value ? { emailSent: value.emailSent } : null };
+        } catch (error) {
+          return { email, ok: false, error };
+        }
+      }),
+    );
+    setInviteResults(summarizeInviteResults(settled).results);
+    setFinishing(false);
   };
 
   return (
@@ -326,15 +365,66 @@ export function BrandingScreen() {
           </div>
         </div>
 
+        {inviteResults && <InviteResultsPanel results={inviteResults} />}
+
         <div className="mt-[26px] flex max-w-[1000px] items-center justify-between">
-          <Link to="/setup" className="text-[13.5px] text-text-tertiary">
-            Back
-          </Link>
-          <Button onClick={finishSetup} loading={updateOrg.isPending}>
-            Finish setup
-          </Button>
+          {inviteResults ? (
+            <span className="text-[13.5px] text-text-tertiary">
+              Your organisation is set up — you can manage invites from Team.
+            </span>
+          ) : (
+            <Link to="/setup" className="text-[13.5px] text-text-tertiary">
+              Back
+            </Link>
+          )}
+          {inviteResults ? (
+            <Button onClick={() => navigate('/app')}>Go to dashboard</Button>
+          ) : (
+            <Button onClick={() => void finishSetup()} loading={finishing}>
+              Finish setup
+            </Button>
+          )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Per-email invite outcome, shown on the finish step because the rows that
+ * produced it were entered on Step 1 and are no longer visible. Failures are
+ * informational: the org is already set up by the time this renders.
+ */
+function InviteResultsPanel({ results }: { results: InviteResult[] }) {
+  const failed = results.filter((r) => r.status === 'failed').length;
+  return (
+    <div
+      role="status"
+      className="mt-[26px] rounded-xl border border-border bg-surface-card p-[22px] shadow-sm"
+    >
+      <div className="mb-1 text-[15px] font-semibold">
+        {failed === 0
+          ? 'Invites sent'
+          : `${results.length - failed} of ${results.length} invites sent`}
+      </div>
+      <p className="mb-[13px] text-[13px] text-text-secondary">
+        Setup is complete either way — anything that failed can be retried from the Team screen.
+      </p>
+      <ul className="flex flex-col gap-[7px]">
+        {results.map((r) => (
+          <li key={r.email} className="flex items-start gap-2.5 text-[13px]">
+            <Icon
+              name={r.status === 'failed' ? 'info' : 'check'}
+              size={14}
+              className={`mt-0.5 flex-none ${r.status === 'failed' ? 'text-danger' : 'text-accent'}`}
+            />
+            <span className="min-w-0 flex-1">
+              <span className="font-medium text-text-primary">{r.email}</span>{' '}
+              <span className="text-text-tertiary">— {r.detail}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

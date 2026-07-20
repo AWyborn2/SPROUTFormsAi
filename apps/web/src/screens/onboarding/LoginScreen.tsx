@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { BrandMark } from '../../components/BrandMark.js';
 import { queryClient } from '../../lib/data/hooks.js';
+import { postSignInDestination, postSignupDestination } from '../../lib/onboarding-routing.js';
+import { takePendingInvite } from '../../lib/pending-invite.js';
 
 type Mode = 'signin' | 'signup';
 type SigninStep = 'email' | 'password';
@@ -121,7 +123,10 @@ export function LoginScreen() {
         return;
       }
       await queryClient.invalidateQueries({ queryKey: ['session'] });
-      navigate('/app');
+      // Pending invite first: `RootRedirect` consumes the token, but a direct
+      // `navigate()` from here would bypass it and strand the invitee in their
+      // own org with the invite unaccepted.
+      navigate(postSignInDestination({ pendingInvite: takePendingInvite() }));
     } catch {
       setError('Unable to connect. Please try again.');
     } finally {
@@ -152,7 +157,9 @@ export function LoginScreen() {
         return;
       }
       await queryClient.invalidateQueries({ queryKey: ['session'] });
-      navigate('/app');
+      // Invite before account kind — the picker defaults to `team`, so
+      // branching on kind first would send an invitee to `/setup`.
+      navigate(postSignupDestination({ accountKind, pendingInvite: takePendingInvite() }));
     } catch {
       setError('Unable to connect. Please try again.');
     } finally {

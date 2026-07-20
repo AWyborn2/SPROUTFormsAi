@@ -1,7 +1,7 @@
 import { createBrowserRouter, type RouteObject } from 'react-router-dom';
 import { RootLayout } from './layouts/RootLayout.js';
 import { AppShell } from './layouts/AppShell.js';
-import { RequireAuth, RootRedirect } from './components/AuthGate.js';
+import { RequireAuth, RequireSetupAccess, RootRedirect } from './components/AuthGate.js';
 import { ScreenPlaceholder } from './screens/ScreenPlaceholder.js';
 import { LoginScreen } from './screens/onboarding/LoginScreen.js';
 import { OrgSetupScreen } from './screens/onboarding/OrgSetupScreen.js';
@@ -60,6 +60,9 @@ const mobileScreens = SCREENS.filter((s) => s.shell === 'mobile');
 // Everything else (onboarding + the public /fill/:token page) stays OUTSIDE
 // RequireAuth — an external fill visitor is logged out by design.
 const standaloneScreens = SCREENS.filter((s) => s.shell !== 'app' && s.shell !== 'mobile');
+// The onboarding wizard is standalone chrome but not public: it needs a signed-in
+// owner/admin of a team org with onboarding still pending (`RequireSetupAccess`).
+const SETUP_SCREEN_KEYS = new Set(['org-setup', 'branding']);
 
 const appRoutes: RouteObject[] = appScreens.map((s) => ({
   path: s.path,
@@ -71,10 +74,13 @@ const mobileRoutes: RouteObject[] = mobileScreens.map((s) => ({
   element: elementFor(s),
 }));
 
-const standaloneRoutes: RouteObject[] = standaloneScreens.map((s) => ({
-  path: s.path,
-  element: elementFor(s),
-}));
+const standaloneRoutes: RouteObject[] = standaloneScreens
+  .filter((s) => !SETUP_SCREEN_KEYS.has(s.key))
+  .map((s) => ({ path: s.path, element: elementFor(s) }));
+
+const setupRoutes: RouteObject[] = standaloneScreens
+  .filter((s) => SETUP_SCREEN_KEYS.has(s.key))
+  .map((s) => ({ path: s.path, element: elementFor(s) }));
 
 export const router: ReturnType<typeof createBrowserRouter> = createBrowserRouter([
   {
@@ -82,6 +88,7 @@ export const router: ReturnType<typeof createBrowserRouter> = createBrowserRoute
     children: [
       { path: '/', element: <RootRedirect /> },
       ...standaloneRoutes,
+      { element: <RequireSetupAccess />, children: setupRoutes },
       {
         element: <RequireAuth />,
         children: [{ element: <AppShell />, children: appRoutes }, ...mobileRoutes],

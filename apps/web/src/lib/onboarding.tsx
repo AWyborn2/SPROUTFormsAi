@@ -1,8 +1,8 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { BrandingKit, Role } from '@formai/shared';
-import { DEFAULT_BRANDING } from '@formai/shared';
 import { orgBrandVars } from './branding.js';
 import { useSession } from './data/hooks.js';
+import { onboardingSeedFromSession, whiteLabelSeed } from './onboarding-routing.js';
 
 export type AuthMode = 'signup' | 'signin';
 
@@ -53,14 +53,6 @@ interface OnboardingCtx extends OnboardingState {
 
 const Ctx = createContext<OnboardingCtx | null>(null);
 
-/**
- * Fixture fallback shown only on unauthenticated demo surfaces (the external
- * fill flow) where no session exists. Once `/auth/me` resolves, the effect
- * below replaces it with the org's real name, so a user who never touches the
- * name field finishes onboarding without renaming their org to this fixture.
- */
-const DEMO_ORG_NAME = 'Meridian Operations';
-
 export function OnboardingProvider({ children }: { children: React.ReactNode }) {
   const { data: session } = useSession();
   const [state, setState] = useState<OnboardingState>({
@@ -68,28 +60,33 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     name: '',
     email: '',
     password: '',
-    orgName: DEMO_ORG_NAME,
-    teamSize: '50–200',
     invites: [{ email: '', role: 'builder' }],
-    branding: { ...DEFAULT_BRANDING },
-    whiteLabel: {
-      customDomain: 'forms.meridian.co',
-      senderEmail: 'noreply@meridian.co',
-      removeBadge: true,
-    },
+    whiteLabel: whiteLabelSeed(),
+    // Neutral until `/auth/me` resolves — an unauthenticated surface has no org.
+    ...onboardingSeedFromSession(null),
   });
 
-  // Adopt the session's org name unless the user has already typed their own.
-  const sessionOrgName = session?.orgName;
+  /**
+   * Seed the wizard from server truth the first time a session arrives.
+   *
+   * Without this a resumed wizard opens on `DEFAULT_BRANDING` and "Finish
+   * setup" writes those defaults straight over the kit the org already saved.
+   * Latched on first edit so a slow `/auth/me` can never overwrite typing that
+   * has already started.
+   */
+  const hydratedRef = useRef(false);
+  const editedRef = useRef(false);
   useEffect(() => {
-    if (!sessionOrgName) return;
-    setState((s) =>
-      s.orgName === '' || s.orgName === DEMO_ORG_NAME ? { ...s, orgName: sessionOrgName } : s,
-    );
-  }, [sessionOrgName]);
+    if (!session || hydratedRef.current || editedRef.current) return;
+    hydratedRef.current = true;
+    setState((s) => ({ ...s, ...onboardingSeedFromSession(session) }));
+  }, [session]);
 
   const value = useMemo<OnboardingCtx>(() => {
-    const patch = (p: Partial<OnboardingState>) => setState((s) => ({ ...s, ...p }));
+    const patch = (p: Partial<OnboardingState>) => {
+      editedRef.current = true;
+      setState((s) => ({ ...s, ...p }));
+    };
     return {
       ...state,
       setAuthMode: (authMode) => patch({ authMode }),
@@ -101,8 +98,14 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
           ...s,
           invites: s.invites.map((inv, i) => (i === index ? { ...inv, ...ip } : inv)),
         })),
-      setBranding: (bp) => setState((s) => ({ ...s, branding: { ...s.branding, ...bp } })),
-      setWhiteLabel: (wp) => setState((s) => ({ ...s, whiteLabel: { ...s.whiteLabel, ...wp } })),
+      setBranding: (bp) => {
+        editedRef.current = true;
+        setState((s) => ({ ...s, branding: { ...s.branding, ...bp } }));
+      },
+      setWhiteLabel: (wp) => {
+        editedRef.current = true;
+        setState((s) => ({ ...s, whiteLabel: { ...s.whiteLabel, ...wp } }));
+      },
       brandStyle: () => orgBrandVars(state.branding),
     };
   }, [state]);
