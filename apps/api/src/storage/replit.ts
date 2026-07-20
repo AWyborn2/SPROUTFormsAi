@@ -6,6 +6,25 @@ export type ReplitStorageClient = Client;
 let cachedClient: ReplitStorageClient | null = null;
 
 /**
+ * Renders an SDK error for inclusion in a thrown error's message. The
+ * `@replit/object-storage` SDK types its errors as `RequestError`
+ * (`{ message, statusCode }`), but reading `.message` alone has previously
+ * hidden the real diagnosis — in production the SDK surfaces only the
+ * generic "Error code undefined" via `.message` while `statusCode` (and any
+ * other field the SDK adds in a future version) went unread. Serializing
+ * the whole object, rather than just `.message`, means nothing is silently
+ * dropped. Falls back to `String()` if the object doesn't serialize
+ * cleanly (circular refs, BigInt, etc.), so this can never itself throw.
+ */
+function describeStorageError(error: unknown): string {
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+/**
  * Lazily construct the Replit Object Storage client. Returns null outside a
  * real Replit deployment. Detection uses `REPLIT_CLUSTER`, which Replit always
  * injects but is never present in local/CI environments.
@@ -32,7 +51,9 @@ export function getReplitClient(): ReplitStorageClient | null {
 export async function uploadPdf(client: ReplitStorageClient, orgId: string, bytes: Uint8Array): Promise<string> {
   const assetId = `${orgId}/${randomUUID()}.pdf`;
   const result = await client.uploadFromBytes(assetId, Buffer.from(bytes));
-  if (!result.ok) throw new Error(`storage_upload_failed: ${result.error.message}`);
+  if (!result.ok) {
+    throw new Error(`storage_upload_failed: ${describeStorageError(result.error)}`, { cause: result.error });
+  }
   return assetId;
 }
 
@@ -66,7 +87,9 @@ export async function uploadImage(
   const key = `${orgId}/logo-${randomUUID()}.${ext}`;
   // Already a Buffer on the upload path; re-wrapping would memcpy up to 2 MB.
   const result = await client.uploadFromBytes(key, Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes));
-  if (!result.ok) throw new Error(`storage_upload_failed: ${result.error.message}`);
+  if (!result.ok) {
+    throw new Error(`storage_upload_failed: ${describeStorageError(result.error)}`, { cause: result.error });
+  }
   return key;
 }
 
@@ -82,7 +105,9 @@ export async function deleteObject(
 ): Promise<void> {
   if (!key.startsWith(`${orgId}/`)) return;
   const result = await client.delete(key, { ignoreNotFound: true });
-  if (!result.ok) throw new Error(`storage_delete_failed: ${result.error.message}`);
+  if (!result.ok) {
+    throw new Error(`storage_delete_failed: ${describeStorageError(result.error)}`, { cause: result.error });
+  }
 }
 
 /**
@@ -94,9 +119,13 @@ export async function deleteObject(
  */
 export async function deletePrefix(client: ReplitStorageClient, orgId: string): Promise<void> {
   const listed = await client.list({ prefix: `${orgId}/` });
-  if (!listed.ok) throw new Error(`storage_delete_prefix_failed: ${listed.error.message}`);
+  if (!listed.ok) {
+    throw new Error(`storage_delete_prefix_failed: ${describeStorageError(listed.error)}`, { cause: listed.error });
+  }
   for (const object of listed.value) {
     const result = await client.delete(object.name, { ignoreNotFound: true });
-    if (!result.ok) throw new Error(`storage_delete_prefix_failed: ${result.error.message}`);
+    if (!result.ok) {
+      throw new Error(`storage_delete_prefix_failed: ${describeStorageError(result.error)}`, { cause: result.error });
+    }
   }
 }
