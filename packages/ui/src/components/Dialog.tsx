@@ -64,6 +64,13 @@ export function Dialog({
     }
   }, []);
 
+  // Auto-focus + focus-restore. Keyed ONLY on `open` so it fires on genuine
+  // open/close transitions and nothing else — in particular, it must not
+  // depend on `onClose`/`trap`, since callers routinely pass an unmemoized
+  // `onClose` that gets a new reference on every re-render (e.g. typing into
+  // a child <Input> re-renders the parent). If this effect re-ran on those
+  // renders it would re-run `querySelector(FOCUSABLE)?.focus()` and steal
+  // focus away from whatever the user is typing into.
   useEffect(() => {
     if (!open) return;
     restoreRef.current = document.activeElement as HTMLElement | null;
@@ -71,6 +78,19 @@ export function Dialog({
     // Focus the first focusable control, else the panel.
     const firstFocusable = panel?.querySelector<HTMLElement>(FOCUSABLE);
     (firstFocusable ?? panel)?.focus();
+
+    return () => {
+      restoreRef.current?.focus?.();
+    };
+  }, [open]);
+
+  // Escape-to-close + Tab focus-trap. Safe to re-subscribe on every
+  // `onClose`/`trap` change — unlike the effect above, re-running this one
+  // has no focus side effects, so it doesn't reproduce the focus-stealing
+  // bug. Keeping it separate also means Escape/Tab always use the latest
+  // `onClose` rather than a stale closure.
+  useEffect(() => {
+    if (!open) return;
 
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
@@ -83,7 +103,6 @@ export function Dialog({
     document.addEventListener('keydown', onKey, true);
     return () => {
       document.removeEventListener('keydown', onKey, true);
-      restoreRef.current?.focus?.();
     };
   }, [open, onClose, trap]);
 
