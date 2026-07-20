@@ -27,11 +27,16 @@ function authHeader() {
   return { cookie: `fai_session=${sealSession(tenant)}` };
 }
 
-function fakeDb(rows: unknown[]) {
+function fakeDb(rows: unknown[], planTier = 'business') {
   return {
     query: {
       auditLogEntries: {
         findMany: vi.fn().mockResolvedValue(rows),
+      },
+      // The route is gated by requirePlanFeature('auditExport'), which resolves
+      // the caller org and checks its plan tier before the handler runs.
+      organizations: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier }),
       },
     },
   } as unknown as Db;
@@ -59,6 +64,20 @@ describe('GET /audit', () => {
     try {
       const res = await fetch(`${base}/audit`, { headers: authHeader() });
       expect(res.status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s with feature_not_available when the org plan lacks auditExport', async () => {
+    mockDbValue = fakeDb([], 'team');
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/audit`, { headers: authHeader() });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; feature: string };
+      expect(body.error).toBe('feature_not_available');
+      expect(body.feature).toBe('auditExport');
     } finally {
       server.close();
     }

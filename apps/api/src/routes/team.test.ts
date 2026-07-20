@@ -56,6 +56,8 @@ function fakeDb(opts: {
   /** Throw from the `invites` insert — the pending-invite unique violation. */
   inviteInsertError?: unknown;
   insertedCompetency?: unknown;
+  /** Resolved by the seat-limit `db.select({ count }).from(memberships).where(...)` query. */
+  activeSeatCount?: number;
 }) {
   const updateSet = vi.fn();
   const deleteWhere = vi.fn();
@@ -83,6 +85,11 @@ function fakeDb(opts: {
         findMany: vi.fn().mockResolvedValue(opts.invitesFindMany ?? []),
       },
     },
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn().mockResolvedValue([{ count: opts.activeSeatCount ?? 0 }]),
+      })),
+    })),
     insert: vi.fn((table: unknown) => ({
       values: (v: unknown) => {
         insertValues(table, v);
@@ -319,12 +326,38 @@ describe('POST /team/members', () => {
     }
   });
 
+  it('403s with seat_limit_reached when active seats already fill the org seatLimit', async () => {
+    const { db, insertValues } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      organizationsFindFirst: { id: 'org-1', name: 'Solo Co', planTier: 'individual', seatLimit: 1 },
+      activeSeatCount: 1,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, {
+        method: 'POST',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'sam@x.io', role: 'builder' }),
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; seatLimit: number; seatUsed: number };
+      expect(body.error).toBe('seat_limit_reached');
+      expect(body.seatLimit).toBe(1);
+      expect(body.seatUsed).toBe(1);
+      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeUndefined();
+      expect(emailMocks.sendInviteEmail).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
   it('sends the invite email with the tenant org name and inviter after the rows commit', async () => {
     const { db } = fakeDb({
       rolePermissionsFindFirst: ADMIN_PERMS,
       usersFindMany: [],
       usersFindFirst: { id: 'u1', name: 'Ash Wyborn', email: 'ash@x.io' },
-      organizationsFindFirst: { id: 'org-1', name: 'Meridian Operations' },
+      organizationsFindFirst: { id: 'org-1', name: 'Meridian Operations', planTier: 'team', seatLimit: 5 },
     });
     mockDbValue = db;
     const { server, base } = startApp();
@@ -354,7 +387,7 @@ describe('POST /team/members', () => {
     const { db, insertValues } = fakeDb({
       rolePermissionsFindFirst: ADMIN_PERMS,
       usersFindMany: [],
-      organizationsFindFirst: { id: 'org-1', name: 'Meridian Operations' },
+      organizationsFindFirst: { id: 'org-1', name: 'Meridian Operations', planTier: 'team', seatLimit: 5 },
     });
     mockDbValue = db;
     const { server, base } = startApp();

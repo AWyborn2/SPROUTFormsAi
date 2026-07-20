@@ -42,6 +42,8 @@ function fakeDb(opts: {
   formTemplatesFindMany?: unknown[];
   insertedCompetency?: unknown;
   insertedRule?: unknown;
+  /** Every route is gated by requirePlanFeature('competencyGating') — enterprise-only. */
+  planTier?: string;
 }) {
   const deleteWhere = vi.fn();
   const updateSet = vi.fn();
@@ -49,6 +51,9 @@ function fakeDb(opts: {
 
   const db = {
     query: {
+      organizations: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: opts.planTier ?? 'enterprise' }),
+      },
       competencies: {
         findFirst: vi.fn().mockResolvedValue(opts.competenciesFindFirst),
         findMany: vi.fn().mockResolvedValue(opts.competenciesFindMany ?? []),
@@ -95,6 +100,20 @@ afterEach(() => {
 });
 
 describe('GET /competencies', () => {
+  it('403s with feature_not_available when the org plan lacks competencyGating', async () => {
+    mockDbValue = fakeDb({ planTier: 'business' }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies`, { headers: authHeader() });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; feature: string };
+      expect(body.error).toBe('feature_not_available');
+      expect(body.feature).toBe('competencyGating');
+    } finally {
+      server.close();
+    }
+  });
+
   it('lists org-scoped competencies', async () => {
     mockDbValue = fakeDb({
       competenciesFindMany: [{ id: 'c1', name: 'First Aid', code: 'HLTAID011', holders: 52 }],
