@@ -2,13 +2,14 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
 import type { BrandingKit } from '@formai/shared';
-import { FORM_FONTS, GOOGLE_FONT_FAMILIES } from '@formai/shared';
+import { DEFAULT_BRANDING, FORM_FONTS, GOOGLE_FONT_FAMILIES } from '@formai/shared';
 import { BrandMark } from '../../components/BrandMark.js';
 import { fontStack } from '../../lib/branding.js';
 import { ensureFontLoaded } from '../../lib/font-loader.js';
 import { useInviteMember, useUpdateOrg, useUploadOrgLogo } from '../../lib/data/hooks.js';
 import { LogoValidationError, prepareLogoUpload } from '../../lib/logo-image.js';
 import { useOnboarding } from '../../lib/onboarding.js';
+import { extractPaletteFromImageFile, mergeExtractedPalette } from '../../lib/palette-extract.js';
 import {
   summarizeInviteResults,
   toRoleName,
@@ -110,7 +111,24 @@ export function BrandingScreen() {
           ? err.message
           : 'That logo could not be uploaded — you can continue and add one later.',
       );
+      return;
     }
+    await prefillPalette(file);
+  };
+
+  /**
+   * Pre-fill the palette from the logo's own colours (R7). Read from the
+   * local file rather than the uploaded URL — the bytes are already here and
+   * a same-origin blob can't taint the canvas. Deliberately outside the
+   * upload try/catch: extraction is cosmetic, so a failure must never surface
+   * as an upload error. Only fields still at their defaults are written, so a
+   * colour the user picked by hand survives a re-upload, and every field
+   * stays editable afterwards.
+   */
+  const prefillPalette = async (file: File) => {
+    const extracted = await extractPaletteFromImageFile(file);
+    const patch = mergeExtractedPalette(branding, extracted, DEFAULT_BRANDING);
+    if (Object.keys(patch).length > 0) setBranding(patch);
   };
 
   const removeLogo = () => {
@@ -541,7 +559,9 @@ function FontPicker({ value, onPick }: { value: string; onPick: (family: string)
                   onClick={() => select(family)}
                   onMouseEnter={() => setActive(i)}
                   className="flex w-full items-center justify-between px-[11px] py-[7px] text-left text-[13px] text-text-primary"
-                  style={{ background: i === active ? 'var(--surface-accent-soft)' : 'transparent' }}
+                  style={{
+                    background: i === active ? 'var(--surface-accent-soft)' : 'transparent',
+                  }}
                 >
                   <span className="truncate">{family}</span>
                   {value === family && (
