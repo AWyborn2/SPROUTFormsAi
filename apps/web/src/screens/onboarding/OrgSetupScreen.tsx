@@ -1,7 +1,8 @@
 import { Link, useNavigate } from 'react-router-dom';
-import { Button, Icon, Input, Select } from '@formai/ui';
+import { Button, Icon, Input, Select, useToast } from '@formai/ui';
 import type { Role } from '@formai/shared';
 import { BrandMark } from '../../components/BrandMark.js';
+import { useUpdateOrg } from '../../lib/data/hooks.js';
 import { useOnboarding } from '../../lib/onboarding.js';
 import { Stepper } from './Stepper.js';
 
@@ -16,7 +17,28 @@ const INVITE_ROLES: Array<{ label: string; value: Role }> = [
 /** Step 1 — create the organisation and invite the first teammates. */
 export function OrgSetupScreen() {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const { orgName, teamSize, invites, patch, addInvite, updateInvite } = useOnboarding();
+  const updateOrg = useUpdateOrg();
+
+  /**
+   * Persist the org identity before moving on. Step 2 is where people abandon,
+   * and the finish-branding nudge reopens Step 2 only — so a rename and team
+   * size typed here would otherwise be lost with no way back to them. Invite
+   * rows stay local until "Finish setup" sends them. An empty name is dropped
+   * rather than overwriting the auto-provisioned one with ''.
+   */
+  const continueToBranding = () => {
+    const name = orgName.trim();
+    updateOrg.mutate(name ? { name, teamSize } : { teamSize }, {
+      onSuccess: () => navigate('/setup/branding'),
+      onError: () =>
+        toast({
+          variant: 'danger',
+          message: 'Could not save your organisation details — try again.',
+        }),
+    });
+  };
 
   return (
     <div className="fai-fade flex min-h-screen flex-col items-center px-6 py-12">
@@ -39,7 +61,7 @@ export function OrgSetupScreen() {
           <div className="flex flex-col gap-[18px]">
             <Input
               label="Organisation name"
-              placeholder="Meridian Operations"
+              placeholder="Acme Corp"
               required
               value={orgName}
               onChange={(e) => patch({ orgName: e.target.value })}
@@ -91,7 +113,9 @@ export function OrgSetupScreen() {
             <Link to="/login" className="text-[13.5px] text-text-tertiary">
               Back
             </Link>
-            <Button onClick={() => navigate('/setup/branding')}>Continue to branding</Button>
+            <Button onClick={continueToBranding} loading={updateOrg.isPending}>
+              Continue to branding
+            </Button>
           </div>
         </div>
       </div>

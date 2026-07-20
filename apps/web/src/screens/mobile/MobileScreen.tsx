@@ -1,9 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Icon, useToast } from '@formai/ui';
 import type { SubmissionValue } from '@formai/shared';
 import { useForm, useForms, useSession, useSubmissions, useSubmitInspection } from '../../lib/data/hooks.js';
 import type { FormDetail, FormSummary, SubmissionRow } from '../../lib/data/types.js';
+import { orgBrandVars } from '../../lib/branding.js';
+import { ensureFontLoaded } from '../../lib/font-loader.js';
 import { useOnboarding } from '../../lib/onboarding.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
 import { answeredCount, publishedForms } from './mobile-fill.js';
@@ -60,18 +62,30 @@ const PHONE_LIGHT_TOKENS = {
 } as React.CSSProperties;
 
 /**
+ * Translucent overlay for chips and scrims sitting on `--org-primary`. Derived
+ * from the resolved primary ink rather than hardcoded white, so it stays
+ * visible whichever way the contrast resolves — a white scrim vanishes on a
+ * light brand primary. Unsupported `color-mix` degrades to no background,
+ * which is harmless: these are decorative, never the only cue.
+ */
+const SCRIM = 'color-mix(in srgb, var(--org-primary-text) 16%, transparent)';
+
+/**
  * Mobile field app (responsive web). A device-framed fill flow — home /
  * activity tabs, a picker over the org's real published forms, the shared
  * field renderer for the selected form's fields, and a submit that posts a
  * real submission (`POST /submissions`) into the same web submissions table.
  * The phone interior uses a fixed light device palette (not the app's theme
  * vars) so it renders as a real device regardless of the app's dark toggle;
- * org brand still flows via the `--org-*` variables.
+ * org brand still flows via the `--org-*` variables — taken from the session
+ * (server truth for this authed surface) rather than the wizard's draft
+ * state, and with the chosen font actually loaded, so this matches the public
+ * fill view's fidelity (R11).
  */
 export function MobileScreen() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { orgName, brandStyle } = useOnboarding();
+  const { orgName } = useOnboarding();
   const { data: session } = useSession();
   const { data: forms = [], isLoading: formsLoading } = useForms();
   const { data: submissions = [] } = useSubmissions();
@@ -85,6 +99,17 @@ export function MobileScreen() {
   const [lastRef, setLastRef] = useState<string | null>(null);
 
   const { data: form } = useForm(formId ?? undefined);
+
+  /**
+   * Naming the family in `--org-font` renders it only if its stylesheet is on
+   * the page. The public fill shell injects it on its own; this surface has to
+   * ask too, or it silently falls back and loses fidelity parity with the
+   * public view (R11).
+   */
+  const formFont = session?.branding?.formFont;
+  useEffect(() => {
+    if (formFont) ensureFontLoaded(formFont);
+  }, [formFont]);
 
   const userName = session?.userName ?? '';
   const firstName = userName.split(' ')[0] ?? userName;
@@ -187,15 +212,15 @@ export function MobileScreen() {
         />
         <div
           className="relative flex h-full w-full flex-col overflow-hidden rounded-[44px]"
-          style={{ background: '#f2f5f4', ...PHONE_LIGHT_TOKENS, ...brandStyle() }}
+          style={{ background: '#f2f5f4', ...PHONE_LIGHT_TOKENS, ...orgBrandVars(session?.branding) }}
         >
           {/* Status bar */}
           <div
             className="flex h-[52px] flex-none items-end justify-between px-8 pb-2"
-            style={{ background: 'var(--org-primary)' }}
+            style={{ background: 'var(--org-primary)', color: 'var(--org-primary-text)' }}
           >
-            <span className="font-ui text-[13px] font-bold text-white">9:41</span>
-            <span className="flex items-center gap-[7px] text-white">
+            <span className="font-ui text-[13px] font-bold">9:41</span>
+            <span className="flex items-center gap-[7px]">
               <Icon name="signal" size={15} />
               <Icon name="wifi" size={15} />
               <Icon name="battery-medium" size={20} />
@@ -264,15 +289,21 @@ function HomeView({
   const dateLong = new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex-none px-[22px] pb-5 pt-1 text-white" style={{ background: 'var(--org-primary)' }}>
+      <div
+        className="flex-none px-[22px] pb-5 pt-1"
+        style={{ background: 'var(--org-primary)', color: 'var(--org-primary-text)' }}
+      >
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-[12.5px] text-white/60">{dateLong}</div>
+            <div className="text-[12.5px] opacity-60">{dateLong}</div>
             <div className="mt-0.5 text-[23px] font-bold" style={{ fontFamily: 'var(--org-font)' }}>
               Hi {firstName || 'there'}
             </div>
           </div>
-          <span className="grid h-[42px] w-[42px] place-items-center rounded-full bg-white/[0.16] font-heading text-[15px] font-bold text-white">
+          <span
+            className="grid h-[42px] w-[42px] place-items-center rounded-full font-heading text-[15px] font-bold"
+            style={{ background: SCRIM }}
+          >
             {initials}
           </span>
         </div>
@@ -334,11 +365,14 @@ function HomeView({
 function ActivityView({ activity }: { activity: SubmissionRow[] }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex-none px-[22px] pb-[18px] pt-1.5 text-white" style={{ background: 'var(--org-primary)' }}>
+      <div
+        className="flex-none px-[22px] pb-[18px] pt-1.5"
+        style={{ background: 'var(--org-primary)', color: 'var(--org-primary-text)' }}
+      >
         <div className="text-[21px] font-bold" style={{ fontFamily: 'var(--org-font)' }}>
           Activity
         </div>
-        <div className="mt-0.5 text-[12px] text-white/60">Latest submissions in your org</div>
+        <div className="mt-0.5 text-[12px] opacity-60">Latest submissions in your org</div>
       </div>
       <div className="flex flex-1 flex-col gap-2.5 overflow-auto p-[16px_18px]">
         {activity.length === 0 && (
@@ -403,12 +437,16 @@ function FillView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex-none px-4 pb-4 pt-1.5 text-white" style={{ background: 'var(--org-primary)' }}>
+      <div
+        className="flex-none px-4 pb-4 pt-1.5"
+        style={{ background: 'var(--org-primary)', color: 'var(--org-primary-text)' }}
+      >
         <div className="flex items-center gap-2.5">
           <button
             onClick={onBack}
             aria-label="Back to forms"
-            className="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px] bg-white/[0.12] text-white"
+            className="grid h-[34px] w-[34px] flex-none place-items-center rounded-[10px]"
+            style={{ background: SCRIM }}
           >
             <Icon name="chevron-left" size={20} />
           </button>
@@ -416,13 +454,16 @@ function FillView({
             <div className="truncate text-[16px] font-bold" style={{ fontFamily: 'var(--org-font)' }}>
               {form.name}
             </div>
-            <div className="truncate text-[11.5px] text-white/60">{form.dept}</div>
+            <div className="truncate text-[11.5px] opacity-60">{form.dept}</div>
           </div>
-          <span className="flex-none text-[12.5px] font-bold text-white">
+          <span className="flex-none text-[12.5px] font-bold">
             {done}/{total}
           </span>
         </div>
-        <div className="mt-[13px] h-1.5 overflow-hidden rounded-pill bg-white/[0.16]">
+        <div
+          className="mt-[13px] h-1.5 overflow-hidden rounded-pill"
+          style={{ background: SCRIM }}
+        >
           <div
             className="h-full rounded-pill transition-[width] duration-300"
             style={{ width: progressPct, background: 'var(--org-accent)' }}
@@ -495,7 +536,10 @@ function DoneView({
   onBackHome: () => void;
 }) {
   return (
-    <div className="flex min-h-0 flex-1 flex-col" style={{ background: 'var(--org-primary)' }}>
+    <div
+      className="flex min-h-0 flex-1 flex-col"
+      style={{ background: 'var(--org-primary)', color: 'var(--org-primary-text)' }}
+    >
       <div className="flex flex-1 flex-col items-center justify-center overflow-auto p-[28px_24px] text-center">
         <span
           className="fai-rise mb-5 grid h-[76px] w-[76px] place-items-center rounded-full"
@@ -503,27 +547,33 @@ function DoneView({
         >
           <Icon name="check" size={40} color="var(--org-accent-text)" />
         </span>
-        <div className="text-[22px] font-bold text-white" style={{ fontFamily: 'var(--org-font)' }}>
+        <div className="text-[22px] font-bold" style={{ fontFamily: 'var(--org-font)' }}>
           {formName} submitted
         </div>
-        <div className="mt-2 max-w-[280px] text-[13.5px] leading-[1.5] text-white/70">
+        <div className="mt-2 max-w-[280px] text-[13.5px] leading-[1.5] opacity-70">
           Synced to {orgName} — your team can review it now.
         </div>
 
-        <div className="mt-6 w-full rounded-[16px] border border-white/[0.12] bg-white/[0.08] p-4 text-left">
+        <div
+          className="mt-6 w-full rounded-[16px] border p-4 text-left"
+          style={{ background: SCRIM, borderColor: SCRIM }}
+        >
           <div className="flex items-center gap-[11px]">
-            <Icon name="cloud-check" size={22} className="flex-none" color="#6ec792" />
+            <Icon name="cloud-check" size={22} className="flex-none" color="var(--org-accent)" />
             <div className="flex-1">
-              <div className="text-[13.5px] font-bold text-white">Uploaded</div>
-              <div className="mt-px text-[11.5px] text-white/60">1 submission · synced just now</div>
+              <div className="text-[13.5px] font-bold">Uploaded</div>
+              <div className="mt-px text-[11.5px] opacity-60">1 submission · synced just now</div>
             </div>
           </div>
         </div>
 
-        <div className="mt-4 inline-flex items-center gap-3 rounded-[12px] bg-white/[0.06] p-[11px_18px]">
+        <div
+          className="mt-4 inline-flex items-center gap-3 rounded-[12px] p-[11px_18px]"
+          style={{ background: SCRIM }}
+        >
           <div className="text-left">
-            <div className="font-mono text-[10px] tracking-[0.05em] text-white/50">REFERENCE</div>
-            <div className="max-w-[220px] truncate font-heading text-[14px] font-bold text-white">{lastRef}</div>
+            <div className="font-mono text-[10px] tracking-[0.05em] opacity-50">REFERENCE</div>
+            <div className="max-w-[220px] truncate font-heading text-[14px] font-bold">{lastRef}</div>
           </div>
         </div>
       </div>
@@ -539,7 +589,8 @@ function DoneView({
         </button>
         <button
           onClick={onBackHome}
-          className="h-11 w-full rounded-[13px] border border-white/20 bg-transparent font-ui text-[14px] font-semibold text-white"
+          className="h-11 w-full rounded-[13px] border bg-transparent font-ui text-[14px] font-semibold"
+          style={{ borderColor: 'color-mix(in srgb, var(--org-primary-text) 30%, transparent)' }}
         >
           Back to forms
         </button>

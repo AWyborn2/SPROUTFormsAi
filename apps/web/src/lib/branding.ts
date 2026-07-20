@@ -1,20 +1,38 @@
 /**
  * Org-brand → CSS custom-property mapping, shared by every surface that
  * renders inside a tenant's brand: the onboarding/white-label previews (via
- * `useOnboarding().brandStyle`) and the public fill page (which gets the
- * serving org's kit from `GET /fill/:token`). Pure so it's unit-testable.
+ * `useOnboarding().brandStyle`), the public fill page (which gets the serving
+ * org's kit from `GET /fill/:token`), and the authed surfaces — the app shell
+ * and the mobile fill screen — which take the kit from the session. Pure so
+ * it's unit-testable.
  */
 import type { CSSProperties } from 'react';
-import type { BrandingKit, FormFont } from '@formai/shared';
-import { contrastText, DEFAULT_BRANDING } from '@formai/shared';
+import type { BrandingKit, FontCategory } from '@formai/shared';
+import { contrastText, DEFAULT_BRANDING, findGoogleFont } from '@formai/shared';
 
-/** Web font stacks for the brand-kit font choices. */
-export const FONT_STACK: Record<FormFont, string> = {
-  Inter: "'Inter',sans-serif",
-  Sora: "'Sora',sans-serif",
-  Spectral: "'Spectral',serif",
-  'JetBrains Mono': "'JetBrains Mono',monospace",
+/**
+ * Generic fallback stacks by catalog category — what renders while the Google
+ * Fonts stylesheet is in flight, and permanently if it never arrives.
+ */
+const FALLBACK: Record<FontCategory, string> = {
+  'sans-serif': 'system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif',
+  serif: 'Georgia, "Times New Roman", Times, serif',
+  monospace: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+  cursive: '"Segoe Script", "Brush Script MT", cursive',
 };
+
+/**
+ * CSS `font-family` value for any catalog family — the fixed four-entry record
+ * this replaced could not express the widened picker. An unknown family
+ * (defensive: the kit may arrive from the network, or predate a catalog
+ * revision) falls back to the product default rather than emitting the
+ * unvalidated name into a stack.
+ */
+export function fontStack(family: string): string {
+  const entry = findGoogleFont(family) ?? findGoogleFont(DEFAULT_BRANDING.formFont);
+  if (!entry) return FALLBACK['sans-serif'];
+  return `"${entry.family}", ${FALLBACK[entry.category]}`;
+}
 
 /**
  * CSS custom properties applying a brand kit to a subtree — the `--org-*`
@@ -27,8 +45,12 @@ export function orgBrandVars(branding?: BrandingKit | null): CSSProperties {
   const b = branding ?? DEFAULT_BRANDING;
   return {
     '--org-primary': b.primaryColor,
+    // Both brand colours carry text — the accent on primary-action buttons,
+    // the primary behind fill mastheads and the chrome's org identity — so
+    // both get their ink resolved rather than assuming a dark brand colour.
+    '--org-primary-text': contrastText(b.primaryColor),
     '--org-accent': b.accentColor,
     '--org-accent-text': contrastText(b.accentColor),
-    '--org-font': FONT_STACK[b.formFont] ?? FONT_STACK.Inter,
+    '--org-font': fontStack(b.formFont),
   } as CSSProperties;
 }

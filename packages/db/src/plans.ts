@@ -8,7 +8,10 @@ export type PlanTier = 'individual' | 'team' | 'business' | 'enterprise';
 export type AccountKind = 'individual' | 'team';
 
 export interface PlanFeatures {
+  /** Custom branding (logo, colors, fonts) on forms. Free at every tier. */
   branding: boolean;
+  /** Remove "Powered by" attribution / full white-label. Business+ only. */
+  whiteLabel: boolean;
   sso: boolean;
   auditExport: boolean;
   competencyGating: boolean;
@@ -22,19 +25,43 @@ export interface PlanConfig {
 export const PLAN_CONFIG: Record<PlanTier, PlanConfig> = {
   individual: {
     seatLimit: 1,
-    features: { branding: false, sso: false, auditExport: false, competencyGating: false },
+    features: {
+      branding: true,
+      whiteLabel: false,
+      sso: false,
+      auditExport: false,
+      competencyGating: false,
+    },
   },
   team: {
     seatLimit: 5,
-    features: { branding: false, sso: false, auditExport: false, competencyGating: false },
+    features: {
+      branding: true,
+      whiteLabel: false,
+      sso: false,
+      auditExport: false,
+      competencyGating: false,
+    },
   },
   business: {
     seatLimit: 15,
-    features: { branding: true, sso: false, auditExport: true, competencyGating: false },
+    features: {
+      branding: true,
+      whiteLabel: true,
+      sso: false,
+      auditExport: true,
+      competencyGating: false,
+    },
   },
   enterprise: {
     seatLimit: 100,
-    features: { branding: true, sso: true, auditExport: true, competencyGating: true },
+    features: {
+      branding: true,
+      whiteLabel: true,
+      sso: true,
+      auditExport: true,
+      competencyGating: true,
+    },
   },
 };
 

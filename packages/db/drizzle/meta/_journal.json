@@ -50,6 +50,13 @@
       "when": 1753056000000,
       "tag": "0006_plan_tiers",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1784559366081,
+      "tag": "0007_signup_onboarding",
+      "breakpoints": true
     }
   ]
 }

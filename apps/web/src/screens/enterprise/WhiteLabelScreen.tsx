@@ -1,152 +1,171 @@
+import { useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { Button, Icon, Input, Switch, useToast } from '@formai/ui';
-import type { BrandingKit, FormFont } from '@formai/shared';
-import { useUpdateWhiteLabel } from '../../lib/data/hooks.js';
+import { BrandColorFields } from '../../components/branding/BrandColorFields.js';
+import { FontPicker } from '../../components/branding/FontPicker.js';
+import { LogoUploadControl } from '../../components/branding/LogoUploadControl.js';
+import { useBilling, useUpdateWhiteLabel } from '../../lib/data/hooks.js';
+import { ensureFontLoaded } from '../../lib/font-loader.js';
 import { useOnboarding } from '../../lib/onboarding.js';
-
-type ColorKey = 'primaryColor' | 'accentColor';
-
-interface SwatchRow {
-  key: ColorKey;
-  label: string;
-  presets: string[];
-}
-
-const SWATCH_ROWS: SwatchRow[] = [
-  { key: 'primaryColor', label: 'Primary', presets: ['#253439', '#1f3a5f', '#3a2f5f', '#2f5f3a', '#181b19'] },
-  { key: 'accentColor', label: 'Accent', presets: ['#6ec792', '#f0a500', '#e0603a', '#3f8fd0', '#8a5cf0'] },
-];
-
-const FONT_OPTIONS: Array<{ name: FormFont; stack: string }> = [
-  { name: 'Inter', stack: "'Inter',sans-serif" },
-  { name: 'Sora', stack: "'Sora',sans-serif" },
-  { name: 'Spectral', stack: "'Spectral',serif" },
-];
+import { brandingBlockAccess, whiteLabelBlockAccess } from '../../lib/plan-gating.js';
 
 /**
- * White-label settings — the org branding editor with a live external-form
- * preview. Edits update the app-wide onboarding/branding context, so the
- * preview here reflects them immediately; external visitors on the fill page
+ * Branding settings — the post-onboarding editor for the org's kit (R10), with
+ * a live external-form preview.
+ *
+ * Two blocks with different entitlements. The **branding block** (logo,
+ * colours, font) is free at every tier and shares its controls with the
+ * onboarding wizard, so anything set in the wizard can be changed here — this
+ * is the only place a logo is editable after setup. The **white-label block**
+ * (custom domain, sender address, badge removal) stays plan-gated on
+ * `features.whiteLabel`; since branding went free the `PATCH /org` gate was
+ * removed, making this the single enforcement site for R9's paid half.
+ *
+ * Edits update the app-wide onboarding/branding context, so the preview
+ * reflects them immediately; external visitors on the fill page
  * (`/fill/:token`) only see the new branding once Save persists the kit to
  * `organizations.branding` via `PATCH /org` (the API writes the audit entry).
  */
 export function WhiteLabelScreen() {
   const { toast } = useToast();
   const { orgName, branding, setBranding, whiteLabel, setWhiteLabel, brandStyle } = useOnboarding();
+  const { data: billing } = useBilling();
   const save = useUpdateWhiteLabel();
-  const logoGlyph = (orgName.trim()[0] ?? 'M').toUpperCase();
+
+  const brandingAccess = brandingBlockAccess(billing?.features);
+  const whiteLabelAccess = whiteLabelBlockAccess(billing?.features);
+  const logoGlyph = (orgName.trim()[0] ?? '?').toUpperCase();
+
+  // The preview renders `var(--org-font)`, which only names the family.
+  useEffect(() => {
+    ensureFontLoaded(branding.formFont);
+  }, [branding.formFont]);
 
   return (
     <div className="fai-rise mx-auto grid max-w-[1000px] grid-cols-1 items-start gap-6 p-[30px_28px_60px] lg:grid-cols-2">
-      {/* Editor */}
-      <div className="rounded-xl border border-border bg-surface-card p-[26px] shadow-sm">
-        <div className="mb-[5px] font-heading text-[17px] font-bold">External form branding</div>
-        <p className="mb-[22px] text-[13.5px] text-text-secondary">
-          Applied to every external-facing form and its confirmation email.
-        </p>
+      <div className="flex flex-col gap-6">
+        {/* Branding block — free at every tier */}
+        <div className="rounded-xl border border-border bg-surface-card p-[26px] shadow-sm">
+          <div className="mb-[5px] font-heading text-[17px] font-bold">External form branding</div>
+          <p className="mb-[22px] text-[13.5px] text-text-secondary">
+            Applied to every external-facing form and its confirmation email. Included on every
+            plan.
+          </p>
 
-        {/* Colours */}
-        <div className="mb-[11px] text-[13px] font-semibold">Brand colours</div>
-        <div className="mb-5 flex flex-col gap-[13px]">
-          {SWATCH_ROWS.map((row) => (
-            <div key={row.key}>
-              <div className="mb-[7px] flex justify-between">
-                <span className="text-[12.5px] text-text-secondary">{row.label}</span>
-                <span className="font-mono text-[11.5px] text-text-tertiary">
-                  {branding[row.key].toUpperCase()}
-                </span>
-              </div>
-              <div className="flex gap-[7px]">
-                {row.presets.map((hex) => {
-                  const selected = branding[row.key].toLowerCase() === hex.toLowerCase();
-                  return (
-                    <button
-                      key={hex}
-                      onClick={() => setBranding({ [row.key]: hex } as Partial<BrandingKit>)}
-                      aria-label={`${row.label} ${hex}`}
-                      aria-pressed={selected}
-                      className="h-[30px] w-[38px] rounded-lg shadow-xs"
-                      style={{
-                        background: hex,
-                        border: `2px solid ${selected ? 'var(--brand-ink)' : 'rgba(0,0,0,.08)'}`,
-                      }}
-                    />
-                  );
-                })}
-              </div>
+          <fieldset disabled={!brandingAccess.editable} className="border-0 p-0">
+            {/* Logo */}
+            <div className="mb-[9px] text-[13px] font-semibold">Logo</div>
+            <div className="mb-[22px]">
+              <LogoUploadControl
+                value={branding.logoAssetUrl ?? null}
+                initial={logoGlyph}
+                swatchColor={branding.primaryColor}
+                onChange={(url) => setBranding({ logoAssetUrl: url })}
+              />
             </div>
-          ))}
-        </div>
 
-        {/* Font */}
-        <div className="mb-[9px] text-[13px] font-semibold">Form font</div>
-        <div className="mb-5 flex gap-2">
-          {FONT_OPTIONS.map((f) => {
-            const selected = branding.formFont === f.name;
-            return (
-              <button
-                key={f.name}
-                onClick={() => setBranding({ formFont: f.name })}
-                aria-pressed={selected}
-                className="fai-chip-btn flex-1 rounded-md border-[1.5px] px-2 py-[11px] text-center"
-                style={{
-                  borderColor: selected ? 'var(--border-accent)' : 'var(--border-default)',
-                  background: selected ? 'var(--surface-accent-soft)' : 'var(--surface-card)',
-                }}
-              >
-                <span className="block text-[17px] font-semibold" style={{ fontFamily: f.stack }}>
-                  Ag
-                </span>
-                <span className="mt-[3px] block text-[11px] text-text-tertiary">{f.name}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Domain / sender / badge */}
-        <div className="flex flex-col gap-3.5">
-          <Input
-            label="Custom form domain"
-            leadingIcon="globe"
-            value={whiteLabel.customDomain}
-            onChange={(e) => setWhiteLabel({ customDomain: e.target.value })}
-          />
-          <Input
-            label="Email sender address"
-            leadingIcon="mail"
-            value={whiteLabel.senderEmail}
-            onChange={(e) => setWhiteLabel({ senderEmail: e.target.value })}
-          />
-          <div className="flex items-center justify-between gap-2.5 rounded-md border border-border-subtle bg-surface-sunken px-3.5 py-3">
-            <div>
-              <div className="text-[13px] font-semibold">Remove “Powered by FormAI”</div>
-              <div className="text-[11.5px] text-text-tertiary">Enterprise · shown on external forms</div>
+            {/* Colours */}
+            <div className="mb-[11px] text-[13px] font-semibold">Brand colours</div>
+            <div className="mb-[22px]">
+              <BrandColorFields branding={branding} onChange={setBranding} />
             </div>
-            <Switch
-              checked={whiteLabel.removeBadge}
-              onChange={(e) => setWhiteLabel({ removeBadge: e.target.checked })}
-              aria-label="Remove Powered by FormAI badge"
+
+            {/* Font */}
+            <div className="mb-[9px] text-[13px] font-semibold">Form font</div>
+            <FontPicker
+              value={branding.formFont}
+              onPick={(family) => setBranding({ formFont: family })}
             />
+          </fieldset>
+
+          <div className="mt-[22px]">
+            <Button
+              leadingIcon="check"
+              loading={save.isPending}
+              onClick={() =>
+                save.mutate(
+                  { branding },
+                  {
+                    onSuccess: () =>
+                      toast({
+                        variant: 'success',
+                        message: 'Branding applied to all external forms.',
+                      }),
+                    onError: () =>
+                      toast({ variant: 'danger', message: 'Could not save branding — try again.' }),
+                  },
+                )
+              }
+            >
+              Save branding
+            </Button>
           </div>
         </div>
 
-        <div className="mt-[22px]">
-          <Button
-            leadingIcon="check"
-            loading={save.isPending}
-            onClick={() =>
-              save.mutate(
-                { branding },
-                {
-                  onSuccess: () =>
-                    toast({ variant: 'success', message: 'White-label settings applied to all external forms.' }),
-                  onError: () =>
-                    toast({ variant: 'danger', message: 'Could not save branding — try again.' }),
-                },
-              )
-            }
+        {/* White-label block — Business and above */}
+        <div className="rounded-xl border border-border bg-surface-card p-[26px] shadow-sm">
+          <div className="mb-[5px] flex items-center gap-2">
+            <span className="font-heading text-[17px] font-bold">White-label delivery</span>
+            {!whiteLabelAccess.editable && (
+              <span className="flex items-center gap-1 rounded-full border border-border bg-surface-sunken px-2 py-0.5 text-[11px] font-semibold text-text-secondary">
+                <Icon name="lock" size={11} />
+                Business
+              </span>
+            )}
+          </div>
+          <p className="mb-[22px] text-[13.5px] text-text-secondary">
+            Serve forms from your own domain and send confirmations from your own address.
+          </p>
+
+          <fieldset
+            disabled={!whiteLabelAccess.editable}
+            aria-describedby={whiteLabelAccess.editable ? undefined : 'white-label-upgrade'}
+            className={`flex flex-col gap-3.5 border-0 p-0 ${
+              whiteLabelAccess.editable ? '' : 'opacity-55'
+            }`}
           >
-            Save branding
-          </Button>
+            <Input
+              label="Custom form domain"
+              leadingIcon="globe"
+              value={whiteLabel.customDomain}
+              onChange={(e) => setWhiteLabel({ customDomain: e.target.value })}
+            />
+            <Input
+              label="Email sender address"
+              leadingIcon="mail"
+              value={whiteLabel.senderEmail}
+              onChange={(e) => setWhiteLabel({ senderEmail: e.target.value })}
+            />
+            <div className="flex items-center justify-between gap-2.5 rounded-md border border-border-subtle bg-surface-sunken px-3.5 py-3">
+              <div>
+                <div className="text-[13px] font-semibold">Remove “Powered by FormAI”</div>
+                <div className="text-[11.5px] text-text-tertiary">Shown on external forms</div>
+              </div>
+              <Switch
+                checked={whiteLabel.removeBadge}
+                onChange={(e) => setWhiteLabel({ removeBadge: e.target.checked })}
+                aria-label="Remove Powered by FormAI badge"
+              />
+            </div>
+          </fieldset>
+
+          {!whiteLabelAccess.editable && (
+            <div
+              id="white-label-upgrade"
+              className="mt-3.5 flex items-center gap-3 rounded-md border border-border-subtle bg-surface-sunken px-3.5 py-3"
+            >
+              <Icon name="sparkles" size={15} className="flex-none text-accent" />
+              <span className="min-w-0 flex-1 text-[12.5px] text-text-secondary">
+                {whiteLabelAccess.upgradeHint}
+              </span>
+              <Link
+                to="/app/billing"
+                className="fai-chip-btn flex-none rounded-md border border-border bg-surface-card px-3 py-1.5 text-xs font-semibold text-text-primary"
+              >
+                See plans
+              </Link>
+            </div>
+          )}
         </div>
       </div>
 
@@ -161,14 +180,22 @@ export function WhiteLabelScreen() {
         <div className="overflow-hidden rounded-lg border border-border shadow-md" style={brandStyle()}>
           <div className="flex items-center gap-2 border-b border-border bg-surface-sunken px-3.5 py-2">
             <Icon name="lock" size={11} className="text-accent" />
-            <span className="font-mono text-[11px] text-text-secondary">
-              {whiteLabel.customDomain}/vendor-onboarding
+            <span className="truncate font-mono text-[11px] text-text-secondary">
+              {whiteLabel.customDomain || 'forms.formai.app'}/vendor-onboarding
             </span>
           </div>
           <div className="flex h-[82px] items-center gap-3 px-6" style={{ background: 'var(--org-primary)' }}>
-            <span className="grid h-[38px] w-[38px] place-items-center rounded-[9px] bg-white/[0.14] font-heading text-base font-bold text-white">
-              {logoGlyph}
-            </span>
+            {branding.logoAssetUrl ? (
+              <img
+                src={branding.logoAssetUrl}
+                alt=""
+                className="h-[38px] w-[38px] flex-none rounded-[9px] bg-white/[0.14] object-contain p-1"
+              />
+            ) : (
+              <span className="grid h-[38px] w-[38px] place-items-center rounded-[9px] bg-white/[0.14] font-heading text-base font-bold text-white">
+                {logoGlyph}
+              </span>
+            )}
             <div>
               <div className="text-base font-bold text-white" style={{ fontFamily: 'var(--org-font)' }}>
                 {orgName}

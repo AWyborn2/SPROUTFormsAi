@@ -104,6 +104,10 @@ describe('POST /auth/login', () => {
         orgName: 'Acme Inc',
         userName: 'Ash Wyborn',
         userEmail: 'ash@x.io',
+        accountKind: 'team',
+        branding: null,
+        teamSize: null,
+        onboardingCompletedAt: null,
       });
       const setCookie = res.headers.get('set-cookie') ?? '';
       expect(setCookie).toContain('fai_session=');
@@ -163,6 +167,54 @@ describe('GET /auth/me', () => {
         orgName: 'Acme Inc',
         userName: 'Ash Wyborn',
         userEmail: 'ash@x.io',
+        accountKind: 'team',
+        branding: null,
+        teamSize: null,
+        onboardingCompletedAt: null,
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns accountKind, branding, teamSize, and onboardingCompletedAt from the org row', async () => {
+    const tenant = { userId: 'u1', orgId: 'o1', role: 'owner' as const };
+    const branding = {
+      logoAssetUrl: null,
+      primaryColor: '#112233',
+      secondaryColor: '#445566',
+      accentColor: '#778899',
+      formFont: 'Sora',
+    };
+    mockDbValue = {
+      query: {
+        organizations: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: 'o1',
+            name: 'Acme Inc',
+            accountKind: 'individual',
+            branding,
+            teamSize: '10–49',
+            onboardingCompletedAt: new Date('2026-07-01T00:00:00.000Z'),
+          }),
+        },
+        users: {
+          findFirst: vi.fn().mockResolvedValue({ id: 'u1', name: 'Ash Wyborn', email: 'ash@x.io' }),
+        },
+      },
+    };
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/auth/me`, {
+        headers: { cookie: `fai_session=${sealSession(tenant)}` },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({
+        accountKind: 'individual',
+        branding,
+        teamSize: '10–49',
+        onboardingCompletedAt: '2026-07-01T00:00:00.000Z',
       });
     } finally {
       server.close();

@@ -3,6 +3,7 @@ import cors from 'cors';
 import express, { type Express } from 'express';
 import { env } from './env.js';
 import { accountRouter } from './routes/account.js';
+import { orgLogoRouter, publicAssetsRouter } from './routes/assets.js';
 import { auditRouter } from './routes/audit.js';
 import { authRouter } from './routes/auth.js';
 import { competenciesRouter, competencyRulesRouter } from './routes/competencies.js';
@@ -33,6 +34,12 @@ export function createApp(): Express {
   // it. The global parser below skips bodies that are already parsed.
   app.use('/pdf', express.json({ limit: '40mb' }), pdfRouter);
 
+  // Same registration-order reason as /pdf above: a 2 MB logo is ~2.7 MB as
+  // base64, which the global 2 MB parser would 413 before the route's own
+  // size check could return a meaningful error. Scoped to /org/logo so the
+  // rest of /org keeps the tighter global limit.
+  app.use('/org/logo', express.json({ limit: '8mb' }), orgLogoRouter);
+
   app.use(express.json({ limit: '2mb' }));
 
   app.use('/health', healthRouter);
@@ -51,6 +58,10 @@ export function createApp(): Express {
   // name the org before asking anyone to sign in; accepting is authenticated
   // and mounts after it, so the more specific POST path wins regardless.
   app.use('/invites', publicInvitesRouter);
+  // Org logo serving — public for the same reason /fill is: logged-out
+  // respondents must be able to load the branding on a public fill page.
+  // The route restricts itself to the logo key namespace (see assets.ts).
+  app.use('/assets', publicAssetsRouter);
   app.use('/invites', invitesRouter);
   app.use('/submissions', submissionsRouter);
   app.use('/team', teamRouter);

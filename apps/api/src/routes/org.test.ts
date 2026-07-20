@@ -5,6 +5,7 @@ import type { BrandingKit } from '@formai/shared';
 
 const ownerTenant = { userId: 'u1', orgId: 'org-1', role: 'owner' as const };
 const adminTenant = { userId: 'u1', orgId: 'org-1', role: 'admin' as const };
+const builderTenant = { userId: 'u1', orgId: 'org-1', role: 'builder' as const };
 const viewerTenant = { userId: 'u1', orgId: 'org-1', role: 'viewer' as const };
 let sealSession: (t: { userId: string; orgId: string; role: string }) => string;
 
@@ -16,8 +17,13 @@ vi.mock('../db.js', () => ({
   getDbStatus: () => 'unconfigured',
 }));
 
+/**
+ * Storage is unconfigured by default (mirroring a deployment with no bucket
+ * credentials); the logo tests swap in a fake client per-test.
+ */
+let mockStorage: unknown = null;
 vi.mock('../storage/index.js', () => ({
-  getStorageClient: () => null,
+  getStorageClient: () => mockStorage,
 }));
 
 const { createApp } = await import('../app.js');
@@ -60,8 +66,13 @@ const NEW_KIT: BrandingKit = {
  * loads the tenant's row, `update(...).set(...).where(...)` captures the
  * write, `insert(...).values(...)` captures the audit entry, and
  * `users.findFirst` feeds `recordAudit`'s actor lookup.
+ *
+ * The `where(...)` result is both awaitable and `.returning()`-able, because
+ * the onboarding stamp is a conditional UPDATE whose matched-row count is the
+ * idempotency signal. `opts.stampRaceLost` makes that UPDATE match zero rows,
+ * standing in for a concurrent PATCH that stamped first.
  */
-function fakeDb(opts: { org?: unknown } = { org: ORG_ROW }) {
+function fakeDb(opts: { org?: unknown; stampRaceLost?: boolean } = { org: ORG_ROW }) {
   const updateSet = vi.fn();
   const insertValues = vi.fn();
   const db = {
@@ -73,7 +84,15 @@ function fakeDb(opts: { org?: unknown } = { org: ORG_ROW }) {
       set: (v: unknown) => ({
         where: (_w: unknown) => {
           updateSet(table, v);
-          return Promise.resolve(undefined);
+          const settled = Promise.resolve(undefined);
+          return Object.assign(settled, {
+            returning: (_cols?: unknown) =>
+              Promise.resolve(
+                opts.stampRaceLost
+                  ? []
+                  : [{ onboardingCompletedAt: (v as { onboardingCompletedAt?: Date }).onboardingCompletedAt ?? null }],
+              ),
+          });
         },
       }),
     })),
@@ -98,6 +117,316 @@ async function patchOrg(base: string, tenant: { userId: string; orgId: string; r
 afterEach(() => {
   vi.clearAllMocks();
   mockDbValue = null;
+  mockStorage = null;
+});
+
+// ── Logo upload fixtures ──────────────────────────────────────────────────
+
+const PNG_BYTES = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.alloc(64, 7),
+]);
+const PDF_BYTES = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(64, 3)]);
+const SVG_BYTES = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>');
+
+/** Fake storage client covering the whole `StorageClient` surface. */
+function fakeStorage(over: { deleteObject?: () => Promise<void> } = {}) {
+  const uploadImage = vi.fn(
+    async (orgId: string, _bytes: Uint8Array, mimeType: string) =>
+      `${orgId}/logo-fixed-uuid.${mimeType === 'image/jpeg' ? 'jpg' : mimeType === 'image/webp' ? 'webp' : 'png'}`,
+  );
+  const download = vi.fn(async (): Promise<Buffer | null> => PNG_BYTES);
+  const deleteObject = vi.fn(over.deleteObject ?? (async () => {}));
+  const client = {
+    upload: vi.fn(),
+    download,
+    deletePrefix: vi.fn(),
+    uploadImage,
+    deleteObject,
+  };
+  return { client, uploadImage, download, deleteObject };
+}
+
+async function postLogo(
+  base: string,
+  tenant: { userId: string; orgId: string; role: string },
+  body: unknown,
+) {
+  return fetch(`${base}/org/logo`, {
+    method: 'POST',
+    headers: { ...authHeader(tenant), 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+describe('POST /org/logo', () => {
+  it('503s storage_unavailable when no storage backend is configured', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await postLogo(base, ownerTenant, {
+        imageBase64: PNG_BYTES.toString('base64'),
+        mimeType: 'image/png',
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'storage_unavailable' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('uploads a PNG within the cap, returns a public-route URL, audits, and the URL round-trips through PATCH /org', async () => {
+    const { db, updateSet, insertValues } = fakeDb();
+    mockDbValue = db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await postLogo(base, ownerTenant, {
+        imageBase64: PNG_BYTES.toString('base64'),
+        mimeType: 'image/png',
+      });
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { url: string };
+      expect(body.url).toBe('/api/assets/logo/org-1/logo-fixed-uuid.png');
+      expect(storage.uploadImage).toHaveBeenCalledTimes(1);
+      expect(storage.uploadImage.mock.calls[0]?.[0]).toBe('org-1');
+      expect(storage.uploadImage.mock.calls[0]?.[2]).toBe('image/png');
+
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert?.[1]).toMatchObject({ category: 'settings' });
+
+      // The returned URL is accepted by PATCH /org branding and echoed back.
+      const kit: BrandingKit = { ...NEW_KIT, logoAssetUrl: body.url };
+      const patched = await patchOrg(base, ownerTenant, { branding: kit });
+      expect(patched.status).toBe(200);
+      const patchedBody = (await patched.json()) as { branding: BrandingKit };
+      expect(patchedBody.branding.logoAssetUrl).toBe(body.url);
+      expect(updateSet.mock.calls.at(-1)?.[1]).toEqual({ branding: kit });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects an oversized payload with a 4xx and never touches storage', async () => {
+    mockDbValue = fakeDb().db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const big = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.alloc(3 * 1024 * 1024, 1),
+      ]);
+      const res = await postLogo(base, ownerTenant, {
+        imageBase64: big.toString('base64'),
+        mimeType: 'image/png',
+      });
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.status).toBeLessThan(500);
+      expect((await res.json()) as { error: string }).toMatchObject({ error: 'file_too_large' });
+      expect(storage.uploadImage).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects PDF bytes declared as image/png via the magic-byte check', async () => {
+    mockDbValue = fakeDb().db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await postLogo(base, ownerTenant, {
+        imageBase64: PDF_BYTES.toString('base64'),
+        mimeType: 'image/png',
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()) as { error: string }).toMatchObject({
+        error: 'unsupported_image_type',
+      });
+      expect(storage.uploadImage).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects image/svg+xml — SVG never reaches storage', async () => {
+    mockDbValue = fakeDb().db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await postLogo(base, ownerTenant, {
+        imageBase64: SVG_BYTES.toString('base64'),
+        mimeType: 'image/svg+xml',
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()) as { error: string }).toMatchObject({
+        error: 'unsupported_image_type',
+      });
+      expect(storage.uploadImage).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a viewer and a builder without touching storage', async () => {
+    mockDbValue = fakeDb().db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      for (const tenant of [viewerTenant, builderTenant]) {
+        const res = await postLogo(base, tenant, {
+          imageBase64: PNG_BYTES.toString('base64'),
+          mimeType: 'image/png',
+        });
+        expect(res.status).toBe(403);
+      }
+      expect(storage.uploadImage).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s without a session', async () => {
+    mockDbValue = fakeDb().db;
+    mockStorage = fakeStorage().client;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/org/logo`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ imageBase64: PNG_BYTES.toString('base64'), mimeType: 'image/png' }),
+      });
+      expect(res.status).toBe(401);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('GET /assets/logo/*', () => {
+  it('serves a logo key without auth, with an extension-derived content type and nosniff', async () => {
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assets/logo/org-1/logo-fixed-uuid.png`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('image/png');
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(Buffer.from(await res.arrayBuffer())).toEqual(PNG_BYTES);
+      expect(storage.download).toHaveBeenCalledWith('org-1', 'org-1/logo-fixed-uuid.png');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s a PDF-style asset key without touching storage', async () => {
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assets/logo/org-1/2f1c1b6e-0000-4000-8000-000000000000.pdf`);
+      expect(res.status).toBe(404);
+      expect(storage.download).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s a nested or traversal-shaped key without touching storage', async () => {
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      for (const key of ['org-1/nested/logo-a.png', 'org-1/notlogo-a.png']) {
+        const res = await fetch(`${base}/assets/logo/${key}`);
+        expect(res.status).toBe(404);
+      }
+      expect(storage.download).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s when the object is missing', async () => {
+    const storage = fakeStorage();
+    storage.download.mockResolvedValue(null);
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assets/logo/org-1/logo-fixed-uuid.png`);
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('PATCH /org logo replacement cleanup', () => {
+  const PREV_URL = '/api/assets/logo/org-1/logo-previous.png';
+  const orgWithLogo = {
+    ...ORG_ROW,
+    branding: { ...ORG_ROW.branding, logoAssetUrl: PREV_URL },
+  };
+
+  it('best-effort deletes the previous logo object when logoAssetUrl changes', async () => {
+    const { db } = fakeDb({ org: orgWithLogo });
+    mockDbValue = db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, logoAssetUrl: '/api/assets/logo/org-1/logo-new.png' },
+      });
+      expect(res.status).toBe(200);
+      expect(storage.deleteObject).toHaveBeenCalledWith('org-1', 'org-1/logo-previous.png');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not delete when logoAssetUrl is unchanged', async () => {
+    const { db } = fakeDb({ org: orgWithLogo });
+    mockDbValue = db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, logoAssetUrl: PREV_URL },
+      });
+      expect(res.status).toBe(200);
+      expect(storage.deleteObject).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still succeeds when the previous-logo deletion fails', async () => {
+    const { db } = fakeDb({ org: orgWithLogo });
+    mockDbValue = db;
+    const storage = fakeStorage({
+      deleteObject: async () => {
+        throw new Error('storage_delete_failed');
+      },
+    });
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, logoAssetUrl: '/api/assets/logo/org-1/logo-new.png' },
+      });
+      expect(res.status).toBe(200);
+      expect(storage.deleteObject).toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe('PATCH /org', () => {
@@ -134,7 +463,13 @@ describe('PATCH /org', () => {
       const res = await patchOrg(base, ownerTenant, { name: '  Meridian Ops  ', branding: NEW_KIT });
       expect(res.status).toBe(200);
       const body = (await res.json()) as { id: string; name: string; branding: BrandingKit };
-      expect(body).toEqual({ id: 'org-1', name: 'Meridian Ops', branding: NEW_KIT });
+      expect(body).toEqual({
+        id: 'org-1',
+        name: 'Meridian Ops',
+        branding: NEW_KIT,
+        teamSize: null,
+        onboardingCompletedAt: null,
+      });
 
       // The row update carried both fields (name trimmed).
       expect(updateSet).toHaveBeenCalledTimes(1);
@@ -206,6 +541,205 @@ describe('PATCH /org', () => {
     }
   });
 
+  it('403s a builder without touching the row', async () => {
+    const { db, updateSet, insertValues } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, builderTenant, { teamSize: '2-5' });
+      expect(res.status).toBe(403);
+      expect(updateSet).not.toHaveBeenCalled();
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepts a branding update on a team-tier org — branding is not plan-gated', async () => {
+    const { db, updateSet } = fakeDb({ org: { ...ORG_ROW, planTier: 'team' } });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { branding: NEW_KIT });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { branding: BrandingKit };
+      expect(body.branding).toEqual(NEW_KIT);
+      expect(updateSet.mock.calls[0]?.[1]).toEqual({ branding: NEW_KIT });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('persists teamSize and round-trips it in the response', async () => {
+    const { db, updateSet } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { teamSize: '10–49' });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { teamSize: string | null };
+      expect(body.teamSize).toBe('10–49');
+      expect(updateSet).toHaveBeenCalledTimes(1);
+      expect(updateSet.mock.calls[0]?.[1]).toEqual({ teamSize: '10–49' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stamps onboardingCompletedAt on the first completion call', async () => {
+    const { db, updateSet } = fakeDb({ org: { ...ORG_ROW, onboardingCompletedAt: null } });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { onboardingComplete: true });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { onboardingCompletedAt: string | null };
+      expect(body.onboardingCompletedAt).not.toBeNull();
+      const setArg = updateSet.mock.calls[0]?.[1] as { onboardingCompletedAt?: unknown };
+      expect(setArg?.onboardingCompletedAt).toBeInstanceOf(Date);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not reset onboardingCompletedAt when completion is repeated', async () => {
+    const stamped = new Date('2026-07-01T00:00:00.000Z');
+    const { db, updateSet } = fakeDb({ org: { ...ORG_ROW, onboardingCompletedAt: stamped } });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { onboardingComplete: true });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { onboardingCompletedAt: string | null };
+      expect(body.onboardingCompletedAt).toBe('2026-07-01T00:00:00.000Z');
+      // No write carried a fresh timestamp.
+      for (const call of updateSet.mock.calls) {
+        expect((call[1] as { onboardingCompletedAt?: unknown }).onboardingCompletedAt).toBeUndefined();
+      }
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not stamp — or audit — when a concurrent PATCH won the race', async () => {
+    // Both requests read a null column; the guarded UPDATE matches zero rows
+    // for the loser, which must not claim a stamp it did not write.
+    const { db, insertValues } = fakeDb({
+      org: { ...ORG_ROW, onboardingCompletedAt: null },
+      stampRaceLost: true,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { onboardingComplete: true });
+      expect(res.status).toBe(200);
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes no audit entry for a repeat completion — nothing changed', async () => {
+    const { db, insertValues } = fakeDb({
+      org: { ...ORG_ROW, onboardingCompletedAt: new Date('2026-07-01T00:00:00.000Z') },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { onboardingComplete: true });
+      expect(res.status).toBe(200);
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('audits a teamSize-only update as organisation details, not a branding change', async () => {
+    const { db, insertValues } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { teamSize: '2-5' });
+      expect(res.status).toBe(200);
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert?.[1]).toMatchObject({
+        action: 'Updated organisation settings',
+        target: 'Organisation details',
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('audits a first completion as onboarding, not a branding change', async () => {
+    const { db, insertValues } = fakeDb({ org: { ...ORG_ROW, onboardingCompletedAt: null } });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { onboardingComplete: true });
+      expect(res.status).toBe(200);
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert?.[1]).toMatchObject({ target: 'Onboarding completed' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a logoAssetUrl owned by another org — no cross-tenant assignment', async () => {
+    const { db, updateSet } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, logoAssetUrl: '/api/assets/logo/org-2/logo-victim.png' },
+      });
+      expect(res.status).toBe(400);
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a logoAssetUrl this API never minted', async () => {
+    const rejected = [
+      'https://evil.example/logo.png',
+      '/api/assets/logo/org-1/notlogo-a.png', // outside the logo namespace
+      '/api/assets/logo/org-1/logo-a.svg', // SVG is never a logo key
+      '/api/assets/logo/org-1/nested/logo-a.png',
+      'javascript:alert(1)',
+    ];
+    for (const url of rejected) {
+      const { db, updateSet } = fakeDb();
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await patchOrg(base, ownerTenant, {
+          branding: { ...NEW_KIT, logoAssetUrl: url },
+        });
+        expect(res.status, url).toBe(400);
+        expect(updateSet, url).not.toHaveBeenCalled();
+      } finally {
+        server.close();
+      }
+    }
+  });
+
+  it('accepts a logoAssetUrl minted for this org', async () => {
+    const { db, updateSet } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const kit = { ...NEW_KIT, logoAssetUrl: '/api/assets/logo/org-1/logo-fixed-uuid.png' };
+      const res = await patchOrg(base, ownerTenant, { branding: kit });
+      expect(res.status).toBe(200);
+      expect(updateSet.mock.calls[0]?.[1]).toEqual({ branding: kit });
+    } finally {
+      server.close();
+    }
+  });
+
   it('400s an empty body (neither name nor branding)', async () => {
     const { db, updateSet } = fakeDb();
     mockDbValue = db;
@@ -246,6 +780,62 @@ describe('PATCH /org', () => {
       expect(res.status).toBe(404);
     } finally {
       server.close();
+    }
+  });
+});
+
+// ── formFont catalog validation ───────────────────────────────────────────
+//
+// `formFont` is no longer a four-value enum: it is any family name present in
+// the bundled Google Fonts catalog snapshot. These pin both halves — the
+// catalog widens what is accepted, and it must still be a closed set (a free
+// string would land unescaped in a `fonts.googleapis.com/css2` URL).
+
+describe('PATCH /org — formFont catalog validation', () => {
+  async function patchFont(font: string) {
+    const { db, updateSet } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, formFont: font },
+      });
+      return { status: res.status, updateSet };
+    } finally {
+      server.close();
+    }
+  }
+
+  it('accepts a catalog family beyond the original four presets', async () => {
+    for (const font of ['Lora', 'Oswald', 'Playfair Display']) {
+      const { status, updateSet } = await patchFont(font);
+      expect(status, font).toBe(200);
+      expect(updateSet.mock.calls[0]?.[1]).toEqual({
+        branding: { ...NEW_KIT, formFont: font },
+      });
+    }
+  });
+
+  it('still accepts all four preset families saved by existing orgs', async () => {
+    for (const font of ['Inter', 'Sora', 'Spectral', 'JetBrains Mono']) {
+      const { status } = await patchFont(font);
+      expect(status, font).toBe(200);
+    }
+  });
+
+  it('rejects a non-catalog family and injection-shaped values', async () => {
+    const rejected = [
+      'Not A Real Font',
+      'Inter"); @import url(evil',
+      'Inter&family=Evil',
+      'Inter;wght@400',
+      '',
+      'inter', // case-sensitive: the catalog spelling is what reaches the css2 URL
+    ];
+    for (const font of rejected) {
+      const { status, updateSet } = await patchFont(font);
+      expect(status, font).toBe(400);
+      expect(updateSet, font).not.toHaveBeenCalled();
     }
   });
 });

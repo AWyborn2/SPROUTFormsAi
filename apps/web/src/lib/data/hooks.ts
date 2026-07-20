@@ -331,14 +331,32 @@ export function useTogglePermission() {
 }
 
 /**
- * Update the org's name and/or branding via `PATCH /org`. Invalidates the
- * session (the app shell shows `orgName` from `/auth/me`) and the audit log
- * (the API records the change server-side).
+ * Uploads an org logo and resolves to its public URL. Deliberately does NOT
+ * invalidate the session: the wizard holds the returned URL in local state
+ * and only persists it when the whole branding kit is saved via `PATCH /org`.
+ */
+export function useUploadOrgLogo() {
+  return useMutation({
+    mutationFn: async (input: { imageBase64: string; mimeType: string }) =>
+      store.uploadOrgLogo(input),
+  });
+}
+
+/**
+ * Update the org's name, branding, teamSize, and/or onboarding completion via
+ * `PATCH /org`. Invalidates the session (the app shell shows `orgName` and
+ * onboarding state from `/auth/me`) and the audit log (the API records the
+ * change server-side).
  */
 export function useUpdateOrg() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { name?: string; branding?: BrandingKit }) => store.updateOrg(input),
+    mutationFn: async (input: {
+      name?: string;
+      branding?: BrandingKit;
+      teamSize?: string;
+      onboardingComplete?: true;
+    }) => store.updateOrg(input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: keys.session });
       qc.invalidateQueries({ queryKey: keys.auditLog });
@@ -352,6 +370,9 @@ export function useUpdateWhiteLabel() {
   return useMutation({
     mutationFn: async (input: { branding: BrandingKit }) => store.updateWhiteLabel(input),
     onSuccess: () => {
+      // The session carries the org's branding, and the app shell reads it —
+      // without this the sidebar keeps the old logo/accent until a reload.
+      qc.invalidateQueries({ queryKey: keys.session });
       qc.invalidateQueries({ queryKey: keys.auditLog });
     },
   });

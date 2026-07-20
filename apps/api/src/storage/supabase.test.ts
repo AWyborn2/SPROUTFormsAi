@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { deletePrefix, downloadPdf, getSupabaseClient, type SupabaseStorageClient, uploadPdf } from './supabase.js';
+import {
+  deleteObject,
+  deletePrefix,
+  downloadPdf,
+  getSupabaseClient,
+  type SupabaseStorageClient,
+  uploadImage,
+  uploadPdf,
+} from './supabase.js';
 
 describe('getSupabaseClient', () => {
   it('returns null when SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY are unset', () => {
@@ -11,13 +19,61 @@ describe('getSupabaseClient', () => {
 function mockClient(overrides: {
   upload?: ReturnType<typeof vi.fn>;
   download?: ReturnType<typeof vi.fn>;
+  remove?: ReturnType<typeof vi.fn>;
 }): SupabaseStorageClient {
   const from = vi.fn(() => ({
     upload: overrides.upload ?? vi.fn().mockResolvedValue({ error: null }),
     download: overrides.download ?? vi.fn().mockResolvedValue({ data: null, error: null }),
+    remove: overrides.remove ?? vi.fn().mockResolvedValue({ error: null }),
   }));
   return { storage: { from } } as unknown as SupabaseStorageClient;
 }
+
+describe('uploadImage', () => {
+  it('writes a FLAT logo key directly under the org prefix', async () => {
+    const upload = vi.fn().mockResolvedValue({ error: null });
+    const client = mockClient({ upload });
+
+    const key = await uploadImage(client, 'org-1', new Uint8Array([1, 2, 3]), 'image/png', 'png');
+
+    // Flat is load-bearing: `deletePrefix` lists one level only, so a nested
+    // `org-1/logo/...` folder would survive org deletion as an orphan.
+    expect(key).toMatch(/^org-1\/logo-[^/]+\.png$/);
+    expect(upload).toHaveBeenCalledWith(
+      key,
+      expect.anything(),
+      expect.objectContaining({ contentType: 'image/png' }),
+    );
+  });
+
+  it('throws when the upload errors', async () => {
+    const client = mockClient({ upload: vi.fn().mockResolvedValue({ error: { message: 'nope' } }) });
+
+    await expect(
+      uploadImage(client, 'org-1', new Uint8Array(), 'image/png', 'png'),
+    ).rejects.toThrow('storage_upload_failed');
+  });
+});
+
+describe('deleteObject', () => {
+  it('removes a key inside the org prefix', async () => {
+    const remove = vi.fn().mockResolvedValue({ error: null });
+    const client = mockClient({ remove });
+
+    await deleteObject(client, 'org-1', 'org-1/logo-abc.png');
+
+    expect(remove).toHaveBeenCalledWith(['org-1/logo-abc.png']);
+  });
+
+  it('ignores a key belonging to another org', async () => {
+    const remove = vi.fn().mockResolvedValue({ error: null });
+    const client = mockClient({ remove });
+
+    await deleteObject(client, 'org-1', 'org-2/logo-abc.png');
+
+    expect(remove).not.toHaveBeenCalled();
+  });
+});
 
 describe('uploadPdf', () => {
   it('uploads bytes under an org-prefixed key and returns that key as the asset id', async () => {

@@ -1,6 +1,9 @@
+import { useEffect } from 'react';
 import { Icon } from '@formai/ui';
 import type { BrandingKit } from '@formai/shared';
+import { DEFAULT_BRANDING } from '@formai/shared';
 import { orgBrandVars } from '../../lib/branding.js';
+import { ensureFontLoaded } from '../../lib/font-loader.js';
 
 /**
  * Lightest-chrome wrapper for the public fill pages. Renders logged OUT: the
@@ -20,17 +23,39 @@ export function ExternalShell({
 }) {
   const displayName = orgName.trim() || 'FormAI';
   const orgInitial = (displayName[0] ?? 'F').toUpperCase();
+  const logoUrl = branding?.logoAssetUrl ?? null;
+
+  // `orgBrandVars` only *names* the family in `--org-font`; without this the
+  // respondent sees the generic fallback for every font but the ones the app
+  // shell happens to bundle. Idempotent, so re-running on kit changes is free.
+  const formFont = branding?.formFont ?? DEFAULT_BRANDING.formFont;
+  useEffect(() => {
+    ensureFontLoaded(formFont);
+  }, [formFont]);
 
   return (
     <div className="flex min-h-screen flex-col bg-surface-page" style={orgBrandVars(branding)}>
       <header className="flex h-14 flex-none items-center justify-between border-b border-border bg-surface-card px-6">
         <div className="flex items-center gap-2.5">
-          <span
-            className="grid h-7 w-7 place-items-center rounded-[7px] font-heading text-[13px] font-bold text-white"
-            style={{ background: 'var(--org-primary)' }}
-          >
-            {orgInitial}
-          </span>
+          {/* The public logo route exists precisely so logged-out respondents
+              can load the org's mark, so this is its primary surface. Mirrors
+              the AppShell conditional: <img> when a logo is set, initial glyph
+              otherwise. The glyph's ink is `--org-primary-text` (U7) rather
+              than a hardcoded white, which vanishes on a light brand primary. */}
+          {logoUrl ? (
+            <img
+              src={logoUrl}
+              alt=""
+              className="h-7 w-7 flex-none rounded-[7px] object-contain"
+            />
+          ) : (
+            <span
+              className="grid h-7 w-7 place-items-center rounded-[7px] font-heading text-[13px] font-bold"
+              style={{ background: 'var(--org-primary)', color: 'var(--org-primary-text)' }}
+            >
+              {orgInitial}
+            </span>
+          )}
           <span className="text-sm font-semibold" style={{ fontFamily: 'var(--org-font)' }}>
             {displayName}
           </span>

@@ -29,6 +29,10 @@ export const organizations = pgTable('organizations', {
   seatLimit: integer('seat_limit').notNull().default(15),
   /** Whether this is a solo workspace ('individual') or a shared team ('team'). */
   accountKind: text('account_kind').notNull().default('team'),
+  /** Self-reported team size bucket from signup (e.g. '2-5'). Display/analytics only. */
+  teamSize: text('team_size'),
+  /** When the onboarding wizard was completed. Null = wizard still pending. */
+  onboardingCompletedAt: timestamp('onboarding_completed_at', { withTimezone: true }),
 });
 
 export const users = pgTable('users', {
