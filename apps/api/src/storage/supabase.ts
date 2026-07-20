@@ -7,6 +7,24 @@ export type SupabaseStorageClient = SupabaseClient;
 let cachedClient: SupabaseStorageClient | null = null;
 
 /**
+ * Renders an SDK error for inclusion in a thrown error's message. Supabase's
+ * `StorageError` carries `.status`/`.statusCode` (and `StorageUnknownError`
+ * an `.originalError`) alongside `.message` — reading `.message` alone, as
+ * this file previously did, silently drops that detail. `StorageError`
+ * defines `toJSON()`, so `JSON.stringify` already serializes the whole
+ * shape; the try/catch is only a defensive fallback for the odd case where
+ * an error object doesn't serialize cleanly (circular refs, BigInt, etc.),
+ * so this can never itself throw.
+ */
+function describeStorageError(error: unknown): string {
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+/**
  * Lazily construct the Supabase Storage client. Returns null when no
  * credentials are configured, mirroring `getAnthropic()`/`getWorkOS()` —
  * `storage/index.ts` falls back to whatever `STORAGE_PROVIDER` selects
@@ -32,7 +50,7 @@ export async function uploadPdf(client: SupabaseStorageClient, orgId: string, by
   const { error } = await client.storage
     .from(env.SUPABASE_STORAGE_BUCKET_PDFS)
     .upload(assetId, bytes, { contentType: 'application/pdf' });
-  if (error) throw new Error(`storage_upload_failed: ${error.message}`);
+  if (error) throw new Error(`storage_upload_failed: ${describeStorageError(error)}`, { cause: error });
   return assetId;
 }
 
@@ -67,7 +85,7 @@ export async function uploadImage(
   const { error } = await client.storage
     .from(env.SUPABASE_STORAGE_BUCKET_PDFS)
     .upload(key, bytes, { contentType });
-  if (error) throw new Error(`storage_upload_failed: ${error.message}`);
+  if (error) throw new Error(`storage_upload_failed: ${describeStorageError(error)}`, { cause: error });
   return key;
 }
 
@@ -83,7 +101,7 @@ export async function deleteObject(
 ): Promise<void> {
   if (!key.startsWith(`${orgId}/`)) return;
   const { error } = await client.storage.from(env.SUPABASE_STORAGE_BUCKET_PDFS).remove([key]);
-  if (error) throw new Error(`storage_delete_failed: ${error.message}`);
+  if (error) throw new Error(`storage_delete_failed: ${describeStorageError(error)}`, { cause: error });
 }
 
 /**
@@ -100,10 +118,12 @@ export async function deletePrefix(client: SupabaseStorageClient, orgId: string)
   const pageSize = 100;
   for (;;) {
     const { data, error } = await bucket.list(orgId, { limit: pageSize });
-    if (error) throw new Error(`storage_delete_prefix_failed: ${error.message}`);
+    if (error) throw new Error(`storage_delete_prefix_failed: ${describeStorageError(error)}`, { cause: error });
     if (!data || data.length === 0) return;
     const { error: removeError } = await bucket.remove(data.map((f) => `${orgId}/${f.name}`));
-    if (removeError) throw new Error(`storage_delete_prefix_failed: ${removeError.message}`);
+    if (removeError) {
+      throw new Error(`storage_delete_prefix_failed: ${describeStorageError(removeError)}`, { cause: removeError });
+    }
     if (data.length < pageSize) return;
   }
 }
