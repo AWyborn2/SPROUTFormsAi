@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
 import { and, count, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { schema } from '@formai/db';
+import { PLAN_CONFIG, schema, type PlanConfig, type PlanTier } from '@formai/db';
 import { PERMISSION_CATEGORIES, ROLES, type PermissionMatrix, type Role } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -99,29 +99,42 @@ teamRouter.post(
     const displayName = name ?? (nameFromEmail(normalizedEmail) || normalizedEmail);
 
     // ── Seat limit check ──────────────────────────────────────────────────
-    // Count active memberships and compare against the org's current seatLimit.
+    // Count active memberships and compare against the org's effective seat
+    // limit. Resolution order:
+    //   1. org.seatLimit — the explicit per-org limit. Drizzle types it as
+    //      non-null (the column has a default), but legacy rows written before
+    //      the column existed read back as null, so treat it as nullable.
+    //   2. The org's plan tier config (PLAN_CONFIG[planTier].seatLimit).
+    //   3. Neither resolves to a finite number → unlimited: enforcement is
+    //      skipped ONLY when the tier genuinely configures no cap (a missing
+    //      or non-finite tier seatLimit). Every shipped tier defines a finite
+    //      limit, so this never silently disables enforcement for normal orgs.
     const org = await db.query.organizations.findFirst({
       where: eq(schema.organizations.id, tenant.orgId),
     });
     if (org) {
-      const [activeSeatResult] = await db
-        .select({ count: count() })
-        .from(schema.memberships)
-        .where(
-          and(
-            eq(schema.memberships.orgId, tenant.orgId),
-            eq(schema.memberships.status, 'active'),
-          ),
-        );
-      const activeSeats = activeSeatResult?.count ?? 0;
-      if (activeSeats >= org.seatLimit) {
-        res.status(403).json({
-          error: 'seat_limit_reached',
-          message: `Your ${org.planTier} plan allows ${org.seatLimit} seat${org.seatLimit === 1 ? '' : 's'}. Remove a member or upgrade your plan to invite more people.`,
-          seatLimit: org.seatLimit,
-          seatUsed: activeSeats,
-        });
-        return;
+      const tierConfig: PlanConfig | undefined = PLAN_CONFIG[org.planTier as PlanTier];
+      const seatLimit = (org.seatLimit as number | null) ?? tierConfig?.seatLimit;
+      if (seatLimit != null && Number.isFinite(seatLimit)) {
+        const [activeSeatResult] = await db
+          .select({ count: count() })
+          .from(schema.memberships)
+          .where(
+            and(
+              eq(schema.memberships.orgId, tenant.orgId),
+              eq(schema.memberships.status, 'active'),
+            ),
+          );
+        const activeSeats = activeSeatResult?.count ?? 0;
+        if (activeSeats >= seatLimit) {
+          res.status(403).json({
+            error: 'seat_limit_reached',
+            message: `Your ${org.planTier} plan allows ${seatLimit} seat${seatLimit === 1 ? '' : 's'}. Remove a member or upgrade your plan to invite more people.`,
+            seatLimit,
+            seatUsed: activeSeats,
+          });
+          return;
+        }
       }
     }
 

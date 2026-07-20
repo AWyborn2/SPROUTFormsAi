@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { Router } from 'express';
 import { eq } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
@@ -16,6 +17,19 @@ export const SESSION_COOKIE_OPTIONS = {
   secure: process.env.NODE_ENV === 'production',
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
+
+/** Cost factor for every bcrypt hash the app mints (signup and the dummy hash below). */
+const BCRYPT_COST = 12;
+
+/**
+ * Structurally valid, full-cost bcrypt hash of a random string, minted once at
+ * module load. When a login hits an unknown email we still run bcrypt.compare
+ * against this hash so the request does the same full-cost work as a real
+ * compare — a malformed constant would let bcrypt short-circuit and reopen the
+ * email-enumeration timing oracle. It hashes random bytes, so no input can
+ * ever match it. Exported for tests only.
+ */
+export const DUMMY_HASH = bcrypt.hashSync(randomBytes(32).toString('hex'), BCRYPT_COST);
 
 export const authRouter: Router = Router();
 
@@ -85,7 +99,7 @@ authRouter.post(
       return;
     }
 
-    const passwordHash = await bcrypt.hash(password, 12);
+    const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
     await db.insert(schema.users).values({ name, email, passwordHash });
 
     const tenant = await provisionTenant(db, { name, email, orgName, accountKind });
@@ -119,7 +133,6 @@ authRouter.post(
     });
 
     // Constant-time path even when user is not found — prevents email enumeration via timing
-    const DUMMY_HASH = '$2b$12$invalidhashforenumerationprotect00000000000000000000000';
     const hashToVerify = user?.passwordHash ?? DUMMY_HASH;
     const valid = await bcrypt.compare(password, hashToVerify);
 
