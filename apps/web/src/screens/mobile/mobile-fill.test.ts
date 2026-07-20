@@ -16,6 +16,7 @@ function summary(overrides: Partial<FormSummary>): FormSummary {
     icon: 'file-text',
     status: 'published',
     sourceType: 'built_from_scratch',
+    currentVersionId: 'v1',
     version: 'v1',
     submissions: 0,
     updated: 'Just now',

@@ -60,6 +60,7 @@ function fakeDb(opts: {
   submissionsFindMany?: unknown[];
   rolePermissionsFindFirst?: unknown;
   usersFindFirst?: unknown;
+  usersFindMany?: unknown[];
   insertedSubmission?: unknown;
 }) {
   const insertValues = vi.fn();
@@ -83,6 +84,7 @@ function fakeDb(opts: {
       },
       users: {
         findFirst: vi.fn().mockResolvedValue(opts.usersFindFirst),
+        findMany: vi.fn().mockResolvedValue(opts.usersFindMany ?? []),
       },
     },
     insert: vi.fn((table: unknown) => ({
@@ -151,8 +153,55 @@ describe('GET /submissions', () => {
           status: 'submitted',
           flag: '',
           createdAt: '2026-07-01T00:00:00.000Z',
+          // Legacy row without a stamped identity — free-text fallback only.
+          submittedBy: null,
         },
       ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('joins the stamped identity with precedence over free-text, falling back for legacy rows', async () => {
+    const stamped = {
+      id: 's1',
+      orgId: 'org-1',
+      templateId: 't1',
+      submittedByUserId: 'u1',
+      submitterName: 'Claimed Name',
+      submitterEmail: 'claimed@contractor.io',
+      status: 'submitted',
+      flag: '',
+      createdAt: new Date('2026-07-01T00:00:00Z'),
+    };
+    const legacy = {
+      id: 's2',
+      orgId: 'org-1',
+      templateId: 't1',
+      submittedByUserId: null,
+      submitterName: 'Tom Reyes',
+      submitterEmail: 'tom@contractor.io',
+      status: 'submitted',
+      flag: '',
+      createdAt: new Date('2026-06-30T00:00:00Z'),
+    };
+    mockDbValue = fakeDb({
+      submissionsFindMany: [stamped, legacy],
+      formTemplatesFindMany: [{ id: 't1', name: 'Vendor onboarding' }],
+      usersFindMany: [{ id: 'u1', name: 'Ash Wyborn' }],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, { headers: authHeader() });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>[];
+      expect(body[0]).toMatchObject({
+        id: 's1',
+        who: 'Ash Wyborn',
+        submittedBy: { userId: 'u1', name: 'Ash Wyborn' },
+      });
+      expect(body[1]).toMatchObject({ id: 's2', who: 'Tom Reyes', submittedBy: null });
     } finally {
       server.close();
     }
@@ -201,6 +250,40 @@ describe('GET /submissions/:id', () => {
         // No pinned version row resolvable → export handles are explicit empties.
         sourcePdfAssetId: null,
         fields: [],
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('exposes the stamped identity in the detail DTO, joined over free-text submitterName', async () => {
+    const row = {
+      id: 's1',
+      templateId: 't1',
+      templateVersionId: 'v1',
+      submittedByUserId: 'u1',
+      submitterName: 'Claimed Name',
+      submitterEmail: 'claimed@contractor.io',
+      values: {},
+      status: 'submitted',
+      flag: '',
+      createdAt: new Date('2026-07-01T00:00:00Z'),
+    };
+    mockDbValue = fakeDb({
+      submissionsFindFirst: row,
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding' },
+      usersFindFirst: { id: 'u1', name: 'Ash Wyborn' },
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions/s1`, { headers: authHeader() });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({
+        id: 's1',
+        who: 'Ash Wyborn',
+        submittedBy: { userId: 'u1', name: 'Ash Wyborn' },
       });
     } finally {
       server.close();
@@ -256,10 +339,13 @@ describe('GET /submissions/:id', () => {
 });
 
 describe('POST /submissions', () => {
-  it('records a submission pinned to the template’s current version', async () => {
+  it('records a submission pinned to the echoed current version id', async () => {
     const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
     const { db, insertValues } = fakeDb({
       formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-current', templateId: 't1' },
+      // The authed path resolves the session user to stamp identity.
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
       insertedSubmission: {
         id: 's-new',
         templateId: 't1',
@@ -279,6 +365,7 @@ describe('POST /submissions', () => {
         headers: { ...authHeader(), 'content-type': 'application/json' },
         body: JSON.stringify({
           templateId: 't1',
+          versionId: 'v-current',
           submitterName: 'Tom Reyes',
           submitterEmail: 'tom@contractor.io',
           values: { abn: '12 345 678 901' },
@@ -292,6 +379,317 @@ describe('POST /submissions', () => {
     }
   });
 
+  it('accepts a stale same-template version id and pins the submission to it (AE2)', async () => {
+    // The template has republished to v-current, but the filler loaded v-old
+    // before the republish — the version they actually saw wins the pin.
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-old', templateId: 't1', state: 'published' },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+      insertedSubmission: {
+        id: 's-new',
+        templateId: 't1',
+        submitterName: 'Tom Reyes',
+        submitterEmail: 'tom@contractor.io',
+        status: 'submitted',
+        flag: '',
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+      },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-old', values: { abn: '12 345 678 901' } }),
+      });
+      expect(res.status).toBe(201);
+      const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionInsert?.[1]).toMatchObject({ templateVersionId: 'v-old' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s (and writes nothing) when the version id is a never-published draft that is not the current version', async () => {
+    // A draft that never went live could not have been served to any filler —
+    // the only honored non-published pin is the template's own current
+    // version (the authed fill-against-current-draft flow).
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-draft', templateId: 't1', state: 'draft' },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-draft', values: {} }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ error: 'version_mismatch' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s unauthenticated (and writes nothing) when the session user row no longer exists', async () => {
+    // Sealed session references a deleted user — the account is gone, so the
+    // session no longer authenticates anyone.
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-current', templateId: 't1', state: 'published' },
+      usersFindFirst: undefined,
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-current', values: { abn: '12 345 678 901' } }),
+      });
+      expect(res.status).toBe(401);
+      const body = await res.json();
+      expect(body).toEqual({ error: 'unauthenticated' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s (and writes nothing) when the version id belongs to another template', async () => {
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-other', templateId: 't-other' },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-other', values: {} }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ error: 'version_mismatch' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s (and writes nothing) when the version id does not exist', async () => {
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: undefined,
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-fabricated', values: {} }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ error: 'version_mismatch' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s invalid_request when versionId is missing', async () => {
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', values: { abn: '12 345 678 901' } }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body).toMatchObject({ error: 'invalid_request' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stamps the session user identity and ignores spoofed body submitter fields (AE3)', async () => {
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-current', templateId: 't1' },
+      usersFindFirst: { id: 'u1', name: 'Ash Wyborn', email: 'ash@charleshull.com.au' },
+      insertedSubmission: {
+        id: 's-new',
+        templateId: 't1',
+        submittedByUserId: 'u1',
+        submitterName: 'Ash Wyborn',
+        submitterEmail: 'ash@charleshull.com.au',
+        status: 'submitted',
+        flag: '',
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+      },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({
+          templateId: 't1',
+          versionId: 'v-current',
+          submitterName: 'Spoofed Name',
+          submitterEmail: 'spoof@evil.io',
+          values: { abn: '12 345 678 901' },
+        }),
+      });
+      expect(res.status).toBe(201);
+      const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionInsert?.[1]).toMatchObject({
+        submittedByUserId: 'u1',
+        submitterName: 'Ash Wyborn',
+        submitterEmail: 'ash@charleshull.com.au',
+      });
+      const body = await res.json();
+      expect(body).toMatchObject({ submittedBy: { userId: 'u1', name: 'Ash Wyborn' } });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s required_fields_missing (and writes nothing) when required answers are absent, naming the fields', async () => {
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: {
+        id: 'v-current',
+        templateId: 't1',
+        fields: [
+          { id: 'abn', type: 'text', label: 'ABN', required: true, source: 'built' },
+          { id: 'notes', type: 'textarea', label: 'Notes', required: false, source: 'built' },
+        ],
+      },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-current', values: { abn: '   ' } }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body).toEqual({ error: 'required_fields_missing', fields: ['abn'] });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('skips required enforcement for a draft submission (incomplete saves are allowed)', async () => {
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: {
+        id: 'v-current',
+        templateId: 't1',
+        fields: [{ id: 'abn', type: 'text', label: 'ABN', required: true, source: 'built' }],
+      },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+      insertedSubmission: {
+        id: 's-draft',
+        templateId: 't1',
+        submitterName: 'Tom Reyes',
+        submitterEmail: 'tom@contractor.io',
+        status: 'draft',
+        flag: '',
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+      },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-current', values: {}, status: 'draft' }),
+      });
+      expect(res.status).toBe(201);
+      const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionInsert?.[1]).toMatchObject({ status: 'draft' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('enforces required-ness against the PINNED (stale) version, not the current one (AE2 companion)', async () => {
+    // The template republished to v-current, but the filler echoes v-old. The
+    // check must run against v-old's fields — its required id is what gets
+    // reported, regardless of what v-current requires by now.
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db } = fakeDb({
+      formTemplatesFindFirst: template,
+      // The route only ever fetches the ECHOED version id — this is what the
+      // lookup returns, and its fields drive enforcement.
+      formTemplateVersionsFindFirst: {
+        id: 'v-old',
+        templateId: 't1',
+        state: 'published',
+        fields: [{ id: 'old-field', type: 'text', label: 'Old required', required: true, source: 'built' }],
+      },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-old', values: {} }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body).toEqual({ error: 'required_fields_missing', fields: ['old-field'] });
+    } finally {
+      server.close();
+    }
+  });
+
   it('404s when the template does not exist in the caller org', async () => {
     mockDbValue = fakeDb({ formTemplatesFindFirst: undefined }).db;
     const { server, base } = startApp();
@@ -299,7 +697,7 @@ describe('POST /submissions', () => {
       const res = await fetch(`${base}/submissions`, {
         method: 'POST',
         headers: { ...authHeader(), 'content-type': 'application/json' },
-        body: JSON.stringify({ templateId: '00000000-0000-0000-0000-000000000000', values: {} }),
+        body: JSON.stringify({ templateId: '00000000-0000-0000-0000-000000000000', versionId: 'v1', values: {} }),
       });
       expect(res.status).toBe(404);
     } finally {
@@ -316,7 +714,7 @@ describe('POST /submissions', () => {
       const res = await fetch(`${base}/submissions`, {
         method: 'POST',
         headers: { ...authHeader(), 'content-type': 'application/json' },
-        body: JSON.stringify({ templateId: 't1', values: {} }),
+        body: JSON.stringify({ templateId: 't1', versionId: 'v1', values: {} }),
       });
       expect(res.status).toBe(422);
     } finally {
@@ -334,7 +732,7 @@ describe('POST /submissions', () => {
       const res = await fetch(`${base}/submissions`, {
         method: 'POST',
         headers: { ...authHeader(), 'content-type': 'application/json' },
-        body: JSON.stringify({ templateId: 't1', values: { abn: { nested: 'object' } } }),
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-current', values: { abn: { nested: 'object' } } }),
       });
       expect(res.status).toBe(400);
       expect(insertValues).not.toHaveBeenCalled();
@@ -434,6 +832,127 @@ describe('PATCH /submissions/:id', () => {
         category: 'submissions',
         icon: 'x-circle',
       });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s required_fields_missing (and writes nothing) when a blank draft is moved to approved', async () => {
+    const draftRow = { ...row, status: 'draft', templateVersionId: 'v1', values: {} };
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: APPROVER_PERMS,
+      submissionsFindFirst: draftRow,
+      formTemplateVersionsFindFirst: {
+        id: 'v1',
+        templateId: 't1',
+        fields: [{ id: 'abn', type: 'text', label: 'ABN', required: true, source: 'built' }],
+      },
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions/s1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'approved' }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body).toEqual({ error: 'required_fields_missing', fields: ['abn'] });
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets a COMPLETE draft transition to approved (the same check passes)', async () => {
+    const draftRow = { ...row, status: 'draft', templateVersionId: 'v1', values: { abn: '12 345 678 901' } };
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: APPROVER_PERMS,
+      submissionsFindFirst: draftRow,
+      formTemplateVersionsFindFirst: {
+        id: 'v1',
+        templateId: 't1',
+        fields: [{ id: 'abn', type: 'text', label: 'ABN', required: true, source: 'built' }],
+      },
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding' },
+      usersFindFirst: { id: 'u1', name: 'Ash Wyborn' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions/s1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'approved' }),
+      });
+      expect(res.status).toBe(200);
+      const submissionUpdate = updateSet.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionUpdate?.[1]).toEqual({ status: 'approved' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets a BLANK draft transition to rejected — rejection is the ungated disposal path', async () => {
+    const draftRow = { ...row, status: 'draft', templateVersionId: 'v1', values: {} };
+    const { db, updateSet, insertValues } = fakeDb({
+      rolePermissionsFindFirst: APPROVER_PERMS,
+      submissionsFindFirst: draftRow,
+      formTemplateVersionsFindFirst: {
+        id: 'v1',
+        templateId: 't1',
+        fields: [{ id: 'abn', type: 'text', label: 'ABN', required: true, source: 'built' }],
+      },
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions/s1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'rejected' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ id: 's1', status: 'rejected' });
+
+      const submissionUpdate = updateSet.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionUpdate?.[1]).toEqual({ status: 'rejected' });
+
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert?.[1]).toMatchObject({ action: 'Rejected submission' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not 500 when the pinned version fields JSONB is truthy but not an array (draft → approved)', async () => {
+    const draftRow = { ...row, status: 'draft', templateVersionId: 'v1', values: {} };
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: APPROVER_PERMS,
+      submissionsFindFirst: draftRow,
+      // Corrupted/legacy JSONB: truthy but not an array — treated as no fields.
+      formTemplateVersionsFindFirst: { id: 'v1', templateId: 't1', fields: { corrupted: true } },
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions/s1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'approved' }),
+      });
+      expect(res.status).toBe(200);
+      const submissionUpdate = updateSet.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionUpdate?.[1]).toEqual({ status: 'approved' });
     } finally {
       server.close();
     }

@@ -98,6 +98,8 @@ interface SubmissionRowDto {
   status: SubmissionStatus;
   flag: string;
   createdAt: string;
+  /** Stamped identity from the users join; null/absent for public or legacy rows. */
+  submittedBy?: { userId: string; name: string } | null;
 }
 
 interface SubmissionDetailDto extends SubmissionRowDto {
@@ -132,6 +134,7 @@ function toFormSummary(dto: FormSummaryDto): FormSummary {
     icon: iconForSourceType(dto.sourceType),
     status: dto.status,
     sourceType: dto.sourceType,
+    currentVersionId: dto.currentVersionId,
     version: dto.currentVersionLabel ?? '—',
     submissions: dto.submissionsCount,
     updated: relativeTime(dto.updatedAt),
@@ -164,6 +167,7 @@ function toSubmissionRow(dto: SubmissionRowDto): SubmissionRow {
     date: relativeTime(dto.createdAt),
     status: dto.status,
     flag: dto.flag,
+    submittedBy: dto.submittedBy ?? null,
   };
 }
 
@@ -530,6 +534,8 @@ export const store = {
 
   submitInspection(input: {
     templateId: string;
+    /** The version the fill surface rendered — pins the submission server-side. */
+    versionId: string;
     values: Record<string, SubmissionValue>;
     submitterName?: string;
     submitterEmail?: string;
@@ -537,6 +543,7 @@ export const store = {
     return apiClient
       .post<SubmissionRowDto>('/submissions', {
         templateId: input.templateId,
+        versionId: input.versionId,
         values: input.values,
         ...(input.submitterName ? { submitterName: input.submitterName } : {}),
         ...(input.submitterEmail ? { submitterEmail: input.submitterEmail } : {}),

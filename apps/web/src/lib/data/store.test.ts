@@ -38,6 +38,7 @@ function detail(overrides: Partial<SubmissionDetail> = {}): SubmissionDetail {
     date: 'Just now',
     status: 'submitted',
     flag: '',
+    submittedBy: null,
     templateVersionId: 'ver-1',
     values: { f1: 'Priya Nair' },
     sourcePdfAssetId: 'asset-123',

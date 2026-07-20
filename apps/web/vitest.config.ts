@@ -12,6 +12,7 @@ export default defineConfig({
     // Data-layer modules only for now — node is enough (File/Blob are global
     // in Node 20+); switch to jsdom if component tests arrive later.
     environment: 'node',
+    setupFiles: ['./vitest.setup.ts'],
     include: ['src/**/*.test.ts'],
   },
 });

@@ -4,7 +4,7 @@
  * idle → uploading → extracting → ready | error.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ExtractionResult } from '@formai/shared';
+import type { ExtractedField, ExtractionResult } from '@formai/shared';
 
 // The real ApiError class is kept (error mapping relies on instanceof);
 // only the request methods are mocked.
@@ -30,11 +30,18 @@ vi.mock('./store.js', () => ({
 
 import { apiClient, ApiError } from './api-client.js';
 import {
+  addFixedRowItem,
   fileToBase64,
   getImportSession,
+  lowestUnresolvedField,
+  removeFixedRowItem,
+  renameFixedRowItem,
   resetImportSession,
   retryExtraction,
+  reviewedToFields,
+  setFieldRequired,
   startExtraction,
+  type ReviewField,
 } from './import-session.js';
 
 const postMock = vi.mocked(apiClient.post);
@@ -187,6 +194,141 @@ describe('retryExtraction', () => {
     await retryExtraction();
     expect(getImportSession().status).toBe('idle');
     expect(postMock).not.toHaveBeenCalled();
+  });
+});
+
+// --- Review UX pure logic (U5) ---------------------------------------------
+
+function reviewField(overrides: Partial<ReviewField> & { id: string }): ReviewField {
+  return { label: overrides.id, type: 'text', confidence: 0.9, ...overrides };
+}
+
+const CHECKLIST: ExtractedField = {
+  id: 'chk',
+  label: 'Category A checks',
+  type: 'repeating_group',
+  confidence: 0.8,
+  columns: [
+    { key: 'item', label: 'Item', type: 'text' },
+    { key: 'ok', label: 'OK', type: 'checkbox' },
+    { key: 'na', label: 'NA', type: 'checkbox' },
+  ],
+  fixedRows: ['Engine oil level', 'Park brake', 'Tyres'],
+};
+
+/** Seed the session store with the given extracted fields via the real pipeline. */
+async function seedSession(fields: ExtractedField[]): Promise<void> {
+  postMock.mockResolvedValueOnce({ assetId: 'asset-seed' });
+  postMock.mockResolvedValueOnce({ ...EXTRACTION, fields });
+  await startExtraction(makeFile());
+  expect(getImportSession().status).toBe('ready');
+}
+
+describe('lowestUnresolvedField', () => {
+  it('returns the lowest-confidence field among unresolved fields only (KTD8)', () => {
+    const fields: ReviewField[] = [
+      reviewField({ id: 'a', confidence: 0.4, resolved: true }),
+      reviewField({ id: 'b', confidence: 0.7 }),
+      reviewField({ id: 'c', confidence: 0.9 }),
+    ];
+    expect(lowestUnresolvedField(fields)?.id).toBe('b');
+  });
+
+  it('is null when every field is resolved (stat hidden)', () => {
+    const fields: ReviewField[] = [
+      reviewField({ id: 'a', confidence: 0.4, resolved: true }),
+      reviewField({ id: 'b', confidence: 0.99, resolved: true }),
+    ];
+    expect(lowestUnresolvedField(fields)).toBeNull();
+  });
+
+  it('is null for an empty field list', () => {
+    expect(lowestUnresolvedField([])).toBeNull();
+  });
+});
+
+describe('reviewedToFields — required + fixedRows (R4/AE5)', () => {
+  it('defaults an untouched fixed-row checklist to required: true and passes fixedRows through', () => {
+    const out = reviewedToFields([{ ...CHECKLIST }])[0]!;
+    expect(out.required).toBe(true);
+    expect(out.fixedRows).toEqual(['Engine oil level', 'Park brake', 'Tyres']);
+  });
+
+  it('carries a reviewer untoggle through (required: false wins over the checklist default)', () => {
+    const out = reviewedToFields([{ ...CHECKLIST, required: false }])[0]!;
+    expect(out.required).toBe(false);
+  });
+
+  it('defaults a non-checklist field to required: false and a toggle to true', () => {
+    const fields = reviewedToFields([
+      reviewField({ id: 'a' }),
+      reviewField({ id: 'b', required: true }),
+    ]);
+    expect(fields[0]!.required).toBe(false);
+    expect(fields[1]!.required).toBe(true);
+  });
+
+  it('omits fixedRows for open row-entry tables', () => {
+    const out = reviewedToFields([{ ...CHECKLIST, fixedRows: undefined }])[0]!;
+    expect(out.required).toBe(false); // no fixedRows → not a checklist → plain default
+    expect('fixedRows' in out).toBe(false);
+  });
+});
+
+describe('review actions — required toggle + fixed-row item editing', () => {
+  it('setFieldRequired writes into the reviewed field state', async () => {
+    await seedSession([{ ...CHECKLIST }]);
+
+    setFieldRequired('chk', false);
+    expect(getImportSession().fields[0]!.required).toBe(false);
+
+    setFieldRequired('chk', true);
+    expect(getImportSession().fields[0]!.required).toBe(true);
+  });
+
+  it('renameFixedRowItem renames one label order-stably', async () => {
+    await seedSession([{ ...CHECKLIST }]);
+
+    renameFixedRowItem('chk', 1, 'Park brake operation');
+    expect(getImportSession().fields[0]!.fixedRows).toEqual([
+      'Engine oil level',
+      'Park brake operation',
+      'Tyres',
+    ]);
+  });
+
+  it('renameFixedRowItem ignores out-of-range indices', async () => {
+    await seedSession([{ ...CHECKLIST }]);
+
+    renameFixedRowItem('chk', 3, 'nope');
+    renameFixedRowItem('chk', -1, 'nope');
+    expect(getImportSession().fields[0]!.fixedRows).toEqual(CHECKLIST.fixedRows);
+  });
+
+  it('addFixedRowItem appends after the existing items', async () => {
+    await seedSession([{ ...CHECKLIST }]);
+
+    addFixedRowItem('chk', 'Horn');
+    expect(getImportSession().fields[0]!.fixedRows).toEqual([
+      'Engine oil level',
+      'Park brake',
+      'Tyres',
+      'Horn',
+    ]);
+  });
+
+  it('removeFixedRowItem removes one item keeping the rest in order', async () => {
+    await seedSession([{ ...CHECKLIST }]);
+
+    removeFixedRowItem('chk', 0);
+    expect(getImportSession().fields[0]!.fixedRows).toEqual(['Park brake', 'Tyres']);
+  });
+
+  it('removing the last item normalizes fixedRows to undefined (never an empty array)', async () => {
+    await seedSession([{ ...CHECKLIST, fixedRows: ['Only item'] }]);
+
+    removeFixedRowItem('chk', 0);
+    expect(getImportSession().fields[0]!.fixedRows).toBeUndefined();
   });
 });
 

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
+import { missingRequiredFields } from '@formai/shared';
 import type { RepeatingRowValue, SubmissionValue } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -17,16 +18,26 @@ import { db } from '../db.js';
  */
 export const submissionsRouter: Router = Router();
 
-function rowDto(row: typeof schema.submissions.$inferSelect, formName: string) {
+function rowDto(
+  row: typeof schema.submissions.$inferSelect,
+  formName: string,
+  submitterUser?: { id: string; name: string } | null,
+) {
+  // Server-verified identity (users join) takes display precedence over the
+  // free-text submitterName; legacy/public rows fall back to the claimed name.
+  const submittedBy = row.submittedByUserId
+    ? { userId: row.submittedByUserId, name: submitterUser?.name ?? row.submitterName }
+    : null;
   return {
     id: row.id,
     formId: row.templateId,
     form: formName,
-    who: row.submitterName,
+    who: submittedBy?.name ?? row.submitterName,
     email: row.submitterEmail,
     status: row.status,
     flag: row.flag,
     createdAt: row.createdAt.toISOString(),
+    submittedBy,
   };
 }
 
@@ -51,7 +62,17 @@ submissionsRouter.get('/', requireTenant, withErrorHandling(async (req, res) => 
   });
   const nameById = new Map(templates.map((t) => [t.id, t.name]));
 
-  res.json(rows.map((r) => rowDto(r, nameById.get(r.templateId) ?? '')));
+  const submitterIds = [...new Set(rows.map((r) => r.submittedByUserId).filter((id): id is string => !!id))];
+  const submitters = submitterIds.length
+    ? await db.query.users.findMany({ where: inArray(schema.users.id, submitterIds) })
+    : [];
+  const userById = new Map(submitters.map((u) => [u.id, u]));
+
+  res.json(
+    rows.map((r) =>
+      rowDto(r, nameById.get(r.templateId) ?? '', r.submittedByUserId ? userById.get(r.submittedByUserId) : null),
+    ),
+  );
 }));
 
 submissionsRouter.get('/:id', requireTenant, withErrorHandling(async (req, res) => {
@@ -70,13 +91,16 @@ submissionsRouter.get('/:id', requireTenant, withErrorHandling(async (req, res) 
   // The pinned version carries the round-trip export handles: the stored
   // source-PDF asset and the frozen fields (whose `sourcePosition`s decide
   // whether the client may offer "Export filled PDF" at all).
-  const [template, version] = await Promise.all([
+  const [template, version, submitterUser] = await Promise.all([
     db.query.formTemplates.findFirst({ where: eq(schema.formTemplates.id, row.templateId) }),
     db.query.formTemplateVersions.findFirst({ where: eq(schema.formTemplateVersions.id, row.templateVersionId) }),
+    row.submittedByUserId
+      ? db.query.users.findFirst({ where: eq(schema.users.id, row.submittedByUserId) })
+      : Promise.resolve(null),
   ]);
 
   res.json({
-    ...rowDto(row, template?.name ?? ''),
+    ...rowDto(row, template?.name ?? '', submitterUser),
     templateVersionId: row.templateVersionId,
     values: row.values,
     sourcePdfAssetId: version?.sourcePdfAssetId ?? null,
@@ -119,6 +143,12 @@ const submissionStatuses = [
 
 const createSubmissionBody = z.object({
   templateId: z.string().min(1),
+  /**
+   * The version the client actually rendered — echoed back so the submission
+   * pins to what the filler saw, not whatever `currentVersionId` points at by
+   * the time the POST lands (mirrors the public fill-link route).
+   */
+  versionId: z.string().min(1),
   submitterName: z.string().optional(),
   submitterEmail: z.string().optional(),
   values: z.record(z.string(), submissionValueSchema),
@@ -137,7 +167,10 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     return;
   }
   const tenant = req.tenant!;
-  const { templateId, submitterName, submitterEmail, values, status, flag } = parsed.data;
+  // `submitterName`/`submitterEmail` in the body are deliberately ignored on
+  // this authed path: identity is server-verified, stamped from the session
+  // (AE3 — a client cannot spoof who submitted).
+  const { templateId, versionId, values, status, flag } = parsed.data;
 
   const template = await db.query.formTemplates.findFirst({
     where: and(eq(schema.formTemplates.id, templateId), eq(schema.formTemplates.orgId, tenant.orgId)),
@@ -151,14 +184,58 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     return;
   }
 
+  // The echoed version must be a real version of THIS template. It need not
+  // be the current one: a filler who loaded the form before a newer publish
+  // may still submit against the version they actually saw (that's the whole
+  // point of pinning — AE2). But a stale pin is only honored for PUBLISHED
+  // versions — a never-published draft was never served to any filler, so an
+  // echoed draft id can only be fabricated. The one exception is the
+  // template's own current version, which authed members may fill
+  // pre-publish. A version of some other template, a fabricated id, or a
+  // non-current draft conflicts: 409 (mirrors fill-links.ts).
+  const version = await db.query.formTemplateVersions.findFirst({
+    where: eq(schema.formTemplateVersions.id, versionId),
+  });
+  if (
+    !version ||
+    version.templateId !== template.id ||
+    (version.state !== 'published' && version.id !== template.currentVersionId)
+  ) {
+    res.status(409).json({ error: 'version_mismatch' });
+    return;
+  }
+
+  // Required enforcement (KTD4) — against the PINNED version's fields just
+  // resolved above, i.e. the form the filler actually saw, never whatever
+  // `currentVersionId` points at by now (AE2 companion). Drafts may save
+  // incomplete; they face the same gate when transitioning via PATCH below.
+  if ((status ?? 'submitted') !== 'draft') {
+    const missing = missingRequiredFields(Array.isArray(version.fields) ? version.fields : [], values);
+    if (missing.length > 0) {
+      res.status(400).json({ error: 'required_fields_missing', fields: missing });
+      return;
+    }
+  }
+
+  const sessionUser = await db.query.users.findFirst({
+    where: eq(schema.users.id, tenant.userId),
+  });
+  if (!sessionUser) {
+    // Sealed session references a user row that no longer exists — the
+    // account is gone, so the session no longer authenticates anyone.
+    res.status(401).json({ error: 'unauthenticated' });
+    return;
+  }
+
   const [row] = await db
     .insert(schema.submissions)
     .values({
       orgId: tenant.orgId,
       templateId: template.id,
-      templateVersionId: template.currentVersionId,
-      submitterName: submitterName ?? '',
-      submitterEmail: submitterEmail ?? '',
+      templateVersionId: version.id,
+      submittedByUserId: sessionUser.id,
+      submitterName: sessionUser.name,
+      submitterEmail: sessionUser.email,
       values,
       status: status ?? 'submitted',
       flag: flag ?? '',
@@ -166,7 +243,7 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     .returning();
   if (!row) throw new Error('submission_create_failed: insert returned no row');
 
-  res.status(201).json(rowDto(row, template.name));
+  res.status(201).json(rowDto(row, template.name, sessionUser));
 }));
 
 /**
@@ -202,10 +279,32 @@ submissionsRouter.patch('/:id', requireTenant, withErrorHandling(async (req, res
     res.status(404).json({ error: 'not_found' });
     return;
   }
-  const template = await db.query.formTemplates.findFirst({
-    where: eq(schema.formTemplates.id, row.templateId),
-  });
   const { status } = parsed.data;
+  // A draft saved incomplete cannot be APPROVED: moving draft → approved runs
+  // the SAME completeness gate as POST, against the submission's pinned
+  // version (closes the draft-then-approve bypass — no other approve path
+  // exists). draft → rejected is deliberately ungated: rejection is the
+  // disposal path for an incomplete draft. Non-draft rows already passed the
+  // gate on create.
+  if (row.status === 'draft' && status === 'approved') {
+    const pinnedVersion = await db.query.formTemplateVersions.findFirst({
+      where: eq(schema.formTemplateVersions.id, row.templateVersionId),
+    });
+    const missing = missingRequiredFields(
+      Array.isArray(pinnedVersion?.fields) ? pinnedVersion.fields : [],
+      row.values,
+    );
+    if (missing.length > 0) {
+      res.status(400).json({ error: 'required_fields_missing', fields: missing });
+      return;
+    }
+  }
+  const [template, submitterUser] = await Promise.all([
+    db.query.formTemplates.findFirst({ where: eq(schema.formTemplates.id, row.templateId) }),
+    row.submittedByUserId
+      ? db.query.users.findFirst({ where: eq(schema.users.id, row.submittedByUserId) })
+      : Promise.resolve(null),
+  ]);
 
   await db.update(schema.submissions).set({ status }).where(eq(schema.submissions.id, row.id));
 
@@ -216,5 +315,5 @@ submissionsRouter.patch('/:id', requireTenant, withErrorHandling(async (req, res
     icon: status === 'approved' ? 'check-circle-2' : 'x-circle',
   });
 
-  res.json(rowDto({ ...row, status }, template?.name ?? ''));
+  res.json(rowDto({ ...row, status }, template?.name ?? '', submitterUser));
 }));

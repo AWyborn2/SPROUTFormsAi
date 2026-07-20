@@ -26,6 +26,12 @@ export interface FormSummary {
   icon: string;
   status: TemplateStatus;
   sourceType: FormSourceType;
+  /**
+   * Id of the template's current version — the version a fill surface renders,
+   * echoed back on submit so the server pins what the filler actually saw.
+   * Null while the template has no published version.
+   */
+  currentVersionId: string | null;
   /** Current published version label, e.g. "v3". */
   version: string;
   submissions: number;
@@ -62,6 +68,11 @@ export interface SubmissionRow {
   status: SubmissionStatus;
   /** Free-text flag, e.g. "2 fails logged", "ABN mismatch". */
   flag: string;
+  /**
+   * Server-stamped submitter identity (session user, verified server-side);
+   * null for public fill-link / legacy rows, whose `who` is a free-text claim.
+   */
+  submittedBy: { userId: string; name: string } | null;
 }
 
 /** A single submission with captured values (detail view). */

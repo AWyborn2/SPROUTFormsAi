@@ -25,12 +25,36 @@ export interface RepeatingGroupProps {
   /** Read-only render (submission detail) — hides add/remove + disables inputs. */
   readOnly?: boolean;
   minRows?: number;
+  /**
+   * Fixed-item checklist mode: ordered pre-printed item labels. Row identity
+   * is positional — row i is the fixed row for fixedRows[i]; ad-hoc rows
+   * follow after. Fixed rows render a locked, read-only label cell (the FIRST
+   * column) and have no remove control. "Add row" appends removable ad-hoc
+   * rows below the fixed set. In this mode `boolean_yes_no` cells render an
+   * explicit Yes/No control (null = unanswered) so an honest "No" is
+   * recordable.
+   */
+  fixedRows?: string[];
+  /**
+   * Row indexes to highlight as incomplete/errored (e.g. required fixed rows
+   * with no answer). Positional, matching `rows`.
+   */
+  errorRowIndexes?: number[];
   className?: string;
 }
 
-function emptyRow(columns: RepeatingGroupColumn[]): RepeatingRow {
+function emptyRow(columns: RepeatingGroupColumn[], fixedMode: boolean): RepeatingRow {
   const row: RepeatingRow = {};
-  for (const c of columns) row[c.key] = c.type === 'boolean_yes_no' || c.type === 'checkbox' ? false : '';
+  for (const c of columns) {
+    row[c.key] =
+      c.type === 'boolean_yes_no'
+        ? fixedMode
+          ? null
+          : false
+        : c.type === 'checkbox'
+          ? false
+          : '';
+  }
   return row;
 }
 
@@ -46,17 +70,24 @@ export function RepeatingGroup({
   addLabel = 'Add row',
   readOnly,
   minRows = 0,
+  fixedRows,
+  errorRowIndexes,
   className,
 }: RepeatingGroupProps) {
+  const fixedCount = fixedRows?.length ?? 0;
+  const fixedMode = fixedCount > 0;
+  const labelKey = columns[0]?.key;
+
   function setCell(rowIndex: number, key: string, value: RepeatingRow[string]) {
     onChange(rows.map((r, i) => (i === rowIndex ? { ...r, [key]: value } : r)));
   }
 
   function addRow() {
-    onChange([...rows, emptyRow(columns)]);
+    onChange([...rows, emptyRow(columns, fixedMode)]);
   }
 
   function removeRow(index: number) {
+    if (index < fixedCount) return;
     if (rows.length <= minRows) return;
     onChange(rows.filter((_, i) => i !== index));
   }
@@ -90,33 +121,63 @@ export function RepeatingGroup({
                 </td>
               </tr>
             ) : (
-              rows.map((row, ri) => (
-                <tr key={ri} className="border-b border-border-subtle last:border-b-0">
-                  {columns.map((c) => (
-                    <td key={c.key} className="px-2 py-1.5 align-middle">
-                      <RepeatingCell
-                        column={c}
-                        value={row[c.key] ?? null}
-                        readOnly={readOnly}
-                        onChange={(v) => setCell(ri, c.key, v)}
-                      />
-                    </td>
-                  ))}
-                  {!readOnly && (
-                    <td className="px-2 py-1.5 text-center align-middle">
-                      <button
-                        type="button"
-                        onClick={() => removeRow(ri)}
-                        disabled={rows.length <= minRows}
-                        aria-label={`Remove row ${ri + 1}`}
-                        className="grid h-7 w-7 place-items-center rounded-md text-text-tertiary hover:bg-surface-hover disabled:opacity-40"
-                      >
-                        <Icon name="trash-2" size={15} />
-                      </button>
-                    </td>
-                  )}
-                </tr>
-              ))
+              rows.map((row, ri) => {
+                const isFixed = ri < fixedCount;
+                const hasError = errorRowIndexes?.includes(ri) ?? false;
+                return (
+                  <tr
+                    key={ri}
+                    className={cn(
+                      'border-b border-border-subtle last:border-b-0',
+                      hasError && 'bg-danger-soft',
+                    )}
+                  >
+                    {columns.map((c) =>
+                      isFixed && c.key === labelKey ? (
+                        <td
+                          key={c.key}
+                          className={cn('px-3 py-1.5 align-middle', !hasError && 'bg-surface-sunken')}
+                        >
+                          <span className="flex items-center gap-1.5 text-[13px] text-text-primary">
+                            <Icon
+                              name="lock"
+                              size={12}
+                              className="shrink-0 text-text-tertiary"
+                              aria-label="Fixed item"
+                            />
+                            {fixedRows?.[ri] ?? String(row[c.key] ?? '')}
+                          </span>
+                        </td>
+                      ) : (
+                        <td key={c.key} className="px-2 py-1.5 align-middle">
+                          <RepeatingCell
+                            column={c}
+                            value={row[c.key] ?? null}
+                            readOnly={readOnly}
+                            explicitYesNo={fixedMode && c.type === 'boolean_yes_no'}
+                            onChange={(v) => setCell(ri, c.key, v)}
+                          />
+                        </td>
+                      ),
+                    )}
+                    {!readOnly && (
+                      <td className="px-2 py-1.5 text-center align-middle">
+                        {!isFixed && (
+                          <button
+                            type="button"
+                            onClick={() => removeRow(ri)}
+                            disabled={rows.length <= minRows}
+                            aria-label={`Remove row ${ri + 1}`}
+                            className="grid h-7 w-7 place-items-center rounded-md text-text-tertiary hover:bg-surface-hover disabled:opacity-40"
+                          >
+                            <Icon name="trash-2" size={15} />
+                          </button>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
@@ -141,11 +202,14 @@ function RepeatingCell({
   column,
   value,
   readOnly,
+  explicitYesNo,
   onChange,
 }: {
   column: RepeatingGroupColumn;
   value: RepeatingRow[string];
   readOnly?: boolean;
+  /** Render boolean_yes_no as an explicit Yes/No pair (null = unanswered). */
+  explicitYesNo?: boolean;
   onChange: (v: RepeatingRow[string]) => void;
 }) {
   const cellClass =
@@ -154,13 +218,47 @@ function RepeatingCell({
   if (readOnly) {
     const display =
       column.type === 'boolean_yes_no' || column.type === 'checkbox'
-        ? value
-          ? 'Yes'
-          : 'No'
+        ? explicitYesNo && (value === null || value === undefined || value === '')
+          ? '—'
+          : value
+            ? 'Yes'
+            : 'No'
         : (value ?? '') === ''
           ? '—'
           : String(value);
     return <span className="block px-1 text-[13px] text-text-primary">{display}</span>;
+  }
+
+  if (column.type === 'boolean_yes_no' && explicitYesNo) {
+    return (
+      <div
+        role="group"
+        aria-label={column.label}
+        className="flex items-center justify-center gap-1"
+      >
+        {(
+          [
+            { label: 'Yes', v: true },
+            { label: 'No', v: false },
+          ] as const
+        ).map(({ label, v }) => (
+          <button
+            key={label}
+            type="button"
+            aria-pressed={value === v}
+            onClick={() => onChange(value === v ? null : v)}
+            className={cn(
+              'rounded-md border px-2.5 py-1 text-[12px] font-semibold focus:outline-none focus-visible:shadow-focus',
+              value === v
+                ? 'border-border-accent bg-surface-accent-soft text-text-accent'
+                : 'border-border-strong bg-surface-card text-text-tertiary hover:bg-surface-hover',
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    );
   }
 
   if (column.type === 'boolean_yes_no' || column.type === 'checkbox') {

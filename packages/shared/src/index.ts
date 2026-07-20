@@ -10,6 +10,7 @@ export * from './form-field.js';
 export * from './extraction.js';
 export * from './template.js';
 export * from './submission.js';
+export * from './submission-validation.js';
 export * from './org.js';
 export * from './competency.js';
 export * from './audit.js';

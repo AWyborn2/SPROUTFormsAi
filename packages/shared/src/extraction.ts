@@ -26,6 +26,12 @@ export interface ExtractedField {
   selectionType?: 'single' | 'multiple';
   /** For repeating_group — extracted once, never per blank row. */
   columns?: RepeatingColumn[];
+  /**
+   * For repeating_group — ordered pre-printed item labels of a fixed-item
+   * checklist table; the labels also occupy the first (text) column. Absent
+   * for open row-entry tables; never an empty array.
+   */
+  fixedRows?: string[];
   sourcePosition?: SourcePosition;
   /** Reviewer-facing note, e.g. "detected as text — likely a signature field". */
   note?: string;

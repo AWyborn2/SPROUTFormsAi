@@ -8,6 +8,7 @@ import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
+import { missingRequiredFields } from '@formai/shared';
 // The authed POST /submissions validates with the same runtime schema —
 // single SubmissionValue contract, two doors.
 import { submissionValueSchema } from './submissions.js';
@@ -287,10 +288,23 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
   // The echoed version must be a real version of THIS template. It need not
   // be the current one: a visitor who loaded the form before a newer publish
   // may still submit against the version they actually saw (that's the whole
-  // point of pinning). A version of some other template — or a fabricated
-  // id — conflicts: 409.
-  if (!version || version.templateId !== link.templateId) {
+  // point of pinning). But the public serve side is published-only, so only
+  // PUBLISHED versions are honored — a never-published draft was never
+  // served to any visitor, so an echoed draft id can only be fabricated. A
+  // version of some other template, a fabricated id, or a draft conflicts:
+  // 409.
+  if (!version || version.templateId !== link.templateId || version.state !== 'published') {
     res.status(409).json({ error: 'version_mismatch' });
+    return;
+  }
+
+  // Required enforcement (KTD4) against the PINNED version's fields — the
+  // form this visitor was actually served. The public path has no draft
+  // state: every submit is final, so the gate always runs. Same shared
+  // helper as the authed route, so the two doors cannot drift.
+  const missing = missingRequiredFields(Array.isArray(version.fields) ? version.fields : [], values);
+  if (missing.length > 0) {
+    res.status(400).json({ error: 'required_fields_missing', fields: missing });
     return;
   }
 
@@ -305,6 +319,9 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
         orgId: link.orgId,
         templateId: link.templateId,
         templateVersionId: version.id,
+        // No session on this public path — no server-verified identity. The
+        // claimed free-text name/email below are kept as unverified input.
+        submittedByUserId: null,
         submitterName: submitterName ?? '',
         submitterEmail: submitterEmail ?? '',
         values,

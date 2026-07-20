@@ -6,7 +6,13 @@ import { ApiError } from '../../lib/data/api-client.js';
 import { useFillForm, useSubmitFill } from '../../lib/data/hooks.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
-import { EMAIL_RE, validateRequired } from '../../lib/validation.js';
+import { fillSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
+import {
+  EMAIL_RE,
+  requiredFieldErrors,
+  requiredFieldsMissingIds,
+  validateRequired,
+} from '../../lib/validation.js';
 import { ExternalShell } from './ExternalShell.js';
 
 /**
@@ -76,10 +82,22 @@ export function FillScreen() {
           } else if (err instanceof ApiError && err.status === 404) {
             toast({ variant: 'warning', message: 'This form link is no longer active.' });
           } else if (err instanceof ApiError && err.status === 400) {
-            toast({
-              variant: 'danger',
-              message: 'Some answers were invalid — check the form and try again.',
-            });
+            // Server-side required enforcement (KTD4): map the named fields
+            // into the same per-field errors the client check uses.
+            const missingIds = requiredFieldsMissingIds(err.body);
+            if (missingIds && missingIds.length > 0) {
+              setErrors((e) => ({ ...e, ...requiredFieldErrors(missingIds) }));
+              const n = missingIds.length;
+              toast({
+                variant: 'warning',
+                message: `${n} required field${n === 1 ? '' : 's'} still need${n === 1 ? 's' : ''} an answer.`,
+              });
+            } else {
+              toast({
+                variant: 'danger',
+                message: 'Some answers were invalid — check the form and try again.',
+              });
+            }
           } else {
             toast({
               variant: 'danger',
@@ -175,19 +193,21 @@ export function FillScreen() {
               </div>
             </div>
 
-            {/* The served version's real fields, via the shared renderer. */}
-            <div className="flex flex-col gap-[16px]">
+            {/* The served version's real fields, via the shared renderer, on
+                the builder's 12-col grid (single column below `sm`). */}
+            <div className="grid grid-cols-12 gap-[16px]">
               {fill.fields.map((f) => (
-                <FieldInput
-                  key={f.id}
-                  field={f}
-                  value={values[f.id] ?? null}
-                  error={errors[f.id] || undefined}
-                  onChange={(v) => setValue(f.id, v)}
-                />
+                <div key={f.id} className={fillSpanClass(resolveFillSpan(f, false))}>
+                  <FieldInput
+                    field={f}
+                    value={values[f.id] ?? null}
+                    error={errors[f.id] || undefined}
+                    onChange={(v) => setValue(f.id, v)}
+                  />
+                </div>
               ))}
               {fill.fields.length === 0 && (
-                <div className="py-4 text-center text-[13px] text-text-tertiary">
+                <div className="col-span-12 py-4 text-center text-[13px] text-text-tertiary">
                   This form has no fields.
                 </div>
               )}

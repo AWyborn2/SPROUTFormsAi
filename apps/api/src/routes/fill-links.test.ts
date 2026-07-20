@@ -539,6 +539,9 @@ describe('POST /fill/:token/submissions (public, no auth)', () => {
         orgId: 'org-1',
         templateId: 't1',
         templateVersionId: 'v1',
+        // Public path: no session, so no server-verified identity — the
+        // claimed free-text name/email are kept as unverified input.
+        submittedByUserId: null,
         submitterName: 'Tom Reyes',
         submitterEmail: 'tom@contractor.io',
         values: { abn: '12 345 678 901' },
@@ -603,6 +606,80 @@ describe('POST /fill/:token/submissions (public, no auth)', () => {
     }
   });
 
+  it('409s (writes nothing) when the echoed versionId is an unpublished draft of the link template', async () => {
+    // The public serve side is published-only — a draft was never served to
+    // any visitor, so an echoed draft id can only be fabricated.
+    const { db, insertValues, query } = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+    });
+    query.formTemplateVersions.findFirst.mockResolvedValue({ ...PUBLISHED_V1, id: 'v-draft', state: 'draft' });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}/submissions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...validBody, versionId: 'v-draft' }),
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: 'version_mismatch' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s required_fields_missing (writes nothing) when required answers are absent, naming the fields', async () => {
+    const { db, insertValues } = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1, // requires `abn`
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}/submissions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...validBody, values: {} }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body).toEqual({ error: 'required_fields_missing', fields: ['abn'] });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('enforces required-ness against the PINNED version the visitor echoed, not the current one', async () => {
+    // Link template republished to v2, visitor echoes v1: the lookup resolves
+    // the echoed v1 and ITS required set drives the failure.
+    const { db, query } = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: { ...PUBLISHED_TEMPLATE, currentVersionId: 'v2' },
+    });
+    query.formTemplateVersions.findFirst.mockResolvedValue({
+      ...PUBLISHED_V1,
+      fields: [{ id: 'old-field', type: 'text', label: 'Old required', required: true, source: 'built' }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}/submissions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...validBody, values: {} }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body).toEqual({ error: 'required_fields_missing', fields: ['old-field'] });
+    } finally {
+      server.close();
+    }
+  });
+
   it('400s (writes nothing) on malformed values — nested objects are not SubmissionValues', async () => {
     const { db, insertValues } = fakeDb({
       fillLinksFindFirst: ACTIVE_LINK,
@@ -639,6 +716,9 @@ describe('POST /fill/:token/submissions (public, no auth)', () => {
         body: JSON.stringify({
           ...validBody,
           values: {
+            // `abn` stays present — PUBLISHED_V1 requires it and this test is
+            // about the accepted value SHAPES, not required enforcement.
+            abn: '12 345 678 901',
             name: 'Tom',
             count: 3,
             confirmed: true,
