@@ -66,8 +66,13 @@ const NEW_KIT: BrandingKit = {
  * loads the tenant's row, `update(...).set(...).where(...)` captures the
  * write, `insert(...).values(...)` captures the audit entry, and
  * `users.findFirst` feeds `recordAudit`'s actor lookup.
+ *
+ * The `where(...)` result is both awaitable and `.returning()`-able, because
+ * the onboarding stamp is a conditional UPDATE whose matched-row count is the
+ * idempotency signal. `opts.stampRaceLost` makes that UPDATE match zero rows,
+ * standing in for a concurrent PATCH that stamped first.
  */
-function fakeDb(opts: { org?: unknown } = { org: ORG_ROW }) {
+function fakeDb(opts: { org?: unknown; stampRaceLost?: boolean } = { org: ORG_ROW }) {
   const updateSet = vi.fn();
   const insertValues = vi.fn();
   const db = {
@@ -79,7 +84,15 @@ function fakeDb(opts: { org?: unknown } = { org: ORG_ROW }) {
       set: (v: unknown) => ({
         where: (_w: unknown) => {
           updateSet(table, v);
-          return Promise.resolve(undefined);
+          const settled = Promise.resolve(undefined);
+          return Object.assign(settled, {
+            returning: (_cols?: unknown) =>
+              Promise.resolve(
+                opts.stampRaceLost
+                  ? []
+                  : [{ onboardingCompletedAt: (v as { onboardingCompletedAt?: Date }).onboardingCompletedAt ?? null }],
+              ),
+          });
         },
       }),
     })),
@@ -603,6 +616,125 @@ describe('PATCH /org', () => {
       for (const call of updateSet.mock.calls) {
         expect((call[1] as { onboardingCompletedAt?: unknown }).onboardingCompletedAt).toBeUndefined();
       }
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not stamp — or audit — when a concurrent PATCH won the race', async () => {
+    // Both requests read a null column; the guarded UPDATE matches zero rows
+    // for the loser, which must not claim a stamp it did not write.
+    const { db, insertValues } = fakeDb({
+      org: { ...ORG_ROW, onboardingCompletedAt: null },
+      stampRaceLost: true,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { onboardingComplete: true });
+      expect(res.status).toBe(200);
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes no audit entry for a repeat completion — nothing changed', async () => {
+    const { db, insertValues } = fakeDb({
+      org: { ...ORG_ROW, onboardingCompletedAt: new Date('2026-07-01T00:00:00.000Z') },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { onboardingComplete: true });
+      expect(res.status).toBe(200);
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('audits a teamSize-only update as organisation details, not a branding change', async () => {
+    const { db, insertValues } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { teamSize: '2-5' });
+      expect(res.status).toBe(200);
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert?.[1]).toMatchObject({
+        action: 'Updated organisation settings',
+        target: 'Organisation details',
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('audits a first completion as onboarding, not a branding change', async () => {
+    const { db, insertValues } = fakeDb({ org: { ...ORG_ROW, onboardingCompletedAt: null } });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { onboardingComplete: true });
+      expect(res.status).toBe(200);
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert?.[1]).toMatchObject({ target: 'Onboarding completed' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a logoAssetUrl owned by another org — no cross-tenant assignment', async () => {
+    const { db, updateSet } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, logoAssetUrl: '/api/assets/logo/org-2/logo-victim.png' },
+      });
+      expect(res.status).toBe(400);
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a logoAssetUrl this API never minted', async () => {
+    const rejected = [
+      'https://evil.example/logo.png',
+      '/api/assets/logo/org-1/notlogo-a.png', // outside the logo namespace
+      '/api/assets/logo/org-1/logo-a.svg', // SVG is never a logo key
+      '/api/assets/logo/org-1/nested/logo-a.png',
+      'javascript:alert(1)',
+    ];
+    for (const url of rejected) {
+      const { db, updateSet } = fakeDb();
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await patchOrg(base, ownerTenant, {
+          branding: { ...NEW_KIT, logoAssetUrl: url },
+        });
+        expect(res.status, url).toBe(400);
+        expect(updateSet, url).not.toHaveBeenCalled();
+      } finally {
+        server.close();
+      }
+    }
+  });
+
+  it('accepts a logoAssetUrl minted for this org', async () => {
+    const { db, updateSet } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const kit = { ...NEW_KIT, logoAssetUrl: '/api/assets/logo/org-1/logo-fixed-uuid.png' };
+      const res = await patchOrg(base, ownerTenant, { branding: kit });
+      expect(res.status).toBe(200);
+      expect(updateSet.mock.calls[0]?.[1]).toEqual({ branding: kit });
     } finally {
       server.close();
     }
