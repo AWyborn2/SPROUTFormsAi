@@ -24,7 +24,7 @@ export function ImportPublishScreen() {
 
   if (!ready) return null;
 
-  const hasTable = session.fields.some((f) => f.type === 'repeating_group');
+  const tableCount = session.fields.filter((f) => f.type === 'repeating_group').length;
   const trimmedName = name.trim();
 
   // Only AcroForm-imported PDFs carry per-field positions; AI-extracted (flat /
@@ -42,7 +42,11 @@ export function ImportPublishScreen() {
       {
         onSuccess: () => {
           toast({
-            message: `${trimmedName} is live${hasTable ? ' — with its repeating table intact' : ''}.`,
+            message: `${trimmedName} is live${
+              tableCount > 0
+                ? ` — with its ${tableCount === 1 ? 'repeating table' : `${tableCount} repeating tables`} intact`
+                : ''
+            }.`,
             variant: 'success',
           });
           navigate('/app/forms');
@@ -89,7 +93,9 @@ export function ImportPublishScreen() {
               <span className="w-[120px] flex-none text-[12.5px] text-text-tertiary">Fields mapped</span>
               <span className="text-sm font-semibold">
                 {session.total}
-                {hasTable ? ' · incl. 1 repeating table' : ''}
+                {tableCount > 0
+                  ? ` · incl. ${tableCount} repeating ${tableCount === 1 ? 'table' : 'tables'}`
+                  : ''}
               </span>
             </div>
             <div className="h-px bg-border-subtle" />
