@@ -142,6 +142,12 @@ const submissionStatuses = [
 
 const createSubmissionBody = z.object({
   templateId: z.string().min(1),
+  /**
+   * The version the client actually rendered — echoed back so the submission
+   * pins to what the filler saw, not whatever `currentVersionId` points at by
+   * the time the POST lands (mirrors the public fill-link route).
+   */
+  versionId: z.string().min(1),
   submitterName: z.string().optional(),
   submitterEmail: z.string().optional(),
   values: z.record(z.string(), submissionValueSchema),
@@ -163,7 +169,7 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
   // `submitterName`/`submitterEmail` in the body are deliberately ignored on
   // this authed path: identity is server-verified, stamped from the session
   // (AE3 — a client cannot spoof who submitted).
-  const { templateId, values, status, flag } = parsed.data;
+  const { templateId, versionId, values, status, flag } = parsed.data;
 
   const template = await db.query.formTemplates.findFirst({
     where: and(eq(schema.formTemplates.id, templateId), eq(schema.formTemplates.orgId, tenant.orgId)),
@@ -174,6 +180,19 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
   }
   if (!template.currentVersionId) {
     res.status(422).json({ error: 'form_not_published' });
+    return;
+  }
+
+  // The echoed version must be a real version of THIS template. It need not
+  // be the current one: a filler who loaded the form before a newer publish
+  // may still submit against the version they actually saw (that's the whole
+  // point of pinning — AE2). A version of some other template, or a
+  // fabricated id, conflicts: 409 (mirrors fill-links.ts).
+  const version = await db.query.formTemplateVersions.findFirst({
+    where: eq(schema.formTemplateVersions.id, versionId),
+  });
+  if (!version || version.templateId !== template.id) {
+    res.status(409).json({ error: 'version_mismatch' });
     return;
   }
 
@@ -192,7 +211,7 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     .values({
       orgId: tenant.orgId,
       templateId: template.id,
-      templateVersionId: template.currentVersionId,
+      templateVersionId: version.id,
       submittedByUserId: sessionUser.id,
       submitterName: sessionUser.name,
       submitterEmail: sessionUser.email,

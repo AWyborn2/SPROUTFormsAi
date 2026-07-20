@@ -367,6 +367,57 @@ describe('POST /forms/:id/versions', () => {
     }
   });
 
+  it('carries sourcePdfAssetId forward from the previous current version on republish', async () => {
+    const template = { id: 't1', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      // The previous current version holds the round-trip export handle.
+      formTemplateVersionsFindFirst: { id: 'v1', templateId: 't1', sourcePdfAssetId: 'asset-9' },
+      insertedVersion: { id: 'v-new', versionLabel: 'v2' },
+      versionsCountRows: [{ count: 1 }],
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/versions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ fields: [{ id: 'f2' }], publish: true }),
+      });
+      expect(res.status).toBe(201);
+      const versionInsertCall = insertValues.mock.calls.find(([table]) => table === schema.formTemplateVersions);
+      expect(versionInsertCall?.[1]).toMatchObject({ sourcePdfAssetId: 'asset-9' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not invent a sourcePdfAssetId when the previous version had none', async () => {
+    const template = { id: 't1', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v1', templateId: 't1', sourcePdfAssetId: null },
+      insertedVersion: { id: 'v-new', versionLabel: 'v2' },
+      versionsCountRows: [{ count: 1 }],
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/versions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ fields: [{ id: 'f2' }], publish: true }),
+      });
+      expect(res.status).toBe(201);
+      const versionInsertCall = insertValues.mock.calls.find(([table]) => table === schema.formTemplateVersions);
+      expect(versionInsertCall?.[1]).toMatchObject({ sourcePdfAssetId: null });
+    } finally {
+      server.close();
+    }
+  });
+
   it('404s when the template does not exist in the caller org', async () => {
     mockDbValue = fakeDb({ formTemplatesFindFirst: undefined }).db;
     const { server, base } = startApp();

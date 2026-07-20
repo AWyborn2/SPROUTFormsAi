@@ -130,6 +130,7 @@ function toFormSummary(dto: FormSummaryDto): FormSummary {
     icon: iconForSourceType(dto.sourceType),
     status: dto.status,
     sourceType: dto.sourceType,
+    currentVersionId: dto.currentVersionId,
     version: dto.currentVersionLabel ?? '—',
     submissions: dto.submissionsCount,
     updated: relativeTime(dto.updatedAt),
@@ -512,6 +513,8 @@ export const store = {
 
   submitInspection(input: {
     templateId: string;
+    /** The version the fill surface rendered — pins the submission server-side. */
+    versionId: string;
     values: Record<string, SubmissionValue>;
     submitterName?: string;
     submitterEmail?: string;
@@ -519,6 +522,7 @@ export const store = {
     return apiClient
       .post<SubmissionRowDto>('/submissions', {
         templateId: input.templateId,
+        versionId: input.versionId,
         values: input.values,
         ...(input.submitterName ? { submitterName: input.submitterName } : {}),
         ...(input.submitterEmail ? { submitterEmail: input.submitterEmail } : {}),

@@ -256,6 +256,15 @@ formsRouter.post('/:id/versions', requireTenant, withErrorHandling(async (req, r
     .from(schema.formTemplateVersions)
     .where(eq(schema.formTemplateVersions.templateId, template.id));
 
+  // Carry the round-trip export handle forward: republishing an imported form
+  // must not orphan the stored source PDF (the new version inherits it from
+  // the previous current version; forms that never had one stay null).
+  const previousCurrent = template.currentVersionId
+    ? await db.query.formTemplateVersions.findFirst({
+        where: eq(schema.formTemplateVersions.id, template.currentVersionId),
+      })
+    : undefined;
+
   const [version] = await db
     .insert(schema.formTemplateVersions)
     .values({
@@ -264,6 +273,7 @@ formsRouter.post('/:id/versions', requireTenant, withErrorHandling(async (req, r
       state: publish ? 'published' : 'draft',
       fields,
       ...(container ? { container } : {}),
+      sourcePdfAssetId: previousCurrent?.sourcePdfAssetId ?? null,
       publishedAt: publish ? now : null,
       publishedBy: publish ? tenant.userId : null,
     })

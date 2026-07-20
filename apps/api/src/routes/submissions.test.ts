@@ -339,10 +339,11 @@ describe('GET /submissions/:id', () => {
 });
 
 describe('POST /submissions', () => {
-  it('records a submission pinned to the template’s current version', async () => {
+  it('records a submission pinned to the echoed current version id', async () => {
     const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
     const { db, insertValues } = fakeDb({
       formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-current', templateId: 't1' },
       // The authed path resolves the session user to stamp identity.
       usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
       insertedSubmission: {
@@ -364,6 +365,7 @@ describe('POST /submissions', () => {
         headers: { ...authHeader(), 'content-type': 'application/json' },
         body: JSON.stringify({
           templateId: 't1',
+          versionId: 'v-current',
           submitterName: 'Tom Reyes',
           submitterEmail: 'tom@contractor.io',
           values: { abn: '12 345 678 901' },
@@ -377,10 +379,118 @@ describe('POST /submissions', () => {
     }
   });
 
+  it('accepts a stale same-template version id and pins the submission to it (AE2)', async () => {
+    // The template has republished to v-current, but the filler loaded v-old
+    // before the republish — the version they actually saw wins the pin.
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-old', templateId: 't1' },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+      insertedSubmission: {
+        id: 's-new',
+        templateId: 't1',
+        submitterName: 'Tom Reyes',
+        submitterEmail: 'tom@contractor.io',
+        status: 'submitted',
+        flag: '',
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+      },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-old', values: { abn: '12 345 678 901' } }),
+      });
+      expect(res.status).toBe(201);
+      const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionInsert?.[1]).toMatchObject({ templateVersionId: 'v-old' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s (and writes nothing) when the version id belongs to another template', async () => {
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-other', templateId: 't-other' },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-other', values: {} }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ error: 'version_mismatch' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s (and writes nothing) when the version id does not exist', async () => {
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: undefined,
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-fabricated', values: {} }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ error: 'version_mismatch' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s invalid_request when versionId is missing', async () => {
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', values: { abn: '12 345 678 901' } }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body).toMatchObject({ error: 'invalid_request' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
   it('stamps the session user identity and ignores spoofed body submitter fields (AE3)', async () => {
     const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
     const { db, insertValues } = fakeDb({
       formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-current', templateId: 't1' },
       usersFindFirst: { id: 'u1', name: 'Ash Wyborn', email: 'ash@charleshull.com.au' },
       insertedSubmission: {
         id: 's-new',
@@ -402,6 +512,7 @@ describe('POST /submissions', () => {
         headers: { ...authHeader(), 'content-type': 'application/json' },
         body: JSON.stringify({
           templateId: 't1',
+          versionId: 'v-current',
           submitterName: 'Spoofed Name',
           submitterEmail: 'spoof@evil.io',
           values: { abn: '12 345 678 901' },
@@ -428,7 +539,7 @@ describe('POST /submissions', () => {
       const res = await fetch(`${base}/submissions`, {
         method: 'POST',
         headers: { ...authHeader(), 'content-type': 'application/json' },
-        body: JSON.stringify({ templateId: '00000000-0000-0000-0000-000000000000', values: {} }),
+        body: JSON.stringify({ templateId: '00000000-0000-0000-0000-000000000000', versionId: 'v1', values: {} }),
       });
       expect(res.status).toBe(404);
     } finally {
@@ -445,7 +556,7 @@ describe('POST /submissions', () => {
       const res = await fetch(`${base}/submissions`, {
         method: 'POST',
         headers: { ...authHeader(), 'content-type': 'application/json' },
-        body: JSON.stringify({ templateId: 't1', values: {} }),
+        body: JSON.stringify({ templateId: 't1', versionId: 'v1', values: {} }),
       });
       expect(res.status).toBe(422);
     } finally {
@@ -463,7 +574,7 @@ describe('POST /submissions', () => {
       const res = await fetch(`${base}/submissions`, {
         method: 'POST',
         headers: { ...authHeader(), 'content-type': 'application/json' },
-        body: JSON.stringify({ templateId: 't1', values: { abn: { nested: 'object' } } }),
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-current', values: { abn: { nested: 'object' } } }),
       });
       expect(res.status).toBe(400);
       expect(insertValues).not.toHaveBeenCalled();

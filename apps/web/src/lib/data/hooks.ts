@@ -406,6 +406,8 @@ export function useSubmitInspection() {
   return useMutation({
     mutationFn: async (input: {
       templateId: string;
+      /** The version the fill surface rendered — pins the submission server-side. */
+      versionId: string;
       values: Record<string, SubmissionValue>;
       submitterName?: string;
       submitterEmail?: string;

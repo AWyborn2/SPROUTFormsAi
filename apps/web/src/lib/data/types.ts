@@ -26,6 +26,12 @@ export interface FormSummary {
   icon: string;
   status: TemplateStatus;
   sourceType: FormSourceType;
+  /**
+   * Id of the template's current version — the version a fill surface renders,
+   * echoed back on submit so the server pins what the filler actually saw.
+   * Null while the template has no published version.
+   */
+  currentVersionId: string | null;
   /** Current published version label, e.g. "v3". */
   version: string;
   submissions: number;

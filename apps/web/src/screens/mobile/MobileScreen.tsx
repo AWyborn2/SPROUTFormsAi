@@ -118,9 +118,16 @@ export function MobileScreen() {
       toast({ variant: 'warning', message: `${n} required field${n === 1 ? '' : 's'} still need an answer.` });
       return;
     }
+    if (!detail.currentVersionId) {
+      // Only published forms are listed, so this shouldn't happen — but a
+      // fabricated submit against an unpublished form must fail honestly.
+      toast({ variant: 'danger', message: 'This form has no published version to submit against.' });
+      return;
+    }
     submit.mutate(
       {
         templateId: detail.id,
+        versionId: detail.currentVersionId,
         values,
         submitterName: session?.userName,
         submitterEmail: session?.userEmail,
