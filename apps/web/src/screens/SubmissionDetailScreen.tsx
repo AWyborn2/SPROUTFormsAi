@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, Icon, useToast } from '@formai/ui';
+import { Badge, Button, Icon, RepeatingGroup, useToast } from '@formai/ui';
 import type { FormField, SubmissionValue } from '@formai/shared';
+import { resolveSubmitterIdentity, toDisplayRows } from '../lib/submission-display.js';
 import {
   useExportSubmissionPdf,
   useSetSubmissionStatus,
@@ -41,6 +42,10 @@ export function SubmissionDetailScreen() {
   }
 
   const decided = sub.status === 'approved' || sub.status === 'rejected';
+
+  // Server-stamped session identity (verified) beats the free-text claim a
+  // public fill-link submitter typed (unverified) — R15/KTD5.
+  const identity = resolveSubmitterIdentity(sub.submittedBy, sub.who);
 
   // Exportability is decided by field positions, not asset presence: the AI
   // extraction path stores the PDF but emits no sourcePositions, and the
@@ -104,7 +109,21 @@ export function SubmissionDetailScreen() {
             <span className="font-mono text-[12.5px] text-text-tertiary">{sub.id}</span>
             <SubmissionStatusBadge status={sub.status} />
           </div>
-          <h3 className="mb-1 text-[21px]">{sub.who}</h3>
+          <div className="mb-1 flex items-center gap-2.5">
+            <h3 className="text-[21px]">{identity.name}</h3>
+            {/* Badge takes no title, so the explanatory tooltip lives on a wrapper. */}
+            <span
+              title={
+                identity.verified
+                  ? 'Identity stamped server-side from the signed-in session'
+                  : 'Name claimed by the submitter on a public fill link — not verified'
+              }
+            >
+              <Badge variant={identity.verified ? 'success' : 'neutral'} dot={identity.verified}>
+                {identity.verified ? 'Verified' : 'Unverified'}
+              </Badge>
+            </span>
+          </div>
           <div className="text-[13px] text-text-secondary">
             {sub.form} · submitted {sub.date}
           </div>
@@ -187,9 +206,10 @@ export function SubmissionDetailScreen() {
 }
 
 /**
- * Format a single submitted value for read-only display. Repeating groups and
- * other object arrays collapse to a row count (the detail values aren't a
- * fixture doc — just what the submitter entered).
+ * Format a single scalar submitted value for read-only display. Repeating
+ * groups with column definitions render as a real table (see the
+ * `repeating_group` branch in CapturedData); the row-count collapse here is
+ * only the fallback for row arrays on fields with no column shape.
  */
 function formatValue(value: SubmissionValue | undefined): string {
   if (value === null || value === undefined || value === '') return '—';
@@ -303,6 +323,22 @@ function CapturedData({ detail }: { detail: SubmissionDetail | null | undefined 
               className="border-b border-border-subtle bg-surface-sunken p-[12px_20px] font-mono text-[11px] uppercase tracking-wide text-text-tertiary last:border-b-0"
             >
               {field.label}
+            </div>
+          ) : field.type === 'repeating_group' && (field.columns?.length ?? 0) > 0 ? (
+            /* Per-item checklist results, not "N rows captured": a read-only
+               table whose fixed-row labels come from the pinned version's
+               fixedRows (authoritative — KTD1), never the stored cells. */
+            <div key={field.id} className="border-b border-border-subtle p-[11px_20px] last:border-b-0">
+              <div className="mb-2 text-[13px] text-text-tertiary">
+                {field.label}
+                {field.required && <span className="ml-0.5 text-danger">*</span>}
+              </div>
+              <RepeatingGroup
+                columns={field.columns ?? []}
+                rows={toDisplayRows(field, detail.values[field.id])}
+                onChange={() => undefined}
+                readOnly
+              />
             </div>
           ) : (
             <div

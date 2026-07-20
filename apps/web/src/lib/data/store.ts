@@ -96,6 +96,8 @@ interface SubmissionRowDto {
   status: SubmissionStatus;
   flag: string;
   createdAt: string;
+  /** Stamped identity from the users join; null/absent for public or legacy rows. */
+  submittedBy?: { userId: string; name: string } | null;
 }
 
 interface SubmissionDetailDto extends SubmissionRowDto {
@@ -163,6 +165,7 @@ function toSubmissionRow(dto: SubmissionRowDto): SubmissionRow {
     date: relativeTime(dto.createdAt),
     status: dto.status,
     flag: dto.flag,
+    submittedBy: dto.submittedBy ?? null,
   };
 }
 

@@ -68,6 +68,11 @@ export interface SubmissionRow {
   status: SubmissionStatus;
   /** Free-text flag, e.g. "2 fails logged", "ABN mismatch". */
   flag: string;
+  /**
+   * Server-stamped submitter identity (session user, verified server-side);
+   * null for public fill-link / legacy rows, whose `who` is a free-text claim.
+   */
+  submittedBy: { userId: string; name: string } | null;
 }
 
 /** A single submission with captured values (detail view). */
