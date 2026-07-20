@@ -539,6 +539,9 @@ describe('POST /fill/:token/submissions (public, no auth)', () => {
         orgId: 'org-1',
         templateId: 't1',
         templateVersionId: 'v1',
+        // Public path: no session, so no server-verified identity — the
+        // claimed free-text name/email are kept as unverified input.
+        submittedByUserId: null,
         submitterName: 'Tom Reyes',
         submitterEmail: 'tom@contractor.io',
         values: { abn: '12 345 678 901' },

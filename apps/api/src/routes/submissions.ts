@@ -17,16 +17,26 @@ import { db } from '../db.js';
  */
 export const submissionsRouter: Router = Router();
 
-function rowDto(row: typeof schema.submissions.$inferSelect, formName: string) {
+function rowDto(
+  row: typeof schema.submissions.$inferSelect,
+  formName: string,
+  submitterUser?: { id: string; name: string } | null,
+) {
+  // Server-verified identity (users join) takes display precedence over the
+  // free-text submitterName; legacy/public rows fall back to the claimed name.
+  const submittedBy = row.submittedByUserId
+    ? { userId: row.submittedByUserId, name: submitterUser?.name ?? row.submitterName }
+    : null;
   return {
     id: row.id,
     formId: row.templateId,
     form: formName,
-    who: row.submitterName,
+    who: submittedBy?.name ?? row.submitterName,
     email: row.submitterEmail,
     status: row.status,
     flag: row.flag,
     createdAt: row.createdAt.toISOString(),
+    submittedBy,
   };
 }
 
@@ -51,7 +61,17 @@ submissionsRouter.get('/', requireTenant, withErrorHandling(async (req, res) => 
   });
   const nameById = new Map(templates.map((t) => [t.id, t.name]));
 
-  res.json(rows.map((r) => rowDto(r, nameById.get(r.templateId) ?? '')));
+  const submitterIds = [...new Set(rows.map((r) => r.submittedByUserId).filter((id): id is string => !!id))];
+  const submitters = submitterIds.length
+    ? await db.query.users.findMany({ where: inArray(schema.users.id, submitterIds) })
+    : [];
+  const userById = new Map(submitters.map((u) => [u.id, u]));
+
+  res.json(
+    rows.map((r) =>
+      rowDto(r, nameById.get(r.templateId) ?? '', r.submittedByUserId ? userById.get(r.submittedByUserId) : null),
+    ),
+  );
 }));
 
 submissionsRouter.get('/:id', requireTenant, withErrorHandling(async (req, res) => {
@@ -70,13 +90,16 @@ submissionsRouter.get('/:id', requireTenant, withErrorHandling(async (req, res) 
   // The pinned version carries the round-trip export handles: the stored
   // source-PDF asset and the frozen fields (whose `sourcePosition`s decide
   // whether the client may offer "Export filled PDF" at all).
-  const [template, version] = await Promise.all([
+  const [template, version, submitterUser] = await Promise.all([
     db.query.formTemplates.findFirst({ where: eq(schema.formTemplates.id, row.templateId) }),
     db.query.formTemplateVersions.findFirst({ where: eq(schema.formTemplateVersions.id, row.templateVersionId) }),
+    row.submittedByUserId
+      ? db.query.users.findFirst({ where: eq(schema.users.id, row.submittedByUserId) })
+      : Promise.resolve(null),
   ]);
 
   res.json({
-    ...rowDto(row, template?.name ?? ''),
+    ...rowDto(row, template?.name ?? '', submitterUser),
     templateVersionId: row.templateVersionId,
     values: row.values,
     sourcePdfAssetId: version?.sourcePdfAssetId ?? null,
@@ -137,7 +160,10 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     return;
   }
   const tenant = req.tenant!;
-  const { templateId, submitterName, submitterEmail, values, status, flag } = parsed.data;
+  // `submitterName`/`submitterEmail` in the body are deliberately ignored on
+  // this authed path: identity is server-verified, stamped from the session
+  // (AE3 — a client cannot spoof who submitted).
+  const { templateId, values, status, flag } = parsed.data;
 
   const template = await db.query.formTemplates.findFirst({
     where: and(eq(schema.formTemplates.id, templateId), eq(schema.formTemplates.orgId, tenant.orgId)),
@@ -151,14 +177,25 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     return;
   }
 
+  const sessionUser = await db.query.users.findFirst({
+    where: eq(schema.users.id, tenant.userId),
+  });
+  if (!sessionUser) {
+    // Sealed session references a user row that no longer exists — the
+    // account is gone, so the session no longer authenticates anyone.
+    res.status(401).json({ error: 'unauthenticated' });
+    return;
+  }
+
   const [row] = await db
     .insert(schema.submissions)
     .values({
       orgId: tenant.orgId,
       templateId: template.id,
       templateVersionId: template.currentVersionId,
-      submitterName: submitterName ?? '',
-      submitterEmail: submitterEmail ?? '',
+      submittedByUserId: sessionUser.id,
+      submitterName: sessionUser.name,
+      submitterEmail: sessionUser.email,
       values,
       status: status ?? 'submitted',
       flag: flag ?? '',
@@ -166,7 +203,7 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     .returning();
   if (!row) throw new Error('submission_create_failed: insert returned no row');
 
-  res.status(201).json(rowDto(row, template.name));
+  res.status(201).json(rowDto(row, template.name, sessionUser));
 }));
 
 /**
@@ -202,9 +239,12 @@ submissionsRouter.patch('/:id', requireTenant, withErrorHandling(async (req, res
     res.status(404).json({ error: 'not_found' });
     return;
   }
-  const template = await db.query.formTemplates.findFirst({
-    where: eq(schema.formTemplates.id, row.templateId),
-  });
+  const [template, submitterUser] = await Promise.all([
+    db.query.formTemplates.findFirst({ where: eq(schema.formTemplates.id, row.templateId) }),
+    row.submittedByUserId
+      ? db.query.users.findFirst({ where: eq(schema.users.id, row.submittedByUserId) })
+      : Promise.resolve(null),
+  ]);
   const { status } = parsed.data;
 
   await db.update(schema.submissions).set({ status }).where(eq(schema.submissions.id, row.id));
@@ -216,5 +256,5 @@ submissionsRouter.patch('/:id', requireTenant, withErrorHandling(async (req, res
     icon: status === 'approved' ? 'check-circle-2' : 'x-circle',
   });
 
-  res.json(rowDto({ ...row, status }, template?.name ?? ''));
+  res.json(rowDto({ ...row, status }, template?.name ?? '', submitterUser));
 }));

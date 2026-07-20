@@ -305,6 +305,9 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
         orgId: link.orgId,
         templateId: link.templateId,
         templateVersionId: version.id,
+        // No session on this public path — no server-verified identity. The
+        // claimed free-text name/email below are kept as unverified input.
+        submittedByUserId: null,
         submitterName: submitterName ?? '',
         submitterEmail: submitterEmail ?? '',
         values,

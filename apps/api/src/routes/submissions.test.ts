@@ -60,6 +60,7 @@ function fakeDb(opts: {
   submissionsFindMany?: unknown[];
   rolePermissionsFindFirst?: unknown;
   usersFindFirst?: unknown;
+  usersFindMany?: unknown[];
   insertedSubmission?: unknown;
 }) {
   const insertValues = vi.fn();
@@ -83,6 +84,7 @@ function fakeDb(opts: {
       },
       users: {
         findFirst: vi.fn().mockResolvedValue(opts.usersFindFirst),
+        findMany: vi.fn().mockResolvedValue(opts.usersFindMany ?? []),
       },
     },
     insert: vi.fn((table: unknown) => ({
@@ -151,8 +153,55 @@ describe('GET /submissions', () => {
           status: 'submitted',
           flag: '',
           createdAt: '2026-07-01T00:00:00.000Z',
+          // Legacy row without a stamped identity — free-text fallback only.
+          submittedBy: null,
         },
       ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('joins the stamped identity with precedence over free-text, falling back for legacy rows', async () => {
+    const stamped = {
+      id: 's1',
+      orgId: 'org-1',
+      templateId: 't1',
+      submittedByUserId: 'u1',
+      submitterName: 'Claimed Name',
+      submitterEmail: 'claimed@contractor.io',
+      status: 'submitted',
+      flag: '',
+      createdAt: new Date('2026-07-01T00:00:00Z'),
+    };
+    const legacy = {
+      id: 's2',
+      orgId: 'org-1',
+      templateId: 't1',
+      submittedByUserId: null,
+      submitterName: 'Tom Reyes',
+      submitterEmail: 'tom@contractor.io',
+      status: 'submitted',
+      flag: '',
+      createdAt: new Date('2026-06-30T00:00:00Z'),
+    };
+    mockDbValue = fakeDb({
+      submissionsFindMany: [stamped, legacy],
+      formTemplatesFindMany: [{ id: 't1', name: 'Vendor onboarding' }],
+      usersFindMany: [{ id: 'u1', name: 'Ash Wyborn' }],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, { headers: authHeader() });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>[];
+      expect(body[0]).toMatchObject({
+        id: 's1',
+        who: 'Ash Wyborn',
+        submittedBy: { userId: 'u1', name: 'Ash Wyborn' },
+      });
+      expect(body[1]).toMatchObject({ id: 's2', who: 'Tom Reyes', submittedBy: null });
     } finally {
       server.close();
     }
@@ -201,6 +250,40 @@ describe('GET /submissions/:id', () => {
         // No pinned version row resolvable → export handles are explicit empties.
         sourcePdfAssetId: null,
         fields: [],
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('exposes the stamped identity in the detail DTO, joined over free-text submitterName', async () => {
+    const row = {
+      id: 's1',
+      templateId: 't1',
+      templateVersionId: 'v1',
+      submittedByUserId: 'u1',
+      submitterName: 'Claimed Name',
+      submitterEmail: 'claimed@contractor.io',
+      values: {},
+      status: 'submitted',
+      flag: '',
+      createdAt: new Date('2026-07-01T00:00:00Z'),
+    };
+    mockDbValue = fakeDb({
+      submissionsFindFirst: row,
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding' },
+      usersFindFirst: { id: 'u1', name: 'Ash Wyborn' },
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions/s1`, { headers: authHeader() });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({
+        id: 's1',
+        who: 'Ash Wyborn',
+        submittedBy: { userId: 'u1', name: 'Ash Wyborn' },
       });
     } finally {
       server.close();
@@ -260,6 +343,8 @@ describe('POST /submissions', () => {
     const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
     const { db, insertValues } = fakeDb({
       formTemplatesFindFirst: template,
+      // The authed path resolves the session user to stamp identity.
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
       insertedSubmission: {
         id: 's-new',
         templateId: 't1',
@@ -287,6 +372,50 @@ describe('POST /submissions', () => {
       expect(res.status).toBe(201);
       const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
       expect(submissionInsert?.[1]).toMatchObject({ templateVersionId: 'v-current', orgId: 'org-1' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stamps the session user identity and ignores spoofed body submitter fields (AE3)', async () => {
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      usersFindFirst: { id: 'u1', name: 'Ash Wyborn', email: 'ash@charleshull.com.au' },
+      insertedSubmission: {
+        id: 's-new',
+        templateId: 't1',
+        submittedByUserId: 'u1',
+        submitterName: 'Ash Wyborn',
+        submitterEmail: 'ash@charleshull.com.au',
+        status: 'submitted',
+        flag: '',
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+      },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({
+          templateId: 't1',
+          submitterName: 'Spoofed Name',
+          submitterEmail: 'spoof@evil.io',
+          values: { abn: '12 345 678 901' },
+        }),
+      });
+      expect(res.status).toBe(201);
+      const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionInsert?.[1]).toMatchObject({
+        submittedByUserId: 'u1',
+        submitterName: 'Ash Wyborn',
+        submitterEmail: 'ash@charleshull.com.au',
+      });
+      const body = await res.json();
+      expect(body).toMatchObject({ submittedBy: { userId: 'u1', name: 'Ash Wyborn' } });
     } finally {
       server.close();
     }

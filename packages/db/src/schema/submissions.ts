@@ -2,7 +2,7 @@ import { relations } from 'drizzle-orm';
 import { index, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import type { SubmissionValue } from '@formai/shared';
 import { submissionStatusEnum } from './enums.ts';
-import { organizations } from './organizations.ts';
+import { organizations, users } from './organizations.ts';
 import { formTemplates, formTemplateVersions } from './forms.ts';
 
 /** A filled instance of a specific, immutable template version. */
@@ -20,6 +20,13 @@ export const submissions = pgTable(
     templateVersionId: uuid()
       .notNull()
       .references(() => formTemplateVersions.id, { onDelete: 'restrict' }),
+    /**
+     * Server-verified submitter identity, stamped from the session on authed
+     * submits — never taken from the request body. Null for public fill-link
+     * submissions (no session) and legacy rows. Display joins this over the
+     * free-text `submitterName` when present.
+     */
+    submittedByUserId: uuid().references(() => users.id, { onDelete: 'set null' }),
     submitterName: text().notNull().default(''),
     submitterEmail: text().notNull().default(''),
     values: jsonb().$type<Record<string, SubmissionValue>>().notNull().default({}),
@@ -46,5 +53,9 @@ export const submissionsRelations = relations(submissions, ({ one }) => ({
   version: one(formTemplateVersions, {
     fields: [submissions.templateVersionId],
     references: [formTemplateVersions.id],
+  }),
+  submittedBy: one(users, {
+    fields: [submissions.submittedByUserId],
+    references: [users.id],
   }),
 }));

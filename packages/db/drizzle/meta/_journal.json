@@ -50,6 +50,13 @@
       "when": 1753056000000,
       "tag": "0006_plan_tiers",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1784526155484,
+      "tag": "0007_concerned_jack_power",
+      "breakpoints": true
     }
   ]
 }
