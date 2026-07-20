@@ -1,5 +1,6 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import bcrypt from 'bcryptjs';
 
 const mockProvisionTenant = vi.fn();
 vi.mock('../auth/tenant-provisioning.js', () => ({
@@ -29,14 +30,96 @@ afterEach(() => {
   mockDbValue = {};
 });
 
-describe('GET /auth/login', () => {
-  it('redirects to the Replit auth URL with the request domain', async () => {
+describe('POST /auth/login', () => {
+  // Low cost factor keeps the test fast; the route only cares that the hash verifies.
+  const passwordHash = bcrypt.hashSync('correct horse battery', 4);
+  const userRow = { id: 'u1', name: 'Ash Wyborn', email: 'ash@x.io', passwordHash };
+  const tenant = { userId: 'u1', orgId: 'o1', role: 'owner' as const };
+
+  function loginDb(user: object | undefined) {
+    return {
+      query: {
+        users: { findFirst: vi.fn().mockResolvedValue(user) },
+        organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme Inc' }) },
+      },
+    };
+  }
+
+  async function postLogin(base: string, body: unknown) {
+    return fetch(`${base}/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('400s on a malformed body', async () => {
+    mockDbValue = loginDb(userRow);
     const { server, base } = startApp();
     try {
-      const res = await fetch(`${base}/auth/login`, { redirect: 'manual' });
-      expect(res.status).toBe(302);
-      const location = res.headers.get('location') ?? '';
-      expect(location).toMatch(/^https:\/\/replit\.com\/auth_with_repl_site\?domain=.+/);
+      const res = await postLogin(base, { email: 'not-an-email', password: '' });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('validation_error');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s with invalid_credentials for a wrong password, setting no cookie', async () => {
+    mockDbValue = loginDb(userRow);
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { email: 'ash@x.io', password: 'wrong-password' });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_credentials');
+      expect(res.headers.get('set-cookie')).toBeNull();
+      expect(mockProvisionTenant).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s with the same invalid_credentials shape for an unknown email', async () => {
+    mockDbValue = loginDb(undefined);
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { email: 'nobody@x.io', password: 'whatever-pass' });
+      expect(res.status).toBe(401);
+      // Same error body as a wrong password — no email enumeration.
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_credentials');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('seals a session cookie and returns the session info on a correct password', async () => {
+    mockProvisionTenant.mockResolvedValue(tenant);
+    mockDbValue = loginDb(userRow);
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { email: 'ash@x.io', password: 'correct horse battery' });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        ...tenant,
+        orgName: 'Acme Inc',
+        userName: 'Ash Wyborn',
+        userEmail: 'ash@x.io',
+      });
+      const setCookie = res.headers.get('set-cookie') ?? '';
+      expect(setCookie).toContain('fai_session=');
+      const sessionToken = setCookie.split('fai_session=')[1]?.split(';')[0] ?? '';
+      expect(unsealSession(decodeURIComponent(sessionToken))).toEqual(tenant);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('503s when the DB client is unavailable', async () => {
+    mockDbValue = null;
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { email: 'ash@x.io', password: 'correct horse battery' });
+      expect(res.status).toBe(503);
     } finally {
       server.close();
     }
@@ -134,9 +217,9 @@ describe('GET /auth/me', () => {
     }
   });
 
-  it('auto-provisions from Replit headers when no session cookie exists', async () => {
-    const tenant = { userId: 'u1', orgId: 'o1', role: 'owner' as const };
-    mockProvisionTenant.mockResolvedValue(tenant);
+  it('does NOT auto-provision from X-Replit-User-* headers — the cookie is the only credential', async () => {
+    // Replit header auth was removed with the move to email+password; headers
+    // that used to mint a session are now ignored entirely.
     mockDbValue = {
       query: {
         organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Replit Org' }) },
@@ -153,13 +236,9 @@ describe('GET /auth/me', () => {
           'x-replit-user-name': 'replituser',
         },
       });
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body).toMatchObject({ userId: 'u1', orgId: 'o1' });
-      const setCookie = res.headers.get('set-cookie') ?? '';
-      expect(setCookie).toContain('fai_session=');
-      const sessionToken = setCookie.split('fai_session=')[1]?.split(';')[0] ?? '';
-      expect(unsealSession(decodeURIComponent(sessionToken))).toEqual(tenant);
+      expect(res.status).toBe(401);
+      expect(res.headers.get('set-cookie')).toBeNull();
+      expect(mockProvisionTenant).not.toHaveBeenCalled();
     } finally {
       server.close();
     }
