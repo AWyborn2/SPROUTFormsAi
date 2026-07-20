@@ -8,6 +8,7 @@ import {
   postSignInDestination,
   postSignupDestination,
   setupGuardDecision,
+  shouldShowBrandingNudge,
   summarizeInviteResults,
   toRoleName,
   whiteLabelSeed,
@@ -199,5 +200,46 @@ describe('role name mapping', () => {
   it('maps the lowercase wizard role onto the invite hook RoleName', () => {
     expect(toRoleName('admin')).toBe('Admin');
     expect(toRoleName('builder')).toBe('Builder');
+  });
+});
+
+describe('finish-branding nudge visibility', () => {
+  // AE3 (nudge half): the owner who abandoned the wizard must find a way back.
+  it('shows for an owner of a team org whose onboarding is unfinished', () => {
+    expect(shouldShowBrandingNudge({ session: session(), isLoading: false })).toBe(true);
+  });
+
+  it('shows for an admin too — they can run the wizard, so they can finish it', () => {
+    expect(shouldShowBrandingNudge({ session: session({ role: 'admin' }), isLoading: false })).toBe(
+      true,
+    );
+  });
+
+  it('stays hidden for members who cannot edit the org anyway', () => {
+    for (const role of ['builder', 'viewer'] as const) {
+      expect(shouldShowBrandingNudge({ session: session({ role }), isLoading: false })).toBe(false);
+    }
+  });
+
+  it('stays hidden for an individual account — it never had a wizard', () => {
+    expect(
+      shouldShowBrandingNudge({ session: session({ accountKind: 'individual' }), isLoading: false }),
+    ).toBe(false);
+  });
+
+  it('stays hidden once onboarding has been stamped complete', () => {
+    expect(
+      shouldShowBrandingNudge({
+        session: session({ onboardingCompletedAt: '2026-07-20T00:00:00.000Z' }),
+        isLoading: false,
+      }),
+    ).toBe(false);
+  });
+
+  it('stays hidden while the session is loading or absent', () => {
+    expect(shouldShowBrandingNudge({ session: undefined, isLoading: true })).toBe(false);
+    expect(shouldShowBrandingNudge({ session: null, isLoading: false })).toBe(false);
+    // A resolved-but-empty session must not flash a banner either.
+    expect(shouldShowBrandingNudge({ session: session(), isLoading: true })).toBe(false);
   });
 });

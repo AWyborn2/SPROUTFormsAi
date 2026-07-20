@@ -74,6 +74,22 @@ export function setupGuardDecision(input: {
   return { kind: 'allow' };
 }
 
+/**
+ * Whether the authed shell shows the "finish your branding" nudge (R5).
+ *
+ * Deliberately the same three conditions the `/setup` guard allows on: the
+ * banner is a doorway into the wizard, so offering it to anyone the guard
+ * would bounce would be a link straight to a redirect. Loading resolves to
+ * `false` rather than `true` so the banner never flashes on a first paint that
+ * a resolved session then contradicts.
+ */
+export function shouldShowBrandingNudge(input: {
+  session: SessionInfo | null | undefined;
+  isLoading: boolean;
+}): boolean {
+  return setupGuardDecision(input).kind === 'allow';
+}
+
 export interface OnboardingSeed {
   orgName: string;
   teamSize: string;

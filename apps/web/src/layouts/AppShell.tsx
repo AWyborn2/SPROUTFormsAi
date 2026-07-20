@@ -9,6 +9,7 @@ import { useTheme } from '../lib/theme.js';
 import { MOD_LABEL } from '../lib/keyboard/platform.js';
 import { BrandMark } from '../components/BrandMark.js';
 import { AccountMenu } from '../components/AccountMenu.js';
+import { FinishBrandingBanner } from '../components/FinishBrandingBanner.js';
 
 /** The authenticated app shell: slate sidebar + topbar + routed content. */
 export function AppShell() {
@@ -153,6 +154,7 @@ export function AppShell() {
             <span className="font-mono text-[13px] font-semibold">?</span>
           </button>
         </header>
+        <FinishBrandingBanner />
         <main className="fai-scroll flex-1 overflow-auto">
           <Outlet />
         </main>
