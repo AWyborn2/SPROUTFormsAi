@@ -8,6 +8,7 @@ import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
+import { missingRequiredFields } from '@formai/shared';
 // The authed POST /submissions validates with the same runtime schema —
 // single SubmissionValue contract, two doors.
 import { submissionValueSchema } from './submissions.js';
@@ -291,6 +292,16 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
   // id — conflicts: 409.
   if (!version || version.templateId !== link.templateId) {
     res.status(409).json({ error: 'version_mismatch' });
+    return;
+  }
+
+  // Required enforcement (KTD4) against the PINNED version's fields — the
+  // form this visitor was actually served. The public path has no draft
+  // state: every submit is final, so the gate always runs. Same shared
+  // helper as the authed route, so the two doors cannot drift.
+  const missing = missingRequiredFields(version.fields ?? [], values);
+  if (missing.length > 0) {
+    res.status(400).json({ error: 'required_fields_missing', fields: missing });
     return;
   }
 

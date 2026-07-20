@@ -532,6 +532,108 @@ describe('POST /submissions', () => {
     }
   });
 
+  it('400s required_fields_missing (and writes nothing) when required answers are absent, naming the fields', async () => {
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: {
+        id: 'v-current',
+        templateId: 't1',
+        fields: [
+          { id: 'abn', type: 'text', label: 'ABN', required: true, source: 'built' },
+          { id: 'notes', type: 'textarea', label: 'Notes', required: false, source: 'built' },
+        ],
+      },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-current', values: { abn: '   ' } }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body).toEqual({ error: 'required_fields_missing', fields: ['abn'] });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('skips required enforcement for a draft submission (incomplete saves are allowed)', async () => {
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: {
+        id: 'v-current',
+        templateId: 't1',
+        fields: [{ id: 'abn', type: 'text', label: 'ABN', required: true, source: 'built' }],
+      },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+      insertedSubmission: {
+        id: 's-draft',
+        templateId: 't1',
+        submitterName: 'Tom Reyes',
+        submitterEmail: 'tom@contractor.io',
+        status: 'draft',
+        flag: '',
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+      },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-current', values: {}, status: 'draft' }),
+      });
+      expect(res.status).toBe(201);
+      const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionInsert?.[1]).toMatchObject({ status: 'draft' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('enforces required-ness against the PINNED (stale) version, not the current one (AE2 companion)', async () => {
+    // The template republished to v-current, but the filler echoes v-old. The
+    // check must run against v-old's fields — its required id is what gets
+    // reported, regardless of what v-current requires by now.
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db } = fakeDb({
+      formTemplatesFindFirst: template,
+      // The route only ever fetches the ECHOED version id — this is what the
+      // lookup returns, and its fields drive enforcement.
+      formTemplateVersionsFindFirst: {
+        id: 'v-old',
+        templateId: 't1',
+        fields: [{ id: 'old-field', type: 'text', label: 'Old required', required: true, source: 'built' }],
+      },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-old', values: {} }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body).toEqual({ error: 'required_fields_missing', fields: ['old-field'] });
+    } finally {
+      server.close();
+    }
+  });
+
   it('404s when the template does not exist in the caller org', async () => {
     mockDbValue = fakeDb({ formTemplatesFindFirst: undefined }).db;
     const { server, base } = startApp();
@@ -674,6 +776,66 @@ describe('PATCH /submissions/:id', () => {
         category: 'submissions',
         icon: 'x-circle',
       });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s required_fields_missing (and writes nothing) when a blank draft is moved to approved', async () => {
+    const draftRow = { ...row, status: 'draft', templateVersionId: 'v1', values: {} };
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: APPROVER_PERMS,
+      submissionsFindFirst: draftRow,
+      formTemplateVersionsFindFirst: {
+        id: 'v1',
+        templateId: 't1',
+        fields: [{ id: 'abn', type: 'text', label: 'ABN', required: true, source: 'built' }],
+      },
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions/s1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'approved' }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body).toEqual({ error: 'required_fields_missing', fields: ['abn'] });
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets a COMPLETE draft transition to approved (the same check passes)', async () => {
+    const draftRow = { ...row, status: 'draft', templateVersionId: 'v1', values: { abn: '12 345 678 901' } };
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: APPROVER_PERMS,
+      submissionsFindFirst: draftRow,
+      formTemplateVersionsFindFirst: {
+        id: 'v1',
+        templateId: 't1',
+        fields: [{ id: 'abn', type: 'text', label: 'ABN', required: true, source: 'built' }],
+      },
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding' },
+      usersFindFirst: { id: 'u1', name: 'Ash Wyborn' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions/s1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'approved' }),
+      });
+      expect(res.status).toBe(200);
+      const submissionUpdate = updateSet.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionUpdate?.[1]).toEqual({ status: 'approved' });
     } finally {
       server.close();
     }

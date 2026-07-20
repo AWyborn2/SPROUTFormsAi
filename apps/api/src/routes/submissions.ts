@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
+import { missingRequiredFields } from '@formai/shared';
 import type { RepeatingRowValue, SubmissionValue } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -196,6 +197,18 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     return;
   }
 
+  // Required enforcement (KTD4) — against the PINNED version's fields just
+  // resolved above, i.e. the form the filler actually saw, never whatever
+  // `currentVersionId` points at by now (AE2 companion). Drafts may save
+  // incomplete; they face the same gate when transitioning via PATCH below.
+  if ((status ?? 'submitted') !== 'draft') {
+    const missing = missingRequiredFields(version.fields ?? [], values);
+    if (missing.length > 0) {
+      res.status(400).json({ error: 'required_fields_missing', fields: missing });
+      return;
+    }
+  }
+
   const sessionUser = await db.query.users.findFirst({
     where: eq(schema.users.id, tenant.userId),
   });
@@ -257,6 +270,20 @@ submissionsRouter.patch('/:id', requireTenant, withErrorHandling(async (req, res
   if (!row) {
     res.status(404).json({ error: 'not_found' });
     return;
+  }
+  // A draft saved incomplete cannot be finalized: moving draft →
+  // approved/rejected runs the SAME completeness gate as POST, against the
+  // submission's pinned version (closes the draft-then-approve bypass — no
+  // other finalize path exists). Non-draft rows already passed it on create.
+  if (row.status === 'draft') {
+    const pinnedVersion = await db.query.formTemplateVersions.findFirst({
+      where: eq(schema.formTemplateVersions.id, row.templateVersionId),
+    });
+    const missing = missingRequiredFields(pinnedVersion?.fields ?? [], row.values);
+    if (missing.length > 0) {
+      res.status(400).json({ error: 'required_fields_missing', fields: missing });
+      return;
+    }
   }
   const [template, submitterUser] = await Promise.all([
     db.query.formTemplates.findFirst({ where: eq(schema.formTemplates.id, row.templateId) }),

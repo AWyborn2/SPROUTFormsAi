@@ -6,8 +6,14 @@ import { useForm, useForms, useSession, useSubmissions, useSubmitInspection } fr
 import type { FormDetail, FormSummary, SubmissionRow } from '../../lib/data/types.js';
 import { useOnboarding } from '../../lib/onboarding.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
+import { ApiError } from '../../lib/data/api-client.js';
 import { answeredCount, publishedForms } from './mobile-fill.js';
-import { inputFields, validateRequired } from '../../lib/validation.js';
+import {
+  inputFields,
+  requiredFieldErrors,
+  requiredFieldsMissingIds,
+  validateRequired,
+} from '../../lib/validation.js';
 
 type Tab = 'home' | 'activity';
 type View = 'list' | 'fill' | 'done';
@@ -138,8 +144,23 @@ export function MobileScreen() {
           setView('done');
           toast({ variant: 'success', message: `${detail.name} submitted — your team can review it on web.` });
         },
-        onError: () => {
-          toast({ variant: 'danger', message: 'Submission failed — check your connection and try again.' });
+        onError: (err) => {
+          // A 400 is the server rejecting the CONTENT, not a transport
+          // failure — never blame the connection for a validation response.
+          if (err instanceof ApiError && err.status === 400) {
+            const missingIds = requiredFieldsMissingIds(err.body);
+            if (missingIds && missingIds.length > 0) {
+              // Server-side required enforcement (KTD4): same per-field
+              // errors as the client-side pre-check above.
+              setErrors((e) => ({ ...e, ...requiredFieldErrors(missingIds) }));
+              const n = missingIds.length;
+              toast({ variant: 'warning', message: `${n} required field${n === 1 ? '' : 's'} still need an answer.` });
+            } else {
+              toast({ variant: 'danger', message: 'Some answers were invalid — check the form and try again.' });
+            }
+          } else {
+            toast({ variant: 'danger', message: 'Submission failed — check your connection and try again.' });
+          }
         },
       },
     );
