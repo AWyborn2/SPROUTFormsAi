@@ -104,6 +104,10 @@ describe('POST /auth/login', () => {
         orgName: 'Acme Inc',
         userName: 'Ash Wyborn',
         userEmail: 'ash@x.io',
+        accountKind: 'team',
+        branding: null,
+        teamSize: null,
+        onboardingCompletedAt: null,
       });
       const setCookie = res.headers.get('set-cookie') ?? '';
       expect(setCookie).toContain('fai_session=');
