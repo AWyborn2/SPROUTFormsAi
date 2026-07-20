@@ -59,6 +59,8 @@ export interface OrgSettingsDto {
   id: string;
   name: string;
   branding: BrandingKit;
+  teamSize: string | null;
+  onboardingCompletedAt: string | null;
 }
 
 /** Raw shapes returned by `apps/api`'s forms/submissions routes (see forms.ts/submissions.ts). */
@@ -472,8 +474,24 @@ export const store = {
       .then(toPermState);
   },
 
-  updateOrg(input: { name?: string; branding?: BrandingKit }): Promise<OrgSettingsDto> {
+  updateOrg(input: {
+    name?: string;
+    branding?: BrandingKit;
+    teamSize?: string;
+    onboardingComplete?: true;
+  }): Promise<OrgSettingsDto> {
     return apiClient.patch<OrgSettingsDto>('/org', input);
+  },
+
+  /**
+   * Uploads an org logo via `POST /org/logo` and returns the public relative
+   * URL to store in `branding.logoAssetUrl`. The URL is same-origin and
+   * unauthenticated to fetch, so it also renders for logged-out respondents
+   * on a public fill page. Callers rasterise SVG to PNG first — the API only
+   * accepts PNG/JPEG/WebP, verified by magic bytes server-side.
+   */
+  uploadOrgLogo(input: { imageBase64: string; mimeType: string }): Promise<{ url: string }> {
+    return apiClient.post<{ url: string }>('/org/logo', input);
   },
 
   updateWhiteLabel(input: { branding: BrandingKit }): Promise<OrgSettingsDto> {

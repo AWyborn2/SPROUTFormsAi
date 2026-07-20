@@ -1,5 +1,7 @@
+import { useRef } from 'react';
 import { Navigate, Outlet } from 'react-router-dom';
 import { useSession } from '../lib/data/hooks.js';
+import { setupGuardDecision } from '../lib/onboarding-routing.js';
 import { takePendingInvite } from '../lib/pending-invite.js';
 
 /** Minimal, brief — `useSession` typically resolves before this is visible. */
@@ -32,5 +34,27 @@ export function RequireAuth() {
   const { data: session, isLoading } = useSession();
   if (isLoading) return <CheckingSession />;
   if (!session) return <Navigate to="/login" replace />;
+  return <Outlet />;
+}
+
+/**
+ * Gates the onboarding wizard (`/setup`, `/setup/branding`). These render with
+ * `shell: 'none'` outside `RequireAuth`, so this guard covers authentication
+ * *and* eligibility: a team org, an owner/admin role, and onboarding not yet
+ * stamped (see `setupGuardDecision`).
+ *
+ * Admission is latched. "Finish setup" writes the completion stamp and
+ * invalidates the session, which would otherwise re-decide mid-render and
+ * redirect away before the invite results list has been read.
+ */
+export function RequireSetupAccess() {
+  const { data: session, isLoading } = useSession();
+  const admitted = useRef(false);
+  const decision = setupGuardDecision({ session, isLoading });
+
+  if (admitted.current) return <Outlet />;
+  if (decision.kind === 'loading') return <CheckingSession />;
+  if (decision.kind === 'redirect') return <Navigate to={decision.to} replace />;
+  admitted.current = true;
   return <Outlet />;
 }

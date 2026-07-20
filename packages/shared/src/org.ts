@@ -43,4 +43,12 @@ export interface SessionInfo extends TenantContext {
   orgName: string;
   userName: string;
   userEmail: string;
+  /** Whether the org is a solo workspace ('individual') or a shared team ('team'). */
+  accountKind: 'individual' | 'team';
+  /** The org's branding kit; null when the org row could not be resolved. */
+  branding: BrandingKit | null;
+  /** Self-reported team size bucket from onboarding (e.g. '2-5'); null until set. */
+  teamSize: string | null;
+  /** ISO timestamp of onboarding wizard completion; null while the wizard is pending. */
+  onboardingCompletedAt: string | null;
 }

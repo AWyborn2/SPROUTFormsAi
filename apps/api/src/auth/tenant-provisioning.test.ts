@@ -1,5 +1,8 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
-import { schema, type Db } from '@formai/db';
+import { PLAN_CONFIG, PLAN_TIERS, schema, type Db } from '@formai/db';
 import { provisionTenant } from './tenant-provisioning.js';
 
 class UniqueViolation extends Error {
@@ -116,6 +119,28 @@ describe('provisionTenant', () => {
     expect(insert).toHaveBeenCalledWith(schema.organizations);
   });
 
+  it('marks onboarding complete at insert for individual orgs', async () => {
+    const { db, insertValues } = mockDb({ newUserId: 'u1', newOrgId: 'o1' });
+
+    await provisionTenant(db, { ...profile, accountKind: 'individual' });
+
+    const orgCall = insertValues.mock.calls.find(([table]) => table === schema.organizations);
+    expect(orgCall?.[1]).toMatchObject({ accountKind: 'individual', planTier: 'individual' });
+    const values = orgCall?.[1] as { onboardingCompletedAt?: Date };
+    expect(values.onboardingCompletedAt).toBeInstanceOf(Date);
+  });
+
+  it('leaves onboardingCompletedAt unset for team orgs so the wizard runs', async () => {
+    const { db, insertValues } = mockDb({ newUserId: 'u1', newOrgId: 'o1' });
+
+    await provisionTenant(db, { ...profile, accountKind: 'team' });
+
+    const orgCall = insertValues.mock.calls.find(([table]) => table === schema.organizations);
+    expect(orgCall?.[1]).toMatchObject({ accountKind: 'team', planTier: 'team' });
+    const values = orgCall?.[1] as { onboardingCompletedAt?: Date };
+    expect(values.onboardingCompletedAt).toBeUndefined();
+  });
+
   it('recovers from a concurrent user-insert race by reusing the winning row', async () => {
     const racedUser = {
       id: 'u-winner',
@@ -127,5 +152,40 @@ describe('provisionTenant', () => {
     const tenant = await provisionTenant(db, profile);
 
     expect(tenant).toEqual({ userId: 'u-winner', orgId: 'o1', role: 'owner' });
+  });
+});
+
+describe('PLAN_CONFIG entitlements', () => {
+  it('exposes branding on every tier', () => {
+    for (const tier of PLAN_TIERS) {
+      expect(PLAN_CONFIG[tier].features.branding, `branding for ${tier}`).toBe(true);
+    }
+  });
+
+  it('gates whiteLabel to business and enterprise only', () => {
+    expect(PLAN_CONFIG.individual.features.whiteLabel).toBe(false);
+    expect(PLAN_CONFIG.team.features.whiteLabel).toBe(false);
+    expect(PLAN_CONFIG.business.features.whiteLabel).toBe(true);
+    expect(PLAN_CONFIG.enterprise.features.whiteLabel).toBe(true);
+  });
+});
+
+describe('onboarding_completed_at migration', () => {
+  it('adds the column and backfills existing orgs as completed', () => {
+    const drizzleDir = fileURLToPath(
+      new URL('../../../../packages/db/drizzle/', import.meta.url),
+    );
+    const migrations = fs
+      .readdirSync(drizzleDir)
+      .filter((f) => f.endsWith('.sql'))
+      .map((f) => ({ file: f, sql: fs.readFileSync(path.join(drizzleDir, f), 'utf8') }))
+      .filter(({ sql }) => sql.includes('onboarding_completed_at'));
+
+    expect(migrations.length).toBeGreaterThan(0);
+    const combined = migrations.map(({ sql }) => sql).join('\n');
+    expect(combined).toContain('ADD COLUMN "onboarding_completed_at"');
+    expect(combined).toContain(
+      'UPDATE "organizations" SET "onboarding_completed_at" = now() WHERE "onboarding_completed_at" IS NULL;',
+    );
   });
 });

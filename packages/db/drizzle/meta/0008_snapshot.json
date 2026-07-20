@@ -1,6 +1,6 @@
 {
-  "id": "76c78879-eb71-42fb-8937-98531e8feef1",
-  "prevId": "b5a9cdbb-eddf-4869-b385-58d25fb901a0",
+  "id": "8af6954f-ee57-4aa7-999e-40a3bd31d6bc",
+  "prevId": "76c78879-eb71-42fb-8937-98531e8feef1",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -332,6 +332,18 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'team'"
+        },
+        "team_size": {
+          "name": "team_size",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "onboarding_completed_at": {
+          "name": "onboarding_completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},

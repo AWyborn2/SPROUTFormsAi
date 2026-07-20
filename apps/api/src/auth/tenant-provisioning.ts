@@ -52,6 +52,8 @@ async function findOrCreateOrg(
       planTier,
       seatLimit: planConfig.seatLimit,
       accountKind,
+      // Solo workspaces skip the team onboarding wizard entirely.
+      ...(isIndividual ? { onboardingCompletedAt: new Date() } : {}),
     })
     .returning();
   if (!created) throw new Error('tenant_provisioning_failed: organization insert returned no row');

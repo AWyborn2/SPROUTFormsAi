@@ -1,74 +1,102 @@
+import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
-import type { BrandingKit, FormFont } from '@formai/shared';
+import { DEFAULT_BRANDING } from '@formai/shared';
 import { BrandMark } from '../../components/BrandMark.js';
-import { useUpdateOrg } from '../../lib/data/hooks.js';
+import { BrandColorFields } from '../../components/branding/BrandColorFields.js';
+import { FontPicker } from '../../components/branding/FontPicker.js';
+import { LogoUploadControl } from '../../components/branding/LogoUploadControl.js';
+import { ensureFontLoaded } from '../../lib/font-loader.js';
+import { useInviteMember, useUpdateOrg } from '../../lib/data/hooks.js';
 import { useOnboarding } from '../../lib/onboarding.js';
+import { extractPaletteFromImageFile, mergeExtractedPalette } from '../../lib/palette-extract.js';
+import {
+  summarizeInviteResults,
+  toRoleName,
+  type InviteResult,
+  type InviteSettled,
+} from '../../lib/onboarding-routing.js';
 import { Stepper } from './Stepper.js';
-
-type ColorKey = 'primaryColor' | 'secondaryColor' | 'accentColor';
-
-interface ColorRow {
-  key: ColorKey;
-  label: string;
-  presets: string[];
-}
-
-const COLOR_ROWS: ColorRow[] = [
-  { key: 'primaryColor', label: 'Primary', presets: ['#253439', '#181b19', '#1f3a5f', '#3d2f4f', '#0f3d3e'] },
-  { key: 'secondaryColor', label: 'Secondary', presets: ['#7c898b', '#5e6a6c', '#9aa4a4', '#45504f', '#c1c8c8'] },
-  { key: 'accentColor', label: 'Accent', presets: ['#6ec792', '#4f9cf9', '#e0a44f', '#f3685f', '#8b7cf6'] },
-];
-
-const FONT_OPTIONS: Array<{ name: FormFont; stack: string }> = [
-  { name: 'Inter', stack: "'Inter',sans-serif" },
-  { name: 'Sora', stack: "'Sora',sans-serif" },
-  { name: 'Spectral', stack: "'Spectral',serif" },
-];
-
-/** Parse a hex or rgb() string to #rrggbb, or null if unrecognised. */
-function parseColor(input: string): string | null {
-  const s = input.trim();
-  let m = s.match(/^#?([0-9a-f]{3})$/i);
-  if (m && m[1]) {
-    const c = m[1];
-    return `#${c[0]}${c[0]}${c[1]}${c[1]}${c[2]}${c[2]}`;
-  }
-  m = s.match(/^#?([0-9a-f]{6})$/i);
-  if (m && m[1]) return `#${m[1].toLowerCase()}`;
-  m = s.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*[\d.]+\s*)?\)$/i);
-  if (m) {
-    const to2 = (n: string) =>
-      Math.max(0, Math.min(255, parseInt(n, 10))).toString(16).padStart(2, '0');
-    return `#${to2(m[1]!)}${to2(m[2]!)}${to2(m[3]!)}`;
-  }
-  return null;
-}
 
 /** Step 2 — the org branding kit, with a live preview of a real branded form. */
 export function BrandingScreen() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { orgName, branding, hasLogo, setBranding, patch, brandStyle } = useOnboarding();
+  const { orgName, branding, invites, setBranding, brandStyle } = useOnboarding();
   const updateOrg = useUpdateOrg();
+  const inviteMember = useInviteMember();
+  const [finishing, setFinishing] = useState(false);
+  const [inviteResults, setInviteResults] = useState<InviteResult[] | null>(null);
 
-  const orgInitial = (orgName.trim()[0] ?? 'M').toUpperCase();
+  const orgInitial = (orgName.trim()[0] ?? '?').toUpperCase();
+
+  // The live preview renders `var(--org-font)`, which only names the family —
+  // load it whenever the selection changes (including on resume, where the
+  // saved kit arrives without the picker having been touched).
+  useEffect(() => {
+    ensureFontLoaded(branding.formFont);
+  }, [branding.formFont]);
 
   /**
-   * Persist the wizard's choices via `PATCH /org`, then enter the app. An
-   * empty name is dropped so we never overwrite the auto-provisioned org
-   * name with ''; on failure we stay on this step so the user can retry.
+   * Pre-fill the palette from the logo's own colours (R7). Read from the
+   * local file rather than the uploaded URL — the bytes are already here and
+   * a same-origin blob can't taint the canvas. Deliberately outside the
+   * upload try/catch: extraction is cosmetic, so a failure must never surface
+   * as an upload error. Only fields still at their defaults are written, so a
+   * colour the user picked by hand survives a re-upload, and every field
+   * stays editable afterwards.
    */
-  const finishSetup = () => {
+  const prefillPalette = async (file: File) => {
+    const extracted = await extractPaletteFromImageFile(file);
+    const patch = mergeExtractedPalette(branding, extracted, DEFAULT_BRANDING);
+    if (Object.keys(patch).length > 0) setBranding(patch);
+  };
+
+  /**
+   * Persist the wizard's choices and stamp onboarding complete via `PATCH /org`,
+   * then send the Step 1 invite rows. An empty name is dropped so we never
+   * overwrite the auto-provisioned org name with ''; if the save itself fails we
+   * stay on this step so the user can retry.
+   *
+   * Invites are best-effort and deliberately do not gate completion — a seat
+   * limit or a bad address must not trap someone in the wizard. Because the
+   * Step 1 rows are off-screen by now, the per-email outcome renders here
+   * before the transition to the app.
+   */
+  const finishSetup = async () => {
+    setFinishing(true);
     const name = orgName.trim();
-    updateOrg.mutate(name ? { name, branding } : { branding }, {
-      onSuccess: () => navigate('/app'),
-      onError: () =>
-        toast({
-          variant: 'danger',
-          message: 'Could not save your organisation settings — try again.',
-        }),
-    });
+    const payload = { branding, onboardingComplete: true as const };
+    try {
+      await updateOrg.mutateAsync(name ? { name, ...payload } : payload);
+    } catch {
+      setFinishing(false);
+      toast({
+        variant: 'danger',
+        message: 'Could not save your organisation settings — try again.',
+      });
+      return;
+    }
+
+    const rows = invites.filter((inv) => inv.email.trim());
+    if (rows.length === 0) {
+      navigate('/app');
+      return;
+    }
+
+    const settled = await Promise.all(
+      rows.map(async (inv): Promise<InviteSettled> => {
+        const email = inv.email.trim();
+        try {
+          const value = await inviteMember.mutateAsync({ email, role: toRoleName(inv.role) });
+          return { email, ok: true, value: value ? { emailSent: value.emailSent } : null };
+        } catch (error) {
+          return { email, ok: false, error };
+        }
+      }),
+    );
+    setInviteResults(summarizeInviteResults(settled).results);
+    setFinishing(false);
   };
 
   return (
@@ -88,72 +116,34 @@ export function BrandingScreen() {
             </div>
             <h3 className="mb-1.5 text-2xl">Make forms carry your brand</h3>
             <p className="mb-6 text-sm text-text-secondary">
-              External forms — vendor onboarding, customer intake — go out under your identity,
-              not ours.
+              External forms — vendor onboarding, customer intake — go out under your identity, not
+              ours.
             </p>
 
             {/* Logo */}
             <div className="mb-[9px] text-[13px] font-semibold">Logo</div>
-            <button
-              onClick={() => patch({ hasLogo: true })}
-              className="fai-chip-btn mb-[22px] flex w-full items-center gap-[13px] rounded-md border-[1.5px] border-dashed border-border-strong bg-surface-sunken p-[14px] text-left"
-            >
-              <span
-                className="grid h-11 w-11 flex-none place-items-center rounded-[10px] font-heading text-[17px] font-bold text-white"
-                style={{ background: branding.primaryColor }}
-              >
-                {orgInitial}
-              </span>
-              <span className="flex-1">
-                <span className="block font-ui text-[13.5px] font-semibold text-text-primary">
-                  {hasLogo ? 'meridian-mark.svg' : 'Upload your logo'}
-                </span>
-                <span className="block text-xs text-text-tertiary">
-                  SVG or PNG · transparent background
-                </span>
-              </span>
-              <Icon name="upload" size={17} className="text-text-tertiary" />
-            </button>
+            <div className="mb-[22px]">
+              <LogoUploadControl
+                value={branding.logoAssetUrl ?? null}
+                initial={orgInitial}
+                swatchColor={branding.primaryColor}
+                onChange={(url) => setBranding({ logoAssetUrl: url })}
+                onUploaded={prefillPalette}
+              />
+            </div>
 
             {/* Colours */}
             <div className="mb-[11px] text-[13px] font-semibold">Brand colours</div>
-            <div className="mb-[22px] flex flex-col gap-[13px]">
-              {COLOR_ROWS.map((row) => (
-                <ColorRowControl
-                  key={row.key}
-                  row={row}
-                  value={branding[row.key]}
-                  onPick={(hex) => setBranding({ [row.key]: hex } as Partial<BrandingKit>)}
-                />
-              ))}
+            <div className="mb-[22px]">
+              <BrandColorFields branding={branding} onChange={setBranding} />
             </div>
 
             {/* Font */}
             <div className="mb-[9px] text-[13px] font-semibold">Form font</div>
-            <div className="flex gap-2">
-              {FONT_OPTIONS.map((f) => {
-                const selected = branding.formFont === f.name;
-                return (
-                  <button
-                    key={f.name}
-                    onClick={() => setBranding({ formFont: f.name })}
-                    className="fai-chip-btn flex-1 rounded-md border-[1.5px] px-2 py-[11px] text-center"
-                    style={{
-                      borderColor: selected ? 'var(--border-accent)' : 'var(--border-default)',
-                      background: selected ? 'var(--surface-accent-soft)' : 'var(--surface-card)',
-                    }}
-                  >
-                    <span
-                      className="block text-[17px] font-semibold text-text-primary"
-                      style={{ fontFamily: f.stack }}
-                    >
-                      Ag
-                    </span>
-                    <span className="mt-[3px] block text-[11px] text-text-tertiary">{f.name}</span>
-                  </button>
-                );
-              })}
-            </div>
+            <FontPicker
+              value={branding.formFont}
+              onPick={(family) => setBranding({ formFont: family })}
+            />
           </div>
 
           {/* Live preview */}
@@ -172,9 +162,17 @@ export function BrandingScreen() {
                 className="flex h-[88px] items-center gap-3 px-[26px]"
                 style={{ background: 'var(--org-primary)' }}
               >
-                <span className="grid h-10 w-10 place-items-center rounded-[9px] bg-white/[0.14] font-heading text-[17px] font-bold text-white">
-                  {orgInitial}
-                </span>
+                {branding.logoAssetUrl ? (
+                  <img
+                    src={branding.logoAssetUrl}
+                    alt=""
+                    className="h-10 w-10 flex-none rounded-[9px] bg-white/[0.14] object-contain p-1"
+                  />
+                ) : (
+                  <span className="grid h-10 w-10 place-items-center rounded-[9px] bg-white/[0.14] font-heading text-[17px] font-bold text-white">
+                    {orgInitial}
+                  </span>
+                )}
                 <div>
                   <div
                     className="text-[17px] font-bold text-white"
@@ -231,67 +229,66 @@ export function BrandingScreen() {
           </div>
         </div>
 
+        {inviteResults && <InviteResultsPanel results={inviteResults} />}
+
         <div className="mt-[26px] flex max-w-[1000px] items-center justify-between">
-          <Link to="/setup" className="text-[13.5px] text-text-tertiary">
-            Back
-          </Link>
-          <Button onClick={finishSetup} loading={updateOrg.isPending}>
-            Finish setup
-          </Button>
+          {inviteResults ? (
+            <span className="text-[13.5px] text-text-tertiary">
+              Your organisation is set up — you can manage invites from Team.
+            </span>
+          ) : (
+            <Link to="/setup" className="text-[13.5px] text-text-tertiary">
+              Back
+            </Link>
+          )}
+          {inviteResults ? (
+            <Button onClick={() => navigate('/app')}>Go to dashboard</Button>
+          ) : (
+            <Button onClick={() => void finishSetup()} loading={finishing}>
+              Finish setup
+            </Button>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-function ColorRowControl({
-  row,
-  value,
-  onPick,
-}: {
-  row: ColorRow;
-  value: string;
-  onPick: (hex: string) => void;
-}) {
+/**
+ * Per-email invite outcome, shown on the finish step because the rows that
+ * produced it were entered on Step 1 and are no longer visible. Failures are
+ * informational: the org is already set up by the time this renders.
+ */
+function InviteResultsPanel({ results }: { results: InviteResult[] }) {
+  const failed = results.filter((r) => r.status === 'failed').length;
   return (
-    <div>
-      <div className="mb-[7px] flex justify-between">
-        <span className="text-[12.5px] text-text-secondary">{row.label}</span>
-        <span className="font-mono text-[11.5px] text-text-tertiary">{value}</span>
+    <div
+      role="status"
+      className="mt-[26px] rounded-xl border border-border bg-surface-card p-[22px] shadow-sm"
+    >
+      <div className="mb-1 text-[15px] font-semibold">
+        {failed === 0
+          ? 'Invites sent'
+          : `${results.length - failed} of ${results.length} invites sent`}
       </div>
-      <div className="flex gap-[7px]">
-        {row.presets.map((hex) => (
-          <button
-            key={hex}
-            onClick={() => onPick(hex)}
-            aria-label={hex}
-            className="h-[30px] w-[38px] rounded-lg shadow-xs"
-            style={{
-              background: hex,
-              border: `2px solid ${value.toLowerCase() === hex.toLowerCase() ? '#181b19' : 'transparent'}`,
-            }}
-          />
+      <p className="mb-[13px] text-[13px] text-text-secondary">
+        Setup is complete either way — anything that failed can be retried from the Team screen.
+      </p>
+      <ul className="flex flex-col gap-[7px]">
+        {results.map((r) => (
+          <li key={r.email} className="flex items-start gap-2.5 text-[13px]">
+            <Icon
+              name={r.status === 'failed' ? 'info' : 'check'}
+              size={14}
+              className={`mt-0.5 flex-none ${r.status === 'failed' ? 'text-danger' : 'text-accent'}`}
+            />
+            <span className="min-w-0 flex-1">
+              <span className="font-medium text-text-primary">{r.email}</span>{' '}
+              <span className="text-text-tertiary">— {r.detail}</span>
+            </span>
+          </li>
         ))}
-      </div>
-      <div className="mt-2 flex items-center gap-[7px]">
-        <input
-          type="color"
-          value={value}
-          onChange={(e) => onPick(e.target.value)}
-          aria-label={`Pick a custom ${row.label.toLowerCase()} colour`}
-          className="h-[30px] w-[34px] flex-none cursor-pointer rounded-md border border-border bg-surface-card p-0.5"
-        />
-        <input
-          defaultValue={value}
-          key={value}
-          onBlur={(e) => {
-            const parsed = parseColor(e.target.value);
-            if (parsed) onPick(parsed);
-          }}
-          placeholder="#RRGGBB or rgb(0,0,0)"
-          className="h-[30px] min-w-0 flex-1 rounded-md border border-border bg-surface-sunken px-[9px] font-mono text-xs text-text-primary"
-        />
-      </div>
+      </ul>
     </div>
   );
 }
