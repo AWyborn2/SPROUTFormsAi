@@ -1,8 +1,10 @@
 /**
  * Org-brand → CSS custom-property mapping, shared by every surface that
  * renders inside a tenant's brand: the onboarding/white-label previews (via
- * `useOnboarding().brandStyle`) and the public fill page (which gets the
- * serving org's kit from `GET /fill/:token`). Pure so it's unit-testable.
+ * `useOnboarding().brandStyle`), the public fill page (which gets the serving
+ * org's kit from `GET /fill/:token`), and the authed surfaces — the app shell
+ * and the mobile fill screen — which take the kit from the session. Pure so
+ * it's unit-testable.
  */
 import type { CSSProperties } from 'react';
 import type { BrandingKit, FontCategory } from '@formai/shared';
@@ -43,6 +45,10 @@ export function orgBrandVars(branding?: BrandingKit | null): CSSProperties {
   const b = branding ?? DEFAULT_BRANDING;
   return {
     '--org-primary': b.primaryColor,
+    // Both brand colours carry text — the accent on primary-action buttons,
+    // the primary behind fill mastheads and the chrome's org identity — so
+    // both get their ink resolved rather than assuming a dark brand colour.
+    '--org-primary-text': contrastText(b.primaryColor),
     '--org-accent': b.accentColor,
     '--org-accent-text': contrastText(b.accentColor),
     '--org-font': fontStack(b.formFont),
