@@ -370,6 +370,9 @@ export function useUpdateWhiteLabel() {
   return useMutation({
     mutationFn: async (input: { branding: BrandingKit }) => store.updateWhiteLabel(input),
     onSuccess: () => {
+      // The session carries the org's branding, and the app shell reads it —
+      // without this the sidebar keeps the old logo/accent until a reload.
+      qc.invalidateQueries({ queryKey: keys.session });
       qc.invalidateQueries({ queryKey: keys.auditLog });
     },
   });

@@ -182,7 +182,10 @@ export type PermState = Record<RoleName, Record<string, Partial<Record<PermActio
 export type PlanTier = 'individual' | 'team' | 'business' | 'enterprise';
 
 export interface PlanFeatures {
+  /** Logo, colours and font on forms. Free at every tier (R9). */
   branding: boolean;
+  /** Custom domain / sender address / badge removal. Business+ only. */
+  whiteLabel: boolean;
   sso: boolean;
   auditExport: boolean;
   competencyGating: boolean;

@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
-import type { BrandingKit } from '@formai/shared';
-import { DEFAULT_BRANDING, FORM_FONTS, GOOGLE_FONT_FAMILIES } from '@formai/shared';
+import { DEFAULT_BRANDING } from '@formai/shared';
 import { BrandMark } from '../../components/BrandMark.js';
-import { fontStack } from '../../lib/branding.js';
+import { BrandColorFields } from '../../components/branding/BrandColorFields.js';
+import { FontPicker } from '../../components/branding/FontPicker.js';
+import { LogoUploadControl } from '../../components/branding/LogoUploadControl.js';
 import { ensureFontLoaded } from '../../lib/font-loader.js';
-import { useInviteMember, useUpdateOrg, useUploadOrgLogo } from '../../lib/data/hooks.js';
-import { LogoValidationError, prepareLogoUpload } from '../../lib/logo-image.js';
+import { useInviteMember, useUpdateOrg } from '../../lib/data/hooks.js';
 import { useOnboarding } from '../../lib/onboarding.js';
 import { extractPaletteFromImageFile, mergeExtractedPalette } from '../../lib/palette-extract.js';
 import {
@@ -18,56 +18,6 @@ import {
 } from '../../lib/onboarding-routing.js';
 import { Stepper } from './Stepper.js';
 
-type ColorKey = 'primaryColor' | 'secondaryColor' | 'accentColor';
-
-interface ColorRow {
-  key: ColorKey;
-  label: string;
-  presets: string[];
-}
-
-const COLOR_ROWS: ColorRow[] = [
-  {
-    key: 'primaryColor',
-    label: 'Primary',
-    presets: ['#253439', '#181b19', '#1f3a5f', '#3d2f4f', '#0f3d3e'],
-  },
-  {
-    key: 'secondaryColor',
-    label: 'Secondary',
-    presets: ['#7c898b', '#5e6a6c', '#9aa4a4', '#45504f', '#c1c8c8'],
-  },
-  {
-    key: 'accentColor',
-    label: 'Accent',
-    presets: ['#6ec792', '#4f9cf9', '#e0a44f', '#f3685f', '#8b7cf6'],
-  },
-];
-
-/** How many matches the results list renders before asking for a narrower query. */
-const FONT_RESULT_LIMIT = 40;
-
-/** Parse a hex or rgb() string to #rrggbb, or null if unrecognised. */
-function parseColor(input: string): string | null {
-  const s = input.trim();
-  let m = s.match(/^#?([0-9a-f]{3})$/i);
-  if (m && m[1]) {
-    const c = m[1];
-    return `#${c[0]}${c[0]}${c[1]}${c[1]}${c[2]}${c[2]}`;
-  }
-  m = s.match(/^#?([0-9a-f]{6})$/i);
-  if (m && m[1]) return `#${m[1].toLowerCase()}`;
-  m = s.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*[\d.]+\s*)?\)$/i);
-  if (m) {
-    const to2 = (n: string) =>
-      Math.max(0, Math.min(255, parseInt(n, 10)))
-        .toString(16)
-        .padStart(2, '0');
-    return `#${to2(m[1]!)}${to2(m[2]!)}${to2(m[3]!)}`;
-  }
-  return null;
-}
-
 /** Step 2 — the org branding kit, with a live preview of a real branded form. */
 export function BrandingScreen() {
   const navigate = useNavigate();
@@ -75,10 +25,6 @@ export function BrandingScreen() {
   const { orgName, branding, invites, setBranding, brandStyle } = useOnboarding();
   const updateOrg = useUpdateOrg();
   const inviteMember = useInviteMember();
-  const uploadLogo = useUploadOrgLogo();
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [logoError, setLogoError] = useState<string | null>(null);
-  const [logoName, setLogoName] = useState<string | null>(null);
   const [finishing, setFinishing] = useState(false);
   const [inviteResults, setInviteResults] = useState<InviteResult[] | null>(null);
 
@@ -90,31 +36,6 @@ export function BrandingScreen() {
   useEffect(() => {
     ensureFontLoaded(branding.formFont);
   }, [branding.formFont]);
-
-  /**
-   * Validate → rasterise (SVG only) → upload → hold the returned public URL
-   * in wizard state. Nothing persists until "Finish setup" writes the whole
-   * branding kit; a failure here is inline and non-blocking, so the user can
-   * always finish without a logo.
-   */
-  const onPickFile = async (file: File | undefined) => {
-    if (!file) return;
-    setLogoError(null);
-    try {
-      const prepared = await prepareLogoUpload(file);
-      const { url } = await uploadLogo.mutateAsync(prepared);
-      setBranding({ logoAssetUrl: url });
-      setLogoName(file.name);
-    } catch (err) {
-      setLogoError(
-        err instanceof LogoValidationError
-          ? err.message
-          : 'That logo could not be uploaded — you can continue and add one later.',
-      );
-      return;
-    }
-    await prefillPalette(file);
-  };
 
   /**
    * Pre-fill the palette from the logo's own colours (R7). Read from the
@@ -129,12 +50,6 @@ export function BrandingScreen() {
     const extracted = await extractPaletteFromImageFile(file);
     const patch = mergeExtractedPalette(branding, extracted, DEFAULT_BRANDING);
     if (Object.keys(patch).length > 0) setBranding(patch);
-  };
-
-  const removeLogo = () => {
-    setBranding({ logoAssetUrl: null });
-    setLogoName(null);
-    setLogoError(null);
   };
 
   /**
@@ -207,89 +122,20 @@ export function BrandingScreen() {
 
             {/* Logo */}
             <div className="mb-[9px] text-[13px] font-semibold">Logo</div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/svg+xml,image/png,image/jpeg,image/webp"
-              className="hidden"
-              onChange={(e) => {
-                void onPickFile(e.target.files?.[0]);
-                // Reset so re-picking the same file still fires onChange.
-                e.target.value = '';
-              }}
-            />
             <div className="mb-[22px]">
-              {branding.logoAssetUrl ? (
-                <div className="flex items-center gap-[13px] rounded-md border-[1.5px] border-border bg-surface-sunken p-[14px]">
-                  <img
-                    src={branding.logoAssetUrl}
-                    alt="Your uploaded logo"
-                    className="h-11 w-11 flex-none rounded-[10px] border border-border bg-white object-contain p-1"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <span className="block truncate font-ui text-[13.5px] font-semibold text-text-primary">
-                      {logoName ?? 'Your logo'}
-                    </span>
-                    <span className="block text-xs text-text-tertiary">
-                      Shown on every branded form
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={uploadLogo.isPending}
-                    className="fai-chip-btn rounded-md border border-border px-2.5 py-1.5 text-xs font-semibold text-text-secondary"
-                  >
-                    Replace
-                  </button>
-                  <button
-                    onClick={removeLogo}
-                    className="fai-chip-btn rounded-md border border-border px-2.5 py-1.5 text-xs font-semibold text-text-secondary"
-                  >
-                    Remove
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploadLogo.isPending}
-                  className="fai-chip-btn flex w-full items-center gap-[13px] rounded-md border-[1.5px] border-dashed border-border-strong bg-surface-sunken p-[14px] text-left"
-                >
-                  <span
-                    className="grid h-11 w-11 flex-none place-items-center rounded-[10px] font-heading text-[17px] font-bold text-white"
-                    style={{ background: branding.primaryColor }}
-                  >
-                    {orgInitial}
-                  </span>
-                  <span className="flex-1">
-                    <span className="block font-ui text-[13.5px] font-semibold text-text-primary">
-                      {uploadLogo.isPending ? 'Uploading…' : 'Upload your logo'}
-                    </span>
-                    <span className="block text-xs text-text-tertiary">
-                      SVG, PNG, JPEG or WebP · up to 2 MB
-                    </span>
-                  </span>
-                  <Icon name="upload" size={17} className="text-text-tertiary" />
-                </button>
-              )}
-              {logoError && (
-                <p role="alert" className="mt-2 flex items-start gap-1.5 text-xs text-danger">
-                  <Icon name="info" size={13} className="mt-px flex-none" />
-                  {logoError}
-                </p>
-              )}
+              <LogoUploadControl
+                value={branding.logoAssetUrl ?? null}
+                initial={orgInitial}
+                swatchColor={branding.primaryColor}
+                onChange={(url) => setBranding({ logoAssetUrl: url })}
+                onUploaded={prefillPalette}
+              />
             </div>
 
             {/* Colours */}
             <div className="mb-[11px] text-[13px] font-semibold">Brand colours</div>
-            <div className="mb-[22px] flex flex-col gap-[13px]">
-              {COLOR_ROWS.map((row) => (
-                <ColorRowControl
-                  key={row.key}
-                  row={row}
-                  value={branding[row.key]}
-                  onPick={(hex) => setBranding({ [row.key]: hex } as Partial<BrandingKit>)}
-                />
-              ))}
+            <div className="mb-[22px]">
+              <BrandColorFields branding={branding} onChange={setBranding} />
             </div>
 
             {/* Font */}
@@ -443,191 +289,6 @@ function InviteResultsPanel({ results }: { results: InviteResult[] }) {
           </li>
         ))}
       </ul>
-    </div>
-  );
-}
-
-/**
- * Font selection: four quick picks over a text-filtered listbox of the whole
- * bundled Google Fonts catalog. Deliberately *not* a free-text field — the
- * value is persisted and validated against the same catalog server-side, so
- * anything typed can only ever select, never submit.
- */
-function FontPicker({ value, onPick }: { value: string; onPick: (family: string) => void }) {
-  const [query, setQuery] = useState('');
-  const [active, setActive] = useState(0);
-  const listRef = useRef<HTMLUListElement>(null);
-
-  // The quick picks render their own name as a specimen, so each needs its
-  // stylesheet — this is precisely the bug the old picker had with Spectral.
-  useEffect(() => {
-    for (const family of FORM_FONTS) ensureFontLoaded(family);
-  }, []);
-
-  const matches = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const pool = q ? GOOGLE_FONT_FAMILIES.filter((f) => f.toLowerCase().includes(q)) : [];
-    return pool.slice(0, FONT_RESULT_LIMIT);
-  }, [query]);
-
-  const select = (family: string) => {
-    onPick(family);
-    setQuery('');
-    setActive(0);
-  };
-
-  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (matches.length === 0) return;
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      const next =
-        e.key === 'ArrowDown'
-          ? (active + 1) % matches.length
-          : (active - 1 + matches.length) % matches.length;
-      setActive(next);
-      listRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      const family = matches[active];
-      if (family) select(family);
-    } else if (e.key === 'Escape') {
-      setQuery('');
-      setActive(0);
-    }
-  };
-
-  return (
-    <div>
-      <div className="mb-2 flex gap-2">
-        {FORM_FONTS.map((family) => {
-          const selected = value === family;
-          return (
-            <button
-              key={family}
-              onClick={() => select(family)}
-              aria-pressed={selected}
-              className="fai-chip-btn flex-1 rounded-md border-[1.5px] px-2 py-[11px] text-center"
-              style={{
-                borderColor: selected ? 'var(--border-accent)' : 'var(--border-default)',
-                background: selected ? 'var(--surface-accent-soft)' : 'var(--surface-card)',
-              }}
-            >
-              <span
-                className="block text-[17px] font-semibold text-text-primary"
-                style={{ fontFamily: fontStack(family) }}
-              >
-                Ag
-              </span>
-              <span className="mt-[3px] block truncate text-[11px] text-text-tertiary">
-                {family}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      <input
-        value={query}
-        onChange={(e) => {
-          setQuery(e.target.value);
-          setActive(0);
-        }}
-        onKeyDown={onKeyDown}
-        role="combobox"
-        aria-expanded={query.trim().length > 0}
-        aria-controls="font-results"
-        aria-autocomplete="list"
-        aria-label="Search all Google Fonts"
-        placeholder="Search all Google Fonts…"
-        className="h-[34px] w-full rounded-md border border-border bg-surface-sunken px-[9px] text-[13px] text-text-primary"
-      />
-
-      {query.trim().length > 0 &&
-        (matches.length === 0 ? (
-          <p className="mt-2 px-[9px] text-xs text-text-tertiary">No fonts found.</p>
-        ) : (
-          <ul
-            id="font-results"
-            ref={listRef}
-            role="listbox"
-            aria-label="Google Fonts"
-            className="fai-scroll mt-2 max-h-[190px] overflow-auto rounded-md border border-border bg-surface-card"
-          >
-            {matches.map((family, i) => (
-              <li key={family} role="option" aria-selected={value === family}>
-                <button
-                  onClick={() => select(family)}
-                  onMouseEnter={() => setActive(i)}
-                  className="flex w-full items-center justify-between px-[11px] py-[7px] text-left text-[13px] text-text-primary"
-                  style={{
-                    background: i === active ? 'var(--surface-accent-soft)' : 'transparent',
-                  }}
-                >
-                  <span className="truncate">{family}</span>
-                  {value === family && (
-                    <Icon name="check" size={13} className="flex-none text-accent" />
-                  )}
-                </button>
-              </li>
-            ))}
-          </ul>
-        ))}
-
-      <p className="mt-2 text-[11.5px] text-text-tertiary">
-        Selected: <span style={{ fontFamily: fontStack(value) }}>{value}</span>
-      </p>
-    </div>
-  );
-}
-
-function ColorRowControl({
-  row,
-  value,
-  onPick,
-}: {
-  row: ColorRow;
-  value: string;
-  onPick: (hex: string) => void;
-}) {
-  return (
-    <div>
-      <div className="mb-[7px] flex justify-between">
-        <span className="text-[12.5px] text-text-secondary">{row.label}</span>
-        <span className="font-mono text-[11.5px] text-text-tertiary">{value}</span>
-      </div>
-      <div className="flex gap-[7px]">
-        {row.presets.map((hex) => (
-          <button
-            key={hex}
-            onClick={() => onPick(hex)}
-            aria-label={hex}
-            className="h-[30px] w-[38px] rounded-lg shadow-xs"
-            style={{
-              background: hex,
-              border: `2px solid ${value.toLowerCase() === hex.toLowerCase() ? '#181b19' : 'transparent'}`,
-            }}
-          />
-        ))}
-      </div>
-      <div className="mt-2 flex items-center gap-[7px]">
-        <input
-          type="color"
-          value={value}
-          onChange={(e) => onPick(e.target.value)}
-          aria-label={`Pick a custom ${row.label.toLowerCase()} colour`}
-          className="h-[30px] w-[34px] flex-none cursor-pointer rounded-md border border-border bg-surface-card p-0.5"
-        />
-        <input
-          defaultValue={value}
-          key={value}
-          onBlur={(e) => {
-            const parsed = parseColor(e.target.value);
-            if (parsed) onPick(parsed);
-          }}
-          placeholder="#RRGGBB or rgb(0,0,0)"
-          className="h-[30px] min-w-0 flex-1 rounded-md border border-border bg-surface-sunken px-[9px] font-mono text-xs text-text-primary"
-        />
-      </div>
     </div>
   );
 }
