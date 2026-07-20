@@ -352,6 +352,102 @@ describe('POST /team/members', () => {
     }
   });
 
+  it('403s with seat_limit_reached via the plan-tier fallback when org.seatLimit is null', async () => {
+    const { db, insertValues } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      // Legacy org row: seatLimit was never backfilled — the team tier's
+      // configured limit (5) must still be enforced.
+      organizationsFindFirst: { id: 'org-1', name: 'Legacy Co', planTier: 'team', seatLimit: null },
+      activeSeatCount: 5,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, {
+        method: 'POST',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'sam@x.io', role: 'builder' }),
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; seatLimit: number; seatUsed: number };
+      expect(body.error).toBe('seat_limit_reached');
+      expect(body.seatLimit).toBe(5);
+      expect(body.seatUsed).toBe(5);
+      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeUndefined();
+      expect(emailMocks.sendInviteEmail).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s with seat_limit_reached when seatLimit is absent from the org row entirely', async () => {
+    // `N >= undefined` is false, so a missing column must not bypass enforcement.
+    const { db, insertValues } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      organizationsFindFirst: { id: 'org-1', name: 'Legacy Co', planTier: 'individual' },
+      activeSeatCount: 1,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, {
+        method: 'POST',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'sam@x.io', role: 'builder' }),
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; seatLimit: number };
+      expect(body.error).toBe('seat_limit_reached');
+      expect(body.seatLimit).toBe(1);
+      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('201s under the plan-tier fallback limit when org.seatLimit is null and seats remain', async () => {
+    const { db } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      organizationsFindFirst: { id: 'org-1', name: 'Legacy Co', planTier: 'team', seatLimit: null },
+      activeSeatCount: 2,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, {
+        method: 'POST',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'sam@x.io', role: 'builder' }),
+      });
+      expect(res.status).toBe(201);
+      expect(((await res.json()) as { status: string }).status).toBe('invited');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('201s regardless of seat count when neither the org nor its tier defines a limit', async () => {
+    const { db } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      // Tier unknown to PLAN_CONFIG → genuinely no configured cap → unlimited.
+      organizationsFindFirst: { id: 'org-1', name: 'Big Co', planTier: 'enterprise-unlimited', seatLimit: null },
+      activeSeatCount: 500,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, {
+        method: 'POST',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'sam@x.io', role: 'builder' }),
+      });
+      expect(res.status).toBe(201);
+      expect(((await res.json()) as { status: string }).status).toBe('invited');
+    } finally {
+      server.close();
+    }
+  });
+
   it('sends the invite email with the tenant org name and inviter after the rows commit', async () => {
     const { db } = fakeDb({
       rolePermissionsFindFirst: ADMIN_PERMS,

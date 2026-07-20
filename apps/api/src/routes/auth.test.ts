@@ -17,6 +17,7 @@ vi.mock('../db.js', () => ({
 
 const { createApp } = await import('../app.js');
 const { sealSession, unsealSession } = await import('../auth/replit-auth.js');
+const { DUMMY_HASH } = await import('./auth.js');
 
 function startApp() {
   const app = createApp();
@@ -90,6 +91,15 @@ describe('POST /auth/login', () => {
     } finally {
       server.close();
     }
+  });
+
+  it('backs the unknown-email path with a structurally valid, full-cost dummy hash', async () => {
+    // A malformed constant would make bcrypt.compare short-circuit instead of
+    // doing full-cost work, reintroducing the timing oracle the dummy compare
+    // exists to prevent. Cost must match the 12 used for real password hashes.
+    expect(DUMMY_HASH).toMatch(/^\$2[aby]\$12\$/);
+    expect(DUMMY_HASH).toHaveLength(60);
+    await expect(bcrypt.compare('anything', DUMMY_HASH)).resolves.toBe(false);
   });
 
   it('seals a session cookie and returns the session info on a correct password', async () => {
