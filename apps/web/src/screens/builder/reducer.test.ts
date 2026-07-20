@@ -59,6 +59,64 @@ describe('initialSeq', () => {
   });
 });
 
+describe('reorder', () => {
+  function seeded() {
+    return initialBuilderState({
+      formId: 'f-1',
+      name: 'X',
+      fields: [field('a'), field('b'), field('c'), field('d')],
+    });
+  }
+
+  it('moves a field forward with arrayMove semantics (0 → 3)', () => {
+    const s = seeded();
+    const next = builderReducer(s, { t: 'reorder', from: 0, to: 3 });
+    expect(next.fields.map((f) => f.id)).toEqual(['b', 'c', 'd', 'a']);
+  });
+
+  it('moves a field backward with arrayMove semantics (3 → 0)', () => {
+    const s = seeded();
+    const next = builderReducer(s, { t: 'reorder', from: 3, to: 0 });
+    expect(next.fields.map((f) => f.id)).toEqual(['d', 'a', 'b', 'c']);
+  });
+
+  it('preserves every field across a reorder', () => {
+    const s = seeded();
+    const next = builderReducer(s, { t: 'reorder', from: 1, to: 2 });
+    expect(next.fields).toHaveLength(4);
+    expect(new Set(next.fields.map((f) => f.id))).toEqual(new Set(['a', 'b', 'c', 'd']));
+  });
+
+  it('preserves the selection', () => {
+    const s = { ...seeded(), selectedId: 'a' };
+    const next = builderReducer(s, { t: 'reorder', from: 0, to: 2 });
+    expect(next.selectedId).toBe('a');
+  });
+
+  it('is a no-op when from === to (state unchanged)', () => {
+    const s = seeded();
+    const next = builderReducer(s, { t: 'reorder', from: 2, to: 2 });
+    expect(next).toBe(s);
+  });
+
+  it('ignores out-of-bounds indices', () => {
+    const s = seeded();
+    expect(builderReducer(s, { t: 'reorder', from: -1, to: 2 })).toBe(s);
+    expect(builderReducer(s, { t: 'reorder', from: 0, to: 4 })).toBe(s);
+    expect(builderReducer(s, { t: 'reorder', from: 4, to: 0 })).toBe(s);
+    expect(builderReducer(s, { t: 'reorder', from: 0, to: -1 })).toBe(s);
+  });
+
+  it('records an undo snapshot like move does, so undo restores the prior order', () => {
+    const s = seeded();
+    const moved = builderReducer(s, { t: 'reorder', from: 0, to: 3 });
+    expect(moved.undo).toHaveLength(s.undo.length + 1);
+    expect(moved.redo).toEqual([]);
+    const undone = builderReducer(moved, { t: 'undo' });
+    expect(undone.fields.map((f) => f.id)).toEqual(['a', 'b', 'c', 'd']);
+  });
+});
+
 describe('adding to a re-loaded form', () => {
   it('never mints an id that collides with existing b<n> ids', () => {
     const s = initialBuilderState({

@@ -118,6 +118,7 @@ export type BuilderAction =
   | { t: 'duplicate'; id: string }
   | { t: 'delete'; id: string }
   | { t: 'move'; id: string; dir: -1 | 1 }
+  | { t: 'reorder'; from: number; to: number }
   | { t: 'copy' }
   | { t: 'paste' }
   | { t: 'undo' }
@@ -201,6 +202,18 @@ export function builderReducer(s: BuilderState, a: BuilderAction): BuilderState 
         [fields[i], fields[j]] = [fields[j]!, fields[i]!];
         return { fields };
       });
+    case 'reorder': {
+      // arrayMove semantics for drag-and-drop drops (unlike `move`, which is an
+      // adjacent swap). No-op when nothing changes; out-of-bounds is ignored.
+      const { from, to } = a;
+      if (from === to) return s;
+      if (from < 0 || to < 0 || from >= s.fields.length || to >= s.fields.length) return s;
+      return mutate(s, (fields) => {
+        const [f] = fields.splice(from, 1);
+        fields.splice(to, 0, f!);
+        return { fields };
+      });
+    }
     case 'copy': {
       const f = s.fields.find((x) => x.id === s.selectedId);
       return f ? { ...s, clipboard: structuredClone(f) } : s;

@@ -1,5 +1,17 @@
-import { useEffect, useMemo, useReducer, useRef } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core';
+import { SortableContext, useSortable, type SortingStrategy } from '@dnd-kit/sortable';
 import {
   Badge,
   Button,
@@ -30,6 +42,14 @@ const COL_OPTIONS: Array<{ span: number; icon: string; label: string }> = [
   { span: 4, icon: 'columns-3', label: 'Third' },
   { span: 3, icon: 'grid-2x2', label: 'Quarter' },
 ];
+
+/**
+ * Sortable strategy that never shifts resting cards. The wrapping variable-width
+ * grid makes dnd-kit's rect projections ambiguous, so instead of live
+ * re-flowing we keep the grid static and draw an insertion-boundary line
+ * (linear field order) on the card under the pointer.
+ */
+const STATIC_STRATEGY: SortingStrategy = () => null;
 
 const VALIDATION_OPTIONS = [
   { label: 'None', value: 'none' },
@@ -169,6 +189,32 @@ function BuilderEditor({ init }: { init: BuilderInit }) {
   );
   const containerSelected = state.selectedId === CONTAINER_ID;
 
+  // Pointer drag-and-drop reordering (edit mode only — preview renders no
+  // canvas, so DnD is structurally absent there). PointerSensor only:
+  // Alt+Arrow (above) stays the one keyboard reorder path.
+  const [drag, setDrag] = useState<{ activeId: string; overId: string | null } | null>(null);
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
+  const dragFrom = drag ? state.fields.findIndex((f) => f.id === drag.activeId) : -1;
+  const dragTo = drag?.overId ? state.fields.findIndex((f) => f.id === drag.overId) : -1;
+  const activeField = dragFrom >= 0 ? state.fields[dragFrom]! : null;
+
+  function onDragStart(e: DragStartEvent) {
+    setDrag({ activeId: String(e.active.id), overId: null });
+  }
+  function onDragOver(e: DragOverEvent) {
+    setDrag((d) => (d ? { ...d, overId: e.over ? String(e.over.id) : null } : d));
+  }
+  function onDragEnd(e: DragEndEvent) {
+    setDrag(null);
+    const over = e.over;
+    const from = state.fields.findIndex((f) => f.id === e.active.id);
+    const to = over ? state.fields.findIndex((f) => f.id === over.id) : -1;
+    if (from >= 0 && to >= 0 && from !== to) dispatch({ t: 'reorder', from, to });
+  }
+  function onDragCancel() {
+    setDrag(null);
+  }
+
   const publishPending = publish.isPending || publishVersion.isPending;
 
   function doPublish() {
@@ -290,32 +336,65 @@ function BuilderEditor({ init }: { init: BuilderInit }) {
                 <span className="text-[11.5px] text-text-tertiary">Size, border &amp; shading</span>
               </button>
 
-              <div className="grid grid-cols-12 items-start gap-2.5">
-                {state.fields.map((f) => (
-                  <FieldCard
-                    key={f.id}
-                    field={f}
-                    selected={f.id === state.selectedId}
-                    onSelect={() => dispatch({ t: 'select', id: f.id })}
-                    onUp={() => dispatch({ t: 'move', id: f.id, dir: -1 })}
-                    onDown={() => dispatch({ t: 'move', id: f.id, dir: 1 })}
-                    onDup={() => dispatch({ t: 'duplicate', id: f.id })}
-                    onDel={() => dispatch({ t: 'delete', id: f.id })}
-                  />
-                ))}
-                <div className="col-span-12 flex items-center justify-center gap-2 rounded-md border-[1.5px] border-dashed border-border p-3.5 text-[12.5px] text-text-tertiary">
-                  {state.fields.length === 0 ? (
-                    <>Blank form — add your first field from the palette above.</>
-                  ) : (
-                    <>
-                      Press <span className="kbd">{MOD_LABEL}</span>
-                      <span className="kbd">Enter</span> to add · <span className="kbd">↑</span>
-                      <span className="kbd">↓</span> select · <span className="kbd">{ALT_LABEL}</span>
-                      <span className="kbd">↑↓</span> reorder
-                    </>
-                  )}
-                </div>
-              </div>
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragStart={onDragStart}
+                onDragOver={onDragOver}
+                onDragEnd={onDragEnd}
+                onDragCancel={onDragCancel}
+              >
+                <SortableContext items={state.fields.map((f) => f.id)} strategy={STATIC_STRATEGY}>
+                  <div className="grid grid-cols-12 items-start gap-2.5">
+                    {state.fields.map((f, i) => (
+                      <SortableFieldCard
+                        key={f.id}
+                        field={f}
+                        indicator={
+                          dragFrom >= 0 && dragTo >= 0 && dragFrom !== dragTo && i === dragTo
+                            ? dragFrom < dragTo
+                              ? 'after'
+                              : 'before'
+                            : null
+                        }
+                        selected={f.id === state.selectedId}
+                        onSelect={() => dispatch({ t: 'select', id: f.id })}
+                        onUp={() => dispatch({ t: 'move', id: f.id, dir: -1 })}
+                        onDown={() => dispatch({ t: 'move', id: f.id, dir: 1 })}
+                        onDup={() => dispatch({ t: 'duplicate', id: f.id })}
+                        onDel={() => dispatch({ t: 'delete', id: f.id })}
+                      />
+                    ))}
+                    <div className="col-span-12 flex items-center justify-center gap-2 rounded-md border-[1.5px] border-dashed border-border p-3.5 text-[12.5px] text-text-tertiary">
+                      {state.fields.length === 0 ? (
+                        <>Blank form — add your first field from the palette above.</>
+                      ) : (
+                        <>
+                          Press <span className="kbd">{MOD_LABEL}</span>
+                          <span className="kbd">Enter</span> to add · <span className="kbd">↑</span>
+                          <span className="kbd">↓</span> select · <span className="kbd">{ALT_LABEL}</span>
+                          <span className="kbd">↑↓</span> reorder
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </SortableContext>
+                <DragOverlay>
+                  {activeField ? (
+                    <div style={{ opacity: 0.75 }}>
+                      <FieldCard
+                        field={activeField}
+                        selected={false}
+                        onSelect={() => {}}
+                        onUp={() => {}}
+                        onDown={() => {}}
+                        onDup={() => {}}
+                        onDel={() => {}}
+                      />
+                    </div>
+                  ) : null}
+                </DragOverlay>
+              </DndContext>
             </div>
 
             {/* Config panel */}
@@ -334,6 +413,68 @@ function BuilderEditor({ init }: { init: BuilderInit }) {
   );
 }
 
+/**
+ * Sortable canvas wrapper for FieldCard: owns the grid span, dims the resting
+ * copy while it is dragged (the DragOverlay carries the visual), and renders
+ * the insertion-boundary indicator — a thin accent line on the top/bottom edge
+ * for full-width cards, left/right edge for partial-width ones, matching the
+ * boundary's orientation in linear reading order.
+ */
+function SortableFieldCard({
+  field,
+  indicator,
+  ...cardProps
+}: {
+  field: FormField;
+  indicator: 'before' | 'after' | null;
+  selected: boolean;
+  onSelect: () => void;
+  onUp: () => void;
+  onDown: () => void;
+  onDup: () => void;
+  onDel: () => void;
+}) {
+  const { setNodeRef, setActivatorNodeRef, listeners, attributes, isDragging } = useSortable({
+    id: field.id,
+  });
+  const span = field.type === 'section_header' ? 12 : (field.colSpan ?? 12);
+  const horizontal = span === 12;
+  const lineStyle: React.CSSProperties = horizontal
+    ? { left: 0, right: 0, height: 3, ...(indicator === 'before' ? { top: -6.5 } : { bottom: -6.5 }) }
+    : { top: 0, bottom: 0, width: 3, ...(indicator === 'before' ? { left: -6.5 } : { right: -6.5 }) };
+
+  return (
+    <div
+      ref={setNodeRef}
+      className="relative min-w-0"
+      style={{ gridColumn: `span ${span} / span ${span}`, opacity: isDragging ? 0.35 : 1 }}
+    >
+      {indicator && (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute z-10 rounded-pill"
+          style={{ background: 'var(--accent)', ...lineStyle }}
+        />
+      )}
+      <FieldCard
+        field={field}
+        {...cardProps}
+        grip={
+          <button
+            ref={setActivatorNodeRef}
+            {...attributes}
+            {...listeners}
+            aria-label="Drag to reorder. Alt+Arrow keys also reorder."
+            className="flex-none cursor-grab touch-none rounded-sm text-text-disabled hover:text-text-secondary focus:outline-none focus-visible:shadow-focus active:cursor-grabbing"
+          >
+            <Icon name="grip-vertical" size={15} />
+          </button>
+        }
+      />
+    </div>
+  );
+}
+
 function FieldCard({
   field,
   selected,
@@ -342,6 +483,7 @@ function FieldCard({
   onDown,
   onDup,
   onDel,
+  grip,
 }: {
   field: FormField;
   selected: boolean;
@@ -350,6 +492,8 @@ function FieldCard({
   onDown: () => void;
   onDup: () => void;
   onDel: () => void;
+  /** Drag activator node; the DragOverlay copy omits it for a static grip. */
+  grip?: React.ReactNode;
 }) {
   const meta = FIELD_META[field.type] ?? { icon: 'help-circle', label: field.type };
   const span = field.type === 'section_header' ? 12 : (field.colSpan ?? 12);
@@ -369,14 +513,13 @@ function FieldCard({
       tabIndex={0}
       className="min-w-0 overflow-hidden rounded-md border bg-surface-card p-[13px_15px]"
       style={{
-        gridColumn: `span ${span} / span ${span}`,
         borderColor: selected ? 'var(--border-accent)' : 'var(--border-default)',
         boxShadow: selected ? 'var(--shadow-sm)' : 'none',
       }}
     >
       <div className="flex flex-col gap-1.5">
         <div className="flex min-w-0 items-center gap-2">
-          <Icon name="grip-vertical" size={15} className="flex-none text-text-disabled" />
+          {grip ?? <Icon name="grip-vertical" size={15} className="flex-none text-text-disabled" />}
           <Icon name={meta.icon} size={15} className="flex-none text-text-tertiary" />
           <span className="min-w-0 flex-1 truncate font-ui text-[13.5px] font-semibold text-text-primary">
             {field.label}

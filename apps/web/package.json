@@ -11,6 +11,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
     "@formai/shared": "workspace:*",
     "@formai/ui": "workspace:*",
     "@tanstack/react-query": "^5.62.11",
