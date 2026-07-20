@@ -17,6 +17,7 @@ import {
   type RepeatingRow,
 } from '@formai/ui';
 import type { FormField, SubmissionValue } from '@formai/shared';
+import { incompleteFixedRowIndices } from '@formai/shared';
 import { resolveRepeatingRows } from '../../lib/fixed-rows.js';
 
 export interface FieldInputProps {
@@ -184,6 +185,11 @@ export function FieldInput({ field, value, onChange, error, disabled }: FieldInp
             onChange={(rows) => onChange(rows)}
             readOnly={disabled}
             fixedRows={field.fixedRows}
+            errorRowIndexes={
+              error && field.fixedRows?.length
+                ? incompleteFixedRowIndices(field, value)
+                : undefined
+            }
           />
         );
       default:
