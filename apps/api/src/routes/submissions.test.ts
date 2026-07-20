@@ -385,7 +385,7 @@ describe('POST /submissions', () => {
     const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
     const { db, insertValues } = fakeDb({
       formTemplatesFindFirst: template,
-      formTemplateVersionsFindFirst: { id: 'v-old', templateId: 't1' },
+      formTemplateVersionsFindFirst: { id: 'v-old', templateId: 't1', state: 'published' },
       usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
       insertedSubmission: {
         id: 's-new',
@@ -409,6 +409,61 @@ describe('POST /submissions', () => {
       expect(res.status).toBe(201);
       const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
       expect(submissionInsert?.[1]).toMatchObject({ templateVersionId: 'v-old' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s (and writes nothing) when the version id is a never-published draft that is not the current version', async () => {
+    // A draft that never went live could not have been served to any filler —
+    // the only honored non-published pin is the template's own current
+    // version (the authed fill-against-current-draft flow).
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-draft', templateId: 't1', state: 'draft' },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-draft', values: {} }),
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body).toMatchObject({ error: 'version_mismatch' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s unauthenticated (and writes nothing) when the session user row no longer exists', async () => {
+    // Sealed session references a deleted user — the account is gone, so the
+    // session no longer authenticates anyone.
+    const template = { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v-current' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      formTemplateVersionsFindFirst: { id: 'v-current', templateId: 't1', state: 'published' },
+      usersFindFirst: undefined,
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ templateId: 't1', versionId: 'v-current', values: { abn: '12 345 678 901' } }),
+      });
+      expect(res.status).toBe(401);
+      const body = await res.json();
+      expect(body).toEqual({ error: 'unauthenticated' });
+      expect(insertValues).not.toHaveBeenCalled();
     } finally {
       server.close();
     }
@@ -613,6 +668,7 @@ describe('POST /submissions', () => {
       formTemplateVersionsFindFirst: {
         id: 'v-old',
         templateId: 't1',
+        state: 'published',
         fields: [{ id: 'old-field', type: 'text', label: 'Old required', required: true, source: 'built' }],
       },
       usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
@@ -823,6 +879,67 @@ describe('PATCH /submissions/:id', () => {
       },
       formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding' },
       usersFindFirst: { id: 'u1', name: 'Ash Wyborn' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions/s1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'approved' }),
+      });
+      expect(res.status).toBe(200);
+      const submissionUpdate = updateSet.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionUpdate?.[1]).toEqual({ status: 'approved' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets a BLANK draft transition to rejected — rejection is the ungated disposal path', async () => {
+    const draftRow = { ...row, status: 'draft', templateVersionId: 'v1', values: {} };
+    const { db, updateSet, insertValues } = fakeDb({
+      rolePermissionsFindFirst: APPROVER_PERMS,
+      submissionsFindFirst: draftRow,
+      formTemplateVersionsFindFirst: {
+        id: 'v1',
+        templateId: 't1',
+        fields: [{ id: 'abn', type: 'text', label: 'ABN', required: true, source: 'built' }],
+      },
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions/s1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'rejected' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ id: 's1', status: 'rejected' });
+
+      const submissionUpdate = updateSet.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionUpdate?.[1]).toEqual({ status: 'rejected' });
+
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert?.[1]).toMatchObject({ action: 'Rejected submission' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not 500 when the pinned version fields JSONB is truthy but not an array (draft → approved)', async () => {
+    const draftRow = { ...row, status: 'draft', templateVersionId: 'v1', values: {} };
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: APPROVER_PERMS,
+      submissionsFindFirst: draftRow,
+      // Corrupted/legacy JSONB: truthy but not an array — treated as no fields.
+      formTemplateVersionsFindFirst: { id: 'v1', templateId: 't1', fields: { corrupted: true } },
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding' },
     });
     mockDbValue = db;
 

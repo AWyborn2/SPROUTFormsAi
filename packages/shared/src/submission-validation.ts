@@ -38,6 +38,22 @@ function isRowRecord(row: unknown): row is RepeatingRowValue {
 }
 
 /**
+ * Key of the read-only label column of a repeating table — `columns[0]` is the
+ * label column by contract (KTD1). Undefined when the field has no columns.
+ */
+export function labelColumnKey(field: FormField): string | undefined {
+  return field.columns?.[0]?.key;
+}
+
+/**
+ * The columns a filler can actually answer: everything AFTER the label column
+ * (KTD1). Empty for label-only or column-less fields.
+ */
+export function answerColumns(field: FormField): RepeatingColumn[] {
+  return (field.columns ?? []).slice(1);
+}
+
+/**
  * Incomplete fixed-row indices of a fixed-item checklist table (R6): index i
  * (i < fixedRows.length) is incomplete unless row i exists and has at least
  * one NON-LABEL cell answered — `columns[0]` is the read-only label column
@@ -53,14 +69,14 @@ export function incompleteFixedRowIndices(
   if (!fixedRows || fixedRows.length === 0) return [];
   // Non-label columns are what a filler can actually answer; a degenerate
   // label-only table has nothing answerable, so nothing can be incomplete.
-  const answerColumns = (field.columns ?? []).slice(1);
-  if (answerColumns.length === 0) return [];
+  const answerable = answerColumns(field);
+  if (answerable.length === 0) return [];
 
   const rows: unknown[] = Array.isArray(value) ? value : [];
   const incomplete: number[] = [];
   for (let i = 0; i < fixedRows.length; i++) {
     const row = rows[i];
-    const answered = isRowRecord(row) && answerColumns.some((c) => isCellAnswered(c, row[c.key]));
+    const answered = isRowRecord(row) && answerable.some((c) => isCellAnswered(c, row[c.key]));
     if (!answered) incomplete.push(i);
   }
   return incomplete;

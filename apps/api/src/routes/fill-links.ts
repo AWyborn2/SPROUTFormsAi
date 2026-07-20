@@ -288,9 +288,12 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
   // The echoed version must be a real version of THIS template. It need not
   // be the current one: a visitor who loaded the form before a newer publish
   // may still submit against the version they actually saw (that's the whole
-  // point of pinning). A version of some other template — or a fabricated
-  // id — conflicts: 409.
-  if (!version || version.templateId !== link.templateId) {
+  // point of pinning). But the public serve side is published-only, so only
+  // PUBLISHED versions are honored — a never-published draft was never
+  // served to any visitor, so an echoed draft id can only be fabricated. A
+  // version of some other template, a fabricated id, or a draft conflicts:
+  // 409.
+  if (!version || version.templateId !== link.templateId || version.state !== 'published') {
     res.status(409).json({ error: 'version_mismatch' });
     return;
   }
@@ -299,7 +302,7 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
   // form this visitor was actually served. The public path has no draft
   // state: every submit is final, so the gate always runs. Same shared
   // helper as the authed route, so the two doors cannot drift.
-  const missing = missingRequiredFields(version.fields ?? [], values);
+  const missing = missingRequiredFields(Array.isArray(version.fields) ? version.fields : [], values);
   if (missing.length > 0) {
     res.status(400).json({ error: 'required_fields_missing', fields: missing });
     return;

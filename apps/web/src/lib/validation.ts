@@ -19,18 +19,6 @@ export function inputFields(fields: FormField[]): FormField[] {
   return fields.filter((f) => f.type !== 'section_header');
 }
 
-/**
- * Legacy value-only answered-ness check (no field context, so it cannot apply
- * the typed rules — prefer @formai/shared's `isFieldAnswered`). Kept for
- * existing callers.
- */
-export function isAnswered(value: SubmissionValue | undefined): boolean {
-  if (value === null || value === undefined) return false;
-  if (typeof value === 'string') return value.trim() !== '';
-  if (Array.isArray(value)) return value.length > 0;
-  return true; // number | boolean
-}
-
 /** Error map for unanswered required fields; empty means submittable. */
 export function validateRequired(
   fields: FormField[],

@@ -187,12 +187,20 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
   // The echoed version must be a real version of THIS template. It need not
   // be the current one: a filler who loaded the form before a newer publish
   // may still submit against the version they actually saw (that's the whole
-  // point of pinning — AE2). A version of some other template, or a
-  // fabricated id, conflicts: 409 (mirrors fill-links.ts).
+  // point of pinning — AE2). But a stale pin is only honored for PUBLISHED
+  // versions — a never-published draft was never served to any filler, so an
+  // echoed draft id can only be fabricated. The one exception is the
+  // template's own current version, which authed members may fill
+  // pre-publish. A version of some other template, a fabricated id, or a
+  // non-current draft conflicts: 409 (mirrors fill-links.ts).
   const version = await db.query.formTemplateVersions.findFirst({
     where: eq(schema.formTemplateVersions.id, versionId),
   });
-  if (!version || version.templateId !== template.id) {
+  if (
+    !version ||
+    version.templateId !== template.id ||
+    (version.state !== 'published' && version.id !== template.currentVersionId)
+  ) {
     res.status(409).json({ error: 'version_mismatch' });
     return;
   }
@@ -202,7 +210,7 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
   // `currentVersionId` points at by now (AE2 companion). Drafts may save
   // incomplete; they face the same gate when transitioning via PATCH below.
   if ((status ?? 'submitted') !== 'draft') {
-    const missing = missingRequiredFields(version.fields ?? [], values);
+    const missing = missingRequiredFields(Array.isArray(version.fields) ? version.fields : [], values);
     if (missing.length > 0) {
       res.status(400).json({ error: 'required_fields_missing', fields: missing });
       return;
@@ -271,15 +279,21 @@ submissionsRouter.patch('/:id', requireTenant, withErrorHandling(async (req, res
     res.status(404).json({ error: 'not_found' });
     return;
   }
-  // A draft saved incomplete cannot be finalized: moving draft →
-  // approved/rejected runs the SAME completeness gate as POST, against the
-  // submission's pinned version (closes the draft-then-approve bypass — no
-  // other finalize path exists). Non-draft rows already passed it on create.
-  if (row.status === 'draft') {
+  const { status } = parsed.data;
+  // A draft saved incomplete cannot be APPROVED: moving draft → approved runs
+  // the SAME completeness gate as POST, against the submission's pinned
+  // version (closes the draft-then-approve bypass — no other approve path
+  // exists). draft → rejected is deliberately ungated: rejection is the
+  // disposal path for an incomplete draft. Non-draft rows already passed the
+  // gate on create.
+  if (row.status === 'draft' && status === 'approved') {
     const pinnedVersion = await db.query.formTemplateVersions.findFirst({
       where: eq(schema.formTemplateVersions.id, row.templateVersionId),
     });
-    const missing = missingRequiredFields(pinnedVersion?.fields ?? [], row.values);
+    const missing = missingRequiredFields(
+      Array.isArray(pinnedVersion?.fields) ? pinnedVersion.fields : [],
+      row.values,
+    );
     if (missing.length > 0) {
       res.status(400).json({ error: 'required_fields_missing', fields: missing });
       return;
@@ -291,7 +305,6 @@ submissionsRouter.patch('/:id', requireTenant, withErrorHandling(async (req, res
       ? db.query.users.findFirst({ where: eq(schema.users.id, row.submittedByUserId) })
       : Promise.resolve(null),
   ]);
-  const { status } = parsed.data;
 
   await db.update(schema.submissions).set({ status }).where(eq(schema.submissions.id, row.id));
 

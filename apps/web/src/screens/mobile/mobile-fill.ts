@@ -1,7 +1,7 @@
 /**
  * Mobile fill helpers specific to the field-app forms list. The generic
- * form-input helpers (`inputFields`, `isAnswered`, `validateRequired`) now live
- * in `lib/validation.ts` — shared with the public fill screen; this module
+ * form-input helpers (`inputFields`, `validateRequired`) now live in
+ * `lib/validation.ts` — shared with the public fill screen; this module
  * keeps the published-form picker filter and the progress numerator. Kept free
  * of React so they're unit-testable.
  */

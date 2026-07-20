@@ -1,11 +1,11 @@
 /**
  * Display-level seeding for fixed-row checklist tables (repeating_group fields
- * carrying `fixedRows`). Pure module — imports from @formai/shared are
- * type-only so the node-env test runner never has to resolve the package.
+ * carrying `fixedRows`). Pure module — no React, no DOM.
  *
  * Fixed-row identity is positional: row i corresponds to fixedRows[i]; ad-hoc
  * rows appended by the filler follow after index fixedRows.length - 1.
  */
+import { labelColumnKey } from '@formai/shared';
 import type { FormField, RepeatingRowValue, SubmissionValue } from '@formai/shared';
 
 /**
@@ -20,7 +20,7 @@ export function seedFixedRows(field: FormField): RepeatingRowValue[] {
   const fixedRows = field.fixedRows;
   if (!fixedRows || fixedRows.length === 0) return [];
   const columns = field.columns ?? [];
-  const labelKey = columns[0]?.key;
+  const labelKey = labelColumnKey(field);
   return fixedRows.map((label) => {
     const row: RepeatingRowValue = {};
     for (const c of columns) {

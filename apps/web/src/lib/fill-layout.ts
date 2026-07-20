@@ -1,8 +1,8 @@
 /**
  * Span resolution for fill-surface layout (KTD7): the 12-column grid built in
  * the builder (Full=12 / Half=6 / Third=4 / Quarter=3 via `FormField.colSpan`)
- * is the grid fillers see. Pure module — the @formai/shared import is
- * type-only so the node-env test runner never has to resolve the package.
+ * is the grid fillers see. Pure module — no React, no DOM (the @formai/shared
+ * import happens to be type-only, but value imports work fine too).
  *
  * All three fill surfaces route through `resolveFillSpan`, but they collapse
  * to a single column differently because two of them are CONTAINERS where

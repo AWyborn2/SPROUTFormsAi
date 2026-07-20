@@ -159,6 +159,10 @@ export function MobileScreen() {
             } else {
               toast({ variant: 'danger', message: 'Some answers were invalid — check the form and try again.' });
             }
+          } else if (err instanceof ApiError && err.status === 409) {
+            // version_mismatch (mirrors FillScreen): the form was republished
+            // while filling — the pinned version is stale, not the connection.
+            toast({ variant: 'warning', message: 'This form was updated — reload the app to get the latest version.' });
           } else {
             toast({ variant: 'danger', message: 'Submission failed — check your connection and try again.' });
           }

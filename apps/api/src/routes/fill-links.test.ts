@@ -606,6 +606,30 @@ describe('POST /fill/:token/submissions (public, no auth)', () => {
     }
   });
 
+  it('409s (writes nothing) when the echoed versionId is an unpublished draft of the link template', async () => {
+    // The public serve side is published-only — a draft was never served to
+    // any visitor, so an echoed draft id can only be fabricated.
+    const { db, insertValues, query } = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+    });
+    query.formTemplateVersions.findFirst.mockResolvedValue({ ...PUBLISHED_V1, id: 'v-draft', state: 'draft' });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}/submissions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ...validBody, versionId: 'v-draft' }),
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: 'version_mismatch' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
   it('400s required_fields_missing (writes nothing) when required answers are absent, naming the fields', async () => {
     const { db, insertValues } = fakeDb({
       fillLinksFindFirst: ACTIVE_LINK,

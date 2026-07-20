@@ -336,6 +336,7 @@ function CapturedData({ detail }: { detail: SubmissionDetail | null | undefined 
               <RepeatingGroup
                 columns={field.columns ?? []}
                 rows={toDisplayRows(field, detail.values[field.id])}
+                fixedRows={field.fixedRows}
                 onChange={() => undefined}
                 readOnly
               />

@@ -8,6 +8,7 @@
  * tampered or short value array can never misrepresent the checklist. R15:
  * the server-stamped user takes precedence over free-text claims.
  */
+import { answerColumns, labelColumnKey } from '@formai/shared';
 import type { FormField, RepeatingRowValue, SubmissionValue } from '@formai/shared';
 
 function isRowRecord(row: unknown): row is RepeatingRowValue {
@@ -27,16 +28,16 @@ export function toDisplayRows(field: FormField, value: SubmissionValue | undefin
   const stored: RepeatingRowValue[] = Array.isArray(value) ? value.filter(isRowRecord) : [];
 
   const fixedRows = field.fixedRows;
-  const labelKey = field.columns?.[0]?.key;
+  const labelKey = labelColumnKey(field);
   if (!fixedRows || fixedRows.length === 0 || labelKey === undefined) return stored;
 
-  const answerColumns = (field.columns ?? []).slice(1);
+  const answerable = answerColumns(field);
   const fixed = fixedRows.map((label, i) => {
     const row = stored[i];
     if (row) return { ...row, [labelKey]: label };
     // Missing fixed row — render it as unanswered, but with its label.
     const padded: RepeatingRowValue = { [labelKey]: label };
-    for (const c of answerColumns) padded[c.key] = null;
+    for (const c of answerable) padded[c.key] = null;
     return padded;
   });
   return [...fixed, ...stored.slice(fixedRows.length)];

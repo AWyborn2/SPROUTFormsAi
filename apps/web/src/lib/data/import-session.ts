@@ -183,7 +183,7 @@ export function reviewStatus(field: ReviewField): ExtractionStatus {
 }
 
 /** A fixed-item checklist table: repeating group with captured item labels. */
-function isChecklistTable(field: Pick<ReviewField, 'type' | 'fixedRows'>): boolean {
+export function isChecklistTable(field: Pick<ReviewField, 'type' | 'fixedRows'>): boolean {
   return field.type === 'repeating_group' && (field.fixedRows?.length ?? 0) > 0;
 }
 

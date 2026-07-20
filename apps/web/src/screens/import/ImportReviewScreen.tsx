@@ -5,6 +5,7 @@ import type { ExtractedField, ExtractionStatus } from '@formai/shared';
 import { FORM_FIELD_TYPES } from '@formai/shared';
 import {
   addFixedRowItem,
+  isChecklistTable,
   lowestUnresolvedField,
   removeFixedRowItem,
   renameFixedRowItem,
@@ -289,7 +290,7 @@ function ReviewRow({
   const isReview = st === 'review' && field.type === 'repeating_group';
   const hasPosition = field.sourcePosition != null;
   const fixedRows = field.type === 'repeating_group' ? (field.fixedRows ?? []) : [];
-  const isChecklist = fixedRows.length > 0;
+  const isChecklist = isChecklistTable(field);
   const [newItem, setNewItem] = useState('');
 
   const submitNewItem = () => {

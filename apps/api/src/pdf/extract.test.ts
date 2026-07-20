@@ -197,6 +197,64 @@ describe('extractForm — fixedRows normalization', () => {
     expect(result.fields[0]?.fixedRows).toEqual(FIXED_ROWS);
   });
 
+  it('drops the model-emitted required flag on a fixedRows checklist (AE5 — the client default owns it)', async () => {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue({
+      content: [
+        {
+          type: 'tool_use',
+          name: EXTRACT_TOOL_NAME,
+          input: {
+            fields: [
+              {
+                label: 'Pre-start checks',
+                type: 'repeating_group',
+                confidence: 0.9,
+                required: false,
+                fixedRows: FIXED_ROWS,
+                columns: [
+                  { key: 'item', label: 'Item', type: 'text' },
+                  { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+                ],
+              },
+              // A plain field keeps whatever the model said.
+              { label: 'Site name', type: 'text', confidence: 0.95, required: false },
+            ],
+            designNotes: [],
+          },
+        },
+      ],
+    } satisfies AnthropicMessage);
+
+    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+
+    expect('required' in result.fields[0]!).toBe(false);
+    expect(result.fields[1]?.required).toBe(false);
+  });
+
+  it('uniquifies the synthetic label column key against a model column keyed "item" at a later index', async () => {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(
+      fixedRowsResponse({
+        label: 'Pre-start checks',
+        type: 'repeating_group',
+        confidence: 0.9,
+        fixedRows: FIXED_ROWS,
+        columns: [
+          { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+          { key: 'item', label: 'Item description', type: 'text' },
+        ],
+      }),
+    );
+
+    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+
+    const columns = result.fields[0]?.columns;
+    // A duplicate 'item' key would make the seeded label readable as an answer.
+    expect(columns?.[0]).toEqual({ key: 'item_label', label: 'Item', type: 'text' });
+    expect(columns?.map((c) => c.key)).toEqual(['item_label', 'ok', 'item']);
+  });
+
   it('prepends a synthetic label column when fixedRows arrives with no columns at all', async () => {
     const pdf = await makeFlatPdf();
     const create = vi.fn().mockResolvedValue(
