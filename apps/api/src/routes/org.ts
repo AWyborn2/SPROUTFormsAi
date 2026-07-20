@@ -8,6 +8,7 @@ import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
+import { deleteSupersededLogo } from './assets.js';
 import { db } from '../db.js';
 
 /**
@@ -90,6 +91,17 @@ orgRouter.patch(
         .update(schema.organizations)
         .set(updates)
         .where(eq(schema.organizations.id, tenant.orgId));
+    }
+
+    // A branding write that swaps in a different logo strands the old object.
+    // Reap it best-effort so a superseded logo isn't publicly reachable
+    // forever; `deleteSupersededLogo` swallows its own failures, since the
+    // settings write has already landed and must not be undone by cleanup.
+    if (branding !== undefined) {
+      const previousUrl = (org.branding as { logoAssetUrl?: string | null } | null)?.logoAssetUrl ?? null;
+      if (previousUrl && previousUrl !== branding.logoAssetUrl) {
+        await deleteSupersededLogo(tenant.orgId, previousUrl);
+      }
     }
 
     const renamed = name !== undefined && name !== org.name;

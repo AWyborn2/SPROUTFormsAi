@@ -17,8 +17,13 @@ vi.mock('../db.js', () => ({
   getDbStatus: () => 'unconfigured',
 }));
 
+/**
+ * Storage is unconfigured by default (mirroring a deployment with no bucket
+ * credentials); the logo tests swap in a fake client per-test.
+ */
+let mockStorage: unknown = null;
 vi.mock('../storage/index.js', () => ({
-  getStorageClient: () => null,
+  getStorageClient: () => mockStorage,
 }));
 
 const { createApp } = await import('../app.js');
@@ -99,6 +104,316 @@ async function patchOrg(base: string, tenant: { userId: string; orgId: string; r
 afterEach(() => {
   vi.clearAllMocks();
   mockDbValue = null;
+  mockStorage = null;
+});
+
+// ── Logo upload fixtures ──────────────────────────────────────────────────
+
+const PNG_BYTES = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.alloc(64, 7),
+]);
+const PDF_BYTES = Buffer.concat([Buffer.from('%PDF-1.7\n'), Buffer.alloc(64, 3)]);
+const SVG_BYTES = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>');
+
+/** Fake storage client covering the whole `StorageClient` surface. */
+function fakeStorage(over: { deleteObject?: () => Promise<void> } = {}) {
+  const uploadImage = vi.fn(
+    async (orgId: string, _bytes: Uint8Array, mimeType: string) =>
+      `${orgId}/logo-fixed-uuid.${mimeType === 'image/jpeg' ? 'jpg' : mimeType === 'image/webp' ? 'webp' : 'png'}`,
+  );
+  const download = vi.fn(async (): Promise<Buffer | null> => PNG_BYTES);
+  const deleteObject = vi.fn(over.deleteObject ?? (async () => {}));
+  const client = {
+    upload: vi.fn(),
+    download,
+    deletePrefix: vi.fn(),
+    uploadImage,
+    deleteObject,
+  };
+  return { client, uploadImage, download, deleteObject };
+}
+
+async function postLogo(
+  base: string,
+  tenant: { userId: string; orgId: string; role: string },
+  body: unknown,
+) {
+  return fetch(`${base}/org/logo`, {
+    method: 'POST',
+    headers: { ...authHeader(tenant), 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+describe('POST /org/logo', () => {
+  it('503s storage_unavailable when no storage backend is configured', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await postLogo(base, ownerTenant, {
+        imageBase64: PNG_BYTES.toString('base64'),
+        mimeType: 'image/png',
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'storage_unavailable' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('uploads a PNG within the cap, returns a public-route URL, audits, and the URL round-trips through PATCH /org', async () => {
+    const { db, updateSet, insertValues } = fakeDb();
+    mockDbValue = db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await postLogo(base, ownerTenant, {
+        imageBase64: PNG_BYTES.toString('base64'),
+        mimeType: 'image/png',
+      });
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { url: string };
+      expect(body.url).toBe('/api/assets/logo/org-1/logo-fixed-uuid.png');
+      expect(storage.uploadImage).toHaveBeenCalledTimes(1);
+      expect(storage.uploadImage.mock.calls[0]?.[0]).toBe('org-1');
+      expect(storage.uploadImage.mock.calls[0]?.[2]).toBe('image/png');
+
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert?.[1]).toMatchObject({ category: 'settings' });
+
+      // The returned URL is accepted by PATCH /org branding and echoed back.
+      const kit: BrandingKit = { ...NEW_KIT, logoAssetUrl: body.url };
+      const patched = await patchOrg(base, ownerTenant, { branding: kit });
+      expect(patched.status).toBe(200);
+      const patchedBody = (await patched.json()) as { branding: BrandingKit };
+      expect(patchedBody.branding.logoAssetUrl).toBe(body.url);
+      expect(updateSet.mock.calls.at(-1)?.[1]).toEqual({ branding: kit });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects an oversized payload with a 4xx and never touches storage', async () => {
+    mockDbValue = fakeDb().db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const big = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.alloc(3 * 1024 * 1024, 1),
+      ]);
+      const res = await postLogo(base, ownerTenant, {
+        imageBase64: big.toString('base64'),
+        mimeType: 'image/png',
+      });
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.status).toBeLessThan(500);
+      expect((await res.json()) as { error: string }).toMatchObject({ error: 'file_too_large' });
+      expect(storage.uploadImage).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects PDF bytes declared as image/png via the magic-byte check', async () => {
+    mockDbValue = fakeDb().db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await postLogo(base, ownerTenant, {
+        imageBase64: PDF_BYTES.toString('base64'),
+        mimeType: 'image/png',
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()) as { error: string }).toMatchObject({
+        error: 'unsupported_image_type',
+      });
+      expect(storage.uploadImage).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects image/svg+xml — SVG never reaches storage', async () => {
+    mockDbValue = fakeDb().db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await postLogo(base, ownerTenant, {
+        imageBase64: SVG_BYTES.toString('base64'),
+        mimeType: 'image/svg+xml',
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()) as { error: string }).toMatchObject({
+        error: 'unsupported_image_type',
+      });
+      expect(storage.uploadImage).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a viewer and a builder without touching storage', async () => {
+    mockDbValue = fakeDb().db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      for (const tenant of [viewerTenant, builderTenant]) {
+        const res = await postLogo(base, tenant, {
+          imageBase64: PNG_BYTES.toString('base64'),
+          mimeType: 'image/png',
+        });
+        expect(res.status).toBe(403);
+      }
+      expect(storage.uploadImage).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s without a session', async () => {
+    mockDbValue = fakeDb().db;
+    mockStorage = fakeStorage().client;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/org/logo`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ imageBase64: PNG_BYTES.toString('base64'), mimeType: 'image/png' }),
+      });
+      expect(res.status).toBe(401);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('GET /assets/logo/*', () => {
+  it('serves a logo key without auth, with an extension-derived content type and nosniff', async () => {
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assets/logo/org-1/logo-fixed-uuid.png`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toBe('image/png');
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(Buffer.from(await res.arrayBuffer())).toEqual(PNG_BYTES);
+      expect(storage.download).toHaveBeenCalledWith('org-1', 'org-1/logo-fixed-uuid.png');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s a PDF-style asset key without touching storage', async () => {
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assets/logo/org-1/2f1c1b6e-0000-4000-8000-000000000000.pdf`);
+      expect(res.status).toBe(404);
+      expect(storage.download).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s a nested or traversal-shaped key without touching storage', async () => {
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      for (const key of ['org-1/nested/logo-a.png', 'org-1/notlogo-a.png']) {
+        const res = await fetch(`${base}/assets/logo/${key}`);
+        expect(res.status).toBe(404);
+      }
+      expect(storage.download).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s when the object is missing', async () => {
+    const storage = fakeStorage();
+    storage.download.mockResolvedValue(null);
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assets/logo/org-1/logo-fixed-uuid.png`);
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('PATCH /org logo replacement cleanup', () => {
+  const PREV_URL = '/api/assets/logo/org-1/logo-previous.png';
+  const orgWithLogo = {
+    ...ORG_ROW,
+    branding: { ...ORG_ROW.branding, logoAssetUrl: PREV_URL },
+  };
+
+  it('best-effort deletes the previous logo object when logoAssetUrl changes', async () => {
+    const { db } = fakeDb({ org: orgWithLogo });
+    mockDbValue = db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, logoAssetUrl: '/api/assets/logo/org-1/logo-new.png' },
+      });
+      expect(res.status).toBe(200);
+      expect(storage.deleteObject).toHaveBeenCalledWith('org-1', 'org-1/logo-previous.png');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not delete when logoAssetUrl is unchanged', async () => {
+    const { db } = fakeDb({ org: orgWithLogo });
+    mockDbValue = db;
+    const storage = fakeStorage();
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, logoAssetUrl: PREV_URL },
+      });
+      expect(res.status).toBe(200);
+      expect(storage.deleteObject).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still succeeds when the previous-logo deletion fails', async () => {
+    const { db } = fakeDb({ org: orgWithLogo });
+    mockDbValue = db;
+    const storage = fakeStorage({
+      deleteObject: async () => {
+        throw new Error('storage_delete_failed');
+      },
+    });
+    mockStorage = storage.client;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, logoAssetUrl: '/api/assets/logo/org-1/logo-new.png' },
+      });
+      expect(res.status).toBe(200);
+      expect(storage.deleteObject).toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe('PATCH /org', () => {

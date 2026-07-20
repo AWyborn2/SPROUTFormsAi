@@ -336,6 +336,18 @@ export function useTogglePermission() {
  * onboarding state from `/auth/me`) and the audit log (the API records the
  * change server-side).
  */
+/**
+ * Uploads an org logo and resolves to its public URL. Deliberately does NOT
+ * invalidate the session: the wizard holds the returned URL in local state
+ * and only persists it when the whole branding kit is saved via `PATCH /org`.
+ */
+export function useUploadOrgLogo() {
+  return useMutation({
+    mutationFn: async (input: { imageBase64: string; mimeType: string }) =>
+      store.uploadOrgLogo(input),
+  });
+}
+
 export function useUpdateOrg() {
   const qc = useQueryClient();
   return useMutation({

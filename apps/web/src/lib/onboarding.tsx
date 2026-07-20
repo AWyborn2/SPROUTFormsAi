@@ -37,7 +37,6 @@ interface OnboardingState {
   teamSize: string;
   invites: Invite[];
   branding: BrandingKit;
-  hasLogo: boolean;
   whiteLabel: WhiteLabelState;
 }
 
@@ -73,7 +72,6 @@ export function OnboardingProvider({ children }: { children: React.ReactNode }) 
     teamSize: '50–200',
     invites: [{ email: '', role: 'builder' }],
     branding: { ...DEFAULT_BRANDING },
-    hasLogo: false,
     whiteLabel: {
       customDomain: 'forms.meridian.co',
       senderEmail: 'noreply@meridian.co',

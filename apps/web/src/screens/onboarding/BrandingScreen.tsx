@@ -1,8 +1,10 @@
+import { useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
 import type { BrandingKit, FormFont } from '@formai/shared';
 import { BrandMark } from '../../components/BrandMark.js';
-import { useUpdateOrg } from '../../lib/data/hooks.js';
+import { useUpdateOrg, useUploadOrgLogo } from '../../lib/data/hooks.js';
+import { LogoValidationError, prepareLogoUpload } from '../../lib/logo-image.js';
 import { useOnboarding } from '../../lib/onboarding.js';
 import { Stepper } from './Stepper.js';
 
@@ -15,9 +17,21 @@ interface ColorRow {
 }
 
 const COLOR_ROWS: ColorRow[] = [
-  { key: 'primaryColor', label: 'Primary', presets: ['#253439', '#181b19', '#1f3a5f', '#3d2f4f', '#0f3d3e'] },
-  { key: 'secondaryColor', label: 'Secondary', presets: ['#7c898b', '#5e6a6c', '#9aa4a4', '#45504f', '#c1c8c8'] },
-  { key: 'accentColor', label: 'Accent', presets: ['#6ec792', '#4f9cf9', '#e0a44f', '#f3685f', '#8b7cf6'] },
+  {
+    key: 'primaryColor',
+    label: 'Primary',
+    presets: ['#253439', '#181b19', '#1f3a5f', '#3d2f4f', '#0f3d3e'],
+  },
+  {
+    key: 'secondaryColor',
+    label: 'Secondary',
+    presets: ['#7c898b', '#5e6a6c', '#9aa4a4', '#45504f', '#c1c8c8'],
+  },
+  {
+    key: 'accentColor',
+    label: 'Accent',
+    presets: ['#6ec792', '#4f9cf9', '#e0a44f', '#f3685f', '#8b7cf6'],
+  },
 ];
 
 const FONT_OPTIONS: Array<{ name: FormFont; stack: string }> = [
@@ -39,7 +53,9 @@ function parseColor(input: string): string | null {
   m = s.match(/^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*[\d.]+\s*)?\)$/i);
   if (m) {
     const to2 = (n: string) =>
-      Math.max(0, Math.min(255, parseInt(n, 10))).toString(16).padStart(2, '0');
+      Math.max(0, Math.min(255, parseInt(n, 10)))
+        .toString(16)
+        .padStart(2, '0');
     return `#${to2(m[1]!)}${to2(m[2]!)}${to2(m[3]!)}`;
   }
   return null;
@@ -49,10 +65,43 @@ function parseColor(input: string): string | null {
 export function BrandingScreen() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { orgName, branding, hasLogo, setBranding, patch, brandStyle } = useOnboarding();
+  const { orgName, branding, setBranding, brandStyle } = useOnboarding();
   const updateOrg = useUpdateOrg();
+  const uploadLogo = useUploadOrgLogo();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [logoError, setLogoError] = useState<string | null>(null);
+  const [logoName, setLogoName] = useState<string | null>(null);
 
   const orgInitial = (orgName.trim()[0] ?? 'M').toUpperCase();
+
+  /**
+   * Validate → rasterise (SVG only) → upload → hold the returned public URL
+   * in wizard state. Nothing persists until "Finish setup" writes the whole
+   * branding kit; a failure here is inline and non-blocking, so the user can
+   * always finish without a logo.
+   */
+  const onPickFile = async (file: File | undefined) => {
+    if (!file) return;
+    setLogoError(null);
+    try {
+      const prepared = await prepareLogoUpload(file);
+      const { url } = await uploadLogo.mutateAsync(prepared);
+      setBranding({ logoAssetUrl: url });
+      setLogoName(file.name);
+    } catch (err) {
+      setLogoError(
+        err instanceof LogoValidationError
+          ? err.message
+          : 'That logo could not be uploaded — you can continue and add one later.',
+      );
+    }
+  };
+
+  const removeLogo = () => {
+    setBranding({ logoAssetUrl: null });
+    setLogoName(null);
+    setLogoError(null);
+  };
 
   /**
    * Persist the wizard's choices via `PATCH /org`, then enter the app. An
@@ -88,32 +137,83 @@ export function BrandingScreen() {
             </div>
             <h3 className="mb-1.5 text-2xl">Make forms carry your brand</h3>
             <p className="mb-6 text-sm text-text-secondary">
-              External forms — vendor onboarding, customer intake — go out under your identity,
-              not ours.
+              External forms — vendor onboarding, customer intake — go out under your identity, not
+              ours.
             </p>
 
             {/* Logo */}
             <div className="mb-[9px] text-[13px] font-semibold">Logo</div>
-            <button
-              onClick={() => patch({ hasLogo: true })}
-              className="fai-chip-btn mb-[22px] flex w-full items-center gap-[13px] rounded-md border-[1.5px] border-dashed border-border-strong bg-surface-sunken p-[14px] text-left"
-            >
-              <span
-                className="grid h-11 w-11 flex-none place-items-center rounded-[10px] font-heading text-[17px] font-bold text-white"
-                style={{ background: branding.primaryColor }}
-              >
-                {orgInitial}
-              </span>
-              <span className="flex-1">
-                <span className="block font-ui text-[13.5px] font-semibold text-text-primary">
-                  {hasLogo ? 'meridian-mark.svg' : 'Upload your logo'}
-                </span>
-                <span className="block text-xs text-text-tertiary">
-                  SVG or PNG · transparent background
-                </span>
-              </span>
-              <Icon name="upload" size={17} className="text-text-tertiary" />
-            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/svg+xml,image/png,image/jpeg,image/webp"
+              className="hidden"
+              onChange={(e) => {
+                void onPickFile(e.target.files?.[0]);
+                // Reset so re-picking the same file still fires onChange.
+                e.target.value = '';
+              }}
+            />
+            <div className="mb-[22px]">
+              {branding.logoAssetUrl ? (
+                <div className="flex items-center gap-[13px] rounded-md border-[1.5px] border-border bg-surface-sunken p-[14px]">
+                  <img
+                    src={branding.logoAssetUrl}
+                    alt="Your uploaded logo"
+                    className="h-11 w-11 flex-none rounded-[10px] border border-border bg-white object-contain p-1"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <span className="block truncate font-ui text-[13.5px] font-semibold text-text-primary">
+                      {logoName ?? 'Your logo'}
+                    </span>
+                    <span className="block text-xs text-text-tertiary">
+                      Shown on every branded form
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploadLogo.isPending}
+                    className="fai-chip-btn rounded-md border border-border px-2.5 py-1.5 text-xs font-semibold text-text-secondary"
+                  >
+                    Replace
+                  </button>
+                  <button
+                    onClick={removeLogo}
+                    className="fai-chip-btn rounded-md border border-border px-2.5 py-1.5 text-xs font-semibold text-text-secondary"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploadLogo.isPending}
+                  className="fai-chip-btn flex w-full items-center gap-[13px] rounded-md border-[1.5px] border-dashed border-border-strong bg-surface-sunken p-[14px] text-left"
+                >
+                  <span
+                    className="grid h-11 w-11 flex-none place-items-center rounded-[10px] font-heading text-[17px] font-bold text-white"
+                    style={{ background: branding.primaryColor }}
+                  >
+                    {orgInitial}
+                  </span>
+                  <span className="flex-1">
+                    <span className="block font-ui text-[13.5px] font-semibold text-text-primary">
+                      {uploadLogo.isPending ? 'Uploading…' : 'Upload your logo'}
+                    </span>
+                    <span className="block text-xs text-text-tertiary">
+                      SVG, PNG, JPEG or WebP · up to 2 MB
+                    </span>
+                  </span>
+                  <Icon name="upload" size={17} className="text-text-tertiary" />
+                </button>
+              )}
+              {logoError && (
+                <p role="alert" className="mt-2 flex items-start gap-1.5 text-xs text-danger">
+                  <Icon name="info" size={13} className="mt-px flex-none" />
+                  {logoError}
+                </p>
+              )}
+            </div>
 
             {/* Colours */}
             <div className="mb-[11px] text-[13px] font-semibold">Brand colours</div>
@@ -172,9 +272,17 @@ export function BrandingScreen() {
                 className="flex h-[88px] items-center gap-3 px-[26px]"
                 style={{ background: 'var(--org-primary)' }}
               >
-                <span className="grid h-10 w-10 place-items-center rounded-[9px] bg-white/[0.14] font-heading text-[17px] font-bold text-white">
-                  {orgInitial}
-                </span>
+                {branding.logoAssetUrl ? (
+                  <img
+                    src={branding.logoAssetUrl}
+                    alt=""
+                    className="h-10 w-10 flex-none rounded-[9px] bg-white/[0.14] object-contain p-1"
+                  />
+                ) : (
+                  <span className="grid h-10 w-10 place-items-center rounded-[9px] bg-white/[0.14] font-heading text-[17px] font-bold text-white">
+                    {orgInitial}
+                  </span>
+                )}
                 <div>
                   <div
                     className="text-[17px] font-bold text-white"

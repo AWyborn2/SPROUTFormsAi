@@ -49,6 +49,44 @@ export async function downloadPdf(client: SupabaseStorageClient, orgId: string, 
 }
 
 /**
+ * Uploads image bytes (an org logo) and returns the object key. Keys are
+ * FLAT — `${orgId}/logo-${uuid}.${ext}` — deliberately: `deletePrefix` below
+ * does a single-level `list(orgId)`, so a nested `logo/` folder would be
+ * listed as one entry whose `remove` is a no-op, silently orphaning every
+ * logo at org deletion. The `logo-` infix is what the public serving route's
+ * namespace check keys off, so a PDF asset id can never be replayed through it.
+ */
+export async function uploadImage(
+  client: SupabaseStorageClient,
+  orgId: string,
+  bytes: Uint8Array,
+  contentType: string,
+  ext: string,
+): Promise<string> {
+  const key = `${orgId}/logo-${randomUUID()}.${ext}`;
+  const { error } = await client.storage
+    .from(env.SUPABASE_STORAGE_BUCKET_PDFS)
+    .upload(key, bytes, { contentType });
+  if (error) throw new Error(`storage_upload_failed: ${error.message}`);
+  return key;
+}
+
+/**
+ * Deletes a single object, scoped to `orgId` — used to reap a superseded
+ * logo when branding changes. A key outside the org's prefix is ignored
+ * rather than acted on, matching `downloadPdf`'s tenant check.
+ */
+export async function deleteObject(
+  client: SupabaseStorageClient,
+  orgId: string,
+  key: string,
+): Promise<void> {
+  if (!key.startsWith(`${orgId}/`)) return;
+  const { error } = await client.storage.from(env.SUPABASE_STORAGE_BUCKET_PDFS).remove([key]);
+  if (error) throw new Error(`storage_delete_failed: ${error.message}`);
+}
+
+/**
  * Deletes every object stored under an org's prefix — called when the org
  * itself is deleted so its PDFs don't linger as unreachable orphans. Objects
  * are keyed `${orgId}/${uuid}.pdf` (flat, no nesting), so listing the org

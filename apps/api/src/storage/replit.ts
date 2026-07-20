@@ -49,6 +49,42 @@ export async function downloadPdf(client: ReplitStorageClient, orgId: string, as
 }
 
 /**
+ * Uploads image bytes (an org logo) and returns the object key. Keys are
+ * FLAT — `${orgId}/logo-${uuid}.${ext}` — to stay inside the org prefix that
+ * `deletePrefix` sweeps at org deletion, and so the `logo-` infix can act as
+ * the namespace the public serving route restricts itself to. Replit's SDK
+ * has no content-type argument on `uploadFromBytes`; the type is carried by
+ * the extension and re-derived when serving.
+ */
+export async function uploadImage(
+  client: ReplitStorageClient,
+  orgId: string,
+  bytes: Uint8Array,
+  _contentType: string,
+  ext: string,
+): Promise<string> {
+  const key = `${orgId}/logo-${randomUUID()}.${ext}`;
+  const result = await client.uploadFromBytes(key, Buffer.from(bytes));
+  if (!result.ok) throw new Error(`storage_upload_failed: ${result.error.message}`);
+  return key;
+}
+
+/**
+ * Deletes a single object, scoped to `orgId` — used to reap a superseded
+ * logo when branding changes. A key outside the org's prefix is ignored
+ * rather than acted on, matching `downloadPdf`'s tenant check.
+ */
+export async function deleteObject(
+  client: ReplitStorageClient,
+  orgId: string,
+  key: string,
+): Promise<void> {
+  if (!key.startsWith(`${orgId}/`)) return;
+  const result = await client.delete(key, { ignoreNotFound: true });
+  if (!result.ok) throw new Error(`storage_delete_failed: ${result.error.message}`);
+}
+
+/**
  * Deletes every object stored under an org's prefix — called when the org
  * itself is deleted so its PDFs don't linger as unreachable orphans. Throws
  * on the first failure; the caller (`DELETE /account`) treats cleanup as
