@@ -16,6 +16,8 @@
  * "pre-filled and remain editable").
  */
 
+import { channelLuminance } from '@formai/shared';
+
 /** Edge length the logo is downscaled to before sampling. */
 const SAMPLE_SIZE = 48;
 
@@ -67,9 +69,9 @@ function saturation({ r, g, b }: Bucket): number {
   return max === 0 ? 0 : (max - min) / max;
 }
 
-/** Perceived luminance in 0..1 (same weights as `contrastText` in shared). */
+/** Perceived luminance in 0..1. */
 function luminance({ r, g, b }: Bucket): number {
-  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return channelLuminance(r, g, b);
 }
 
 function distanceSq(a: Bucket, b: Bucket): number {

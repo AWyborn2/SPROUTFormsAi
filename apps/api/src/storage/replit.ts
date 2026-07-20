@@ -64,7 +64,8 @@ export async function uploadImage(
   ext: string,
 ): Promise<string> {
   const key = `${orgId}/logo-${randomUUID()}.${ext}`;
-  const result = await client.uploadFromBytes(key, Buffer.from(bytes));
+  // Already a Buffer on the upload path; re-wrapping would memcpy up to 2 MB.
+  const result = await client.uploadFromBytes(key, Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes));
   if (!result.ok) throw new Error(`storage_upload_failed: ${result.error.message}`);
   return key;
 }

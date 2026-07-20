@@ -55,6 +55,17 @@ export const DEFAULT_BRANDING: BrandingKit = {
   formFont: 'Inter',
 };
 
+/** Decoded-bytes ceiling for an uploaded org logo. Logos are marks, not photography. */
+export const MAX_LOGO_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Perceived luminance in 0..1 from 8-bit channels. Shared so `contrastText`
+ * and the logo palette extractor judge lightness by the same rule.
+ */
+export function channelLuminance(r: number, g: number, b: number): number {
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+
 /**
  * Contrast rule: Sprout Green only passes contrast with dark ink text on top.
  * Returns the readable text color for a given background hex. Mirrors the
@@ -66,8 +77,7 @@ export function contrastText(hex: string): '#12321f' | '#ffffff' {
     const r = parseInt(h.slice(0, 2), 16);
     const g = parseInt(h.slice(2, 4), 16);
     const b = parseInt(h.slice(4, 6), 16);
-    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-    return luminance > 0.62 ? '#12321f' : '#ffffff';
+    return channelLuminance(r, g, b) > 0.62 ? '#12321f' : '#ffffff';
   } catch {
     return '#12321f';
   }

@@ -9,8 +9,9 @@
  * that reached it would simply be rejected.
  */
 
-/** Must match `MAX_LOGO_BYTES` in apps/api/src/routes/assets.ts. */
-export const MAX_LOGO_BYTES = 2 * 1024 * 1024;
+import { MAX_LOGO_BYTES } from '@formai/shared';
+
+export { MAX_LOGO_BYTES };
 
 /** Raster types the API accepts as-is. */
 const RASTER_TYPES = ['image/png', 'image/jpeg', 'image/webp'];

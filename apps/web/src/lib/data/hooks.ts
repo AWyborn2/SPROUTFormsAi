@@ -331,12 +331,6 @@ export function useTogglePermission() {
 }
 
 /**
- * Update the org's name, branding, teamSize, and/or onboarding completion via
- * `PATCH /org`. Invalidates the session (the app shell shows `orgName` and
- * onboarding state from `/auth/me`) and the audit log (the API records the
- * change server-side).
- */
-/**
  * Uploads an org logo and resolves to its public URL. Deliberately does NOT
  * invalidate the session: the wizard holds the returned URL in local state
  * and only persists it when the whole branding kit is saved via `PATCH /org`.
@@ -348,6 +342,12 @@ export function useUploadOrgLogo() {
   });
 }
 
+/**
+ * Update the org's name, branding, teamSize, and/or onboarding completion via
+ * `PATCH /org`. Invalidates the session (the app shell shows `orgName` and
+ * onboarding state from `/auth/me`) and the audit log (the API records the
+ * change server-side).
+ */
 export function useUpdateOrg() {
   const qc = useQueryClient();
   return useMutation({

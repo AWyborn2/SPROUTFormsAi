@@ -22,8 +22,9 @@ import { db } from '../db.js';
 export const orgLogoRouter: Router = Router();
 export const publicAssetsRouter: Router = Router();
 
-/** Decoded-bytes ceiling. Logos are marks, not photography. */
-export const MAX_LOGO_BYTES = 2 * 1024 * 1024;
+import { MAX_LOGO_BYTES } from '@formai/shared';
+
+export { MAX_LOGO_BYTES };
 
 /**
  * The only key shape the public route will serve. Single path segment for the
