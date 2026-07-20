@@ -7,6 +7,7 @@ import type { FormDetail, FormSummary, SubmissionRow } from '../../lib/data/type
 import { useOnboarding } from '../../lib/onboarding.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
 import { ApiError } from '../../lib/data/api-client.js';
+import { previewSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
 import { answeredCount, publishedForms } from './mobile-fill.js';
 import {
   inputFields,
@@ -473,18 +474,22 @@ function FillView({
 
         {/* Fields — the same shared renderer the builder preview / fill flow uses */}
         <div className="rounded-[14px] border border-[#e2e7e7] bg-white p-[15px_13px]">
-          <div className="flex flex-col gap-[16px]">
+          {/* Same 12-col grid path as the other fill surfaces, but the 390px
+              frame is a CONTAINER (viewport breakpoints don't apply), so
+              `narrow` collapses every span to 12 — effectively stacked. */}
+          <div className="grid grid-cols-12 gap-[16px]">
             {form.fields.map((f) => (
-              <FieldInput
-                key={f.id}
-                field={f}
-                value={values[f.id] ?? null}
-                error={errors[f.id] || undefined}
-                onChange={(v) => onChange(f.id, v)}
-              />
+              <div key={f.id} className={previewSpanClass(resolveFillSpan(f, true))}>
+                <FieldInput
+                  field={f}
+                  value={values[f.id] ?? null}
+                  error={errors[f.id] || undefined}
+                  onChange={(v) => onChange(f.id, v)}
+                />
+              </div>
             ))}
             {form.fields.length === 0 && (
-              <div className="py-4 text-center text-[13px] text-[#7a8586]">This form has no fields.</div>
+              <div className="col-span-12 py-4 text-center text-[13px] text-[#7a8586]">This form has no fields.</div>
             )}
           </div>
         </div>

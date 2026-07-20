@@ -24,6 +24,7 @@ import {
 import type { FormField, FormFieldType } from '@formai/shared';
 import { FORM_FIELD_TYPES } from '@formai/shared';
 import { useForm, usePublishBuilder, usePublishVersion } from '../../lib/data/hooks.js';
+import { previewSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
 import { isModChord, isTypingTarget, MOD_LABEL, ALT_LABEL } from '../../lib/keyboard/platform.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
 import {
@@ -873,6 +874,10 @@ function Slider({
 }
 
 function PreviewMode({ state }: { state: BuilderState }) {
+  // The preview frame is a CONTAINER sized by the width slider — viewport
+  // breakpoints would lie — so narrowness comes from the container width and
+  // the resolved span is applied as a bare (unprefixed) class.
+  const narrow = state.container.maxWidth < 640;
   return (
     <div className="flex justify-center">
       <div
@@ -885,9 +890,11 @@ function PreviewMode({ state }: { state: BuilderState }) {
       >
         <h3 className="mb-1 text-xl font-bold">{state.name}</h3>
         <p className="mb-6 text-[13px] text-text-tertiary">Fields marked * are required.</p>
-        <div className="flex flex-col gap-[18px]">
+        <div className="grid grid-cols-12 gap-[18px]">
           {state.fields.map((f) => (
-            <FieldInput key={f.id} field={f} value={null} onChange={() => {}} />
+            <div key={f.id} className={previewSpanClass(resolveFillSpan(f, narrow))}>
+              <FieldInput field={f} value={null} onChange={() => {}} />
+            </div>
           ))}
         </div>
         <div className="mt-7 flex justify-end">
