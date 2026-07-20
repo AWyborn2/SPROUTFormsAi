@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Badge, Button, Icon, Select, type BadgeVariant } from '@formai/ui';
+import { Badge, Button, Icon, Select, Switch, type BadgeVariant } from '@formai/ui';
 import type { ExtractedField, ExtractionStatus } from '@formai/shared';
 import { FORM_FIELD_TYPES } from '@formai/shared';
 import {
+  addFixedRowItem,
+  lowestUnresolvedField,
+  removeFixedRowItem,
+  renameFixedRowItem,
   retryExtraction,
   reviewStatus,
+  setFieldRequired,
   useImportSession,
   type ReviewField,
 } from '../../lib/data/import-session.js';
@@ -52,6 +57,9 @@ export function ImportReviewScreen() {
   }, [session.status, navigate]);
 
   if (session.status === 'idle') return null;
+
+  // Weakest still-unconfirmed extraction (hidden once everything is resolved).
+  const lowest = lowestUnresolvedField(session.fields);
 
   // Build highlight data for the PDF viewer
   const highlights = session.fields
@@ -175,11 +183,23 @@ export function ImportReviewScreen() {
           {ready ? (
             <>
               <div className="mb-3.5 flex items-center gap-3.5 rounded-md border border-border bg-surface-card p-[14px_16px]">
-                <div className="flex-1">
+                <div className="min-w-0 flex-1">
                   <div className="font-heading text-[15px] font-bold">{session.total} fields extracted</div>
                   <div className="text-[12.5px] text-text-tertiary">
                     Average confidence {Math.round(session.avgConfidence * 100)}%
                   </div>
+                  {lowest && (
+                    <button
+                      onClick={() => handleSelectField(lowest.id)}
+                      title="Jump to the weakest unconfirmed extraction"
+                      className="mt-0.5 flex max-w-full items-center gap-1 text-[12.5px] text-text-tertiary hover:text-text-secondary"
+                    >
+                      <Icon name="arrow-down-right" size={13} className="flex-none" />
+                      <span className="truncate">
+                        Lowest: {lowest.label} · {Math.round(lowest.confidence * 100)}%
+                      </span>
+                    </button>
+                  )}
                 </div>
                 <div
                   className="flex items-center gap-[7px] rounded-pill px-[11px] py-1.5"
@@ -268,6 +288,16 @@ function ReviewRow({
   const isLow = st === 'low';
   const isReview = st === 'review' && field.type === 'repeating_group';
   const hasPosition = field.sourcePosition != null;
+  const fixedRows = field.type === 'repeating_group' ? (field.fixedRows ?? []) : [];
+  const isChecklist = fixedRows.length > 0;
+  const [newItem, setNewItem] = useState('');
+
+  const submitNewItem = () => {
+    const label = newItem.trim();
+    if (!label) return;
+    addFixedRowItem(field.id, label);
+    setNewItem('');
+  };
 
   return (
     <div
@@ -366,6 +396,83 @@ function ReviewRow({
             <Icon name="check" size={14} />
             Keep as repeating table
           </button>
+        </div>
+      )}
+
+      {isChecklist && (
+        /* Captured checklist items — the only correction valve before publish
+           (builder-side fixedRows editing is deferred). */
+        <div
+          className="mt-[11px] rounded-md border border-border-subtle bg-surface-sunken p-[11px_12px]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="mb-2 flex items-center gap-2">
+            <span className="rounded-pill border border-border bg-surface-card px-2 py-0.5 font-mono text-[11px] font-semibold text-text-secondary">
+              {fixedRows.length} item{fixedRows.length === 1 ? '' : 's'}
+            </span>
+            <span className="text-[11.5px] text-text-tertiary">
+              Fixed checklist items — fillers answer each one
+            </span>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {fixedRows.map((label, i) => (
+              <div key={i} className="flex items-center gap-1.5">
+                <input
+                  value={label}
+                  onChange={(e) => renameFixedRowItem(field.id, i, e.target.value)}
+                  aria-label={`Checklist item ${i + 1}`}
+                  className="h-7 min-w-0 flex-1 rounded-sm border border-border bg-surface-card px-2 text-[12.5px] text-text-primary focus-visible:shadow-focus"
+                />
+                <button
+                  onClick={() => removeFixedRowItem(field.id, i)}
+                  aria-label={`Remove checklist item ${i + 1}`}
+                  className="grid h-7 w-7 flex-none place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover hover:text-danger-text"
+                >
+                  <Icon name="x" size={13} />
+                </button>
+              </div>
+            ))}
+            <div className="mt-0.5 flex items-center gap-1.5">
+              <input
+                value={newItem}
+                onChange={(e) => setNewItem(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitNewItem();
+                }}
+                placeholder="Add a missed item…"
+                aria-label={`Add checklist item to ${field.label}`}
+                className="h-7 min-w-0 flex-1 rounded-sm border border-dashed border-border-strong bg-transparent px-2 text-[12.5px] text-text-primary focus-visible:shadow-focus"
+              />
+              <button
+                onClick={submitNewItem}
+                disabled={!newItem.trim()}
+                className="inline-flex h-7 flex-none items-center gap-1 rounded-sm border border-border px-2 text-[12px] font-semibold text-text-secondary hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Icon name="plus" size={13} />
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {field.type !== 'section_header' && (
+        /* Local mirror of the builder's Required switch pattern (R4). */
+        <div
+          className="mt-[11px] flex items-center justify-between gap-2.5 rounded-md border border-border-subtle bg-surface-sunken p-[9px_12px]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div>
+            <div className="text-[12.5px] font-semibold">Required</div>
+            <div className="text-[11px] text-text-tertiary">
+              {isChecklist ? 'Checklists default to required' : 'Must be answered to submit'}
+            </div>
+          </div>
+          <Switch
+            checked={field.required ?? isChecklist}
+            onChange={(e) => setFieldRequired(field.id, e.target.checked)}
+            aria-label={`Required: ${field.label}`}
+          />
         </div>
       )}
     </div>
