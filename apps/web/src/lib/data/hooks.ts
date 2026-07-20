@@ -331,14 +331,20 @@ export function useTogglePermission() {
 }
 
 /**
- * Update the org's name and/or branding via `PATCH /org`. Invalidates the
- * session (the app shell shows `orgName` from `/auth/me`) and the audit log
- * (the API records the change server-side).
+ * Update the org's name, branding, teamSize, and/or onboarding completion via
+ * `PATCH /org`. Invalidates the session (the app shell shows `orgName` and
+ * onboarding state from `/auth/me`) and the audit log (the API records the
+ * change server-side).
  */
 export function useUpdateOrg() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { name?: string; branding?: BrandingKit }) => store.updateOrg(input),
+    mutationFn: async (input: {
+      name?: string;
+      branding?: BrandingKit;
+      teamSize?: string;
+      onboardingComplete?: true;
+    }) => store.updateOrg(input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: keys.session });
       qc.invalidateQueries({ queryKey: keys.auditLog });

@@ -13,7 +13,8 @@ import { db } from '../db.js';
 /**
  * Org settings and billing info.
  *
- * PATCH /org — update name and/or branding (owner/admin; branding gated on plan).
+ * PATCH /org — update name, branding, teamSize, and/or stamp onboarding
+ *   completion (owner/admin; branding is available on every plan).
  * GET  /org/billing — current plan, seat usage, features, and all tier configs.
  * POST /org/plan — DEV/TESTING ONLY: switch planTier directly (owner-only, no
  *   payment processing). Replace with real billing integration before going live.
@@ -32,10 +33,19 @@ const patchOrgBody = z
   .object({
     name: z.string().trim().min(1).optional(),
     branding: brandingBody.optional(),
+    /** Self-reported team size bucket (e.g. '2-5'). Display/analytics only. */
+    teamSize: z.string().trim().min(1).max(32).optional(),
+    /** Marks the onboarding wizard finished. Stamps once; repeats are no-ops. */
+    onboardingComplete: z.literal(true).optional(),
   })
-  .refine((b) => b.name !== undefined || b.branding !== undefined, {
-    message: 'At least one of name or branding is required',
-  });
+  .refine(
+    (b) =>
+      b.name !== undefined ||
+      b.branding !== undefined ||
+      b.teamSize !== undefined ||
+      b.onboardingComplete !== undefined,
+    { message: 'At least one of name, branding, teamSize or onboardingComplete is required' },
+  );
 
 orgRouter.patch(
   '/',
@@ -56,24 +66,6 @@ orgRouter.patch(
       return;
     }
 
-    // Branding changes require the branding plan feature.
-    if (parsed.data.branding !== undefined) {
-      const org = await db.query.organizations.findFirst({
-        where: eq(schema.organizations.id, tenant.orgId),
-      });
-      const tier = (org?.planTier ?? 'business') as PlanTier;
-      const config = PLAN_CONFIG[tier] ?? PLAN_CONFIG.business;
-      if (!config.features.branding) {
-        res.status(403).json({
-          error: 'feature_not_available',
-          feature: 'branding',
-          planTier: tier,
-          message: `Your ${tier} plan does not include custom branding. Upgrade to access this feature.`,
-        });
-        return;
-      }
-    }
-
     const org = await db.query.organizations.findFirst({
       where: eq(schema.organizations.id, tenant.orgId),
     });
@@ -81,15 +73,24 @@ orgRouter.patch(
       res.status(404).json({ error: 'not_found' });
       return;
     }
-    const { name, branding } = parsed.data;
+    const { name, branding, teamSize, onboardingComplete } = parsed.data;
 
-    await db
-      .update(schema.organizations)
-      .set({
-        ...(name !== undefined ? { name } : {}),
-        ...(branding !== undefined ? { branding } : {}),
-      })
-      .where(eq(schema.organizations.id, tenant.orgId));
+    // Stamp completion only once — repeat calls must not reset the timestamp.
+    const stampOnboarding = onboardingComplete === true && org.onboardingCompletedAt == null;
+    const onboardingCompletedAt = stampOnboarding ? new Date() : org.onboardingCompletedAt ?? null;
+
+    const updates = {
+      ...(name !== undefined ? { name } : {}),
+      ...(branding !== undefined ? { branding } : {}),
+      ...(teamSize !== undefined ? { teamSize } : {}),
+      ...(stampOnboarding ? { onboardingCompletedAt } : {}),
+    };
+    if (Object.keys(updates).length > 0) {
+      await db
+        .update(schema.organizations)
+        .set(updates)
+        .where(eq(schema.organizations.id, tenant.orgId));
+    }
 
     const renamed = name !== undefined && name !== org.name;
     await recordAudit(db, tenant, {
@@ -103,6 +104,8 @@ orgRouter.patch(
       id: org.id,
       name: name ?? org.name,
       branding: branding ?? org.branding,
+      teamSize: teamSize ?? org.teamSize ?? null,
+      onboardingCompletedAt: onboardingCompletedAt?.toISOString() ?? null,
     });
   }),
 );

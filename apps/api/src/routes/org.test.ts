@@ -5,6 +5,7 @@ import type { BrandingKit } from '@formai/shared';
 
 const ownerTenant = { userId: 'u1', orgId: 'org-1', role: 'owner' as const };
 const adminTenant = { userId: 'u1', orgId: 'org-1', role: 'admin' as const };
+const builderTenant = { userId: 'u1', orgId: 'org-1', role: 'builder' as const };
 const viewerTenant = { userId: 'u1', orgId: 'org-1', role: 'viewer' as const };
 let sealSession: (t: { userId: string; orgId: string; role: string }) => string;
 
@@ -134,7 +135,13 @@ describe('PATCH /org', () => {
       const res = await patchOrg(base, ownerTenant, { name: '  Meridian Ops  ', branding: NEW_KIT });
       expect(res.status).toBe(200);
       const body = (await res.json()) as { id: string; name: string; branding: BrandingKit };
-      expect(body).toEqual({ id: 'org-1', name: 'Meridian Ops', branding: NEW_KIT });
+      expect(body).toEqual({
+        id: 'org-1',
+        name: 'Meridian Ops',
+        branding: NEW_KIT,
+        teamSize: null,
+        onboardingCompletedAt: null,
+      });
 
       // The row update carried both fields (name trimmed).
       expect(updateSet).toHaveBeenCalledTimes(1);
@@ -201,6 +208,86 @@ describe('PATCH /org', () => {
       expect(res.status).toBe(403);
       expect(updateSet).not.toHaveBeenCalled();
       expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a builder without touching the row', async () => {
+    const { db, updateSet, insertValues } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, builderTenant, { teamSize: '2-5' });
+      expect(res.status).toBe(403);
+      expect(updateSet).not.toHaveBeenCalled();
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepts a branding update on a team-tier org — branding is not plan-gated', async () => {
+    const { db, updateSet } = fakeDb({ org: { ...ORG_ROW, planTier: 'team' } });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { branding: NEW_KIT });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { branding: BrandingKit };
+      expect(body.branding).toEqual(NEW_KIT);
+      expect(updateSet.mock.calls[0]?.[1]).toEqual({ branding: NEW_KIT });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('persists teamSize and round-trips it in the response', async () => {
+    const { db, updateSet } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { teamSize: '10–49' });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { teamSize: string | null };
+      expect(body.teamSize).toBe('10–49');
+      expect(updateSet).toHaveBeenCalledTimes(1);
+      expect(updateSet.mock.calls[0]?.[1]).toEqual({ teamSize: '10–49' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stamps onboardingCompletedAt on the first completion call', async () => {
+    const { db, updateSet } = fakeDb({ org: { ...ORG_ROW, onboardingCompletedAt: null } });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { onboardingComplete: true });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { onboardingCompletedAt: string | null };
+      expect(body.onboardingCompletedAt).not.toBeNull();
+      const setArg = updateSet.mock.calls[0]?.[1] as { onboardingCompletedAt?: unknown };
+      expect(setArg?.onboardingCompletedAt).toBeInstanceOf(Date);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not reset onboardingCompletedAt when completion is repeated', async () => {
+    const stamped = new Date('2026-07-01T00:00:00.000Z');
+    const { db, updateSet } = fakeDb({ org: { ...ORG_ROW, onboardingCompletedAt: stamped } });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { onboardingComplete: true });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { onboardingCompletedAt: string | null };
+      expect(body.onboardingCompletedAt).toBe('2026-07-01T00:00:00.000Z');
+      // No write carried a fresh timestamp.
+      for (const call of updateSet.mock.calls) {
+        expect((call[1] as { onboardingCompletedAt?: unknown }).onboardingCompletedAt).toBeUndefined();
+      }
     } finally {
       server.close();
     }

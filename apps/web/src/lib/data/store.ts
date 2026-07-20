@@ -59,6 +59,8 @@ export interface OrgSettingsDto {
   id: string;
   name: string;
   branding: BrandingKit;
+  teamSize: string | null;
+  onboardingCompletedAt: string | null;
 }
 
 /** Raw shapes returned by `apps/api`'s forms/submissions routes (see forms.ts/submissions.ts). */
@@ -468,7 +470,12 @@ export const store = {
       .then(toPermState);
   },
 
-  updateOrg(input: { name?: string; branding?: BrandingKit }): Promise<OrgSettingsDto> {
+  updateOrg(input: {
+    name?: string;
+    branding?: BrandingKit;
+    teamSize?: string;
+    onboardingComplete?: true;
+  }): Promise<OrgSettingsDto> {
     return apiClient.patch<OrgSettingsDto>('/org', input);
   },
 
