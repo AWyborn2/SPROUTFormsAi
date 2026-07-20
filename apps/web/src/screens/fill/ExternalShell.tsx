@@ -1,6 +1,9 @@
+import { useEffect } from 'react';
 import { Icon } from '@formai/ui';
 import type { BrandingKit } from '@formai/shared';
+import { DEFAULT_BRANDING } from '@formai/shared';
 import { orgBrandVars } from '../../lib/branding.js';
+import { ensureFontLoaded } from '../../lib/font-loader.js';
 
 /**
  * Lightest-chrome wrapper for the public fill pages. Renders logged OUT: the
@@ -20,6 +23,14 @@ export function ExternalShell({
 }) {
   const displayName = orgName.trim() || 'FormAI';
   const orgInitial = (displayName[0] ?? 'F').toUpperCase();
+
+  // `orgBrandVars` only *names* the family in `--org-font`; without this the
+  // respondent sees the generic fallback for every font but the ones the app
+  // shell happens to bundle. Idempotent, so re-running on kit changes is free.
+  const formFont = branding?.formFont ?? DEFAULT_BRANDING.formFont;
+  useEffect(() => {
+    ensureFontLoaded(formFont);
+  }, [formFont]);
 
   return (
     <div className="flex min-h-screen flex-col bg-surface-page" style={orgBrandVars(branding)}>

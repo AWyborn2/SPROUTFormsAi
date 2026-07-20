@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { and, count, eq } from 'drizzle-orm';
 import { PLAN_CONFIG, PLAN_TIERS, schema } from '@formai/db';
 import type { PlanTier } from '@formai/db';
-import { FORM_FONTS } from '@formai/shared';
+import { isValidFormFont } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -27,7 +27,12 @@ const brandingBody = z.object({
   primaryColor: z.string().regex(/^#[0-9a-f]{6}$/i),
   secondaryColor: z.string().regex(/^#[0-9a-f]{6}$/i),
   accentColor: z.string().regex(/^#[0-9a-f]{6}$/i),
-  formFont: z.enum(FORM_FONTS),
+  // Any family in the bundled Google Fonts catalog, not just the four legacy
+  // presets. Validated against the closed snapshot rather than accepted as a
+  // free string: the web app interpolates this value straight into a
+  // `fonts.googleapis.com/css2` URL, so an arbitrary string would be an
+  // injection point into that request (and into the CSS `font-family` stack).
+  formFont: z.string().refine(isValidFormFont, { message: 'Unknown font family' }),
 });
 
 const patchOrgBody = z

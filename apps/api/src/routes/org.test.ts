@@ -651,3 +651,59 @@ describe('PATCH /org', () => {
     }
   });
 });
+
+// ── formFont catalog validation ───────────────────────────────────────────
+//
+// `formFont` is no longer a four-value enum: it is any family name present in
+// the bundled Google Fonts catalog snapshot. These pin both halves — the
+// catalog widens what is accepted, and it must still be a closed set (a free
+// string would land unescaped in a `fonts.googleapis.com/css2` URL).
+
+describe('PATCH /org — formFont catalog validation', () => {
+  async function patchFont(font: string) {
+    const { db, updateSet } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, formFont: font },
+      });
+      return { status: res.status, updateSet };
+    } finally {
+      server.close();
+    }
+  }
+
+  it('accepts a catalog family beyond the original four presets', async () => {
+    for (const font of ['Lora', 'Oswald', 'Playfair Display']) {
+      const { status, updateSet } = await patchFont(font);
+      expect(status, font).toBe(200);
+      expect(updateSet.mock.calls[0]?.[1]).toEqual({
+        branding: { ...NEW_KIT, formFont: font },
+      });
+    }
+  });
+
+  it('still accepts all four preset families saved by existing orgs', async () => {
+    for (const font of ['Inter', 'Sora', 'Spectral', 'JetBrains Mono']) {
+      const { status } = await patchFont(font);
+      expect(status, font).toBe(200);
+    }
+  });
+
+  it('rejects a non-catalog family and injection-shaped values', async () => {
+    const rejected = [
+      'Not A Real Font',
+      'Inter"); @import url(evil',
+      'Inter&family=Evil',
+      'Inter;wght@400',
+      '',
+      'inter', // case-sensitive: the catalog spelling is what reaches the css2 URL
+    ];
+    for (const font of rejected) {
+      const { status, updateSet } = await patchFont(font);
+      expect(status, font).toBe(400);
+      expect(updateSet, font).not.toHaveBeenCalled();
+    }
+  });
+});
