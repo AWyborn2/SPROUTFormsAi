@@ -10,14 +10,29 @@
  * idle → uploading → extracting → ready | error.
  */
 import { useSyncExternalStore } from 'react';
-import type { ExtractedField, ExtractionResult, ExtractionStatus, FormField } from '@formai/shared';
+import type {
+  ExtractedField,
+  ExtractionResult,
+  ExtractionStatus,
+  FormField,
+  VisibilityCondition,
+} from '@formai/shared';
 import { statusForConfidence } from '@formai/shared';
+import type { BuilderAction, BuilderState } from '../field-editor/reducer.js';
+import { builderReducer, initialBuilderState } from '../field-editor/reducer.js';
 import { ApiError, apiClient } from './api-client.js';
 
-/** An extracted field plus the reviewer's resolution state. */
+/**
+ * An extracted field plus the reviewer's resolution state. Backed by the shared
+ * field editor: everything except `note` and `resolved` is a real `FormField`
+ * property, so a review row is the field that will publish plus the metadata of
+ * the extraction run that produced it.
+ */
 export interface ReviewField extends ExtractedField {
   /** Set once the reviewer has explicitly confirmed/corrected this field. */
   resolved?: boolean;
+  /** Editor-side properties that publish but have no extraction equivalent. */
+  visibleWhen?: VisibilityCondition;
 }
 
 export type ImportSessionStatus = 'idle' | 'uploading' | 'extracting' | 'ready' | 'error';
@@ -63,10 +78,81 @@ let heldBase64: string | null = null;
 /** Monotonic run token — a reset/new start invalidates in-flight async work. */
 let runId = 0;
 
+/**
+ * The field list under edit, in the SAME reducer the builder uses. Review and
+ * the builder therefore share one set of edit operations (rename, retype,
+ * reorder, delete, undo) instead of two implementations that drift.
+ *
+ * `FormField` carries everything `ExtractedField` does except `note`, so the
+ * editor holds publishable fields directly and the extraction-only metadata
+ * rides alongside in `reviewMeta`. Keeping confidence and notes out of the
+ * editor matters because they are properties of the extraction run, not of the
+ * published field — `reviewedToFields` already drops them at publish.
+ */
+let editor: BuilderState | null = null;
+/** Extraction metadata by field id — the part of a ReviewField that isn't a FormField. */
+const reviewMeta = new Map<string, { note?: string; resolved?: boolean }>();
+
+/** Editor fields + their extraction metadata, as the review UI consumes them. */
+function derivedReviewFields(): ReviewField[] {
+  if (!editor) return [];
+  return editor.fields.map((f) => {
+    const meta = reviewMeta.get(f.id);
+    return {
+      ...f,
+      confidence: f.confidence ?? 1,
+      ...(meta?.note !== undefined ? { note: meta.note } : {}),
+      ...(meta?.resolved !== undefined ? { resolved: meta.resolved } : {}),
+    } as ReviewField;
+  });
+}
+
+/** Seed the editor from a fresh extraction. */
+function seedEditor(fields: ExtractedField[]): ReviewField[] {
+  reviewMeta.clear();
+  const formFields: FormField[] = fields.map((f) => {
+    if (f.note !== undefined) reviewMeta.set(f.id, { note: f.note });
+    return {
+      id: f.id,
+      type: f.type,
+      label: f.label,
+      // Resolve the checklist default once, here, rather than leaving it to
+      // publish — the reviewer sees and can override the same value that ships.
+      required: f.required ?? isChecklistTable(f),
+      source: 'imported',
+      confidence: f.confidence,
+      ...(f.description !== undefined ? { description: f.description } : {}),
+      ...(f.options ? { options: f.options } : {}),
+      ...(f.selectionType ? { selectionType: f.selectionType } : {}),
+      ...(f.columns ? { columns: f.columns } : {}),
+      ...(f.answerSets ? { answerSets: f.answerSets } : {}),
+      ...(f.fixedRows && f.fixedRows.length > 0 ? { fixedRows: f.fixedRows } : {}),
+      ...(f.sourcePosition ? { sourcePosition: f.sourcePosition } : {}),
+    };
+  });
+  editor = initialBuilderState({ formId: null, name: '', fields: formFields });
+  return derivedReviewFields();
+}
+
+/** Run a field-editor action and republish the derived review view. */
+function dispatchEdit(action: BuilderAction): void {
+  if (!editor) return;
+  editor = builderReducer(editor, action);
+  session = { ...session, fields: derivedReviewFields() };
+  listeners.forEach((l) => l());
+}
+
+/** Patch a field's extraction metadata (note / resolved) without touching the editor. */
+function setMeta(id: string, patch: { note?: string; resolved?: boolean }): void {
+  reviewMeta.set(id, { ...reviewMeta.get(id), ...patch });
+  session = { ...session, fields: derivedReviewFields() };
+  listeners.forEach((l) => l());
+}
+
 const listeners = new Set<() => void>();
 
 function emit() {
-  session = { ...session, fields: session.fields.slice() };
+  session = { ...session, fields: editor ? derivedReviewFields() : session.fields.slice() };
   listeners.forEach((l) => l());
 }
 
@@ -89,6 +175,8 @@ export function getImportSession(): ImportSession {
 export function resetImportSession() {
   runId += 1; // orphan any in-flight upload/extract
   heldBase64 = null;
+  editor = null;
+  reviewMeta.clear();
   session = emptySession();
   listeners.forEach((l) => l());
 }
@@ -182,7 +270,7 @@ async function runPipeline(run: number, fileName: string, base64: string): Promi
       fileName: result.fileName,
       pageCount: result.pageCount,
       designNotes: result.designNotes,
-      fields: result.fields.map((f) => ({ ...f })),
+      fields: seedEditor(result.fields),
       error: null,
     });
   } catch (err) {
@@ -217,29 +305,30 @@ export function lowestUnresolvedField(fields: ReviewField[]): ReviewField | null
   return lowest;
 }
 
+/** The editor field behind a review row, or undefined once it has been deleted. */
+function editorField(id: string): FormField | undefined {
+  return editor?.fields.find((f) => f.id === id);
+}
+
 /** Reviewer toggles a field's required-ness (R4). */
 export function setFieldRequired(id: string, required: boolean): void {
-  session.fields = session.fields.map((f) => (f.id === id ? { ...f, required } : f));
-  emit();
+  dispatchEdit({ t: 'update', id, patch: { required } });
 }
 
 /** Rename one captured checklist item in place; out-of-range indices ignored. */
 export function renameFixedRowItem(id: string, index: number, label: string): void {
-  session.fields = session.fields.map((f) => {
-    if (f.id !== id || !f.fixedRows || index < 0 || index >= f.fixedRows.length) return f;
-    const fixedRows = f.fixedRows.slice();
-    fixedRows[index] = label;
-    return { ...f, fixedRows };
-  });
-  emit();
+  const current = editorField(id)?.fixedRows;
+  if (!current || index < 0 || index >= current.length) return;
+  const fixedRows = current.slice();
+  fixedRows[index] = label;
+  dispatchEdit({ t: 'update', id, patch: { fixedRows } });
 }
 
 /** Append a checklist item after the existing fixed set (extraction missed one). */
 export function addFixedRowItem(id: string, label: string): void {
-  session.fields = session.fields.map((f) =>
-    f.id === id ? { ...f, fixedRows: [...(f.fixedRows ?? []), label] } : f,
-  );
-  emit();
+  const current = editorField(id);
+  if (!current) return;
+  dispatchEdit({ t: 'update', id, patch: { fixedRows: [...(current.fixedRows ?? []), label] } });
 }
 
 /**
@@ -248,12 +337,10 @@ export function addFixedRowItem(id: string, label: string): void {
  * becomes an open row-entry table.
  */
 export function removeFixedRowItem(id: string, index: number): void {
-  session.fields = session.fields.map((f) => {
-    if (f.id !== id || !f.fixedRows || index < 0 || index >= f.fixedRows.length) return f;
-    const fixedRows = f.fixedRows.filter((_, i) => i !== index);
-    return { ...f, fixedRows: fixedRows.length > 0 ? fixedRows : undefined };
-  });
-  emit();
+  const current = editorField(id)?.fixedRows;
+  if (!current || index < 0 || index >= current.length) return;
+  const fixedRows = current.filter((_, i) => i !== index);
+  dispatchEdit({ t: 'update', id, patch: { fixedRows: fixedRows.length > 0 ? fixedRows : undefined } });
 }
 
 export function useImportSession() {
@@ -268,30 +355,31 @@ export function useImportSession() {
     avgConfidence:
       snap.fields.reduce((sum, f) => sum + f.confidence, 0) / Math.max(1, snap.fields.length),
 
-    /** Remap the low-confidence "text" field to a signature (the known case). */
+    /**
+     * Remap the low-confidence "text" field to a signature (the known case).
+     * Type lives in the editor; the confirmation note and resolved flag are
+     * extraction metadata and never reach the published field.
+     */
     remapSignature(id: string) {
-      session.fields = session.fields.map((f) =>
-        f.id === id
-          ? { ...f, type: 'signature', confidence: 1, resolved: true, note: 'Corrected — remapped to a signature field' }
-          : f,
-      );
-      emit();
+      dispatchEdit({ t: 'update', id, patch: { type: 'signature', confidence: 1 } });
+      setMeta(id, { resolved: true, note: 'Corrected — remapped to a signature field' });
     },
 
     /** Inline type correction for a flagged field. */
     setType(id: string, type: ExtractedField['type']) {
-      session.fields = session.fields.map((f) =>
-        f.id === id ? { ...f, type, confidence: reviewStatus(f) === 'low' ? 1 : f.confidence, resolved: true } : f,
-      );
-      emit();
+      const current = snap.fields.find((f) => f.id === id);
+      const confidence = current && reviewStatus(current) === 'low' ? 1 : current?.confidence;
+      dispatchEdit({
+        t: 'update',
+        id,
+        patch: { type, ...(confidence !== undefined ? { confidence } : {}) },
+      });
+      setMeta(id, { resolved: true });
     },
 
     /** Confirm a detected repeating table should stay a repeating group. */
     confirmTable(id: string) {
-      session.fields = session.fields.map((f) =>
-        f.id === id ? { ...f, resolved: true, note: 'Confirmed as a repeating table' } : f,
-      );
-      emit();
+      setMeta(id, { resolved: true, note: 'Confirmed as a repeating table' });
     },
   };
 }
@@ -313,6 +401,10 @@ export function reviewedToFields(fields: ReviewField[]): FormField[] {
     ...(f.options ? { options: f.options } : {}),
     ...(f.selectionType ? { selectionType: f.selectionType } : {}),
     ...(f.columns ? { columns: f.columns } : {}),
+    // This whitelist is the publish boundary: a property missing here is
+    // silently dropped even though review displayed it correctly.
+    ...(f.answerSets && f.answerSets.length > 0 ? { answerSets: f.answerSets } : {}),
+    ...(f.visibleWhen ? { visibleWhen: f.visibleWhen } : {}),
     ...(f.fixedRows && f.fixedRows.length > 0 ? { fixedRows: f.fixedRows } : {}),
     ...(f.sourcePosition ? { sourcePosition: f.sourcePosition } : {}),
   }));

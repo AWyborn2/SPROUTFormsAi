@@ -15,7 +15,7 @@ import {
   useImportSession,
   type ReviewField,
 } from '../../lib/data/import-session.js';
-import { FIELD_META } from '../builder/reducer.js';
+import { FIELD_META } from '../../lib/field-editor/reducer.js';
 import { stripFileExtension } from './upload-validation.js';
 import { ImportStepper } from './ImportStepper.js';
 import { PdfViewer } from './PdfViewer.js';

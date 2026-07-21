@@ -332,6 +332,65 @@ describe('review actions — required toggle + fixed-row item editing', () => {
   });
 });
 
+describe('field-editor backing (U2) — extraction metadata survives edits', () => {
+  it('keeps confidence and note when a reducer edit changes the field', async () => {
+    await seedSession([{ ...CHECKLIST, confidence: 0.42, note: 'Low-confidence table' }]);
+
+    setFieldRequired('chk', false);
+
+    const field = getImportSession().fields[0]!;
+    expect(field.confidence).toBe(0.42);
+    expect(field.note).toBe('Low-confidence table');
+    expect(field.required).toBe(false);
+  });
+
+  it('carries answerSets from extraction through to the published field', async () => {
+    await seedSession([
+      { ...CHECKLIST, answerSets: [{ key: 'verdict', columnKeys: ['ok', 'na'] }] },
+    ]);
+
+    expect(getImportSession().fields[0]!.answerSets).toEqual([
+      { key: 'verdict', columnKeys: ['ok', 'na'] },
+    ]);
+    expect(reviewedToFields(getImportSession().fields)[0]!.answerSets).toEqual([
+      { key: 'verdict', columnKeys: ['ok', 'na'] },
+    ]);
+  });
+
+  it('resolves the checklist required default at seed time, matching what publish would produce', async () => {
+    await seedSession([{ ...CHECKLIST }]);
+
+    // The reviewer sees the same value that ships, rather than a blank that
+    // silently becomes `true` at publish.
+    expect(getImportSession().fields[0]!.required).toBe(true);
+    expect(reviewedToFields(getImportSession().fields)[0]!.required).toBe(true);
+  });
+
+  it('drops metadata for a field that is no longer in the editor', async () => {
+    await seedSession([{ ...CHECKLIST, note: 'Confirm this table' }]);
+
+    expect(getImportSession().fields).toHaveLength(1);
+    resetImportSession();
+    expect(getImportSession().fields).toHaveLength(0);
+  });
+
+  it('leaves an untouched extraction publishing exactly what it extracted', async () => {
+    const source: ExtractedField = { ...CHECKLIST };
+    await seedSession([source]);
+
+    const published = reviewedToFields(getImportSession().fields)[0]!;
+    expect(published.id).toBe(source.id);
+    expect(published.label).toBe(source.label);
+    expect(published.type).toBe(source.type);
+    expect(published.columns).toEqual(source.columns);
+    expect(published.fixedRows).toEqual(source.fixedRows);
+    expect(published.source).toBe('imported');
+    // Extraction-only metadata never reaches the published field.
+    expect('note' in published).toBe(false);
+    expect('resolved' in published).toBe(false);
+  });
+});
+
 describe('resetImportSession', () => {
   it('returns to idle with zero fields and no fixture data', async () => {
     postMock.mockResolvedValueOnce({ assetId: 'asset-123' });

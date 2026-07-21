@@ -1,8 +1,15 @@
 /**
- * Form-builder state + reducer. Mirrors the prototype's builder ops
+ * Field-editing state + reducer, shared by the builder and the PDF import
+ * review screen. Mirrors the prototype's builder ops
  * (bAdd/bDelete/bMove/bDuplicate/bCopy/bPaste/bUndo/bRedo) with an undo/redo
  * snapshot stack. Fields use the shared FormField shape so publishing feeds the
  * data layer directly.
+ *
+ * It lives under `lib/` rather than `screens/builder/` because import review
+ * needs the same operations (rename, retype, reorder, delete, undo) before
+ * publish that the builder offers after it. One reducer means a correction
+ * behaves identically on both sides of publishing, instead of two editors
+ * drifting apart.
  */
 import type { FormContainer, FormField, FormFieldType } from '@formai/shared';
 import { DEFAULT_CONTAINER } from '@formai/shared';

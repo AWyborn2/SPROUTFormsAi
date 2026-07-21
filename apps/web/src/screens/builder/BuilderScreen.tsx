@@ -36,7 +36,7 @@ import {
   PALETTE,
   type BuilderInit,
   type BuilderState,
-} from './reducer.js';
+} from '../../lib/field-editor/reducer.js';
 
 const COL_OPTIONS: Array<{ span: number; icon: string; label: string }> = [
   { span: 12, icon: 'rectangle-horizontal', label: 'Full' },
