@@ -52,6 +52,91 @@ function bytesInclude(bytes: Uint8Array, needle: string): boolean {
   return decodedText(bytes).includes(needle);
 }
 
+interface Glyph {
+  x: number;
+  y: number;
+  text: string;
+}
+
+/**
+ * Every text run drawn on the page, with the point coordinates it was placed
+ * at. Column placement is the whole point of the answer-set export, so the
+ * assertions have to look at WHERE a glyph landed, not just that it exists.
+ */
+function drawnGlyphs(bytes: Uint8Array): Glyph[] {
+  const buf = Buffer.from(bytes);
+  const hay = buf.toString('latin1');
+  const out: Glyph[] = [];
+  let pos = 0;
+  while ((pos = hay.indexOf('stream', pos)) !== -1) {
+    if (hay.slice(pos - 3, pos + 6) === 'endstream') {
+      pos += 9;
+      continue;
+    }
+    let dataStart = pos + 6;
+    if (hay[dataStart] === '\r') dataStart++;
+    if (hay[dataStart] === '\n') dataStart++;
+    const end = hay.indexOf('endstream', dataStart);
+    if (end === -1) break;
+    let content: string;
+    try {
+      content = zlib.inflateSync(buf.subarray(dataStart, end)).toString('latin1');
+    } catch {
+      pos = end + 9;
+      continue;
+    }
+    const re = /1 0 0 1 (-?[\d.]+) (-?[\d.]+) Tm\s*<([0-9A-Fa-f]*)> Tj/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(content)) !== null) {
+      out.push({
+        x: Number(m[1]),
+        y: Number(m[2]),
+        text: Buffer.from(m[3]!, 'hex').toString('latin1'),
+      });
+    }
+    pos = end + 9;
+  }
+  return out;
+}
+
+/** X positions of every `X` mark drawn, sorted. */
+function markXs(bytes: Uint8Array): number[] {
+  return drawnGlyphs(bytes)
+    .filter((g) => g.text === 'X')
+    .map((g) => g.x)
+    .sort((a, b) => a - b);
+}
+
+/** Table box used by the grouped fixtures: 4 columns of 100pt each from x=40. */
+const GROUPED_POS = {
+  page: 0,
+  x: 40,
+  y: 400,
+  width: 400,
+  height: 120,
+  pageWidth: 600,
+  pageHeight: 800,
+} as const;
+
+/** Cell text x for column index `ci` in a 4-column GROUPED_POS table. */
+const cellX = (ci: number): number => GROUPED_POS.x + (GROUPED_POS.width / 4) * ci + 3;
+
+const GROUPED_FIELD: FormField = {
+  id: 'checks',
+  type: 'repeating_group',
+  label: 'Pre-start checks',
+  required: false,
+  source: 'imported',
+  columns: [
+    { key: 'item', label: 'Item', type: 'text' },
+    { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+    { key: 'fault', label: 'Fault', type: 'boolean_yes_no' },
+    { key: 'na', label: 'N/A', type: 'boolean_yes_no' },
+  ],
+  answerSets: [{ key: 'status', columnKeys: ['ok', 'fault', 'na'] }],
+  sourcePosition: { ...GROUPED_POS },
+};
+
 const FIELDS: FormField[] = [
   {
     id: 'site',
@@ -122,5 +207,101 @@ describe('roundTripExport', () => {
     });
     expect(bytesInclude(output, 'should not appear')).toBe(false);
     expect(bytesInclude(output, LETTERHEAD)).toBe(true);
+  });
+
+  it('still exports the remaining fields when one has no source position', async () => {
+    const original = await makeFlatPdf();
+    const builtField: FormField = {
+      id: 'note',
+      type: 'text',
+      label: 'Internal note',
+      required: false,
+      source: 'built',
+    };
+    const output = await roundTripExport({
+      originalPdf: original,
+      fields: [builtField, ...FIELDS],
+      values: { note: 'should not appear', ...VALUES },
+    });
+    expect(bytesInclude(output, 'should not appear')).toBe(false);
+    expect(bytesInclude(output, 'Warehouse B')).toBe(true);
+    expect(bytesInclude(output, 'Fire extinguishers tagged')).toBe(true);
+  });
+
+  it('exports an ungrouped table with one mark per truthy cell', async () => {
+    const original = await makeFlatPdf();
+    const output = await roundTripExport({ originalPdf: original, fields: FIELDS, values: VALUES });
+    // Both rows tick the single `pass` column (index 1 of 2 columns, width 200).
+    expect(markXs(output)).toEqual([40 + 200 + 3, 40 + 200 + 3]);
+  });
+});
+
+describe('roundTripExport — answer sets', () => {
+  it('marks only the column the row answered', async () => {
+    const original = await makeFlatPdf();
+    const output = await roundTripExport({
+      originalPdf: original,
+      fields: [GROUPED_FIELD],
+      values: {
+        checks: [
+          { item: 'Engine oil level', na: true },
+          // Stored as the string 'true' — `isChosen` counts it, so it marks the
+          // cell rather than printing the literal text.
+          { item: 'Coolant', ok: 'true' },
+        ],
+      },
+    });
+    // The third member column (`na`, column index 3) is marked…
+    expect(markXs(output)).toEqual([cellX(1), cellX(3)]);
+    // …and on that row (the topmost, so the highest y) its two siblings are blank.
+    const marks = drawnGlyphs(output).filter((g) => g.text === 'X');
+    const topY = Math.max(...marks.map((g) => g.y));
+    const firstRow = marks.filter((g) => g.y === topY).map((g) => g.x);
+    expect(firstRow).toEqual([cellX(3)]);
+    expect(bytesInclude(output, 'Engine oil level')).toBe(true);
+  });
+
+  it('marks nothing for an unanswered grouped row', async () => {
+    const original = await makeFlatPdf();
+    const output = await roundTripExport({
+      originalPdf: original,
+      fields: [GROUPED_FIELD],
+      values: { checks: [{ item: 'Engine oil level', ok: false, fault: null }] },
+    });
+    expect(markXs(output)).toEqual([]);
+    expect(bytesInclude(output, 'Engine oil level')).toBe(true);
+  });
+
+  it('marks one cell, not two, for a malformed row with two truthy members', async () => {
+    const original = await makeFlatPdf();
+    const output = await roundTripExport({
+      originalPdf: original,
+      fields: [GROUPED_FIELD],
+      values: { checks: [{ item: 'Engine oil level', ok: true, fault: true }] },
+    });
+    // `selectedOption` reports the first truthy member; the sibling stays blank.
+    expect(markXs(output)).toEqual([cellX(1)]);
+  });
+
+  it('renders a grouped set and an ungrouped free-text column together', async () => {
+    const original = await makeFlatPdf();
+    const field: FormField = {
+      ...GROUPED_FIELD,
+      columns: [
+        { key: 'item', label: 'Item', type: 'text' },
+        { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+        { key: 'fault', label: 'Fault', type: 'boolean_yes_no' },
+        { key: 'comment', label: 'Comment', type: 'text' },
+      ],
+      answerSets: [{ key: 'status', columnKeys: ['ok', 'fault'] }],
+    };
+    const output = await roundTripExport({
+      originalPdf: original,
+      fields: [field],
+      values: { checks: [{ item: 'Engine oil level', fault: true, comment: 'Topped up' }] },
+    });
+    expect(markXs(output)).toEqual([cellX(2)]);
+    const comment = drawnGlyphs(output).find((g) => g.text === 'Topped up');
+    expect(comment?.x).toBe(cellX(3));
   });
 });
