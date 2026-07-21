@@ -429,6 +429,108 @@ describe('PATCH /org logo replacement cleanup', () => {
   });
 });
 
+describe('POST /org/brand-scan', () => {
+  it('403s a viewer', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/org/brand-scan`, {
+        method: 'POST',
+        headers: {
+          ...authHeader({ userId: 'u1', orgId: 'org-1', role: 'viewer' }),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ url: 'https://example.com' }),
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a missing url', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/org/brand-scan`, {
+        method: 'POST',
+        headers: { ...authHeader(ownerTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * The SSRF guard has its own suite; this asserts the route surfaces its
+   * refusal as a clean 422 rather than a 500, and that an internal hostname
+   * cannot be scanned through this endpoint.
+   */
+  it('422s a URL the SSRF guard refuses', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/org/brand-scan`, {
+        method: 'POST',
+        headers: { ...authHeader(ownerTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ url: 'http://169.254.169.254/latest/meta-data/' }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { error: string; reason: string };
+      expect(body.error).toBe('scan_failed');
+      expect(body.reason).toBe('blocked_address');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('422s a blocked scheme', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/org/brand-scan`, {
+        method: 'POST',
+        headers: { ...authHeader(ownerTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ url: 'file:///etc/passwd' }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { reason: string };
+      expect(body.reason).toBe('blocked_scheme');
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * This endpoint makes the server fetch an address the caller picks, so it is
+   * usable as an amplifier or scanner even with private space refused. The
+   * logo upload shipped without a limit; this one does not.
+   */
+  it('rate limits repeated scans for one org', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const call = () =>
+        fetch(`${base}/org/brand-scan`, {
+          method: 'POST',
+          headers: {
+            ...authHeader({ userId: 'u1', orgId: 'rate-test-org', role: 'owner' }),
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ url: 'http://127.0.0.1/' }),
+        });
+
+      const statuses: number[] = [];
+      for (let i = 0; i < 7; i++) statuses.push((await call()).status);
+      expect(statuses.filter((s) => s === 429).length).toBeGreaterThan(0);
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('PATCH /org theme', () => {
   const THEMED: BrandingKit = {
     ...NEW_KIT,
