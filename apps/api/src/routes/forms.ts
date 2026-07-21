@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, count, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import type { FormContainer, FormField } from '@formai/shared';
+import type { FormContainer, FormField, ThemeTokens } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
@@ -214,6 +214,8 @@ formsRouter.get('/:id', requireTenant, withErrorHandling(async (req, res) => {
     updatedAt: template.updatedAt.toISOString(),
     fields: current?.fields ?? [],
     container: current?.container,
+    /** Sparse per-form patch over the org theme; null when never restyled. */
+    themeOverride: template.themeOverride ?? null,
     versions: versions.map((v) => ({
       id: v.id,
       label: v.versionLabel,
@@ -364,6 +366,57 @@ formsRouter.post('/:id/versions/:versionId/publish', requireTenant, withErrorHan
 
   const dto = await summaryDto(template.id);
   res.json(dto);
+}));
+
+/**
+ * Per-form theme override (R14). A sparse patch over the org theme where an
+ * absent key means inherit; `null` clears the override entirely and returns
+ * the form to the org theme.
+ *
+ * Deliberately a template-level mutation rather than a new version: restyling
+ * a live form should take effect immediately, not wait for a republish, and
+ * should not fork the field content into a new version row.
+ */
+const themeOverrideBody = z.object({
+  themeOverride: z.custom<ThemeTokens>().nullable(),
+});
+
+formsRouter.patch('/:id/theme', requireTenant, withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const tenant = req.tenant!;
+  if (!(await hasPermission(tenant, 'forms', 'edit'))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  const parsed = themeOverrideBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return;
+  }
+  const template = await db.query.formTemplates.findFirst({
+    where: and(eq(schema.formTemplates.id, req.params.id!), eq(schema.formTemplates.orgId, tenant.orgId)),
+  });
+  if (!template) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+
+  await db
+    .update(schema.formTemplates)
+    .set({ themeOverride: parsed.data.themeOverride, updatedAt: new Date() })
+    .where(eq(schema.formTemplates.id, template.id));
+
+  await recordAudit(db, tenant, {
+    action: parsed.data.themeOverride ? 'Updated form theme' : 'Reset form theme',
+    target: template.name,
+    category: 'forms',
+    icon: 'settings',
+  });
+
+  res.json({ id: template.id, themeOverride: parsed.data.themeOverride });
 }));
 
 formsRouter.post('/:id/archive', requireTenant, withErrorHandling(async (req, res) => {
