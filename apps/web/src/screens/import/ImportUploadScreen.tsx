@@ -1,20 +1,29 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Button, FileDropzone, Icon } from '@formai/ui';
-import { resetImportSession, startExtraction } from '../../lib/data/import-session.js';
+import { useForm } from '../../lib/data/hooks.js';
+import { resetImportSession, setImportTarget, startExtraction } from '../../lib/data/import-session.js';
 import { formatFileSize, validateUploadFile } from './upload-validation.js';
 import { ImportStepper } from './ImportStepper.js';
 
-/** Import step 1 — upload the source PDF. */
+/**
+ * Import step 1 — upload the source PDF. With `?form=<id>` the wizard runs in
+ * re-extract mode: the result becomes a new version of that existing form.
+ */
 export function ImportUploadScreen() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const targetFormId = searchParams.get('form');
+  const { data: targetForm } = useForm(targetFormId ?? undefined);
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Fresh session each time the wizard is entered from the top.
+  // Fresh session each time the wizard is entered from the top; the target
+  // (if any) is set AFTER the reset so a plain "Import PDF" entry clears it.
   useEffect(() => {
     resetImportSession();
-  }, []);
+    setImportTarget(targetFormId);
+  }, [targetFormId]);
 
   function handleFiles(files: File[]) {
     const candidate = files[0];
@@ -41,11 +50,30 @@ export function ImportUploadScreen() {
       <ImportStepper currentStep={0} />
 
       <div className="mx-auto max-w-[640px]">
-        <h3 className="mb-1.5 text-[23px]">Convert an existing PDF</h3>
-        <p className="mb-6 text-[14.5px] text-text-secondary">
-          Bring across a form you already use. We preserve the original layout so the digital version —
-          and its PDF export — match the paper one.
-        </p>
+        {targetFormId ? (
+          <>
+            <h3 className="mb-1.5 text-[23px]">Re-extract from an updated PDF</h3>
+            <p className="mb-4 text-[14.5px] text-text-secondary">
+              Upload the updated PDF — the extracted fields become a new version of the existing form,
+              keeping its fill links, submissions, and version history.
+            </p>
+            <div className="mb-6 flex items-center gap-2.5 rounded-md border border-border-accent bg-surface-accent-soft p-[10px_14px]">
+              <Icon name="refresh-cw" size={16} className="flex-none text-accent" />
+              <span className="text-[13px]">
+                Updating <span className="font-semibold">{targetForm?.name ?? 'form'}</span>
+                {targetForm ? ` · currently ${targetForm.version}` : ''}
+              </span>
+            </div>
+          </>
+        ) : (
+          <>
+            <h3 className="mb-1.5 text-[23px]">Convert an existing PDF</h3>
+            <p className="mb-6 text-[14.5px] text-text-secondary">
+              Bring across a form you already use. We preserve the original layout so the digital version —
+              and its PDF export — match the paper one.
+            </p>
+          </>
+        )}
 
         <FileDropzone
           accept="application/pdf"

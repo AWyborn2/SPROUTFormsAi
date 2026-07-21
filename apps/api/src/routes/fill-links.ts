@@ -88,6 +88,14 @@ formFillLinksRouter.post('/:id/fill-links', requireTenant, withErrorHandling(asy
     res.status(404).json({ error: 'not_found' });
     return;
   }
+  // An archived form keeps serving its EXISTING links (the public path never
+  // reads template status), but minting new distribution for it conflicts
+  // with being out of circulation: 409, distinct from form_not_published so
+  // the web layer can say "restore this form" instead of "publish it".
+  if (template.status === 'archived') {
+    res.status(409).json({ error: 'form_archived' });
+    return;
+  }
   // A link is only mintable against a published current version: 409 (not
   // 400) because the request is well-formed — the *template's state*
   // conflicts with it. `currentVersionId` may point at an unpublished v1
