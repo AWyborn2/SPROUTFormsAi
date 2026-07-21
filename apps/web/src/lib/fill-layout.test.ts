@@ -1,10 +1,52 @@
 import { describe, expect, it } from 'vitest';
-import type { FormField } from '@formai/shared';
+import type { FormContainer, FormField } from '@formai/shared';
+import { DEFAULT_CONTAINER } from '@formai/shared';
 import {
+  containerSurfaceStyle,
   fillSpanClass,
   previewSpanClass,
   resolveFillSpan,
 } from './fill-layout.js';
+
+function container(patch: Partial<FormContainer> = {}): FormContainer {
+  return { ...DEFAULT_CONTAINER, ...patch };
+}
+
+describe('containerSurfaceStyle', () => {
+  it('maps the saved container onto surface styling', () => {
+    const style = containerSurfaceStyle(container({ radius: 20, borderWidth: 2, shadow: 'sm' }));
+    expect(style.borderRadius).toBe('20px');
+    expect(style.borderWidth).toBe('2px');
+    expect(style.borderStyle).toBe('solid');
+    expect(style.boxShadow).toBe('var(--shadow-sm)');
+  });
+
+  it('omits empty colour fields so the product token keeps applying', () => {
+    const style = containerSurfaceStyle(container({ borderColor: '', background: '' }));
+    expect(style.borderColor).toBeUndefined();
+    expect(style.background).toBeUndefined();
+  });
+
+  it('applies colour fields once they are set', () => {
+    const style = containerSurfaceStyle(container({ borderColor: '#abcdef', background: '#101010' }));
+    expect(style.borderColor).toBe('#abcdef');
+    expect(style.background).toBe('#101010');
+  });
+
+  it('supports an explicitly shadowless container', () => {
+    expect(containerSurfaceStyle(container({ shadow: 'none' })).boxShadow).toBe('none');
+  });
+
+  it('returns an empty style for a missing container rather than throwing', () => {
+    expect(containerSurfaceStyle(null)).toEqual({});
+    expect(containerSurfaceStyle(undefined)).toEqual({});
+  });
+
+  it('drops an unrecognised shadow level instead of emitting an empty shadow', () => {
+    const style = containerSurfaceStyle(container({ shadow: 'glow' as FormContainer['shadow'] }));
+    expect(style.boxShadow).toBeUndefined();
+  });
+});
 
 function field(patch: Partial<FormField>): FormField {
   return {

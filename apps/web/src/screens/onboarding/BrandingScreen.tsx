@@ -166,21 +166,35 @@ export function BrandingScreen() {
                   <img
                     src={branding.logoAssetUrl}
                     alt=""
-                    className="h-10 w-10 flex-none rounded-[9px] bg-white/[0.14] object-contain p-1"
+                    className="h-10 w-10 flex-none rounded-[9px] object-contain p-1"
+                    style={{
+                      background: 'color-mix(in srgb, var(--org-primary-text) 14%, transparent)',
+                    }}
                   />
                 ) : (
-                  <span className="grid h-10 w-10 place-items-center rounded-[9px] bg-white/[0.14] font-heading text-[17px] font-bold text-white">
+                  <span
+                    className="grid h-10 w-10 place-items-center rounded-[9px] font-heading text-[17px] font-bold"
+                    style={{
+                      background: 'color-mix(in srgb, var(--org-primary-text) 14%, transparent)',
+                      color: 'var(--org-primary-text)',
+                    }}
+                  >
                     {orgInitial}
                   </span>
                 )}
                 <div>
                   <div
-                    className="text-[17px] font-bold text-white"
-                    style={{ fontFamily: 'var(--org-font)' }}
+                    className="text-[17px] font-bold"
+                    style={{ fontFamily: 'var(--org-font)', color: 'var(--org-primary-text)' }}
                   >
                     {orgName}
                   </div>
-                  <div className="text-[11.5px] text-white/60">Vendor onboarding</div>
+                  <div
+                    className="text-[11.5px]"
+                    style={{ color: 'color-mix(in srgb, var(--org-primary-text) 60%, transparent)' }}
+                  >
+                    Vendor onboarding
+                  </div>
                 </div>
               </div>
               <div className="bg-white px-[26px] py-6" style={{ fontFamily: 'var(--org-font)' }}>

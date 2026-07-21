@@ -5,6 +5,7 @@
 
 export * from './roles.js';
 export * from './branding.js';
+export * from './theme.js';
 export * from './google-fonts-catalog.js';
 export * from './form-field.js';
 export * from './extraction.js';
