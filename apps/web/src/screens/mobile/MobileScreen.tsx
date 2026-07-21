@@ -9,6 +9,7 @@ import { ensureFontLoaded } from '../../lib/font-loader.js';
 import { useOnboarding } from '../../lib/onboarding.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
 import { ApiError } from '../../lib/data/api-client.js';
+import { discardImpactOf, discardWarningMessage } from '../../lib/discard-warning.js';
 import { previewSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
 import { answeredCount, publishedForms } from './mobile-fill.js';
 import {
@@ -142,6 +143,13 @@ export function MobileScreen() {
   }
 
   function setValue(fieldId: string, value: SubmissionValue) {
+    // R22 — a change that hides an answered section destroys those answers
+    // (the server strips hidden values on save), so confirm before applying
+    // rather than after. Silent when only empty fields would hide: a prompt
+    // that fires on every harmless toggle gets dismissed unread.
+    const impact = discardImpactOf(form?.fields ?? [], values, fieldId, value);
+    if (impact.count > 0 && !window.confirm(discardWarningMessage(impact))) return;
+
     setValues((v) => ({ ...v, [fieldId]: value }));
     setErrors((e) => (e[fieldId] ? { ...e, [fieldId]: '' } : e));
   }

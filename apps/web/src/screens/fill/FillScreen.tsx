@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { Icon, Input, useToast } from '@formai/ui';
 import type { SubmissionValue } from '@formai/shared';
 import { ApiError } from '../../lib/data/api-client.js';
+import { discardImpactOf, discardWarningMessage } from '../../lib/discard-warning.js';
 import { useFillForm, useSubmitFill } from '../../lib/data/hooks.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
@@ -47,6 +48,13 @@ export function FillScreen() {
   const [doneRef, setDoneRef] = useState<string | null>(null);
 
   function setValue(fieldId: string, value: SubmissionValue) {
+    // R22 — a change that hides an answered section destroys those answers
+    // (the server strips hidden values on save), so confirm before applying
+    // rather than after. Silent when only empty fields would hide: a prompt
+    // that fires on every harmless toggle gets dismissed unread.
+    const impact = discardImpactOf(fill?.fields ?? [], values, fieldId, value);
+    if (impact.count > 0 && !window.confirm(discardWarningMessage(impact))) return;
+
     setValues((v) => ({ ...v, [fieldId]: value }));
     setErrors((e) => (e[fieldId] ? { ...e, [fieldId]: '' } : e));
   }
