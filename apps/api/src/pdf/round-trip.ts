@@ -9,7 +9,7 @@
  * exactly where the source field was, at any DPI the original was authored in.
  */
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
-import { resolveAnswerSets, selectedOption } from '@formai/shared';
+import { resolveAnswerSets, selectedOption, visibleFields } from '@formai/shared';
 import type { FormField, RepeatingRowValue, SubmissionValue } from '@formai/shared';
 
 const INK = rgb(0.094, 0.106, 0.098); // #181b19
@@ -46,7 +46,12 @@ export async function roundTripExport({
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const pages = doc.getPages();
 
-  for (const field of fields) {
+  // Conditional visibility is applied HERE rather than left to the caller
+  // (U11). An exported PDF is read in incident investigations as evidence of
+  // what was recorded — a question the filler never saw must not appear on it
+  // carrying a stale answer from before its source question changed. Putting
+  // the filter inside the exporter means no future caller can forget it.
+  for (const field of visibleFields(fields, values)) {
     const pos = field.sourcePosition;
     if (!pos) continue;
     const page = pages[pos.page];

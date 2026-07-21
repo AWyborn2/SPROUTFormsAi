@@ -6,7 +6,7 @@ import { ApiError } from '../../lib/data/api-client.js';
 import { useFillForm, useSubmitFill } from '../../lib/data/hooks.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
-import { fillSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
+import { fillSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
 import {
   EMAIL_RE,
   requiredFieldErrors,
@@ -200,9 +200,11 @@ export function FillScreen() {
             </div>
 
             {/* The served version's real fields, via the shared renderer, on
-                the builder's 12-col grid (single column below `sm`). */}
+                the builder's 12-col grid (single column below `sm`). Fields
+                hidden by an unmet condition are filtered out before the grid
+                is built, so they occupy no cell and leave no gap. */}
             <div className="grid grid-cols-12 gap-[16px]">
-              {fill.fields.map((f) => (
+              {visibleFillFields(fill.fields, values).map((f) => (
                 <div key={f.id} className={fillSpanClass(resolveFillSpan(f, false))}>
                   <FieldInput
                     field={f}

@@ -6,7 +6,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { FormField, RepeatingRowValue } from '@formai/shared';
-import { incompleteFixedRowIndices, isFieldAnswered, missingRequiredFields } from '@formai/shared';
+import {
+  incompleteFixedRowIndices,
+  isFieldAnswered,
+  missingRequiredFields,
+  stripHiddenValues,
+} from '@formai/shared';
 
 const text: FormField = { id: 'name', type: 'text', label: 'Name', required: true, source: 'built' };
 const num: FormField = { id: 'qty', type: 'number', label: 'Qty', required: true, source: 'built' };
@@ -281,5 +286,92 @@ describe('answer sets — open row-entry tables', () => {
 
   it('is unanswered when there are no rows at all', () => {
     expect(isFieldAnswered(openTable, [])).toBe(false);
+  });
+});
+
+/**
+ * U11 — conditional visibility crosses into completeness. A hidden field is
+ * unrequired: it must not appear in `missingRequiredFields`, because the
+ * filler was never shown it and no amount of scrolling will reveal it.
+ * `visibleFields` (shared) does the section expansion, so a hidden section
+ * header takes its whole scope with it.
+ */
+describe('missingRequiredFields — conditional visibility', () => {
+  const trigger: FormField = { id: 'has_plant', type: 'boolean_yes_no', label: 'Plant on site?', required: false, source: 'built' };
+  const hiddenRequired: FormField = {
+    id: 'plant_reg',
+    type: 'text',
+    label: 'Plant registration',
+    required: true,
+    source: 'built',
+    visibleWhen: { fieldId: 'has_plant', op: 'equals', value: 'true' },
+  };
+  const sectionHeader: FormField = {
+    id: 'plant_section',
+    type: 'section_header',
+    label: 'Plant',
+    required: false,
+    source: 'built',
+    visibleWhen: { fieldId: 'has_plant', op: 'equals', value: 'true' },
+  };
+
+  it('omits a hidden required field — it cannot block a submit', () => {
+    expect(missingRequiredFields([trigger, hiddenRequired], { has_plant: false })).toEqual([]);
+  });
+
+  it('still reports the field once its condition is met', () => {
+    expect(missingRequiredFields([trigger, hiddenRequired], { has_plant: true })).toEqual(['plant_reg']);
+  });
+
+  it('omits every required field inside a hidden section', () => {
+    const plainRequired: FormField = { id: 'plant_reg', type: 'text', label: 'Plant registration', required: true, source: 'built' };
+    const fields: FormField[] = [trigger, sectionHeader, plainRequired, { ...text, id: 'plant_owner' }];
+    expect(missingRequiredFields(fields, { has_plant: false })).toEqual([]);
+    expect(missingRequiredFields(fields, { has_plant: true }).sort()).toEqual(['plant_owner', 'plant_reg']);
+  });
+
+  it('behaves identically to today for a form with no conditions', () => {
+    expect(missingRequiredFields([text, num], {})).toEqual(['name', 'qty']);
+  });
+});
+
+describe('stripHiddenValues', () => {
+  const trigger: FormField = { id: 'has_plant', type: 'boolean_yes_no', label: 'Plant?', required: false, source: 'built' };
+  const hidden: FormField = {
+    id: 'plant_reg',
+    type: 'text',
+    label: 'Plant registration',
+    required: false,
+    source: 'built',
+    visibleWhen: { fieldId: 'has_plant', op: 'equals', value: 'true' },
+  };
+
+  it('drops values for hidden fields and names them', () => {
+    const out = stripHiddenValues([trigger, hidden], { has_plant: false, plant_reg: 'ABC123' });
+    expect(out.values).toEqual({ has_plant: false });
+    expect(out.discarded).toEqual(['plant_reg']);
+  });
+
+  it('keeps everything and discards nothing when all fields are visible', () => {
+    const out = stripHiddenValues([trigger, hidden], { has_plant: true, plant_reg: 'ABC123' });
+    expect(out.values).toEqual({ has_plant: true, plant_reg: 'ABC123' });
+    expect(out.discarded).toEqual([]);
+  });
+
+  it('is a no-op for a form with no conditions', () => {
+    const values = { name: 'Priya', qty: 3 };
+    const out = stripHiddenValues([text, num], values);
+    expect(out.values).toEqual(values);
+    expect(out.discarded).toEqual([]);
+  });
+
+  it('only names hidden fields that actually carried a value', () => {
+    const out = stripHiddenValues([trigger, hidden], { has_plant: false });
+    expect(out.discarded).toEqual([]);
+  });
+
+  it('keeps values for ids that are not fields at all — stripping decides on visibility, not membership', () => {
+    const out = stripHiddenValues([trigger], { has_plant: true, stray: 'x' });
+    expect(out.values).toEqual({ has_plant: true, stray: 'x' });
   });
 });

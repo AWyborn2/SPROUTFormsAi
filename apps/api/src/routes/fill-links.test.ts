@@ -842,3 +842,150 @@ describe('POST /fill/:token/submissions (public, no auth)', () => {
     }
   });
 });
+
+/**
+ * U11 — the public submit path is where the client is least trusted: a token
+ * is the only credential and the payload is whatever the caller chose to send.
+ * Hidden fields are stripped SERVER-SIDE before the insert, and the discarded
+ * ids ride along on the audit entry so a stripping bug and a filler who simply
+ * never answered stay distinguishable in the record.
+ */
+describe('POST /fill/:token/submissions — hidden fields (U11)', () => {
+  const CONDITIONAL_V1 = {
+    id: 'v1',
+    templateId: 't1',
+    state: 'published',
+    fields: [
+      { id: 'has_plant', type: 'boolean_yes_no', label: 'Plant on site?', required: false, source: 'built' },
+      {
+        id: 'plant_reg',
+        type: 'text',
+        label: 'Plant registration',
+        required: true,
+        source: 'built',
+        visibleWhen: { fieldId: 'has_plant', op: 'equals', value: 'true' },
+      },
+      {
+        id: 'plant_section',
+        type: 'section_header',
+        label: 'Plant detail',
+        required: false,
+        source: 'built',
+        visibleWhen: { fieldId: 'has_plant', op: 'equals', value: 'true' },
+      },
+      { id: 'plant_owner', type: 'text', label: 'Owner', required: true, source: 'built' },
+    ],
+    container: CONTAINER,
+  };
+
+  function submit(base: string, values: Record<string, unknown>) {
+    return fetch(`${base}/fill/${ACTIVE_LINK.token}/submissions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ versionId: 'v1', submitterName: 'Tom Reyes', values }),
+    });
+  }
+
+  it('accepts a submission that leaves a hidden section untouched, recording none of its answers', async () => {
+    const { db, insertValues } = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: CONDITIONAL_V1,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await submit(base, { has_plant: false });
+      expect(res.status).toBe(201);
+      const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionInsert?.[1].values).toEqual({ has_plant: false });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not name a hidden required field in the 400 missing-fields list', async () => {
+    const { db } = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: CONDITIONAL_V1,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // `plant_owner` is required and inside the hidden section; `plant_reg`
+      // is required and hidden on its own condition. Neither may block.
+      const res = await submit(base, {});
+      expect(res.status).toBe(201);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('strips values a caller posted for a hidden field, and names them on the audit entry', async () => {
+    const { db, insertValues } = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: CONDITIONAL_V1,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await submit(base, { has_plant: false, plant_reg: 'SNEAKY', plant_owner: 'ALSO SNEAKY' });
+      expect(res.status).toBe(201);
+
+      const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionInsert?.[1].values).toEqual({ has_plant: false });
+
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      const target = String(auditInsert?.[1].target);
+      expect(target).toContain('plant_reg');
+      expect(target).toContain('plant_owner');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('drops a stale draft answer for a field hidden at submit time, rather than resurrecting it', async () => {
+    const { db, insertValues } = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: CONDITIONAL_V1,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // The filler answered while `has_plant` was true, then changed it to
+      // false. The stale answer must not survive into the record.
+      const res = await submit(base, { has_plant: false, plant_reg: 'STALE' });
+      expect(res.status).toBe(201);
+      const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionInsert?.[1].values).not.toHaveProperty('plant_reg');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes an audit entry unchanged from today when nothing is hidden', async () => {
+    const { db, insertValues } = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await submit(base, { abn: '12 345 678 901' });
+      expect(res.status).toBe(201);
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert?.[1]).toMatchObject({
+        action: 'Received external submission',
+        target: 'Vendor onboarding: Tom Reyes',
+      });
+      const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionInsert?.[1].values).toEqual({ abn: '12 345 678 901' });
+    } finally {
+      server.close();
+    }
+  });
+});

@@ -314,12 +314,15 @@ export const store = {
     return getOrUndefined(apiClient.get<SubmissionDetailDto>(`/submissions/${id}`).then(toSubmissionDetail));
   },
 
+  /**
+   * The export sends the submission id and nothing else: the API loads the
+   * pinned version's fields and the stored values itself and applies the
+   * visibility filter server-side (U11). Sending fields/values from here would
+   * make the exported PDF a render of whatever the browser said, rather than
+   * evidence of what was recorded.
+   */
   exportSubmissionPdf(detail: SubmissionDetail): Promise<Blob> {
-    return apiClient.postForBlob('/pdf/round-trip', {
-      ...(detail.sourcePdfAssetId ? { assetId: detail.sourcePdfAssetId } : {}),
-      fields: detail.fields,
-      values: detail.values,
-    });
+    return apiClient.postForBlob('/pdf/round-trip', { submissionId: detail.id });
   },
 
   setSubmissionStatus(input: { id: string; status: 'approved' | 'rejected' }): Promise<SubmissionRow> {

@@ -305,3 +305,84 @@ describe('roundTripExport — answer sets', () => {
     expect(comment?.x).toBe(cellX(3));
   });
 });
+
+/**
+ * U11 — the exported PDF is evidence of what was RECORDED. A field the filler
+ * never saw must not be drawn on the page, even when a stale value for it is
+ * still sitting in the submission (a draft saved before the source answer
+ * changed). The filter lives inside `roundTripExport` so no caller can forget
+ * it.
+ */
+describe('roundTripExport — conditional visibility', () => {
+  const trigger: FormField = {
+    id: 'has_plant',
+    type: 'boolean_yes_no',
+    label: 'Plant on site?',
+    required: false,
+    source: 'imported',
+    sourcePosition: { page: 0, x: 130, y: 720, width: 200, height: 16, pageWidth: 600, pageHeight: 800 },
+  };
+  const conditional: FormField = {
+    id: 'plant_reg',
+    type: 'text',
+    label: 'Plant registration',
+    required: false,
+    source: 'imported',
+    visibleWhen: { fieldId: 'has_plant', op: 'equals', value: 'true' },
+    sourcePosition: { page: 0, x: 130, y: 660, width: 200, height: 16, pageWidth: 600, pageHeight: 800 },
+  };
+
+  it('does not draw a hidden field, even when a stale value survives for it', async () => {
+    const original = await makeFlatPdf();
+    const output = await roundTripExport({
+      originalPdf: original,
+      fields: [trigger, conditional],
+      values: { has_plant: false, plant_reg: 'STALE-REG-9' },
+    });
+    expect(bytesInclude(output, 'STALE-REG-9')).toBe(false);
+    expect(bytesInclude(output, LETTERHEAD)).toBe(true);
+  });
+
+  it('draws the same field once its condition is met', async () => {
+    const original = await makeFlatPdf();
+    const output = await roundTripExport({
+      originalPdf: original,
+      fields: [trigger, conditional],
+      values: { has_plant: true, plant_reg: 'REG-9' },
+    });
+    expect(bytesInclude(output, 'REG-9')).toBe(true);
+  });
+
+  it('drops a whole hidden section, header scope included', async () => {
+    const original = await makeFlatPdf();
+    const header: FormField = {
+      id: 'plant_section',
+      type: 'section_header',
+      label: 'Plant',
+      required: false,
+      source: 'imported',
+      visibleWhen: { fieldId: 'has_plant', op: 'equals', value: 'true' },
+    };
+    const inSection: FormField = {
+      id: 'plant_owner',
+      type: 'text',
+      label: 'Owner',
+      required: false,
+      source: 'imported',
+      sourcePosition: { page: 0, x: 130, y: 600, width: 200, height: 16, pageWidth: 600, pageHeight: 800 },
+    };
+    const output = await roundTripExport({
+      originalPdf: original,
+      fields: [trigger, header, inSection],
+      values: { has_plant: false, plant_owner: 'SECTION-OWNER' },
+    });
+    expect(bytesInclude(output, 'SECTION-OWNER')).toBe(false);
+  });
+
+  it('exports a condition-free form exactly as it does today', async () => {
+    const original = await makeFlatPdf();
+    const output = await roundTripExport({ originalPdf: original, fields: FIELDS, values: VALUES });
+    expect(bytesInclude(output, 'Warehouse B')).toBe(true);
+    expect(bytesInclude(output, 'Fire extinguishers tagged')).toBe(true);
+  });
+});

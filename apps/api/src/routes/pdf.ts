@@ -1,6 +1,9 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { and, eq } from 'drizzle-orm';
+import { schema } from '@formai/db';
 import type { FormField, SubmissionValue } from '@formai/shared';
+import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { getAnthropic } from '../anthropic.js';
@@ -128,50 +131,87 @@ pdfRouter.post(
   }),
 );
 
-const exportBody = z
-  .object({
-    pdfBase64: z.string().min(1).optional(),
-    assetId: z.string().min(1).optional(),
-    fields: z.array(z.custom<FormField>()),
-    values: z.record(z.string(), z.custom<SubmissionValue>()),
-  })
-  .refine((v) => (v.pdfBase64 ? 1 : 0) + (v.assetId ? 1 : 0) === 1, {
-    message: 'exactly one of pdfBase64 or assetId is required',
-  });
+/**
+ * The export takes a submission id and NOTHING else.
+ *
+ * It used to take `fields` and `values` straight off the request body as
+ * `z.custom` passthroughs — which perform no runtime validation whatsoever.
+ * That made two forgeries trivial for any authenticated caller: post the
+ * form's own field list with `visibleWhen` stripped and the PDF renders a
+ * hidden section's answers; or post values matching no stored submission at
+ * all and the PDF renders those. A filled PDF is read in incident
+ * investigations as evidence of what was RECORDED, so both fields and values
+ * are now loaded server-side from the submission and its pinned version, and
+ * the visibility filter is applied to those (U11).
+ *
+ * There is deliberately no ad-hoc "render these fields" variant: nothing in
+ * apps/web needs one (the only caller is `store.exportSubmissionPdf`). If one
+ * is ever needed it belongs on a separate, clearly non-evidentiary route —
+ * never on this one, whose whole value is that its output cannot be steered.
+ */
+const exportBody = z.object({
+  submissionId: z.string().min(1),
+});
 
 pdfRouter.post(
   '/round-trip',
   requireTenant,
   withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
     const parsed = exportBody.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
       return;
     }
     const tenant = req.tenant!;
-    let original: Buffer;
-    if (parsed.data.assetId) {
-      const client = getStorageClient();
-      if (!client) {
-        res.status(503).json({ error: 'storage_unavailable' });
-        return;
-      }
-      const downloaded = await client.download(tenant.orgId, parsed.data.assetId);
-      if (!downloaded) {
-        res.status(404).json({ error: 'asset_not_found' });
-        return;
-      }
-      original = downloaded;
-    } else {
-      original = Buffer.from(parsed.data.pdfBase64!, 'base64');
+
+    // Org-scoped: a submission from another tenant is indistinguishable from
+    // one that does not exist.
+    const submission = await db.query.submissions.findFirst({
+      where: and(
+        eq(schema.submissions.id, parsed.data.submissionId),
+        eq(schema.submissions.orgId, tenant.orgId),
+      ),
+    });
+    if (!submission) {
+      res.status(404).json({ error: 'not_found' });
+      return;
     }
 
+    // The PINNED version — the form as the filler actually saw it — supplies
+    // both the field definitions (including their conditions) and the source
+    // PDF the values are overlaid onto.
+    const version = await db.query.formTemplateVersions.findFirst({
+      where: eq(schema.formTemplateVersions.id, submission.templateVersionId),
+    });
+    const fields: FormField[] = Array.isArray(version?.fields) ? (version.fields as FormField[]) : [];
+    if (!version?.sourcePdfAssetId) {
+      // Built-from-scratch (or AI-extracted) forms have no original page to
+      // draw on. Well-formed request, unprocessable subject: 422.
+      res.status(422).json({ error: 'no_source_pdf' });
+      return;
+    }
+
+    const client = getStorageClient();
+    if (!client) {
+      res.status(503).json({ error: 'storage_unavailable' });
+      return;
+    }
+    const original = await client.download(tenant.orgId, version.sourcePdfAssetId);
+    if (!original) {
+      res.status(404).json({ error: 'asset_not_found' });
+      return;
+    }
+
+    const values = (submission.values ?? {}) as Record<string, SubmissionValue>;
+
     try {
-      const out = await roundTripExport({
-        originalPdf: original,
-        fields: parsed.data.fields,
-        values: parsed.data.values,
-      });
+      // `roundTripExport` applies the visibility filter itself, so the drawn
+      // page and the stored record cannot disagree.
+      const out = await roundTripExport({ originalPdf: original, fields, values });
       res.setHeader('Content-Type', 'application/pdf');
       res.send(Buffer.from(out));
     } catch (err) {

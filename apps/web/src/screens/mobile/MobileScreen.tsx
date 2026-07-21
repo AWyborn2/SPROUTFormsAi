@@ -9,7 +9,7 @@ import { ensureFontLoaded } from '../../lib/font-loader.js';
 import { useOnboarding } from '../../lib/onboarding.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
 import { ApiError } from '../../lib/data/api-client.js';
-import { previewSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
+import { previewSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
 import { answeredCount, publishedForms } from './mobile-fill.js';
 import {
   inputFields,
@@ -532,7 +532,7 @@ function FillView({
               frame is a CONTAINER (viewport breakpoints don't apply), so
               `narrow` collapses every span to 12 — effectively stacked. */}
           <div className="grid grid-cols-12 gap-[16px]">
-            {form.fields.map((f) => (
+            {visibleFillFields(form.fields, values).map((f) => (
               <div key={f.id} className={previewSpanClass(resolveFillSpan(f, true))}>
                 <FieldInput
                   field={f}

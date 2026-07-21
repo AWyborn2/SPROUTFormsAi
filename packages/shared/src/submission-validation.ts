@@ -7,6 +7,7 @@
  * runner): see apps/api/src/routes/submission-validation.test.ts.
  */
 import { resolveAnswerSets, selectedOption } from './answer-set.js';
+import { visibleFields } from './visibility.js';
 import type { FormField, FormFieldType, RepeatingColumn } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 
@@ -145,7 +146,8 @@ export function incompleteRowsByField(
   values: Record<string, SubmissionValue>,
 ): Record<string, number[]> {
   const out: Record<string, number[]> = {};
-  for (const f of fields) {
+  // Hidden tables cannot be incomplete — the filler was never shown them (U11).
+  for (const f of visibleFields(fields, values)) {
     if (f.type !== 'repeating_group' || !f.required) continue;
     const incomplete = incompleteFixedRowIndices(f, values[f.id]);
     if (incomplete.length > 0) out[f.id] = incomplete;
@@ -163,7 +165,48 @@ export function missingRequiredFields(
   fields: FormField[],
   values: Record<string, SubmissionValue>,
 ): string[] {
-  return fields
+  // Required-ness is scoped to what the filler can actually SEE (U11): a
+  // hidden required field has no answer to give and must never block a submit,
+  // or a conditional section becomes an unclearable wall. `visibleFields`
+  // expands section-header conditions across their scope, so this agrees with
+  // the fill renderer field-for-field.
+  return visibleFields(fields, values)
     .filter((f) => f.type !== 'section_header' && f.required && !isFieldAnswered(f, values[f.id]))
     .map((f) => f.id);
+}
+
+/**
+ * Drop the values of fields that are not visible under `values` itself, and
+ * name what was dropped.
+ *
+ * The guarantee U11 exists for is that a hidden field is UNRECORDED — not
+ * merely unrendered. A client can post whatever it likes (the public fill
+ * route's only credential is a link token), and a draft saved while a section
+ * was visible carries stale answers after the source answer changes. Both
+ * cases resolve here, on the server, before the insert.
+ *
+ * Ids with no matching field are left alone: this decides on visibility, not
+ * on schema membership, and silently eating unknown keys would hide a
+ * different class of bug. `discarded` names only fields that actually carried
+ * a value, so an audit trace of `[]` means "nothing was thrown away" rather
+ * than "nothing was hidden".
+ */
+export function stripHiddenValues(
+  fields: FormField[],
+  values: Record<string, SubmissionValue>,
+): { values: Record<string, SubmissionValue>; discarded: string[] } {
+  const visibleIds = new Set(visibleFields(fields, values).map((f) => f.id));
+  const hiddenIds = new Set(fields.filter((f) => !visibleIds.has(f.id)).map((f) => f.id));
+  if (hiddenIds.size === 0) return { values, discarded: [] };
+
+  const kept: Record<string, SubmissionValue> = {};
+  const discarded: string[] = [];
+  for (const [id, value] of Object.entries(values)) {
+    if (hiddenIds.has(id)) {
+      discarded.push(id);
+      continue;
+    }
+    kept[id] = value;
+  }
+  return { values: kept, discarded };
 }
