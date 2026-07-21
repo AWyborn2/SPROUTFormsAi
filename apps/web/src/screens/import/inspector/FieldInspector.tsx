@@ -30,6 +30,7 @@ import {
 } from '../../../lib/data/import-session.js';
 import { FIELD_META, PALETTE } from '../../../lib/field-editor/reducer.js';
 import { ColumnInspector } from './ColumnInspector.js';
+import { importSessionColumnActions } from './column-actions.js';
 
 const TYPE_OPTIONS = FORM_FIELD_TYPES.map((t) => ({ label: FIELD_META[t]?.label ?? t, value: t }));
 
@@ -164,7 +165,7 @@ export function FieldInspector({ field, index, count, onSelect }: FieldInspector
           </>
         )}
 
-        {isTable && <ColumnInspector field={field} />}
+        {isTable && <ColumnInspector field={field} actions={importSessionColumnActions} />}
 
         <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
           <div className="text-[12.5px] font-semibold">Insert below</div>

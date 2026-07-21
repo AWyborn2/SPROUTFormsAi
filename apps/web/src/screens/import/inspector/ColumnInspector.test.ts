@@ -6,6 +6,7 @@
  * sets, a rename that breaks a set) is asserted against the wrappers and, where
  * publish is the thing at stake, through `reviewedToFields`.
  */
+import { importSessionColumnActions } from './column-actions.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ExtractedField, ExtractionResult } from '@formai/shared';
 import { groupedColumnKeys, resolveAnswerSets } from '@formai/shared';
@@ -97,12 +98,12 @@ beforeEach(async () => {
 describe('proposed vs accepted', () => {
   it('starts a proposed set unaccepted and lets the reviewer accept it', () => {
     expect(answerSetAccepted('t1', 'as1')).toBe(false);
-    expect(columnRows(field('t1')).find((r) => r.column.key === 'ok')?.membership).toBe('proposed');
+    expect(columnRows(field('t1'), importSessionColumnActions.answerSetAccepted).find((r) => r.column.key === 'ok')?.membership).toBe('proposed');
 
     acceptAnswerSet('t1', 'as1');
 
     expect(answerSetAccepted('t1', 'as1')).toBe(true);
-    expect(columnRows(field('t1')).find((r) => r.column.key === 'ok')?.membership).toBe('accepted');
+    expect(columnRows(field('t1'), importSessionColumnActions.answerSetAccepted).find((r) => r.column.key === 'ok')?.membership).toBe('accepted');
   });
 
   it('treats a reviewer-made grouping as accepted immediately', () => {
@@ -114,7 +115,7 @@ describe('proposed vs accepted', () => {
   it('starts a table with no proposed set with an empty grouping state', () => {
     expect(field('t2').answerSets ?? []).toEqual([]);
     expect(groupedColumnKeys(field('t2')).size).toBe(0);
-    expect(columnRows(field('t2')).every((r) => r.membership === 'none')).toBe(true);
+    expect(columnRows(field('t2'), importSessionColumnActions.answerSetAccepted).every((r) => r.membership === 'none')).toBe(true);
     expect(published('t2').answerSets).toBeUndefined();
   });
 });
@@ -150,7 +151,7 @@ describe('grouping', () => {
     resetGroups('t2');
     expect(groupColumns('t2', ['desc', 'yes'])).toBeNull();
     expect(field('t2').answerSets ?? []).toEqual([]);
-    expect(columnRows(field('t2'))[0]!.groupable).toBe(false);
+    expect(columnRows(field('t2'), importSessionColumnActions.answerSetAccepted)[0]!.groupable).toBe(false);
   });
 
   it('moves a column already in another set rather than duplicating membership', () => {

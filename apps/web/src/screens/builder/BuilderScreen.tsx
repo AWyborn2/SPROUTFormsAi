@@ -37,6 +37,8 @@ import {
   type BuilderInit,
   type BuilderState,
 } from '../../lib/field-editor/reducer.js';
+import { ColumnInspector } from '../import/inspector/ColumnInspector.js';
+import { builderColumnActions } from '../import/inspector/column-actions.js';
 
 const COL_OPTIONS: Array<{ span: number; icon: string; label: string }> = [
   { span: 12, icon: 'rectangle-horizontal', label: 'Full' },
@@ -61,9 +63,24 @@ const VALIDATION_OPTIONS = [
   { label: 'Max length', value: 'maxLength' },
 ];
 
-const TYPE_OPTIONS = FORM_FIELD_TYPES.filter(
-  (t) => !['repeating_group', 'checkbox_group', 'boolean_yes_no'].includes(t),
-).map((t) => ({ label: FIELD_META[t]?.label ?? t, value: t }));
+const STRUCTURAL_TYPES = ['repeating_group', 'checkbox_group', 'boolean_yes_no'];
+
+const TYPE_OPTIONS = FORM_FIELD_TYPES.filter((t) => !STRUCTURAL_TYPES.includes(t)).map((t) => ({
+  label: FIELD_META[t]?.label ?? t,
+  value: t,
+}));
+
+/**
+ * Type choices for the selected field. Structural types stay out of the list
+ * for a scalar field — they are imported, not authored, and a `repeating_group`
+ * conjured from a text field would have no columns. But an IMPORTED structural
+ * field must still see its own type, or the dropdown would silently show
+ * something it is not and one stray change would destroy the table (R17).
+ */
+function typeOptionsFor(type: string) {
+  if (!STRUCTURAL_TYPES.includes(type)) return TYPE_OPTIONS;
+  return [{ label: FIELD_META[type]?.label ?? type, value: type }, ...TYPE_OPTIONS];
+}
 
 /**
  * Builder entry point. With no `?form` param it starts a blank new-form
@@ -801,10 +818,18 @@ function ConfigPanel({
           )}
           <Select
             label="Field type"
-            options={TYPE_OPTIONS}
+            options={typeOptionsFor(field.type)}
             value={field.type}
             onChange={(e) => dispatch({ t: 'changeType', id: field.id, fieldType: e.target.value as FormFieldType })}
           />
+          {field.type === 'repeating_group' && (field.columns?.length ?? 0) > 0 && (
+            <ColumnInspector
+              field={field}
+              actions={builderColumnActions(field, (patch) =>
+                dispatch({ t: 'update', id: field.id, patch }),
+              )}
+            />
+          )}
         </div>
       ) : (
         <div className="flex flex-col gap-4 p-4">

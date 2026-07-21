@@ -22,18 +22,34 @@
  */
 import { useState } from 'react';
 import { Icon, Select, Switch } from '@formai/ui';
-import type { AnswerSet, FormFieldType, RepeatingColumn } from '@formai/shared';
+import type { AnswerSet, FormField, FormFieldType, RepeatingColumn } from '@formai/shared';
 import { resolveAnswerSets } from '@formai/shared';
-import {
-  acceptAnswerSet,
-  answerSetAccepted,
-  groupColumns,
-  renameColumn,
-  setColumnRequired,
-  setColumnType,
-  ungroupAnswerSet,
-  type ReviewField,
-} from '../../../lib/data/import-session.js';
+/**
+ * The panel needs only these three properties, and taking them structurally is
+ * what lets it serve both hosts: a review row carries extraction metadata a
+ * published field does not, so requiring `ReviewField` would lock the builder
+ * out of the very inspector R17 says it must share.
+ */
+export type ColumnInspectorField = Pick<FormField, 'id' | 'columns' | 'answerSets'>;
+
+/**
+ * The edits this panel performs, supplied by whoever mounts it.
+ *
+ * R17 asks for the SAME inspector before and after publish, and the two hosts
+ * drive different stores: import review dispatches through the session, the
+ * builder through its own reducer. Taking the actions as a contract is what
+ * makes one component serve both — a copy per host is exactly the drift the
+ * shared field editor exists to prevent.
+ */
+export interface ColumnActions {
+  renameColumn(fieldId: string, columnKey: string, label: string): void;
+  setColumnType(fieldId: string, columnKey: string, type: FormFieldType): void;
+  setColumnRequired(fieldId: string, columnKey: string, required: boolean): void;
+  groupColumns(fieldId: string, columnKeys: string[]): string | null;
+  ungroupAnswerSet(fieldId: string, setKey: string): void;
+  acceptAnswerSet(fieldId: string, setKey: string): void;
+  answerSetAccepted(fieldId: string, setKey: string): boolean;
+}
 
 /** Types a table cell can sensibly take (a column is never a section header). */
 const COLUMN_TYPE_OPTIONS: Array<{ label: string; value: FormFieldType }> = [
@@ -64,7 +80,10 @@ export interface ColumnRow {
  * accepted distinction is the load-bearing part: getting it wrong publishes an
  * AI guess as a reviewed decision.
  */
-export function columnRows(field: ReviewField): ColumnRow[] {
+export function columnRows(
+  field: ColumnInspectorField,
+  isAccepted: (fieldId: string, setKey: string) => boolean,
+): ColumnRow[] {
   const columns = field.columns ?? [];
   const { sets } = resolveAnswerSets(field);
 
@@ -76,7 +95,7 @@ export function columnRows(field: ReviewField): ColumnRow[] {
       index,
       isLabel,
       groupable: !isLabel,
-      membership: !set ? 'none' : answerSetAccepted(field.id, set.key) ? 'accepted' : 'proposed',
+      membership: !set ? 'none' : isAccepted(field.id, set.key) ? 'accepted' : 'proposed',
       ...(set ? { set } : {}),
     };
   });
@@ -89,12 +108,13 @@ const MEMBERSHIP_TEXT: Record<ColumnMembership, string> = {
 };
 
 export interface ColumnInspectorProps {
-  field: ReviewField;
+  field: ColumnInspectorField;
+  actions: ColumnActions;
 }
 
-export function ColumnInspector({ field }: ColumnInspectorProps) {
+export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
   const [picked, setPicked] = useState<string[]>([]);
-  const rows = columnRows(field);
+  const rows = columnRows(field, actions.answerSetAccepted);
   const { sets } = resolveAnswerSets(field);
   const selectable = picked.filter((k) => rows.some((r) => r.groupable && r.column.key === k));
 
@@ -127,7 +147,7 @@ export function ColumnInspector({ field }: ColumnInspectorProps) {
               />
               <input
                 value={row.column.label}
-                onChange={(e) => renameColumn(field.id, row.column.key, e.target.value)}
+                onChange={(e) => actions.renameColumn(field.id, row.column.key, e.target.value)}
                 aria-label={`Column label: ${row.column.key}`}
                 className="h-7 min-w-0 flex-1 rounded-sm border border-border bg-surface-card px-2 text-[12.5px] text-text-primary focus-visible:shadow-focus"
               />
@@ -148,14 +168,14 @@ export function ColumnInspector({ field }: ColumnInspectorProps) {
                   <Select
                     options={COLUMN_TYPE_OPTIONS}
                     value={row.column.type}
-                    onChange={(e) => setColumnType(field.id, row.column.key, e.target.value as FormFieldType)}
+                    onChange={(e) => actions.setColumnType(field.id, row.column.key, e.target.value as FormFieldType)}
                     aria-label={`Column type: ${row.column.label}`}
                   />
                 </div>
                 <span className="ml-auto text-[11px] text-text-secondary">Required</span>
                 <Switch
                   checked={row.column.required ?? false}
-                  onChange={(e) => setColumnRequired(field.id, row.column.key, e.target.checked)}
+                  onChange={(e) => actions.setColumnRequired(field.id, row.column.key, e.target.checked)}
                   aria-label={`Column required: ${row.column.label}`}
                 />
               </div>
@@ -166,7 +186,7 @@ export function ColumnInspector({ field }: ColumnInspectorProps) {
 
       <button
         onClick={() => {
-          groupColumns(field.id, selectable);
+          actions.groupColumns(field.id, selectable);
           setPicked([]);
         }}
         disabled={selectable.length < 2}
@@ -180,7 +200,7 @@ export function ColumnInspector({ field }: ColumnInspectorProps) {
         <div className="flex flex-col gap-1.5">
           <div className="text-[12.5px] font-semibold">Answer sets</div>
           {sets.map((set) => {
-            const accepted = answerSetAccepted(field.id, set.key);
+            const accepted = actions.answerSetAccepted(field.id, set.key);
             const labels = set.columnKeys
               .map((k) => field.columns?.find((c) => c.key === k)?.label ?? k)
               .join(' / ');
@@ -205,7 +225,7 @@ export function ColumnInspector({ field }: ColumnInspectorProps) {
                 <div className="mt-1.5 flex gap-1.5">
                   {!accepted && (
                     <button
-                      onClick={() => acceptAnswerSet(field.id, set.key)}
+                      onClick={() => actions.acceptAnswerSet(field.id, set.key)}
                       className="inline-flex items-center gap-1 rounded-sm border border-border px-2 py-1 text-[11.5px] font-semibold text-text-secondary hover:bg-surface-hover"
                     >
                       <Icon name="check" size={12} />
@@ -213,7 +233,7 @@ export function ColumnInspector({ field }: ColumnInspectorProps) {
                     </button>
                   )}
                   <button
-                    onClick={() => ungroupAnswerSet(field.id, set.key)}
+                    onClick={() => actions.ungroupAnswerSet(field.id, set.key)}
                     className="inline-flex items-center gap-1 rounded-sm border border-border px-2 py-1 text-[11.5px] font-semibold text-text-secondary hover:bg-surface-hover"
                   >
                     <Icon name="ungroup" size={12} />
