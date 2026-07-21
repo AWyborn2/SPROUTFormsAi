@@ -1,16 +1,39 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as pdfjs from 'pdfjs-dist';
+import { Icon } from '@formai/ui';
 import type { ExtractedField, ExtractionStatus } from '@formai/shared';
+import {
+  anchoredScrollOffset,
+  clampZoom,
+  fitWidthZoom,
+  formatZoomPercent,
+  stepZoom,
+} from '../../lib/pdf-zoom.js';
 
 // Vite resolves the worker asset to a served URL.
 import workerSrc from 'pdfjs-dist/build/pdf.worker.mjs?url';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
 
+/**
+ * Pages are rasterised once at this scale and then CSS-scaled to the current
+ * zoom, so zooming never re-renders through pdfjs. 2x keeps text crisp up to
+ * ~200% zoom; beyond that upscaling softens slightly, which is acceptable for
+ * a verification preview.
+ */
+const RENDER_SCALE = 2;
+
+/** Horizontal breathing room inside the scroll viewport, in CSS px per side. */
+const VIEWPORT_PADDING = 12;
+
+/** Pointer travel (px) beyond which a press is a pan, not a click. */
+const DRAG_THRESHOLD = 4;
+
 interface PageRender {
   dataUrl: string;
-  width: number;
-  height: number;
+  /** Page size at pdfjs scale 1, i.e. PDF units — the same space as sourcePosition. */
+  naturalWidth: number;
+  naturalHeight: number;
 }
 
 interface FieldHighlight {
@@ -46,6 +69,20 @@ export function PdfViewer({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // 'fit' tracks the container width; a number is an explicit user zoom.
+  const [zoom, setZoom] = useState<number | 'fit'>('fit');
+  const [containerWidth, setContainerWidth] = useState(0);
+
+  const viewportRef = useRef<HTMLDivElement>(null);
+  // Cursor anchor for the next zoom change, applied in a layout effect so the
+  // point under the cursor (or viewport centre) stays put while scaling.
+  const anchorRef = useRef<{ x: number; y: number; prevZoom: number } | null>(null);
+  const didDragRef = useRef(false);
+
+  const widestPage = pages.reduce((w, p) => Math.max(w, p.naturalWidth), 0);
+  const fit = fitWidthZoom(containerWidth - VIEWPORT_PADDING * 2, widestPage);
+  const effectiveZoom = zoom === 'fit' ? fit : zoom;
+
   const loadPdf = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -67,8 +104,8 @@ export function PdfViewer({
       const rendered: PageRender[] = [];
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
-        const scale = 1.5;
-        const viewport = page.getViewport({ scale });
+        const natural = page.getViewport({ scale: 1 });
+        const viewport = page.getViewport({ scale: RENDER_SCALE });
         const canvas = document.createElement('canvas');
         canvas.width = viewport.width;
         canvas.height = viewport.height;
@@ -76,8 +113,8 @@ export function PdfViewer({
         await page.render({ canvas, viewport }).promise;
         rendered.push({
           dataUrl: canvas.toDataURL('image/png'),
-          width: viewport.width,
-          height: viewport.height,
+          naturalWidth: natural.width,
+          naturalHeight: natural.height,
         });
       }
       setPages(rendered);
@@ -91,6 +128,106 @@ export function PdfViewer({
   useEffect(() => {
     loadPdf();
   }, [loadPdf]);
+
+  // Track viewport width so fit-to-width follows the layout.
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      setContainerWidth(entries[0]?.contentRect.width ?? 0);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [pages.length]);
+
+  const applyZoom = useCallback(
+    (next: number | 'fit', anchor?: { x: number; y: number }) => {
+      const el = viewportRef.current;
+      if (el) {
+        anchorRef.current = {
+          x: anchor?.x ?? el.clientWidth / 2,
+          y: anchor?.y ?? el.clientHeight / 2,
+          prevZoom: effectiveZoom,
+        };
+      }
+      setZoom(next);
+    },
+    [effectiveZoom],
+  );
+
+  // Keep the anchored point stationary once the new zoom has laid out.
+  useLayoutEffect(() => {
+    const el = viewportRef.current;
+    const anchor = anchorRef.current;
+    if (!el || !anchor || anchor.prevZoom <= 0) return;
+    anchorRef.current = null;
+    const ratio = effectiveZoom / anchor.prevZoom;
+    if (ratio === 1) return;
+    el.scrollLeft = anchoredScrollOffset(el.scrollLeft, anchor.x, ratio);
+    el.scrollTop = anchoredScrollOffset(el.scrollTop, anchor.y, ratio);
+  }, [effectiveZoom]);
+
+  // Ctrl/Cmd + wheel zooms about the cursor. Native listener because React's
+  // wheel handler can't reliably preventDefault (passive on some roots).
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    function onWheel(e: WheelEvent) {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const rect = el!.getBoundingClientRect();
+      applyZoom(stepZoom(effectiveZoom, e.deltaY < 0 ? 1 : -1), {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      });
+    }
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [applyZoom, effectiveZoom]);
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (!e.ctrlKey && !e.metaKey) return; // plain arrows keep native scroll
+    if (e.key === '+' || e.key === '=') {
+      e.preventDefault();
+      applyZoom(stepZoom(effectiveZoom, 1));
+    } else if (e.key === '-' || e.key === '_') {
+      e.preventDefault();
+      applyZoom(stepZoom(effectiveZoom, -1));
+    } else if (e.key === '0') {
+      e.preventDefault();
+      applyZoom('fit');
+    }
+  }
+
+  // Drag-to-pan. Highlight clicks still work: a press that travels less than
+  // DRAG_THRESHOLD is treated as a click and never suppressed.
+  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    const el = viewportRef.current;
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    didDragRef.current = false;
+    const start = { x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop };
+
+    function onMove(ev: PointerEvent) {
+      const dx = ev.clientX - start.x;
+      const dy = ev.clientY - start.y;
+      if (!didDragRef.current && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+      didDragRef.current = true;
+      el!.scrollLeft = start.left - dx;
+      el!.scrollTop = start.top - dy;
+    }
+    function onUp() {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      // Let the click that follows this pointerup see the drag flag, then reset.
+      setTimeout(() => {
+        didDragRef.current = false;
+      }, 0);
+    }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
 
   if (loading) {
     return (
@@ -114,57 +251,123 @@ export function PdfViewer({
 
   if (pages.length === 0) return null;
 
+  const displayedWidth = Math.max(1, Math.round(widestPage * effectiveZoom));
+
   return (
-    <div className={`flex flex-col gap-4 ${className}`}>
-      {pages.map((page, pageIndex) => (
-        <div
-          key={pageIndex}
-          id={`pdf-page-${pageIndex}`}
-          className="relative mx-auto"
-          style={{ width: page.width, height: page.height }}
+    <div className={`flex min-h-0 flex-col ${className}`}>
+      {/* Zoom toolbar */}
+      <div className="mb-2 flex flex-none items-center justify-end gap-1">
+        <button
+          type="button"
+          aria-label="Zoom out"
+          title="Zoom out (Ctrl -)"
+          onClick={() => applyZoom(stepZoom(effectiveZoom, -1))}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary"
         >
-          <img
-            src={page.dataUrl}
-            alt={`Page ${pageIndex + 1}`}
-            className="max-w-full rounded-md border border-border shadow-sm"
-            style={{ width: page.width, height: page.height, display: 'block' }}
-          />
-          {highlights
-            .filter((h) => h.position.page === pageIndex)
-            .map((h) => {
-              const scaleX = page.width / h.position.pageWidth;
-              const scaleY = page.height / h.position.pageHeight;
-              const isSelected = h.id === selectedFieldId;
-              const left = h.position.x * scaleX;
-              const top = page.height - (h.position.y + h.position.height) * scaleY;
-              const width = h.position.width * scaleX;
-              const height = h.position.height * scaleY;
-              return (
-                <div
-                  key={h.id}
-                  className="absolute cursor-pointer rounded-[3px] transition-all"
-                  style={{
-                    left,
-                    top: Math.max(0, top),
-                    width: Math.max(2, width),
-                    height: Math.max(2, height),
-                    border: `2px solid ${CONF[h.status].color}`,
-                    backgroundColor: CONF[h.status].bg,
-                    opacity: isSelected ? 0.6 : 0.25,
-                    boxShadow: isSelected
-                      ? `0 0 0 3px ${CONF[h.status].color}`
-                      : undefined,
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onSelectField?.(h.id);
-                  }}
-                  title={`${h.id}`}
+          <Icon name="zoom-out" size={15} />
+        </button>
+        <button
+          type="button"
+          aria-label="Reset zoom to 100%"
+          title="Actual size (100%)"
+          onClick={() => applyZoom(clampZoom(1))}
+          className="inline-flex h-7 min-w-[52px] items-center justify-center rounded-md border border-border px-1.5 font-ui text-[12px] tabular-nums text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary"
+        >
+          {formatZoomPercent(effectiveZoom)}
+        </button>
+        <button
+          type="button"
+          aria-label="Zoom in"
+          title="Zoom in (Ctrl +)"
+          onClick={() => applyZoom(stepZoom(effectiveZoom, 1))}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary"
+        >
+          <Icon name="zoom-in" size={15} />
+        </button>
+        <button
+          type="button"
+          aria-label="Fit page to width"
+          title="Fit to width (Ctrl 0)"
+          onClick={() => applyZoom('fit')}
+          className={`inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors ${
+            zoom === 'fit'
+              ? 'border-accent bg-surface-accent-soft text-accent'
+              : 'border-border text-text-secondary hover:bg-surface-hover hover:text-text-primary'
+          }`}
+        >
+          <Icon name="maximize" size={15} />
+        </button>
+      </div>
+
+      {/* Scrollable page viewport. Focusable so arrow keys nudge-scroll. */}
+      <div
+        ref={viewportRef}
+        tabIndex={0}
+        role="region"
+        aria-label="PDF preview. Arrow keys scroll, Ctrl plus and minus zoom, Ctrl 0 fits to width."
+        onKeyDown={onKeyDown}
+        onPointerDown={onPointerDown}
+        className="min-h-0 flex-1 cursor-grab overflow-auto rounded-md bg-surface-sunken outline-none focus-visible:ring-2 focus-visible:ring-accent/50 active:cursor-grabbing"
+        style={{ padding: VIEWPORT_PADDING }}
+      >
+        <div className="mx-auto flex flex-col gap-4" style={{ width: displayedWidth }}>
+          {pages.map((page, pageIndex) => {
+            const pageWidth = Math.round(page.naturalWidth * effectiveZoom);
+            const pageHeight = Math.round(page.naturalHeight * effectiveZoom);
+            return (
+              <div
+                key={pageIndex}
+                id={`pdf-page-${pageIndex}`}
+                className="relative mx-auto"
+                style={{ width: pageWidth, height: pageHeight }}
+              >
+                <img
+                  src={page.dataUrl}
+                  alt={`Page ${pageIndex + 1}`}
+                  draggable={false}
+                  className="select-none rounded-md border border-border shadow-sm"
+                  style={{ width: pageWidth, height: pageHeight, display: 'block' }}
                 />
-              );
-            })}
+                {highlights
+                  .filter((h) => h.position.page === pageIndex)
+                  .map((h) => {
+                    const scaleX = pageWidth / h.position.pageWidth;
+                    const scaleY = pageHeight / h.position.pageHeight;
+                    const isSelected = h.id === selectedFieldId;
+                    const left = h.position.x * scaleX;
+                    const top = pageHeight - (h.position.y + h.position.height) * scaleY;
+                    const width = h.position.width * scaleX;
+                    const height = h.position.height * scaleY;
+                    return (
+                      <div
+                        key={h.id}
+                        className="absolute cursor-pointer rounded-[3px] transition-all"
+                        style={{
+                          left,
+                          top: Math.max(0, top),
+                          width: Math.max(2, width),
+                          height: Math.max(2, height),
+                          border: `2px solid ${CONF[h.status].color}`,
+                          backgroundColor: CONF[h.status].bg,
+                          opacity: isSelected ? 0.6 : 0.25,
+                          boxShadow: isSelected
+                            ? `0 0 0 3px ${CONF[h.status].color}`
+                            : undefined,
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (didDragRef.current) return;
+                          onSelectField?.(h.id);
+                        }}
+                        title={`${h.id}`}
+                      />
+                    );
+                  })}
+              </div>
+            );
+          })}
         </div>
-      ))}
+      </div>
     </div>
   );
 }
