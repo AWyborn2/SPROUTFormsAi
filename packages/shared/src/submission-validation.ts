@@ -100,10 +100,14 @@ function isRowAnswered(field: FormField, row: unknown): boolean {
 
   const sets = resolveAnswerSets(field).sets;
   if (sets.length > 0) {
-    return sets.every((s) => {
-      const sel = selectedOption(s, row);
-      return sel.columnKey !== null && !sel.malformed;
-    });
+    // A contradictory row is refused whatever the set's required flag says:
+    // one-answer-per-row is the grouping's structural invariant, not a
+    // required-ness question. `required: false` only relaxes "must be
+    // answered" — it never licenses recording both OK and N/A.
+    if (sets.some((s) => selectedOption(s, row).malformed)) return false;
+    return sets
+      .filter((s) => s.required !== false)
+      .every((s) => selectedOption(s, row).columnKey !== null);
   }
 
   return answerColumns(field).some((c) => isCellAnswered(c, row[c.key]));
@@ -141,6 +145,22 @@ export function isFieldAnswered(field: FormField, value: SubmissionValue | undef
  * and 14 of a forty-row table is told exactly that instead of re-scanning the
  * whole table on a phone.
  */
+/**
+ * Unanswered row indexes of an OPEN (no `fixedRows`) table backed by an answer
+ * set. Without this the filler gets "this table is incomplete" with no row
+ * highlighted — the R10 gap left open for one of the two table shapes, since
+ * `incompleteFixedRowIndices` returns [] the moment `fixedRows` is absent.
+ */
+function openRowIndices(field: FormField, value: SubmissionValue | undefined): number[] {
+  if (resolveAnswerSets(field).sets.length === 0) return [];
+  const rows: unknown[] = Array.isArray(value) ? value : [];
+  const out: number[] = [];
+  rows.forEach((row, i) => {
+    if (!isRowAnswered(field, row)) out.push(i);
+  });
+  return out;
+}
+
 export function incompleteRowsByField(
   fields: FormField[],
   values: Record<string, SubmissionValue>,
@@ -149,7 +169,10 @@ export function incompleteRowsByField(
   // Hidden tables cannot be incomplete — the filler was never shown them (U11).
   for (const f of visibleFields(fields, values)) {
     if (f.type !== 'repeating_group' || !f.required) continue;
-    const incomplete = incompleteFixedRowIndices(f, values[f.id]);
+    const incomplete =
+      f.fixedRows && f.fixedRows.length > 0
+        ? incompleteFixedRowIndices(f, values[f.id])
+        : openRowIndices(f, values[f.id]);
     if (incomplete.length > 0) out[f.id] = incomplete;
   }
   return out;
@@ -195,18 +218,31 @@ export function stripHiddenValues(
   fields: FormField[],
   values: Record<string, SubmissionValue>,
 ): { values: Record<string, SubmissionValue>; discarded: string[] } {
-  const visibleIds = new Set(visibleFields(fields, values).map((f) => f.id));
-  const hiddenIds = new Set(fields.filter((f) => !visibleIds.has(f.id)).map((f) => f.id));
-  if (hiddenIds.size === 0) return { values, discarded: [] };
-
-  const kept: Record<string, SubmissionValue> = {};
+  // Iterate to a fixpoint. One pass is not enough with chained conditions: a
+  // dependent can be kept because its source was still present in `values`,
+  // while that same pass discards the source. Every later evaluation — the
+  // exporter, the submission render, an approval-time re-strip — then sees the
+  // source gone and treats the dependent as hidden, so the stored record and
+  // the exported evidence PDF disagree about what was answered. Re-running
+  // until nothing new drops makes the recorded values self-consistent under the
+  // same evaluator every consumer uses.
+  let kept = values;
   const discarded: string[] = [];
-  for (const [id, value] of Object.entries(values)) {
-    if (hiddenIds.has(id)) {
-      discarded.push(id);
-      continue;
+
+  // Bounded by the field count: each round must discard at least one field to
+  // continue, so it cannot exceed the number of fields.
+  for (let round = 0; round <= fields.length; round++) {
+    const visibleIds = new Set(visibleFields(fields, kept).map((f) => f.id));
+    const dropped = fields.filter((f) => !visibleIds.has(f.id) && f.id in kept).map((f) => f.id);
+    if (dropped.length === 0) break;
+
+    const next: Record<string, SubmissionValue> = {};
+    for (const [key, value] of Object.entries(kept)) {
+      if (!dropped.includes(key)) next[key] = value;
     }
-    kept[id] = value;
+    kept = next;
+    discarded.push(...dropped);
   }
+
   return { values: kept, discarded };
 }

@@ -154,3 +154,21 @@ describe('applySelection', () => {
     expect(selectedOption(TRIPLE, row)).toEqual({ columnKey: 'ok', malformed: false });
   });
 });
+
+describe('review findings — regressions', () => {
+  it('drops a set naming the same column twice, which would make every row unanswerable', () => {
+    // ['ok','ok'] passed the length>=2 check, then selectedOption filtered the
+    // same key twice and always reported malformed — a required table became an
+    // unclearable submit wall with no visible cause. Reachable from the LLM
+    // proposal path, which coerces columnKeys without deduping.
+    const { sets, dropped } = resolveAnswerSets(field([{ key: 'v', columnKeys: ['ok', 'ok'] }]));
+
+    expect(sets).toEqual([]);
+    expect(dropped).toEqual([{ key: 'v', reason: 'duplicate-membership' }]);
+  });
+
+  it('drops a three-key set with one repeat rather than silently grouping two', () => {
+    const { sets } = resolveAnswerSets(field([{ key: 'v', columnKeys: ['ok', 'no', 'ok'] }]));
+    expect(sets).toEqual([]);
+  });
+});

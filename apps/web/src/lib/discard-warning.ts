@@ -13,7 +13,7 @@
  * dismiss without reading — and then it fails on the one that mattered.
  */
 import type { FormField, SubmissionValue } from '@formai/shared';
-import { isFieldAnswered, visibleFields } from '@formai/shared';
+import { incompleteFixedRowIndices, isFieldAnswered, visibleFields } from '@formai/shared';
 
 export interface DiscardImpact {
   /** Fields that are visible now, would be hidden after the change, and hold answers. */
@@ -45,13 +45,30 @@ export function discardImpactOf(
   const after = new Set(visibleFields(fields, { ...values, [fieldId]: nextValue }).map((f) => f.id));
 
   const lost = before.filter(
-    (f) =>
-      f.type !== 'section_header' &&
-      !after.has(f.id) &&
-      isFieldAnswered(f, values[f.id]),
+    (f) => f.type !== 'section_header' && !after.has(f.id) && holdsWork(f, values[f.id]),
   );
 
   return lost.length > 0 ? { fields: lost, count: lost.length } : NO_IMPACT;
+}
+
+/**
+ * Whether a field carries work worth warning about — ANY answered content, not
+ * a complete answer.
+ *
+ * `isFieldAnswered` on a table is all-or-nothing: a 40-row checklist with 25
+ * rows ticked reads as unanswered. Using it here inverted the guarantee — the
+ * warning fired on a finished table (little left to lose, since the filler is
+ * about to submit) and stayed silent on a half-finished one, which is exactly
+ * the state someone is in when they go back to correct an earlier answer.
+ */
+function holdsWork(field: FormField, value: SubmissionValue | undefined): boolean {
+  if (field.type === 'repeating_group') {
+    const fixed = field.fixedRows?.length ?? 0;
+    if (fixed > 0) return incompleteFixedRowIndices(field, value).length < fixed;
+    // Open table: any row present at all is work the filler entered.
+    return Array.isArray(value) && value.length > 0;
+  }
+  return isFieldAnswered(field, value);
 }
 
 /** Sentence shown to the filler before the change is applied. */
@@ -60,4 +77,25 @@ export function discardWarningMessage(impact: DiscardImpact): string {
   return count === 1
     ? 'Changing this hides 1 answered question, and its answer will be cleared. Continue?'
     : `Changing this hides ${count} answered questions, and their answers will be cleared. Continue?`;
+}
+
+/**
+ * Whether a change to this field should be treated as a committed answer.
+ *
+ * Discrete-choice fields commit on every change — picking a dropdown option is
+ * a decision. Free-text, number and date fields change on each keystroke, and
+ * an intermediate value is not an answer; warning there would block editing
+ * entirely. Unknown ids are treated as non-committing, which fails toward
+ * silence rather than toward an undismissable prompt.
+ */
+export function isCommittedChange(fields: FormField[], fieldId: string): boolean {
+  const field = fields.find((f) => f.id === fieldId);
+  if (!field) return false;
+  return (
+    field.type === 'dropdown' ||
+    field.type === 'radio' ||
+    field.type === 'checkbox' ||
+    field.type === 'boolean_yes_no' ||
+    field.type === 'checkbox_group'
+  );
 }

@@ -561,7 +561,11 @@ export function setColumnType(id: string, key: string, type: FormFieldType): voi
   const columns = patchColumn(id, key, { type });
   if (!columns) return;
   const patch: Partial<FormField> = { columns };
-  if (type === 'text') {
+  // Any non-tick type leaves the set: a date or number column can never
+  // register as a row's answer (isChosen accepts only true/'true'/1) while
+  // applySelection would still write boolean `true` into it. The builder host
+  // already strips on every retype — the two must agree.
+  if (type !== 'checkbox') {
     const sets = editorField(id)?.answerSets ?? [];
     patch.answerSets = withoutMembers(id, sets, new Set([key]));
   }
@@ -672,6 +676,15 @@ export function useImportSession() {
  * tables default to `required: true` (R4/AE5) unless the reviewer untoggled;
  * everything else defaults to false.
  */
+/**
+ * The answer sets on a review field that the reviewer actually accepted.
+ * Extraction's proposals start unaccepted; a grouping the reviewer made
+ * themselves is accepted by construction (see `groupColumns`).
+ */
+function publishableAnswerSets(field: ReviewField): AnswerSet[] {
+  return (field.answerSets ?? []).filter((s) => answerSetAccepted(field.id, s.key));
+}
+
 export function reviewedToFields(fields: ReviewField[]): FormField[] {
   return fields.map((f) => ({
     id: f.id,
@@ -686,7 +699,15 @@ export function reviewedToFields(fields: ReviewField[]): FormField[] {
     ...(f.columns ? { columns: f.columns } : {}),
     // This whitelist is the publish boundary: a property missing here is
     // silently dropped even though review displayed it correctly.
-    ...(f.answerSets && f.answerSets.length > 0 ? { answerSets: f.answerSets } : {}),
+    //
+    // Only ACCEPTED groupings cross it. R6 says a proposal is never silently
+    // applied, and the inspector tells the reviewer as much ("Not applied
+    // yet") — publishing an unreviewed proposal anyway would both break the
+    // requirement and contradict what the reviewer was shown. A grouping
+    // changes the completeness rule for every filler from "any cell filled"
+    // to "exactly one option per set", so an AI guess nobody looked at must
+    // not silently make a second answer unrecordable.
+    ...(publishableAnswerSets(f).length > 0 ? { answerSets: publishableAnswerSets(f) } : {}),
     ...(f.visibleWhen ? { visibleWhen: f.visibleWhen } : {}),
     ...(f.fixedRows && f.fixedRows.length > 0 ? { fixedRows: f.fixedRows } : {}),
     ...(f.sourcePosition ? { sourcePosition: f.sourcePosition } : {}),

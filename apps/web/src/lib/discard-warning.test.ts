@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { FormField, SubmissionValue } from '@formai/shared';
-import { discardImpactOf, discardWarningMessage } from './discard-warning.js';
+import { discardImpactOf, discardWarningMessage, isCommittedChange } from './discard-warning.js';
 
 const location: FormField = {
   id: 'loc',
@@ -132,5 +132,82 @@ describe('discardWarningMessage', () => {
 
   it('pluralises for several', () => {
     expect(discardWarningMessage({ fields: [bbm, bbm2], count: 2 })).toContain('2 answered questions');
+  });
+});
+
+describe('discardImpactOf — partially completed tables (review finding)', () => {
+  const table: FormField = {
+    id: 'checks',
+    type: 'repeating_group',
+    label: 'Category A checks',
+    required: true,
+    source: 'imported',
+    visibleWhen: { fieldId: 'loc', op: 'equals', value: 'BBM Mining' },
+    columns: [
+      { key: 'item', label: 'Item', type: 'text' },
+      { key: 'ok', label: 'OK', type: 'checkbox' },
+      { key: 'na', label: 'N/A', type: 'checkbox' },
+    ],
+    fixedRows: ['Horn', 'Brakes', 'Tyres', 'Lights'],
+  };
+
+  it('warns about a HALF-filled checklist — the highest-loss case', () => {
+    // Two of four rows done. isFieldAnswered says "not answered", which is why
+    // this silently lost 25 rows of work before.
+    const impact = discardImpactOf(
+      [location, table],
+      { loc: 'BBM Mining', checks: [{ ok: true }, { ok: true }, {}, {}] },
+      'loc',
+      'Raw Materials',
+    );
+
+    expect(impact.count).toBe(1);
+    expect(impact.fields[0]?.id).toBe('checks');
+  });
+
+  it('warns about a single answered row', () => {
+    const impact = discardImpactOf(
+      [location, table],
+      { loc: 'BBM Mining', checks: [{ ok: true }, {}, {}, {}] },
+      'loc',
+      'Raw Materials',
+    );
+    expect(impact.count).toBe(1);
+  });
+
+  it('stays silent for a completely untouched table', () => {
+    const impact = discardImpactOf(
+      [location, table],
+      { loc: 'BBM Mining', checks: [{}, {}, {}, {}] },
+      'loc',
+      'Raw Materials',
+    );
+    expect(impact.count).toBe(0);
+  });
+
+  it('warns about an open row-entry table carrying any row', () => {
+    const open: FormField = { ...table, id: 'faults', fixedRows: undefined };
+    const impact = discardImpactOf(
+      [location, open],
+      { loc: 'BBM Mining', faults: [{ item: 'Cracked mirror' }] },
+      'loc',
+      'Raw Materials',
+    );
+    expect(impact.count).toBe(1);
+  });
+});
+
+describe('isCommittedChange', () => {
+  it('treats discrete-choice fields as committing', () => {
+    expect(isCommittedChange([location], 'loc')).toBe(true);
+  });
+
+  it('does not treat free-text as committing — a keystroke is not an answer', () => {
+    const text: FormField = { id: 'notes', type: 'text', label: 'Notes', required: false, source: 'built' };
+    expect(isCommittedChange([text], 'notes')).toBe(false);
+  });
+
+  it('fails toward silence for an unknown field id', () => {
+    expect(isCommittedChange([location], 'nope')).toBe(false);
   });
 });

@@ -97,6 +97,14 @@ function evaluate(
   // never recursing further.
   if (source.visibleWhen && !evaluateSelf(source, fields, answers)) return true;
 
+  // ...and so is a source hidden by its ENCLOSING SECTION. Section scope is the
+  // main way authors hide things, so exempting it left the fail-open guarantee
+  // not holding for the common case: a source the filler never saw was still
+  // treated as authoritative. That also made `stripHiddenValues` non-idempotent
+  // — a dependent kept because of an answer discarded in the same pass — so the
+  // stored record and the exported PDF could disagree.
+  if (isSectionHidden(source, fields, answers)) return true;
+
   const raw = answers[condition.fieldId];
   if (isNonScalarAnswer(raw)) return true;
 
@@ -160,6 +168,30 @@ export function isFieldVisible(
  * swallowing the second one's fields. A hidden header hides itself and its
  * scope; fields after the next header are untouched.
  */
+/**
+ * Whether `field` sits inside a section whose header is hidden.
+ *
+ * Walks back to the governing `section_header` and tests only that header's own
+ * condition — never recursing, which keeps this a loop-free single level like
+ * the own-condition check above.
+ */
+function isSectionHidden(
+  field: FormField,
+  fields: readonly FormField[],
+  answers: VisibilityAnswers,
+): boolean {
+  const index = fields.findIndex((f) => f.id === field.id);
+  if (index < 0) return false;
+
+  for (let i = index - 1; i >= 0; i--) {
+    const candidate = fields[i]!;
+    if (candidate.type !== 'section_header') continue;
+    // The nearest preceding header governs; anything before it is a closed scope.
+    return !!candidate.visibleWhen && !evaluateSelf(candidate, fields, answers);
+  }
+  return false;
+}
+
 export function visibleFields(
   fields: readonly FormField[],
   answers: VisibilityAnswers,

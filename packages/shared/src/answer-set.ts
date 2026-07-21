@@ -73,6 +73,14 @@ export function resolveAnswerSets(field: Pick<FormField, 'columns' | 'answerSets
     const keys = set.columnKeys ?? [];
     const drop = (reason: AnswerSetDropReason) => dropped.push({ key: set.key, reason });
 
+    // Duplicates first: ['ok','ok'] would otherwise pass the length check,
+    // then make `selectedOption` report two chosen members on every row, so
+    // the row can never be answered and a required table becomes an
+    // unclearable submit wall with no visible cause.
+    if (new Set(keys).size !== keys.length) {
+      drop('duplicate-membership');
+      continue;
+    }
     if (keys.length < 2) {
       drop('too-few-columns');
       continue;

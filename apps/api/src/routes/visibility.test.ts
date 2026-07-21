@@ -145,3 +145,39 @@ describe('visibleFields', () => {
     expect(visibleFields(fields, { src: 'no' }).map((x) => x.id)).toEqual(['src', 'h1']);
   });
 });
+
+describe('review finding — a section-hidden source is unevaluatable', () => {
+  const q0: FormField = { id: 'q0', type: 'dropdown', label: 'Site', required: false, source: 'built', options: ['A', 'B'] };
+  const header: FormField = {
+    id: 'h1', type: 'section_header', label: 'Site A only', required: false, source: 'built',
+    visibleWhen: { fieldId: 'q0', op: 'equals', value: 'A' },
+  };
+  const inside: FormField = { id: 'q1', type: 'dropdown', label: 'Permit needed?', required: false, source: 'built', options: ['yes', 'no'] };
+  const after: FormField = { id: 'h2', type: 'section_header', label: 'General', required: false, source: 'built' };
+  const dependent: FormField = {
+    id: 'b', type: 'text', label: 'Permit number', required: false, source: 'built',
+    visibleWhen: { fieldId: 'q1', op: 'equals', value: 'yes' },
+  };
+  const FIELDS = [q0, header, inside, after, dependent];
+
+  it('fails open when the source is hidden by its SECTION, not just by its own rule', () => {
+    // q1 sits in a hidden section, so the filler never saw it. Treating its
+    // submitted answer as authoritative is what made stripHiddenValues
+    // non-idempotent and let the record and the exported PDF disagree.
+    const answers = { q0: 'B', q1: 'yes' };
+    expect(isFieldVisible(dependent, FIELDS, answers)).toBe(true);
+  });
+
+  it('still evaluates normally when the source’s section is visible', () => {
+    expect(isFieldVisible(dependent, FIELDS, { q0: 'A', q1: 'yes' })).toBe(true);
+    expect(isFieldVisible(dependent, FIELDS, { q0: 'A', q1: 'no' })).toBe(false);
+  });
+
+  it('keeps the dependent visible under repeated evaluation (idempotent)', () => {
+    const once = visibleFields(FIELDS, { q0: 'B', q1: 'yes' }).map((f) => f.id);
+    const kept: Record<string, string> = {};
+    for (const id of once) if (id === 'q0' || id === 'b') kept[id] = id === 'q0' ? 'B' : 'PN-1';
+    const twice = visibleFields(FIELDS, kept).map((f) => f.id);
+    expect(twice).toContain('b');
+  });
+});

@@ -30,6 +30,7 @@ vi.mock('./store.js', () => ({
 
 import { apiClient, ApiError } from './api-client.js';
 import {
+  acceptAnswerSet,
   addFixedRowItem,
   fileToBase64,
   getImportSession,
@@ -344,14 +345,30 @@ describe('field-editor backing (U2) — extraction metadata survives edits', () 
     expect(field.required).toBe(false);
   });
 
-  it('carries answerSets from extraction through to the published field', async () => {
+  it('does NOT publish an extractor proposal the reviewer never accepted', () => {
+    // R6: a proposal is never silently applied. A grouping changes the
+    // completeness rule for every filler from "any cell filled" to "exactly
+    // one option per set", so an AI guess nobody looked at must not make a
+    // second answer unrecordable on a live compliance form.
+    return seedSession([
+      { ...CHECKLIST, answerSets: [{ key: 'verdict', columnKeys: ['ok', 'na'] }] },
+    ]).then(() => {
+      // Review still shows it, so the reviewer can see and accept it.
+      expect(getImportSession().fields[0]!.answerSets).toEqual([
+        { key: 'verdict', columnKeys: ['ok', 'na'] },
+      ]);
+      // Publish drops it.
+      expect(reviewedToFields(getImportSession().fields)[0]!.answerSets).toBeUndefined();
+    });
+  });
+
+  it('publishes a grouping once the reviewer accepts it', async () => {
     await seedSession([
       { ...CHECKLIST, answerSets: [{ key: 'verdict', columnKeys: ['ok', 'na'] }] },
     ]);
 
-    expect(getImportSession().fields[0]!.answerSets).toEqual([
-      { key: 'verdict', columnKeys: ['ok', 'na'] },
-    ]);
+    acceptAnswerSet('chk', 'verdict');
+
     expect(reviewedToFields(getImportSession().fields)[0]!.answerSets).toEqual([
       { key: 'verdict', columnKeys: ['ok', 'na'] },
     ]);
