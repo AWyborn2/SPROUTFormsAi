@@ -16,18 +16,19 @@
  */
 import type { FormContainer, FormField } from '@formai/shared';
 
-/** Layouts the fill surface can actually render today. */
-export const RENDERABLE_LAYOUTS = ['card', 'hero', 'split'] as const;
+/** Layouts the fill surface can actually render. */
+export const RENDERABLE_LAYOUTS = ['card', 'hero', 'split', 'conversational'] as const;
 export type RenderableLayout = (typeof RENDERABLE_LAYOUTS)[number];
 
 /**
  * Which arrangement the fill surface should draw for a resolved theme.
  *
  * Anything unrecognised degrades to `card` rather than rendering nothing —
- * this value arrives from the network and may predate or postdate this build.
- * `conversational` degrades too: it replaces the fill engine rather than
- * skinning it, so until that lands a form set to it still serves, as a card,
- * instead of breaking for respondents.
+ * this value arrives from the network and may predate or postdate this build,
+ * and a respondent cannot fix a form that refuses to render.
+ *
+ * `conversational` reuses the card framing for its chrome; what differs is the
+ * body, which paces questions one screen at a time.
  */
 export function resolveLayout(layout?: string | null): RenderableLayout {
   return (RENDERABLE_LAYOUTS as readonly string[]).includes(layout ?? '')

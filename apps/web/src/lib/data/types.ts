@@ -260,6 +260,21 @@ export interface PublicFillForm {
   container: FormContainer;
 }
 
+/**
+ * A draft theme proposed from the org's website. Mirrors the API's
+ * `BrandScanProposal`. Nothing here is saved until the owner applies it.
+ */
+export interface BrandScanProposal {
+  sourceUrl: string;
+  siteName: string | null;
+  colors: { primary?: string; secondary?: string; accent?: string };
+  font: string | null;
+  logoCandidates: string[];
+  palette: string[];
+  empty: boolean;
+  notes: string[];
+}
+
 /* ── Competency gating (Phase 4) ─────────────────────────────────────────── */
 
 /** A held-competency record synced from the org's LMS. */
