@@ -63,6 +63,14 @@ jobs:
           kill "$pid" 2>/dev/null || true
           exit 1
 
+      - name: Verify migration journal ordering
+        # Drizzle skips a migration whose journal `when` is below an
+        # already-applied entry's — silently, with exit code 0. Running
+        # migrations in CI cannot detect it: CI starts from an empty database
+        # where everything applies in order regardless. This repo has hit that
+        # bug three times (0006, 0007, 0008), so the check is structural.
+        run: node scripts/check-migration-order.mjs
+
       - name: Verify Drizzle migrations are up to date
         run: |
           pnpm --filter @formai/db generate
