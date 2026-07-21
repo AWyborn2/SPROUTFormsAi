@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { Icon } from '@formai/ui';
 import type { BrandingKit } from '@formai/shared';
-import { DEFAULT_BRANDING } from '@formai/shared';
+import { DEFAULT_BRANDING, resolveTheme } from '@formai/shared';
 import { orgBrandVars } from '../../lib/branding.js';
 import { ensureFontLoaded } from '../../lib/font-loader.js';
 
@@ -24,6 +24,8 @@ export function ExternalShell({
   const displayName = orgName.trim() || 'FormAI';
   const orgInitial = (displayName[0] ?? 'F').toUpperCase();
   const logoUrl = branding?.logoAssetUrl ?? null;
+  const theme = resolveTheme(branding?.theme);
+  const chromeLogoPx = { small: 22, medium: 28, large: 32 }[theme.logoSize] ?? 28;
 
   // `orgBrandVars` only *names* the family in `--org-font`; without this the
   // respondent sees the generic fallback for every font but the ones the app
@@ -42,16 +44,26 @@ export function ExternalShell({
               the AppShell conditional: <img> when a logo is set, initial glyph
               otherwise. The glyph's ink is `--org-primary-text` (U7) rather
               than a hardcoded white, which vanishes on a light brand primary. */}
+          {/* Size follows the theme's logo setting rather than a fixed 28px,
+              so a wordmark that needs room gets it. Capped at 32px here
+              regardless: this is a 56px-tall chrome bar, not the form
+              masthead, and a large mark would overflow it. */}
           {logoUrl ? (
             <img
               src={logoUrl}
               alt=""
-              className="h-7 w-7 flex-none rounded-[7px] object-contain"
+              className="flex-none rounded-[7px] object-contain"
+              style={{ width: chromeLogoPx, height: chromeLogoPx }}
             />
           ) : (
             <span
-              className="grid h-7 w-7 place-items-center rounded-[7px] font-heading text-[13px] font-bold"
-              style={{ background: 'var(--org-primary)', color: 'var(--org-primary-text)' }}
+              className="grid flex-none place-items-center rounded-[7px] font-heading text-[13px] font-bold"
+              style={{
+                width: chromeLogoPx,
+                height: chromeLogoPx,
+                background: 'var(--org-primary)',
+                color: 'var(--org-primary-text)',
+              }}
             >
               {orgInitial}
             </span>

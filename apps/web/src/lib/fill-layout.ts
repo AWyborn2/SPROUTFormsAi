@@ -16,6 +16,25 @@
  */
 import type { FormContainer, FormField } from '@formai/shared';
 
+/** Layouts the fill surface can actually render today. */
+export const RENDERABLE_LAYOUTS = ['card', 'hero', 'split'] as const;
+export type RenderableLayout = (typeof RENDERABLE_LAYOUTS)[number];
+
+/**
+ * Which arrangement the fill surface should draw for a resolved theme.
+ *
+ * Anything unrecognised degrades to `card` rather than rendering nothing —
+ * this value arrives from the network and may predate or postdate this build.
+ * `conversational` degrades too: it replaces the fill engine rather than
+ * skinning it, so until that lands a form set to it still serves, as a card,
+ * instead of breaking for respondents.
+ */
+export function resolveLayout(layout?: string | null): RenderableLayout {
+  return (RENDERABLE_LAYOUTS as readonly string[]).includes(layout ?? '')
+    ? (layout as RenderableLayout)
+    : 'card';
+}
+
 /** Shadow levels map onto the product's existing tokens, not new values. */
 const CONTAINER_SHADOW: Record<string, string> = {
   none: 'none',
