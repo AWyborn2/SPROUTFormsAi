@@ -10,6 +10,7 @@ import {
   requiredFieldErrors,
   requiredFieldsMissingIds,
   validateRequired,
+  incompleteRowsByFieldFrom,
 } from './validation.js';
 
 const header: FormField = { id: 's1', type: 'section_header', label: 'Section', required: false, source: 'built' };
@@ -79,5 +80,40 @@ describe('requiredFieldErrors', () => {
 
   it('returns an empty map for no ids', () => {
     expect(requiredFieldErrors([])).toEqual({});
+  });
+});
+
+describe('incompleteRowsByFieldFrom', () => {
+  it('reads per-field row indexes out of a required_fields_missing body', () => {
+    expect(
+      incompleteRowsByFieldFrom({
+        error: 'required_fields_missing',
+        fields: ['cat-a'],
+        incompleteRows: { 'cat-a': [6, 13] },
+      }),
+    ).toEqual({ 'cat-a': [6, 13] });
+  });
+
+  it('returns empty when the server omitted the detail (scalar-only failure)', () => {
+    expect(incompleteRowsByFieldFrom({ error: 'required_fields_missing', fields: ['name'] })).toEqual({});
+  });
+
+  it('ignores a body for a different error', () => {
+    expect(incompleteRowsByFieldFrom({ error: 'invalid_request', incompleteRows: { a: [1] } })).toEqual({});
+  });
+
+  it('tolerates junk rather than throwing in front of a filler', () => {
+    expect(incompleteRowsByFieldFrom(null)).toEqual({});
+    expect(incompleteRowsByFieldFrom('nope')).toEqual({});
+    expect(incompleteRowsByFieldFrom({ error: 'required_fields_missing', incompleteRows: 'nope' })).toEqual({});
+  });
+
+  it('drops non-integer and negative indexes, and fields left with none', () => {
+    expect(
+      incompleteRowsByFieldFrom({
+        error: 'required_fields_missing',
+        incompleteRows: { good: [0, 2], bad: ['x', -1, 1.5], empty: [] },
+      }),
+    ).toEqual({ good: [0, 2] });
   });
 });

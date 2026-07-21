@@ -55,6 +55,46 @@ export interface SourcePosition {
   pageHeight: number;
 }
 
+/**
+ * An ordered group of repeating-table columns that share ONE answer per row —
+ * `OK`/`NA`, `✓`/`×`/`N-A`, `Pass`/`Fail`/`NA`. The columns keep their own
+ * definitions; this is the grouping layer over them. Resolvers, validation
+ * rules, and the drop reasons for malformed sets live in `answer-set.ts`.
+ *
+ * Single-answer only, deliberately. A multi-select variant would need its own
+ * render affordance, its own definition of a complete row, and its own export
+ * semantics — none of which the single-answer path implies.
+ */
+export interface AnswerSet {
+  /** Stable within the field; survives column renames. */
+  key: string;
+  /** Optional heading for the collapsed narrow-viewport presentation. */
+  label?: string;
+  /** Member columns, in the order the source document printed them. */
+  columnKeys: string[];
+  /** Every row must carry an answer. Independent of the field's own `required`. */
+  required?: boolean;
+}
+
+/** How a visibility condition compares the source field's answer. */
+export type VisibilityOperator = 'equals' | 'notEquals';
+
+/**
+ * Shows or hides a field based on another field's ANSWER — distinct from
+ * competency gating, which keys off what the filler holds. On a `section_header`
+ * the condition governs every field up to the next header, so a multi-location
+ * assessment is one authored condition rather than one per field.
+ *
+ * Sources are restricted to non-repeating fields, so evaluation needs no row
+ * state and cannot loop.
+ */
+export interface VisibilityCondition {
+  /** Id of the field whose answer is read. */
+  fieldId: string;
+  op: VisibilityOperator;
+  value: string;
+}
+
 /** A column definition inside a repeating group (never enumerates blank rows). */
 export interface RepeatingColumn {
   key: string;
@@ -84,6 +124,16 @@ export interface FormField {
 
   /** For repeating_group — the column shape, extracted once. */
   columns?: RepeatingColumn[];
+
+  /**
+   * For repeating_group — column groups sharing one answer per row. Absent
+   * means every column is an independent cell, which is the pre-existing
+   * behaviour and stays valid.
+   */
+  answerSets?: AnswerSet[];
+
+  /** Hides this field (or, on a section_header, its whole section) by answer. */
+  visibleWhen?: VisibilityCondition;
 
   /**
    * For repeating_group — ordered pre-printed item labels of a fixed-item

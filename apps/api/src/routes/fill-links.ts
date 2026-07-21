@@ -8,7 +8,12 @@ import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
-import { missingRequiredFields, resolveTheme } from '@formai/shared';
+import {
+  incompleteRowsByField,
+  missingRequiredFields,
+  resolveTheme,
+  stripHiddenValues,
+} from '@formai/shared';
 // The authed POST /submissions validates with the same runtime schema —
 // single SubmissionValue contract, two doors.
 import { submissionValueSchema } from './submissions.js';
@@ -328,11 +333,24 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
   // form this visitor was actually served. The public path has no draft
   // state: every submit is final, so the gate always runs. Same shared
   // helper as the authed route, so the two doors cannot drift.
-  const missing = missingRequiredFields(Array.isArray(version.fields) ? version.fields : [], values);
+  const versionFields = Array.isArray(version.fields) ? version.fields : [];
+  const missing = missingRequiredFields(versionFields, values);
   if (missing.length > 0) {
-    res.status(400).json({ error: 'required_fields_missing', fields: missing });
+    const incompleteRows = incompleteRowsByField(versionFields, values);
+    res.status(400).json({
+      error: 'required_fields_missing',
+      fields: missing,
+      ...(Object.keys(incompleteRows).length > 0 ? { incompleteRows } : {}),
+    });
     return;
   }
+
+  // Conditional visibility is enforced HERE, not by the browser (U11). This
+  // door's only credential is a link token, so the posted body is the least
+  // trusted input in the product: a caller can send answers for a section the
+  // form never showed, and an honest filler's draft can carry stale answers
+  // from before they changed the source question. Neither reaches the record.
+  const { values: recordedValues, discarded } = stripHiddenValues(versionFields, values);
 
   // The submission row and its audit entry commit together or not at all: a
   // crash between two separate awaits would otherwise record a submission with
@@ -350,7 +368,7 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
         submittedByUserId: null,
         submitterName: submitterName ?? '',
         submitterEmail: submitterEmail ?? '',
-        values,
+        values: recordedValues,
         status: 'submitted',
         flag: '',
       })
@@ -361,12 +379,23 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
     // this path, so insert directly with an honest attribution: no actorId,
     // actorName marks the unauthenticated door; the submitter's claimed name
     // goes in the target (it is unverified input, not an actor).
+    //
+    // When stripping actually threw something away, the discarded ids are
+    // appended to the target. Without that line, a stripping BUG and a filler
+    // who simply never answered are indistinguishable in the record — both
+    // leave an absence. An audit reader can only investigate what was written
+    // down. The suffix is omitted entirely when nothing was discarded, so the
+    // overwhelmingly common entry is byte-identical to what it was before.
+    const baseTarget = submitterName ? `${template.name}: ${submitterName}` : template.name;
     await tx.insert(schema.auditLogEntries).values({
       orgId: link.orgId,
       actorId: null,
       actorName: 'External fill link',
       action: 'Received external submission',
-      target: submitterName ? `${template.name}: ${submitterName}` : template.name,
+      target:
+        discarded.length > 0
+          ? `${baseTarget} (hidden fields not recorded: ${discarded.join(', ')})`
+          : baseTarget,
       category: 'submissions',
       icon: 'inbox',
     });

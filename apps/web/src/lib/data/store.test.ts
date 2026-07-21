@@ -73,27 +73,26 @@ beforeEach(() => {
   postForBlobMock.mockResolvedValue(new Blob());
 });
 
+/**
+ * U11 — the export is evidentiary: the client sends only the submission id and
+ * the server loads the pinned version's fields and the stored values itself.
+ * Sending fields/values from the browser would let a caller unmask a hidden
+ * answer (post the same fields with `visibleWhen` stripped) or export values
+ * matching no stored submission at all.
+ */
 describe('store.exportSubmissionPdf', () => {
-  it('posts /pdf/round-trip with { assetId, fields, values } when sourcePdfAssetId is set', async () => {
+  it('posts /pdf/round-trip with the submission id only', async () => {
     const d = detail();
     await store.exportSubmissionPdf(d);
 
-    expect(postForBlobMock).toHaveBeenCalledWith('/pdf/round-trip', {
-      assetId: 'asset-123',
-      fields: d.fields,
-      values: d.values,
-    });
+    expect(postForBlobMock).toHaveBeenCalledWith('/pdf/round-trip', { submissionId: 'sub-1' });
   });
 
-  it('omits assetId when sourcePdfAssetId is null', async () => {
-    const d = detail({ sourcePdfAssetId: null });
-    await store.exportSubmissionPdf(d);
-
-    expect(postForBlobMock).toHaveBeenCalledWith('/pdf/round-trip', {
-      fields: d.fields,
-      values: d.values,
-    });
+  it('never sends fields or values — the server owns both', async () => {
+    await store.exportSubmissionPdf(detail());
     const body = postForBlobMock.mock.calls[0]![1] as Record<string, unknown>;
+    expect(body).not.toHaveProperty('fields');
+    expect(body).not.toHaveProperty('values');
     expect(body).not.toHaveProperty('assetId');
   });
 });

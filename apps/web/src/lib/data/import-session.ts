@@ -10,14 +10,32 @@
  * idle → uploading → extracting → ready | error.
  */
 import { useSyncExternalStore } from 'react';
-import type { ExtractedField, ExtractionResult, ExtractionStatus, FormField } from '@formai/shared';
+import type {
+  AnswerSet,
+  ExtractedField,
+  ExtractionResult,
+  ExtractionStatus,
+  FormField,
+  FormFieldType,
+  RepeatingColumn,
+  VisibilityCondition,
+} from '@formai/shared';
 import { statusForConfidence } from '@formai/shared';
+import type { BuilderAction, BuilderState } from '../field-editor/reducer.js';
+import { builderReducer, initialBuilderState } from '../field-editor/reducer.js';
 import { ApiError, apiClient } from './api-client.js';
 
-/** An extracted field plus the reviewer's resolution state. */
+/**
+ * An extracted field plus the reviewer's resolution state. Backed by the shared
+ * field editor: everything except `note` and `resolved` is a real `FormField`
+ * property, so a review row is the field that will publish plus the metadata of
+ * the extraction run that produced it.
+ */
 export interface ReviewField extends ExtractedField {
   /** Set once the reviewer has explicitly confirmed/corrected this field. */
   resolved?: boolean;
+  /** Editor-side properties that publish but have no extraction equivalent. */
+  visibleWhen?: VisibilityCondition;
 }
 
 export type ImportSessionStatus = 'idle' | 'uploading' | 'extracting' | 'ready' | 'error';
@@ -63,10 +81,83 @@ let heldBase64: string | null = null;
 /** Monotonic run token — a reset/new start invalidates in-flight async work. */
 let runId = 0;
 
+/**
+ * The field list under edit, in the SAME reducer the builder uses. Review and
+ * the builder therefore share one set of edit operations (rename, retype,
+ * reorder, delete, undo) instead of two implementations that drift.
+ *
+ * `FormField` carries everything `ExtractedField` does except `note`, so the
+ * editor holds publishable fields directly and the extraction-only metadata
+ * rides alongside in `reviewMeta`. Keeping confidence and notes out of the
+ * editor matters because they are properties of the extraction run, not of the
+ * published field — `reviewedToFields` already drops them at publish.
+ */
+let editor: BuilderState | null = null;
+/** Extraction metadata by field id — the part of a ReviewField that isn't a FormField. */
+const reviewMeta = new Map<string, { note?: string; resolved?: boolean }>();
+
+/** Editor fields + their extraction metadata, as the review UI consumes them. */
+function derivedReviewFields(): ReviewField[] {
+  if (!editor) return [];
+  return editor.fields.map((f) => {
+    const meta = reviewMeta.get(f.id);
+    return {
+      ...f,
+      confidence: f.confidence ?? 1,
+      ...(meta?.note !== undefined ? { note: meta.note } : {}),
+      ...(meta?.resolved !== undefined ? { resolved: meta.resolved } : {}),
+    } as ReviewField;
+  });
+}
+
+/** Seed the editor from a fresh extraction. */
+function seedEditor(fields: ExtractedField[]): ReviewField[] {
+  reviewMeta.clear();
+  // Proposals from THIS run start unaccepted (R6) — never inherit approvals.
+  acceptedAnswerSets.clear();
+  const formFields: FormField[] = fields.map((f) => {
+    if (f.note !== undefined) reviewMeta.set(f.id, { note: f.note });
+    return {
+      id: f.id,
+      type: f.type,
+      label: f.label,
+      // Resolve the checklist default once, here, rather than leaving it to
+      // publish — the reviewer sees and can override the same value that ships.
+      required: f.required ?? isChecklistTable(f),
+      source: 'imported',
+      confidence: f.confidence,
+      ...(f.description !== undefined ? { description: f.description } : {}),
+      ...(f.options ? { options: f.options } : {}),
+      ...(f.selectionType ? { selectionType: f.selectionType } : {}),
+      ...(f.columns ? { columns: f.columns } : {}),
+      ...(f.answerSets ? { answerSets: f.answerSets } : {}),
+      ...(f.fixedRows && f.fixedRows.length > 0 ? { fixedRows: f.fixedRows } : {}),
+      ...(f.sourcePosition ? { sourcePosition: f.sourcePosition } : {}),
+    };
+  });
+  editor = initialBuilderState({ formId: null, name: '', fields: formFields });
+  return derivedReviewFields();
+}
+
+/** Run a field-editor action and republish the derived review view. */
+function dispatchEdit(action: BuilderAction): void {
+  if (!editor) return;
+  editor = builderReducer(editor, action);
+  session = { ...session, fields: derivedReviewFields() };
+  listeners.forEach((l) => l());
+}
+
+/** Patch a field's extraction metadata (note / resolved) without touching the editor. */
+function setMeta(id: string, patch: { note?: string; resolved?: boolean }): void {
+  reviewMeta.set(id, { ...reviewMeta.get(id), ...patch });
+  session = { ...session, fields: derivedReviewFields() };
+  listeners.forEach((l) => l());
+}
+
 const listeners = new Set<() => void>();
 
 function emit() {
-  session = { ...session, fields: session.fields.slice() };
+  session = { ...session, fields: editor ? derivedReviewFields() : session.fields.slice() };
   listeners.forEach((l) => l());
 }
 
@@ -89,6 +180,9 @@ export function getImportSession(): ImportSession {
 export function resetImportSession() {
   runId += 1; // orphan any in-flight upload/extract
   heldBase64 = null;
+  editor = null;
+  reviewMeta.clear();
+  acceptedAnswerSets.clear();
   session = emptySession();
   listeners.forEach((l) => l());
 }
@@ -182,7 +276,7 @@ async function runPipeline(run: number, fileName: string, base64: string): Promi
       fileName: result.fileName,
       pageCount: result.pageCount,
       designNotes: result.designNotes,
-      fields: result.fields.map((f) => ({ ...f })),
+      fields: seedEditor(result.fields),
       error: null,
     });
   } catch (err) {
@@ -217,29 +311,30 @@ export function lowestUnresolvedField(fields: ReviewField[]): ReviewField | null
   return lowest;
 }
 
+/** The editor field behind a review row, or undefined once it has been deleted. */
+function editorField(id: string): FormField | undefined {
+  return editor?.fields.find((f) => f.id === id);
+}
+
 /** Reviewer toggles a field's required-ness (R4). */
 export function setFieldRequired(id: string, required: boolean): void {
-  session.fields = session.fields.map((f) => (f.id === id ? { ...f, required } : f));
-  emit();
+  dispatchEdit({ t: 'update', id, patch: { required } });
 }
 
 /** Rename one captured checklist item in place; out-of-range indices ignored. */
 export function renameFixedRowItem(id: string, index: number, label: string): void {
-  session.fields = session.fields.map((f) => {
-    if (f.id !== id || !f.fixedRows || index < 0 || index >= f.fixedRows.length) return f;
-    const fixedRows = f.fixedRows.slice();
-    fixedRows[index] = label;
-    return { ...f, fixedRows };
-  });
-  emit();
+  const current = editorField(id)?.fixedRows;
+  if (!current || index < 0 || index >= current.length) return;
+  const fixedRows = current.slice();
+  fixedRows[index] = label;
+  dispatchEdit({ t: 'update', id, patch: { fixedRows } });
 }
 
 /** Append a checklist item after the existing fixed set (extraction missed one). */
 export function addFixedRowItem(id: string, label: string): void {
-  session.fields = session.fields.map((f) =>
-    f.id === id ? { ...f, fixedRows: [...(f.fixedRows ?? []), label] } : f,
-  );
-  emit();
+  const current = editorField(id);
+  if (!current) return;
+  dispatchEdit({ t: 'update', id, patch: { fixedRows: [...(current.fixedRows ?? []), label] } });
 }
 
 /**
@@ -248,12 +343,291 @@ export function addFixedRowItem(id: string, label: string): void {
  * becomes an open row-entry table.
  */
 export function removeFixedRowItem(id: string, index: number): void {
-  session.fields = session.fields.map((f) => {
-    if (f.id !== id || !f.fixedRows || index < 0 || index >= f.fixedRows.length) return f;
-    const fixedRows = f.fixedRows.filter((_, i) => i !== index);
-    return { ...f, fixedRows: fixedRows.length > 0 ? fixedRows : undefined };
-  });
+  const current = editorField(id)?.fixedRows;
+  if (!current || index < 0 || index >= current.length) return;
+  const fixedRows = current.filter((_, i) => i !== index);
+  dispatchEdit({ t: 'update', id, patch: { fixedRows: fixedRows.length > 0 ? fixedRows : undefined } });
+}
+
+/**
+ * Push an undo snapshot without changing anything.
+ *
+ * The reducer's `update` action is deliberately NOT undoable — in the builder,
+ * typing in the label box must not fill the undo stack one keystroke at a
+ * time. Review needs label and option edits to be undoable as discrete
+ * corrections, so the wrappers below take a snapshot themselves. `mutate`
+ * snapshots before running its callback, and `delete` of an id that cannot
+ * exist leaves the field list untouched — so this is a pure "checkpoint".
+ */
+const SNAPSHOT_SENTINEL = '__import_undo_checkpoint__';
+function pushUndoCheckpoint(): void {
+  dispatchEdit({ t: 'delete', id: SNAPSHOT_SENTINEL });
+}
+
+/**
+ * Consecutive keystrokes in one input coalesce into a single undo step: a
+ * checkpoint is taken only when the edit target changes. Structural edits
+ * (which snapshot themselves) clear the key so the next keystroke starts a
+ * fresh step.
+ */
+let coalesceKey: string | null = null;
+
+function dispatchCoalesced(key: string, action: BuilderAction): void {
+  if (coalesceKey !== key) {
+    pushUndoCheckpoint();
+    coalesceKey = key;
+  }
+  dispatchEdit(action);
+}
+
+function dispatchStructural(action: BuilderAction): void {
+  coalesceKey = null;
+  dispatchEdit(action);
+}
+
+/** Rename a field's label (undoable as one step per focused field). */
+export function renameField(id: string, label: string): void {
+  dispatchCoalesced(`label:${id}`, { t: 'update', id, patch: { label } });
+}
+
+/** Change a field's type; choice types seed default options (builder parity). */
+export function changeFieldType(id: string, fieldType: FormFieldType): void {
+  dispatchStructural({ t: 'changeType', id, fieldType });
+}
+
+/** Edit one choice option in place. */
+export function setFieldOption(id: string, index: number, value: string): void {
+  dispatchCoalesced(`option:${id}:${index}`, { t: 'setOption', id, index, value });
+}
+
+/** Append a new choice option. */
+export function addFieldOption(id: string): void {
+  dispatchStructural({ t: 'addOption', id });
+}
+
+/** Remove one choice option. */
+export function removeFieldOption(id: string, index: number): void {
+  dispatchStructural({ t: 'removeOption', id, index });
+}
+
+/**
+ * Set (or clear, with null) a field's visibility condition.
+ *
+ * Structural rather than coalesced: a condition is one deliberate decision, not
+ * a stream of keystrokes, and the author must be able to undo it in one step.
+ * Clearing writes `undefined` rather than deleting the key — the publish
+ * whitelist in `reviewedToFields` treats both identically, and the reducer's
+ * `update` is a spread.
+ */
+export function setFieldCondition(id: string, condition: VisibilityCondition | null): void {
+  dispatchStructural({ t: 'update', id, patch: { visibleWhen: condition ?? undefined } });
+}
+
+/** Drop a field from the import entirely (it never reaches publish). */
+export function deleteField(id: string): void {
+  dispatchStructural({ t: 'delete', id });
+}
+
+/**
+ * Insert a new field directly after `afterId` (end of list when omitted or
+ * unknown). Returns the new field's id so the caller can select it.
+ */
+export function addField(fieldType: FormFieldType, afterId?: string | null): string | null {
+  if (!editor) return null;
+  coalesceKey = null;
+  dispatchEdit({ t: 'select', id: afterId ?? null });
+  dispatchEdit({ t: 'add', fieldType });
+  return editor.selectedId;
+}
+
+/** Nudge a field one place up (-1) or down (1). */
+export function moveField(id: string, dir: -1 | 1): void {
+  dispatchStructural({ t: 'move', id, dir });
+}
+
+/** arrayMove reorder (drag-and-drop drops). */
+export function reorderFields(from: number, to: number): void {
+  dispatchStructural({ t: 'reorder', from, to });
+}
+
+/* ------------------------------------------------------------------ *
+ * Repeating-table columns and answer sets (R6)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Which proposed answer sets the reviewer has explicitly accepted, as
+ * `${fieldId}::${setKey}`.
+ *
+ * Extraction PROPOSES a grouping; publishing one unreviewed is the failure R6
+ * exists to prevent. Acceptance is therefore tracked HERE rather than on the
+ * field: it is review state, not published field state — `AnswerSet` has no
+ * "accepted" flag and must not grow one, or every consumer downstream of
+ * publish would have to reason about a proposal that no longer exists. A set
+ * the reviewer created themselves is accepted by construction (they just made
+ * it), so `groupColumns` marks it immediately; only extractor proposals start
+ * unaccepted. Cleared on reset and on every fresh extraction, so a new run can
+ * never inherit the previous run's approvals.
+ */
+const acceptedAnswerSets = new Set<string>();
+
+function acceptanceKey(fieldId: string, setKey: string): string {
+  return `${fieldId}::${setKey}`;
+}
+
+/** True once the reviewer has explicitly accepted this set (or made it). */
+export function answerSetAccepted(fieldId: string, setKey: string): boolean {
+  return acceptedAnswerSets.has(acceptanceKey(fieldId, setKey));
+}
+
+/** Reviewer accepts extraction's proposed grouping as-is. */
+export function acceptAnswerSet(fieldId: string, setKey: string): void {
+  acceptedAnswerSets.add(acceptanceKey(fieldId, setKey));
   emit();
+}
+
+/** The column list of a repeating table under review, or an empty list. */
+function columnsOf(id: string): RepeatingColumn[] {
+  return editorField(id)?.columns ?? [];
+}
+
+/** The label column key — `columns[0]`, never answerable, never groupable. */
+function labelKeyOf(id: string): string | undefined {
+  return columnsOf(id)[0]?.key;
+}
+
+/**
+ * Rewrite one column in place. The `key` is never part of the patch: it is the
+ * identity a row value and any answer set naming it are stored under, so a
+ * rename must move only the display `label`.
+ */
+function patchColumn(id: string, key: string, patch: Partial<Omit<RepeatingColumn, 'key'>>): RepeatingColumn[] | null {
+  const columns = columnsOf(id);
+  if (!columns.some((c) => c.key === key)) return null;
+  return columns.map((c) => (c.key === key ? { ...c, ...patch } : c));
+}
+
+/**
+ * Strip `keys` from every set, dropping any set left with fewer than two
+ * members — a one-column "group" is just a checkbox, and leaving it would be a
+ * set `resolveAnswerSets` reports as dropped rather than a clean table.
+ */
+function withoutMembers(fieldId: string, sets: AnswerSet[], keys: Set<string>): AnswerSet[] {
+  const next: AnswerSet[] = [];
+  for (const set of sets) {
+    const columnKeys = set.columnKeys.filter((k) => !keys.has(k));
+    if (columnKeys.length === set.columnKeys.length) {
+      next.push(set);
+      continue;
+    }
+    if (columnKeys.length < 2) {
+      acceptedAnswerSets.delete(acceptanceKey(fieldId, set.key));
+      continue;
+    }
+    next.push({ ...set, columnKeys });
+  }
+  return next;
+}
+
+/** Mint a set key unique within the field. */
+function nextAnswerSetKey(sets: AnswerSet[]): string {
+  const taken = new Set(sets.map((s) => s.key));
+  let n = sets.length + 1;
+  while (taken.has(`as${n}`)) n += 1;
+  return `as${n}`;
+}
+
+/** Rename a column's display label; its `key` (and any set naming it) is untouched. */
+export function renameColumn(id: string, key: string, label: string): void {
+  const columns = patchColumn(id, key, { label });
+  if (!columns) return;
+  dispatchCoalesced(`column:${id}:${key}`, { t: 'update', id, patch: { columns } });
+}
+
+/** Toggle a column's per-cell required flag. */
+export function setColumnRequired(id: string, key: string, required: boolean): void {
+  const columns = patchColumn(id, key, { required });
+  if (!columns) return;
+  dispatchStructural({ t: 'update', id, patch: { columns } });
+}
+
+/**
+ * Retype a column. The label column is fixed text (pre-printed item names) and
+ * is left alone. Retyping a grouped column to `text` removes it from its set:
+ * a free-text cell cannot be one option of a one-answer-per-row group, and
+ * leaving it in would publish a malformed set.
+ */
+export function setColumnType(id: string, key: string, type: FormFieldType): void {
+  if (key === labelKeyOf(id)) return;
+  const columns = patchColumn(id, key, { type });
+  if (!columns) return;
+  const patch: Partial<FormField> = { columns };
+  // Any non-tick type leaves the set: a date or number column can never
+  // register as a row's answer (isChosen accepts only true/'true'/1) while
+  // applySelection would still write boolean `true` into it. The builder host
+  // already strips on every retype — the two must agree.
+  if (type !== 'checkbox') {
+    const sets = editorField(id)?.answerSets ?? [];
+    patch.answerSets = withoutMembers(id, sets, new Set([key]));
+  }
+  dispatchStructural({ t: 'update', id, patch });
+}
+
+/**
+ * Group columns into a new answer set (one answer per row across them).
+ *
+ * The label column is filtered out rather than rejecting the whole request —
+ * a reviewer sweeping a row of columns should get the answerable ones grouped.
+ * Members already in another set MOVE here: `resolveAnswerSets` drops sets with
+ * overlapping membership outright, so duplicating would silently un-group both.
+ * Returns the new set's key, or null when fewer than two groupable columns
+ * remain.
+ */
+export function groupColumns(id: string, columnKeys: string[]): string | null {
+  const field = editorField(id);
+  if (!field) return null;
+  const known = new Set((field.columns ?? []).map((c) => c.key));
+  const labelKey = labelKeyOf(id);
+
+  const members: string[] = [];
+  for (const k of columnKeys) {
+    if (k === labelKey || !known.has(k) || members.includes(k)) continue;
+    members.push(k);
+  }
+  if (members.length < 2) return null;
+
+  const existing = withoutMembers(id, field.answerSets ?? [], new Set(members));
+  const key = nextAnswerSetKey(field.answerSets ?? []);
+  acceptedAnswerSets.add(acceptanceKey(id, key));
+  dispatchStructural({ t: 'update', id, patch: { answerSets: [...existing, { key, columnKeys: members }] } });
+  return key;
+}
+
+/** Dissolve one answer set — its columns return to independent cells. */
+export function ungroupAnswerSet(id: string, setKey: string): void {
+  const field = editorField(id);
+  if (!field?.answerSets) return;
+  acceptedAnswerSets.delete(acceptanceKey(id, setKey));
+  dispatchStructural({
+    t: 'update',
+    id,
+    patch: { answerSets: field.answerSets.filter((s) => s.key !== setKey) },
+  });
+}
+
+export function undoFieldEdit(): void {
+  dispatchStructural({ t: 'undo' });
+}
+
+export function redoFieldEdit(): void {
+  dispatchStructural({ t: 'redo' });
+}
+
+export function canUndoFieldEdit(): boolean {
+  return (editor?.undo.length ?? 0) > 0;
+}
+
+export function canRedoFieldEdit(): boolean {
+  return (editor?.redo.length ?? 0) > 0;
 }
 
 export function useImportSession() {
@@ -268,30 +642,31 @@ export function useImportSession() {
     avgConfidence:
       snap.fields.reduce((sum, f) => sum + f.confidence, 0) / Math.max(1, snap.fields.length),
 
-    /** Remap the low-confidence "text" field to a signature (the known case). */
+    /**
+     * Remap the low-confidence "text" field to a signature (the known case).
+     * Type lives in the editor; the confirmation note and resolved flag are
+     * extraction metadata and never reach the published field.
+     */
     remapSignature(id: string) {
-      session.fields = session.fields.map((f) =>
-        f.id === id
-          ? { ...f, type: 'signature', confidence: 1, resolved: true, note: 'Corrected — remapped to a signature field' }
-          : f,
-      );
-      emit();
+      dispatchEdit({ t: 'update', id, patch: { type: 'signature', confidence: 1 } });
+      setMeta(id, { resolved: true, note: 'Corrected — remapped to a signature field' });
     },
 
     /** Inline type correction for a flagged field. */
     setType(id: string, type: ExtractedField['type']) {
-      session.fields = session.fields.map((f) =>
-        f.id === id ? { ...f, type, confidence: reviewStatus(f) === 'low' ? 1 : f.confidence, resolved: true } : f,
-      );
-      emit();
+      const current = snap.fields.find((f) => f.id === id);
+      const confidence = current && reviewStatus(current) === 'low' ? 1 : current?.confidence;
+      dispatchEdit({
+        t: 'update',
+        id,
+        patch: { type, ...(confidence !== undefined ? { confidence } : {}) },
+      });
+      setMeta(id, { resolved: true });
     },
 
     /** Confirm a detected repeating table should stay a repeating group. */
     confirmTable(id: string) {
-      session.fields = session.fields.map((f) =>
-        f.id === id ? { ...f, resolved: true, note: 'Confirmed as a repeating table' } : f,
-      );
-      emit();
+      setMeta(id, { resolved: true, note: 'Confirmed as a repeating table' });
     },
   };
 }
@@ -301,6 +676,15 @@ export function useImportSession() {
  * tables default to `required: true` (R4/AE5) unless the reviewer untoggled;
  * everything else defaults to false.
  */
+/**
+ * The answer sets on a review field that the reviewer actually accepted.
+ * Extraction's proposals start unaccepted; a grouping the reviewer made
+ * themselves is accepted by construction (see `groupColumns`).
+ */
+function publishableAnswerSets(field: ReviewField): AnswerSet[] {
+  return (field.answerSets ?? []).filter((s) => answerSetAccepted(field.id, s.key));
+}
+
 export function reviewedToFields(fields: ReviewField[]): FormField[] {
   return fields.map((f) => ({
     id: f.id,
@@ -313,6 +697,18 @@ export function reviewedToFields(fields: ReviewField[]): FormField[] {
     ...(f.options ? { options: f.options } : {}),
     ...(f.selectionType ? { selectionType: f.selectionType } : {}),
     ...(f.columns ? { columns: f.columns } : {}),
+    // This whitelist is the publish boundary: a property missing here is
+    // silently dropped even though review displayed it correctly.
+    //
+    // Only ACCEPTED groupings cross it. R6 says a proposal is never silently
+    // applied, and the inspector tells the reviewer as much ("Not applied
+    // yet") — publishing an unreviewed proposal anyway would both break the
+    // requirement and contradict what the reviewer was shown. A grouping
+    // changes the completeness rule for every filler from "any cell filled"
+    // to "exactly one option per set", so an AI guess nobody looked at must
+    // not silently make a second answer unrecordable.
+    ...(publishableAnswerSets(f).length > 0 ? { answerSets: publishableAnswerSets(f) } : {}),
+    ...(f.visibleWhen ? { visibleWhen: f.visibleWhen } : {}),
     ...(f.fixedRows && f.fixedRows.length > 0 ? { fixedRows: f.fixedRows } : {}),
     ...(f.sourcePosition ? { sourcePosition: f.sourcePosition } : {}),
   }));

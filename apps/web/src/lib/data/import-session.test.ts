@@ -30,6 +30,7 @@ vi.mock('./store.js', () => ({
 
 import { apiClient, ApiError } from './api-client.js';
 import {
+  acceptAnswerSet,
   addFixedRowItem,
   fileToBase64,
   getImportSession,
@@ -329,6 +330,81 @@ describe('review actions — required toggle + fixed-row item editing', () => {
 
     removeFixedRowItem('chk', 0);
     expect(getImportSession().fields[0]!.fixedRows).toBeUndefined();
+  });
+});
+
+describe('field-editor backing (U2) — extraction metadata survives edits', () => {
+  it('keeps confidence and note when a reducer edit changes the field', async () => {
+    await seedSession([{ ...CHECKLIST, confidence: 0.42, note: 'Low-confidence table' }]);
+
+    setFieldRequired('chk', false);
+
+    const field = getImportSession().fields[0]!;
+    expect(field.confidence).toBe(0.42);
+    expect(field.note).toBe('Low-confidence table');
+    expect(field.required).toBe(false);
+  });
+
+  it('does NOT publish an extractor proposal the reviewer never accepted', () => {
+    // R6: a proposal is never silently applied. A grouping changes the
+    // completeness rule for every filler from "any cell filled" to "exactly
+    // one option per set", so an AI guess nobody looked at must not make a
+    // second answer unrecordable on a live compliance form.
+    return seedSession([
+      { ...CHECKLIST, answerSets: [{ key: 'verdict', columnKeys: ['ok', 'na'] }] },
+    ]).then(() => {
+      // Review still shows it, so the reviewer can see and accept it.
+      expect(getImportSession().fields[0]!.answerSets).toEqual([
+        { key: 'verdict', columnKeys: ['ok', 'na'] },
+      ]);
+      // Publish drops it.
+      expect(reviewedToFields(getImportSession().fields)[0]!.answerSets).toBeUndefined();
+    });
+  });
+
+  it('publishes a grouping once the reviewer accepts it', async () => {
+    await seedSession([
+      { ...CHECKLIST, answerSets: [{ key: 'verdict', columnKeys: ['ok', 'na'] }] },
+    ]);
+
+    acceptAnswerSet('chk', 'verdict');
+
+    expect(reviewedToFields(getImportSession().fields)[0]!.answerSets).toEqual([
+      { key: 'verdict', columnKeys: ['ok', 'na'] },
+    ]);
+  });
+
+  it('resolves the checklist required default at seed time, matching what publish would produce', async () => {
+    await seedSession([{ ...CHECKLIST }]);
+
+    // The reviewer sees the same value that ships, rather than a blank that
+    // silently becomes `true` at publish.
+    expect(getImportSession().fields[0]!.required).toBe(true);
+    expect(reviewedToFields(getImportSession().fields)[0]!.required).toBe(true);
+  });
+
+  it('drops metadata for a field that is no longer in the editor', async () => {
+    await seedSession([{ ...CHECKLIST, note: 'Confirm this table' }]);
+
+    expect(getImportSession().fields).toHaveLength(1);
+    resetImportSession();
+    expect(getImportSession().fields).toHaveLength(0);
+  });
+
+  it('leaves an untouched extraction publishing exactly what it extracted', async () => {
+    const source: ExtractedField = { ...CHECKLIST };
+    await seedSession([source]);
+
+    const published = reviewedToFields(getImportSession().fields)[0]!;
+    expect(published.id).toBe(source.id);
+    expect(published.label).toBe(source.label);
+    expect(published.type).toBe(source.type);
+    expect(published.columns).toEqual(source.columns);
+    expect(published.fixedRows).toEqual(source.fixedRows);
+    expect(published.source).toBe('imported');
+    // Extraction-only metadata never reaches the published field.
+    expect('note' in published).toBe(false);
+    expect('resolved' in published).toBe(false);
   });
 });
 

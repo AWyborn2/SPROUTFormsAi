@@ -1,8 +1,15 @@
 /**
- * Form-builder state + reducer. Mirrors the prototype's builder ops
+ * Field-editing state + reducer, shared by the builder and the PDF import
+ * review screen. Mirrors the prototype's builder ops
  * (bAdd/bDelete/bMove/bDuplicate/bCopy/bPaste/bUndo/bRedo) with an undo/redo
  * snapshot stack. Fields use the shared FormField shape so publishing feeds the
  * data layer directly.
+ *
+ * It lives under `lib/` rather than `screens/builder/` because import review
+ * needs the same operations (rename, retype, reorder, delete, undo) before
+ * publish that the builder offers after it. One reducer means a correction
+ * behaves identically on both sides of publishing, instead of two editors
+ * drifting apart.
  */
 import type { FormContainer, FormField, FormFieldType } from '@formai/shared';
 import { DEFAULT_CONTAINER } from '@formai/shared';
@@ -87,6 +94,34 @@ function newField(type: FormFieldType, id: string): FormField {
   };
   if (type === 'dropdown' || type === 'radio') field.options = ['Option 1', 'Option 2'];
   return field;
+}
+
+/**
+ * Clear visibility conditions whose source is no longer strictly earlier in the
+ * list.
+ *
+ * `conditionSources` enforces earlier-only when the condition is AUTHORED, but
+ * `move`, `reorder` and drag-and-drop rewrite the order afterwards, and the
+ * evaluator performs no order check. Drag a source below the section it gates
+ * and `visibleFields` hides the header, which hides the source as section
+ * content — so the filler can never answer it and the section can never open.
+ * Worse than a dead section: required-ness is scoped to visible fields, so
+ * every required question inside it is silently exempted and the submission
+ * passes validation with a whole location's checks never asked.
+ *
+ * Clearing is the conservative repair: the dependent becomes always-visible
+ * (over-collect), matching the fail-open direction the evaluator already takes.
+ */
+function pruneOrphanedConditions(fields: FormField[]): FormField[] {
+  const indexById = new Map(fields.map((f, i) => [f.id, i]));
+  return fields.map((f, i) => {
+    const sourceId = f.visibleWhen?.fieldId;
+    if (sourceId === undefined) return f;
+    const sourceIndex = indexById.get(sourceId);
+    if (sourceIndex !== undefined && sourceIndex < i) return f;
+    const { visibleWhen: _dropped, ...rest } = f;
+    return rest as FormField;
+  });
 }
 
 function snapshot(s: BuilderState): Snapshot {
@@ -200,7 +235,7 @@ export function builderReducer(s: BuilderState, a: BuilderAction): BuilderState 
         const j = i + a.dir;
         if (i < 0 || j < 0 || j >= fields.length) return { fields };
         [fields[i], fields[j]] = [fields[j]!, fields[i]!];
-        return { fields };
+        return { fields: pruneOrphanedConditions(fields) };
       });
     case 'reorder': {
       // arrayMove semantics for drag-and-drop drops (unlike `move`, which is an
@@ -211,7 +246,7 @@ export function builderReducer(s: BuilderState, a: BuilderAction): BuilderState 
       return mutate(s, (fields) => {
         const [f] = fields.splice(from, 1);
         fields.splice(to, 0, f!);
-        return { fields };
+        return { fields: pruneOrphanedConditions(fields) };
       });
     }
     case 'copy': {

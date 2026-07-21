@@ -36,7 +36,10 @@ import {
   PALETTE,
   type BuilderInit,
   type BuilderState,
-} from './reducer.js';
+} from '../../lib/field-editor/reducer.js';
+import { ColumnInspector } from '../import/inspector/ColumnInspector.js';
+import { ConditionEditor, governedFieldIds } from '../import/inspector/ConditionEditor.js';
+import { builderColumnActions, builderConditionActions } from '../import/inspector/column-actions.js';
 
 const COL_OPTIONS: Array<{ span: number; icon: string; label: string }> = [
   { span: 12, icon: 'rectangle-horizontal', label: 'Full' },
@@ -61,9 +64,24 @@ const VALIDATION_OPTIONS = [
   { label: 'Max length', value: 'maxLength' },
 ];
 
-const TYPE_OPTIONS = FORM_FIELD_TYPES.filter(
-  (t) => !['repeating_group', 'checkbox_group', 'boolean_yes_no'].includes(t),
-).map((t) => ({ label: FIELD_META[t]?.label ?? t, value: t }));
+const STRUCTURAL_TYPES = ['repeating_group', 'checkbox_group', 'boolean_yes_no'];
+
+const TYPE_OPTIONS = FORM_FIELD_TYPES.filter((t) => !STRUCTURAL_TYPES.includes(t)).map((t) => ({
+  label: FIELD_META[t]?.label ?? t,
+  value: t,
+}));
+
+/**
+ * Type choices for the selected field. Structural types stay out of the list
+ * for a scalar field — they are imported, not authored, and a `repeating_group`
+ * conjured from a text field would have no columns. But an IMPORTED structural
+ * field must still see its own type, or the dropdown would silently show
+ * something it is not and one stray change would destroy the table (R17).
+ */
+function typeOptionsFor(type: string) {
+  if (!STRUCTURAL_TYPES.includes(type)) return TYPE_OPTIONS;
+  return [{ label: FIELD_META[type]?.label ?? type, value: type }, ...TYPE_OPTIONS];
+}
 
 /**
  * Builder entry point. With no `?form` param it starts a blank new-form
@@ -190,6 +208,21 @@ function BuilderEditor({ init }: { init: BuilderInit }) {
     [state.fields, state.selectedId],
   );
   const containerSelected = state.selectedId === CONTAINER_ID;
+
+  /**
+   * Fields governed by a conditioned section header. One condition on a header
+   * silently decides the fate of everything under it, so the canvas marks the
+   * range — otherwise the only way to see what was scoped is to count headers.
+   */
+  const scopedIds = useMemo(() => {
+    const out = new Set<string>();
+    for (const f of state.fields) {
+      if (f.type === 'section_header' && f.visibleWhen) {
+        for (const id of governedFieldIds(state.fields, f.id)) out.add(id);
+      }
+    }
+    return out;
+  }, [state.fields]);
 
   // Pointer drag-and-drop reordering (edit mode only — preview renders no
   // canvas, so DnD is structurally absent there). PointerSensor only:
@@ -369,6 +402,7 @@ function BuilderEditor({ init }: { init: BuilderInit }) {
                             : null
                         }
                         selected={f.id === state.selectedId}
+                        scoped={scopedIds.has(f.id)}
                         onSelect={() => dispatch({ t: 'select', id: f.id })}
                         onUp={() => dispatch({ t: 'move', id: f.id, dir: -1 })}
                         onDown={() => dispatch({ t: 'move', id: f.id, dir: 1 })}
@@ -439,6 +473,7 @@ function SortableFieldCard({
   field: FormField;
   indicator: 'before' | 'after' | null;
   selected: boolean;
+  scoped?: boolean;
   onSelect: () => void;
   onUp: () => void;
   onDown: () => void;
@@ -489,6 +524,7 @@ function SortableFieldCard({
 function FieldCard({
   field,
   selected,
+  scoped,
   onSelect,
   onUp,
   onDown,
@@ -498,6 +534,8 @@ function FieldCard({
 }: {
   field: FormField;
   selected: boolean;
+  /** Inside the range a conditioned section header governs. */
+  scoped?: boolean;
   onSelect: () => void;
   onUp: () => void;
   onDown: () => void;
@@ -546,6 +584,15 @@ function FieldCard({
           <Badge variant={field.source === 'imported' ? 'info' : 'accent'}>
             {field.source === 'imported' ? 'Imported' : 'Built'}
           </Badge>
+          {(field.visibleWhen || scoped) && (
+            <span className="flex-none rounded-pill border border-border-subtle bg-surface-sunken px-2 py-[3px] font-mono text-[10.5px] text-text-secondary">
+              {field.visibleWhen
+                ? field.type === 'section_header'
+                  ? 'Conditional section'
+                  : 'Conditional'
+                : 'In conditional section'}
+            </span>
+          )}
           <span className="min-w-1 flex-1" />
           {selected && (
             <span className="flex flex-none">
@@ -801,9 +848,22 @@ function ConfigPanel({
           )}
           <Select
             label="Field type"
-            options={TYPE_OPTIONS}
+            options={typeOptionsFor(field.type)}
             value={field.type}
             onChange={(e) => dispatch({ t: 'changeType', id: field.id, fieldType: e.target.value as FormFieldType })}
+          />
+          {field.type === 'repeating_group' && (field.columns?.length ?? 0) > 0 && (
+            <ColumnInspector
+              field={field}
+              actions={builderColumnActions(field, (patch) =>
+                dispatch({ t: 'update', id: field.id, patch }),
+              )}
+            />
+          )}
+          <ConditionEditor
+            field={field}
+            fields={state.fields}
+            actions={builderConditionActions((patch) => dispatch({ t: 'update', id: field.id, patch }))}
           />
         </div>
       ) : (

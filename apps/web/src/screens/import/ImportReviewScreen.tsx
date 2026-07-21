@@ -5,17 +5,22 @@ import type { ExtractedField, ExtractionStatus } from '@formai/shared';
 import { FORM_FIELD_TYPES } from '@formai/shared';
 import {
   addFixedRowItem,
+  canRedoFieldEdit,
+  canUndoFieldEdit,
   isChecklistTable,
   lowestUnresolvedField,
   removeFixedRowItem,
   renameFixedRowItem,
   retryExtraction,
+  redoFieldEdit,
   reviewStatus,
   setFieldRequired,
+  undoFieldEdit,
   useImportSession,
   type ReviewField,
 } from '../../lib/data/import-session.js';
-import { FIELD_META } from '../builder/reducer.js';
+import { FIELD_META } from '../../lib/field-editor/reducer.js';
+import { FieldInspector } from './inspector/FieldInspector.js';
 import { stripFileExtension } from './upload-validation.js';
 import { ImportStepper } from './ImportStepper.js';
 import { PdfViewer } from './PdfViewer.js';
@@ -89,6 +94,17 @@ export function ImportReviewScreen() {
         pageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     }
+  };
+
+  // The inspector binds to the SAME selection the PDF pane uses. A deleted (or
+  // never-chosen) selection simply yields `undefined` here, which is what puts
+  // the panel into its persistent prompt state rather than collapsing it.
+  const selectedIndex = session.fields.findIndex((f) => f.id === selectedFieldId);
+  const selectedField = selectedIndex < 0 ? undefined : session.fields[selectedIndex];
+
+  const handleInspectorSelect = (id: string | null) => {
+    if (id === null) setSelectedFieldId(null);
+    else handleSelectField(id);
   };
 
   if (session.status === 'error') {
@@ -219,6 +235,37 @@ export function ImportReviewScreen() {
                     {session.needReview ? `${session.needReview} need review` : 'All confirmed'}
                   </span>
                 </div>
+              </div>
+
+              {/* Editing surface — sits beside the triage rows, never replaces
+                  them. Sticky so it stays reachable while the list scrolls. */}
+              <div className="sticky top-0 z-10 mb-3.5">
+                <div className="mb-1.5 flex items-center justify-end gap-1.5">
+                  <button
+                    onClick={() => undoFieldEdit()}
+                    disabled={!canUndoFieldEdit()}
+                    aria-label="Undo"
+                    className="inline-flex items-center gap-1 rounded-sm border border-border bg-surface-card px-2 py-1 text-[11.5px] font-semibold text-text-secondary hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Icon name="undo-2" size={13} />
+                    Undo
+                  </button>
+                  <button
+                    onClick={() => redoFieldEdit()}
+                    disabled={!canRedoFieldEdit()}
+                    aria-label="Redo"
+                    className="inline-flex items-center gap-1 rounded-sm border border-border bg-surface-card px-2 py-1 text-[11.5px] font-semibold text-text-secondary hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Icon name="redo-2" size={13} />
+                    Redo
+                  </button>
+                </div>
+                <FieldInspector
+                  field={selectedField}
+                  index={selectedIndex}
+                  count={session.fields.length}
+                  onSelect={handleInspectorSelect}
+                />
               </div>
 
               <div ref={fieldListRef} className="flex flex-col gap-2.5">

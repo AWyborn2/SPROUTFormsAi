@@ -1010,3 +1010,218 @@ describe('PATCH /submissions/:id', () => {
     }
   });
 });
+
+/**
+ * U11 — the authed submit path applies the same server-side visibility filter
+ * as the public one. Filtering only the public route would leave the internal
+ * fill screen and the mobile app free to record answers to questions their
+ * filler never saw.
+ */
+describe('POST /submissions — hidden fields (U11)', () => {
+  const CONDITIONAL_FIELDS = [
+    { id: 'has_plant', type: 'boolean_yes_no', label: 'Plant on site?', required: false, source: 'built' },
+    {
+      id: 'plant_reg',
+      type: 'text',
+      label: 'Plant registration',
+      required: true,
+      source: 'built',
+      visibleWhen: { fieldId: 'has_plant', op: 'equals', value: 'true' },
+    },
+  ];
+
+  function conditionalDb() {
+    return fakeDb({
+      formTemplatesFindFirst: { id: 't1', name: 'Site audit', currentVersionId: 'v1' },
+      formTemplateVersionsFindFirst: {
+        id: 'v1',
+        templateId: 't1',
+        state: 'published',
+        fields: CONDITIONAL_FIELDS,
+      },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+      insertedSubmission: {
+        id: 's-new',
+        templateId: 't1',
+        submitterName: 'Tom Reyes',
+        submitterEmail: 'tom@contractor.io',
+        status: 'submitted',
+        flag: '',
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+      },
+    });
+  }
+
+  function post(base: string, values: Record<string, unknown>, status?: string) {
+    return fetch(`${base}/submissions`, {
+      method: 'POST',
+      headers: { ...authHeader(), 'content-type': 'application/json' },
+      body: JSON.stringify({ templateId: 't1', versionId: 'v1', values, ...(status ? { status } : {}) }),
+    });
+  }
+
+  it('does not let a hidden required field block the submit', async () => {
+    const { db } = conditionalDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { has_plant: false });
+      expect(res.status).toBe(201);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('strips values posted for a hidden field before the insert', async () => {
+    const { db, insertValues } = conditionalDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { has_plant: false, plant_reg: 'SNEAKY' });
+      expect(res.status).toBe(201);
+      const insert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(insert?.[1].values).toEqual({ has_plant: false });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('keeps the value once the condition is met', async () => {
+    const { db, insertValues } = conditionalDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { has_plant: true, plant_reg: 'REG-9' });
+      expect(res.status).toBe(201);
+      const insert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(insert?.[1].values).toEqual({ has_plant: true, plant_reg: 'REG-9' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('PRESERVES hidden values on a DRAFT save — a draft is work, not a record', async () => {
+    // The strip is destructive and irreversible. An operator who picks the
+    // wrong machine type, completes that section, then corrects the choice
+    // would otherwise find the work permanently gone on switching back —
+    // redone from memory, outdoors. R21 is a guarantee about the record, and
+    // the draft->approved transition re-strips before the row becomes one.
+    const { db, insertValues } = conditionalDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { has_plant: false, plant_reg: 'KEPT' }, 'draft');
+      expect(res.status).toBe(201);
+      const insert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(insert?.[1].values).toHaveProperty('plant_reg', 'KEPT');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still strips on a non-draft save, where the row IS the record', async () => {
+    const { db, insertValues } = conditionalDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { has_plant: false, plant_reg: 'STALE' });
+      expect(res.status).toBe(201);
+      const insert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(insert?.[1].values).not.toHaveProperty('plant_reg');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('leaves a condition-free submission byte-identical to today', async () => {
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: { id: 't1', name: 'Vendor onboarding', currentVersionId: 'v1' },
+      formTemplateVersionsFindFirst: {
+        id: 'v1',
+        templateId: 't1',
+        state: 'published',
+        fields: [{ id: 'abn', type: 'text', label: 'ABN', required: true, source: 'built' }],
+      },
+      usersFindFirst: { id: 'u1', name: 'Tom Reyes', email: 'tom@contractor.io' },
+      insertedSubmission: {
+        id: 's-new',
+        templateId: 't1',
+        submitterName: 'Tom Reyes',
+        submitterEmail: 'tom@contractor.io',
+        status: 'submitted',
+        flag: '',
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+      },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { abn: '12 345 678 901' });
+      expect(res.status).toBe(201);
+      const insert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(insert?.[1].values).toEqual({ abn: '12 345 678 901' });
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * U11 — a draft saved while a section was visible must not have those stale
+ * answers approved into the record after the source answer changed. The
+ * draft → approved transition re-applies the filter against the pinned
+ * version, so the approved row carries only what was visible at approval.
+ */
+describe('PATCH /submissions/:id — stale hidden values (U11)', () => {
+  it('drops stale values for a now-hidden field when a draft is approved', async () => {
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: APPROVER_PERMS,
+      submissionsFindFirst: {
+        id: 's1',
+        orgId: 'org-1',
+        templateId: 't1',
+        templateVersionId: 'v1',
+        status: 'draft',
+        submitterName: 'Tom Reyes',
+        submitterEmail: 'tom@contractor.io',
+        submittedByUserId: null,
+        flag: '',
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+        values: { has_plant: false, plant_reg: 'STALE' },
+      },
+      formTemplateVersionsFindFirst: {
+        id: 'v1',
+        templateId: 't1',
+        state: 'published',
+        fields: [
+          { id: 'has_plant', type: 'boolean_yes_no', label: 'Plant?', required: false, source: 'built' },
+          {
+            id: 'plant_reg',
+            type: 'text',
+            label: 'Plant registration',
+            required: true,
+            source: 'built',
+            visibleWhen: { fieldId: 'has_plant', op: 'equals', value: 'true' },
+          },
+        ],
+      },
+      formTemplatesFindFirst: { id: 't1', name: 'Site audit' },
+      usersFindFirst: { id: 'u1', name: 'Ash Wyborn' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/submissions/s1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ status: 'approved' }),
+      });
+      expect(res.status).toBe(200);
+      const submissionUpdate = updateSet.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionUpdate?.[1]).toMatchObject({ status: 'approved' });
+      expect(submissionUpdate?.[1].values).toEqual({ has_plant: false });
+    } finally {
+      server.close();
+    }
+  });
+});

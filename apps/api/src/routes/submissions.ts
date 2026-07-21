@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { missingRequiredFields } from '@formai/shared';
+import { incompleteRowsByField, missingRequiredFields, stripHiddenValues } from '@formai/shared';
 import type { RepeatingRowValue, SubmissionValue } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -205,17 +205,47 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     return;
   }
 
+  const versionFields = Array.isArray(version.fields) ? version.fields : [];
+
   // Required enforcement (KTD4) — against the PINNED version's fields just
   // resolved above, i.e. the form the filler actually saw, never whatever
   // `currentVersionId` points at by now (AE2 companion). Drafts may save
   // incomplete; they face the same gate when transitioning via PATCH below.
   if ((status ?? 'submitted') !== 'draft') {
-    const missing = missingRequiredFields(Array.isArray(version.fields) ? version.fields : [], values);
+    const missing = missingRequiredFields(versionFields, values);
     if (missing.length > 0) {
-      res.status(400).json({ error: 'required_fields_missing', fields: missing });
+      // `fields` is the long-standing shape and stays exactly as it was;
+      // `incompleteRows` is additive detail so the fill view can point at the
+      // rows that were missed instead of flagging a 40-row table as a whole.
+      const incompleteRows = incompleteRowsByField(versionFields, values);
+      res.status(400).json({
+        error: 'required_fields_missing',
+        fields: missing,
+        // Additive detail, present only when a table row is actually missing —
+        // an empty object would change the response shape for every scalar-only
+        // failure without telling the client anything.
+        ...(Object.keys(incompleteRows).length > 0 ? { incompleteRows } : {}),
+      });
       return;
     }
   }
+
+  // Hidden fields are stripped on THIS door too (U11). Being authenticated says
+  // who the caller is, not that their payload is honest — a field the filler
+  // never saw must not be recorded whichever route wrote it.
+  //
+  // But NOT on a draft. A draft is work in progress, not a record, and the strip
+  // is destructive: an operator who picks Excavator, completes that section,
+  // realises they picked wrong, switches to Loader and saves would find the
+  // section permanently empty on switching back — work redone from memory,
+  // outdoors. The in-session warning cannot help a draft resumed on another
+  // device or after a reload. R21 is a guarantee about the RECORD, and the
+  // draft→approved transition below re-strips before the row becomes one, so
+  // deferring costs the guarantee nothing.
+  const isDraft = (status ?? 'submitted') === 'draft';
+  const { values: recordedValues } = isDraft
+    ? { values }
+    : stripHiddenValues(versionFields, values);
 
   const sessionUser = await db.query.users.findFirst({
     where: eq(schema.users.id, tenant.userId),
@@ -236,7 +266,7 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
       submittedByUserId: sessionUser.id,
       submitterName: sessionUser.name,
       submitterEmail: sessionUser.email,
-      values,
+      values: recordedValues,
       status: status ?? 'submitted',
       flag: flag ?? '',
     })
@@ -286,18 +316,30 @@ submissionsRouter.patch('/:id', requireTenant, withErrorHandling(async (req, res
   // exists). draft → rejected is deliberately ungated: rejection is the
   // disposal path for an incomplete draft. Non-draft rows already passed the
   // gate on create.
+  let approvedValues: Record<string, SubmissionValue> | undefined;
   if (row.status === 'draft' && status === 'approved') {
     const pinnedVersion = await db.query.formTemplateVersions.findFirst({
       where: eq(schema.formTemplateVersions.id, row.templateVersionId),
     });
-    const missing = missingRequiredFields(
-      Array.isArray(pinnedVersion?.fields) ? pinnedVersion.fields : [],
-      row.values,
-    );
+    const pinnedFields = Array.isArray(pinnedVersion?.fields) ? pinnedVersion.fields : [];
+    const missing = missingRequiredFields(pinnedFields, row.values);
     if (missing.length > 0) {
-      res.status(400).json({ error: 'required_fields_missing', fields: missing });
+      const incompleteRows = incompleteRowsByField(pinnedFields, row.values);
+      res.status(400).json({
+        error: 'required_fields_missing',
+        fields: missing,
+        ...(Object.keys(incompleteRows).length > 0 ? { incompleteRows } : {}),
+      });
       return;
     }
+    // A draft is the one place stale hidden answers can accumulate: it was
+    // saved over time, and the source answer may have moved since. Approval is
+    // the moment the row becomes a record, so the filter runs once more here —
+    // otherwise a field the filler ended up never seeing would be approved
+    // into the evidence (U11). Only recomputed on this transition; rows that
+    // were never drafts already passed the filter on create.
+    const stripped = stripHiddenValues(pinnedFields, row.values);
+    if (stripped.discarded.length > 0) approvedValues = stripped.values;
   }
   const [template, submitterUser] = await Promise.all([
     db.query.formTemplates.findFirst({ where: eq(schema.formTemplates.id, row.templateId) }),
@@ -306,7 +348,10 @@ submissionsRouter.patch('/:id', requireTenant, withErrorHandling(async (req, res
       : Promise.resolve(null),
   ]);
 
-  await db.update(schema.submissions).set({ status }).where(eq(schema.submissions.id, row.id));
+  await db
+    .update(schema.submissions)
+    .set({ status, ...(approvedValues ? { values: approvedValues } : {}) })
+    .where(eq(schema.submissions.id, row.id));
 
   await recordAudit(db, tenant, {
     action: status === 'approved' ? 'Approved submission' : 'Rejected submission',

@@ -14,7 +14,28 @@
  * - Builder preview (container-width slider): pass
  *   `narrow: state.container.maxWidth < 640` and use `previewSpanClass`.
  */
-import type { FormContainer, FormField } from '@formai/shared';
+import { visibleFields } from '@formai/shared';
+import type { FormContainer, FormField, SubmissionValue } from '@formai/shared';
+
+/**
+ * The fields a fill surface should lay out, given the answers so far.
+ *
+ * Filtering happens BEFORE the grid is built, not inside each cell: a hidden
+ * field must consume no layout space at all, and an empty `col-span-*` wrapper
+ * would leave a visible hole in the row. Section-header scope is expanded by
+ * `visibleFields` in @formai/shared — the same call the validator, both submit
+ * routes, and the PDF exporter make, so no surface can disagree about whether
+ * a field is showing.
+ *
+ * This is presentation only. The server strips hidden values and skips hidden
+ * required fields on its own; nothing here is load-bearing for the guarantee.
+ */
+export function visibleFillFields(
+  fields: FormField[],
+  values: Record<string, SubmissionValue>,
+): FormField[] {
+  return visibleFields(fields, values);
+}
 
 /** Layouts the fill surface can actually render. */
 export const RENDERABLE_LAYOUTS = ['card', 'hero', 'split', 'conversational'] as const;

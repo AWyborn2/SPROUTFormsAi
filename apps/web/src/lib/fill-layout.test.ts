@@ -7,6 +7,7 @@ import {
   previewSpanClass,
   resolveFillSpan,
   resolveLayout,
+  visibleFillFields,
 } from './fill-layout.js';
 
 function container(patch: Partial<FormContainer> = {}): FormContainer {
@@ -152,5 +153,48 @@ describe('span class lookups', () => {
     }
     expect(fillSpanClass(99)).toBe('col-span-12 sm:col-span-12');
     expect(previewSpanClass(99)).toBe('col-span-12');
+  });
+});
+
+/**
+ * U11 — hidden fields must consume NO layout space. The fill surfaces filter
+ * the field list BEFORE laying out the grid, so a hidden field contributes no
+ * grid cell at all — as opposed to an empty `col-span-*` wrapper, which would
+ * leave a visible gap in the row.
+ */
+describe('visibleFillFields', () => {
+  const trigger = field({ id: 'has_plant', type: 'boolean_yes_no', label: 'Plant?' });
+  const conditional = field({
+    id: 'plant_reg',
+    label: 'Plant registration',
+    visibleWhen: { fieldId: 'has_plant', op: 'equals', value: 'true' },
+  });
+  const after = field({ id: 'notes', label: 'Notes' });
+
+  it('drops a hidden field entirely — no cell, no gap', () => {
+    const out = visibleFillFields([trigger, conditional, after], { has_plant: false });
+    expect(out.map((f) => f.id)).toEqual(['has_plant', 'notes']);
+  });
+
+  it('restores it once its condition is met', () => {
+    const out = visibleFillFields([trigger, conditional, after], { has_plant: true });
+    expect(out.map((f) => f.id)).toEqual(['has_plant', 'plant_reg', 'notes']);
+  });
+
+  it('drops a hidden section header and its whole scope', () => {
+    const header = field({
+      id: 'plant_section',
+      type: 'section_header',
+      label: 'Plant',
+      visibleWhen: { fieldId: 'has_plant', op: 'equals', value: 'true' },
+    });
+    const inSection = field({ id: 'plant_owner', label: 'Owner' });
+    const out = visibleFillFields([trigger, header, inSection], { has_plant: false });
+    expect(out.map((f) => f.id)).toEqual(['has_plant']);
+  });
+
+  it('returns a condition-free form unchanged', () => {
+    const fields = [trigger, after];
+    expect(visibleFillFields(fields, {})).toEqual(fields);
   });
 });

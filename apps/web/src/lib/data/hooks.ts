@@ -111,7 +111,9 @@ export function useSubmission(id: string | undefined) {
 
 /**
  * Round-trip export: POST the submission's version fields + values + stored
- * source-PDF asset to /pdf/round-trip; resolves the filled PDF as a Blob.
+ * submission id to /pdf/round-trip; the API loads the pinned version's fields
+ * and the stored values itself, so the request cannot forge either. Resolves
+ * the filled PDF as a Blob.
  */
 export function useExportSubmissionPdf() {
   return useMutation({

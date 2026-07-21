@@ -4,10 +4,16 @@ import { Icon, Input, useToast } from '@formai/ui';
 import type { SubmissionValue } from '@formai/shared';
 import { resolveTheme } from '@formai/shared';
 import { ApiError } from '../../lib/data/api-client.js';
+import { discardImpactOf, discardWarningMessage, isCommittedChange } from '../../lib/discard-warning.js';
 import { useFillForm, useSubmitFill } from '../../lib/data/hooks.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
-import { fillSpanClass, resolveFillSpan, resolveLayout } from '../../lib/fill-layout.js';
+import {
+  fillSpanClass,
+  resolveFillSpan,
+  resolveLayout,
+  visibleFillFields,
+} from '../../lib/fill-layout.js';
 import { FormLayoutFrame } from './FormLayoutFrame.js';
 import { ConversationalFill } from './ConversationalFill.js';
 import {
@@ -15,6 +21,7 @@ import {
   requiredFieldErrors,
   requiredFieldsMissingIds,
   validateRequired,
+  incompleteRowsByFieldFrom,
 } from '../../lib/validation.js';
 import { ExternalShell } from './ExternalShell.js';
 
@@ -43,10 +50,25 @@ export function FillScreen() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitterName, setSubmitterName] = useState('');
   const [submitterEmail, setSubmitterEmail] = useState('');
+  /** Per-field incomplete row indexes from the last failed submit (R10). */
+  const [incompleteRows, setIncompleteRows] = useState<Record<string, number[]>>({});
   const [emailError, setEmailError] = useState('');
   const [doneRef, setDoneRef] = useState<string | null>(null);
 
   function setValue(fieldId: string, value: SubmissionValue) {
+    // R22 — a change that hides an answered section destroys those answers
+    // (the server strips hidden values on save), so confirm before applying
+    // rather than after. Silent when only empty fields would hide: a prompt
+    // that fires on every harmless toggle gets dismissed unread.
+    // Only warn on sources whose every change IS a commit. On a free-text or
+    // numeric source each keystroke moves the value away from the match, so a
+    // per-keystroke modal would make the field uneditable: cancel drops the
+    // character, accept wipes the section. Those are re-checked at submit.
+    if (isCommittedChange(fill?.fields ?? [], fieldId)) {
+      const impact = discardImpactOf(fill?.fields ?? [], values, fieldId, value);
+      if (impact.count > 0 && !window.confirm(discardWarningMessage(impact))) return;
+    }
+
     setValues((v) => ({ ...v, [fieldId]: value }));
     setErrors((e) => (e[fieldId] ? { ...e, [fieldId]: '' } : e));
   }
@@ -88,6 +110,9 @@ export function FillScreen() {
             // Server-side required enforcement (KTD4): map the named fields
             // into the same per-field errors the client check uses.
             const missingIds = requiredFieldsMissingIds(err.body);
+            // Row-level detail travels with the same 400 — surfacing it is what
+            // turns "this table is incomplete" into "rows 7 and 14".
+            setIncompleteRows(incompleteRowsByFieldFrom(err.body));
             if (missingIds && missingIds.length > 0) {
               setErrors((e) => ({ ...e, ...requiredFieldErrors(missingIds) }));
               const n = missingIds.length;
@@ -192,9 +217,13 @@ export function FillScreen() {
         branding={fill.orgBranding}
         container={fill.container}
       >
+        {/* Both branches filter hidden fields identically. The conversational
+            layout paces one question at a time, so an unfiltered list would
+            stop the respondent on a question their answers have already ruled
+            out -- a worse failure there than a gap in a grid. */}
         {isConversational ? (
           <ConversationalFill
-            fields={fill.fields}
+            fields={visibleFillFields(fill.fields, values)}
             values={values}
             errors={errors}
             setValue={setValue}
@@ -207,14 +236,17 @@ export function FillScreen() {
             {identityBlock}
 
             {/* The served version's real fields, via the shared renderer, on
-                the builder's 12-col grid (single column below `sm`). */}
+                the builder's 12-col grid (single column below `sm`). Fields
+                hidden by an unmet condition are filtered out before the grid
+                is built, so they occupy no cell and leave no gap. */}
             <div className="grid grid-cols-12 gap-[16px]">
-              {fill.fields.map((f) => (
+              {visibleFillFields(fill.fields, values).map((f) => (
                 <div key={f.id} className={fillSpanClass(resolveFillSpan(f, false))}>
                   <FieldInput
                     field={f}
                     value={values[f.id] ?? null}
                     error={errors[f.id] || undefined}
+                    incompleteRowIndexes={incompleteRows[f.id]}
                     onChange={(v) => setValue(f.id, v)}
                   />
                 </div>

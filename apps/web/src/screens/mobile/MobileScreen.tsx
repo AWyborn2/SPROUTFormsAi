@@ -9,13 +9,15 @@ import { ensureFontLoaded } from '../../lib/font-loader.js';
 import { useOnboarding } from '../../lib/onboarding.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
 import { ApiError } from '../../lib/data/api-client.js';
-import { previewSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
+import { discardImpactOf, discardWarningMessage, isCommittedChange } from '../../lib/discard-warning.js';
+import { previewSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
 import { answeredCount, publishedForms } from './mobile-fill.js';
 import {
   inputFields,
   requiredFieldErrors,
   requiredFieldsMissingIds,
   validateRequired,
+  incompleteRowsByFieldFrom,
 } from '../../lib/validation.js';
 
 type Tab = 'home' | 'activity';
@@ -103,6 +105,8 @@ export function MobileScreen() {
   const [formId, setFormId] = useState<string | null>(null);
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+  /** Per-field incomplete row indexes from the last failed submit (R10). */
+  const [incompleteRows, setIncompleteRows] = useState<Record<string, number[]>>({});
   const [lastRef, setLastRef] = useState<string | null>(null);
 
   const { data: form } = useForm(formId ?? undefined);
@@ -134,10 +138,24 @@ export function MobileScreen() {
     setFormId(f.id);
     setValues({});
     setErrors({});
+    setIncompleteRows({});
     setView('fill');
   }
 
   function setValue(fieldId: string, value: SubmissionValue) {
+    // R22 — a change that hides an answered section destroys those answers
+    // (the server strips hidden values on save), so confirm before applying
+    // rather than after. Silent when only empty fields would hide: a prompt
+    // that fires on every harmless toggle gets dismissed unread.
+    // Only warn on sources whose every change IS a commit. On a free-text or
+    // numeric source each keystroke moves the value away from the match, so a
+    // per-keystroke modal would make the field uneditable: cancel drops the
+    // character, accept wipes the section. Those are re-checked at submit.
+    if (isCommittedChange(form?.fields ?? [], fieldId)) {
+      const impact = discardImpactOf(form?.fields ?? [], values, fieldId, value);
+      if (impact.count > 0 && !window.confirm(discardWarningMessage(impact))) return;
+    }
+
     setValues((v) => ({ ...v, [fieldId]: value }));
     setErrors((e) => (e[fieldId] ? { ...e, [fieldId]: '' } : e));
   }
@@ -175,6 +193,7 @@ export function MobileScreen() {
           // failure — never blame the connection for a validation response.
           if (err instanceof ApiError && err.status === 400) {
             const missingIds = requiredFieldsMissingIds(err.body);
+            setIncompleteRows(incompleteRowsByFieldFrom(err.body));
             if (missingIds && missingIds.length > 0) {
               // Server-side required enforcement (KTD4): same per-field
               // errors as the client-side pre-check above.
@@ -200,6 +219,7 @@ export function MobileScreen() {
     setFormId(null);
     setValues({});
     setErrors({});
+    setIncompleteRows({});
     setView('list');
     setTab('home');
   }
@@ -278,6 +298,7 @@ export function MobileScreen() {
               firstName={firstName}
               values={values}
               errors={errors}
+              incompleteRows={incompleteRows}
               submitting={submit.isPending}
               onBack={reset}
               onChange={setValue}
@@ -442,6 +463,7 @@ function FillView({
   firstName,
   values,
   errors,
+  incompleteRows,
   submitting,
   onBack,
   onChange,
@@ -451,6 +473,7 @@ function FillView({
   firstName: string;
   values: Record<string, SubmissionValue>;
   errors: Record<string, string>;
+  incompleteRows: Record<string, number[]>;
   submitting: boolean;
   onBack: () => void;
   onChange: (fieldId: string, value: SubmissionValue) => void;
@@ -464,8 +487,14 @@ function FillView({
     );
   }
 
-  const total = inputFields(form.fields).length;
-  const done = answeredCount(form.fields, values);
+  // Count the SHOWN fields: the rendered list is filtered by visibility, so
+  // counting the full list leaves a conditional form stuck at e.g. '8 of 20'
+  // with everything visible answered — the filler hunts for questions that do
+  // not exist, or stops trusting the submit gate that is correctly letting
+  // them through.
+  const shownFields = visibleFillFields(form.fields, values);
+  const total = inputFields(shownFields).length;
+  const done = answeredCount(shownFields, values);
   const progressPct = `${total === 0 ? 0 : Math.round((done / total) * 100)}%`;
 
   return (
@@ -523,12 +552,13 @@ function FillView({
               frame is a CONTAINER (viewport breakpoints don't apply), so
               `narrow` collapses every span to 12 — effectively stacked. */}
           <div className="grid grid-cols-12 gap-[16px]">
-            {form.fields.map((f) => (
+            {visibleFillFields(form.fields, values).map((f) => (
               <div key={f.id} className={previewSpanClass(resolveFillSpan(f, true))}>
                 <FieldInput
                   field={f}
                   value={values[f.id] ?? null}
                   error={errors[f.id] || undefined}
+                  incompleteRowIndexes={incompleteRows[f.id]}
                   onChange={(v) => onChange(f.id, v)}
                 />
               </div>

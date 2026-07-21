@@ -63,6 +63,28 @@ export const extractFormFieldsTool = {
                 required: ['key', 'label', 'type'],
               },
             },
+            answerSets: {
+              type: 'array',
+              description:
+                'For repeating_group only — groups of columns that are ALTERNATIVES sharing ONE answer per row (exactly one may be ticked), as opposed to independent checkboxes each ticked on its own. The house shapes are OK / NA, ✓ / × / N-A, and Pass / Fail / NA. Each set must name at least two keys from columns, must not include the first (item/label) column, and no column may appear in two sets. Omit entirely when every column is independent.',
+              items: {
+                type: 'object',
+                properties: {
+                  key: { type: 'string', description: 'Stable identifier for this group within the field.' },
+                  label: { type: 'string', description: 'Optional heading for the group, e.g. "Status".' },
+                  columnKeys: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'The member column keys, in printed order. At least two.',
+                  },
+                  required: {
+                    type: 'boolean',
+                    description: 'True when every row must carry an answer within this group.',
+                  },
+                },
+                required: ['key', 'columnKeys'],
+              },
+            },
             fixedRows: {
               type: 'array',
               items: { type: 'string' },

@@ -6,6 +6,8 @@
  * Pure and React-free. Tested from apps/api (packages/shared has no test
  * runner): see apps/api/src/routes/submission-validation.test.ts.
  */
+import { groupedColumnKeys, resolveAnswerSets, selectedOption } from './answer-set.js';
+import { visibleFields } from './visibility.js';
 import type { FormField, FormFieldType, RepeatingColumn } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 
@@ -75,11 +77,64 @@ export function incompleteFixedRowIndices(
   const rows: unknown[] = Array.isArray(value) ? value : [];
   const incomplete: number[] = [];
   for (let i = 0; i < fixedRows.length; i++) {
-    const row = rows[i];
-    const answered = isRowRecord(row) && answerable.some((c) => isCellAnswered(c, row[c.key]));
-    if (!answered) incomplete.push(i);
+    if (!isRowAnswered(field, rows[i])) incomplete.push(i);
   }
   return incomplete;
+}
+
+/**
+ * Whether one repeating row counts as answered.
+ *
+ * Grouping changes the question. On an UNGROUPED table it stays the legacy
+ * rule — any non-label cell carrying something — so existing published
+ * versions never change behaviour. On a table with answer sets the row must
+ * carry exactly one chosen option per set: neither zero (unanswered) nor two
+ * (the contradiction the grouping exists to prevent, which the legacy rule
+ * would happily accept).
+ *
+ * A malformed set is dropped by `resolveAnswerSets`, so a bad grouping falls
+ * back to the legacy rule rather than making the table unanswerable.
+ */
+function isRowAnswered(field: FormField, row: unknown): boolean {
+  if (!isRowRecord(row)) return false;
+
+  const sets = resolveAnswerSets(field).sets;
+  if (sets.length > 0) {
+    // A contradictory row is refused whatever the set's required flag says:
+    // one-answer-per-row is the grouping's structural invariant, not a
+    // required-ness question. `required: false` only relaxes "must be
+    // answered" — it never licenses recording both OK and N/A.
+    if (sets.some((s) => selectedOption(s, row).malformed)) return false;
+    if (!requiredColumnsFilled(field, row)) return false;
+    return sets
+      .filter((s) => s.required !== false)
+      .every((s) => selectedOption(s, row).columnKey !== null);
+  }
+
+  if (!requiredColumnsFilled(field, row)) return false;
+  return answerColumns(field).some((c) => isCellAnswered(c, row[c.key]));
+}
+
+/**
+ * Every column the author marked required must be answered on this row.
+ *
+ * `@formai/ui` renders a red asterisk from `RepeatingColumn.required` and the
+ * column inspector offers the toggle, but nothing read the flag — so a reviewer
+ * could mark "Corrective action" required, the filler would see it marked
+ * mandatory, tick Fail, leave every comment blank, and submit with no errors.
+ * An investigation would then show a mandatory column that is entirely empty
+ * on a form the system reported complete. A required marker nothing enforces is
+ * worse than no marker.
+ *
+ * Grouped member columns are exempt: their required-ness is the answer set's
+ * (exactly one option per row), and requiring each member individually would
+ * demand every option be ticked at once — the contradiction the set prevents.
+ */
+function requiredColumnsFilled(field: FormField, row: RepeatingRowValue): boolean {
+  const grouped = groupedColumnKeys(field);
+  return answerColumns(field)
+    .filter((c) => c.required && !grouped.has(c.key))
+    .every((c) => isCellAnswered(c, row[c.key]));
 }
 
 /**
@@ -96,8 +151,55 @@ export function isFieldAnswered(field: FormField, value: SubmissionValue | undef
     return incompleteFixedRowIndices(field, value).length === 0;
   }
   if (value === null || value === undefined) return false;
-  if (Array.isArray(value)) return value.length > 0;
+  if (Array.isArray(value)) {
+    // An open row-entry table backed by answer sets still cannot record a
+    // contradictory or blank row — the any-row rule would accept both.
+    if (field.type === 'repeating_group' && resolveAnswerSets(field).sets.length > 0) {
+      return value.length > 0 && value.every((row) => isRowAnswered(field, row));
+    }
+    return value.length > 0;
+  }
   return scalarAnswered(field.type, value);
+}
+
+/**
+ * Rows of a required table the given value leaves unanswered, keyed by field
+ * id — the per-row detail behind R10. `missingRequiredFields` reports WHICH
+ * fields failed; this reports WHERE inside them, so a filler who missed rows 7
+ * and 14 of a forty-row table is told exactly that instead of re-scanning the
+ * whole table on a phone.
+ */
+/**
+ * Unanswered row indexes of an OPEN (no `fixedRows`) table backed by an answer
+ * set. Without this the filler gets "this table is incomplete" with no row
+ * highlighted — the R10 gap left open for one of the two table shapes, since
+ * `incompleteFixedRowIndices` returns [] the moment `fixedRows` is absent.
+ */
+function openRowIndices(field: FormField, value: SubmissionValue | undefined): number[] {
+  if (resolveAnswerSets(field).sets.length === 0) return [];
+  const rows: unknown[] = Array.isArray(value) ? value : [];
+  const out: number[] = [];
+  rows.forEach((row, i) => {
+    if (!isRowAnswered(field, row)) out.push(i);
+  });
+  return out;
+}
+
+export function incompleteRowsByField(
+  fields: FormField[],
+  values: Record<string, SubmissionValue>,
+): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  // Hidden tables cannot be incomplete — the filler was never shown them (U11).
+  for (const f of visibleFields(fields, values)) {
+    if (f.type !== 'repeating_group' || !f.required) continue;
+    const incomplete =
+      f.fixedRows && f.fixedRows.length > 0
+        ? incompleteFixedRowIndices(f, values[f.id])
+        : openRowIndices(f, values[f.id]);
+    if (incomplete.length > 0) out[f.id] = incomplete;
+  }
+  return out;
 }
 
 /**
@@ -110,7 +212,61 @@ export function missingRequiredFields(
   fields: FormField[],
   values: Record<string, SubmissionValue>,
 ): string[] {
-  return fields
+  // Required-ness is scoped to what the filler can actually SEE (U11): a
+  // hidden required field has no answer to give and must never block a submit,
+  // or a conditional section becomes an unclearable wall. `visibleFields`
+  // expands section-header conditions across their scope, so this agrees with
+  // the fill renderer field-for-field.
+  return visibleFields(fields, values)
     .filter((f) => f.type !== 'section_header' && f.required && !isFieldAnswered(f, values[f.id]))
     .map((f) => f.id);
+}
+
+/**
+ * Drop the values of fields that are not visible under `values` itself, and
+ * name what was dropped.
+ *
+ * The guarantee U11 exists for is that a hidden field is UNRECORDED — not
+ * merely unrendered. A client can post whatever it likes (the public fill
+ * route's only credential is a link token), and a draft saved while a section
+ * was visible carries stale answers after the source answer changes. Both
+ * cases resolve here, on the server, before the insert.
+ *
+ * Ids with no matching field are left alone: this decides on visibility, not
+ * on schema membership, and silently eating unknown keys would hide a
+ * different class of bug. `discarded` names only fields that actually carried
+ * a value, so an audit trace of `[]` means "nothing was thrown away" rather
+ * than "nothing was hidden".
+ */
+export function stripHiddenValues(
+  fields: FormField[],
+  values: Record<string, SubmissionValue>,
+): { values: Record<string, SubmissionValue>; discarded: string[] } {
+  // Iterate to a fixpoint. One pass is not enough with chained conditions: a
+  // dependent can be kept because its source was still present in `values`,
+  // while that same pass discards the source. Every later evaluation — the
+  // exporter, the submission render, an approval-time re-strip — then sees the
+  // source gone and treats the dependent as hidden, so the stored record and
+  // the exported evidence PDF disagree about what was answered. Re-running
+  // until nothing new drops makes the recorded values self-consistent under the
+  // same evaluator every consumer uses.
+  let kept = values;
+  const discarded: string[] = [];
+
+  // Bounded by the field count: each round must discard at least one field to
+  // continue, so it cannot exceed the number of fields.
+  for (let round = 0; round <= fields.length; round++) {
+    const visibleIds = new Set(visibleFields(fields, kept).map((f) => f.id));
+    const dropped = fields.filter((f) => !visibleIds.has(f.id) && f.id in kept).map((f) => f.id);
+    if (dropped.length === 0) break;
+
+    const next: Record<string, SubmissionValue> = {};
+    for (const [key, value] of Object.entries(kept)) {
+      if (!dropped.includes(key)) next[key] = value;
+    }
+    kept = next;
+    discarded.push(...dropped);
+  }
+
+  return { values: kept, discarded };
 }
