@@ -6,6 +6,7 @@
  * Pure and React-free. Tested from apps/api (packages/shared has no test
  * runner): see apps/api/src/routes/submission-validation.test.ts.
  */
+import { resolveAnswerSets, selectedOption } from './answer-set.js';
 import type { FormField, FormFieldType, RepeatingColumn } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 
@@ -75,11 +76,36 @@ export function incompleteFixedRowIndices(
   const rows: unknown[] = Array.isArray(value) ? value : [];
   const incomplete: number[] = [];
   for (let i = 0; i < fixedRows.length; i++) {
-    const row = rows[i];
-    const answered = isRowRecord(row) && answerable.some((c) => isCellAnswered(c, row[c.key]));
-    if (!answered) incomplete.push(i);
+    if (!isRowAnswered(field, rows[i])) incomplete.push(i);
   }
   return incomplete;
+}
+
+/**
+ * Whether one repeating row counts as answered.
+ *
+ * Grouping changes the question. On an UNGROUPED table it stays the legacy
+ * rule — any non-label cell carrying something — so existing published
+ * versions never change behaviour. On a table with answer sets the row must
+ * carry exactly one chosen option per set: neither zero (unanswered) nor two
+ * (the contradiction the grouping exists to prevent, which the legacy rule
+ * would happily accept).
+ *
+ * A malformed set is dropped by `resolveAnswerSets`, so a bad grouping falls
+ * back to the legacy rule rather than making the table unanswerable.
+ */
+function isRowAnswered(field: FormField, row: unknown): boolean {
+  if (!isRowRecord(row)) return false;
+
+  const sets = resolveAnswerSets(field).sets;
+  if (sets.length > 0) {
+    return sets.every((s) => {
+      const sel = selectedOption(s, row);
+      return sel.columnKey !== null && !sel.malformed;
+    });
+  }
+
+  return answerColumns(field).some((c) => isCellAnswered(c, row[c.key]));
 }
 
 /**
@@ -96,8 +122,35 @@ export function isFieldAnswered(field: FormField, value: SubmissionValue | undef
     return incompleteFixedRowIndices(field, value).length === 0;
   }
   if (value === null || value === undefined) return false;
-  if (Array.isArray(value)) return value.length > 0;
+  if (Array.isArray(value)) {
+    // An open row-entry table backed by answer sets still cannot record a
+    // contradictory or blank row — the any-row rule would accept both.
+    if (field.type === 'repeating_group' && resolveAnswerSets(field).sets.length > 0) {
+      return value.length > 0 && value.every((row) => isRowAnswered(field, row));
+    }
+    return value.length > 0;
+  }
   return scalarAnswered(field.type, value);
+}
+
+/**
+ * Rows of a required table the given value leaves unanswered, keyed by field
+ * id — the per-row detail behind R10. `missingRequiredFields` reports WHICH
+ * fields failed; this reports WHERE inside them, so a filler who missed rows 7
+ * and 14 of a forty-row table is told exactly that instead of re-scanning the
+ * whole table on a phone.
+ */
+export function incompleteRowsByField(
+  fields: FormField[],
+  values: Record<string, SubmissionValue>,
+): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const f of fields) {
+    if (f.type !== 'repeating_group' || !f.required) continue;
+    const incomplete = incompleteFixedRowIndices(f, values[f.id]);
+    if (incomplete.length > 0) out[f.id] = incomplete;
+  }
+  return out;
 }
 
 /**

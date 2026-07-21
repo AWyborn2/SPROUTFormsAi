@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { missingRequiredFields } from '@formai/shared';
+import { incompleteRowsByField, missingRequiredFields } from '@formai/shared';
 import type { RepeatingRowValue, SubmissionValue } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -210,9 +210,21 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
   // `currentVersionId` points at by now (AE2 companion). Drafts may save
   // incomplete; they face the same gate when transitioning via PATCH below.
   if ((status ?? 'submitted') !== 'draft') {
-    const missing = missingRequiredFields(Array.isArray(version.fields) ? version.fields : [], values);
+    const versionFields = Array.isArray(version.fields) ? version.fields : [];
+    const missing = missingRequiredFields(versionFields, values);
     if (missing.length > 0) {
-      res.status(400).json({ error: 'required_fields_missing', fields: missing });
+      // `fields` is the long-standing shape and stays exactly as it was;
+      // `incompleteRows` is additive detail so the fill view can point at the
+      // rows that were missed instead of flagging a 40-row table as a whole.
+      const incompleteRows = incompleteRowsByField(versionFields, values);
+      res.status(400).json({
+        error: 'required_fields_missing',
+        fields: missing,
+        // Additive detail, present only when a table row is actually missing —
+        // an empty object would change the response shape for every scalar-only
+        // failure without telling the client anything.
+        ...(Object.keys(incompleteRows).length > 0 ? { incompleteRows } : {}),
+      });
       return;
     }
   }
@@ -290,12 +302,15 @@ submissionsRouter.patch('/:id', requireTenant, withErrorHandling(async (req, res
     const pinnedVersion = await db.query.formTemplateVersions.findFirst({
       where: eq(schema.formTemplateVersions.id, row.templateVersionId),
     });
-    const missing = missingRequiredFields(
-      Array.isArray(pinnedVersion?.fields) ? pinnedVersion.fields : [],
-      row.values,
-    );
+    const pinnedFields = Array.isArray(pinnedVersion?.fields) ? pinnedVersion.fields : [];
+    const missing = missingRequiredFields(pinnedFields, row.values);
     if (missing.length > 0) {
-      res.status(400).json({ error: 'required_fields_missing', fields: missing });
+      const incompleteRows = incompleteRowsByField(pinnedFields, row.values);
+      res.status(400).json({
+        error: 'required_fields_missing',
+        fields: missing,
+        ...(Object.keys(incompleteRows).length > 0 ? { incompleteRows } : {}),
+      });
       return;
     }
   }

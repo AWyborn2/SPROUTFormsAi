@@ -8,7 +8,7 @@ import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
-import { missingRequiredFields } from '@formai/shared';
+import { incompleteRowsByField, missingRequiredFields } from '@formai/shared';
 // The authed POST /submissions validates with the same runtime schema —
 // single SubmissionValue contract, two doors.
 import { submissionValueSchema } from './submissions.js';
@@ -310,9 +310,15 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
   // form this visitor was actually served. The public path has no draft
   // state: every submit is final, so the gate always runs. Same shared
   // helper as the authed route, so the two doors cannot drift.
-  const missing = missingRequiredFields(Array.isArray(version.fields) ? version.fields : [], values);
+  const versionFields = Array.isArray(version.fields) ? version.fields : [];
+  const missing = missingRequiredFields(versionFields, values);
   if (missing.length > 0) {
-    res.status(400).json({ error: 'required_fields_missing', fields: missing });
+    const incompleteRows = incompleteRowsByField(versionFields, values);
+    res.status(400).json({
+      error: 'required_fields_missing',
+      fields: missing,
+      ...(Object.keys(incompleteRows).length > 0 ? { incompleteRows } : {}),
+    });
     return;
   }
 

@@ -5,7 +5,7 @@
  * routes are the enforcement consumers of this exact contract (KTD2/R6).
  */
 import { describe, expect, it } from 'vitest';
-import type { FormField } from '@formai/shared';
+import type { FormField, RepeatingRowValue } from '@formai/shared';
 import { incompleteFixedRowIndices, isFieldAnswered, missingRequiredFields } from '@formai/shared';
 
 const text: FormField = { id: 'name', type: 'text', label: 'Name', required: true, source: 'built' };
@@ -176,5 +176,110 @@ describe('isFieldAnswered (progress-counting predicate)', () => {
     expect(isFieldAnswered(check, true)).toBe(true);
     expect(isFieldAnswered(yesNo, null)).toBe(false);
     expect(isFieldAnswered(yesNo, false)).toBe(true);
+  });
+});
+
+/**
+ * Answer-set backed tables (U5/R9/R10). The grouping changes what "this row is
+ * answered" means: not "some cell has something in it" but "exactly one of the
+ * alternatives is chosen". A row with both OK and N/A ticked is the exact
+ * contradiction answer sets exist to prevent, so it must FAIL rather than pass
+ * the old any-cell rule.
+ */
+const grouped: FormField = {
+  id: 'cat-a-grouped',
+  type: 'repeating_group',
+  label: 'Category A checks',
+  required: true,
+  source: 'imported',
+  columns: [
+    { key: 'item', label: 'Item', type: 'text' },
+    { key: 'ok', label: '✓', type: 'checkbox' },
+    { key: 'no', label: '×', type: 'checkbox' },
+    { key: 'na', label: 'N-A', type: 'checkbox' },
+  ],
+  answerSets: [{ key: 'verdict', columnKeys: ['ok', 'no', 'na'] }],
+  fixedRows: ['Engine oil level', 'Park brake', 'Tyres'],
+};
+
+function rows(...picks: Array<'ok' | 'no' | 'na' | null>) {
+  return picks.map((p) => ({
+    ok: p === 'ok' ? true : null,
+    no: p === 'no' ? true : null,
+    na: p === 'na' ? true : null,
+  }));
+}
+
+describe('answer sets — row completeness (R9)', () => {
+  it('passes when every row has exactly one option chosen', () => {
+    expect(incompleteFixedRowIndices(grouped, rows('ok', 'no', 'na'))).toEqual([]);
+    expect(missingRequiredFields([grouped], { 'cat-a-grouped': rows('ok', 'no', 'na') })).toEqual([]);
+  });
+
+  it('counts an explicit N/A as an answer', () => {
+    expect(incompleteFixedRowIndices(grouped, rows('na', 'na', 'na'))).toEqual([]);
+  });
+
+  it('reports the unanswered rows individually (AE4)', () => {
+    expect(incompleteFixedRowIndices(grouped, rows('ok', null, 'na'))).toEqual([1]);
+    expect(incompleteFixedRowIndices(grouped, rows(null, null, 'na'))).toEqual([0, 1]);
+  });
+
+  it('fails a row with two options ticked rather than passing it as answered', () => {
+    const value = [{ ok: true, no: true, na: null }, ...rows('ok', 'ok')];
+    expect(incompleteFixedRowIndices(grouped, value)).toEqual([0]);
+    expect(isFieldAnswered(grouped, value)).toBe(false);
+  });
+
+  it('treats an explicit false in every option as unanswered, not as an answer', () => {
+    const value = [{ ok: false, no: false, na: false }, ...rows('ok', 'ok')];
+    expect(incompleteFixedRowIndices(grouped, value)).toEqual([0]);
+  });
+
+  it('reports the missing tail when the value array is shorter than fixedRows', () => {
+    expect(incompleteFixedRowIndices(grouped, rows('ok'))).toEqual([1, 2]);
+  });
+
+  it('exempts ad-hoc rows appended past the fixed set', () => {
+    const value = [...rows('ok', 'ok', 'ok'), { ok: null, no: null, na: null }];
+    expect(incompleteFixedRowIndices(grouped, value)).toEqual([]);
+  });
+
+  it('ignores a malformed answer set and falls back to the ungrouped rule', () => {
+    // The set names the label column, so it is dropped — the table behaves
+    // exactly as an ungrouped one rather than becoming unanswerable.
+    const bad: FormField = { ...grouped, answerSets: [{ key: 'v', columnKeys: ['item', 'ok'] }] };
+    expect(incompleteFixedRowIndices(bad, rows('ok', 'ok', 'ok'))).toEqual([]);
+  });
+
+  it('leaves an ungrouped fixed-row table behaving exactly as before', () => {
+    expect(incompleteFixedRowIndices(checklist, rows('ok', 'ok', 'ok'))).toEqual([]);
+    // The old any-cell rule still accepts a double-ticked row on an ungrouped table.
+    const both: RepeatingRowValue[] = [
+      { ok: true, na: true },
+      { ok: true, na: null },
+      { ok: null, na: true },
+    ];
+    expect(incompleteFixedRowIndices(checklist, both)).toEqual([]);
+  });
+});
+
+describe('answer sets — open row-entry tables', () => {
+  const openTable: FormField = { ...grouped, id: 'faults', fixedRows: undefined };
+
+  it('accepts rows that each carry exactly one answer', () => {
+    expect(isFieldAnswered(openTable, rows('ok', 'na'))).toBe(true);
+  });
+
+  it('rejects a contradictory row even with no fixed rows', () => {
+    expect(isFieldAnswered(openTable, [{ ok: true, no: true, na: null }])).toBe(false);
+  });
+
+  it('rejects a row that answers nothing', () => {
+    expect(isFieldAnswered(openTable, [{ ok: null, no: null, na: null }])).toBe(false);
+  });
+
+  it('is unanswered when there are no rows at all', () => {
+    expect(isFieldAnswered(openTable, [])).toBe(false);
   });
 });
