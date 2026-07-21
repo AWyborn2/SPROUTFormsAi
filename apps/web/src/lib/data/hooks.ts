@@ -409,6 +409,16 @@ export function useUploadOrgLogo() {
 }
 
 /**
+ * Propose branding from the org's website. Read-only on the server: the
+ * result is a draft the owner reviews, so there is nothing to invalidate.
+ */
+export function useBrandScan() {
+  return useMutation({
+    mutationFn: async (input: { url: string }) => store.scanBrandFromWebsite(input),
+  });
+}
+
+/**
  * Update the org's name, branding, teamSize, and/or onboarding completion via
  * `PATCH /org`. Invalidates the session (the app shell shows `orgName` and
  * onboarding state from `/auth/me`) and the audit log (the API records the

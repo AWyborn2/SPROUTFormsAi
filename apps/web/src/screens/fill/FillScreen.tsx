@@ -2,12 +2,14 @@ import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Icon, Input, useToast } from '@formai/ui';
 import type { SubmissionValue } from '@formai/shared';
+import { resolveTheme } from '@formai/shared';
 import { ApiError } from '../../lib/data/api-client.js';
 import { useFillForm, useSubmitFill } from '../../lib/data/hooks.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
-import { fillSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
+import { fillSpanClass, resolveFillSpan, resolveLayout } from '../../lib/fill-layout.js';
 import { FormLayoutFrame } from './FormLayoutFrame.js';
+import { ConversationalFill } from './ConversationalFill.js';
 import {
   EMAIL_RE,
   requiredFieldErrors,
@@ -143,6 +145,40 @@ export function FillScreen() {
     );
   }
 
+  // Identity is captured the same way in both bodies — the flat page shows it
+  // at the top, the stepper shows it on its first screen — so it lives here
+  // rather than being written twice and drifting.
+  const identityBlock = (
+    <div>
+      <div className="mb-3.5 flex items-center gap-2 border-b border-border-subtle pb-2.5 text-sm font-bold text-text-primary">
+        Your details
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Input
+          label="Your name"
+          value={submitterName}
+          placeholder="Rebecca Hsu"
+          onChange={(e) => setSubmitterName(e.target.value)}
+        />
+        <Input
+          label="Email"
+          required
+          type="email"
+          leadingIcon="mail"
+          value={submitterEmail}
+          error={emailError}
+          placeholder="you@company.com"
+          onChange={(e) => {
+            setSubmitterEmail(e.target.value);
+            setEmailError('');
+          }}
+        />
+      </div>
+    </div>
+  );
+
+  const isConversational = resolveLayout(resolveTheme(fill.orgBranding?.theme).layout) === 'conversational';
+
   return (
     <ExternalShell orgName={fill.orgName} branding={fill.orgBranding}>
       {/* Arrangement (card / hero / split), container geometry and logo
@@ -156,33 +192,19 @@ export function FillScreen() {
         branding={fill.orgBranding}
         container={fill.container}
       >
-            {/* Submitter identity — rides along as submitterName/submitterEmail. */}
-            <div>
-              <div className="mb-3.5 flex items-center gap-2 border-b border-border-subtle pb-2.5 text-sm font-bold text-text-primary">
-                Your details
-              </div>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Input
-                  label="Your name"
-                  value={submitterName}
-                  placeholder="Rebecca Hsu"
-                  onChange={(e) => setSubmitterName(e.target.value)}
-                />
-                <Input
-                  label="Email"
-                  required
-                  type="email"
-                  leadingIcon="mail"
-                  value={submitterEmail}
-                  error={emailError}
-                  placeholder="you@company.com"
-                  onChange={(e) => {
-                    setSubmitterEmail(e.target.value);
-                    setEmailError('');
-                  }}
-                />
-              </div>
-            </div>
+        {isConversational ? (
+          <ConversationalFill
+            fields={fill.fields}
+            values={values}
+            errors={errors}
+            setValue={setValue}
+            onSubmit={() => onSubmit(fill)}
+            submitting={submit.isPending}
+            header={identityBlock}
+          />
+        ) : (
+          <>
+            {identityBlock}
 
             {/* The served version's real fields, via the shared renderer, on
                 the builder's 12-col grid (single column below `sm`). */}
@@ -217,6 +239,8 @@ export function FillScreen() {
               {submit.isPending ? 'Submitting…' : 'Submit'}
               <Icon name="arrow-right" size={17} />
             </button>
+          </>
+        )}
       </FormLayoutFrame>
       <div className="mt-4 flex items-center justify-center gap-1.5 text-[11.5px] text-text-tertiary">
         <Icon name="shield-check" size={13} />

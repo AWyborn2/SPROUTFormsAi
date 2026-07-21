@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Button, Icon, Input, Switch, useToast } from '@formai/ui';
 import { BrandColorFields } from '../../components/branding/BrandColorFields.js';
 import { BrandedFormPreview } from '../../components/branding/BrandedFormPreview.js';
+import { BrandScanPanel } from '../../components/branding/BrandScanPanel.js';
 import { FontPicker } from '../../components/branding/FontPicker.js';
 import { LogoUploadControl } from '../../components/branding/LogoUploadControl.js';
 import { ThemeCustomizer } from '../../components/branding/ThemeCustomizer.js';
@@ -58,6 +59,15 @@ export function WhiteLabelScreen() {
           </p>
 
           <fieldset disabled={!brandingAccess.editable} className="border-0 p-0">
+            {/* Fastest path to on-brand: read it off the org's own site. */}
+            <div className="mb-[22px]">
+              <BrandScanPanel
+                branding={branding}
+                onApply={(patch) => setBranding(patch)}
+                disabled={!brandingAccess.editable}
+              />
+            </div>
+
             {/* Presets first: pick a look, keep your colours. */}
             <div className="mb-[9px] text-[13px] font-semibold">Style preset</div>
             <div className="mb-[22px]">

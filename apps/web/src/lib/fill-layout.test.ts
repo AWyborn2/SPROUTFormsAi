@@ -20,13 +20,8 @@ describe('resolveLayout', () => {
     expect(resolveLayout('split')).toBe('split');
   });
 
-  /**
-   * Conversational replaces the fill engine rather than reframing it. Until
-   * that lands, a form set to it must still serve — degrading to a card beats
-   * rendering nothing for a respondent who cannot fix it.
-   */
-  it('degrades conversational to card until the stepper ships', () => {
-    expect(resolveLayout('conversational')).toBe('card');
+  it('returns conversational now that the stepper renders it', () => {
+    expect(resolveLayout('conversational')).toBe('conversational');
   });
 
   it('degrades anything unrecognised to card', () => {
