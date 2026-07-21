@@ -27,6 +27,18 @@ function authHeader() {
   return { cookie: `fai_session=${sealSession(tenant)}` };
 }
 
+/** Version create/publish, archive, and restore gate on `forms.edit`; hard delete on `forms.delete`. */
+const EDITOR_PERMS = {
+  orgId: 'org-1',
+  role: 'admin',
+  matrix: { forms: { view: true, create: true, edit: true, delete: true }, submissions: {}, team: {}, billing: {}, audit: {} },
+};
+const VIEWER_PERMS = {
+  orgId: 'org-1',
+  role: 'viewer',
+  matrix: { forms: { view: true, create: false, edit: false, delete: false }, submissions: {}, team: {}, billing: {}, audit: {} },
+};
+
 /** `.values(...)` result that is awaitable and exposes `.returning()`. */
 function insertResult(rows: unknown[]) {
   const awaitable = Promise.resolve(undefined) as Promise<undefined> & {
@@ -51,6 +63,8 @@ function fakeDb(opts: {
   formTemplateVersionsFindFirst?: unknown;
   formTemplateVersionsFindMany?: unknown[];
   usersFindMany?: unknown[];
+  usersFindFirst?: unknown;
+  rolePermissionsFindFirst?: unknown;
   insertedTemplate?: unknown;
   insertedVersion?: unknown;
   submissionsCountRows?: unknown[];
@@ -58,35 +72,58 @@ function fakeDb(opts: {
 }) {
   const insertValues = vi.fn();
   const updateSet = vi.fn();
+  const deleteWhere = vi.fn();
 
-  const db = {
-    query: {
-      formTemplates: {
-        findFirst: vi.fn().mockResolvedValue(opts.formTemplatesFindFirst),
-        findMany: vi.fn().mockResolvedValue(opts.formTemplatesFindMany ?? []),
-      },
-      formTemplateVersions: {
-        findFirst: vi.fn().mockResolvedValue(opts.formTemplateVersionsFindFirst),
-        findMany: vi.fn().mockResolvedValue(opts.formTemplateVersionsFindMany ?? []),
-      },
-      users: {
-        findMany: vi.fn().mockResolvedValue(opts.usersFindMany ?? []),
-      },
-    },
-    insert: vi.fn((table: unknown) => ({
+  const makeInsert = () =>
+    vi.fn((table: unknown) => ({
       values: (v: unknown) => {
         insertValues(table, v);
         if (table === schema.formTemplates) return insertResult([opts.insertedTemplate]);
         if (table === schema.formTemplateVersions) return insertResult([opts.insertedVersion]);
         return insertResult([]);
       },
-    })),
+    }));
+  const makeDelete = () =>
+    vi.fn((table: unknown) => ({
+      where: vi.fn((cond: unknown) => {
+        deleteWhere(table, cond);
+        return Promise.resolve(undefined);
+      }),
+    }));
+
+  const query = {
+    formTemplates: {
+      findFirst: vi.fn().mockResolvedValue(opts.formTemplatesFindFirst),
+      findMany: vi.fn().mockResolvedValue(opts.formTemplatesFindMany ?? []),
+    },
+    formTemplateVersions: {
+      findFirst: vi.fn().mockResolvedValue(opts.formTemplateVersionsFindFirst),
+      findMany: vi.fn().mockResolvedValue(opts.formTemplateVersionsFindMany ?? []),
+    },
+    users: {
+      findMany: vi.fn().mockResolvedValue(opts.usersFindMany ?? []),
+      findFirst: vi.fn().mockResolvedValue(opts.usersFindFirst),
+    },
+    rolePermissions: {
+      findFirst: vi.fn().mockResolvedValue(opts.rolePermissionsFindFirst),
+    },
+  };
+
+  const transaction = vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+    const tx = { query, insert: makeInsert(), delete: makeDelete() };
+    return fn(tx);
+  });
+
+  const db = {
+    query,
+    insert: makeInsert(),
     update: vi.fn((table: unknown) => ({
       set: (v: unknown) => {
         updateSet(table, v);
         return { where: vi.fn().mockResolvedValue(undefined) };
       },
     })),
+    delete: makeDelete(),
     select: vi.fn(() => ({
       from: vi.fn((table: unknown) => ({
         where: vi.fn(() => {
@@ -97,9 +134,10 @@ function fakeDb(opts: {
         }),
       })),
     })),
+    transaction,
   } as unknown as Db;
 
-  return { db, insertValues, updateSet };
+  return { db, insertValues, updateSet, deleteWhere, transaction };
 }
 
 afterEach(() => {
@@ -322,6 +360,7 @@ describe('POST /forms/:id/versions', () => {
     const template = { id: 't1', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
     const { db, updateSet } = fakeDb({
       formTemplatesFindFirst: template,
+      rolePermissionsFindFirst: EDITOR_PERMS,
       insertedVersion: { id: 'v-new', versionLabel: 'v2' },
       versionsCountRows: [{ count: 1 }],
     });
@@ -347,6 +386,7 @@ describe('POST /forms/:id/versions', () => {
     const template = { id: 't1', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
     const { db, updateSet } = fakeDb({
       formTemplatesFindFirst: template,
+      rolePermissionsFindFirst: EDITOR_PERMS,
       insertedVersion: { id: 'v-new', versionLabel: 'v2' },
       versionsCountRows: [{ count: 1 }],
     });
@@ -371,6 +411,7 @@ describe('POST /forms/:id/versions', () => {
     const template = { id: 't1', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
     const { db, insertValues } = fakeDb({
       formTemplatesFindFirst: template,
+      rolePermissionsFindFirst: EDITOR_PERMS,
       // The previous current version holds the round-trip export handle.
       formTemplateVersionsFindFirst: { id: 'v1', templateId: 't1', sourcePdfAssetId: 'asset-9' },
       insertedVersion: { id: 'v-new', versionLabel: 'v2' },
@@ -397,6 +438,7 @@ describe('POST /forms/:id/versions', () => {
     const template = { id: 't1', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
     const { db, insertValues } = fakeDb({
       formTemplatesFindFirst: template,
+      rolePermissionsFindFirst: EDITOR_PERMS,
       formTemplateVersionsFindFirst: { id: 'v1', templateId: 't1', sourcePdfAssetId: null },
       insertedVersion: { id: 'v-new', versionLabel: 'v2' },
       versionsCountRows: [{ count: 1 }],
@@ -419,7 +461,7 @@ describe('POST /forms/:id/versions', () => {
   });
 
   it('404s when the template does not exist in the caller org', async () => {
-    mockDbValue = fakeDb({ formTemplatesFindFirst: undefined }).db;
+    mockDbValue = fakeDb({ formTemplatesFindFirst: undefined, rolePermissionsFindFirst: EDITOR_PERMS }).db;
     const { server, base } = startApp();
     try {
       const res = await fetch(`${base}/forms/missing/versions`, {
@@ -428,6 +470,429 @@ describe('POST /forms/:id/versions', () => {
         body: JSON.stringify({ fields: [] }),
       });
       expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a role without forms.edit — version create can publish, so both publish doors gate alike', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: { id: 't1', status: 'published', currentVersionId: 'v1' },
+      rolePermissionsFindFirst: VIEWER_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/versions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ fields: [], publish: true }),
+      });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'forbidden' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('body sourcePdfAssetId overrides the inherited one — re-extract carries the NEW pdf', async () => {
+    const template = { id: 't1', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      formTemplateVersionsFindFirst: { id: 'v1', templateId: 't1', sourcePdfAssetId: 'asset-old' },
+      insertedVersion: { id: 'v-new', versionLabel: 'v2' },
+      versionsCountRows: [{ count: 1 }],
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/versions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ fields: [], sourcePdfAssetId: 'asset-new' }),
+      });
+      expect(res.status).toBe(201);
+      const versionInsertCall = insertValues.mock.calls.find(([table]) => table === schema.formTemplateVersions);
+      expect(versionInsertCall?.[1]).toMatchObject({ sourcePdfAssetId: 'asset-new', state: 'draft' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('inherits the previous current version container when the body sends none', async () => {
+    const template = { id: 't1', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
+    const customContainer = { maxWidth: 720, padding: 30, radius: 8, borderWidth: 2, borderColor: '#000', background: '#fff', shadow: 'none' };
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: template,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      formTemplateVersionsFindFirst: { id: 'v1', templateId: 't1', sourcePdfAssetId: null, container: customContainer },
+      insertedVersion: { id: 'v-new', versionLabel: 'v2' },
+      versionsCountRows: [{ count: 1 }],
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/versions`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ fields: [] }),
+      });
+      expect(res.status).toBe(201);
+      const versionInsertCall = insertValues.mock.calls.find(([table]) => table === schema.formTemplateVersions);
+      expect(versionInsertCall?.[1]).toMatchObject({ container: customContainer });
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('POST /forms/:id/versions/:versionId/publish', () => {
+  const template = { id: 't1', name: 'Vendor onboarding', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
+
+  it('publishes a draft version: state flips, currentVersionId moves, template published', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: template,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      formTemplateVersionsFindFirst: { id: 'v2', templateId: 't1', versionLabel: 'v2', state: 'draft' },
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/versions/v2/publish`, {
+        method: 'POST',
+        headers: authHeader(),
+      });
+      expect(res.status).toBe(200);
+      const versionUpdate = updateSet.mock.calls.find(([table]) => table === schema.formTemplateVersions);
+      expect(versionUpdate?.[1]).toMatchObject({ state: 'published', publishedBy: 'u1' });
+      const templateUpdate = updateSet.mock.calls.find(([table]) => table === schema.formTemplates);
+      expect(templateUpdate?.[1]).toMatchObject({ currentVersionId: 'v2', status: 'published' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('publishing on an archived template restores it to published (restore-on-publish)', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: { ...template, status: 'archived' },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      formTemplateVersionsFindFirst: { id: 'v2', templateId: 't1', versionLabel: 'v2', state: 'draft' },
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/versions/v2/publish`, {
+        method: 'POST',
+        headers: authHeader(),
+      });
+      expect(res.status).toBe(200);
+      const templateUpdate = updateSet.mock.calls.find(([table]) => table === schema.formTemplates);
+      expect(templateUpdate?.[1]).toMatchObject({ status: 'published' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s when the version is already published', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: template,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      formTemplateVersionsFindFirst: { id: 'v1', templateId: 't1', versionLabel: 'v1', state: 'published' },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/versions/v1/publish`, { method: 'POST', headers: authHeader() });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'version_already_published' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s when the version belongs to another template or does not exist', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: template,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      formTemplateVersionsFindFirst: undefined,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/versions/other/publish`, { method: 'POST', headers: authHeader() });
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a role without forms.edit', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: template,
+      rolePermissionsFindFirst: VIEWER_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/versions/v2/publish`, { method: 'POST', headers: authHeader() });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('POST /forms/:id/archive and /restore', () => {
+  const published = { id: 't1', name: 'Vendor onboarding', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
+
+  it('archives a published form: status-only flip, currentVersionId untouched', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: published,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/archive`, { method: 'POST', headers: authHeader() });
+      expect(res.status).toBe(200);
+      const templateUpdate = updateSet.mock.calls.find(([table]) => table === schema.formTemplates);
+      expect(templateUpdate?.[1]).toMatchObject({ status: 'archived' });
+      expect(templateUpdate?.[1]).not.toHaveProperty('currentVersionId');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('archives a draft form too (a draft with fills is undeletable — archive is its exit)', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: { ...published, status: 'draft' },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/archive`, { method: 'POST', headers: authHeader() });
+      expect(res.status).toBe(200);
+      const templateUpdate = updateSet.mock.calls.find(([table]) => table === schema.formTemplates);
+      expect(templateUpdate?.[1]).toMatchObject({ status: 'archived' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s archiving an already-archived form', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: { ...published, status: 'archived' },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/archive`, { method: 'POST', headers: authHeader() });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'form_archived' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('restore returns to published when the current version is published', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: { ...published, status: 'archived' },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      formTemplateVersionsFindFirst: { id: 'v1', templateId: 't1', state: 'published' },
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/restore`, { method: 'POST', headers: authHeader() });
+      expect(res.status).toBe(200);
+      const templateUpdate = updateSet.mock.calls.find(([table]) => table === schema.formTemplates);
+      expect(templateUpdate?.[1]).toMatchObject({ status: 'published' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('restore returns to draft when the form was never published', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: { ...published, status: 'archived' },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      formTemplateVersionsFindFirst: { id: 'v1', templateId: 't1', state: 'draft' },
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/restore`, { method: 'POST', headers: authHeader() });
+      expect(res.status).toBe(200);
+      const templateUpdate = updateSet.mock.calls.find(([table]) => table === schema.formTemplates);
+      expect(templateUpdate?.[1]).toMatchObject({ status: 'draft' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s restoring a form that is not archived', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: published,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/restore`, { method: 'POST', headers: authHeader() });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'form_not_archived' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s archive for a role without forms.edit', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: published,
+      rolePermissionsFindFirst: VIEWER_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/archive`, { method: 'POST', headers: authHeader() });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for another tenant\'s form id', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: undefined,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/foreign/archive`, { method: 'POST', headers: authHeader() });
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('DELETE /forms/:id', () => {
+  const draft = { id: 't1', name: 'Old draft', status: 'draft', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
+
+  it('deletes a draft with no submissions: 204, delete and audit inside one transaction', async () => {
+    const { db, deleteWhere, insertValues, transaction } = fakeDb({
+      formTemplatesFindFirst: draft,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+      submissionsCountRows: [{ count: 0 }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1`, { method: 'DELETE', headers: authHeader() });
+      expect(res.status).toBe(204);
+      expect(transaction).toHaveBeenCalledTimes(1);
+      const deletedTables = deleteWhere.mock.calls.map(([table]) => table);
+      expect(deletedTables).toContain(schema.formTemplates);
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert?.[1]).toMatchObject({ action: 'Deleted form', target: 'Old draft', category: 'forms' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s form_has_submissions for a draft with fills — drafts CAN have authed submissions', async () => {
+    const { db, deleteWhere } = fakeDb({
+      formTemplatesFindFirst: draft,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      submissionsCountRows: [{ count: 3 }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1`, { method: 'DELETE', headers: authHeader() });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'form_has_submissions' });
+      expect(deleteWhere).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s form_not_draft for a published form', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: { ...draft, status: 'published' },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1`, { method: 'DELETE', headers: authHeader() });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'form_not_draft' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s form_not_draft for an archived form', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: { ...draft, status: 'archived' },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1`, { method: 'DELETE', headers: authHeader() });
+      expect(res.status).toBe(409);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a role without forms.delete', async () => {
+    const builderPerms = {
+      orgId: 'org-1',
+      role: 'builder',
+      matrix: { forms: { view: true, create: true, edit: true, delete: false }, submissions: {}, team: {}, billing: {}, audit: {} },
+    };
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: draft,
+      rolePermissionsFindFirst: builderPerms,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1`, { method: 'DELETE', headers: authHeader() });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'forbidden' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for another tenant\'s or unknown form id', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: undefined,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/foreign`, { method: 'DELETE', headers: authHeader() });
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('503s when the DB is unconfigured', async () => {
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1`, { method: 'DELETE', headers: authHeader() });
+      expect(res.status).toBe(503);
     } finally {
       server.close();
     }

@@ -34,6 +34,13 @@ interface ImportSession {
   extraction: ExtractionResult | null;
   /** User-facing failure message when status is 'error'. */
   error: string | null;
+  /**
+   * Re-extract mode: the EXISTING form this wizard run updates (a new version
+   * of it), instead of creating a new form. Null = normal import. Cleared on
+   * reset, so entering the wizard fresh from "Import PDF" never silently
+   * retargets an old re-extract.
+   */
+  targetFormId: string | null;
 }
 
 const EMPTY_SESSION: Omit<ImportSession, 'designNotes' | 'fields'> = {
@@ -43,6 +50,7 @@ const EMPTY_SESSION: Omit<ImportSession, 'designNotes' | 'fields'> = {
   assetId: null,
   extraction: null,
   error: null,
+  targetFormId: null,
 };
 
 function emptySession(): ImportSession {
@@ -83,6 +91,11 @@ export function resetImportSession() {
   heldBase64 = null;
   session = emptySession();
   listeners.forEach((l) => l());
+}
+
+/** Enter (or leave, with null) re-extract mode — set by step 1 from its `?form=` param, after reset. */
+export function setImportTarget(formId: string | null) {
+  update({ targetFormId: formId });
 }
 
 export const MAX_UPLOAD_MB = 25;
@@ -128,7 +141,9 @@ export async function fileToBase64(file: File): Promise<string> {
 export async function startExtraction(file: File): Promise<void> {
   const run = ++runId;
   heldBase64 = null;
-  update({ ...emptySession(), status: 'uploading', fileName: file.name });
+  // Starting over with a new file keeps the re-extract target — the target is
+  // wizard-scoped (cleared by reset on step-1 entry), not file-scoped.
+  update({ ...emptySession(), targetFormId: session.targetFormId, status: 'uploading', fileName: file.name });
 
   let base64: string;
   try {

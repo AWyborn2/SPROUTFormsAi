@@ -175,6 +175,72 @@ export function usePublishImport() {
   });
 }
 
+/** Re-extract: save the re-imported PDF as a new version (draft or published) of an existing form. */
+export function useCreateVersionFromImport() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { formId: string; fields: FormField[]; sourcePdfAssetId?: string; publish: boolean }) =>
+      store.createVersionFromImport(input),
+    onSuccess: (_summary, input) => {
+      qc.invalidateQueries({ queryKey: keys.forms });
+      qc.invalidateQueries({ queryKey: keys.form(input.formId) });
+      qc.invalidateQueries({ queryKey: keys.dashboard });
+    },
+  });
+}
+
+/** Publish an existing draft version from version history — flips live fill links to it immediately. */
+export function usePublishFormVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { formId: string; versionId: string }) => store.publishFormVersion(input),
+    onSuccess: (_summary, input) => {
+      qc.invalidateQueries({ queryKey: keys.forms });
+      qc.invalidateQueries({ queryKey: keys.form(input.formId) });
+      qc.invalidateQueries({ queryKey: keys.dashboard });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+export function useArchiveForm() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => store.archiveForm(id),
+    onSuccess: (_summary, id) => {
+      qc.invalidateQueries({ queryKey: keys.forms });
+      qc.invalidateQueries({ queryKey: keys.form(id) });
+      qc.invalidateQueries({ queryKey: keys.dashboard });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+export function useRestoreForm() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => store.restoreForm(id),
+    onSuccess: (_summary, id) => {
+      qc.invalidateQueries({ queryKey: keys.forms });
+      qc.invalidateQueries({ queryKey: keys.form(id) });
+      qc.invalidateQueries({ queryKey: keys.dashboard });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+export function useDeleteForm() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => store.deleteForm(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.forms });
+      qc.invalidateQueries({ queryKey: keys.dashboard });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
 export function useFillForm(token: string | undefined) {
   return useQuery({
     queryKey: keys.fillForm(token ?? ''),

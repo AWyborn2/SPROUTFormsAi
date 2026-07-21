@@ -23,6 +23,7 @@ import {
 } from '@formai/ui';
 import type { FormField, FormFieldType } from '@formai/shared';
 import { FORM_FIELD_TYPES } from '@formai/shared';
+import { ApiError } from '../../lib/data/api-client.js';
 import { useForm, usePublishBuilder, usePublishVersion } from '../../lib/data/hooks.js';
 import { previewSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
 import { isModChord, isTypingTarget, MOD_LABEL, ALT_LABEL } from '../../lib/keyboard/platform.js';
@@ -230,7 +231,16 @@ function BuilderEditor({ init }: { init: BuilderInit }) {
             toast({ message: `"${summary.name}" published as ${summary.version}.`, variant: 'success' });
             navigate('/app/forms');
           },
-          onError,
+          onError: (err) => {
+            // A 404 here means the form was deleted from under this session —
+            // retrying can never succeed, so bounce (mirrors the load path).
+            if (err instanceof ApiError && err.status === 404) {
+              toast({ message: 'This form was deleted — your edits could not be published.', variant: 'danger' });
+              navigate('/app/forms');
+              return;
+            }
+            onError();
+          },
         },
       );
     } else {

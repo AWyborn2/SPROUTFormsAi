@@ -243,6 +243,28 @@ describe('POST /forms/:id/fill-links', () => {
     }
   });
 
+  it('409s form_archived when minting on an archived template — existing links keep working, new distribution is blocked', async () => {
+    const { db, insertValues } = fakeDb({
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      formTemplatesFindFirst: { ...PUBLISHED_TEMPLATE, status: 'archived' },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1/fill-links`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'form_archived' });
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
   it('409s when the template has no current version at all', async () => {
     const { db, insertValues } = fakeDb({
       rolePermissionsFindFirst: EDITOR_PERMS,
@@ -506,6 +528,24 @@ describe('GET /fill/:token (public, no auth)', () => {
       server.close();
     }
   });
+
+  it('keeps serving an ARCHIVED template — archive is metadata-only, the public path reads version state', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: { ...PUBLISHED_TEMPLATE, status: 'archived' },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: { id: 'org-1', name: 'Charles Hull', branding: BRANDING },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { versionId: string };
+      expect(body.versionId).toBe('v1');
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe('POST /fill/:token/submissions (public, no auth)', () => {
@@ -555,6 +595,28 @@ describe('POST /fill/:token/submissions (public, no auth)', () => {
         actorName: 'External fill link',
         category: 'submissions',
       });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepts a submission for an ARCHIVED template exactly as before archiving', async () => {
+    const { db, insertValues } = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: { ...PUBLISHED_TEMPLATE, status: 'archived' },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}/submissions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(validBody),
+      });
+      expect(res.status).toBe(201);
+      const submissionInsert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(submissionInsert?.[1]).toMatchObject({ templateId: 't1', templateVersionId: 'v1' });
     } finally {
       server.close();
     }

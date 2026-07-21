@@ -371,6 +371,40 @@ export const store = {
       .then(toFormSummary);
   },
 
+  /** Re-extract: a new version of an EXISTING form carrying the re-imported PDF. */
+  createVersionFromImport(input: {
+    formId: string;
+    fields: FormField[];
+    sourcePdfAssetId?: string;
+    publish: boolean;
+  }): Promise<FormSummary> {
+    return apiClient
+      .post<FormSummaryDto>(`/forms/${input.formId}/versions`, {
+        fields: input.fields,
+        ...(input.sourcePdfAssetId ? { sourcePdfAssetId: input.sourcePdfAssetId } : {}),
+        publish: input.publish,
+      })
+      .then(toFormSummary);
+  },
+
+  publishFormVersion(input: { formId: string; versionId: string }): Promise<FormSummary> {
+    return apiClient
+      .post<FormSummaryDto>(`/forms/${input.formId}/versions/${input.versionId}/publish`, {})
+      .then(toFormSummary);
+  },
+
+  archiveForm(id: string): Promise<FormSummary> {
+    return apiClient.post<FormSummaryDto>(`/forms/${id}/archive`, {}).then(toFormSummary);
+  },
+
+  restoreForm(id: string): Promise<FormSummary> {
+    return apiClient.post<FormSummaryDto>(`/forms/${id}/restore`, {}).then(toFormSummary);
+  },
+
+  deleteForm(id: string): Promise<void> {
+    return apiClient.delete<void>(`/forms/${id}`);
+  },
+
   /* ── Public fill links ─────────────────────────────────────────────────── */
 
   getFillForm(token: string): Promise<PublicFillForm | undefined> {
