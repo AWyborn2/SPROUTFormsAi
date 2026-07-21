@@ -272,3 +272,133 @@ describe('extractForm — fixedRows normalization', () => {
     expect(result.fields[0]?.fixedRows).toEqual(FIXED_ROWS);
   });
 });
+
+describe('extractForm — answerSets proposals', () => {
+  function oneFieldResponse(field: Record<string, unknown>): AnthropicMessage {
+    return {
+      content: [
+        { type: 'tool_use', name: EXTRACT_TOOL_NAME, input: { fields: [field], designNotes: [] } },
+      ],
+    };
+  }
+
+  async function extractOne(field: Record<string, unknown>) {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(oneFieldResponse(field));
+    const result = await extractForm(pdf, {
+      fileName: 'flat.pdf',
+      anthropic: { messages: { create } },
+    });
+    return result.fields[0]!;
+  }
+
+  const OK_NA_COLUMNS = [
+    { key: 'item', label: 'Item', type: 'text' },
+    { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+    { key: 'na', label: 'NA', type: 'boolean_yes_no' },
+    { key: 'comments', label: 'Comments', type: 'text' },
+  ];
+
+  it('keeps an OK/NA proposal as one two-column answer set', async () => {
+    const field = await extractOne({
+      label: 'Pre-start checks',
+      type: 'repeating_group',
+      confidence: 0.9,
+      columns: OK_NA_COLUMNS,
+      answerSets: [{ key: 'status', label: 'Status', columnKeys: ['ok', 'na'], required: true }],
+    });
+
+    expect(field.answerSets).toHaveLength(1);
+    expect(field.answerSets?.[0]?.key).toBe('status');
+    expect(field.answerSets?.[0]?.label).toBe('Status');
+    expect(field.answerSets?.[0]?.columnKeys).toEqual(['ok', 'na']);
+    expect(field.answerSets?.[0]?.required).toBe(true);
+  });
+
+  it('keeps a ✓ / × / N-A proposal as one three-column answer set', async () => {
+    const field = await extractOne({
+      label: 'Competency assessment',
+      type: 'repeating_group',
+      confidence: 0.88,
+      columns: [
+        { key: 'item', label: 'Task', type: 'text' },
+        { key: 'tick', label: '✓', type: 'boolean_yes_no' },
+        { key: 'cross', label: '×', type: 'boolean_yes_no' },
+        { key: 'na', label: 'N-A', type: 'boolean_yes_no' },
+      ],
+      answerSets: [{ key: 'outcome', columnKeys: ['tick', 'cross', 'na'] }],
+    });
+
+    expect(field.answerSets).toHaveLength(1);
+    expect(field.answerSets?.[0]?.columnKeys).toEqual(['tick', 'cross', 'na']);
+  });
+
+  it('drops a set naming a column absent from columns, still parsing the field', async () => {
+    const field = await extractOne({
+      label: 'Pre-start checks',
+      type: 'repeating_group',
+      confidence: 0.9,
+      columns: OK_NA_COLUMNS,
+      answerSets: [{ key: 'status', columnKeys: ['ok', 'nope'] }],
+    });
+
+    expect(field.answerSets).toBeUndefined();
+    expect(field.columns?.map((c) => c.key)).toEqual(['item', 'ok', 'na', 'comments']);
+  });
+
+  it('drops a set that names the label column', async () => {
+    const field = await extractOne({
+      label: 'Pre-start checks',
+      type: 'repeating_group',
+      confidence: 0.9,
+      columns: OK_NA_COLUMNS,
+      answerSets: [{ key: 'status', columnKeys: ['item', 'ok'] }],
+    });
+
+    expect(field.answerSets).toBeUndefined();
+  });
+
+  it('drops a set with a single column key', async () => {
+    const field = await extractOne({
+      label: 'Pre-start checks',
+      type: 'repeating_group',
+      confidence: 0.9,
+      columns: OK_NA_COLUMNS,
+      answerSets: [{ key: 'status', columnKeys: ['ok'] }],
+    });
+
+    expect(field.answerSets).toBeUndefined();
+  });
+
+  it('keeps at most one of two sets claiming the same column', async () => {
+    const field = await extractOne({
+      label: 'Pre-start checks',
+      type: 'repeating_group',
+      confidence: 0.9,
+      columns: OK_NA_COLUMNS,
+      answerSets: [
+        { key: 'a', columnKeys: ['ok', 'na'] },
+        { key: 'b', columnKeys: ['na', 'comments'] },
+      ],
+    });
+
+    expect(field.answerSets).toHaveLength(1);
+    expect(field.answerSets?.[0]?.key).toBe('a');
+  });
+
+  it('leaves answerSets absent when the model proposes none', async () => {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(toolUseResponse());
+
+    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+
+    expect(result.fields.every((f) => f.answerSets === undefined)).toBe(true);
+  });
+
+  it('leaves the AcroForm path untouched — scalar fields carry no answerSets', async () => {
+    const pdf = await makeAcroFormPdf();
+    const result = await extractForm(pdf, { fileName: 'acro.pdf' });
+
+    expect(result.fields.every((f) => f.answerSets === undefined)).toBe(true);
+  });
+});

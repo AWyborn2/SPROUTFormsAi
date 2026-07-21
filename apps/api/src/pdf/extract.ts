@@ -18,12 +18,14 @@ import {
   PDFTextField,
 } from 'pdf-lib';
 import type {
+  AnswerSet,
   ExtractedField,
   ExtractionResult,
   FormFieldType,
   RepeatingColumn,
   SourcePosition,
 } from '@formai/shared';
+import { resolveAnswerSets } from '@formai/shared';
 import { EXTRACT_TOOL_NAME, extractFormFieldsTool } from './tool-schema.js';
 
 /** Minimum tokens for the forced tool call — undersizing makes it fail outright. */
@@ -62,7 +64,12 @@ const EXTRACTION_PROMPT =
   'labels (a fixed-item checklist such as "Engine oil level", "Park brake"), those are not blank ' +
   'rows: emit the item labels in order as fixedRows, and still list the item/label column as the ' +
   'FIRST columns entry (type text). If a line looks like plain text but is really a ' +
-  'signature, still classify it and add a note. Give every field a confidence score.';
+  'signature, still classify it and add a note. In a table, distinguish columns that are ' +
+  'INDEPENDENT checkboxes (each can be ticked on its own, e.g. "Cleaned" and "Inspected") from ' +
+  'columns that are ALTERNATIVES sharing ONE answer per row — exactly one may be ticked. The ' +
+  'house shapes are OK / NA, ✓ / × / N-A, and Pass / Fail / NA. Group alternatives into an ' +
+  'answerSets entry naming those column keys; leave independent checkboxes ungrouped. ' +
+  'Give every field a confidence score.';
 
 /** Read the widget rectangle of an AcroForm field into PDF point space. */
 function widgetPosition(field: {
@@ -191,6 +198,23 @@ function toFixedRows(raw: unknown): string[] | undefined {
   return raw.map(String);
 }
 
+/**
+ * Coerce the model's answerSets proposal. Malformed entries collapse to
+ * `undefined` rather than throwing — the same tolerance as `toColumns`.
+ */
+function toAnswerSets(raw: unknown): AnswerSet[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const sets = raw
+    .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
+    .map((s, i) => ({
+      key: String(s.key ?? `set_${i + 1}`),
+      columnKeys: Array.isArray(s.columnKeys) ? s.columnKeys.map(String) : [],
+      ...(typeof s.label === 'string' ? { label: s.label } : {}),
+      ...(typeof s.required === 'boolean' ? { required: s.required } : {}),
+    }));
+  return sets.length > 0 ? sets : undefined;
+}
+
 function normalizeField(raw: Record<string, unknown>, index: number): ExtractedField {
   const fixedRows = toFixedRows(raw.fixedRows);
   let columns = toColumns(raw.columns);
@@ -208,6 +232,17 @@ function normalizeField(raw: Record<string, unknown>, index: number): ExtractedF
     }
     columns = [{ key, label: 'Item', type: 'text' }, ...(columns ?? [])];
   }
+  // Answer sets are a PROPOSAL, validated against the final column list (after
+  // any synthetic label column is seeded, so the label-column rule sees the
+  // real first column). Invalid proposals are dropped, never fatal: the table
+  // simply publishes ungrouped and the reviewer can regroup it. Validation is
+  // delegated to `resolveAnswerSets` so extraction, the fill view, and the
+  // validator all agree on exactly which sets are legal.
+  const proposedSets = toAnswerSets(raw.answerSets);
+  const resolved = proposedSets
+    ? resolveAnswerSets({ columns, answerSets: proposedSets }).sets
+    : [];
+  const answerSets = resolved.length > 0 ? resolved : undefined;
   return {
     id: `ai_${index + 1}`,
     label: String(raw.label ?? `Field ${index + 1}`),
@@ -223,6 +258,7 @@ function normalizeField(raw: Record<string, unknown>, index: number): ExtractedF
       ? { selectionType: raw.selectionType }
       : {}),
     ...(columns ? { columns } : {}),
+    ...(answerSets ? { answerSets } : {}),
     ...(fixedRows ? { fixedRows } : {}),
     ...(typeof raw.note === 'string' ? { note: raw.note } : {}),
   };
