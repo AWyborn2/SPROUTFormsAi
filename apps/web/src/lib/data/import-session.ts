@@ -15,6 +15,7 @@ import type {
   ExtractionResult,
   ExtractionStatus,
   FormField,
+  FormFieldType,
   VisibilityCondition,
 } from '@formai/shared';
 import { statusForConfidence } from '@formai/shared';
@@ -341,6 +342,110 @@ export function removeFixedRowItem(id: string, index: number): void {
   if (!current || index < 0 || index >= current.length) return;
   const fixedRows = current.filter((_, i) => i !== index);
   dispatchEdit({ t: 'update', id, patch: { fixedRows: fixedRows.length > 0 ? fixedRows : undefined } });
+}
+
+/**
+ * Push an undo snapshot without changing anything.
+ *
+ * The reducer's `update` action is deliberately NOT undoable — in the builder,
+ * typing in the label box must not fill the undo stack one keystroke at a
+ * time. Review needs label and option edits to be undoable as discrete
+ * corrections, so the wrappers below take a snapshot themselves. `mutate`
+ * snapshots before running its callback, and `delete` of an id that cannot
+ * exist leaves the field list untouched — so this is a pure "checkpoint".
+ */
+const SNAPSHOT_SENTINEL = '__import_undo_checkpoint__';
+function pushUndoCheckpoint(): void {
+  dispatchEdit({ t: 'delete', id: SNAPSHOT_SENTINEL });
+}
+
+/**
+ * Consecutive keystrokes in one input coalesce into a single undo step: a
+ * checkpoint is taken only when the edit target changes. Structural edits
+ * (which snapshot themselves) clear the key so the next keystroke starts a
+ * fresh step.
+ */
+let coalesceKey: string | null = null;
+
+function dispatchCoalesced(key: string, action: BuilderAction): void {
+  if (coalesceKey !== key) {
+    pushUndoCheckpoint();
+    coalesceKey = key;
+  }
+  dispatchEdit(action);
+}
+
+function dispatchStructural(action: BuilderAction): void {
+  coalesceKey = null;
+  dispatchEdit(action);
+}
+
+/** Rename a field's label (undoable as one step per focused field). */
+export function renameField(id: string, label: string): void {
+  dispatchCoalesced(`label:${id}`, { t: 'update', id, patch: { label } });
+}
+
+/** Change a field's type; choice types seed default options (builder parity). */
+export function changeFieldType(id: string, fieldType: FormFieldType): void {
+  dispatchStructural({ t: 'changeType', id, fieldType });
+}
+
+/** Edit one choice option in place. */
+export function setFieldOption(id: string, index: number, value: string): void {
+  dispatchCoalesced(`option:${id}:${index}`, { t: 'setOption', id, index, value });
+}
+
+/** Append a new choice option. */
+export function addFieldOption(id: string): void {
+  dispatchStructural({ t: 'addOption', id });
+}
+
+/** Remove one choice option. */
+export function removeFieldOption(id: string, index: number): void {
+  dispatchStructural({ t: 'removeOption', id, index });
+}
+
+/** Drop a field from the import entirely (it never reaches publish). */
+export function deleteField(id: string): void {
+  dispatchStructural({ t: 'delete', id });
+}
+
+/**
+ * Insert a new field directly after `afterId` (end of list when omitted or
+ * unknown). Returns the new field's id so the caller can select it.
+ */
+export function addField(fieldType: FormFieldType, afterId?: string | null): string | null {
+  if (!editor) return null;
+  coalesceKey = null;
+  dispatchEdit({ t: 'select', id: afterId ?? null });
+  dispatchEdit({ t: 'add', fieldType });
+  return editor.selectedId;
+}
+
+/** Nudge a field one place up (-1) or down (1). */
+export function moveField(id: string, dir: -1 | 1): void {
+  dispatchStructural({ t: 'move', id, dir });
+}
+
+/** arrayMove reorder (drag-and-drop drops). */
+export function reorderFields(from: number, to: number): void {
+  dispatchStructural({ t: 'reorder', from, to });
+}
+
+export function undoFieldEdit(): void {
+  dispatchStructural({ t: 'undo' });
+}
+
+export function redoFieldEdit(): void {
+  dispatchStructural({ t: 'redo' });
+}
+
+export function canUndoFieldEdit(): boolean {
+  return (editor?.undo.length ?? 0) > 0;
+}
+
+export function canRedoFieldEdit(): boolean {
+  return (editor?.redo.length ?? 0) > 0;
 }
 
 export function useImportSession() {
