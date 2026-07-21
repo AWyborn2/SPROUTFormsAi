@@ -2,12 +2,20 @@ import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Icon, Input, useToast } from '@formai/ui';
 import type { SubmissionValue } from '@formai/shared';
+import { resolveTheme } from '@formai/shared';
 import { ApiError } from '../../lib/data/api-client.js';
 import { discardImpactOf, discardWarningMessage, isCommittedChange } from '../../lib/discard-warning.js';
 import { useFillForm, useSubmitFill } from '../../lib/data/hooks.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
-import { fillSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
+import {
+  fillSpanClass,
+  resolveFillSpan,
+  resolveLayout,
+  visibleFillFields,
+} from '../../lib/fill-layout.js';
+import { FormLayoutFrame } from './FormLayoutFrame.js';
+import { ConversationalFill } from './ConversationalFill.js';
 import {
   EMAIL_RE,
   requiredFieldErrors,
@@ -162,56 +170,70 @@ export function FillScreen() {
     );
   }
 
+  // Identity is captured the same way in both bodies — the flat page shows it
+  // at the top, the stepper shows it on its first screen — so it lives here
+  // rather than being written twice and drifting.
+  const identityBlock = (
+    <div>
+      <div className="mb-3.5 flex items-center gap-2 border-b border-border-subtle pb-2.5 text-sm font-bold text-text-primary">
+        Your details
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Input
+          label="Your name"
+          value={submitterName}
+          placeholder="Rebecca Hsu"
+          onChange={(e) => setSubmitterName(e.target.value)}
+        />
+        <Input
+          label="Email"
+          required
+          type="email"
+          leadingIcon="mail"
+          value={submitterEmail}
+          error={emailError}
+          placeholder="you@company.com"
+          onChange={(e) => {
+            setSubmitterEmail(e.target.value);
+            setEmailError('');
+          }}
+        />
+      </div>
+    </div>
+  );
+
+  const isConversational = resolveLayout(resolveTheme(fill.orgBranding?.theme).layout) === 'conversational';
+
   return (
     <ExternalShell orgName={fill.orgName} branding={fill.orgBranding}>
-      <div className="w-full max-w-[600px]">
-        <div className="overflow-hidden rounded-lg border border-border bg-white shadow-sm">
-          <div className="p-[24px_28px]" style={{ background: 'var(--org-primary)' }}>
-            <div className="mb-[7px] font-mono text-[11px] uppercase tracking-wide text-white/60">
-              {fill.orgName || 'Form'}
-            </div>
-            <div
-              className="text-[21px] font-bold text-white"
-              style={{ fontFamily: 'var(--org-font)' }}
-            >
-              {fill.formName}
-            </div>
-            <div className="mt-1.5 text-[13px] text-white/70">
-              Fields marked * are required
-            </div>
-          </div>
-
-          <div
-            className="flex flex-col gap-6 p-[26px_28px]"
-            style={{ fontFamily: 'var(--org-font)' }}
-          >
-            {/* Submitter identity — rides along as submitterName/submitterEmail. */}
-            <div>
-              <div className="mb-3.5 flex items-center gap-2 border-b border-border-subtle pb-2.5 text-sm font-bold text-text-primary">
-                Your details
-              </div>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Input
-                  label="Your name"
-                  value={submitterName}
-                  placeholder="Rebecca Hsu"
-                  onChange={(e) => setSubmitterName(e.target.value)}
-                />
-                <Input
-                  label="Email"
-                  required
-                  type="email"
-                  leadingIcon="mail"
-                  value={submitterEmail}
-                  error={emailError}
-                  placeholder="you@company.com"
-                  onChange={(e) => {
-                    setSubmitterEmail(e.target.value);
-                    setEmailError('');
-                  }}
-                />
-              </div>
-            </div>
+      {/* Arrangement (card / hero / split), container geometry and logo
+          placement all come from the resolved theme. The field list and submit
+          control below are identical across layouts -- only the framing
+          differs, which is what stops the layouts drifting apart. */}
+      <div className="flex w-full flex-col items-center">
+      <FormLayoutFrame
+        orgName={fill.orgName}
+        formName={fill.formName}
+        branding={fill.orgBranding}
+        container={fill.container}
+      >
+        {/* Both branches filter hidden fields identically. The conversational
+            layout paces one question at a time, so an unfiltered list would
+            stop the respondent on a question their answers have already ruled
+            out -- a worse failure there than a gap in a grid. */}
+        {isConversational ? (
+          <ConversationalFill
+            fields={visibleFillFields(fill.fields, values)}
+            values={values}
+            errors={errors}
+            setValue={setValue}
+            onSubmit={() => onSubmit(fill)}
+            submitting={submit.isPending}
+            header={identityBlock}
+          />
+        ) : (
+          <>
+            {identityBlock}
 
             {/* The served version's real fields, via the shared renderer, on
                 the builder's 12-col grid (single column below `sm`). Fields
@@ -249,12 +271,13 @@ export function FillScreen() {
               {submit.isPending ? 'Submitting…' : 'Submit'}
               <Icon name="arrow-right" size={17} />
             </button>
-          </div>
-        </div>
-        <div className="mt-4 flex items-center justify-center gap-1.5 text-[11.5px] text-text-tertiary">
-          <Icon name="shield-check" size={13} />
-          Your responses are encrypted and only shared with {fill.orgName || 'this organisation'}.
-        </div>
+          </>
+        )}
+      </FormLayoutFrame>
+      <div className="mt-4 flex items-center justify-center gap-1.5 text-[11.5px] text-text-tertiary">
+        <Icon name="shield-check" size={13} />
+        Your responses are encrypted and only shared with {fill.orgName || 'this organisation'}.
+      </div>
       </div>
     </ExternalShell>
   );

@@ -4,6 +4,7 @@
  */
 
 import { findGoogleFont } from './google-fonts-catalog.js';
+import type { ThemeTokens } from './theme.js';
 
 /**
  * The quick-pick presets surfaced above the font search in the branding
@@ -44,6 +45,16 @@ export interface BrandingKit {
   secondaryColor: string;
   accentColor: string;
   formFont: FormFont;
+  /**
+   * Optional theme layered on top of the kit — colour and typography roles,
+   * button and surface styling, density, logo geometry, layout type.
+   *
+   * Optional rather than required, and stored inside the existing `branding`
+   * jsonb column rather than beside it, so adding it needs no migration and an
+   * org that predates theming keeps rendering exactly as before: absent means
+   * `DEFAULT_THEME`.
+   */
+  theme?: ThemeTokens;
 }
 
 /** FormAI's own defaults, mirroring the prototype's initial brand state. */
@@ -66,19 +77,42 @@ export function channelLuminance(r: number, g: number, b: number): number {
   return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
 }
 
+/** The two inks `contrastText` chooses between for a given background. */
+export interface InkPair {
+  /** Used when the background is light. */
+  dark: string;
+  /** Used when the background is dark. */
+  light: string;
+}
+
 /**
- * Contrast rule: Sprout Green only passes contrast with dark ink text on top.
- * Returns the readable text color for a given background hex. Mirrors the
- * prototype's `contrastText()` (luminance > 0.62 -> dark ink, else white).
+ * The product's original pair. `#12321f` is Sprout-green-specific rather than a
+ * neutral, which is fine for the brand primary and accent it was written for.
+ * Roles carrying arbitrary customer colours can pass their own pair instead.
  */
-export function contrastText(hex: string): '#12321f' | '#ffffff' {
+export const DEFAULT_INK: InkPair = { dark: '#12321f', light: '#ffffff' };
+
+export function contrastText(hex: string): '#12321f' | '#ffffff';
+export function contrastText(hex: string, ink: InkPair): string;
+/**
+ * Contrast rule: returns the readable text color for a given background hex
+ * (luminance > 0.62 -> dark ink, else light). Mirrors the prototype's
+ * `contrastText()`.
+ *
+ * Called with one argument it behaves exactly as before, so existing callers
+ * and their assertions are untouched. The optional `ink` pair exists because a
+ * theme applies this rule to arbitrary customer-chosen role colours, where the
+ * brand-specific dark is not always the right answer.
+ */
+export function contrastText(hex: string, ink: InkPair = DEFAULT_INK): string {
   try {
     const h = hex.replace('#', '');
     const r = parseInt(h.slice(0, 2), 16);
     const g = parseInt(h.slice(2, 4), 16);
     const b = parseInt(h.slice(4, 6), 16);
-    return channelLuminance(r, g, b) > 0.62 ? '#12321f' : '#ffffff';
+    if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return ink.dark;
+    return channelLuminance(r, g, b) > 0.62 ? ink.dark : ink.light;
   } catch {
-    return '#12321f';
+    return ink.dark;
   }
 }

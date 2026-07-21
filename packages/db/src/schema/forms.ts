@@ -1,6 +1,6 @@
 import { relations } from 'drizzle-orm';
 import { index, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
-import type { FormContainer, FormField } from '@formai/shared';
+import type { FormContainer, FormField, ThemeTokens } from '@formai/shared';
 import { formSourceTypeEnum, templateStatusEnum, versionStateEnum } from './enums.ts';
 import { organizations, users } from './organizations.ts';
 
@@ -35,6 +35,16 @@ export const formTemplates = pgTable(
     status: templateStatusEnum().notNull().default('draft'),
     /** FK set after the first version row exists (nullable to break the cycle). */
     currentVersionId: uuid(),
+    /**
+     * Per-form theme override — a sparse patch over the org's theme, where an
+     * absent key means "inherit". Null when the form has never been restyled.
+     *
+     * Deliberately on the mutable template rather than on the version beside
+     * `container`: versions are immutable once published, so putting theme
+     * there would mint a new form version on every colour tweak and leave live
+     * forms stale until someone republished them.
+     */
+    themeOverride: jsonb('theme_override').$type<ThemeTokens>(),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },

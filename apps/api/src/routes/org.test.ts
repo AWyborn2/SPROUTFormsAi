@@ -429,6 +429,221 @@ describe('PATCH /org logo replacement cleanup', () => {
   });
 });
 
+describe('POST /org/brand-scan', () => {
+  it('403s a viewer', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/org/brand-scan`, {
+        method: 'POST',
+        headers: {
+          ...authHeader({ userId: 'u1', orgId: 'org-1', role: 'viewer' }),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ url: 'https://example.com' }),
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a missing url', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/org/brand-scan`, {
+        method: 'POST',
+        headers: { ...authHeader(ownerTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * The SSRF guard has its own suite; this asserts the route surfaces its
+   * refusal as a clean 422 rather than a 500, and that an internal hostname
+   * cannot be scanned through this endpoint.
+   */
+  it('422s a URL the SSRF guard refuses', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/org/brand-scan`, {
+        method: 'POST',
+        headers: { ...authHeader(ownerTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ url: 'http://169.254.169.254/latest/meta-data/' }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { error: string; reason: string };
+      expect(body.error).toBe('scan_failed');
+      expect(body.reason).toBe('blocked_address');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('422s a blocked scheme', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/org/brand-scan`, {
+        method: 'POST',
+        headers: { ...authHeader(ownerTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ url: 'file:///etc/passwd' }),
+      });
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { reason: string };
+      expect(body.reason).toBe('blocked_scheme');
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * This endpoint makes the server fetch an address the caller picks, so it is
+   * usable as an amplifier or scanner even with private space refused. The
+   * logo upload shipped without a limit; this one does not.
+   */
+  it('rate limits repeated scans for one org', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const call = () =>
+        fetch(`${base}/org/brand-scan`, {
+          method: 'POST',
+          headers: {
+            ...authHeader({ userId: 'u1', orgId: 'rate-test-org', role: 'owner' }),
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ url: 'http://127.0.0.1/' }),
+        });
+
+      const statuses: number[] = [];
+      for (let i = 0; i < 7; i++) statuses.push((await call()).status);
+      expect(statuses.filter((s) => s === 429).length).toBeGreaterThan(0);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('PATCH /org theme', () => {
+  const THEMED: BrandingKit = {
+    ...NEW_KIT,
+    theme: {
+      headingSize: 28,
+      headingWeight: 700,
+      buttonShape: 'pill',
+      radius: 18,
+      density: 'spacious',
+      layout: 'hero',
+      pageBackground: '#101010',
+      // An unset role is the empty string, not a missing key — the emitter
+      // relies on that to skip the variable and keep the product token.
+      headingColor: '',
+    },
+  };
+
+  it('round-trips a full theme through the branding column', async () => {
+    const { db, updateSet } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { branding: THEMED });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { branding: BrandingKit };
+      expect(body.branding.theme).toEqual(THEMED.theme);
+      // Persisted, not merely echoed.
+      const written = updateSet.mock.calls.at(-1)?.[1] as { branding?: BrandingKit };
+      expect(written.branding?.theme?.layout).toBe('hero');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepts branding with no theme at all, leaving the org on defaults', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { branding: NEW_KIT });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { branding: BrandingKit };
+      expect(body.branding.theme).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * These values are emitted straight into CSS custom properties on a public,
+   * respondent-facing page, so the bound is a defacement guard rather than
+   * taste policing.
+   */
+  it.each([
+    ['a non-hex colour role', { pageBackground: 'red' }],
+    ['a colour role with a CSS payload', { headingColor: '#fff; background: url(//evil)' }],
+    ['an absurd type size', { headingSize: 9000 }],
+    ['a zero type size', { headingSize: 0 }],
+    ['a fractional type size', { headingSize: 14.5 }],
+    ['a weight the font loader never requests', { headingWeight: 250 }],
+    ['an unknown button shape', { buttonShape: 'blob' }],
+    ['an unknown layout', { layout: 'carousel' }],
+    ['an unknown density', { density: 'airy' }],
+    ['a negative radius', { radius: -4 }],
+  ])('rejects %s with a 400', async (_label, theme) => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, theme },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe('invalid_request');
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * A client on an older build must not have its whole save rejected because
+   * this server does not know a key yet — the unknown key is dropped instead.
+   */
+  it('strips an unknown theme key rather than failing the request', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, {
+        branding: { ...NEW_KIT, theme: { radius: 8, futureKey: 'whatever' } },
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { branding: BrandingKit };
+      expect(body.branding.theme).toEqual({ radius: 8 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a viewer attempting a theme change', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(
+        base,
+        { userId: 'u1', orgId: 'org-1', role: 'viewer' },
+        { branding: THEMED },
+      );
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('PATCH /org', () => {
   it('503s when the DB client is unavailable', async () => {
     const { server, base } = startApp();

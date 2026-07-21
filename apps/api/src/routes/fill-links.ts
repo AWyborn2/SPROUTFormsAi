@@ -8,7 +8,12 @@ import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
-import { incompleteRowsByField, missingRequiredFields, stripHiddenValues } from '@formai/shared';
+import {
+  incompleteRowsByField,
+  missingRequiredFields,
+  resolveTheme,
+  stripHiddenValues,
+} from '@formai/shared';
 // The authed POST /submissions validates with the same runtime schema —
 // single SubmissionValue contract, two doors.
 import { submissionValueSchema } from './submissions.js';
@@ -248,10 +253,28 @@ publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
 
   // Deliberately narrow payload: name + branding + the form itself. No org
   // ids, plan, members, or anything else internal.
+  //
+  // The theme is resolved server-side (org theme <- this form's override) so
+  // the public page receives one already-merged object and never has to apply
+  // the precedence rule itself.
+  //
+  // Only included when something actually sets it. An org that has never
+  // themed anything keeps the exact payload it had before theming existed —
+  // the client resolves absent to defaults either way, so emitting a fully
+  // populated theme for every form would be pure wire weight and a silent
+  // contract change on the most-hit anonymous route in the product.
+  const orgTheme = org?.branding?.theme;
+  const formOverride = template.themeOverride;
+  const orgBranding = org?.branding
+    ? orgTheme || formOverride
+      ? { ...org.branding, theme: resolveTheme(orgTheme, formOverride) }
+      : org.branding
+    : null;
+
   res.json({
     formName: template.name,
     orgName: org?.name ?? '',
-    orgBranding: org?.branding ?? null,
+    orgBranding,
     versionId: version.id,
     fields: version.fields,
     container: version.container,

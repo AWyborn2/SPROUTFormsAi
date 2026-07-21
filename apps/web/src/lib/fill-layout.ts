@@ -15,7 +15,7 @@
  *   `narrow: state.container.maxWidth < 640` and use `previewSpanClass`.
  */
 import { visibleFields } from '@formai/shared';
-import type { FormField, SubmissionValue } from '@formai/shared';
+import type { FormContainer, FormField, SubmissionValue } from '@formai/shared';
 
 /**
  * The fields a fill surface should lay out, given the answers so far.
@@ -35,6 +35,64 @@ export function visibleFillFields(
   values: Record<string, SubmissionValue>,
 ): FormField[] {
   return visibleFields(fields, values);
+}
+
+/** Layouts the fill surface can actually render. */
+export const RENDERABLE_LAYOUTS = ['card', 'hero', 'split', 'conversational'] as const;
+export type RenderableLayout = (typeof RENDERABLE_LAYOUTS)[number];
+
+/**
+ * Which arrangement the fill surface should draw for a resolved theme.
+ *
+ * Anything unrecognised degrades to `card` rather than rendering nothing —
+ * this value arrives from the network and may predate or postdate this build,
+ * and a respondent cannot fix a form that refuses to render.
+ *
+ * `conversational` reuses the card framing for its chrome; what differs is the
+ * body, which paces questions one screen at a time.
+ */
+export function resolveLayout(layout?: string | null): RenderableLayout {
+  return (RENDERABLE_LAYOUTS as readonly string[]).includes(layout ?? '')
+    ? (layout as RenderableLayout)
+    : 'card';
+}
+
+/** Shadow levels map onto the product's existing tokens, not new values. */
+const CONTAINER_SHADOW: Record<string, string> = {
+  none: 'none',
+  sm: 'var(--shadow-sm)',
+  md: 'var(--shadow-md)',
+  lg: 'var(--shadow-lg)',
+};
+
+/**
+ * The form card's surface styling, derived from the container the builder
+ * saved. This object has been persisted and shipped to the fill page since the
+ * builder gained container controls, but the fill page drew its own hardcoded
+ * card and ignored it — so width, padding, radius, border and shadow were all
+ * editable settings that changed nothing for respondents.
+ *
+ * Empty-string colour fields mean "keep the product token", matching how
+ * `FormContainer` has always been authored, so they are omitted rather than
+ * emitted blank.
+ */
+export function containerSurfaceStyle(
+  container?: FormContainer | null,
+): Record<string, string | number> {
+  const style: Record<string, string | number> = {};
+  if (!container) return style;
+
+  if (typeof container.radius === 'number') style.borderRadius = `${container.radius}px`;
+  if (typeof container.borderWidth === 'number') {
+    style.borderWidth = `${container.borderWidth}px`;
+    style.borderStyle = 'solid';
+  }
+  if (container.borderColor) style.borderColor = container.borderColor;
+  if (container.background) style.background = container.background;
+  if (container.shadow) style.boxShadow = CONTAINER_SHADOW[container.shadow] ?? '';
+  if (style.boxShadow === '') delete style.boxShadow;
+
+  return style;
 }
 
 /**

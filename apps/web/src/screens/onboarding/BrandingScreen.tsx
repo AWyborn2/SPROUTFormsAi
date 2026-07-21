@@ -4,6 +4,7 @@ import { Button, Icon, useToast } from '@formai/ui';
 import { DEFAULT_BRANDING } from '@formai/shared';
 import { BrandMark } from '../../components/BrandMark.js';
 import { BrandColorFields } from '../../components/branding/BrandColorFields.js';
+import { BrandedFormPreview } from '../../components/branding/BrandedFormPreview.js';
 import { FontPicker } from '../../components/branding/FontPicker.js';
 import { LogoUploadControl } from '../../components/branding/LogoUploadControl.js';
 import { ensureFontLoaded } from '../../lib/font-loader.js';
@@ -22,7 +23,7 @@ import { Stepper } from './Stepper.js';
 export function BrandingScreen() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { orgName, branding, invites, setBranding, brandStyle } = useOnboarding();
+  const { orgName, branding, invites, setBranding } = useOnboarding();
   const updateOrg = useUpdateOrg();
   const inviteMember = useInviteMember();
   const [finishing, setFinishing] = useState(false);
@@ -146,85 +147,13 @@ export function BrandingScreen() {
             />
           </div>
 
-          {/* Live preview */}
+          {/* Live preview — the same component the settings screen uses, so
+              neither can drift from the other or from the real fill page. */}
           <div className="sticky top-4">
-            <div className="mb-[11px] flex items-center gap-2">
-              <Icon name="eye" size={15} className="text-accent" />
-              <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">
-                Live preview · vendor onboarding
-              </span>
-            </div>
-            <div
-              className="overflow-hidden rounded-lg border border-border shadow-md"
-              style={brandStyle()}
-            >
-              <div
-                className="flex h-[88px] items-center gap-3 px-[26px]"
-                style={{ background: 'var(--org-primary)' }}
-              >
-                {branding.logoAssetUrl ? (
-                  <img
-                    src={branding.logoAssetUrl}
-                    alt=""
-                    className="h-10 w-10 flex-none rounded-[9px] bg-white/[0.14] object-contain p-1"
-                  />
-                ) : (
-                  <span className="grid h-10 w-10 place-items-center rounded-[9px] bg-white/[0.14] font-heading text-[17px] font-bold text-white">
-                    {orgInitial}
-                  </span>
-                )}
-                <div>
-                  <div
-                    className="text-[17px] font-bold text-white"
-                    style={{ fontFamily: 'var(--org-font)' }}
-                  >
-                    {orgName}
-                  </div>
-                  <div className="text-[11.5px] text-white/60">Vendor onboarding</div>
-                </div>
-              </div>
-              <div className="bg-white px-[26px] py-6" style={{ fontFamily: 'var(--org-font)' }}>
-                <div
-                  className="mb-1 text-lg font-bold text-[#1a2224]"
-                  style={{ fontFamily: 'var(--org-font)' }}
-                >
-                  Supplier details
-                </div>
-                <div className="mb-[18px] text-[12.5px] text-[#6b7677]">
-                  Fields marked * are required.
-                </div>
-                <div className="mb-[14px]">
-                  <div className="mb-[5px] text-xs font-semibold text-[#33403f]">
-                    Legal entity name *
-                  </div>
-                  <div className="h-[38px] rounded-lg border border-[#d9dede] bg-[#fbfcfc]" />
-                </div>
-                <div className="mb-[18px]">
-                  <div className="mb-[5px] text-xs font-semibold text-[#33403f]">
-                    Business category *
-                  </div>
-                  <div className="flex h-[38px] items-center justify-end rounded-lg border border-[#d9dede] bg-[#fbfcfc] px-3">
-                    <Icon name="chevron-down" size={15} color="#9aa4a4" />
-                  </div>
-                </div>
-                <div className="flex justify-end">
-                  <div
-                    className="rounded-lg px-5 py-2.5 text-[13.5px] font-bold"
-                    style={{
-                      background: 'var(--org-accent)',
-                      color: 'var(--org-accent-text)',
-                      fontFamily: 'var(--org-font)',
-                    }}
-                  >
-                    Submit application
-                  </div>
-                </div>
-              </div>
-            </div>
+            <BrandedFormPreview orgName={orgName} branding={branding} />
             <p className="mt-3 flex items-center gap-1.5 text-xs text-text-tertiary">
               <Icon name="info" size={13} />
-              Green passes contrast only with dark text on top — we lock the button label to ink
-              automatically.
+              Text sitting on a brand colour locks to a readable ink automatically.
             </p>
           </div>
         </div>

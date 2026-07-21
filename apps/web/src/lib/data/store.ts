@@ -32,6 +32,7 @@ import { ROLE_NAMES } from './types.js';
 import type {
   AuditCategory,
   AuditEntry,
+  BrandScanProposal,
   Competency,
   CompetencyRule,
   DashboardSummary,
@@ -533,6 +534,14 @@ export const store = {
 
   updateWhiteLabel(input: { branding: BrandingKit }): Promise<OrgSettingsDto> {
     return store.updateOrg({ branding: input.branding });
+  },
+
+  /**
+   * Propose branding from the org's own website. Returns a draft only —
+   * nothing is persisted until the owner reviews it and saves.
+   */
+  scanBrandFromWebsite(input: { url: string }): Promise<BrandScanProposal> {
+    return apiClient.post<BrandScanProposal>('/org/brand-scan', input);
   },
 
   /* ── Competency gating ─────────────────────────────────────────────────── */
