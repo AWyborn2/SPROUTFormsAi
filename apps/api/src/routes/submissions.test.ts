@@ -1100,12 +1100,31 @@ describe('POST /submissions — hidden fields (U11)', () => {
     }
   });
 
-  it('strips hidden values from a DRAFT save too — a hidden field is never recorded', async () => {
+  it('PRESERVES hidden values on a DRAFT save — a draft is work, not a record', async () => {
+    // The strip is destructive and irreversible. An operator who picks the
+    // wrong machine type, completes that section, then corrects the choice
+    // would otherwise find the work permanently gone on switching back —
+    // redone from memory, outdoors. R21 is a guarantee about the record, and
+    // the draft->approved transition re-strips before the row becomes one.
     const { db, insertValues } = conditionalDb();
     mockDbValue = db;
     const { server, base } = startApp();
     try {
-      const res = await post(base, { has_plant: false, plant_reg: 'STALE' }, 'draft');
+      const res = await post(base, { has_plant: false, plant_reg: 'KEPT' }, 'draft');
+      expect(res.status).toBe(201);
+      const insert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
+      expect(insert?.[1].values).toHaveProperty('plant_reg', 'KEPT');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still strips on a non-draft save, where the row IS the record', async () => {
+    const { db, insertValues } = conditionalDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { has_plant: false, plant_reg: 'STALE' });
       expect(res.status).toBe(201);
       const insert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
       expect(insert?.[1].values).not.toHaveProperty('plant_reg');

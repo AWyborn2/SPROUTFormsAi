@@ -28,7 +28,7 @@
  * never by evaluating another condition.
  */
 
-import type { FormField, VisibilityCondition } from './form-field.js';
+import type { FormField, FormFieldType, VisibilityCondition } from './form-field.js';
 import type { SubmissionValue } from './submission.js';
 
 /**
@@ -58,7 +58,22 @@ const NON_SCALAR_TYPES = new Set<FormField['type']>(['repeating_group', 'section
  * meaning. Returning undefined here would HIDE dependents, so arrays are
  * handled by the caller as unevaluatable (visible) instead.
  */
-function scalarAnswer(value: SubmissionValue | undefined): string | undefined {
+function scalarAnswer(
+  value: SubmissionValue | undefined,
+  sourceType?: FormFieldType,
+): string | undefined {
+  // A checkbox has no unanswered state — `scalarAnswered` in
+  // submission-validation already treats anything but an explicit `true` as
+  // not-ticked. So an absent value IS 'false' here. Without this, the standard
+  // compliance shape "if Competent is NOT ticked, show Corrective action",
+  // authored as `equals false`, never fires: the fill screens hold an untouched
+  // box as null, the condition never matches, and a required section silently
+  // never appears. `boolean_yes_no` is deliberately excluded — its null means
+  // genuinely unanswered, which is the distinction that lets an honest "No" be
+  // recordable.
+  if (sourceType === 'checkbox' && (value === undefined || value === null || value === '')) {
+    return 'false';
+  }
   if (value === undefined || value === null || value === '') return undefined;
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (typeof value === 'number') return String(value);
@@ -108,7 +123,7 @@ function evaluate(
   const raw = answers[condition.fieldId];
   if (isNonScalarAnswer(raw)) return true;
 
-  const answer = scalarAnswer(raw);
+  const answer = scalarAnswer(raw, source.type);
 
   // notEquals is the strict inverse of equals, including when the source is
   // unanswered: "not yes" is true of a blank. That direction fails open, which
@@ -136,7 +151,7 @@ function evaluateSelf(
   const raw = answers[condition.fieldId];
   if (isNonScalarAnswer(raw)) return true;
 
-  const answer = scalarAnswer(raw);
+  const answer = scalarAnswer(raw, source.type);
   const matches = answer !== undefined && answer === condition.value;
   return condition.op === 'notEquals' ? !matches : matches;
 }

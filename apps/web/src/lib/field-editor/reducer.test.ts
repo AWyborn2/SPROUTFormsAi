@@ -130,3 +130,37 @@ describe('adding to a re-loaded form', () => {
     expect(ids).toContain('b5');
   });
 });
+
+describe('review finding — reordering cannot orphan a condition', () => {
+  const q: FormField = { id: 'q1', type: 'dropdown', label: 'Site', required: false, source: 'built', colSpan: 12 };
+  const dep: FormField = {
+    id: 'sec', type: 'section_header', label: 'Site A only', required: false, source: 'built', colSpan: 12,
+    visibleWhen: { fieldId: 'q1', op: 'equals', value: 'A' },
+  };
+
+  it('clears a condition when its source is moved below the dependent', () => {
+    // Otherwise the header hides, which hides the source as section content, so
+    // the filler can never answer it and the section can never open — while its
+    // required questions are silently exempted from validation.
+    let s = initialBuilderState({ formId: null, name: 'f', fields: [q, dep] });
+    s = builderReducer(s, { t: 'move', id: 'q1', dir: 1 });
+
+    expect(s.fields.map((f) => f.id)).toEqual(['sec', 'q1']);
+    expect(s.fields.find((f) => f.id === 'sec')?.visibleWhen).toBeUndefined();
+  });
+
+  it('clears it on a drag-reorder too', () => {
+    let s = initialBuilderState({ formId: null, name: 'f', fields: [q, dep] });
+    s = builderReducer(s, { t: 'reorder', from: 0, to: 1 });
+    expect(s.fields.find((f) => f.id === 'sec')?.visibleWhen).toBeUndefined();
+  });
+
+  it('leaves a still-valid condition intact', () => {
+    const other: FormField = { id: 'z', type: 'text', label: 'Z', required: false, source: 'built', colSpan: 12 };
+    let s = initialBuilderState({ formId: null, name: 'f', fields: [q, dep, other] });
+    s = builderReducer(s, { t: 'move', id: 'z', dir: -1 });
+    expect(s.fields.find((f) => f.id === 'sec')?.visibleWhen).toEqual({
+      fieldId: 'q1', op: 'equals', value: 'A',
+    });
+  });
+});

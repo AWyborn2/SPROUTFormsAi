@@ -96,6 +96,34 @@ function newField(type: FormFieldType, id: string): FormField {
   return field;
 }
 
+/**
+ * Clear visibility conditions whose source is no longer strictly earlier in the
+ * list.
+ *
+ * `conditionSources` enforces earlier-only when the condition is AUTHORED, but
+ * `move`, `reorder` and drag-and-drop rewrite the order afterwards, and the
+ * evaluator performs no order check. Drag a source below the section it gates
+ * and `visibleFields` hides the header, which hides the source as section
+ * content — so the filler can never answer it and the section can never open.
+ * Worse than a dead section: required-ness is scoped to visible fields, so
+ * every required question inside it is silently exempted and the submission
+ * passes validation with a whole location's checks never asked.
+ *
+ * Clearing is the conservative repair: the dependent becomes always-visible
+ * (over-collect), matching the fail-open direction the evaluator already takes.
+ */
+function pruneOrphanedConditions(fields: FormField[]): FormField[] {
+  const indexById = new Map(fields.map((f, i) => [f.id, i]));
+  return fields.map((f, i) => {
+    const sourceId = f.visibleWhen?.fieldId;
+    if (sourceId === undefined) return f;
+    const sourceIndex = indexById.get(sourceId);
+    if (sourceIndex !== undefined && sourceIndex < i) return f;
+    const { visibleWhen: _dropped, ...rest } = f;
+    return rest as FormField;
+  });
+}
+
 function snapshot(s: BuilderState): Snapshot {
   return { fields: structuredClone(s.fields), selectedId: s.selectedId };
 }
@@ -207,7 +235,7 @@ export function builderReducer(s: BuilderState, a: BuilderAction): BuilderState 
         const j = i + a.dir;
         if (i < 0 || j < 0 || j >= fields.length) return { fields };
         [fields[i], fields[j]] = [fields[j]!, fields[i]!];
-        return { fields };
+        return { fields: pruneOrphanedConditions(fields) };
       });
     case 'reorder': {
       // arrayMove semantics for drag-and-drop drops (unlike `move`, which is an
@@ -218,7 +246,7 @@ export function builderReducer(s: BuilderState, a: BuilderAction): BuilderState 
       return mutate(s, (fields) => {
         const [f] = fields.splice(from, 1);
         fields.splice(to, 0, f!);
-        return { fields };
+        return { fields: pruneOrphanedConditions(fields) };
       });
     }
     case 'copy': {

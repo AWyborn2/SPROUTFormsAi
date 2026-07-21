@@ -181,3 +181,35 @@ describe('review finding — a section-hidden source is unevaluatable', () => {
     expect(twice).toContain('b');
   });
 });
+
+describe('review finding — an untouched checkbox source reads as false', () => {
+  const competent: FormField = { id: 'comp', type: 'checkbox', label: 'Competent', required: false, source: 'built' };
+  const corrective: FormField = {
+    id: 'corr', type: 'text', label: 'Corrective action', required: true, source: 'built',
+    visibleWhen: { fieldId: 'comp', op: 'equals', value: 'false' },
+  };
+  const FIELDS = [competent, corrective];
+
+  it('shows a section gated on "NOT ticked" without the box being ticked and un-ticked first', () => {
+    // The standard compliance shape. A checkbox has no unanswered state, so an
+    // absent value IS false; treating it as undefined left the section hidden
+    // forever and silently dropped a required question.
+    expect(isFieldVisible(corrective, FIELDS, {})).toBe(true);
+    expect(isFieldVisible(corrective, FIELDS, { comp: null })).toBe(true);
+    expect(isFieldVisible(corrective, FIELDS, { comp: false })).toBe(true);
+  });
+
+  it('hides it once the box is ticked', () => {
+    expect(isFieldVisible(corrective, FIELDS, { comp: true })).toBe(false);
+  });
+
+  it('leaves boolean_yes_no alone — its null genuinely means unanswered', () => {
+    const fit: FormField = { id: 'fit', type: 'boolean_yes_no', label: 'Fit for work', required: false, source: 'built' };
+    const dep: FormField = {
+      id: 'why', type: 'text', label: 'Why not', required: false, source: 'built',
+      visibleWhen: { fieldId: 'fit', op: 'equals', value: 'false' },
+    };
+    expect(isFieldVisible(dep, [fit, dep], {})).toBe(false);
+    expect(isFieldVisible(dep, [fit, dep], { fit: false })).toBe(true);
+  });
+});

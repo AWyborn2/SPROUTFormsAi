@@ -6,7 +6,7 @@
  * Pure and React-free. Tested from apps/api (packages/shared has no test
  * runner): see apps/api/src/routes/submission-validation.test.ts.
  */
-import { resolveAnswerSets, selectedOption } from './answer-set.js';
+import { groupedColumnKeys, resolveAnswerSets, selectedOption } from './answer-set.js';
 import { visibleFields } from './visibility.js';
 import type { FormField, FormFieldType, RepeatingColumn } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
@@ -105,12 +105,36 @@ function isRowAnswered(field: FormField, row: unknown): boolean {
     // required-ness question. `required: false` only relaxes "must be
     // answered" — it never licenses recording both OK and N/A.
     if (sets.some((s) => selectedOption(s, row).malformed)) return false;
+    if (!requiredColumnsFilled(field, row)) return false;
     return sets
       .filter((s) => s.required !== false)
       .every((s) => selectedOption(s, row).columnKey !== null);
   }
 
+  if (!requiredColumnsFilled(field, row)) return false;
   return answerColumns(field).some((c) => isCellAnswered(c, row[c.key]));
+}
+
+/**
+ * Every column the author marked required must be answered on this row.
+ *
+ * `@formai/ui` renders a red asterisk from `RepeatingColumn.required` and the
+ * column inspector offers the toggle, but nothing read the flag — so a reviewer
+ * could mark "Corrective action" required, the filler would see it marked
+ * mandatory, tick Fail, leave every comment blank, and submit with no errors.
+ * An investigation would then show a mandatory column that is entirely empty
+ * on a form the system reported complete. A required marker nothing enforces is
+ * worse than no marker.
+ *
+ * Grouped member columns are exempt: their required-ness is the answer set's
+ * (exactly one option per row), and requiring each member individually would
+ * demand every option be ticked at once — the contradiction the set prevents.
+ */
+function requiredColumnsFilled(field: FormField, row: RepeatingRowValue): boolean {
+  const grouped = groupedColumnKeys(field);
+  return answerColumns(field)
+    .filter((c) => c.required && !grouped.has(c.key))
+    .every((c) => isCellAnswered(c, row[c.key]));
 }
 
 /**

@@ -375,3 +375,42 @@ describe('stripHiddenValues', () => {
     expect(out.values).toEqual({ has_plant: true, stray: 'x' });
   });
 });
+
+describe('review finding — per-column required is enforced', () => {
+  const defects: FormField = {
+    id: 'defects',
+    type: 'repeating_group',
+    label: 'Defects',
+    required: true,
+    source: 'imported',
+    columns: [
+      { key: 'item', label: 'Item', type: 'text' },
+      { key: 'result', label: 'Result', type: 'checkbox' },
+      { key: 'action', label: 'Corrective action', type: 'text', required: true },
+    ],
+    fixedRows: ['Brakes'],
+  };
+
+  it('rejects a row leaving a required column blank, as the asterisk promises', () => {
+    expect(incompleteFixedRowIndices(defects, [{ result: true, action: '' }])).toEqual([0]);
+  });
+
+  it('accepts the row once the required column is filled', () => {
+    expect(incompleteFixedRowIndices(defects, [{ result: true, action: 'Replaced pads' }])).toEqual([]);
+  });
+
+  it('exempts grouped member columns — the set owns their required-ness', () => {
+    const g: FormField = {
+      ...defects,
+      columns: [
+        { key: 'item', label: 'Item', type: 'text' },
+        { key: 'ok', label: 'OK', type: 'checkbox', required: true },
+        { key: 'na', label: 'N/A', type: 'checkbox', required: true },
+      ],
+      answerSets: [{ key: 'v', columnKeys: ['ok', 'na'] }],
+    };
+    // Requiring each member individually would demand both be ticked at once —
+    // the contradiction the set exists to prevent.
+    expect(incompleteFixedRowIndices(g, [{ ok: true, na: null }])).toEqual([]);
+  });
+});

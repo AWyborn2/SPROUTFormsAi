@@ -230,13 +230,22 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     }
   }
 
-  // Hidden fields are stripped on THIS door too (U11). Being authenticated
-  // says who the caller is, not that their payload is honest — and the guarantee
-  // is about the record, not the client: a field the filler never saw must not
-  // be recorded whichever route wrote it. Drafts included: visibility is
-  // computed from the same values being saved, so a dependent only drops once
-  // its source answer actually changes.
-  const { values: recordedValues } = stripHiddenValues(versionFields, values);
+  // Hidden fields are stripped on THIS door too (U11). Being authenticated says
+  // who the caller is, not that their payload is honest — a field the filler
+  // never saw must not be recorded whichever route wrote it.
+  //
+  // But NOT on a draft. A draft is work in progress, not a record, and the strip
+  // is destructive: an operator who picks Excavator, completes that section,
+  // realises they picked wrong, switches to Loader and saves would find the
+  // section permanently empty on switching back — work redone from memory,
+  // outdoors. The in-session warning cannot help a draft resumed on another
+  // device or after a reload. R21 is a guarantee about the RECORD, and the
+  // draft→approved transition below re-strips before the row becomes one, so
+  // deferring costs the guarantee nothing.
+  const isDraft = (status ?? 'submitted') === 'draft';
+  const { values: recordedValues } = isDraft
+    ? { values }
+    : stripHiddenValues(versionFields, values);
 
   const sessionUser = await db.query.users.findFirst({
     where: eq(schema.users.id, tenant.userId),
