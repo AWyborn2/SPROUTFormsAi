@@ -6,11 +6,37 @@ import {
   fillSpanClass,
   previewSpanClass,
   resolveFillSpan,
+  resolveLayout,
 } from './fill-layout.js';
 
 function container(patch: Partial<FormContainer> = {}): FormContainer {
   return { ...DEFAULT_CONTAINER, ...patch };
 }
+
+describe('resolveLayout', () => {
+  it('returns each renderable layout unchanged', () => {
+    expect(resolveLayout('card')).toBe('card');
+    expect(resolveLayout('hero')).toBe('hero');
+    expect(resolveLayout('split')).toBe('split');
+  });
+
+  /**
+   * Conversational replaces the fill engine rather than reframing it. Until
+   * that lands, a form set to it must still serve — degrading to a card beats
+   * rendering nothing for a respondent who cannot fix it.
+   */
+  it('degrades conversational to card until the stepper ships', () => {
+    expect(resolveLayout('conversational')).toBe('card');
+  });
+
+  it('degrades anything unrecognised to card', () => {
+    // This value comes off the network and may predate or postdate this build.
+    expect(resolveLayout('carousel')).toBe('card');
+    expect(resolveLayout('')).toBe('card');
+    expect(resolveLayout(undefined)).toBe('card');
+    expect(resolveLayout(null)).toBe('card');
+  });
+});
 
 describe('containerSurfaceStyle', () => {
   it('maps the saved container onto surface styling', () => {

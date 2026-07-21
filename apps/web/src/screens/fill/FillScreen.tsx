@@ -6,7 +6,8 @@ import { ApiError } from '../../lib/data/api-client.js';
 import { useFillForm, useSubmitFill } from '../../lib/data/hooks.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
-import { containerSurfaceStyle, fillSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
+import { fillSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
+import { FormLayoutFrame } from './FormLayoutFrame.js';
 import {
   EMAIL_RE,
   requiredFieldErrors,
@@ -144,49 +145,17 @@ export function FillScreen() {
 
   return (
     <ExternalShell orgName={fill.orgName} branding={fill.orgBranding}>
-      {/* Width, radius, border, background and shadow all come from the
-          container the builder saved and the API already ships in this payload.
-          They were previously hardcoded here, which made every container
-          control a no-op for respondents. */}
-      <div className="w-full" style={{ maxWidth: `${fill.container?.maxWidth ?? 600}px` }}>
-        <div
-          className="overflow-hidden border border-border bg-white"
-          style={containerSurfaceStyle(fill.container)}
-        >
-          {/* Every string in this masthead sits on the brand primary, so each
-              takes its ink from the resolved contrast token rather than a
-              hardcoded white. A light brand primary (a white masthead is a real
-              customer choice) rendered white-on-white before this. The
-              translucent variants use `color-mix` against the same token, the
-              pattern MobileScreen's SCRIM already established. */}
-          <div className="p-[24px_28px]" style={{ background: 'var(--org-primary)' }}>
-            <div
-              className="mb-[7px] font-mono text-[11px] uppercase tracking-wide"
-              style={{ color: 'color-mix(in srgb, var(--org-primary-text) 60%, transparent)' }}
-            >
-              {fill.orgName || 'Form'}
-            </div>
-            <div
-              className="text-[21px] font-bold"
-              style={{ fontFamily: 'var(--org-font)', color: 'var(--org-primary-text)' }}
-            >
-              {fill.formName}
-            </div>
-            <div
-              className="mt-1.5 text-[13px]"
-              style={{ color: 'color-mix(in srgb, var(--org-primary-text) 70%, transparent)' }}
-            >
-              Fields marked * are required
-            </div>
-          </div>
-
-          <div
-            className="flex flex-col gap-6"
-            style={{
-              fontFamily: 'var(--org-font)',
-              padding: `${fill.container?.padding ?? 26}px 28px`,
-            }}
-          >
+      {/* Arrangement (card / hero / split), container geometry and logo
+          placement all come from the resolved theme. The field list and submit
+          control below are identical across layouts -- only the framing
+          differs, which is what stops the layouts drifting apart. */}
+      <div className="flex w-full flex-col items-center">
+      <FormLayoutFrame
+        orgName={fill.orgName}
+        formName={fill.formName}
+        branding={fill.orgBranding}
+        container={fill.container}
+      >
             {/* Submitter identity — rides along as submitterName/submitterEmail. */}
             <div>
               <div className="mb-3.5 flex items-center gap-2 border-b border-border-subtle pb-2.5 text-sm font-bold text-text-primary">
@@ -248,12 +217,11 @@ export function FillScreen() {
               {submit.isPending ? 'Submitting…' : 'Submit'}
               <Icon name="arrow-right" size={17} />
             </button>
-          </div>
-        </div>
-        <div className="mt-4 flex items-center justify-center gap-1.5 text-[11.5px] text-text-tertiary">
-          <Icon name="shield-check" size={13} />
-          Your responses are encrypted and only shared with {fill.orgName || 'this organisation'}.
-        </div>
+      </FormLayoutFrame>
+      <div className="mt-4 flex items-center justify-center gap-1.5 text-[11.5px] text-text-tertiary">
+        <Icon name="shield-check" size={13} />
+        Your responses are encrypted and only shared with {fill.orgName || 'this organisation'}.
+      </div>
       </div>
     </ExternalShell>
   );
