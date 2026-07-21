@@ -213,12 +213,12 @@ sequenceDiagram
 
 ### Sequencing
 
-| Tranche | Units | Ships |
-|---|---|---|
-| 1 — Foundation and defects | U1–U5 | Token model, contrast fixes, all four dead settings, shared preview |
-| 2 — Editor and presets | U6–U9 | Presets-first editor, guidance, logo controls, per-form overrides |
-| 3 — Layouts and scan | U10–U13 | Layout types A/B/C, website scan |
-| 4 — Conversational | U14 | One-question-at-a-time fill engine |
+| Tranche | Units | Ships | Status |
+|---|---|---|---|
+| 1 — Foundation and defects | U1–U5 | Token model, contrast fixes, dead settings, shared preview | Done (PR #9) |
+| 2 — Editor and presets | U6–U9 | Presets-first editor, guidance, per-form overrides | Done (PR #9) |
+| 3 — Layouts and scan | U10–U13 | Logo geometry, layout types A/B/C, website scan | Remaining |
+| 4 — Conversational | U14 | One-question-at-a-time fill engine | Remaining |
 
 ---
 
