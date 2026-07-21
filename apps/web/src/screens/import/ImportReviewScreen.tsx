@@ -126,8 +126,8 @@ export function ImportReviewScreen() {
 
       <div className="mx-auto grid max-w-[1160px] grid-cols-1 items-start gap-5 lg:grid-cols-2">
         {/* PDF preview with confidence overlays */}
-        <div className="lg:h-[calc(100vh-220px)] lg:overflow-y-auto lg:pr-1">
-          <div className="sticky top-0 z-10 mb-2 border-b border-border bg-surface/95 pb-2 pt-1 backdrop-blur-sm">
+        <div className="lg:flex lg:h-[calc(100vh-220px)] lg:min-h-0 lg:flex-col lg:pr-1">
+          <div className="mb-2 flex-none border-b border-border pb-2 pt-1">
             <div className="font-heading text-[15px] font-bold text-text-primary">
               {displayTitleFromFileName(session.fileName)}
             </div>
@@ -136,15 +136,16 @@ export function ImportReviewScreen() {
             </div>
           </div>
 
-          <div className="relative overflow-hidden rounded-lg border border-border bg-white shadow-md">
-            <div className="h-[5px] bg-brand-slate" />
-            <div className="p-[18px_18px_22px]">
+          <div className="relative flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-white shadow-md lg:flex-1">
+            <div className="h-[5px] flex-none bg-brand-slate" />
+            <div className="flex min-h-0 flex-1 flex-col p-[14px_14px_16px]">
               <PdfViewer
                 pdfBase64={session.pdfBase64 ?? undefined}
                 assetId={session.assetId}
                 highlights={highlights}
                 selectedFieldId={selectedFieldId}
                 onSelectField={handleSelectField}
+                className="max-h-[70vh] lg:max-h-none lg:flex-1"
               />
             </div>
             {scanning && (
