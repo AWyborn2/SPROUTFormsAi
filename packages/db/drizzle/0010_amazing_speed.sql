@@ -1,0 +1,1 @@
+ALTER TABLE "form_templates" ADD COLUMN "theme_override" jsonb;

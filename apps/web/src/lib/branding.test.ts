@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { BrandingKit } from '@formai/shared';
+import type { BrandingKit, ThemeTokens } from '@formai/shared';
 import { DEFAULT_BRANDING } from '@formai/shared';
 import { fontStack, orgBrandVars } from './branding.js';
 
@@ -101,5 +101,96 @@ describe('orgBrandVars', () => {
   it('falls back to Inter for an unrecognised font from the network', () => {
     const kit = { ...KIT, formFont: 'Comic Sans' };
     expect(vars(kit)['--org-font']).toBe(fontStack('Inter'));
+  });
+});
+
+describe('orgBrandVars — secondary colour', () => {
+  /**
+   * Covers AE8. `secondaryColor` has been stored and editable since the kit
+   * shipped but was never emitted, so the control changed nothing anywhere.
+   */
+  it('emits the secondary colour and a readable ink for it', () => {
+    const v = vars(KIT);
+    expect(v['--org-secondary']).toBe('#445566');
+    expect(v['--org-secondary-text']).toBe('#ffffff'); // dark slate
+    expect(vars({ ...KIT, secondaryColor: '#eef2f0' })['--org-secondary-text']).toBe('#12321f');
+  });
+});
+
+describe('orgBrandVars — theme tokens', () => {
+  function themed(theme: ThemeTokens): Record<string, string> {
+    return orgBrandVars(KIT, theme) as Record<string, string>;
+  }
+
+  it('emits typography, surface, button and spacing tokens from the defaults', () => {
+    const v = vars(KIT);
+    expect(v['--org-heading-size']).toBe('21px');
+    expect(v['--org-heading-weight']).toBe('700');
+    expect(v['--org-button-size']).toBe('15px');
+    expect(v['--org-radius']).toBe('14px');
+    expect(v['--org-border-width']).toBe('1px');
+    expect(v['--org-gap']).toBe('24px');
+    expect(v['--org-pad']).toBe('26px');
+    expect(v['--org-button-radius']).toBe('6px');
+    expect(v['--org-logo-size']).toBe('40px');
+  });
+
+  it('scales spacing with density', () => {
+    expect(themed({ density: 'compact' })['--org-gap']).toBe('14px');
+    expect(themed({ density: 'spacious' })['--org-gap']).toBe('34px');
+  });
+
+  it('maps button shape onto a radius', () => {
+    expect(themed({ buttonShape: 'pill' })['--org-button-radius']).toBe('999px');
+    expect(themed({ buttonShape: 'square' })['--org-button-radius']).toBe('0px');
+  });
+
+  it('maps shadow onto the product shadow tokens', () => {
+    expect(themed({ shadow: 'none' })['--org-shadow']).toBe('none');
+    expect(themed({ shadow: 'sm' })['--org-shadow']).toBe('var(--shadow-sm)');
+  });
+
+  /**
+   * The roles below are served by the product's own tokens when the theme does
+   * not set them. Emitting an empty custom property would blank them out, so
+   * they must be absent rather than empty — this is what keeps an untouched
+   * org rendering byte-identically (AE3).
+   */
+  it('omits unset colour roles instead of emitting them empty', () => {
+    const v = vars(KIT);
+    for (const key of [
+      '--org-page-bg',
+      '--org-heading-color',
+      '--org-body-color',
+      '--org-label-color',
+      '--org-border-color',
+    ]) {
+      expect(v[key], key).toBeUndefined();
+    }
+  });
+
+  it('emits a colour role once the theme sets it', () => {
+    const v = themed({ pageBackground: '#101010', headingColor: '#abcdef' });
+    expect(v['--org-page-bg']).toBe('#101010');
+    expect(v['--org-heading-color']).toBe('#abcdef');
+  });
+
+  it('never emits an empty, undefined or NaN value', () => {
+    for (const theme of [undefined, {}, { density: 'spacious' } as ThemeTokens]) {
+      const v = orgBrandVars(null, theme) as Record<string, string>;
+      for (const [key, value] of Object.entries(v)) {
+        expect(value, key).toBeTypeOf('string');
+        expect(value, key).not.toBe('');
+        expect(value, key).not.toMatch(/undefined|null|NaN/);
+      }
+    }
+  });
+
+  it('falls back to sane values for an out-of-range theme from the network', () => {
+    const rogue = { density: 'huge', shadow: 'glow', buttonShape: 'blob' } as unknown as ThemeTokens;
+    const v = themed(rogue);
+    expect(v['--org-gap']).toBe('24px');
+    expect(v['--org-shadow']).toBe('var(--shadow-lg)');
+    expect(v['--org-button-radius']).toBe('6px');
   });
 });

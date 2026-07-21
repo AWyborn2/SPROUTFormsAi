@@ -14,7 +14,45 @@
  * - Builder preview (container-width slider): pass
  *   `narrow: state.container.maxWidth < 640` and use `previewSpanClass`.
  */
-import type { FormField } from '@formai/shared';
+import type { FormContainer, FormField } from '@formai/shared';
+
+/** Shadow levels map onto the product's existing tokens, not new values. */
+const CONTAINER_SHADOW: Record<string, string> = {
+  none: 'none',
+  sm: 'var(--shadow-sm)',
+  md: 'var(--shadow-md)',
+  lg: 'var(--shadow-lg)',
+};
+
+/**
+ * The form card's surface styling, derived from the container the builder
+ * saved. This object has been persisted and shipped to the fill page since the
+ * builder gained container controls, but the fill page drew its own hardcoded
+ * card and ignored it — so width, padding, radius, border and shadow were all
+ * editable settings that changed nothing for respondents.
+ *
+ * Empty-string colour fields mean "keep the product token", matching how
+ * `FormContainer` has always been authored, so they are omitted rather than
+ * emitted blank.
+ */
+export function containerSurfaceStyle(
+  container?: FormContainer | null,
+): Record<string, string | number> {
+  const style: Record<string, string | number> = {};
+  if (!container) return style;
+
+  if (typeof container.radius === 'number') style.borderRadius = `${container.radius}px`;
+  if (typeof container.borderWidth === 'number') {
+    style.borderWidth = `${container.borderWidth}px`;
+    style.borderStyle = 'solid';
+  }
+  if (container.borderColor) style.borderColor = container.borderColor;
+  if (container.background) style.background = container.background;
+  if (container.shadow) style.boxShadow = CONTAINER_SHADOW[container.shadow] ?? '';
+  if (style.boxShadow === '') delete style.boxShadow;
+
+  return style;
+}
 
 /**
  * Resolve the grid span (out of 12) a field occupies on a fill surface.

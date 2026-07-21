@@ -6,7 +6,7 @@ import { ApiError } from '../../lib/data/api-client.js';
 import { useFillForm, useSubmitFill } from '../../lib/data/hooks.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
-import { fillSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
+import { containerSurfaceStyle, fillSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
 import {
   EMAIL_RE,
   requiredFieldErrors,
@@ -144,26 +144,48 @@ export function FillScreen() {
 
   return (
     <ExternalShell orgName={fill.orgName} branding={fill.orgBranding}>
-      <div className="w-full max-w-[600px]">
-        <div className="overflow-hidden rounded-lg border border-border bg-white shadow-sm">
+      {/* Width, radius, border, background and shadow all come from the
+          container the builder saved and the API already ships in this payload.
+          They were previously hardcoded here, which made every container
+          control a no-op for respondents. */}
+      <div className="w-full" style={{ maxWidth: `${fill.container?.maxWidth ?? 600}px` }}>
+        <div
+          className="overflow-hidden border border-border bg-white"
+          style={containerSurfaceStyle(fill.container)}
+        >
+          {/* Every string in this masthead sits on the brand primary, so each
+              takes its ink from the resolved contrast token rather than a
+              hardcoded white. A light brand primary (a white masthead is a real
+              customer choice) rendered white-on-white before this. The
+              translucent variants use `color-mix` against the same token, the
+              pattern MobileScreen's SCRIM already established. */}
           <div className="p-[24px_28px]" style={{ background: 'var(--org-primary)' }}>
-            <div className="mb-[7px] font-mono text-[11px] uppercase tracking-wide text-white/60">
+            <div
+              className="mb-[7px] font-mono text-[11px] uppercase tracking-wide"
+              style={{ color: 'color-mix(in srgb, var(--org-primary-text) 60%, transparent)' }}
+            >
               {fill.orgName || 'Form'}
             </div>
             <div
-              className="text-[21px] font-bold text-white"
-              style={{ fontFamily: 'var(--org-font)' }}
+              className="text-[21px] font-bold"
+              style={{ fontFamily: 'var(--org-font)', color: 'var(--org-primary-text)' }}
             >
               {fill.formName}
             </div>
-            <div className="mt-1.5 text-[13px] text-white/70">
+            <div
+              className="mt-1.5 text-[13px]"
+              style={{ color: 'color-mix(in srgb, var(--org-primary-text) 70%, transparent)' }}
+            >
               Fields marked * are required
             </div>
           </div>
 
           <div
-            className="flex flex-col gap-6 p-[26px_28px]"
-            style={{ fontFamily: 'var(--org-font)' }}
+            className="flex flex-col gap-6"
+            style={{
+              fontFamily: 'var(--org-font)',
+              padding: `${fill.container?.padding ?? 26}px 28px`,
+            }}
           >
             {/* Submitter identity — rides along as submitterName/submitterEmail. */}
             <div>

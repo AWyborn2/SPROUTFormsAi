@@ -22,6 +22,61 @@ import { db } from '../db.js';
  */
 export const orgRouter: Router = Router();
 
+/**
+ * A theme colour role. Unlike the three brand colours these may be empty:
+ * `''` means "keep the product's own token", which is how an unset role is
+ * represented and what stops the emitter blanking a surface out.
+ */
+const roleColor = z.union([z.literal(''), z.string().regex(/^#[0-9a-f]{6}$/i)]);
+
+/**
+ * Type sizes are bounded rather than free numbers — the value is emitted
+ * straight into a CSS custom property, and an absurd size is a defacement
+ * vector on a public respondent-facing page, not just a bad look.
+ */
+const typeSize = z.number().int().min(8).max(96);
+
+/** Only weights the font loader actually requests; see THEME_FONT_WEIGHTS. */
+const typeWeight = z.union([z.literal(400), z.literal(500), z.literal(600), z.literal(700)]);
+
+/**
+ * Every key optional and unknown keys stripped: a theme is a sparse patch, and
+ * `resolveTheme` treats absent as inherit. `.strict()` is deliberately not used
+ * — a client on an older build sending a key this server does not know yet
+ * should have it ignored, not have the whole save rejected.
+ */
+const themeBody = z.object({
+  pageBackground: roleColor.optional(),
+  formBackground: roleColor.optional(),
+  headingColor: roleColor.optional(),
+  bodyColor: roleColor.optional(),
+  labelColor: roleColor.optional(),
+
+  headingSize: typeSize.optional(),
+  headingWeight: typeWeight.optional(),
+  bodySize: typeSize.optional(),
+  bodyWeight: typeWeight.optional(),
+  labelSize: typeSize.optional(),
+  labelWeight: typeWeight.optional(),
+  buttonSize: typeSize.optional(),
+  buttonWeight: typeWeight.optional(),
+
+  buttonShape: z.enum(['rounded', 'pill', 'square']).optional(),
+  buttonStyle: z.enum(['solid', 'outline', 'soft']).optional(),
+
+  radius: z.number().int().min(0).max(64).optional(),
+  borderWidth: z.number().int().min(0).max(8).optional(),
+  borderColor: roleColor.optional(),
+  shadow: z.enum(['none', 'sm', 'md', 'lg']).optional(),
+
+  density: z.enum(['compact', 'comfortable', 'spacious']).optional(),
+
+  logoSize: z.enum(['small', 'medium', 'large']).optional(),
+  logoPlacement: z.enum(['left', 'center']).optional(),
+
+  layout: z.enum(['card', 'hero', 'split', 'conversational']).optional(),
+});
+
 const brandingBody = z.object({
   // Only a URL this API minted (`POST /org/logo` → `logoPublicUrl`) is
   // storable. An arbitrary string would let an admin point their org at
@@ -45,6 +100,8 @@ const brandingBody = z.object({
   // `fonts.googleapis.com/css2` URL, so an arbitrary string would be an
   // injection point into that request (and into the CSS `font-family` stack).
   formFont: z.string().refine(isValidFormFont, { message: 'Unknown font family' }),
+  /** Optional theme layer. Absent leaves the org on the product defaults. */
+  theme: themeBody.optional(),
 });
 
 const patchOrgBody = z

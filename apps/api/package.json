@@ -21,6 +21,7 @@
     "cors": "^2.8.5",
     "drizzle-orm": "^0.38.4",
     "express": "^4.21.2",
+    "ipaddr.js": "^2.4.0",
     "memoizee": "^0.4.17",
     "openid-client": "^6.8.4",
     "pdf-lib": "^1.17.1",

@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { Icon } from '@formai/ui';
+import { contrastText } from '@formai/shared';
 import { useUploadOrgLogo } from '../../lib/data/hooks.js';
 import { LogoValidationError, prepareLogoUpload } from '../../lib/logo-image.js';
 
@@ -111,9 +112,12 @@ export function LogoUploadControl({
           disabled={uploadLogo.isPending}
           className="fai-chip-btn flex w-full items-center gap-[13px] rounded-md border-[1.5px] border-dashed border-border-strong bg-surface-sunken p-[14px] text-left"
         >
+          {/* The swatch is the org's own primary colour, so its glyph resolves
+              its ink rather than assuming white — a light brand primary made
+              this initial invisible. */}
           <span
-            className="grid h-11 w-11 flex-none place-items-center rounded-[10px] font-heading text-[17px] font-bold text-white"
-            style={{ background: swatchColor }}
+            className="grid h-11 w-11 flex-none place-items-center rounded-[10px] font-heading text-[17px] font-bold"
+            style={{ background: swatchColor, color: contrastText(swatchColor) }}
           >
             {initial}
           </span>

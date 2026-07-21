@@ -480,6 +480,103 @@ describe('GET /fill/:token (public, no auth)', () => {
     }
   });
 
+  /**
+   * An org that never opened the theme editor must keep the exact payload it
+   * had before theming existed — this is the AE3 guarantee on the wire, and
+   * this route is the most-hit anonymous endpoint in the product.
+   */
+  it('omits the theme entirely when neither the org nor the form sets one', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: { id: 'org-1', name: 'Charles Hull', branding: BRANDING },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as { orgBranding: Record<string, unknown> };
+      expect(body.orgBranding.theme).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('resolves the org theme into the payload when the org sets one', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Charles Hull',
+        branding: { ...BRANDING, theme: { radius: 4, density: 'compact' } },
+      },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as {
+        orgBranding: { theme: Record<string, unknown> };
+      };
+      expect(body.orgBranding.theme.radius).toBe(4);
+      expect(body.orgBranding.theme.density).toBe('compact');
+      // Fully resolved: keys neither layer set still arrive with defaults, so
+      // the public page never has to know the precedence rule.
+      expect(body.orgBranding.theme.layout).toBe('card');
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * Covers AE4. The form override wins on the keys it sets and inherits the
+   * org's value everywhere else — not the product default.
+   */
+  it('lets a form override win over the org theme, inheriting the rest', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: {
+        ...PUBLISHED_TEMPLATE,
+        themeOverride: { radius: 20 },
+      },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Charles Hull',
+        branding: { ...BRANDING, theme: { radius: 4, density: 'compact' } },
+      },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as {
+        orgBranding: { theme: Record<string, unknown> };
+      };
+      expect(body.orgBranding.theme.radius).toBe(20); // form wins
+      expect(body.orgBranding.theme.density).toBe('compact'); // inherited from org
+    } finally {
+      server.close();
+    }
+  });
+
+  it('resolves a form override even when the org has no theme', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: { ...PUBLISHED_TEMPLATE, themeOverride: { layout: 'hero' } },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: { id: 'org-1', name: 'Charles Hull', branding: BRANDING },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as { orgBranding: { theme: Record<string, unknown> } };
+      expect(body.orgBranding.theme.layout).toBe('hero');
+    } finally {
+      server.close();
+    }
+  });
+
   it('404s identically for unknown, revoked, and expired tokens', async () => {
     const { db, query } = fakeDb({});
     query.fillLinks.findFirst
