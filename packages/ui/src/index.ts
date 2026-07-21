@@ -39,6 +39,7 @@ export {
   RepeatingGroup,
   type RepeatingGroupProps,
   type RepeatingGroupColumn,
+  type RepeatingGroupAnswerSet,
   type RepeatingRow,
 } from './components/RepeatingGroup.js';
 export { SignaturePad, type SignaturePadProps } from './components/SignaturePad.js';

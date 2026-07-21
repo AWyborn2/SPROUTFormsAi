@@ -17,7 +17,13 @@ import {
   type RepeatingRow,
 } from '@formai/ui';
 import type { FormField, SubmissionValue } from '@formai/shared';
-import { incompleteFixedRowIndices } from '@formai/shared';
+import {
+  applySelection,
+  incompleteFixedRowIndices,
+  resolveAnswerSets,
+  selectedOption,
+} from '@formai/shared';
+import type { RepeatingRowValue } from '@formai/shared';
 import { resolveRepeatingRows } from '../../lib/fixed-rows.js';
 
 export interface FieldInputProps {
@@ -26,13 +32,27 @@ export interface FieldInputProps {
   onChange: (value: SubmissionValue) => void;
   error?: string;
   disabled?: boolean;
+  /**
+   * Rows the server reported incomplete on a failed submit — the `incompleteRows`
+   * entry for this field in the 400 body (`incompleteRowsByField`). When absent,
+   * a repeating group with an error recomputes them locally, so the highlight
+   * works even where the caller has no response to hand.
+   */
+  incompleteRowIndexes?: number[];
 }
 
 function asString(v: SubmissionValue): string {
   return v === null || v === undefined || Array.isArray(v) ? '' : String(v);
 }
 
-export function FieldInput({ field, value, onChange, error, disabled }: FieldInputProps) {
+export function FieldInput({
+  field,
+  value,
+  onChange,
+  error,
+  disabled,
+  incompleteRowIndexes,
+}: FieldInputProps) {
   if (field.type === 'section_header') {
     return (
       <div className="border-b border-border-subtle pb-2 pt-2">
@@ -177,21 +197,36 @@ export function FieldInput({ field, value, onChange, error, disabled }: FieldInp
             hint="PDF, image or document"
           />
         );
-      case 'repeating_group':
+      case 'repeating_group': {
+        const rows = resolveRepeatingRows(field, value);
+        // Answer-set resolution stays here: @formai/ui is dependency-free, so
+        // the component is handed the surviving sets plus a resolved selection.
+        const sets = resolveAnswerSets(field).sets;
         return (
           <RepeatingGroup
             columns={field.columns ?? []}
-            rows={resolveRepeatingRows(field, value) as RepeatingRow[]}
-            onChange={(rows) => onChange(rows)}
+            rows={rows as RepeatingRow[]}
+            onChange={(next) => onChange(next)}
             readOnly={disabled}
             fixedRows={field.fixedRows}
+            answerSets={sets}
+            answerSelection={(ri, set) => selectedOption(set, rows[ri]).columnKey}
+            onAnswerSelect={(ri, set, columnKey) =>
+              onChange(
+                rows.map((r, i) =>
+                  i === ri ? applySelection(set, r as RepeatingRowValue, columnKey) : r,
+                ) as RepeatingRow[],
+              )
+            }
             errorRowIndexes={
-              error && field.fixedRows?.length
+              incompleteRowIndexes ??
+              (error && field.fixedRows?.length
                 ? incompleteFixedRowIndices(field, value)
-                : undefined
+                : undefined)
             }
           />
         );
+      }
       default:
         return (
           <div className="flex h-9 items-center gap-2 rounded-md border border-border bg-surface-sunken px-3 text-[13px] text-text-tertiary">
