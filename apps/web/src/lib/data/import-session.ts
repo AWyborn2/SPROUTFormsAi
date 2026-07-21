@@ -11,11 +11,13 @@
  */
 import { useSyncExternalStore } from 'react';
 import type {
+  AnswerSet,
   ExtractedField,
   ExtractionResult,
   ExtractionStatus,
   FormField,
   FormFieldType,
+  RepeatingColumn,
   VisibilityCondition,
 } from '@formai/shared';
 import { statusForConfidence } from '@formai/shared';
@@ -111,6 +113,8 @@ function derivedReviewFields(): ReviewField[] {
 /** Seed the editor from a fresh extraction. */
 function seedEditor(fields: ExtractedField[]): ReviewField[] {
   reviewMeta.clear();
+  // Proposals from THIS run start unaccepted (R6) — never inherit approvals.
+  acceptedAnswerSets.clear();
   const formFields: FormField[] = fields.map((f) => {
     if (f.note !== undefined) reviewMeta.set(f.id, { note: f.note });
     return {
@@ -178,6 +182,7 @@ export function resetImportSession() {
   heldBase64 = null;
   editor = null;
   reviewMeta.clear();
+  acceptedAnswerSets.clear();
   session = emptySession();
   listeners.forEach((l) => l());
 }
@@ -430,6 +435,166 @@ export function moveField(id: string, dir: -1 | 1): void {
 /** arrayMove reorder (drag-and-drop drops). */
 export function reorderFields(from: number, to: number): void {
   dispatchStructural({ t: 'reorder', from, to });
+}
+
+/* ------------------------------------------------------------------ *
+ * Repeating-table columns and answer sets (R6)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Which proposed answer sets the reviewer has explicitly accepted, as
+ * `${fieldId}::${setKey}`.
+ *
+ * Extraction PROPOSES a grouping; publishing one unreviewed is the failure R6
+ * exists to prevent. Acceptance is therefore tracked HERE rather than on the
+ * field: it is review state, not published field state — `AnswerSet` has no
+ * "accepted" flag and must not grow one, or every consumer downstream of
+ * publish would have to reason about a proposal that no longer exists. A set
+ * the reviewer created themselves is accepted by construction (they just made
+ * it), so `groupColumns` marks it immediately; only extractor proposals start
+ * unaccepted. Cleared on reset and on every fresh extraction, so a new run can
+ * never inherit the previous run's approvals.
+ */
+const acceptedAnswerSets = new Set<string>();
+
+function acceptanceKey(fieldId: string, setKey: string): string {
+  return `${fieldId}::${setKey}`;
+}
+
+/** True once the reviewer has explicitly accepted this set (or made it). */
+export function answerSetAccepted(fieldId: string, setKey: string): boolean {
+  return acceptedAnswerSets.has(acceptanceKey(fieldId, setKey));
+}
+
+/** Reviewer accepts extraction's proposed grouping as-is. */
+export function acceptAnswerSet(fieldId: string, setKey: string): void {
+  acceptedAnswerSets.add(acceptanceKey(fieldId, setKey));
+  emit();
+}
+
+/** The column list of a repeating table under review, or an empty list. */
+function columnsOf(id: string): RepeatingColumn[] {
+  return editorField(id)?.columns ?? [];
+}
+
+/** The label column key — `columns[0]`, never answerable, never groupable. */
+function labelKeyOf(id: string): string | undefined {
+  return columnsOf(id)[0]?.key;
+}
+
+/**
+ * Rewrite one column in place. The `key` is never part of the patch: it is the
+ * identity a row value and any answer set naming it are stored under, so a
+ * rename must move only the display `label`.
+ */
+function patchColumn(id: string, key: string, patch: Partial<Omit<RepeatingColumn, 'key'>>): RepeatingColumn[] | null {
+  const columns = columnsOf(id);
+  if (!columns.some((c) => c.key === key)) return null;
+  return columns.map((c) => (c.key === key ? { ...c, ...patch } : c));
+}
+
+/**
+ * Strip `keys` from every set, dropping any set left with fewer than two
+ * members — a one-column "group" is just a checkbox, and leaving it would be a
+ * set `resolveAnswerSets` reports as dropped rather than a clean table.
+ */
+function withoutMembers(fieldId: string, sets: AnswerSet[], keys: Set<string>): AnswerSet[] {
+  const next: AnswerSet[] = [];
+  for (const set of sets) {
+    const columnKeys = set.columnKeys.filter((k) => !keys.has(k));
+    if (columnKeys.length === set.columnKeys.length) {
+      next.push(set);
+      continue;
+    }
+    if (columnKeys.length < 2) {
+      acceptedAnswerSets.delete(acceptanceKey(fieldId, set.key));
+      continue;
+    }
+    next.push({ ...set, columnKeys });
+  }
+  return next;
+}
+
+/** Mint a set key unique within the field. */
+function nextAnswerSetKey(sets: AnswerSet[]): string {
+  const taken = new Set(sets.map((s) => s.key));
+  let n = sets.length + 1;
+  while (taken.has(`as${n}`)) n += 1;
+  return `as${n}`;
+}
+
+/** Rename a column's display label; its `key` (and any set naming it) is untouched. */
+export function renameColumn(id: string, key: string, label: string): void {
+  const columns = patchColumn(id, key, { label });
+  if (!columns) return;
+  dispatchCoalesced(`column:${id}:${key}`, { t: 'update', id, patch: { columns } });
+}
+
+/** Toggle a column's per-cell required flag. */
+export function setColumnRequired(id: string, key: string, required: boolean): void {
+  const columns = patchColumn(id, key, { required });
+  if (!columns) return;
+  dispatchStructural({ t: 'update', id, patch: { columns } });
+}
+
+/**
+ * Retype a column. The label column is fixed text (pre-printed item names) and
+ * is left alone. Retyping a grouped column to `text` removes it from its set:
+ * a free-text cell cannot be one option of a one-answer-per-row group, and
+ * leaving it in would publish a malformed set.
+ */
+export function setColumnType(id: string, key: string, type: FormFieldType): void {
+  if (key === labelKeyOf(id)) return;
+  const columns = patchColumn(id, key, { type });
+  if (!columns) return;
+  const patch: Partial<FormField> = { columns };
+  if (type === 'text') {
+    const sets = editorField(id)?.answerSets ?? [];
+    patch.answerSets = withoutMembers(id, sets, new Set([key]));
+  }
+  dispatchStructural({ t: 'update', id, patch });
+}
+
+/**
+ * Group columns into a new answer set (one answer per row across them).
+ *
+ * The label column is filtered out rather than rejecting the whole request —
+ * a reviewer sweeping a row of columns should get the answerable ones grouped.
+ * Members already in another set MOVE here: `resolveAnswerSets` drops sets with
+ * overlapping membership outright, so duplicating would silently un-group both.
+ * Returns the new set's key, or null when fewer than two groupable columns
+ * remain.
+ */
+export function groupColumns(id: string, columnKeys: string[]): string | null {
+  const field = editorField(id);
+  if (!field) return null;
+  const known = new Set((field.columns ?? []).map((c) => c.key));
+  const labelKey = labelKeyOf(id);
+
+  const members: string[] = [];
+  for (const k of columnKeys) {
+    if (k === labelKey || !known.has(k) || members.includes(k)) continue;
+    members.push(k);
+  }
+  if (members.length < 2) return null;
+
+  const existing = withoutMembers(id, field.answerSets ?? [], new Set(members));
+  const key = nextAnswerSetKey(field.answerSets ?? []);
+  acceptedAnswerSets.add(acceptanceKey(id, key));
+  dispatchStructural({ t: 'update', id, patch: { answerSets: [...existing, { key, columnKeys: members }] } });
+  return key;
+}
+
+/** Dissolve one answer set — its columns return to independent cells. */
+export function ungroupAnswerSet(id: string, setKey: string): void {
+  const field = editorField(id);
+  if (!field?.answerSets) return;
+  acceptedAnswerSets.delete(acceptanceKey(id, setKey));
+  dispatchStructural({
+    t: 'update',
+    id,
+    patch: { answerSets: field.answerSets.filter((s) => s.key !== setKey) },
+  });
 }
 
 export function undoFieldEdit(): void {

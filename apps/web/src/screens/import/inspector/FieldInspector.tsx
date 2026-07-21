@@ -29,6 +29,7 @@ import {
   type ReviewField,
 } from '../../../lib/data/import-session.js';
 import { FIELD_META, PALETTE } from '../../../lib/field-editor/reducer.js';
+import { ColumnInspector } from './ColumnInspector.js';
 
 const TYPE_OPTIONS = FORM_FIELD_TYPES.map((t) => ({ label: FIELD_META[t]?.label ?? t, value: t }));
 
@@ -73,6 +74,9 @@ export function FieldInspector({ field, index, count, onSelect }: FieldInspector
   const isSection = mode === 'section';
   const isChoice = field.type === 'dropdown' || field.type === 'radio';
   const checklist = isChecklistTable(field);
+  // Columns and answer sets only exist on a repeating table, and only once
+  // extraction actually captured a column shape.
+  const isTable = field.type === 'repeating_group' && (field.columns?.length ?? 0) > 0;
 
   return (
     <div className="overflow-hidden rounded-md border border-border bg-surface-card shadow-xs">
@@ -159,6 +163,8 @@ export function FieldInspector({ field, index, count, onSelect }: FieldInspector
             </div>
           </>
         )}
+
+        {isTable && <ColumnInspector field={field} />}
 
         <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
           <div className="text-[12.5px] font-semibold">Insert below</div>
