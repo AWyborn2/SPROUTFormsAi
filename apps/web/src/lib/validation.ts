@@ -45,3 +45,28 @@ export function requiredFieldsMissingIds(body: unknown): string[] | null {
   if (error !== 'required_fields_missing' || !Array.isArray(fields)) return null;
   return fields.filter((f): f is string => typeof f === 'string');
 }
+
+/**
+ * Per-field incomplete row indices from a `required_fields_missing` 400 body.
+ *
+ * The server names WHICH fields failed in `fields`; this reads the additive
+ * `incompleteRows` detail saying WHERE inside them. Without it a filler who
+ * missed rows 7 and 14 of a forty-row table is told only that the table is
+ * incomplete and has to re-scan it by eye, outdoors, on a phone — which is the
+ * gap R10 exists to close. Absent on older responses and on scalar-only
+ * failures, so callers must tolerate `{}`.
+ */
+export function incompleteRowsByFieldFrom(body: unknown): Record<string, number[]> {
+  if (typeof body !== 'object' || body === null) return {};
+  const { error, incompleteRows } = body as { error?: unknown; incompleteRows?: unknown };
+  if (error !== 'required_fields_missing') return {};
+  if (typeof incompleteRows !== 'object' || incompleteRows === null) return {};
+
+  const out: Record<string, number[]> = {};
+  for (const [fieldId, rows] of Object.entries(incompleteRows as Record<string, unknown>)) {
+    if (!Array.isArray(rows)) continue;
+    const indexes = rows.filter((r): r is number => typeof r === 'number' && Number.isInteger(r) && r >= 0);
+    if (indexes.length > 0) out[fieldId] = indexes;
+  }
+  return out;
+}

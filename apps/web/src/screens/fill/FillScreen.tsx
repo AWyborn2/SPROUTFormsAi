@@ -12,6 +12,7 @@ import {
   requiredFieldErrors,
   requiredFieldsMissingIds,
   validateRequired,
+  incompleteRowsByFieldFrom,
 } from '../../lib/validation.js';
 import { ExternalShell } from './ExternalShell.js';
 
@@ -40,6 +41,8 @@ export function FillScreen() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitterName, setSubmitterName] = useState('');
   const [submitterEmail, setSubmitterEmail] = useState('');
+  /** Per-field incomplete row indexes from the last failed submit (R10). */
+  const [incompleteRows, setIncompleteRows] = useState<Record<string, number[]>>({});
   const [emailError, setEmailError] = useState('');
   const [doneRef, setDoneRef] = useState<string | null>(null);
 
@@ -85,6 +88,9 @@ export function FillScreen() {
             // Server-side required enforcement (KTD4): map the named fields
             // into the same per-field errors the client check uses.
             const missingIds = requiredFieldsMissingIds(err.body);
+            // Row-level detail travels with the same 400 — surfacing it is what
+            // turns "this table is incomplete" into "rows 7 and 14".
+            setIncompleteRows(incompleteRowsByFieldFrom(err.body));
             if (missingIds && missingIds.length > 0) {
               setErrors((e) => ({ ...e, ...requiredFieldErrors(missingIds) }));
               const n = missingIds.length;
@@ -202,6 +208,7 @@ export function FillScreen() {
                     field={f}
                     value={values[f.id] ?? null}
                     error={errors[f.id] || undefined}
+                    incompleteRowIndexes={incompleteRows[f.id]}
                     onChange={(v) => setValue(f.id, v)}
                   />
                 </div>

@@ -16,6 +16,7 @@ import {
   requiredFieldErrors,
   requiredFieldsMissingIds,
   validateRequired,
+  incompleteRowsByFieldFrom,
 } from '../../lib/validation.js';
 
 type Tab = 'home' | 'activity';
@@ -103,6 +104,8 @@ export function MobileScreen() {
   const [formId, setFormId] = useState<string | null>(null);
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+  /** Per-field incomplete row indexes from the last failed submit (R10). */
+  const [incompleteRows, setIncompleteRows] = useState<Record<string, number[]>>({});
   const [lastRef, setLastRef] = useState<string | null>(null);
 
   const { data: form } = useForm(formId ?? undefined);
@@ -134,6 +137,7 @@ export function MobileScreen() {
     setFormId(f.id);
     setValues({});
     setErrors({});
+    setIncompleteRows({});
     setView('fill');
   }
 
@@ -175,6 +179,7 @@ export function MobileScreen() {
           // failure — never blame the connection for a validation response.
           if (err instanceof ApiError && err.status === 400) {
             const missingIds = requiredFieldsMissingIds(err.body);
+            setIncompleteRows(incompleteRowsByFieldFrom(err.body));
             if (missingIds && missingIds.length > 0) {
               // Server-side required enforcement (KTD4): same per-field
               // errors as the client-side pre-check above.
@@ -200,6 +205,7 @@ export function MobileScreen() {
     setFormId(null);
     setValues({});
     setErrors({});
+    setIncompleteRows({});
     setView('list');
     setTab('home');
   }
@@ -278,6 +284,7 @@ export function MobileScreen() {
               firstName={firstName}
               values={values}
               errors={errors}
+              incompleteRows={incompleteRows}
               submitting={submit.isPending}
               onBack={reset}
               onChange={setValue}
@@ -442,6 +449,7 @@ function FillView({
   firstName,
   values,
   errors,
+  incompleteRows,
   submitting,
   onBack,
   onChange,
@@ -451,6 +459,7 @@ function FillView({
   firstName: string;
   values: Record<string, SubmissionValue>;
   errors: Record<string, string>;
+  incompleteRows: Record<string, number[]>;
   submitting: boolean;
   onBack: () => void;
   onChange: (fieldId: string, value: SubmissionValue) => void;
@@ -529,6 +538,7 @@ function FillView({
                   field={f}
                   value={values[f.id] ?? null}
                   error={errors[f.id] || undefined}
+                  incompleteRowIndexes={incompleteRows[f.id]}
                   onChange={(v) => onChange(f.id, v)}
                 />
               </div>
