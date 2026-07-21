@@ -38,7 +38,8 @@ import {
   type BuilderState,
 } from '../../lib/field-editor/reducer.js';
 import { ColumnInspector } from '../import/inspector/ColumnInspector.js';
-import { builderColumnActions } from '../import/inspector/column-actions.js';
+import { ConditionEditor, governedFieldIds } from '../import/inspector/ConditionEditor.js';
+import { builderColumnActions, builderConditionActions } from '../import/inspector/column-actions.js';
 
 const COL_OPTIONS: Array<{ span: number; icon: string; label: string }> = [
   { span: 12, icon: 'rectangle-horizontal', label: 'Full' },
@@ -207,6 +208,21 @@ function BuilderEditor({ init }: { init: BuilderInit }) {
     [state.fields, state.selectedId],
   );
   const containerSelected = state.selectedId === CONTAINER_ID;
+
+  /**
+   * Fields governed by a conditioned section header. One condition on a header
+   * silently decides the fate of everything under it, so the canvas marks the
+   * range — otherwise the only way to see what was scoped is to count headers.
+   */
+  const scopedIds = useMemo(() => {
+    const out = new Set<string>();
+    for (const f of state.fields) {
+      if (f.type === 'section_header' && f.visibleWhen) {
+        for (const id of governedFieldIds(state.fields, f.id)) out.add(id);
+      }
+    }
+    return out;
+  }, [state.fields]);
 
   // Pointer drag-and-drop reordering (edit mode only — preview renders no
   // canvas, so DnD is structurally absent there). PointerSensor only:
@@ -386,6 +402,7 @@ function BuilderEditor({ init }: { init: BuilderInit }) {
                             : null
                         }
                         selected={f.id === state.selectedId}
+                        scoped={scopedIds.has(f.id)}
                         onSelect={() => dispatch({ t: 'select', id: f.id })}
                         onUp={() => dispatch({ t: 'move', id: f.id, dir: -1 })}
                         onDown={() => dispatch({ t: 'move', id: f.id, dir: 1 })}
@@ -456,6 +473,7 @@ function SortableFieldCard({
   field: FormField;
   indicator: 'before' | 'after' | null;
   selected: boolean;
+  scoped?: boolean;
   onSelect: () => void;
   onUp: () => void;
   onDown: () => void;
@@ -506,6 +524,7 @@ function SortableFieldCard({
 function FieldCard({
   field,
   selected,
+  scoped,
   onSelect,
   onUp,
   onDown,
@@ -515,6 +534,8 @@ function FieldCard({
 }: {
   field: FormField;
   selected: boolean;
+  /** Inside the range a conditioned section header governs. */
+  scoped?: boolean;
   onSelect: () => void;
   onUp: () => void;
   onDown: () => void;
@@ -563,6 +584,15 @@ function FieldCard({
           <Badge variant={field.source === 'imported' ? 'info' : 'accent'}>
             {field.source === 'imported' ? 'Imported' : 'Built'}
           </Badge>
+          {(field.visibleWhen || scoped) && (
+            <span className="flex-none rounded-pill border border-border-subtle bg-surface-sunken px-2 py-[3px] font-mono text-[10.5px] text-text-secondary">
+              {field.visibleWhen
+                ? field.type === 'section_header'
+                  ? 'Conditional section'
+                  : 'Conditional'
+                : 'In conditional section'}
+            </span>
+          )}
           <span className="min-w-1 flex-1" />
           {selected && (
             <span className="flex flex-none">
@@ -830,6 +860,11 @@ function ConfigPanel({
               )}
             />
           )}
+          <ConditionEditor
+            field={field}
+            fields={state.fields}
+            actions={builderConditionActions((patch) => dispatch({ t: 'update', id: field.id, patch }))}
+          />
         </div>
       ) : (
         <div className="flex flex-col gap-4 p-4">

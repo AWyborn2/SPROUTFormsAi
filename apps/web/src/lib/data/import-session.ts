@@ -410,6 +410,19 @@ export function removeFieldOption(id: string, index: number): void {
   dispatchStructural({ t: 'removeOption', id, index });
 }
 
+/**
+ * Set (or clear, with null) a field's visibility condition.
+ *
+ * Structural rather than coalesced: a condition is one deliberate decision, not
+ * a stream of keystrokes, and the author must be able to undo it in one step.
+ * Clearing writes `undefined` rather than deleting the key — the publish
+ * whitelist in `reviewedToFields` treats both identically, and the reducer's
+ * `update` is a spread.
+ */
+export function setFieldCondition(id: string, condition: VisibilityCondition | null): void {
+  dispatchStructural({ t: 'update', id, patch: { visibleWhen: condition ?? undefined } });
+}
+
 /** Drop a field from the import entirely (it never reaches publish). */
 export function deleteField(id: string): void {
   dispatchStructural({ t: 'delete', id });

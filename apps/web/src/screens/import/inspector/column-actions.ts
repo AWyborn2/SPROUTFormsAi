@@ -6,7 +6,7 @@
  * reducer. Keeping both adapters here means the difference between the two is
  * one small file rather than two diverging copies of the panel.
  */
-import type { FormField, FormFieldType } from '@formai/shared';
+import type { FormField, FormFieldType, VisibilityCondition } from '@formai/shared';
 import {
   acceptAnswerSet,
   answerSetAccepted,
@@ -14,9 +14,11 @@ import {
   renameColumn,
   setColumnRequired,
   setColumnType,
+  setFieldCondition,
   ungroupAnswerSet,
 } from '../../../lib/data/import-session.js';
 import type { ColumnActions } from './ColumnInspector.js';
+import type { ConditionActions } from './ConditionEditor.js';
 
 /** Pre-publish: every edit goes through the import session's shared editor. */
 export const importSessionColumnActions: ColumnActions = {
@@ -28,6 +30,25 @@ export const importSessionColumnActions: ColumnActions = {
   acceptAnswerSet,
   answerSetAccepted,
 };
+
+/** Pre-publish: the condition is written into the reviewed field list. */
+export const importSessionConditionActions: ConditionActions = {
+  setCondition: setFieldCondition,
+};
+
+/**
+ * Post-publish: the same panel, writing a reducer patch instead. Clearing sets
+ * `visibleWhen` to undefined rather than omitting it, so the spread in the
+ * reducer's `update` actually removes the old condition.
+ */
+export function builderConditionActions(
+  update: (patch: Partial<FormField>) => void,
+): ConditionActions {
+  return {
+    setCondition: (_id: string, condition: VisibilityCondition | null) =>
+      update({ visibleWhen: condition ?? undefined }),
+  };
+}
 
 /** Patch one column of a repeating field, preserving column order and key. */
 function patchColumn(

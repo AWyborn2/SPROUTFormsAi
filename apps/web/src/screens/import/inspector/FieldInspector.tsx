@@ -26,11 +26,13 @@ import {
   renameField,
   setFieldOption,
   setFieldRequired,
+  useImportSession,
   type ReviewField,
 } from '../../../lib/data/import-session.js';
 import { FIELD_META, PALETTE } from '../../../lib/field-editor/reducer.js';
 import { ColumnInspector } from './ColumnInspector.js';
-import { importSessionColumnActions } from './column-actions.js';
+import { ConditionEditor } from './ConditionEditor.js';
+import { importSessionColumnActions, importSessionConditionActions } from './column-actions.js';
 
 const TYPE_OPTIONS = FORM_FIELD_TYPES.map((t) => ({ label: FIELD_META[t]?.label ?? t, value: t }));
 
@@ -58,6 +60,10 @@ export interface FieldInspectorProps {
 
 export function FieldInspector({ field, index, count, onSelect }: FieldInspectorProps) {
   const mode = inspectorMode(field);
+  // The condition panel needs the whole form to derive its source list (only
+  // fields EARLIER than this one may be a source), so it reads the session
+  // rather than taking the list through every caller.
+  const { fields } = useImportSession();
 
   if (mode === 'prompt' || !field) {
     return (
@@ -166,6 +172,8 @@ export function FieldInspector({ field, index, count, onSelect }: FieldInspector
         )}
 
         {isTable && <ColumnInspector field={field} actions={importSessionColumnActions} />}
+
+        <ConditionEditor field={field} fields={fields} actions={importSessionConditionActions} />
 
         <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
           <div className="text-[12.5px] font-semibold">Insert below</div>
