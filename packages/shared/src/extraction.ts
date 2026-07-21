@@ -4,7 +4,7 @@
  * real compliance forms; see the implementation plan's PDF pipeline section.
  */
 
-import type { FormFieldType, RepeatingColumn, SourcePosition } from './form-field.js';
+import type { AnswerSet, FormFieldType, RepeatingColumn, SourcePosition } from './form-field.js';
 
 /** Per-field review status in the import UI. */
 export type ExtractionStatus = 'ok' | 'review' | 'low';
@@ -26,6 +26,12 @@ export interface ExtractedField {
   selectionType?: 'single' | 'multiple';
   /** For repeating_group — extracted once, never per blank row. */
   columns?: RepeatingColumn[];
+  /**
+   * For repeating_group — column groups the extractor believes share one answer
+   * per row (`OK`/`NA`, `✓`/`×`/`N-A`). A proposal, never applied silently: the
+   * reviewer accepts, ungroups, or regroups before publish.
+   */
+  answerSets?: AnswerSet[];
   /**
    * For repeating_group — ordered pre-printed item labels of a fixed-item
    * checklist table; the labels also occupy the first (text) column. Absent

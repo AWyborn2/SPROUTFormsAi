@@ -7,6 +7,7 @@ export * from './roles.js';
 export * from './branding.js';
 export * from './google-fonts-catalog.js';
 export * from './form-field.js';
+export * from './answer-set.js';
 export * from './extraction.js';
 export * from './template.js';
 export * from './submission.js';
