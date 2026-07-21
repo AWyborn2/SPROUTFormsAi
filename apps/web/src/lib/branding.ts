@@ -91,10 +91,13 @@ const LOGO_PX: Record<LogoSize, number> = {
  */
 export function orgBrandVars(
   branding?: BrandingKit | null,
-  theme?: ThemeTokens | null,
+  themeOverride?: ThemeTokens | null,
 ): CSSProperties {
   const b = branding ?? DEFAULT_BRANDING;
-  const t = resolveTheme(theme);
+  // The org's own theme rides inside the kit; `themeOverride` is the per-form
+  // layer on top of it. Existing callers pass only the kit and pick up org
+  // theming for free.
+  const t = resolveTheme(b.theme, themeOverride);
   const density = DENSITY_SCALE[t.density] ?? DENSITY_SCALE.comfortable;
 
   const vars: Record<string, string> = {

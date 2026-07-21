@@ -4,6 +4,7 @@
  */
 
 import { findGoogleFont } from './google-fonts-catalog.js';
+import type { ThemeTokens } from './theme.js';
 
 /**
  * The quick-pick presets surfaced above the font search in the branding
@@ -44,6 +45,16 @@ export interface BrandingKit {
   secondaryColor: string;
   accentColor: string;
   formFont: FormFont;
+  /**
+   * Optional theme layered on top of the kit — colour and typography roles,
+   * button and surface styling, density, logo geometry, layout type.
+   *
+   * Optional rather than required, and stored inside the existing `branding`
+   * jsonb column rather than beside it, so adding it needs no migration and an
+   * org that predates theming keeps rendering exactly as before: absent means
+   * `DEFAULT_THEME`.
+   */
+  theme?: ThemeTokens;
 }
 
 /** FormAI's own defaults, mirroring the prototype's initial brand state. */
