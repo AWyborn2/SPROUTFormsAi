@@ -9,6 +9,8 @@ import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
 import { deleteSupersededLogo, logoKeyFromPublicUrl } from './assets.js';
+import { runBrandScan } from '../brand-scan/scan.js';
+import { SafeFetchError } from '../brand-scan/safe-fetch.js';
 import { db } from '../db.js';
 
 /**
@@ -21,6 +23,33 @@ import { db } from '../db.js';
  *   payment processing). Replace with real billing integration before going live.
  */
 export const orgRouter: Router = Router();
+
+/**
+ * Per-org rate limit for the brand scan.
+ *
+ * This is the only endpoint that makes the server perform an outbound request
+ * to an address the caller chooses, which makes it usable as a traffic
+ * amplifier or a port scanner even with the SSRF guard refusing private
+ * space. `POST /org/logo` shipped without a limit and that gap is a known
+ * residual risk; this one starts with one rather than inheriting it.
+ *
+ * Deliberately in-process: this API runs as a single instance today, and a
+ * shared store would be reached for when that stops being true.
+ */
+const SCAN_WINDOW_MS = 60_000;
+const SCAN_MAX_PER_WINDOW = 5;
+const scanHits = new Map<string, number[]>();
+
+function scanRateLimited(orgId: string, now = Date.now()): boolean {
+  const recent = (scanHits.get(orgId) ?? []).filter((t) => now - t < SCAN_WINDOW_MS);
+  if (recent.length >= SCAN_MAX_PER_WINDOW) {
+    scanHits.set(orgId, recent);
+    return true;
+  }
+  recent.push(now);
+  scanHits.set(orgId, recent);
+  return false;
+}
 
 /**
  * A theme colour role. Unlike the three brand colours these may be empty:
@@ -76,6 +105,57 @@ const themeBody = z.object({
 
   layout: z.enum(['card', 'hero', 'split', 'conversational']).optional(),
 });
+
+const brandScanBody = z.object({ url: z.string().min(1).max(2048) });
+
+/**
+ * Propose a theme from the org's own website (R15).
+ *
+ * Never applies anything: the response is a draft the owner reviews, edits and
+ * confirms. That human step is the load-bearing control, because every value
+ * here originates from a document the org's own visitors — and anyone else —
+ * can influence.
+ */
+orgRouter.post('/brand-scan', requireTenant, withErrorHandling(async (req, res) => {
+  const tenant = req.tenant!;
+  if (tenant.role !== 'owner' && tenant.role !== 'admin') {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  const parsed = brandScanBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return;
+  }
+  if (scanRateLimited(tenant.orgId)) {
+    res.status(429).json({ error: 'rate_limited' });
+    return;
+  }
+
+  // A bare domain is what people type, so add a scheme when there is none.
+  // The check is for *any* scheme, not just http(s): testing only for
+  // `http(s)://` would rewrite `file:///etc/passwd` into
+  // `https://file:///etc/passwd`, turning a value the guard would have
+  // rejected outright into a hostname lookup. Anything with a scheme is passed
+  // through untouched so `assertFetchableUrl` can refuse it on its merits.
+  const raw = parsed.data.url.trim();
+  const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw);
+  const candidate = hasScheme ? raw : `https://${raw}`;
+
+  try {
+    const proposal = await runBrandScan(candidate);
+    res.json(proposal);
+  } catch (err) {
+    if (err instanceof SafeFetchError) {
+      // The guard's reason is safe to surface: it tells an owner who typed an
+      // internal hostname why it was refused, and reveals nothing they could
+      // not learn by trying the URL in their own browser.
+      res.status(422).json({ error: 'scan_failed', reason: err.code, detail: err.message });
+      return;
+    }
+    throw err;
+  }
+}));
 
 const brandingBody = z.object({
   // Only a URL this API minted (`POST /org/logo` → `logoPublicUrl`) is
