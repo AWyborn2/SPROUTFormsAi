@@ -68,6 +68,7 @@ Two consequences to state plainly rather than discover later:
 
 - R5. Geometry is derived from the source PDF's text layer: column bands from the horizontal extents of the column-header glyphs, row bands from the vertical positions of the pre-printed row labels.
 - R6. Derivation treats the header as a *cluster of positioned items*, never assuming any particular character is independently addressable, and tolerates locating fewer anchors than the table has columns. Verified across the library: the tick is an unmappable Private-Use glyph on some documents and absent from the text layer entirely on others, and `/ ×` arrives as a single combined item where it appears at all.
+- R16. A proposal is emitted only when corroborated by evidence the derivation did not itself consume. Uncorroborated means no proposal, with the reason recorded — the module's doctrine is that refusing is safe and a confident wrong grid is not, and review proved that doctrine was not being honoured.
 - R15. A proposal that the shipped geometry validator would reject is never emitted. Duplicate band keys, non-finite bounds, bands outside the segment box and overlapping bands are all dropped silently downstream, leaving the reviewer an empty grid with no stated reason — so the proposer must satisfy the validator rather than rely on it.
 - R7. A derived grid is shown overlaid on the PDF in review, marked as derived rather than settled, and the reviewer can adjust any band or reject the grid entirely.
 - R8. A field whose geometry the reviewer has not confirmed is exported as data, never with a guessed mark.
@@ -160,6 +161,8 @@ U1 is a spike and can change U3's approach, so it runs first and its findings ar
 flowchart TB
   U1["U1 text-layer spike"] --> U2["U2 geometry model + page fix"]
   U2 --> U3["U3 derive bands"]
+  U3 --> U7["U7 corroborate or refuse"]
+  U7 --> U4
   U2 --> U6["U6 retrofit path"]
   U3 --> U4["U4 confirm + adjust UI"]
   U4 --> U5["U5 export against bands"]
@@ -242,7 +245,7 @@ flowchart TB
 
 - **Goal:** The reviewer sees the proposed grid on the page and can correct it before it is trusted.
 - **Requirements:** R7, R8, R9
-- **Dependencies:** U3
+- **Dependencies:** U3, **U7** — U4 is the human-confirmation step, and its entire value rests on the reviewer checking a proposal that is *plausible*. A proposal that is confidently wrong in the ways U7 fixes trains the reviewer to rubber-stamp, which converts the safety step into a liability.
 - **Files:** `apps/web/src/screens/import/PdfViewer.tsx`, `apps/web/src/screens/import/inspector/GeometryPanel.tsx` (new) and its test, `apps/web/src/lib/data/import-session.ts`
 - **Approach:** Extend the viewer's existing highlight overlay to draw band lines for the selected field, reusing the point→pixel mapping and zoom already there. The inspector gains a panel to accept, nudge an edge, or reject. Confirmation is explicit and per field; nothing is trusted by default (R8). Scalar fields get the same treatment with a single box (R9). Confirmed geometry is carried to the published field through `reviewedToFields` — the whitelist there drops unknown properties, so it must be extended or geometry dies silently at publish, exactly as `answerSets` would have.
 - **Test scenarios:** an unconfirmed field publishes with no geometry; confirming writes bands onto the field; adjusting an edge moves only that band; rejecting returns the field to no geometry; geometry survives publish; a form where nothing was confirmed publishes exactly as it does today.
@@ -267,6 +270,52 @@ flowchart TB
 - **Approach:** Re-import produces a new version carrying geometry; the old version is untouched and its submissions keep exporting against it (R14). Update the "won't round-trip" messaging so it reflects confirmed geometry rather than extraction path — that copy is currently the product's honest admission of this gap and becomes wrong the moment U5 lands.
 - **Test scenarios:** an old submission exports unchanged after its template is re-imported; a new submission against the new version exports with marks; the publish-screen copy reflects geometry state, not path.
 - **Verification:** `pnpm --filter @formai/web test` passes.
+
+### U7. Corroborate a proposal, or refuse it
+
+- **Goal:** Make the module's stated doctrine true. It claims to always fail toward refusing; review proved three paths where it emits a confident, validator-clean, *wrong* grid instead.
+- **Requirements:** R6, R15, plus R16 below
+- **Dependencies:** U3
+- **Files:** `apps/web/src/lib/pdf-geometry.ts`, `apps/web/src/lib/pdf-geometry.test.ts`
+
+**Why this is a unit and not a bug-fix list.** All six findings share one root: every "typical value" is a statistic over two-to-four samples, and **no proposal is ever checked against evidence it did not use to build itself**. `resolveGeometry` is the only downstream gate and by design it rejects geometry that is *malformed*, never geometry that is merely *in the wrong place*. Patching each finding separately would leave that hole open for the next one.
+
+- **KTD7. A proposal must be corroborated by independent evidence before it is emitted.** "Independent" is the load-bearing word: a check computed from the same anchors that built the bands is vacuous — the anchors necessarily fall inside bands derived from them. Each check below uses a signal the derivation did *not* consume.
+
+- **R16 (new).** A proposal is emitted only when corroborated. When corroboration fails, the module returns nothing and records why, so U4 can tell a reviewer "this table needs drawing by hand" rather than showing an empty panel.
+
+**The four checks, each closing a specific proven failure:**
+
+| Check | Independent signal | Closes |
+|---|---|---|
+| **Cluster tightness** — reject a header whose anchor cluster spans more than *k* × the sum of its own anchors' widths | Glyph *widths*, which the centre-based derivation never reads | Page furniture accepted as a header. Measured: the real dozer cluster spans 50.6pt against 30.7pt of member width (ratio 1.65); a running head's `Rev 4` / `07/2026` pair is far looser |
+| **Header repetition** — when a page carries two or more header rows, their anchor x-positions must agree within a tolerance | The *other* tables on the page | Furniture again, and a stray anchor: a stray shifts one header's cluster but not its siblings'. U1 measured headers repeating 2× on p7 and 3× on p8/p9 |
+| **Right-boundedness** — only extend leftward when the rightmost located anchor is within half a pitch of the header row's rightmost text | The printed right edge of the table | Inference assuming the *leftmost* columns are the missing ones. Removing `N/A` from the dozer header currently shifts every band one column left, stamping a recorded `×` in the ✓ column |
+| **Gap separability** — split the row-gap list into wrap and row clusters; use the row cluster's median as pitch, and refuse when the two are not separable | The *distribution* of gaps rather than a single median over them | Row pitch estimated from the gaps it is meant to classify. Three rows with irregular leading currently give 2 bands for 3 printed rows |
+
+- **Also in scope, smaller:**
+  - Floor a table at the first row-gap that breaks the derived pitch, not only at the next *detected* header — today a detection failure on the lower table silently corrupts the upper one.
+  - Compute the left bound from the label *column's* widest cell, not the label *header* (192pt vs 442pt on the fixture), so a four-option layout cannot place a band over the printed question text.
+  - Refuse below a stated confidence floor rather than shipping a proposal at 0.
+
+- **Execution note:** proof-first, and the proofs are the review's own executed counter-examples. Each one is a failing test before it is a fix — they were reproduced against a working port, so they transcribe directly.
+
+- **Calibrate against the library, not the fixture.** Every threshold here (*k*, the repetition tolerance, the separability ratio, the confidence floor) must be measured across all eight surveyed documents, not tuned until the dozer passes. U3's own smoke covered one document, which is exactly how the Grader and Small Loader shapes went unexercised. **A threshold that cannot be justified from at least three documents does not ship** — refuse in that case instead.
+
+- **Test scenarios:**
+  - A document-control running head yields no proposal (currently yields one at confidence 0.7).
+  - A signature strip (`I declare that…` + `Date:` + `Time:`) yields no proposal.
+  - Three rows with irregular leading yield three row bands, not two.
+  - A table whose labels mostly wrap yields one band per printed row, not per line.
+  - A three-line wrapped label is one row.
+  - The dozer header with `N/A` removed refuses, rather than shifting every band one column left.
+  - The dozer header with the tick removed either lands the inferred band over the real glyph at x=502.6, or refuses — asserted against the fixture's recorded position, not against a count.
+  - Two headers on a page whose anchor positions disagree yields no proposal for the outlier.
+  - A stray `:` surviving into a 3-candidate header no longer produces bands over blank paper.
+  - A lower table whose header is undetected does not extend the upper table's rows into it.
+  - Every existing U3 test still passes unchanged, or its change is justified in the diff.
+
+- **Verification:** `pnpm --filter @formai/web test` passes. Then run the module across **all eight** surveyed documents and record, per document, how many tables were proposed against how many were printed — including the refusals, which are the point.
 
 ---
 
