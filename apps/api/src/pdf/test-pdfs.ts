@@ -3,7 +3,7 @@
  * exercise: an AcroForm PDF with real fillable fields, and a flat PDF that only
  * carries drawn letterhead text (no form dictionary).
  */
-import { PDFDocument, StandardFonts } from 'pdf-lib';
+import { PDFDocument, PDFName, StandardFonts } from 'pdf-lib';
 
 export const LETTERHEAD = 'MERIDIAN OPERATIONS';
 
@@ -22,6 +22,55 @@ export async function makeAcroFormPdf(): Promise<Uint8Array> {
   const category = form.createDropdown('category');
   category.addOptions(['Goods supplier', 'Services contractor']);
   category.addToPage(page, { x: 100, y: 600, width: 160, height: 20 });
+
+  return doc.save();
+}
+
+/**
+ * A four-page AcroForm PDF whose only field sits on page 3 (index 2).
+ *
+ * Exists to pin the page index an extracted position records. Every other
+ * fixture here is single-page, which is exactly why a hardcoded `page: 0`
+ * survived unnoticed — a one-page document cannot tell a real page index from
+ * a default one. The compliance library is not one page: the dozer assessment
+ * is eighteen.
+ */
+export async function makeMultiPageAcroFormPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  // Page 2 is LANDSCAPE while the rest are portrait, mirroring the dozer
+  // assessment (595x842 and 842x595 in one file). Uniform page sizes would let
+  // a "read dimensions from page 0" bug pass this fixture unnoticed.
+  doc.addPage([600, 800]);
+  doc.addPage([600, 800]);
+  doc.addPage([900, 500]);
+  doc.addPage([600, 800]);
+  const form = doc.getForm();
+
+  const assessor = form.createTextField('assessor_name');
+  assessor.addToPage(doc.getPage(2), { x: 120, y: 300, width: 200, height: 18 });
+
+  return doc.save();
+}
+
+/**
+ * An AcroForm PDF whose widget carries no `/P` back-pointer.
+ *
+ * `/P` is optional per the spec and plenty of producers omit it. Resolving a
+ * widget's page from `/P` alone would silently drop the position of every field
+ * in such a document — an invisible regression for forms that exported fine
+ * before, since nothing errors, the answers just stop being drawn.
+ */
+export async function makeAcroFormPdfWithoutPageRef(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([600, 800]);
+  const form = doc.getForm();
+
+  const name = form.createTextField('supplier_name');
+  name.addToPage(page, { x: 100, y: 700, width: 220, height: 20 });
+
+  // Strip the back-pointer the extractor would prefer, leaving only the page's
+  // own /Annots array to resolve from.
+  name.acroField.getWidgets()[0]!.dict.delete(PDFName.of('P'));
 
   return doc.save();
 }

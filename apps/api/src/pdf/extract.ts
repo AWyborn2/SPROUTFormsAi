@@ -71,16 +71,93 @@ const EXTRACTION_PROMPT =
   'answerSets entry naming those column keys; leave independent checkboxes ungrouped. ' +
   'Give every field a confidence score.';
 
-/** Read the widget rectangle of an AcroForm field into PDF point space. */
-function widgetPosition(field: {
-  acroField: { getWidgets(): Array<{ getRectangle(): { x: number; y: number; width: number; height: number } }> };
-}, pageWidth: number, pageHeight: number): SourcePosition | undefined {
+/**
+ * Which page a widget sits on, or -1 when it cannot be established.
+ *
+ * `/P` is consulted first because it is direct, but it is only a back-pointer
+ * and the spec makes it OPTIONAL — pdf-lib's accessor additionally yields
+ * nothing unless the value is a direct ref. Trusting it alone would drop the
+ * position of every field in a producer that omits it, and one of the real
+ * fixture documents (a 73-field fillable checklist) is exactly the kind of
+ * single-page form where that would be a silent regression from previously
+ * working output.
+ *
+ * The page's own `/Annots` array is the authoritative statement of what is on
+ * that page, so it is the fallback. It also settles the disagreement case: a
+ * `/P` left stale by a merge or re-paginate resolves to a real, in-range,
+ * plausible-looking page, which is the one failure this module must not
+ * produce. When `/P` names a page whose `/Annots` does not contain the widget,
+ * `/Annots` wins.
+ */
+function resolveWidgetPage(
+  widget: { P(): unknown; dict: unknown },
+  pages: ReturnType<PDFDocument['getPages']>,
+): number {
+  const byAnnots = pages.findIndex((p) => {
+    try {
+      const annots = p.node.Annots();
+      if (!annots) return false;
+      for (let i = 0; i < annots.size(); i++) {
+        if (p.doc.context.lookup(annots.get(i)) === widget.dict) return true;
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  });
+  if (byAnnots >= 0) return byAnnots;
+
+  const pageRef = widget.P();
+  if (!pageRef) return -1;
+  return pages.findIndex((p) => p.ref === pageRef);
+}
+
+/**
+ * Read the widget rectangle of an AcroForm field into PDF point space.
+ *
+ * The page index is resolved (see `resolveWidgetPage`) — never a default. An
+ * earlier version stamped `page: 0` on every position, which no single-page
+ * fixture could catch and which silently mislocates every field in a
+ * multi-page document; the compliance library is full of them (the dozer
+ * assessment runs to eighteen pages and mixes portrait with landscape).
+ * Dimensions are read from that same resolved page, because a landscape page
+ * overlaid against a portrait extent puts nothing where the printed form
+ * expects it.
+ *
+ * A widget whose page cannot be resolved returns undefined rather than falling
+ * back to page 0: no position degrades to a data-only export, whereas a wrong
+ * position draws a confident mark on the wrong page of a compliance record.
+ *
+ * Only the FIRST widget is positioned. That predates this change and is left
+ * alone deliberately: a radio group's options and a field repeated across pages
+ * are each one field with several widgets, and representing them properly means
+ * emitting one segment per widget into `FieldGeometry` — which belongs to the
+ * unit that populates geometry, not to this one.
+ */
+function widgetPosition(
+  field: {
+    acroField: {
+      getWidgets(): Array<{
+        getRectangle(): { x: number; y: number; width: number; height: number };
+        P(): unknown;
+        dict: unknown;
+      }>;
+    };
+  },
+  doc: PDFDocument,
+): SourcePosition | undefined {
   try {
     const widget = field.acroField.getWidgets()[0];
     if (!widget) return undefined;
+
+    const pages = doc.getPages();
+    const page = resolveWidgetPage(widget, pages);
+    if (page < 0) return undefined;
+
     const rect = widget.getRectangle();
+    const { width: pageWidth, height: pageHeight } = pages[page]!.getSize();
     return {
-      page: 0,
+      page,
       x: rect.x,
       y: rect.y,
       width: rect.width,
@@ -97,8 +174,6 @@ function widgetPosition(field: {
 function extractAcroForm(doc: PDFDocument, fileName: string): ExtractionResult {
   const form = doc.getForm();
   const acroFields = form.getFields();
-  const firstPage = doc.getPage(0);
-  const { width: pageWidth, height: pageHeight } = firstPage.getSize();
 
   const fields: ExtractedField[] = [];
   for (const field of acroFields) {
@@ -122,15 +197,14 @@ function extractAcroForm(doc: PDFDocument, fileName: string): ExtractionResult {
       type = 'text';
     }
 
+    const sourcePosition = widgetPosition(field as never, doc);
     fields.push({
       id: `acro_${fields.length + 1}`,
       label,
       type,
       confidence: 1,
       ...(options ? { options } : {}),
-      ...(widgetPosition(field as never, pageWidth, pageHeight)
-        ? { sourcePosition: widgetPosition(field as never, pageWidth, pageHeight) }
-        : {}),
+      ...(sourcePosition ? { sourcePosition } : {}),
     });
   }
 

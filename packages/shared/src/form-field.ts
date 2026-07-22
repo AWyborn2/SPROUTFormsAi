@@ -56,6 +56,49 @@ export interface SourcePosition {
 }
 
 /**
+ * A span along one axis in PDF points — x for a column, y for a row. `end` is
+ * exclusive, so bands that touch are adjacent rather than overlapping, which is
+ * how printed tables share a cell border.
+ */
+export interface GeometryBand {
+  /** Column key for a column band; a stable row identity for a row band. */
+  key: string;
+  start: number;
+  end: number;
+}
+
+/** One page's worth of a field's footprint, in PDF point space. */
+export interface PageBox {
+  /** Zero-based, and always the real page — never a default. */
+  page: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** That page's own dimensions; a mixed-orientation document needs these per page. */
+  pageWidth: number;
+  pageHeight: number;
+  /** Explicit column spans. Absent on a scalar field. */
+  columnBands?: GeometryBand[];
+  /** Explicit row spans. Absent on a scalar field. */
+  rowBands?: GeometryBand[];
+}
+
+/**
+ * A field's footprint across the document — the successor to `SourcePosition`
+ * for anything that is not a single box on a single page. Resolvers and the
+ * drop reasons for malformed geometry live in `geometry.ts`.
+ *
+ * There is deliberately no `confirmed` flag: only geometry a reviewer has
+ * confirmed is ever written onto a published field, so absent means
+ * unconfirmed. A flag would let an unconfirmed proposal be published and then
+ * rely on every consumer remembering to check it.
+ */
+export interface FieldGeometry {
+  segments: PageBox[];
+}
+
+/**
  * An ordered group of repeating-table columns that share ONE answer per row —
  * `OK`/`NA`, `✓`/`×`/`N-A`, `Pass`/`Fail`/`NA`. The columns keep their own
  * definitions; this is the grouping layer over them. Resolvers, validation
@@ -145,6 +188,16 @@ export interface FormField {
 
   /** For PDF-imported fields — round-trip render anchor. */
   sourcePosition?: SourcePosition;
+
+  /**
+   * For PDF-imported fields — multi-page footprint with explicit column and
+   * row bands, for tables that span page breaks or whose columns are not
+   * evenly spaced. Supersedes `sourcePosition` where present, but never
+   * replaces it: an AcroForm widget is one box and stays described by one.
+   * Written only once a reviewer has confirmed it, so absent means unconfirmed.
+   * See geometry.ts.
+   */
+  geometry?: FieldGeometry;
 
   /** Confidence [0,1] from extraction; undefined for built fields. */
   confidence?: number;
