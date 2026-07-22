@@ -15,12 +15,14 @@ import type {
   ExtractedField,
   ExtractionResult,
   ExtractionStatus,
+  FieldGeometry,
   FormField,
   FormFieldType,
+  PageBox,
   RepeatingColumn,
   VisibilityCondition,
 } from '@formai/shared';
-import { statusForConfidence } from '@formai/shared';
+import { resolveGeometry, statusForConfidence } from '@formai/shared';
 import type { BuilderAction, BuilderState } from '../field-editor/reducer.js';
 import { builderReducer, initialBuilderState } from '../field-editor/reducer.js';
 import { ApiError, apiClient } from './api-client.js';
@@ -115,6 +117,10 @@ function seedEditor(fields: ExtractedField[]): ReviewField[] {
   reviewMeta.clear();
   // Proposals from THIS run start unaccepted (R6) — never inherit approvals.
   acceptedAnswerSets.clear();
+  // Same rule for geometry (R8): a re-extraction against a revised PDF must
+  // not inherit a confirmation given to the previous document's layout.
+  geometryProposals.clear();
+  confirmedGeometry.clear();
   const formFields: FormField[] = fields.map((f) => {
     if (f.note !== undefined) reviewMeta.set(f.id, { note: f.note });
     return {
@@ -183,6 +189,8 @@ export function resetImportSession() {
   editor = null;
   reviewMeta.clear();
   acceptedAnswerSets.clear();
+  geometryProposals.clear();
+  confirmedGeometry.clear();
   session = emptySession();
   listeners.forEach((l) => l());
 }
@@ -479,6 +487,120 @@ export function answerSetAccepted(fieldId: string, setKey: string): boolean {
   return acceptedAnswerSets.has(acceptanceKey(fieldId, setKey));
 }
 
+/**
+ * Geometry under review — where a field's answers sit on the original PDF.
+ *
+ * Two stores, deliberately separate, exactly as answer sets are: what was
+ * PROPOSED (derived from the text layer, or drawn by hand) and what the
+ * reviewer has CONFIRMED. Only the second crosses the publish boundary.
+ *
+ * That split is R8. Derivation refuses rather than guess when it cannot see
+ * enough, but a proposal it *is* willing to make can still be wrong in ways
+ * only a human looking at the page will catch — and an unconfirmed proposal
+ * that published would draw marks on a compliance record nobody checked. So
+ * unconfirmed geometry does not merely rank lower; it does not exist
+ * downstream.
+ */
+const geometryProposals = new Map<string, PageBox>();
+const confirmedGeometry = new Set<string>();
+
+/**
+ * Widen a segment box so it contains every one of its bands, clamped to the
+ * page. Bands outside the box are rejected by the shared validator, so an
+ * adjustment that pushes past the current edge has to carry the box with it.
+ */
+function growToFit(segment: PageBox): PageBox {
+  const cols = segment.columnBands ?? [];
+  const rows = segment.rowBands ?? [];
+
+  const left = Math.max(Math.min(segment.x, ...cols.map((b) => b.start)), 0);
+  const right = Math.min(Math.max(segment.x + segment.width, ...cols.map((b) => b.end)), segment.pageWidth);
+  const bottom = Math.max(Math.min(segment.y, ...rows.map((b) => b.start)), 0);
+  const top = Math.min(Math.max(segment.y + segment.height, ...rows.map((b) => b.end)), segment.pageHeight);
+
+  return { ...segment, x: left, y: bottom, width: right - left, height: top - bottom };
+}
+
+/** Record a proposed footprint for a field, replacing any earlier proposal. */
+export function proposeGeometry(fieldId: string, segment: PageBox): void {
+  geometryProposals.set(fieldId, segment);
+  // A new proposal is unconfirmed by construction — re-deriving must never
+  // inherit the confirmation given to the geometry it replaced.
+  confirmedGeometry.delete(fieldId);
+  emit();
+}
+
+/** The proposal on offer for a field, confirmed or not. */
+export function geometryProposal(fieldId: string): PageBox | undefined {
+  return geometryProposals.get(fieldId);
+}
+
+/** True once the reviewer has explicitly confirmed this field's geometry. */
+export function geometryConfirmed(fieldId: string): boolean {
+  return confirmedGeometry.has(fieldId);
+}
+
+/** Reviewer accepts the proposed grid as drawn. */
+export function confirmGeometry(fieldId: string): void {
+  if (!geometryProposals.has(fieldId)) return;
+  confirmedGeometry.add(fieldId);
+  emit();
+}
+
+/** Reviewer rejects the grid outright — the field exports as data. */
+export function rejectGeometry(fieldId: string): void {
+  geometryProposals.delete(fieldId);
+  confirmedGeometry.delete(fieldId);
+  emit();
+}
+
+/**
+ * Move one band edge.
+ *
+ * An adjustment un-confirms the field: the reviewer is mid-correction, and
+ * treating a half-moved grid as still-confirmed would publish an intermediate
+ * state. They confirm again when the grid looks right.
+ */
+export function adjustGeometryBand(
+  fieldId: string,
+  axis: 'column' | 'row',
+  key: string,
+  edge: 'start' | 'end',
+  value: number,
+): void {
+  const segment = geometryProposals.get(fieldId);
+  if (!segment) return;
+
+  const bands = axis === 'column' ? segment.columnBands : segment.rowBands;
+  const band = bands?.find((b) => b.key === key);
+  if (!band) return;
+
+  const moved = { ...band, [edge]: value };
+  if (!(moved.end > moved.start)) return; // an inverted band is not an edit
+
+  const withMove: PageBox = {
+    ...segment,
+    ...(axis === 'column'
+      ? { columnBands: segment.columnBands!.map((b) => (b.key === key ? moved : b)) }
+      : { rowBands: segment.rowBands!.map((b) => (b.key === key ? moved : b)) }),
+  };
+
+  // Grow the box to contain the moved band. Bands must lie inside the segment,
+  // so without this a reviewer dragging the outermost edge outward would see
+  // the control simply do nothing — the edit is legitimate, it is the box that
+  // was too small.
+  const next = growToFit(withMove);
+
+  // Reject an edit the shipped validator would refuse, rather than storing a
+  // grid that silently vanishes at publish. Overlapping a neighbour is the
+  // common case when dragging an edge past it.
+  if (resolveGeometry({ geometry: { segments: [next] } }).segments.length !== 1) return;
+
+  geometryProposals.set(fieldId, next);
+  confirmedGeometry.delete(fieldId);
+  emit();
+}
+
 /** Reviewer accepts extraction's proposed grouping as-is. */
 export function acceptAnswerSet(fieldId: string, setKey: string): void {
   acceptedAnswerSets.add(acceptanceKey(fieldId, setKey));
@@ -711,5 +833,18 @@ export function reviewedToFields(fields: ReviewField[]): FormField[] {
     ...(f.visibleWhen ? { visibleWhen: f.visibleWhen } : {}),
     ...(f.fixedRows && f.fixedRows.length > 0 ? { fixedRows: f.fixedRows } : {}),
     ...(f.sourcePosition ? { sourcePosition: f.sourcePosition } : {}),
+    // Only CONFIRMED geometry crosses, for the same reason only accepted
+    // answer sets do (R8). An unconfirmed proposal that published would draw
+    // marks onto a competency record against a grid no human ever looked at —
+    // and because absent geometry degrades to a data-only export, refusing to
+    // publish it is visible and correctable rather than silently wrong.
+    ...(publishableGeometry(f) ? { geometry: publishableGeometry(f)! } : {}),
   }));
+}
+
+/** A field's geometry, but only once the reviewer has confirmed it. */
+function publishableGeometry(field: ReviewField): FieldGeometry | undefined {
+  if (!geometryConfirmed(field.id)) return undefined;
+  const segment = geometryProposals.get(field.id);
+  return segment ? { segments: [segment] } : undefined;
 }
