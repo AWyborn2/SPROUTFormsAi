@@ -210,3 +210,30 @@ describe('section scope', () => {
     expect(ids).not.toContain('q2');
   });
 });
+
+describe('conditionSources — non-scalar sources are not offered', () => {
+  /**
+   * The evaluator classifies an ARRAY answer as non-scalar and fails open, so a
+   * condition keyed off a multi-select is always true. Offering one authored a
+   * silent no-op: the rule is set, no error is shown, and the field is simply
+   * always visible. The editor must not offer a source the evaluator cannot use.
+   */
+  const fields = [
+    { id: 'shift', label: 'Shift', type: 'checkbox_group' as const, options: ['D', 'N'] },
+    { id: 'tbl', label: 'Defects', type: 'repeating_group' as const },
+    { id: 'sec', label: 'Checks', type: 'section_header' as const },
+    { id: 'loc', label: 'Location', type: 'dropdown' as const, options: ['A', 'B'] },
+    { id: 'target', label: 'Why?', type: 'text' as const },
+  ];
+
+  it('offers only the scalar-answerable earlier field', () => {
+    expect(conditionSources(fields, 'target').map((f) => f.id)).toEqual(['loc']);
+  });
+
+  it('excludes checkbox_group specifically, even though it has options', () => {
+    // `sourceValueOptions` would happily enumerate D / N, which is exactly why
+    // this one looked usable and was not.
+    expect(conditionSources(fields, 'target').map((f) => f.id)).not.toContain('shift');
+    expect(sourceValueOptions(fields[0]!)).toEqual(['D', 'N']);
+  });
+});

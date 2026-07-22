@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Button, Icon, Select, Switch, type BadgeVariant } from '@formai/ui';
 import type { ExtractedField, ExtractionStatus } from '@formai/shared';
-import { FORM_FIELD_TYPES } from '@formai/shared';
 import {
   addFixedRowItem,
   canRedoFieldEdit,
@@ -19,7 +18,7 @@ import {
   useImportSession,
   type ReviewField,
 } from '../../lib/data/import-session.js';
-import { FIELD_META } from '../../lib/field-editor/reducer.js';
+import { FIELD_META, typeOptionsFor } from '../../lib/field-editor/reducer.js';
 import { FieldInspector } from './inspector/FieldInspector.js';
 import { stripFileExtension } from './upload-validation.js';
 import { ImportStepper } from './ImportStepper.js';
@@ -41,8 +40,6 @@ function statusBadge(status: ExtractionStatus) {
   return <Badge variant={b.variant}>{b.label}</Badge>;
 }
 
-const TYPE_OPTIONS = FORM_FIELD_TYPES.map((t) => ({ label: FIELD_META[t]?.label ?? t, value: t }));
-
 /** Document title for the source-preview header — the file name minus its extension. */
 export function displayTitleFromFileName(fileName: string): string {
   return stripFileExtension(fileName) || 'Imported document';
@@ -62,6 +59,30 @@ export function ImportReviewScreen() {
     if (session.status === 'idle') navigate('/app/import', { replace: true });
   }, [session.status, navigate]);
 
+  /*
+    Both scrolls run AFTER the accordion commits, not inline in the click
+    handler. Expanding a row changes its height, so scrolling against the
+    collapsed geometry lands short — the row grows out from under the scroll
+    that was meant to reveal it.
+
+    Selection identity is the only trigger. Re-running on every session
+    mutation would yank the list back while the reviewer is typing a label in
+    the expanded editor.
+  */
+  useEffect(() => {
+    if (!selectedFieldId) return;
+    document
+      .getElementById(`review-row-${selectedFieldId}`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    const field = session.fields.find((f) => f.id === selectedFieldId);
+    if (field?.sourcePosition) {
+      document
+        .getElementById(`pdf-page-${field.sourcePosition.page}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFieldId]);
+
   if (session.status === 'idle') return null;
 
   // Weakest still-unconfirmed extraction (hidden once everything is resolved).
@@ -76,35 +97,15 @@ export function ImportReviewScreen() {
       status: reviewStatus(f),
     }));
 
-  // When a field is selected from either pane, sync both:
-  //   → scroll its row into view in the field list
-  //   → scroll the PDF pane to its page so the overlay is visible
+  /*
+    Selected IS expanded. The screen already had exactly one notion of "current
+    field", shared with the PDF pane, so the accordion rides on it rather than
+    adding a second piece of state: clicking a highlight expands its row, and
+    collapsing deselects. Re-picking the open row closes it, which is the
+    implicit "I'm finished" that the old floating panel had no way to express.
+  */
   const handleSelectField = (id: string) => {
-    setSelectedFieldId(id);
-    // 1. Scroll field row into view
-    const rowEl = document.getElementById(`review-row-${id}`);
-    if (rowEl) {
-      rowEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-    // 2. Scroll PDF to the page containing this field
-    const field = session.fields.find((f) => f.id === id);
-    if (field?.sourcePosition) {
-      const pageEl = document.getElementById(`pdf-page-${field.sourcePosition.page}`);
-      if (pageEl) {
-        pageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    }
-  };
-
-  // The inspector binds to the SAME selection the PDF pane uses. A deleted (or
-  // never-chosen) selection simply yields `undefined` here, which is what puts
-  // the panel into its persistent prompt state rather than collapsing it.
-  const selectedIndex = session.fields.findIndex((f) => f.id === selectedFieldId);
-  const selectedField = selectedIndex < 0 ? undefined : session.fields[selectedIndex];
-
-  const handleInspectorSelect = (id: string | null) => {
-    if (id === null) setSelectedFieldId(null);
-    else handleSelectField(id);
+    setSelectedFieldId((cur) => (cur === id ? null : id));
   };
 
   if (session.status === 'error') {
@@ -200,7 +201,12 @@ export function ImportReviewScreen() {
           )}
           {ready ? (
             <>
-              <div className="mb-3.5 flex items-center gap-3.5 rounded-md border border-border bg-surface-card p-[14px_16px]">
+              {/* Summary + edit history. Sticky, because undo is global and
+                  must stay reachable while the list scrolls — but this card is
+                  short, which is the point: the editing panel that used to sit
+                  here was ~350px tall and covered most of the list it edited. */}
+              <div className="sticky top-0 z-10 mb-3.5 rounded-md border border-border bg-surface-card p-[14px_16px] shadow-xs">
+                <div className="flex items-center gap-3.5">
                 <div className="min-w-0 flex-1">
                   <div className="font-heading text-[15px] font-bold">{session.total} fields extracted</div>
                   <div className="text-[12.5px] text-text-tertiary">
@@ -235,12 +241,8 @@ export function ImportReviewScreen() {
                     {session.needReview ? `${session.needReview} need review` : 'All confirmed'}
                   </span>
                 </div>
-              </div>
-
-              {/* Editing surface — sits beside the triage rows, never replaces
-                  them. Sticky so it stays reachable while the list scrolls. */}
-              <div className="sticky top-0 z-10 mb-3.5">
-                <div className="mb-1.5 flex items-center justify-end gap-1.5">
+                </div>
+                <div className="mt-2.5 flex items-center justify-end gap-1.5 border-t border-border-subtle pt-2.5">
                   <button
                     onClick={() => undoFieldEdit()}
                     disabled={!canUndoFieldEdit()}
@@ -260,22 +262,19 @@ export function ImportReviewScreen() {
                     Redo
                   </button>
                 </div>
-                <FieldInspector
-                  field={selectedField}
-                  index={selectedIndex}
-                  count={session.fields.length}
-                  onSelect={handleInspectorSelect}
-                />
               </div>
 
               <div ref={fieldListRef} className="flex flex-col gap-2.5">
-                {session.fields.map((f) => (
+                {session.fields.map((f, i) => (
                   <ReviewRow
                     key={f.id}
                     id={`review-row-${f.id}`}
                     field={f}
-                    selected={f.id === selectedFieldId}
-                    onSelect={() => handleSelectField(f.id)}
+                    index={i}
+                    count={session.fields.length}
+                    expanded={f.id === selectedFieldId}
+                    onToggle={() => handleSelectField(f.id)}
+                    onSelect={setSelectedFieldId}
                     onRemapSignature={() => session.remapSignature(f.id)}
                     onSetType={(type) => session.setType(f.id, type)}
                     onConfirmTable={() => session.confirmTable(f.id)}
@@ -314,10 +313,27 @@ export function ImportReviewScreen() {
   );
 }
 
+/**
+ * One extracted field: triage summary always, full editor when expanded.
+ *
+ * The editor used to float above this list in a sticky panel. Detached from
+ * the row it edited, it had no way to say "this change is applied" — its only
+ * button was Delete, so it read as a dead end, and at ~350px it covered the
+ * list it was editing. Inside the row the connection is structural: the row you
+ * opened is the row you are editing, and closing it IS the completion.
+ *
+ * The editor is mounted only while expanded. That is not just tidiness —
+ * `FieldInspector` pulls in `ColumnInspector` and `ConditionEditor`, and the
+ * latter reads the whole session to derive its source list. One mounted instead
+ * of ten is real work avoided on a large import.
+ */
 function ReviewRow({
   id,
   field,
-  selected,
+  index,
+  count,
+  expanded,
+  onToggle,
   onSelect,
   onRemapSignature,
   onSetType,
@@ -325,8 +341,13 @@ function ReviewRow({
 }: {
   id: string;
   field: ReviewField;
-  selected: boolean;
-  onSelect: () => void;
+  index: number;
+  count: number;
+  expanded: boolean;
+  /** Open this row, or close it when it is already open. */
+  onToggle: () => void;
+  /** Re-point the accordion, e.g. onto a field the inspector just inserted. */
+  onSelect: (id: string | null) => void;
   onRemapSignature: () => void;
   onSetType: (type: ExtractedField['type']) => void;
   onConfirmTable: () => void;
@@ -348,28 +369,48 @@ function ReviewRow({
     setNewItem('');
   };
 
+  const panelId = `${id}-editor`;
+
   return (
     <div
       id={id}
-      className={`cursor-pointer rounded-md border bg-surface-card p-[13px_15px] shadow-xs transition-all ${
-        selected ? 'ring-2 ring-offset-1' : ''
+      className={`rounded-md border bg-surface-card p-[13px_15px] shadow-xs transition-all ${
+        expanded ? 'ring-2 ring-offset-1' : ''
       }`}
       style={{
         borderColor: c.color,
-        ...(selected ? { ringColor: c.color, boxShadow: `0 0 0 2px ${c.color}33` } : {}),
+        ...(expanded ? { ringColor: c.color, boxShadow: `0 0 0 2px ${c.color}33` } : {}),
       }}
-      onClick={onSelect}
     >
-      <div className="flex items-center gap-[11px]">
+      {/*
+        A real button, not a div with onClick. The row was neither focusable
+        nor keyboard-operable before, and the accordion makes that worse — with
+        the editor hidden behind a disclosure, a keyboard user had no way to
+        reach it at all. It wraps only the summary; the controls below cannot
+        be nested inside a button.
+      */}
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        aria-controls={expanded ? panelId : undefined}
+        className="flex w-full items-center gap-[11px] text-left focus-visible:shadow-focus"
+      >
+        <Icon
+          name="chevron-right"
+          size={15}
+          className={`flex-none text-text-tertiary transition-transform ${expanded ? 'rotate-90' : ''}`}
+        />
         <span className="grid h-8 w-8 flex-none place-items-center rounded-lg bg-surface-sunken">
           <Icon name={meta.icon} size={16} className="text-text-secondary" />
         </span>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[13.5px] font-semibold">{field.label}</div>
-          <div className="text-[11.5px] text-text-tertiary">{meta.label}</div>
-        </div>
-        <div className="w-[112px] flex-none">
-          <div className="mb-1 flex items-center justify-between">
+        {/* Spans, not divs — a button may only contain phrasing content. */}
+        <span className="block min-w-0 flex-1">
+          <span className="block truncate text-[13.5px] font-semibold">{field.label}</span>
+          <span className="block text-[11.5px] text-text-tertiary">{meta.label}</span>
+        </span>
+        <span className="block w-[112px] flex-none">
+          <span className="mb-1 flex items-center justify-between">
             <span className="font-mono text-[11px] font-semibold" style={{ color: c.text }}>
               {Math.round(field.confidence * 100)}%
             </span>
@@ -379,21 +420,21 @@ function ReviewRow({
             >
               {c.label}
             </span>
-          </div>
-          <div className="h-[5px] overflow-hidden rounded-pill bg-surface-sunken">
-            <div
-              className="h-full rounded-pill"
+          </span>
+          <span className="block h-[5px] overflow-hidden rounded-pill bg-surface-sunken">
+            <span
+              className="block h-full rounded-pill"
               style={{ width: `${Math.round(field.confidence * 100)}%`, background: c.color }}
             />
-          </div>
-        </div>
+          </span>
+        </span>
         <span className="flex w-[88px] flex-none justify-end">{statusBadge(st)}</span>
         {hasPosition && (
           <span className="flex-none text-[10px] text-text-tertiary" title="Located on PDF">
             <Icon name="map-pin" size={12} />
           </span>
         )}
-      </div>
+      </button>
 
       {isLow && (
         <div className="mt-[11px] rounded-md bg-danger-soft p-[11px_12px]">
@@ -403,7 +444,7 @@ function ReviewRow({
           </div>
           <div className="flex flex-wrap items-center gap-2.5">
             <button
-              onClick={(e) => { e.stopPropagation(); onRemapSignature(); }}
+              onClick={onRemapSignature}
               className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-[#12321f]"
             >
               <Icon name="pen-tool" size={14} />
@@ -412,7 +453,7 @@ function ReviewRow({
             <span className="text-xs text-text-tertiary">or</span>
             <div className="w-[160px]">
               <Select
-                options={TYPE_OPTIONS}
+                options={typeOptionsFor(field.type)}
                 value={field.type}
                 onChange={(e) => onSetType(e.target.value as ExtractedField['type'])}
                 aria-label="Correct field type"
@@ -439,7 +480,7 @@ function ReviewRow({
             ))}
           </div>
           <button
-            onClick={(e) => { e.stopPropagation(); onConfirmTable(); }}
+            onClick={onConfirmTable}
             className="inline-flex items-center gap-1.5 rounded-md bg-brand-slate px-3 py-1.5 text-[12.5px] font-semibold text-white"
           >
             <Icon name="check" size={14} />
@@ -453,7 +494,6 @@ function ReviewRow({
            (builder-side fixedRows editing is deferred). */
         <div
           className="mt-[11px] rounded-md border border-border-subtle bg-surface-sunken p-[11px_12px]"
-          onClick={(e) => e.stopPropagation()}
         >
           <div className="mb-2 flex items-center gap-2">
             <span className="rounded-pill border border-border bg-surface-card px-2 py-0.5 font-mono text-[11px] font-semibold text-text-secondary">
@@ -506,10 +546,12 @@ function ReviewRow({
       )}
 
       {field.type !== 'section_header' && (
-        /* Local mirror of the builder's Required switch pattern (R4). */
+        /* The ONLY Required control on this screen — the inspector no longer
+           carries a second one. It stays on the collapsed row because required
+           is triage: worth reading across every field at a glance, without
+           opening any of them. */
         <div
           className="mt-[11px] flex items-center justify-between gap-2.5 rounded-md border border-border-subtle bg-surface-sunken p-[9px_12px]"
-          onClick={(e) => e.stopPropagation()}
         >
           <div>
             <div className="text-[12.5px] font-semibold">Required</div>
@@ -522,6 +564,17 @@ function ReviewRow({
             onChange={(e) => setFieldRequired(field.id, e.target.checked)}
             aria-label={`Required: ${field.label}`}
           />
+        </div>
+      )}
+
+      {expanded && (
+        <div
+          id={panelId}
+          role="region"
+          aria-label={`Edit ${field.label}`}
+          className="mt-[11px] border-t border-border-subtle pt-[11px]"
+        >
+          <FieldInspector field={field} index={index} count={count} onSelect={onSelect} />
         </div>
       )}
     </div>

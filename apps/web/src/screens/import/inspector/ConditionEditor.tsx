@@ -49,10 +49,18 @@ export interface ConditionActions {
   setCondition(fieldId: string, condition: VisibilityCondition | null): void;
 }
 
-/** Types whose answer cannot serve as a condition source. Mirrors `visibility.ts`. */
+/**
+ * Types whose answer cannot serve as a condition source. Mirrors `visibility.ts`.
+ *
+ * `checkbox_group` is here because its answer is an ARRAY, which the evaluator
+ * classifies as non-scalar and fails open on — so a condition keyed off one is
+ * always true. Offering it authored a silent no-op: the author sets up a rule,
+ * sees no error, and the field is simply always visible.
+ */
 const NON_SOURCE_TYPES: ReadonlySet<FormField['type']> = new Set([
   'repeating_group',
   'section_header',
+  'checkbox_group',
 ]);
 
 const OPERATOR_OPTIONS: Array<{ label: string; value: VisibilityOperator }> = [

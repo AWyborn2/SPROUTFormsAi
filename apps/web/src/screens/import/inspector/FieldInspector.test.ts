@@ -5,8 +5,8 @@
  * environment, only picks up `src/**\/*.test.ts`, and `@testing-library/react`
  * is not a dependency. So these are logic-level tests against the
  * import-session action wrappers the inspector dispatches, plus the pure
- * `inspectorMode` helper that decides which of the three panel states
- * (prompt / section-header / full) renders. Every assertion that matters
+ * `inspectorMode` helper that decides which panel body (section-header /
+ * full) renders. Every assertion that matters
  * ("survives to the publish payload") is made through `reviewedToFields`,
  * which is the real publish boundary.
  */
@@ -159,20 +159,26 @@ describe('undo', () => {
   });
 });
 
-describe('inspectorMode — the three non-happy-path states', () => {
-  it('prompts when nothing is selected', () => {
-    expect(inspectorMode(undefined)).toBe('prompt');
-    expect(inspectorMode(null)).toBe('prompt');
-  });
+describe('inspectorMode — which panel body renders', () => {
+  // Distinct from the module-level `byId`, which reads the PUBLISHED payload.
+  const reviewField = (id: string) => getImportSession().fields.find((f) => f.id === id)!;
 
-  it('falls back to the prompt when the selected field has been deleted', () => {
-    const before = getImportSession().fields.find((f) => f.id === 'f2');
-    expect(inspectorMode(before)).toBe('full');
-    deleteField('f2');
-    expect(inspectorMode(getImportSession().fields.find((f) => f.id === 'f2'))).toBe('prompt');
+  it('renders the full editor for an answerable field', () => {
+    expect(inspectorMode(reviewField('f2'))).toBe('full');
   });
 
   it('renders label + delete only for a section header', () => {
-    expect(inspectorMode(getImportSession().fields.find((f) => f.id === 'f4'))).toBe('section');
+    expect(inspectorMode(reviewField('f4'))).toBe('section');
+  });
+
+  it('has no "nothing selected" state — the row owns the mount', () => {
+    /*
+      Under the accordion the panel is mounted by the expanded row, so a
+      deleted field takes its panel with it and "no field" is unreachable. The
+      old floating panel rendered a placeholder prompt instead, purely to hold
+      its own layout when the selection was empty or deleted.
+    */
+    deleteField('f2');
+    expect(getImportSession().fields.find((f) => f.id === 'f2')).toBeUndefined();
   });
 });

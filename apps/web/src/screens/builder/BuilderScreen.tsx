@@ -22,7 +22,6 @@ import {
   useToast,
 } from '@formai/ui';
 import type { FormField, FormFieldType } from '@formai/shared';
-import { FORM_FIELD_TYPES } from '@formai/shared';
 import { ApiError } from '../../lib/data/api-client.js';
 import { useForm, usePublishBuilder, usePublishVersion } from '../../lib/data/hooks.js';
 import { previewSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
@@ -34,6 +33,7 @@ import {
   CONTAINER_ID,
   FIELD_META,
   PALETTE,
+  typeOptionsFor,
   type BuilderInit,
   type BuilderState,
 } from '../../lib/field-editor/reducer.js';
@@ -63,25 +63,6 @@ const VALIDATION_OPTIONS = [
   { label: 'Min length', value: 'minLength' },
   { label: 'Max length', value: 'maxLength' },
 ];
-
-const STRUCTURAL_TYPES = ['repeating_group', 'checkbox_group', 'boolean_yes_no'];
-
-const TYPE_OPTIONS = FORM_FIELD_TYPES.filter((t) => !STRUCTURAL_TYPES.includes(t)).map((t) => ({
-  label: FIELD_META[t]?.label ?? t,
-  value: t,
-}));
-
-/**
- * Type choices for the selected field. Structural types stay out of the list
- * for a scalar field — they are imported, not authored, and a `repeating_group`
- * conjured from a text field would have no columns. But an IMPORTED structural
- * field must still see its own type, or the dropdown would silently show
- * something it is not and one stray change would destroy the table (R17).
- */
-function typeOptionsFor(type: string) {
-  if (!STRUCTURAL_TYPES.includes(type)) return TYPE_OPTIONS;
-  return [{ label: FIELD_META[type]?.label ?? type, value: type }, ...TYPE_OPTIONS];
-}
 
 /**
  * Builder entry point. With no `?form` param it starts a blank new-form
