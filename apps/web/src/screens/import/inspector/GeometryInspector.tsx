@@ -10,6 +10,7 @@
  * panels, so the grid is confirmed against the same PDF page the overlay is
  * drawing on.
  */
+import { useMemo } from 'react';
 import { Button, Icon } from '@formai/ui';
 import type { GeometryBand, PageBox } from '@formai/shared';
 import type { TextPage } from '../../../lib/pdf-geometry.js';
@@ -33,9 +34,28 @@ export interface GeometryInspectorProps {
 export function GeometryInspector({ field, textPages }: GeometryInspectorProps) {
   const proposal = geometryProposal(field.id);
   const confirmed = geometryConfirmed(field.id);
-  // Only derive when there is nothing stored — a reviewer's adjustments must
-  // never be overwritten by a fresh derivation on the next render.
-  const derived = proposal ? null : deriveAcrossPages(field, textPages);
+
+  /*
+    Derivation is memoized because the panel re-renders far more often than its
+    inputs change: `useImportSession` is a `useSyncExternalStore` subscription,
+    so every keystroke in the label field above re-renders this component, and
+    `deriveAcrossPages` scans the text of EVERY page each time. On an
+    eighteen-page assessment that is a full re-scan per character typed.
+
+    The key is a value signature, not the field object — the session hands out a
+    fresh field object on every store update, so identity would never hit.
+    Only the properties derivation actually reads take part.
+  */
+  const columnSig = (field.columns ?? []).map((c) => `${c.key}:${c.type}`).join('|');
+  const rowCount = field.fixedRows?.length ?? -1;
+  const derived = useMemo(
+    // Derive only when nothing is stored — a reviewer's adjustments must never
+    // be overwritten by a fresh derivation on the next render.
+    () => (proposal ? null : deriveAcrossPages(field, textPages)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [field.id, field.type, columnSig, rowCount, textPages, Boolean(proposal)],
+  );
+
   const state = panelState(field, proposal, confirmed, derived);
 
   if (state.kind === 'unsupported') return null;
