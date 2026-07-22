@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import * as pdfjs from 'pdfjs-dist';
 import { Icon } from '@formai/ui';
 import type { ExtractedField, ExtractionStatus, PageBox } from '@formai/shared';
-import type { PositionedText } from '../../lib/pdf-geometry.js';
+import type { PositionedText, TextPage } from '../../lib/pdf-geometry.js';
 import {
   anchoredScrollOffset,
   clampZoom,
@@ -50,7 +50,7 @@ interface PdfViewerProps {
   selectedFieldId?: string | null;
   onSelectField?: (id: string) => void;
   /** Positioned text per page, once the document has loaded. */
-  onTextLayer?: (pages: PositionedText[][]) => void;
+  onTextLayer?: (pages: TextPage[]) => void;
   /** A proposed grid to draw over the page, for the selected field. */
   bandOverlay?: PageBox | null;
   className?: string;
@@ -178,7 +178,7 @@ export function PdfViewer({
 
       const pdf = await pdfjs.getDocument({ data: source }).promise;
       const rendered: PageRender[] = [];
-      const textPages: PositionedText[][] = [];
+      const textPages: TextPage[] = [];
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const natural = page.getViewport({ scale: 1 });
@@ -190,8 +190,8 @@ export function PdfViewer({
         // `transform[4]`/`[5]` are the run's x and BASELINE y in PDF points,
         // which is already the space geometry is stored in.
         const content = await page.getTextContent();
-        textPages.push(
-          content.items
+        textPages.push({
+          items: content.items
             .map((item) => ('str' in item ? item : null))
             .filter((item): item is Exclude<typeof item, null> => item !== null && Boolean(item.str.trim()))
             .map((item) => ({
@@ -200,7 +200,11 @@ export function PdfViewer({
               y: item.transform[5] as number,
               width: item.width,
             })),
-        );
+          // This page's own size, not the document's first — derivation places
+          // bands inside a segment box measured against THIS page.
+          width: natural.width,
+          height: natural.height,
+        });
 
         const viewport = page.getViewport({ scale: RENDER_SCALE });
         const canvas = document.createElement('canvas');

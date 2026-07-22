@@ -46,6 +46,10 @@ const PROPOSED: ExtractedField = {
     { key: 'ok', label: 'OK', type: 'checkbox' },
     { key: 'na', label: 'N/A', type: 'checkbox' },
     { key: 'fault', label: 'Fault', type: 'checkbox' },
+    // A second ungrouped tickable column. Membership moves are tested with
+    // this rather than with `notes`: a set member must be able to carry the
+    // set's tick, so grouping a text column is refused outright.
+    { key: 'spare', label: 'Spare', type: 'checkbox' },
     { key: 'notes', label: 'Notes', type: 'text' },
   ],
   answerSets: [{ key: 'as1', columnKeys: ['ok', 'na', 'fault'] }],
@@ -62,6 +66,7 @@ const UNGROUPED: ExtractedField = {
     { key: 'desc', label: 'Description', type: 'text' },
     { key: 'yes', label: 'Yes', type: 'checkbox' },
     { key: 'no', label: 'No', type: 'checkbox' },
+    { key: 'na', label: 'N/A', type: 'checkbox' },
     { key: 'note', label: 'Note', type: 'text' },
   ],
 };
@@ -128,7 +133,7 @@ describe('grouping', () => {
     expect(groupedColumnKeys(field('t1')).size).toBe(0);
     expect(published('t1').answerSets).toBeUndefined();
     // The columns themselves survive untouched.
-    expect(published('t1').columns?.map((c) => c.key)).toEqual(['item', 'ok', 'na', 'fault', 'notes']);
+    expect(published('t1').columns?.map((c) => c.key)).toEqual(['item', 'ok', 'na', 'fault', 'spare', 'notes']);
   });
 
   it('groups two previously independent columns into a valid set', () => {
@@ -155,13 +160,13 @@ describe('grouping', () => {
   });
 
   it('moves a column already in another set rather than duplicating membership', () => {
-    groupColumns('t1', ['fault', 'notes']);
+    groupColumns('t1', ['fault', 'spare']);
 
     const resolved = resolveAnswerSets(field('t1'));
     expect(resolved.dropped).toEqual([]);
     expect(resolved.sets.map((s) => s.columnKeys)).toEqual([
       ['ok', 'na'],
-      ['fault', 'notes'],
+      ['fault', 'spare'],
     ]);
     const memberships = resolved.sets.flatMap((s) => s.columnKeys);
     expect(new Set(memberships).size).toBe(memberships.length);
@@ -169,11 +174,11 @@ describe('grouping', () => {
 
   it('drops a set that a move would leave with a single member', () => {
     groupColumns('t2', ['yes', 'no']);
-    groupColumns('t2', ['no', 'note']);
+    groupColumns('t2', ['no', 'na']);
 
     const resolved = resolveAnswerSets(field('t2'));
     expect(resolved.dropped).toEqual([]);
-    expect(resolved.sets.map((s) => s.columnKeys)).toEqual([['no', 'note']]);
+    expect(resolved.sets.map((s) => s.columnKeys)).toEqual([['no', 'na']]);
   });
 });
 
@@ -183,7 +188,7 @@ describe('column edits', () => {
 
     const col = field('t1').columns!.find((c) => c.key === 'ok')!;
     expect(col.label).toBe('Compliant');
-    expect(published('t1').columns!.map((c) => c.key)).toEqual(['item', 'ok', 'na', 'fault', 'notes']);
+    expect(published('t1').columns!.map((c) => c.key)).toEqual(['item', 'ok', 'na', 'fault', 'spare', 'notes']);
     expect(resolveAnswerSets(field('t1')).sets[0]!.columnKeys).toEqual(['ok', 'na', 'fault']);
   });
 

@@ -422,7 +422,68 @@ not affect the import-review work.
 
 **Verdict: safe to merge; no interaction with the fix plan in either direction.**
 
-## 6. Recommended sequencing
+## 6. Re-verification against `d66bfe7` (2026-07-22)
+
+The review was written against `3409eac`. Six PRs have merged since (#15–#20), several of
+which rewrote `round-trip.ts` and the shared package. Every finding was re-checked against
+the code as it now stands.
+
+**Result: no finding was invalidated by the intervening work.** Six are fixed by #17, one by
+the PR carrying this section; the remaining thirteen still reproduce.
+
+| Finding | Status |
+|---|---|
+| H1, M1, M2, L4, L6, L7 | **FIXED** by #17 |
+| H2 | **FIXED** — membership now constrained to tickable column types (see below) |
+| H3 | Still present — `submission-validation.ts:162` short-circuit unchanged |
+| M3 | Still present — vacuous `every` at `:111-113`; the legacy floor is still skipped |
+| M4 | Still present — `:197`, `:223`; the "Independent of the field's own `required`" doc is verbatim unchanged |
+| M5, M6 | Still present — `RepeatingGroup.tsx:283-306`, `:110-128` |
+| M7 | Still present — `visibility.ts:205` vs `:113,121` |
+| M8, M9 | Still present — **not** superseded by the geometry work |
+| M10 | Still present — `answer-set.ts:85-87`, `:107`; both publish schemas still `z.custom` |
+| L1, L2, L3, L5 | Still present |
+
+### M8/M9 were not superseded — and the advice still holds
+
+The geometry track (#15–#18, #20) built `geometry.ts` and wired `resolveGeometry` into the
+**web** review side, but **the exporter was never migrated**: `roundTripExport` still reads
+`field.sourcePosition`, and `geometrySegments` has zero production callers. U3 has not
+landed. So §5's advice — fix M8/M9 *as part of* U3 — is still live, not stale.
+
+M8's blast radius is now slightly **wider**. #19 added `drawMark`, `SELF_ANSWERING` and the
+"a recorded `false` must leave a mark" guarantee, but all of that sits in the **ungrouped**
+`cols.forEach` fallback, which grouped keys skip at `round-trip.ts:179`. The new guarantee
+explicitly does not hold for a grouped column.
+
+### A correction to note
+
+An automated re-check reported that #19's `check_cross` membership guard had created a live
+shared/UI divergence — a set over `check_cross` columns rendering in the fill view while
+validation and export dropped it. **That was checked and does not hold.** There are two
+production `RepeatingGroup` call sites: `FieldRenderer.tsx:206` passes
+`resolveAnswerSets(field).sets` (already filtered by the shared rules), and
+`SubmissionDetailScreen.tsx:336` passes no `answerSets` at all. An unresolved set never
+reaches the component.
+
+M6 stands, but as a **latent maintainability hazard rather than a reachable bug**:
+`usableSets` re-derives rules that are a strict subset of the shared ones, over input the
+caller has already filtered. It cannot currently accept or reject anything the resolver did
+not — but it will drift the moment either side gains a rule, which is exactly what happened
+here on paper. Whoever fixes M6 should delete the duplication rather than sync it.
+
+### H2, as fixed
+
+Membership is now constrained to types that can carry the set's tick (`checkbox`,
+`boolean_yes_no`), rather than widening `isChosen`. That keeps extraction, authoring, fill,
+validation and export agreeing on one definition of "answered", and a mistyped column simply
+fails to group — visible and correctable in review, instead of an unclearable 400.
+
+Two existing tests had to change: both grouped a **text** column while testing membership
+*moving*, and were relying on the permissiveness this fixes. The fixtures gained a second
+tickable column; the assertions' intent is unchanged.
+
+## 7. Recommended sequencing
 
 1. **H1, M1, M2 and L7** — web-only, self-contained, and the ones manual testing hits first.
    Planned in [docs/plans/2026-07-22-001-fix-import-inspector-defects-plan.md](../plans/2026-07-22-001-fix-import-inspector-defects-plan.md).

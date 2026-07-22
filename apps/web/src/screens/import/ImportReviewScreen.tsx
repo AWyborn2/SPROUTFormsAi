@@ -19,6 +19,8 @@ import {
   type ReviewField,
 } from '../../lib/data/import-session.js';
 import { FIELD_META, typeOptionsFor } from '../../lib/field-editor/reducer.js';
+import type { TextPage } from '../../lib/pdf-geometry.js';
+import { geometryProposal } from '../../lib/data/import-session.js';
 import { FieldInspector } from './inspector/FieldInspector.js';
 import { stripFileExtension } from './upload-validation.js';
 import { ImportStepper } from './ImportStepper.js';
@@ -52,6 +54,10 @@ export function ImportReviewScreen() {
   const scanning = session.status === 'uploading' || session.status === 'extracting';
   const ready = session.status === 'ready';
   const [selectedFieldId, setSelectedFieldId] = useState<string | null>(null);
+  // The PDF text layer, read once by the viewer and reused by every row that
+  // needs to derive a grid. Held here rather than in the session because it is
+  // a cache of the source document, not review state.
+  const [textPages, setTextPages] = useState<readonly TextPage[]>([]);
   const fieldListRef = useRef<HTMLDivElement>(null);
 
   // Guard direct navigation — with no import in flight there is nothing to review.
@@ -162,6 +168,8 @@ export function ImportReviewScreen() {
                 highlights={highlights}
                 selectedFieldId={selectedFieldId}
                 onSelectField={handleSelectField}
+                onTextLayer={setTextPages}
+                bandOverlay={selectedFieldId ? (geometryProposal(selectedFieldId) ?? null) : null}
                 className="max-h-[70vh] lg:max-h-none lg:flex-1"
               />
             </div>
@@ -275,6 +283,7 @@ export function ImportReviewScreen() {
                     expanded={f.id === selectedFieldId}
                     onToggle={() => handleSelectField(f.id)}
                     onSelect={setSelectedFieldId}
+                    textPages={textPages}
                     onRemapSignature={() => session.remapSignature(f.id)}
                     onSetType={(type) => session.setType(f.id, type)}
                     onConfirmTable={() => session.confirmTable(f.id)}
@@ -335,6 +344,7 @@ function ReviewRow({
   expanded,
   onToggle,
   onSelect,
+  textPages,
   onRemapSignature,
   onSetType,
   onConfirmTable,
@@ -348,6 +358,8 @@ function ReviewRow({
   onToggle: () => void;
   /** Re-point the accordion, e.g. onto a field the inspector just inserted. */
   onSelect: (id: string | null) => void;
+  /** PDF text layer, forwarded to the geometry panel. */
+  textPages: readonly TextPage[];
   onRemapSignature: () => void;
   onSetType: (type: ExtractedField['type']) => void;
   onConfirmTable: () => void;
@@ -574,7 +586,13 @@ function ReviewRow({
           aria-label={`Edit ${field.label}`}
           className="mt-[11px] border-t border-border-subtle pt-[11px]"
         >
-          <FieldInspector field={field} index={index} count={count} onSelect={onSelect} />
+          <FieldInspector
+            field={field}
+            index={index}
+            count={count}
+            onSelect={onSelect}
+            textPages={textPages}
+          />
         </div>
       )}
     </div>

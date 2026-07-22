@@ -205,3 +205,50 @@ describe('resolveAnswerSets — check/cross columns cannot be grouped', () => {
     expect(resolveAnswerSets(base('checkbox')).sets).toHaveLength(1);
   });
 });
+
+describe('resolveAnswerSets — a member must be able to carry the tick (H2)', () => {
+  const withTypes = (okType: string, naType = okType) => ({
+    columns: [
+      { key: 'item', label: 'Item', type: 'text' as const },
+      { key: 'ok', label: 'Pass', type: okType as never },
+      { key: 'na', label: 'Fail', type: naType as never },
+    ],
+    answerSets: [{ key: 'status', columnKeys: ['ok', 'na'] }],
+  });
+
+  it('drops a set over text columns — the case that made submit unclearable', () => {
+    /*
+      The model may type a Pass/Fail table's columns `text`. Nothing used to
+      stop that grouping, and then no input could answer it: the filler types
+      '✓', `isChosen` (true/'true'/1) says false, the row reports unanswered,
+      and a required table returned 400 on every submit — including on the
+      unauthenticated fill link — with no way to clear it. It now simply fails
+      to group, which review can see and correct.
+    */
+    const { sets, dropped } = resolveAnswerSets(withTypes('text'));
+    expect(sets).toHaveLength(0);
+    expect(dropped).toEqual([{ key: 'status', reason: 'non-tickable-column' }]);
+  });
+
+  it('drops a set when only ONE member is untickable', () => {
+    const { sets, dropped } = resolveAnswerSets(withTypes('checkbox', 'date'));
+    expect(sets).toHaveLength(0);
+    expect(dropped[0]?.reason).toBe('non-tickable-column');
+  });
+
+  it.each(['number', 'date', 'signature', 'dropdown'])('drops a %s member', (type) => {
+    expect(resolveAnswerSets(withTypes(type)).sets).toHaveLength(0);
+  });
+
+  it('still accepts the two types a real tick column is given', () => {
+    expect(resolveAnswerSets(withTypes('checkbox')).sets).toHaveLength(1);
+    expect(resolveAnswerSets(withTypes('boolean_yes_no')).sets).toHaveLength(1);
+    // ...and a mix of the two, which is what a hand-corrected table looks like.
+    expect(resolveAnswerSets(withTypes('checkbox', 'boolean_yes_no')).sets).toHaveLength(1);
+  });
+
+  it('reports check_cross separately — a different mistake, not a mistyping', () => {
+    // Tickable in principle, but it already records its own true/false.
+    expect(resolveAnswerSets(withTypes('check_cross')).dropped[0]?.reason).toBe('self-answering-column');
+  });
+});
