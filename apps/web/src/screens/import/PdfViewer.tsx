@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as pdfjs from 'pdfjs-dist';
 import { Icon } from '@formai/ui';
-import type { ExtractedField, ExtractionStatus } from '@formai/shared';
+import type { ExtractedField, ExtractionStatus, PageBox } from '@formai/shared';
+import type { PositionedText } from '../../lib/pdf-geometry.js';
 import {
   anchoredScrollOffset,
   clampZoom,
@@ -48,6 +49,10 @@ interface PdfViewerProps {
   highlights?: FieldHighlight[];
   selectedFieldId?: string | null;
   onSelectField?: (id: string) => void;
+  /** Positioned text per page, once the document has loaded. */
+  onTextLayer?: (pages: PositionedText[][]) => void;
+  /** A proposed grid to draw over the page, for the selected field. */
+  bandOverlay?: PageBox | null;
   className?: string;
 }
 
@@ -57,12 +62,83 @@ const CONF = {
   low: { color: 'var(--danger)', bg: 'var(--danger-soft)' },
 } as const;
 
+/**
+ * The proposed grid, drawn over the page so a reviewer can see whether the
+ * bands sit on the printed rules before confirming them.
+ *
+ * Deliberately drawn as lines rather than filled cells: the reviewer is
+ * checking alignment against printed rules a millimetre wide, and a translucent
+ * fill over the whole cell hides exactly the edge they need to judge.
+ */
+function BandGrid({
+  segment,
+  pageWidth,
+  pageHeight,
+}: {
+  segment: PageBox;
+  pageWidth: number;
+  pageHeight: number;
+}) {
+  const scaleX = pageWidth / segment.pageWidth;
+  const scaleY = pageHeight / segment.pageHeight;
+
+  const top = pageHeight - (segment.y + segment.height) * scaleY;
+  const height = segment.height * scaleY;
+  const left = segment.x * scaleX;
+  const width = segment.width * scaleX;
+
+  return (
+    <div aria-hidden className="pointer-events-none absolute inset-0">
+      <div
+        className="absolute rounded-[2px]"
+        style={{
+          left,
+          top,
+          width,
+          height,
+          border: '1px dashed var(--accent)',
+          backgroundColor: 'color-mix(in srgb, var(--accent) 6%, transparent)',
+        }}
+      />
+      {(segment.columnBands ?? []).map((band) => (
+        <div
+          key={`c-${band.key}`}
+          className="absolute"
+          style={{
+            left: band.start * scaleX,
+            top,
+            width: Math.max(1, (band.end - band.start) * scaleX),
+            height,
+            borderLeft: '1px solid var(--accent)',
+            borderRight: '1px solid var(--accent)',
+          }}
+        />
+      ))}
+      {(segment.rowBands ?? []).map((band) => (
+        <div
+          key={`r-${band.key}`}
+          className="absolute"
+          style={{
+            left,
+            top: pageHeight - band.end * scaleY,
+            width,
+            height: Math.max(1, (band.end - band.start) * scaleY),
+            borderTop: '1px solid color-mix(in srgb, var(--accent) 55%, transparent)',
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 export function PdfViewer({
   pdfBase64,
   assetId,
   highlights = [],
   selectedFieldId,
   onSelectField,
+  onTextLayer,
+  bandOverlay,
   className = '',
 }: PdfViewerProps) {
   const [pages, setPages] = useState<PageRender[]>([]);
@@ -102,9 +178,30 @@ export function PdfViewer({
 
       const pdf = await pdfjs.getDocument({ data: source }).promise;
       const rendered: PageRender[] = [];
+      const textPages: PositionedText[][] = [];
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const natural = page.getViewport({ scale: 1 });
+
+        // The text layer, adapted here into the band-derivation module's own
+        // input shape. Doing the adapting in the viewer is what keeps pdfjs out
+        // of that module, so it stays a pure function over positioned text —
+        // testable against measured fixtures with no PDF, no worker and no DOM.
+        // `transform[4]`/`[5]` are the run's x and BASELINE y in PDF points,
+        // which is already the space geometry is stored in.
+        const content = await page.getTextContent();
+        textPages.push(
+          content.items
+            .map((item) => ('str' in item ? item : null))
+            .filter((item): item is Exclude<typeof item, null> => item !== null && Boolean(item.str.trim()))
+            .map((item) => ({
+              text: item.str.trim(),
+              x: item.transform[4] as number,
+              y: item.transform[5] as number,
+              width: item.width,
+            })),
+        );
+
         const viewport = page.getViewport({ scale: RENDER_SCALE });
         const canvas = document.createElement('canvas');
         canvas.width = viewport.width;
@@ -118,6 +215,7 @@ export function PdfViewer({
         });
       }
       setPages(rendered);
+      onTextLayer?.(textPages);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to render PDF');
     } finally {
@@ -363,6 +461,13 @@ export function PdfViewer({
                       />
                     );
                   })}
+                {bandOverlay && bandOverlay.page === pageIndex && (
+                  <BandGrid
+                    segment={bandOverlay}
+                    pageWidth={pageWidth}
+                    pageHeight={pageHeight}
+                  />
+                )}
               </div>
             );
           })}
