@@ -68,6 +68,7 @@ Two consequences to state plainly rather than discover later:
 
 - R5. Geometry is derived from the source PDF's text layer: column bands from the horizontal extents of the column-header glyphs, row bands from the vertical positions of the pre-printed row labels.
 - R6. Derivation treats the header as a *cluster of positioned items*, never assuming any particular character is independently addressable, and tolerates locating fewer anchors than the table has columns. Verified across the library: the tick is an unmappable Private-Use glyph on some documents and absent from the text layer entirely on others, and `/ ×` arrives as a single combined item where it appears at all.
+- R15. A proposal that the shipped geometry validator would reject is never emitted. Duplicate band keys, non-finite bounds, bands outside the segment box and overlapping bands are all dropped silently downstream, leaving the reviewer an empty grid with no stated reason — so the proposer must satisfy the validator rather than rely on it.
 - R7. A derived grid is shown overlaid on the PDF in review, marked as derived rather than settled, and the reviewer can adjust any band or reject the grid entirely.
 - R8. A field whose geometry the reviewer has not confirmed is exported as data, never with a guessed mark.
 - R9. Scalar fields carry geometry too, so a round-tripped form shows names, dates and free text in place — not only table marks.
@@ -95,6 +96,10 @@ Two consequences to state plainly rather than discover later:
 ### Scope Boundaries
 
 Not in this plan, and each already sequenced on the previous plan's Roadmap: assessment pathways (item 1), scored question banks (item 2), logbooks with thresholds (item 3), multi-session assignment (item 4), two-party sign-off with a verdict (item 5).
+
+### Deferred to Follow-Up Work
+
+**AcroForm cell reconstruction.** Synthesise a grouped checklist — `columns`, `fixedRows` and `answerSets` — from an AcroForm document's per-cell field naming (`OKEngine oil level` / `NAEngine oil level`), taking each widget's rectangle as exact geometry instead of deriving bands from text. Its own unit, sequenced after U5. Rationale for deferring is in Open Questions; the short version is that it is an extraction-output change rather than a geometry change, and the naming convention has exactly one confirmed specimen in the library. Two prerequisites already recorded as U2 review residuals belong to this work: emit one segment per widget rather than positioning only the first, and decide the page-rotation handling that per-widget geometry will inherit.
 
 This matters more than a usual deferral list, because the fixture document contains all five. A perfectly round-tripped dozer PDF is still not a substitute for the paper assessment. It is the last piece of *fidelity*; it is not the last piece of *the assessment*.
 
@@ -187,13 +192,51 @@ flowchart TB
 ### U3. Derive bands from the text layer
 
 - **Goal:** Given a rendered page and an extracted table, propose column and row bands.
-- **Requirements:** R5, R6
+- **Requirements:** R5, R6, R15
 - **Dependencies:** U2
 - **Files:** `apps/web/src/lib/pdf-geometry.ts` (new), `apps/web/src/lib/pdf-geometry.test.ts` (new)
-- **Approach:** A pure module taking positioned text items plus the field's columns, returning candidate bands with a confidence. Column bands come from the cluster of short narrow items right of the label-column header on the header baseline, per KTD4 — geometry first, characters only as after-the-fact labels. A combined item such as `/ ×` is split on its advance width. Row bands come from the y-positions of the label-column text. Pure functions over an item list — pdfjs stays in the viewer, so this is unit-testable from fixtures with no PDF in the loop.
-- **Fixture data:** use the real page-7 header row as the primary test fixture — label header at x=37.5 (w=192), `U+F0FC` at 502.6 (w=7.1), `/ ×` at 512.1 (w=10.3), `N/A` at 539.9 (w=13.3), page 595×842. Synthetic evenly-spaced fixtures hide exactly the irregularity this unit exists to handle.
-- **Test scenarios:** the real page-7 header yields three option bands, not two or four; the combined `/ ×` item splits into two bands on its advance width; an unmappable `U+F0FC` glyph is treated as a band like any other rather than discarded; a Small-Loader-shaped header with the tick missing from the text layer still yields three bands, inferring the absent one from pitch; a Grader-shaped header carrying only `N/A` returns a low-confidence proposal rather than a confident wrong one; the 192pt label header is not mistaken for an option column; `ADMN-FRM-111`'s ASCII `OK`/`NA` header yields two bands; rows whose labels wrap to two lines produce one band, not two; a header row with no short items right of the label returns no proposal rather than a guess.
-- **Verification:** `pnpm --filter @formai/web test` passes.
+- **Input shape — the module defines its own, and pdfjs never crosses the boundary.** It takes a `PositionedText[]` (`{ text, x, y, width, height }`, PDF point space, origin bottom-left), the field's `columns`, and the page size. U4 adapts pdfjs `getTextContent()` items into that shape in the viewer. Defining our own input is what keeps this unit testable from measured fixtures with no PDF, no worker, and no DOM.
+
+- **Approach — reconcile located anchors against the column count.** Four stages:
+
+  1. **Find the header row.** Group items by baseline (y within ~2pt). A header-row candidate is a row containing one wide item — the label-column header — plus two or more short, narrow items entirely to its right. Score candidates and take the best; a table repeats its header per occurrence (KTD4a), so each segment finds its own.
+  2. **Take each short item as one anchor.** No character matching, no splitting.
+  3. **Reconcile anchor count against `columns.length - 1`** (the option columns; `columns[0]` is always the label column and is never an option). This reconciliation is the heart of the unit, because U1 proved the anchor count varies per document:
+
+     | Case | Library example | Behaviour |
+     |---|---|---|
+     | anchors == expected | Dozer (3 for 3), `ADMN-FRM-111` (2 for 2) | Map 1:1 in x order. High confidence. |
+     | anchors < expected | Small Loader (tick absent from the text layer) | Infer the missing anchors from the median pitch of those found, extending in the direction with room. Reduced confidence. |
+     | anchors > expected | — | Merge the closest pair, or return no proposal when the excess cannot be resolved. Low confidence. |
+     | anchors < 2 | Grader (only `N/A`) | No pitch is derivable from one point. Return a low-confidence proposal or none — never a confident guess. |
+
+  4. **Convert anchors to bands by midpoint.** A boundary sits midway between adjacent anchors' facing edges; the outermost edges extend to the table box. Bands are therefore contiguous and gapless by construction, which is also what makes them survive the shipped validator.
+
+- **Row bands** come from the y-positions of items in the label column's x-range, within the table's vertical extent, with boundaries at the midpoints between adjacent baselines. A label wrapping to two lines is one row, not two: merge baselines closer together than the median row pitch.
+
+- **A `/`-style separator is a character inside an anchor, not a column.** An earlier draft of this plan said the combined `/ ×` item "splits into two bands on its advance width". That is wrong and would produce a band for the separator glyph. On the measured page-7 header the printed row reads `✓ / × N/A` — three option columns, and the `/` is punctuation that happens to share a text run with `×`. So the run is **one** anchor. Never split a run; reconciliation against the column count is what handles a run that genuinely spans two columns, and it does so without needing per-glyph advances, which `getTextContent` does not provide.
+
+- **Emit only what the shipped validator accepts (R15).** `resolveGeometry` rejects duplicate band keys, non-finite bounds, bands outside the segment box, and overlapping bands. A proposal that trips any of those is silently dropped downstream and the reviewer sees an empty grid with no reason. Assign band keys from `columns[n].key` (unique by construction), clamp the outer edges to the box, and self-check the proposal through `resolveGeometry` before returning it — a proposal that does not survive its own validator is a bug in this unit, not a bad document.
+
+- **Confidence is a number the reviewer will act on**, so it must be derived, not vibed. Start at 1 and reduce for: anchors inferred rather than located (the dominant term), irregular pitch between located anchors, a label-column header narrower than expected, and fewer than two anchors. U4 surfaces it; low confidence is a normal outcome for Grader-shaped documents and must not be dressed up as high.
+
+- **Fixture data:** the primary fixture is the real page-7 header row — label header `During the demonstration, did the candidate:` at x=37.5 (w=192), `U+F0FC` at 502.6 (w=7.1), `/ ×` at 512.1 (w=10.3), `N/A` at 539.9 (w=13.3), page 595×842. Synthetic evenly-spaced fixtures hide exactly the irregularity this unit exists to handle: the option columns are ~10–13pt wide against a 192pt label header, and the gaps between them are uneven (2.4pt tick→cross, 17.5pt cross→N/A).
+
+- **Test scenarios:**
+  - The measured page-7 header yields exactly three option bands, keyed to `columns[1..3]`, in x order.
+  - The `/ ×` run produces **one** band, not two — the separator does not become a column.
+  - An unmappable `U+F0FC` glyph is an anchor like any other, not discarded for being unprintable.
+  - A Small-Loader-shaped header (tick absent from the text layer, two anchors, three columns) yields three bands with the missing one inferred from pitch, at reduced confidence.
+  - A Grader-shaped header (one anchor, three columns) returns no proposal or a low-confidence one — never three confident bands.
+  - `ADMN-FRM-111`'s ASCII `OK`/`NA` header yields two bands at high confidence.
+  - The 192pt label header is never taken for an option column.
+  - Bands are contiguous: each band's `end` equals the next band's `start`, and the outer edges reach the table box.
+  - Every emitted proposal survives `resolveGeometry` unchanged — asserted directly, not assumed.
+  - Row labels wrapping to two lines produce one row band, not two.
+  - A header row with no short items to the right of the label returns no proposal rather than a guess.
+  - Two header rows on one page (page 7 has two tables) each produce their own proposal.
+  - Confidence is strictly lower for an inferred anchor than for the same table with all anchors located.
+- **Verification:** `pnpm --filter @formai/web test` passes. Then run the module over the real dozer text layer for pages 7, 8 and 9 and confirm the proposed bands land on the printed column rules.
 
 ### U4. Confirm and adjust the grid in review
 
@@ -259,9 +302,17 @@ Manual smoke against the local stack (web 5000, API 8000):
 - **Only the first widget of an AcroForm field is positioned.** Pre-existing, but `FieldGeometry.segments[]` is now the right shape to fix it. A radio group's options are separate widgets, and a field repeated across pages (assessor initials on all eighteen) is one field with many. Today the export draws the selected option's text at the *first* option's rectangle — a wrong-and-confident mark, not an absent one. Whichever unit populates geometry from the AcroForm path should emit one segment per widget.
 - **Row-band keys are unique within a segment but not across segments.** A continuation page authored by duplicating a segment reproduces its row keys verbatim. If a row key is meant to be a stable identity across the whole table, that is a collision; if continuation rows are legitimately distinct, the rule needs writing down. Undefined either way — settle it when the renderer defines how rows map to segments.
 
-**Raised by U1, for U3/U4 to answer**
+**Resolved by U3's planning — AcroForm reconstruction is its own unit, not part of U3**
 
-- Whether an AcroForm document should bypass derivation entirely. `ADMN-FRM-111` exists in two variants, and the fillable one carries **73 real AcroForm fields with widget rectangles**, named per cell — `OKEngine oil level` at x=157.2, `NAEngine oil level` at x=185.5, and so on. For that document the per-cell geometry is already in the file and needs no deriving at all. The catch is that the AcroForm path produces no `columns`, so the table arrives as 73 independent scalar fields rather than a grouped checklist. Reconstructing answer sets from the `OK…`/`NA…` naming pairs is a real option and probably a cheap one, but it is a *different* mechanism from text-derived bands and belongs to U3's design, not U2's model. Flagged, not decided.
+The question was whether an AcroForm document should bypass text-derivation entirely, since `ADMN-FRM-111`'s fillable variant carries 73 widget rectangles named per cell (`OKEngine oil level` at x=157.2, `NAEngine oil level` at x=185.5) — exact geometry, already in the file.
+
+It is deferred to its own unit — recorded under Scope Boundaries as *AcroForm cell reconstruction* — for three reasons:
+
+1. **U3 has to handle `ADMN-FRM-111` regardless.** The document ships in two variants and the *flat* one carries no AcroForm fields at all, so it takes the AI path and needs text-derived bands like everything else. Folding AcroForm reconstruction into U3 would not remove a single case from U3's scope.
+2. **It is not a geometry change, it is an extraction-output change.** The AcroForm path emits no `columns`, so reconstruction means synthesising `columns`, `fixedRows` and `answerSets` from a field-naming convention — which lands in validation, fill rendering and export, not just in where a mark is drawn. That is a materially wider blast radius than U3's pure module.
+3. **The convention is evidenced on exactly one file.** U1 surveyed eight documents; seven are flat with no AcroForm at all. A parser keyed on `<ANSWER><item>` naming has one confirmed specimen, and building a second extraction mechanism on a sample of one is how you get a mechanism that fits one form and nothing else.
+
+Deferring costs nothing: the fillable variant still imports today as 73 working scalar fields, and gains exact geometry whenever item 10 is picked up.
 
 **Resolved — do not re-open**
 
