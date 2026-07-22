@@ -28,13 +28,21 @@ vi.mock('./store.js', () => ({
   },
 }));
 
+import { resolveGeometry } from '@formai/shared';
+import type { PageBox } from '@formai/shared';
 import { apiClient, ApiError } from './api-client.js';
 import {
   acceptAnswerSet,
   addFixedRowItem,
+  adjustGeometryBand,
+  confirmGeometry,
   fileToBase64,
+  geometryConfirmed,
+  geometryProposal,
   getImportSession,
   lowestUnresolvedField,
+  proposeGeometry,
+  rejectGeometry,
   removeFixedRowItem,
   renameFixedRowItem,
   resetImportSession,
@@ -426,5 +434,156 @@ describe('resetImportSession', () => {
     expect(session.assetId).toBeNull();
     expect(session.extraction).toBeNull();
     expect(session.error).toBeNull();
+  });
+});
+
+describe('geometry review (U4, R8)', () => {
+  const SEGMENT: PageBox = {
+    page: 6,
+    x: 37.5,
+    y: 570,
+    width: 520,
+    height: 80,
+    pageWidth: 595,
+    pageHeight: 842,
+    columnBands: [
+      { key: 'tick', start: 496, end: 511.7 },
+      { key: 'cross', start: 511.7, end: 531.9 },
+      { key: 'na', start: 531.9, end: 556.7 },
+    ],
+    rowBands: [
+      { key: 'r0', start: 620, end: 640 },
+      { key: 'r1', start: 600, end: 620 },
+    ],
+  };
+
+  function reviewField(): ReviewField {
+    return { id: 'f1', label: 'Operational requirements', type: 'repeating_group', confidence: 0.9 };
+  }
+
+  it('does not publish a proposal the reviewer never confirmed', () => {
+    // The heart of R8. Derivation refuses rather than guess, but a proposal it
+    // IS willing to make can still be wrong in ways only a human on the page
+    // catches — so unconfirmed geometry must not merely rank lower, it must
+    // not exist downstream.
+    proposeGeometry('f1', SEGMENT);
+
+    expect(reviewedToFields([reviewField()])[0]?.geometry).toBeUndefined();
+  });
+
+  it('publishes geometry once confirmed', () => {
+    proposeGeometry('f1', SEGMENT);
+    confirmGeometry('f1');
+
+    const published = reviewedToFields([reviewField()])[0];
+
+    expect(published?.geometry?.segments).toHaveLength(1);
+    expect(published?.geometry?.segments[0]?.page).toBe(6);
+  });
+
+  it('publishes geometry the shipped validator accepts', () => {
+    proposeGeometry('f1', SEGMENT);
+    confirmGeometry('f1');
+
+    const published = reviewedToFields([reviewField()])[0]!;
+
+    expect(resolveGeometry(published, 18).dropped).toEqual([]);
+  });
+
+  it('rejecting returns the field to no geometry', () => {
+    proposeGeometry('f1', SEGMENT);
+    confirmGeometry('f1');
+    rejectGeometry('f1');
+
+    expect(geometryProposal('f1')).toBeUndefined();
+    expect(reviewedToFields([reviewField()])[0]?.geometry).toBeUndefined();
+  });
+
+  it('a fresh proposal does not inherit the previous confirmation', () => {
+    proposeGeometry('f1', SEGMENT);
+    confirmGeometry('f1');
+
+    proposeGeometry('f1', { ...SEGMENT, page: 7 });
+
+    expect(geometryConfirmed('f1')).toBe(false);
+  });
+
+  it('adjusting a band edge un-confirms the field', () => {
+    proposeGeometry('f1', SEGMENT);
+    confirmGeometry('f1');
+
+    adjustGeometryBand('f1', 'column', 'na', 'end', 560);
+
+    expect(geometryConfirmed('f1')).toBe(false);
+    expect(geometryProposal('f1')?.columnBands?.find((b) => b.key === 'na')?.end).toBe(560);
+  });
+
+  it('grows the segment box to contain a band dragged past its edge', () => {
+    // 560 sits beyond the box's right edge of 557.5. Bands outside the box are
+    // rejected by the shared validator, so without growing the box the control
+    // would silently do nothing — the edit is legitimate, the box was small.
+    proposeGeometry('f1', SEGMENT);
+
+    adjustGeometryBand('f1', 'column', 'na', 'end', 560);
+
+    const grown = geometryProposal('f1')!;
+    expect(grown.x + grown.width).toBeGreaterThanOrEqual(560);
+    expect(resolveGeometry({ geometry: { segments: [grown] } }).dropped).toEqual([]);
+  });
+
+  it('never grows the box beyond the page', () => {
+    proposeGeometry('f1', SEGMENT);
+
+    adjustGeometryBand('f1', 'column', 'na', 'end', 900);
+
+    // 900 exceeds the 595pt page, so the edit is refused outright rather than
+    // producing a box that runs off the paper.
+    expect(geometryProposal('f1')?.columnBands?.find((b) => b.key === 'na')?.end).toBe(556.7);
+  });
+
+  it('refuses an adjustment that would overlap a neighbouring band', () => {
+    // Dragging an edge past its neighbour is the common mis-drag. Storing it
+    // would make the whole grid vanish at publish with no reason shown.
+    proposeGeometry('f1', SEGMENT);
+
+    adjustGeometryBand('f1', 'column', 'tick', 'end', 540);
+
+    expect(geometryProposal('f1')?.columnBands?.find((b) => b.key === 'tick')?.end).toBe(511.7);
+  });
+
+  it('refuses an inverted adjustment', () => {
+    proposeGeometry('f1', SEGMENT);
+
+    adjustGeometryBand('f1', 'column', 'cross', 'end', 400);
+
+    expect(geometryProposal('f1')?.columnBands?.find((b) => b.key === 'cross')?.end).toBe(531.9);
+  });
+
+  it('adjusts a row band as well as a column band', () => {
+    proposeGeometry('f1', SEGMENT);
+
+    adjustGeometryBand('f1', 'row', 'r1', 'start', 595);
+
+    expect(geometryProposal('f1')?.rowBands?.find((b) => b.key === 'r1')?.start).toBe(595);
+  });
+
+  it('confirming a field with no proposal does nothing', () => {
+    confirmGeometry('nope');
+
+    expect(geometryConfirmed('nope')).toBe(false);
+  });
+
+  it('resetImportSession clears proposals and confirmations', () => {
+    proposeGeometry('f1', SEGMENT);
+    confirmGeometry('f1');
+
+    resetImportSession();
+
+    expect(geometryProposal('f1')).toBeUndefined();
+    expect(geometryConfirmed('f1')).toBe(false);
+  });
+
+  it('leaves a field with no proposal publishing exactly as before', () => {
+    expect(reviewedToFields([reviewField()])[0]?.geometry).toBeUndefined();
   });
 });
