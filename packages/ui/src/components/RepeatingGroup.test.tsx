@@ -279,3 +279,48 @@ describe('required markers on grouped columns', () => {
     expect(headers.find((h) => h.textContent?.startsWith('OK'))?.textContent).toContain('*');
   });
 });
+
+describe('check/cross cells', () => {
+  const columns: RepeatingGroupColumn[] = [
+    { key: 'item', label: 'Item', type: 'text' },
+    { key: 'result', label: 'Result', type: 'check_cross' },
+  ];
+
+  it('renders two mutually-exclusive marks, not a checkbox', () => {
+    render(<Harness columns={columns} initialRows={[{}]} />);
+    const group = screen.getByRole('group', { name: 'Result' });
+    expect(within(group).getByRole('button', { name: '✓' })).toBeTruthy();
+    expect(within(group).getByRole('button', { name: '✗' })).toBeTruthy();
+  });
+
+  it('records a cross as an explicit false, distinct from untouched', () => {
+    render(<Harness columns={columns} initialRows={[{}]} />);
+    const group = screen.getByRole('group', { name: 'Result' });
+    const cross = within(group).getByRole('button', { name: '✗' });
+    // Untouched: neither pressed.
+    expect(within(group).getByRole('button', { name: '✓' }).getAttribute('aria-pressed')).toBe('false');
+    expect(cross.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(cross);
+    expect(cross.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('clears back to unanswered when the active mark is re-clicked', () => {
+    // The three-state escape hatch: an assessor who ticks by mistake must be
+    // able to return the cell to "not assessed", not just flip it to a fail.
+    render(<Harness columns={columns} initialRows={[{}]} />);
+    const group = screen.getByRole('group', { name: 'Result' });
+    const tick = within(group).getByRole('button', { name: '✓' });
+    fireEvent.click(tick);
+    expect(tick.getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(tick);
+    expect(tick.getAttribute('aria-pressed')).toBe('false');
+    expect(within(group).getByRole('button', { name: '✗' }).getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('is explicit in an open table too, unlike boolean_yes_no', () => {
+    // No fixedRows here. A check/cross cell has no meaningful collapsed form —
+    // a single checkbox cannot say "assessed and failed".
+    render(<Harness columns={columns} initialRows={[{}, {}]} />);
+    expect(screen.getAllByRole('group', { name: 'Result' })).toHaveLength(2);
+  });
+});

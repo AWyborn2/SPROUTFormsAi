@@ -22,6 +22,15 @@ export const FORM_FIELD_TYPES = [
   'repeating_group',
   'checkbox_group',
   'boolean_yes_no',
+  /**
+   * ✓ / ✗ — the same two-state-plus-unanswered shape as `boolean_yes_no`,
+   * kept a DISTINCT type so the audit intent survives in the stored data: a
+   * reviewer, an export or a later analysis can tell a pass/fail assessment
+   * from an ordinary Yes/No question. Answered-ness deliberately routes
+   * through the `boolean_yes_no` branch rather than a second rule, so a tick
+   * is `true`, a cross is an explicit `false`, and only `null` is unanswered.
+   */
+  'check_cross',
   'textarea',
 ] as const;
 export type FormFieldType = (typeof FORM_FIELD_TYPES)[number];

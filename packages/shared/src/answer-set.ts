@@ -25,11 +25,30 @@ export type AnswerSetDropReason =
   | 'too-few-columns'
   | 'unknown-column'
   | 'label-column'
-  | 'duplicate-membership';
+  | 'duplicate-membership'
+  | 'self-answering-column';
 
 export interface DroppedAnswerSet {
   key: string;
   reason: AnswerSetDropReason;
+}
+
+/**
+ * Column types that cannot be an answer-set member.
+ *
+ * `check_cross` only — NOT `boolean_yes_no`, which is exactly how a real OK/NA
+ * pair is typed and whose grouping is the established design. The difference is
+ * what `false` means. In a set, a member's falsity means "this option was not
+ * chosen", and the set decides the row. A `check_cross` false is its own
+ * recorded answer ("assessed, failed"), so a crossed member would assert two
+ * contradictory things at once — and `selectedOption` would silently discard
+ * one of them.
+ */
+const SELF_ANSWERING_TYPES: ReadonlySet<string> = new Set(['check_cross']);
+
+/** A column's declared type, or '' when the key names no column. */
+function columnTypeOf(columns: readonly RepeatingColumn[], key: string): string {
+  return columns.find((c) => c.key === key)?.type ?? '';
 }
 
 export interface AnswerSetResolution {
@@ -95,6 +114,15 @@ export function resolveAnswerSets(field: Pick<FormField, 'columns' | 'answerSets
     }
     if (keys.some((k) => claimed.has(k))) {
       drop('duplicate-membership');
+      continue;
+    }
+    // A set means "these columns share ONE answer per row". A `check_cross`
+    // (or `boolean_yes_no`) column already carries its own true/false, so
+    // grouping two of them asks which of two complete answers is THE answer —
+    // a question with no coherent reading. `selectedOption` would report the
+    // first ticked member and silently discard the other's recorded value.
+    if (keys.some((k) => SELF_ANSWERING_TYPES.has(columnTypeOf(columns, k)))) {
+      drop('self-answering-column');
       continue;
     }
 

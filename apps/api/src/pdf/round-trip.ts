@@ -14,6 +14,46 @@ import type { FormField, RepeatingRowValue, SubmissionValue } from '@formai/shar
 
 const INK = rgb(0.094, 0.106, 0.098); // #181b19
 
+/**
+ * Column types whose `false` is a RECORDED answer rather than an empty cell.
+ *
+ * A plain `checkbox` that is false is simply unticked, and drawing anything
+ * would invent an answer. A `check_cross` that is false is an assessor saying
+ * "I checked this and it failed" — exporting that as blank made it identical
+ * to never-assessed on the one artefact an investigation actually reads.
+ */
+const SELF_ANSWERING = new Set(['check_cross', 'boolean_yes_no']);
+
+/**
+ * Draw a tick or a cross as vector strokes.
+ *
+ * Not text: the page font is `StandardFonts.Helvetica`, which is WinAnsi, and
+ * neither U+2713 nor U+2717 exists in that encoding — pdf-lib cannot draw them
+ * at all. (PR #15's spike hit the same wall from the other side: the source
+ * PDFs' own ticks are Private-Use glyphs.) Two line segments each need no font,
+ * no embedded asset, and scale to whatever the cell is.
+ */
+function drawMark(
+  page: ReturnType<PDFDocument['getPages']>[number],
+  kind: 'tick' | 'cross',
+  x: number,
+  y: number,
+  size: number,
+): void {
+  const t = Math.max(0.8, size / 9);
+  const line = (x1: number, y1: number, x2: number, y2: number) =>
+    page.drawLine({ start: { x: x1, y: y1 }, end: { x: x2, y: y2 }, thickness: t, color: INK });
+
+  if (kind === 'tick') {
+    // Down-stroke into the elbow, then the long up-stroke.
+    line(x, y + size * 0.45, x + size * 0.35, y + size * 0.08);
+    line(x + size * 0.35, y + size * 0.08, x + size * 0.95, y + size * 0.92);
+    return;
+  }
+  line(x, y + size * 0.08, x + size * 0.9, y + size * 0.92);
+  line(x, y + size * 0.92, x + size * 0.9, y + size * 0.08);
+}
+
 /** Render a scalar value to the string drawn on the page. */
 function scalarText(value: SubmissionValue | undefined): string {
   if (value === null || value === undefined) return '';
@@ -138,6 +178,21 @@ function drawRepeatingGroup(
     cols.forEach((col, ci) => {
       if (groupedKeys.has(col.key)) return; // already handled by its answer set
       const raw = row[col.key];
+
+      if (SELF_ANSWERING.has(col.type)) {
+        // Only a real boolean is an answer here; null/'' is untouched and must
+        // stay blank. `false` is a recorded fail and MUST leave a mark.
+        if (typeof raw !== 'boolean') return;
+        if (col.type === 'check_cross') {
+          drawMark(page, raw ? 'tick' : 'cross', pos.x + colWidth * ci + 3, y + 3, size);
+        } else {
+          // boolean_yes_no keeps its existing 'X' for true; 'N' is the fix for
+          // a false that used to export as an empty cell.
+          mark(ci, raw ? 'X' : 'N');
+        }
+        return;
+      }
+
       const text =
         typeof raw === 'boolean' ? (raw ? 'X' : '') : raw === null || raw === undefined ? '' : String(raw);
       if (!text) return;

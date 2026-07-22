@@ -386,3 +386,90 @@ describe('roundTripExport — conditional visibility', () => {
     expect(bytesInclude(output, 'Fire extinguishers tagged')).toBe(true);
   });
 });
+
+/**
+ * A check/cross column records THREE states and the export must preserve all
+ * three. `scalarText` used to collapse `false` to an empty string, so an
+ * assessor's explicit cross reached the PDF as a blank cell — indistinguishable
+ * from never-assessed on the one artefact an investigation actually reads.
+ *
+ * The marks are vector strokes, not glyphs, because the page font is
+ * `StandardFonts.Helvetica` (WinAnsi) and neither U+2713 nor U+2717 exists in
+ * that encoding. So these assert on the drawn CONTENT rather than on decoded
+ * text: counting stroke operators is unreliable against a compressed stream,
+ * but "did the page change, and did it change differently" is exactly the
+ * property that matters.
+ */
+describe('roundTripExport — check/cross columns', () => {
+  const columnsWith = (type: string) => [
+    { key: 'item', label: 'Item', type: 'text' },
+    { key: 'result', label: 'Result', type },
+    { key: 'note', label: 'Note', type: 'text' },
+    { key: 'spare', label: 'Spare', type: 'text' },
+  ];
+
+  const CHECK_FIELD: FormField = {
+    id: 'checks',
+    type: 'repeating_group',
+    label: 'Competency checks',
+    required: false,
+    source: 'imported',
+    columns: columnsWith('check_cross') as FormField['columns'],
+    sourcePosition: { ...GROUPED_POS },
+  };
+
+  /** Export one row, optionally overriding the result column's type. */
+  async function exportRow(result: unknown, type = 'check_cross'): Promise<string> {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [{ ...CHECK_FIELD, columns: columnsWith(type) as FormField['columns'] }],
+      values: { checks: [{ item: 'Isolation applied', result }] as never },
+    });
+    return decodedText(output);
+  }
+
+  it('draws something for an explicit false — the cross must not vanish', async () => {
+    // Before the fix these were byte-identical: a recorded fail and an
+    // untouched cell produced the same page.
+    expect(await exportRow(false)).not.toBe(await exportRow(null));
+  });
+
+  it('draws a different mark for true than for false', async () => {
+    // A tick has an elbow, a cross does not. If these ever match, the two
+    // states are indistinguishable on the page — the whole failure this column
+    // type exists to prevent.
+    expect(await exportRow(true)).not.toBe(await exportRow(false));
+  });
+
+  it('draws nothing for an untouched cell', async () => {
+    // Same page as a plain checkbox left false, which draws no mark at all.
+    expect(await exportRow(null)).toBe(await exportRow(false, 'checkbox'));
+  });
+
+  it('still draws the row label alongside the mark', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [CHECK_FIELD],
+      values: { checks: [{ item: 'Isolation applied', result: false }] as never },
+    });
+    expect(bytesInclude(output, 'Isolation applied')).toBe(true);
+  });
+
+  it('leaves a plain checkbox false blank — there, unticked is not an answer', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [{ ...CHECK_FIELD, columns: columnsWith('checkbox') as FormField['columns'] }],
+      values: { checks: [{ item: 'Isolation applied', result: false }] as never },
+    });
+    expect(markXs(output)).toEqual([]);
+  });
+
+  it('marks a boolean_yes_no false as N rather than leaving it blank', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [{ ...CHECK_FIELD, columns: columnsWith('boolean_yes_no') as FormField['columns'] }],
+      values: { checks: [{ item: 'Isolation applied', result: false }] as never },
+    });
+    expect(drawnGlyphs(output).filter((g) => g.text === 'N').map((g) => g.x)).toEqual([cellX(1)]);
+  });
+});

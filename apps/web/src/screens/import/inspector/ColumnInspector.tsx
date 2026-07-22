@@ -45,6 +45,8 @@ export interface ColumnActions {
   renameColumn(fieldId: string, columnKey: string, label: string): void;
   setColumnType(fieldId: string, columnKey: string, type: FormFieldType): void;
   setColumnRequired(fieldId: string, columnKey: string, required: boolean): void;
+  /** Replace a choice column's option list wholesale. */
+  setColumnOptions(fieldId: string, columnKey: string, options: string[]): void;
   groupColumns(fieldId: string, columnKeys: string[]): string | null;
   ungroupAnswerSet(fieldId: string, setKey: string): void;
   acceptAnswerSet(fieldId: string, setKey: string): void;
@@ -55,10 +57,21 @@ export interface ColumnActions {
 const COLUMN_TYPE_OPTIONS: Array<{ label: string; value: FormFieldType }> = [
   { label: 'Text', value: 'text' },
   { label: 'Checkbox', value: 'checkbox' },
+  /*
+    Check / Cross records a real boolean, and — unlike Checkbox — distinguishes
+    an explicit fail from an untouched cell. That distinction is the reason it
+    exists: on a competency record, "assessed as failing" and "never assessed"
+    must not be the same value.
+  */
+  { label: 'Check / Cross', value: 'check_cross' },
+  { label: 'Dropdown', value: 'dropdown' },
   { label: 'Number', value: 'number' },
   { label: 'Date', value: 'date' },
   { label: 'Signature', value: 'signature' },
 ];
+
+/** Column types answered by picking from `options`. */
+const CHOICE_COLUMN_TYPES: ReadonlySet<string> = new Set(['dropdown', 'radio']);
 
 /** How a column relates to the field's answer sets. */
 export type ColumnMembership = 'none' | 'proposed' | 'accepted';
@@ -180,6 +193,14 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
                 />
               </div>
             )}
+
+            {!row.isLabel && CHOICE_COLUMN_TYPES.has(row.column.type) && (
+              <ColumnOptions
+                fieldId={field.id}
+                column={row.column}
+                onChange={actions.setColumnOptions}
+              />
+            )}
           </div>
         ))}
       </div>
@@ -245,6 +266,60 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Per-column option list for a dropdown cell.
+ *
+ * Edits replace the whole array rather than patching one index, because the
+ * column is the unit the store already patches — a per-index action would need
+ * its own coalescing rules to stay one undo step per edit, for no gain.
+ */
+function ColumnOptions({
+  fieldId,
+  column,
+  onChange,
+}: {
+  fieldId: string;
+  column: RepeatingColumn;
+  onChange: (fieldId: string, columnKey: string, options: string[]) => void;
+}) {
+  const options = column.options ?? [];
+  const write = (next: string[]) => onChange(fieldId, column.key, next);
+
+  return (
+    <div className="mt-1.5 rounded-sm border border-border-subtle bg-surface-card p-[8px_9px]">
+      <div className="mb-1.5 text-[11px] font-semibold text-text-secondary">
+        Options for {column.label}
+      </div>
+      <div className="flex flex-col gap-1">
+        {options.map((o, i) => (
+          <div key={i} className="flex items-center gap-1.5">
+            <input
+              value={o}
+              onChange={(e) => write(options.map((x, j) => (j === i ? e.target.value : x)))}
+              aria-label={`${column.label} option ${i + 1}`}
+              className="h-7 min-w-0 flex-1 rounded-sm border border-border bg-surface-card px-2 text-[12px] text-text-primary focus-visible:shadow-focus"
+            />
+            <button
+              onClick={() => write(options.filter((_, j) => j !== i))}
+              aria-label={`Remove ${column.label} option ${i + 1}`}
+              className="grid h-7 w-7 flex-none place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover hover:text-danger-text"
+            >
+              <Icon name="x" size={12} />
+            </button>
+          </div>
+        ))}
+      </div>
+      <button
+        onClick={() => write([...options, `Option ${options.length + 1}`])}
+        className="mt-1.5 inline-flex items-center gap-1 rounded-sm border border-dashed border-border-strong px-2 py-1 text-[11.5px] font-semibold text-text-secondary hover:bg-surface-hover"
+      >
+        <Icon name="plus" size={12} />
+        Add option
+      </button>
     </div>
   );
 }

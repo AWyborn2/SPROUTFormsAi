@@ -569,7 +569,28 @@ export function setColumnType(id: string, key: string, type: FormFieldType): voi
     const sets = editorField(id)?.answerSets ?? [];
     patch.answerSets = withoutMembers(id, sets, new Set([key]));
   }
+  // A choice column with no options falls through to a plain text input, so
+  // seed it — the same trap `retypeField` closes for scalar fields. The
+  // builder host does the same; the two must agree.
+  if ((type === 'dropdown' || type === 'radio') && !columnOf(id, key)?.options?.length) {
+    patch.columns = columns.map((c) =>
+      c.key === key ? { ...c, options: ['Option 1', 'Option 2'] } : c,
+    );
+  }
   dispatchStructural({ t: 'update', id, patch });
+}
+
+/** Replace a choice column's option list wholesale. */
+export function setColumnOptions(id: string, key: string, options: string[]): void {
+  if (key === labelKeyOf(id)) return;
+  const columns = patchColumn(id, key, { options });
+  if (!columns) return;
+  dispatchStructural({ t: 'update', id, patch: { columns } });
+}
+
+/** One column of a reviewed repeating field, by key. */
+function columnOf(id: string, key: string) {
+  return editorField(id)?.columns?.find((c) => c.key === key);
 }
 
 /**

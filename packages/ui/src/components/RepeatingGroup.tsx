@@ -89,13 +89,19 @@ function emptyRow(
     // option", and a whole row of falses is indistinguishable from an answer.
     row[c.key] = groupedKeys.has(c.key)
       ? null
-      : c.type === 'boolean_yes_no'
-        ? fixedMode
-          ? null
-          : false
-        : c.type === 'checkbox'
-          ? false
-          : '';
+      : // A check/cross cell seeds `null` in EVERY mode, unlike yes/no. Its
+        // `false` means "assessed and failed" — seeding it would record a
+        // fail on every untouched row of an audit table, which is the one
+        // value this type must never invent.
+        c.type === 'check_cross'
+        ? null
+        : c.type === 'boolean_yes_no'
+          ? fixedMode
+            ? null
+            : false
+          : c.type === 'checkbox'
+            ? false
+            : '';
   }
   return row;
 }
@@ -508,6 +514,18 @@ function AnswerSetCell({
   );
 }
 
+/**
+ * Two-state column types and the labels their buttons carry.
+ *
+ * `check_cross` exists so an audit's pass/fail reads as pass/fail rather than
+ * as a Yes/No question, but it is deliberately the SAME control and the same
+ * stored booleans — only the labels differ.
+ */
+const BINARY_LABELS: Record<string, readonly [string, string]> = {
+  boolean_yes_no: ['Yes', 'No'],
+  check_cross: ['✓', '✗'],
+};
+
 function RepeatingCell({
   column,
   value,
@@ -528,21 +546,31 @@ function RepeatingCell({
   const cellClass =
     'h-9 w-full min-w-[120px] rounded-md border border-border-strong bg-surface-card px-2.5 text-[13px] text-text-primary focus:outline-none focus-visible:border-border-accent focus-visible:shadow-focus disabled:bg-surface-sunken';
 
+  const pair = BINARY_LABELS[column.type];
+  /*
+    `check_cross` is ALWAYS explicit — it has no meaningful collapsed form,
+    because a single checkbox cannot say "assessed and failed". `boolean_yes_no`
+    keeps its existing `fixedMode` gate so already-published forms render
+    exactly as they do today.
+  */
+  const explicitPair = column.type === 'check_cross' || (column.type === 'boolean_yes_no' && explicitYesNo);
+
   if (readOnly) {
+    const blank = value === null || value === undefined || value === '';
     const display =
-      column.type === 'boolean_yes_no' || column.type === 'checkbox'
-        ? explicitYesNo && (value === null || value === undefined || value === '')
+      pair || column.type === 'checkbox'
+        ? explicitPair && blank
           ? '—'
           : value
-            ? 'Yes'
-            : 'No'
+            ? (pair?.[0] ?? 'Yes')
+            : (pair?.[1] ?? 'No')
         : (value ?? '') === ''
           ? '—'
           : String(value);
     return <span className="block px-1 text-[13px] text-text-primary">{display}</span>;
   }
 
-  if (column.type === 'boolean_yes_no' && explicitYesNo) {
+  if (pair && explicitPair) {
     return (
       <div
         role="group"
@@ -551,8 +579,8 @@ function RepeatingCell({
       >
         {(
           [
-            { label: 'Yes', v: true },
-            { label: 'No', v: false },
+            { label: pair[0], v: true },
+            { label: pair[1], v: false },
           ] as const
         ).map(({ label, v }) => (
           <button
