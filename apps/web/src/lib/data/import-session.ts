@@ -745,6 +745,82 @@ export function groupColumns(id: string, columnKeys: string[]): string | null {
   return key;
 }
 
+/**
+ * Split one extracted table into the `groups` printed groups it really is.
+ *
+ * `ADMN-FRM-111`'s Category A block prints as 6 rows × 3 side-by-side groups
+ * and extraction flattened it to one 18-item field in across-then-down order,
+ * so item `i` prints at row floor(i/3), group `i % groups`. `PageBox` is a
+ * cross product of column bands × row bands: it can say "column 2, row 5" and
+ * cannot say "the 7th answer belongs to the middle group's first row" (R18).
+ * No band adjustment reaches that, so the field is split instead — each group
+ * becomes a plain N-row grid the derivation and the exporter already handle,
+ * and each is confirmable on its own, so a misplaced middle group cannot
+ * scatter wrong answers through the whole list.
+ *
+ * The REVIEWER declares this; extraction never infers it. Production `v3` of
+ * this same form split the block into three fields while this import merged
+ * it — extraction is already inconsistent run to run on one document, which is
+ * the argument for an explicit decision by someone looking at the page rather
+ * than a silent model judgement.
+ *
+ * Refused rather than approximated when the shape cannot support it: fewer
+ * than two groups is nothing to do, more groups than items would mint a table
+ * with no rows, and a table with no captured items has nothing to distribute.
+ */
+export function splitTableGroups(id: string, groups: number): string[] {
+  const field = editorField(id);
+  const items = field?.fixedRows;
+  if (!field || !items?.length) return [];
+  if (!Number.isInteger(groups) || groups < 2 || groups > items.length) return [];
+
+  const parts = Array.from({ length: groups }, (_, g) => ({
+    label: `${field.label} (${g + 1} of ${groups})`,
+    // Reading order, not contiguous blocks: the items were captured across the
+    // page, so every `groups`-th one belongs to the same printed column. This
+    // also puts each group back in top-to-bottom order as printed.
+    fixedRows: items.filter((_item, i) => i % groups === g),
+    // Both position records described the merged block and describe none of
+    // the groups. `sourcePosition` is dropped for the same reason geometry is
+    // below — and it matters more, because `geometrySegments` falls back to it
+    // when there is no geometry, so leaving it would stack all three groups'
+    // marks on one spot at export.
+    sourcePosition: undefined,
+  }));
+
+  coalesceKey = null;
+  dispatchEdit({ t: 'splitField', id, parts });
+
+  // Answer-set acceptance carries: the groups have the source's columns and the
+  // source's sets, making exactly the claim the reviewer already judged, so
+  // re-asking three times would be noise rather than safety.
+  // The reducer leaves the first new part selected, and the parts replaced the
+  // source in place, so they are the `groups` fields from there.
+  const all = editor?.fields ?? [];
+  const at = all.findIndex((f) => f.id === editor?.selectedId);
+  const created = at < 0 ? [] : all.slice(at, at + groups);
+  for (const set of field.answerSets ?? []) {
+    if (answerSetAccepted(id, set.key)) {
+      for (const part of created) acceptedAnswerSets.add(acceptanceKey(part.id, set.key));
+    }
+    acceptedAnswerSets.delete(acceptanceKey(id, set.key));
+  }
+
+  // Geometry does NOT carry. It is positional: a grid confirmed over all 18
+  // items describes none of the three groups, and the ids are fresh anyway, so
+  // the only thing to do is drop what the source held (R8).
+  geometryProposals.delete(id);
+  confirmedGeometry.delete(id);
+
+  // Nor does the extraction metadata: the groups have fresh ids and so inherit
+  // no `reviewMeta` entry, which is the behaviour we want — three new tables
+  // each awaiting their own confirmation rather than three arriving already
+  // marked resolved by a judgement made about the merged one.
+  reviewMeta.delete(id);
+  emit();
+  return created.map((f) => f.id);
+}
+
 /** Dissolve one answer set — its columns return to independent cells. */
 export function ungroupAnswerSet(id: string, setKey: string): void {
   const field = editorField(id);

@@ -243,6 +243,7 @@ export type BuilderAction =
   | { t: 'update'; id: string; patch: Partial<FormField> }
   | { t: 'changeType'; id: string; fieldType: FormFieldType }
   | { t: 'duplicate'; id: string }
+  | { t: 'splitField'; id: string; parts: Array<Partial<FormField>> }
   | { t: 'delete'; id: string }
   | { t: 'move'; id: string; dir: -1 | 1 }
   | { t: 'reorder'; from: number; to: number }
@@ -305,6 +306,37 @@ export function builderReducer(s: BuilderState, a: BuilderAction): BuilderState 
         return { fields, selectedId: nid };
       });
       return { ...next, seq: s.seq + 1 };
+    }
+    /**
+     * Replace one field with several derived from it, as ONE undo step.
+     *
+     * `duplicate` + `update` would reach the same field list, but each
+     * duplicate takes its own snapshot, so undoing a three-way split would
+     * take three presses and leave two half-splits on the way back. A split is
+     * one decision by the reviewer and has to undo like one.
+     *
+     * Ids are minted here rather than passed in, so `seq` stays the single
+     * source of id uniqueness. Every part gets a FRESH id — none inherits the
+     * source's — because review state elsewhere is keyed by field id, and a
+     * part that reused the id would silently inherit judgements made about the
+     * whole. Callers carry forward whatever genuinely still applies.
+     */
+    case 'splitField': {
+      if (a.parts.length === 0) return s;
+      const i = s.fields.findIndex((f) => f.id === a.id);
+      if (i < 0) return s;
+      const source = s.fields[i]!;
+      const next = mutate(s, (fields) => {
+        const parts = a.parts.map((patch, n) => ({
+          ...structuredClone(source),
+          ...patch,
+          id: `b${s.seq + n + 1}`,
+        }));
+        fields.splice(i, 1, ...parts);
+        // The source id is gone; anything conditioned on it would dangle.
+        return { fields: pruneOrphanedConditions(fields), selectedId: parts[0]!.id };
+      });
+      return { ...next, seq: s.seq + a.parts.length };
     }
     case 'delete':
       return mutate(s, (fields) => {
