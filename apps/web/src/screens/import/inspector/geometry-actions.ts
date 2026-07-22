@@ -120,6 +120,60 @@ export function unsupportedReason(
  */
 export const NUDGE_POINTS = 1;
 
+/**
+ * How far from a printed glyph a dragged edge still counts as meaning it.
+ *
+ * The objection to dragging is real and documented on `BandNudger`: a pointer
+ * over a scaled preview cannot resolve a 7-13pt column. Snapping answers it by
+ * changing what the pointer has to do — it picks WHICH printed thing the edge
+ * belongs to, and the text layer supplies the coordinate, so precision stops
+ * depending on the pointer at all (KTD12).
+ *
+ * 12pt is one option glyph wide: `ADMN-FRM-111` prints OK at 12.2 and NA at
+ * 12.6, and the dozer family's N/A is 13.3. Inside a glyph's own width the
+ * reviewer meant that glyph; beyond it they meant a bare coordinate, and
+ * pulling them to a distant column would be the overshoot the buttons exist to
+ * avoid. Ambiguity between two nearby targets is not settled by this number —
+ * `snapEdge` takes the NEAREST target, so the closest edge always wins.
+ */
+export const SNAP_RANGE = 12;
+
+/**
+ * Where a dragged edge may land: both edges of every printed run on the page.
+ *
+ * Deliberately the raw text layer rather than the derivation's own output.
+ * `proposeTableSegments` isolates the RIGHTMOST cluster on a row by design, so
+ * its bands know 512.6/540.7 on `ADMN-FRM-111` and nothing about the two
+ * groups printed to the left — which are exactly the places a reviewer needs
+ * to drag to. Extra targets cost nothing here: the pointer has already
+ * narrowed the choice to within a glyph's width before any of them apply.
+ */
+export function snapTargets(items: readonly PositionedText[]): number[] {
+  const edges: number[] = [];
+  for (const item of items) {
+    edges.push(item.x, item.x + item.width);
+  }
+  edges.sort((a, b) => a - b);
+
+  // Collapse duplicates — a column of items printed at one x contributes that
+  // x once, not once per row.
+  const unique: number[] = [];
+  for (const e of edges) {
+    if (unique.length === 0 || e - unique[unique.length - 1]! > 0.5) unique.push(e);
+  }
+  return unique;
+}
+
+/** Pull a dragged coordinate onto the nearest printed edge, or leave it alone. */
+export function snapEdge(value: number, targets: readonly number[], range = SNAP_RANGE): number {
+  let best: number | null = null;
+  for (const t of targets) {
+    if (Math.abs(t - value) > range) continue;
+    if (best === null || Math.abs(t - value) < Math.abs(best - value)) best = t;
+  }
+  return best ?? value;
+}
+
 /** The panel state for a field, given what has been proposed and confirmed. */
 export function panelState(
   field: Pick<FormField, 'type' | 'columns'>,

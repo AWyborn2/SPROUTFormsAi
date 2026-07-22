@@ -415,6 +415,8 @@ y=339.3   D(472.8 w6.1)  ☐(481.2 w8.6)  N(517.2 w6.4)  ☐(525.9 w8.6)
 
 - **Verification:** `pnpm --filter @formai/web test` passes. Place one group on `ADMN-FRM-111` by dragging, repeat it across, and confirm all three grids without using the step buttons.
 
+- **Repeat-across is DEFERRED, and the reason is the plan's own doctrine.** Snapping shipped and closes the defect this unit names: the 350-click reposition is now one drag. Repeat-across is a further convenience, and it needs something the model does not carry — a link from a *field* to which printed *group* it is. After U9 the three groups are three separate fields, so generating a sibling grid means choosing which field receives it, and nothing in `FormField` says "this is the middle group." The two available guesses are label-sniffing the `(2 of 3)` suffix U9 happens to mint, and assuming list adjacency; both are the sort of inference that survives on `ADMN-FRM-111` and breaks on the next form, which is precisely what R16 exists to refuse. KTD13's premise is also weaker than it looked: the pitch on this form is 181.2pt then 166.9pt, not the uniform ~174/~167 assumed — so "the detected pitch" is not one number. Ship it when a group index exists on the field, or when the offsets are applied to multiple *segments of one field* rather than to sibling fields.
+
 ---
 
 ## Verification Contract

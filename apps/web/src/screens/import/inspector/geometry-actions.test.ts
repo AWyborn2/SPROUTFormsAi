@@ -9,7 +9,16 @@
 import { describe, expect, it } from 'vitest';
 import type { FormField } from '@formai/shared';
 import type { PositionedText } from '../../../lib/pdf-geometry.js';
-import { deriveAcrossPages, deriveForField, panelState, unsupportedReason } from './geometry-actions.js';
+import {
+  NUDGE_POINTS,
+  SNAP_RANGE,
+  deriveAcrossPages,
+  deriveForField,
+  panelState,
+  snapEdge,
+  snapTargets,
+  unsupportedReason,
+} from './geometry-actions.js';
 
 const A4 = { width: 595, height: 842 };
 
@@ -196,5 +205,89 @@ describe('deriveAcrossPages', () => {
 
   it('is empty-safe before the viewer has read the PDF', () => {
     expect(deriveAcrossPages(tableField(), [])).toBeNull();
+  });
+});
+
+describe('snapping a dragged edge to the printed page (U10, R19)', () => {
+  /**
+   * `ADMN-FRM-111`'s three option-header groups as measured, at y=306.2. These
+   * are the six places a reviewer needs to be able to drag a band to; the
+   * derivation only ever offers the rightmost pair.
+   */
+  const OPTION_HEADERS: PositionedText[] = [
+    { text: 'OK', x: 164.5, y: 306.2, width: 12.2 },
+    { text: 'NA', x: 192.7, y: 306.2, width: 12.6 },
+    { text: 'OK', x: 345.7, y: 306.2, width: 12.2 },
+    { text: 'NA', x: 371.1, y: 306.2, width: 12.6 },
+    { text: 'OK', x: 512.6, y: 306.2, width: 12.2 },
+    { text: 'NA', x: 540.7, y: 306.2, width: 12.6 },
+  ];
+
+  it('offers both edges of every printed run', () => {
+    const targets = snapTargets(OPTION_HEADERS);
+
+    // Left edge of the leftmost OK and right edge of the rightmost NA — the
+    // two ends of the reachable range.
+    expect(targets[0]).toBeCloseTo(164.5, 5);
+    expect(targets[targets.length - 1]).toBeCloseTo(553.3, 5);
+    expect(targets).toHaveLength(12);
+  });
+
+  it('reaches the groups the derivation never proposes', () => {
+    // proposeTableSegments isolates the RIGHTMOST cluster by design, so its
+    // bands know 512.6/540.7 and nothing about the two groups to the left.
+    const targets = snapTargets(OPTION_HEADERS);
+
+    expect(targets).toContain(164.5);
+    expect(targets).toContain(345.7);
+  });
+
+  it('collapses a column of items printed at one x into a single target', () => {
+    const column: PositionedText[] = [0, 1, 2, 3].map((r) => ({
+      text: 'OK', x: 164.5, y: 306.2 - r * 16, width: 12.2,
+    }));
+
+    expect(snapTargets(column)).toEqual([164.5, 176.7]);
+  });
+
+  it('pulls a rough drag onto the printed column, not the pointer coordinate', () => {
+    const targets = snapTargets(OPTION_HEADERS);
+
+    // A drag that lands 3pt short of the middle group's OK.
+    expect(snapEdge(342.4, targets)).toBeCloseTo(345.7, 5);
+  });
+
+  it('takes the nearest target when two are in range', () => {
+    const targets = snapTargets(OPTION_HEADERS);
+
+    // 371.1 (NA left edge) and 357.9 (OK right edge) are both within range of
+    // 366; the nearer one wins.
+    expect(snapEdge(366, targets)).toBeCloseTo(371.1, 5);
+  });
+
+  it('leaves a drag with nothing near it exactly where it was put', () => {
+    const targets = snapTargets(OPTION_HEADERS);
+
+    // Mid-gutter, 30pt from anything printed. Jumping to a distant column here
+    // would be the overshoot the step buttons exist to avoid.
+    expect(snapEdge(280, targets)).toBe(280);
+  });
+
+  it('is empty-safe before the viewer has read the page', () => {
+    expect(snapTargets([])).toEqual([]);
+    expect(snapEdge(280, [])).toBe(280);
+  });
+
+  it('snaps within one option glyph and no further', () => {
+    // SNAP_RANGE is one option glyph wide (OK 12.2, NA 12.6, dozer N/A 13.3):
+    // inside a glyph's own width the reviewer meant that glyph.
+    expect(snapEdge(164.5 - SNAP_RANGE + 0.5, [164.5])).toBe(164.5);
+    expect(snapEdge(164.5 - SNAP_RANGE - 0.5, [164.5])).toBe(164.5 - SNAP_RANGE - 0.5);
+  });
+
+  it('still steps by 1pt after a snap, for when snapping picks wrong', () => {
+    // Snapping is gross placement; the buttons remain the fine correction.
+    expect(NUDGE_POINTS).toBe(1);
+    expect(snapEdge(345.7 + NUDGE_POINTS, [345.7], 0)).toBe(345.7 + NUDGE_POINTS);
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Button, Icon, Select, Switch, type BadgeVariant } from '@formai/ui';
 import type { ExtractedField, ExtractionStatus } from '@formai/shared';
@@ -20,7 +20,8 @@ import {
 } from '../../lib/data/import-session.js';
 import { FIELD_META, typeOptionsFor } from '../../lib/field-editor/reducer.js';
 import type { TextPage } from '../../lib/pdf-geometry.js';
-import { geometryProposal } from '../../lib/data/import-session.js';
+import { adjustGeometryBand, geometryProposal } from '../../lib/data/import-session.js';
+import { snapTargets } from './inspector/geometry-actions.js';
 import { FieldInspector } from './inspector/FieldInspector.js';
 import { stripFileExtension } from './upload-validation.js';
 import { ImportStepper } from './ImportStepper.js';
@@ -58,6 +59,18 @@ export function ImportReviewScreen() {
   // needs to derive a grid. Held here rather than in the session because it is
   // a cache of the source document, not review state.
   const [textPages, setTextPages] = useState<readonly TextPage[]>([]);
+
+  const bandOverlay = selectedFieldId ? (geometryProposal(selectedFieldId) ?? null) : null;
+  /**
+   * Where a dragged band edge may land, from the overlay page's own text (U10).
+   * Derived here rather than in the viewer because the screen already holds the
+   * text layer, and the viewer stays a presentational surface that reports a
+   * coordinate rather than deciding what a legal one is.
+   */
+  const bandSnapTargets = useMemo(
+    () => (bandOverlay ? snapTargets(textPages[bandOverlay.page]?.items ?? []) : []),
+    [bandOverlay?.page, textPages],
+  );
   const fieldListRef = useRef<HTMLDivElement>(null);
 
   // Guard direct navigation — with no import in flight there is nothing to review.
@@ -169,7 +182,13 @@ export function ImportReviewScreen() {
                 selectedFieldId={selectedFieldId}
                 onSelectField={handleSelectField}
                 onTextLayer={setTextPages}
-                bandOverlay={selectedFieldId ? (geometryProposal(selectedFieldId) ?? null) : null}
+                bandOverlay={bandOverlay}
+                bandSnapTargets={bandSnapTargets}
+                onBandEdge={
+                  selectedFieldId
+                    ? (key, edge, value) => adjustGeometryBand(selectedFieldId, 'column', key, edge, value)
+                    : undefined
+                }
                 className="max-h-[70vh] lg:max-h-none lg:flex-1"
               />
             </div>

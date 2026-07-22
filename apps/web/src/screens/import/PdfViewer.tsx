@@ -3,6 +3,7 @@ import * as pdfjs from 'pdfjs-dist';
 import { Icon } from '@formai/ui';
 import type { ExtractedField, ExtractionStatus, PageBox } from '@formai/shared';
 import type { PositionedText, TextPage } from '../../lib/pdf-geometry.js';
+import { snapEdge } from './inspector/geometry-actions.js';
 import {
   anchoredScrollOffset,
   clampZoom,
@@ -53,6 +54,13 @@ interface PdfViewerProps {
   onTextLayer?: (pages: TextPage[]) => void;
   /** A proposed grid to draw over the page, for the selected field. */
   bandOverlay?: PageBox | null;
+  /**
+   * Printed edges on the overlay's page that a dragged band edge may snap to
+   * (U10). Supplied by the screen, which already holds the text layer.
+   */
+  bandSnapTargets?: readonly number[];
+  /** A band edge was dragged to `value` (PDF points). Omit to draw read-only. */
+  onBandEdge?: (key: string, edge: 'start' | 'end', value: number) => void;
   className?: string;
 }
 
@@ -74,13 +82,51 @@ function BandGrid({
   segment,
   pageWidth,
   pageHeight,
+  snapTargets = [],
+  onBandEdge,
 }: {
   segment: PageBox;
   pageWidth: number;
   pageHeight: number;
+  /** Printed edges this page offers a dragged band edge (U10). */
+  snapTargets?: readonly number[];
+  onBandEdge?: (key: string, edge: 'start' | 'end', value: number) => void;
 }) {
+  const surface = useRef<HTMLDivElement>(null);
   const scaleX = pageWidth / segment.pageWidth;
   const scaleY = pageHeight / segment.pageHeight;
+
+  /**
+   * Drag a column edge, snapped to the printed page.
+   *
+   * The pointer only has to choose WHICH printed thing the edge belongs to —
+   * `snapEdge` supplies the coordinate from the text layer — so a 7-13pt
+   * column is reachable despite the preview being scaled (KTD12). Pointer
+   * capture keeps the drag alive when the cursor leaves the page image, and
+   * every move goes through `adjustGeometryBand`, so the shipped validator
+   * refuses an inverting or overlapping drag exactly as it refuses a step.
+   */
+  const startDrag = (key: string, edge: 'start' | 'end') => (e: React.PointerEvent) => {
+    if (!onBandEdge) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const handle = e.currentTarget as HTMLElement;
+    handle.setPointerCapture(e.pointerId);
+
+    const move = (ev: PointerEvent) => {
+      const rect = surface.current?.getBoundingClientRect();
+      if (!rect) return;
+      onBandEdge(key, edge, snapEdge((ev.clientX - rect.left) / scaleX, snapTargets));
+    };
+    const stop = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', stop);
+      handle.removeEventListener('pointercancel', stop);
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', stop);
+    handle.addEventListener('pointercancel', stop);
+  };
 
   const top = pageHeight - (segment.y + segment.height) * scaleY;
   const height = segment.height * scaleY;
@@ -88,7 +134,7 @@ function BandGrid({
   const width = segment.width * scaleX;
 
   return (
-    <div aria-hidden className="pointer-events-none absolute inset-0">
+    <div ref={surface} aria-hidden className="pointer-events-none absolute inset-0">
       <div
         className="absolute rounded-[2px]"
         style={{
@@ -114,6 +160,23 @@ function BandGrid({
           }}
         />
       ))}
+      {onBandEdge &&
+        (segment.columnBands ?? []).flatMap((band) =>
+          (['start', 'end'] as const).map((edge) => (
+            <div
+              key={`h-${band.key}-${edge}`}
+              role="slider"
+              tabIndex={-1}
+              aria-label={`Drag ${band.key} ${edge} edge`}
+              aria-valuenow={Math.round(band[edge])}
+              onPointerDown={startDrag(band.key, edge)}
+              className="pointer-events-auto absolute cursor-ew-resize"
+              // Wider than the line it moves: a 1px hit target is unusable, and
+              // the drag does not need to be precise — the snap is.
+              style={{ left: band[edge] * scaleX - 5, top, width: 10, height }}
+            />
+          )),
+        )}
       {(segment.rowBands ?? []).map((band) => (
         <div
           key={`r-${band.key}`}
@@ -139,6 +202,8 @@ export function PdfViewer({
   onSelectField,
   onTextLayer,
   bandOverlay,
+  bandSnapTargets,
+  onBandEdge,
   className = '',
 }: PdfViewerProps) {
   const [pages, setPages] = useState<PageRender[]>([]);
@@ -468,6 +533,8 @@ export function PdfViewer({
                 {bandOverlay && bandOverlay.page === pageIndex && (
                   <BandGrid
                     segment={bandOverlay}
+                    snapTargets={bandSnapTargets}
+                    onBandEdge={onBandEdge}
                     pageWidth={pageWidth}
                     pageHeight={pageHeight}
                   />
