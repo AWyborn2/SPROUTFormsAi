@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Band derivation from the PDF text layer (U3, R5/R6/R15).
  *
  * Every fixture here is MEASURED from the real fixture documents, not invented.
@@ -76,6 +76,27 @@ function propose(items: PositionedText[], columns = tickCrossNaColumns()) {
   return proposeTableSegments({ page: 6, ...A4, items, columns });
 }
 
+/**
+ * The same table repeated lower on the page.
+ *
+ * Real pages carry two or three occurrences of a table and its header — U1
+ * measured 2 on page 7 and 3 on pages 8 and 9 — and that repetition is what
+ * corroborates a header. A single-table fixture is the unrepresentative case,
+ * so any scenario about *inference* needs a sibling to be realistic.
+ */
+function repeated(items: PositionedText[], dy = 200): PositionedText[] {
+  return [...items, ...items.map((i) => ({ ...i, y: i.y - dy }))];
+}
+
+/**
+ * Page 7's first table with the tick gone from the text layer — the measured
+ * Small Loader shape, where `/ ×` and `N/A` reach the text layer but no
+ * Private-Use tick does.
+ */
+function withoutTick(): PositionedText[] {
+  return dozerPage7Table1().filter((i) => i.text.codePointAt(0) !== 0xf0fc);
+}
+
 describe('proposeTableSegments — the measured dozer header', () => {
   it('yields exactly three option bands for a three-option table', () => {
     const [proposal] = propose(dozerPage7Table1());
@@ -135,10 +156,21 @@ describe('proposeTableSegments — the measured dozer header', () => {
     }
   });
 
-  it('reports full confidence when every anchor was located', () => {
+  it('holds back full confidence when nothing on the page corroborates the header', () => {
+    // Locating every anchor is necessary but not sufficient. A lone header
+    // cannot be cross-checked against a sibling, so it stays short of full
+    // confidence and says why — a running head also "locates every anchor".
     const [proposal] = propose(dozerPage7Table1());
 
+    expect(proposal!.confidence).toBeLessThan(1);
+    expect(proposal!.notes.join(' ')).toMatch(/could not be cross-checked/);
+  });
+
+  it('reports full confidence when a second table confirms the header shape', () => {
+    const [proposal] = propose([...dozerPage7Table1(), ...dozerPage7Table2Header()]);
+
     expect(proposal!.confidence).toBe(1);
+    expect(proposal!.notes).toEqual([]);
   });
 
   it('derives one row band per printed row', () => {
@@ -151,7 +183,7 @@ describe('proposeTableSegments — the measured dozer header', () => {
 describe('proposeTableSegments — anchor reconciliation', () => {
   it('infers a missing anchor from pitch when the tick is absent from the text layer', () => {
     // The Small Loader shape: 18 "/ x" runs and 18 "N/A", zero Private-Use ticks.
-    const items = dozerPage7Table1().filter((i) => i.text !== '');
+    const items = repeated(withoutTick());
 
     const [proposal] = propose(items);
 
@@ -161,15 +193,15 @@ describe('proposeTableSegments — anchor reconciliation', () => {
   });
 
   it('scores an inferred anchor strictly below a fully located one', () => {
-    const located = propose(dozerPage7Table1())[0]!;
-    const inferred = propose(dozerPage7Table1().filter((i) => i.text !== ''))[0]!;
+    const located = propose(repeated(dozerPage7Table1()))[0]!;
+    const inferred = propose(repeated(withoutTick()))[0]!;
 
     expect(inferred.confidence).toBeLessThan(located.confidence);
   });
 
   it('returns no proposal for a Grader-shaped header carrying a single anchor', () => {
     // One point yields no pitch, so three bands cannot be honestly derived.
-    const items = dozerPage7Table1().filter((i) => i.text !== '' && i.text !== '/ ×');
+    const items = withoutTick().filter((i) => i.text !== '/ ×');
 
     expect(propose(items)).toEqual([]);
   });
@@ -208,7 +240,9 @@ describe('proposeTableSegments — anchor reconciliation', () => {
     });
 
     expect(proposal?.segment.columnBands?.map((b) => b.key)).toEqual(['ok', 'na']);
-    expect(proposal?.confidence).toBe(1);
+    // A single-table form is real (ADMN-FRM-111 is one table on one page), so
+    // it still proposes — just uncorroborated, and marked as such.
+    expect(proposal?.confidence).toBe(0.8);
   });
 });
 
@@ -252,7 +286,7 @@ describe('proposeTableSegments — validator conformance (R15)', () => {
   });
 
   it('emits a validator-clean proposal on the inferred-anchor path too', () => {
-    const items = dozerPage7Table1().filter((i) => i.text !== '');
+    const items = repeated(withoutTick());
     const [proposal] = propose(items);
 
     const resolved = resolveGeometry({ geometry: { segments: [proposal!.segment] } }, 18);
@@ -333,6 +367,130 @@ describe('proposeTableSegments — refusals', () => {
     const [proposal] = propose(items);
 
     expect(proposal?.segment.rowBands).toHaveLength(4);
+  });
+});
+
+describe('proposeTableSegments — corroboration (U7, R16)', () => {
+  it('refuses a document-control running head', () => {
+    // Executed counter-example: this previously produced a proposal at
+    // confidence 0.7 on a page where the real table is the Grader shape that
+    // is asserted to return nothing.
+    const items: PositionedText[] = [
+      { text: 'Charles Hull Contracting Pty Ltd — Operator Competency', x: 37.5, y: 800, width: 250 },
+      { text: 'Rev 4', x: 480, y: 800, width: 20 },
+      { text: '07/2026', x: 520, y: 800, width: 30 },
+      { text: 'Some body line', x: 37.5, y: 780, width: 90 },
+      { text: 'Another body line', x: 37.5, y: 763, width: 95 },
+    ];
+
+    expect(propose(items)).toEqual([]);
+  });
+
+  it('refuses a signature strip', () => {
+    const items: PositionedText[] = [
+      { text: 'I declare that the assessment above was conducted correctly', x: 37.5, y: 300, width: 260 },
+      { text: 'Date:', x: 420, y: 300, width: 22 },
+      { text: 'Time:', x: 480, y: 300, width: 22 },
+      { text: 'Assessor name', x: 37.5, y: 283, width: 60 },
+      { text: 'Candidate name', x: 37.5, y: 266, width: 65 },
+    ];
+
+    expect(propose(items)).toEqual([]);
+  });
+
+  it('drops the header whose anchor pattern no sibling confirms', () => {
+    // A running head sharing a page with two real tables: the real headers
+    // corroborate each other, the furniture matches neither.
+    const items = [
+      { text: 'Charles Hull Contracting Pty Ltd — Operator Competency', x: 37.5, y: 800, width: 250 },
+      { text: 'Rev 4', x: 480, y: 800, width: 20 },
+      { text: '07/2026', x: 520, y: 800, width: 30 },
+      { text: 'Doc line', x: 37.5, y: 783, width: 40 },
+      ...dozerPage7Table1(),
+      ...dozerPage7Table2Header(),
+    ];
+
+    const out = propose(items);
+
+    expect(out).toHaveLength(2);
+    for (const p of out) {
+      expect(p.segment.columnBands?.map((b) => b.key)).toEqual(['tick', 'cross', 'na']);
+    }
+  });
+
+  it('refuses a header whose anchor cluster spreads far wider than its own glyphs', () => {
+    // The stray ':' survives the gap-outlier split when there are too few gaps
+    // for it to have an uncontaminated reference. Glyph width is the
+    // independent signal: measured clean clusters span 1.00-3.68x their own
+    // width, contaminated ones 9.76-10.69x.
+    const items: PositionedText[] = [
+      { text: 'During the demonstration, did the Candidate', x: 37.5, y: 545.4, width: 190.5 },
+      { text: ':', x: 228, y: 545.4, width: 2.5 },
+      { text: 'N/A', x: 539.9, y: 545.4, width: 13.3 },
+      { text: 'A row label', x: 37.5, y: 528.6, width: 60 },
+      { text: 'Another row label', x: 37.5, y: 511.8, width: 70 },
+    ];
+
+    const columns: RepeatingColumn[] = [
+      { key: 'item', label: 'Item', type: 'text' },
+      { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+      { key: 'na', label: 'NA', type: 'boolean_yes_no' },
+    ];
+
+    expect(propose(items, columns)).toEqual([]);
+  });
+
+  it('refuses to infer leftward when text sits right of the last located anchor', () => {
+    // Executed counter-example: with N/A removed, inference shifted every band
+    // one column left, stamping a recorded cross in the tick column. The
+    // printed N/A text is still on the row, so the missing column may be the
+    // RIGHTMOST one — which cannot be told apart, so refuse.
+    // 'Comments' is wide enough not to read as an option header, so only two
+    // anchors are located for three columns — but it proves something IS
+    // printed to the right of them.
+    const items = [
+      ...dozerPage7Table1().filter((i) => i.text !== 'N/A'),
+      { text: 'Comments', x: 539.9, y: 647.7, width: 60 },
+    ];
+    const withSibling = [...items, ...dozerPage7Table2Header()];
+
+    expect(propose(withSibling).filter((p) => p.anchorsInferred > 0)).toEqual([]);
+  });
+});
+
+describe('proposeTableSegments — row pitch from the gap distribution (U7)', () => {
+  function tableWithRowGaps(gaps: number[]): PositionedText[] {
+    const items = [...dozerPage7Table1()].filter((i) => !i.text.startsWith('Receive') && !i.text.startsWith('Identify') && !i.text.startsWith('Communicate') && !i.text.startsWith('Wearing'));
+    let y = 630.8;
+    items.push({ text: 'Row label 0', x: 37.5, y, width: 80 });
+    gaps.forEach((g, n) => {
+      y -= g;
+      items.push({ text: `Row label ${n + 1}`, x: 37.5, y, width: 80 });
+    });
+    return items;
+  }
+
+  it('does not merge a genuine row away when leading is irregular', () => {
+    // Executed counter-example: gaps [16.8, 30] gave 2 bands for 3 printed
+    // rows, because the median landed on the larger gap and the wrap threshold
+    // then swallowed the smaller one.
+    const [proposal] = propose(tableWithRowGaps([16.8, 30]));
+
+    expect(proposal?.segment.rowBands).toHaveLength(3);
+  });
+
+  it('still merges a wrap when the gap distribution separates cleanly', () => {
+    const [proposal] = propose(tableWithRowGaps([10.4, 16.8, 16.9]));
+
+    expect(proposal?.segment.rowBands).toHaveLength(3);
+  });
+
+  it('merges nothing when wraps and rows cannot be told apart', () => {
+    // Equal-sized clusters: adding a spurious row is recoverable in review,
+    // silently deleting a printed one is not.
+    const [proposal] = propose(tableWithRowGaps([10.4, 16.8]));
+
+    expect(proposal?.segment.rowBands).toHaveLength(3);
   });
 });
 

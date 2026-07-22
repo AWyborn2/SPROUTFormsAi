@@ -73,6 +73,29 @@ const WRAP_PITCH_RATIO = 0.75;
 const CLUSTER_GAP_FACTOR = 3;
 
 /**
+ * Reject a header whose anchors span more than this multiple of their own
+ * combined glyph width.
+ *
+ * Calibrated across the library, not tuned to one form. Clean option clusters
+ * measure 1.00-3.68 (Scraper 3.68, dozer 1.65, Small Excavator 1.80); the same
+ * headers with a stray item included measure 9.76-10.69 (dozer, Small Loader,
+ * Small Excavator). A threshold of 5 sits in that gap with room on both sides.
+ *
+ * This keys on glyph WIDTHS, which the centre-based band derivation never
+ * reads — so it is real corroboration rather than a restatement of the inputs.
+ * It does NOT separate furniture from real headers (furniture measures
+ * 1.99-2.15, tighter than a genuine Scraper cluster); header repetition is what
+ * catches furniture.
+ */
+const MAX_CLUSTER_SPREAD = 5;
+
+/** A sorted-gap jump of at least this ratio separates wraps from rows. */
+const GAP_SPLIT_RATIO = 1.4;
+
+/** Two headers are the same table shape when every anchor agrees within this. */
+const REPEAT_TOLERANCE = 2;
+
+/**
  * How far a row's first item may sit from the label column's left margin.
  *
  * Measured: label lines print at exactly x=37.5 while numbered section headings
@@ -157,6 +180,8 @@ interface HeaderRow {
   row: Row;
   labelHeader: PositionedText;
   anchors: PositionedText[];
+  /** Whether another header on the page confirms this anchor pattern. */
+  corroborated?: boolean;
 }
 
 /**
@@ -184,10 +209,35 @@ function findHeaderRows(rows: Row[]): HeaderRow[] {
     const anchors = rightmostCluster(candidates);
     if (anchors.length < 2) continue;
 
+    // Corroboration by glyph width. The gap-outlier split above needs three or
+    // more gaps to have a reference the outlier does not define; with two
+    // candidates it cannot fire at all. This catches what it misses: a cluster
+    // holding something that is not a column header spreads far wider than its
+    // own glyphs. See MAX_CLUSTER_SPREAD for the measured separation.
+    const span = anchors[anchors.length - 1]!.x + anchors[anchors.length - 1]!.width - anchors[0]!.x;
+    const widthSum = anchors.reduce((sum, a) => sum + a.width, 0);
+    if (!(widthSum > 0) || span / widthSum > MAX_CLUSTER_SPREAD) continue;
+
     headers.push({ row, labelHeader, anchors });
   }
 
-  return headers;
+  // Corroboration by repetition. A printed table repeats its header per
+  // occurrence — measured 2-3 times per page on every real table across five
+  // documents — while page furniture (a running head, a signature strip) occurs
+  // once. So when a page offers several candidates, one that matches no sibling
+  // is furniture and is dropped. A lone candidate cannot be corroborated this
+  // way and is kept, because single-table forms are real (ADMN-FRM-111 is one
+  // table on one page); it is marked uncorroborated instead so the proposal
+  // carries lower confidence and says why.
+  if (headers.length < 2) return headers.map((h) => ({ ...h, corroborated: false }));
+
+  const matches = (a: HeaderRow, b: HeaderRow) =>
+    a.anchors.length === b.anchors.length &&
+    a.anchors.every((anchor, i) => Math.abs(anchor.x - b.anchors[i]!.x) <= REPEAT_TOLERANCE);
+
+  return headers
+    .filter((h) => headers.some((other) => other !== h && matches(h, other)))
+    .map((h) => ({ ...h, corroborated: true }));
 }
 
 /**
@@ -200,6 +250,7 @@ function findHeaderRows(rows: Row[]): HeaderRow[] {
 function reconcile(
   anchors: PositionedText[],
   expected: number,
+  rightmostText?: number,
 ): { centres: number[]; located: number; inferred: number; merged: number } | null {
   const centres = anchors.map((a) => a.x + a.width / 2).sort((a, b) => a - b);
 
@@ -231,6 +282,16 @@ function reconcile(
   // there, whereas extending right would run off the page.
   const pitch = median(centres.slice(1).map((c, i) => c - centres[i]!));
   if (pitch === undefined || !(pitch > 0)) return null;
+
+  // Extending leftward asserts that the MISSING columns are the leftmost ones.
+  // Nothing checked that, and when it is wrong every band shifts one column and
+  // a recorded cross is stamped in the tick column — reproduced on the dozer
+  // header with N/A removed. Only extend when the located cluster is bounded on
+  // the right by evidence the derivation did not use: the rightmost text on the
+  // header row. If something is printed to the right of the last located
+  // anchor, the missing column may well be THAT one, and there is no honest way
+  // to tell — so refuse and let the reviewer draw it.
+  if (rightmostText !== undefined && rightmostText > centres[centres.length - 1]! + pitch / 2) return null;
 
   const extended = [...centres];
   while (extended.length < expected) extended.unshift(extended[0]! - pitch);
@@ -278,6 +339,46 @@ function centresToBands(
 }
 
 /**
+ * The row pitch, from the *distribution* of baseline gaps rather than one
+ * statistic over them.
+ *
+ * A median over the raw gaps is circular: the wraps this pitch exists to
+ * identify are themselves in the sample, so a table whose labels mostly wrap
+ * drags the median down onto a wrap gap and merging stops — while a table with
+ * irregular leading drags it up and a genuine row gets merged away. Both were
+ * reproduced; both produced a wrong grid at full confidence.
+ *
+ * Instead: sort the gaps and split at the largest ratio jump. The larger side
+ * is the row pitch, the smaller side is wraps. Returns 0 — meaning "merge
+ * nothing" — whenever the two sides are the same size, because that is a table
+ * where wraps and rows cannot be told apart, and adding a spurious row is
+ * recoverable in review while silently deleting a printed one is not.
+ */
+function rowPitch(gaps: number[]): number {
+  if (gaps.length === 0) return 0;
+  if (gaps.length === 1) return gaps[0]!;
+
+  const sorted = [...gaps].sort((a, b) => a - b);
+  let splitAt = -1;
+  let widest = GAP_SPLIT_RATIO;
+  for (let i = 1; i < sorted.length; i++) {
+    const ratio = sorted[i]! / sorted[i - 1]!;
+    if (ratio >= widest) {
+      widest = ratio;
+      splitAt = i;
+    }
+  }
+
+  // No separable jump: every gap is a row gap.
+  if (splitAt < 0) return median(sorted) ?? 0;
+
+  const wraps = sorted.slice(0, splitAt);
+  const rows = sorted.slice(splitAt);
+  if (rows.length <= wraps.length) return 0;
+  return median(rows) ?? 0;
+}
+
+/**
  * Row bands from the label column's baselines.
  *
  * A label that wraps onto a second line is ONE row. Measured need: page 7's
@@ -295,7 +396,7 @@ function rowBands(rows: Row[], header: HeaderRow, floor: number): GeometryBand[]
     .sort((a, b) => b.y - a.y);
   if (below.length === 0) return [];
 
-  const pitch = median(below.slice(1).map((r, i) => below[i]!.y - r.y)) ?? 0;
+  const pitch = rowPitch(below.slice(1).map((r, i) => below[i]!.y - r.y));
 
   // Merge wrapped continuation lines into the row they belong to.
   const baselines: number[] = [];
@@ -333,8 +434,16 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
   const proposals: TableProposal[] = [];
 
   for (const [index, header] of headers.entries()) {
-    const resolved = reconcile(header.anchors, optionColumns.length);
+    const rightmostText = Math.max(...header.row.items.map((i) => i.x + i.width));
+    const resolved = reconcile(header.anchors, optionColumns.length, rightmostText);
     if (!resolved) continue;
+
+    // Inference on an uncorroborated header stacks a guess on a guess: the
+    // header itself is unconfirmed, and inference then invents a column
+    // position on top of it. That combination is what turned a running head
+    // ("Rev 4", "07/2026" beside a document title) into a plausible three-column
+    // grid. A confirmed header may infer; an unconfirmed one must be exact.
+    if (resolved.inferred > 0 && header.corroborated === false) continue;
 
     // A table ends where the next one begins. Without this floor the first
     // table on a page claims every label line beneath it — 35 rows for a table
@@ -362,6 +471,12 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
       confidence -= 0.3 * resolved.inferred;
       notes.push(
         `${resolved.inferred} of ${optionColumns.length} column positions inferred from pitch — the header glyphs were not in the text layer. Inference assumes the MISSING columns are the leftmost ones; check the rightmost located header really is the last printed column.`,
+      );
+    }
+    if (header.corroborated === false) {
+      confidence -= 0.2;
+      notes.push(
+        'No second table on this page confirms this header shape, so the grid could not be cross-checked — verify it is a real column header and not a running head or signature strip.',
       );
     }
     if (resolved.merged > 0) {
