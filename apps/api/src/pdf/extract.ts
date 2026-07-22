@@ -71,16 +71,48 @@ const EXTRACTION_PROMPT =
   'answerSets entry naming those column keys; leave independent checkboxes ungrouped. ' +
   'Give every field a confidence score.';
 
-/** Read the widget rectangle of an AcroForm field into PDF point space. */
-function widgetPosition(field: {
-  acroField: { getWidgets(): Array<{ getRectangle(): { x: number; y: number; width: number; height: number } }> };
-}, pageWidth: number, pageHeight: number): SourcePosition | undefined {
+/**
+ * Read the widget rectangle of an AcroForm field into PDF point space.
+ *
+ * The page index comes from the widget's own `/P` reference matched against the
+ * document's pages — never a default. An earlier version stamped `page: 0` on
+ * every position, which no single-page fixture could catch and which silently
+ * mislocates every field in a multi-page document; the compliance library is
+ * full of them (the dozer assessment runs to eighteen pages and mixes portrait
+ * with landscape). Dimensions are read from that same resolved page, because a
+ * landscape page overlaid against a portrait extent puts nothing where the
+ * printed form expects it.
+ *
+ * A widget whose page cannot be resolved returns undefined rather than falling
+ * back to page 0: no position degrades to a data-only export, whereas a wrong
+ * position draws a confident mark on the wrong page of a compliance record.
+ */
+function widgetPosition(
+  field: {
+    acroField: {
+      getWidgets(): Array<{
+        getRectangle(): { x: number; y: number; width: number; height: number };
+        P(): unknown;
+      }>;
+    };
+  },
+  doc: PDFDocument,
+): SourcePosition | undefined {
   try {
     const widget = field.acroField.getWidgets()[0];
     if (!widget) return undefined;
+
+    const pageRef = widget.P();
+    if (!pageRef) return undefined;
+
+    const pages = doc.getPages();
+    const page = pages.findIndex((p) => p.ref === pageRef);
+    if (page < 0) return undefined;
+
     const rect = widget.getRectangle();
+    const { width: pageWidth, height: pageHeight } = pages[page]!.getSize();
     return {
-      page: 0,
+      page,
       x: rect.x,
       y: rect.y,
       width: rect.width,
@@ -97,8 +129,6 @@ function widgetPosition(field: {
 function extractAcroForm(doc: PDFDocument, fileName: string): ExtractionResult {
   const form = doc.getForm();
   const acroFields = form.getFields();
-  const firstPage = doc.getPage(0);
-  const { width: pageWidth, height: pageHeight } = firstPage.getSize();
 
   const fields: ExtractedField[] = [];
   for (const field of acroFields) {
@@ -122,15 +152,14 @@ function extractAcroForm(doc: PDFDocument, fileName: string): ExtractionResult {
       type = 'text';
     }
 
+    const sourcePosition = widgetPosition(field as never, doc);
     fields.push({
       id: `acro_${fields.length + 1}`,
       label,
       type,
       confidence: 1,
       ...(options ? { options } : {}),
-      ...(widgetPosition(field as never, pageWidth, pageHeight)
-        ? { sourcePosition: widgetPosition(field as never, pageWidth, pageHeight) }
-        : {}),
+      ...(sourcePosition ? { sourcePosition } : {}),
     });
   }
 

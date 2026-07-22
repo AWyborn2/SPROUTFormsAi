@@ -26,6 +26,32 @@ export async function makeAcroFormPdf(): Promise<Uint8Array> {
   return doc.save();
 }
 
+/**
+ * A four-page AcroForm PDF whose only field sits on page 3 (index 2).
+ *
+ * Exists to pin the page index an extracted position records. Every other
+ * fixture here is single-page, which is exactly why a hardcoded `page: 0`
+ * survived unnoticed — a one-page document cannot tell a real page index from
+ * a default one. The compliance library is not one page: the dozer assessment
+ * is eighteen.
+ */
+export async function makeMultiPageAcroFormPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  // Page 2 is LANDSCAPE while the rest are portrait, mirroring the dozer
+  // assessment (595x842 and 842x595 in one file). Uniform page sizes would let
+  // a "read dimensions from page 0" bug pass this fixture unnoticed.
+  doc.addPage([600, 800]);
+  doc.addPage([600, 800]);
+  doc.addPage([900, 500]);
+  doc.addPage([600, 800]);
+  const form = doc.getForm();
+
+  const assessor = form.createTextField('assessor_name');
+  assessor.addToPage(doc.getPage(2), { x: 120, y: 300, width: 200, height: 18 });
+
+  return doc.save();
+}
+
 /** A flat PDF: drawn letterhead + labels only, no AcroForm fields. */
 export async function makeFlatPdf(): Promise<Uint8Array> {
   const doc = await PDFDocument.create();

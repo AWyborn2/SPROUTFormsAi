@@ -9,6 +9,7 @@ export * from './theme.js';
 export * from './theme-presets.js';
 export * from './google-fonts-catalog.js';
 export * from './form-field.js';
+export * from './geometry.js';
 export * from './answer-set.js';
 export * from './visibility.js';
 export * from './extraction.js';
