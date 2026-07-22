@@ -36,6 +36,7 @@ import {
   addFixedRowItem,
   answerSetAccepted,
   adjustGeometryBand,
+  adjustGeometryBoundary,
   confirmGeometry,
   fileToBase64,
   geometryConfirmed,
@@ -586,6 +587,48 @@ describe('geometry review (U4, R8)', () => {
     expect(geometryProposal('f1')?.rowBands?.find((b) => b.key === 'r1')?.start).toBe(595);
   });
 
+  it('moves both bands sharing an interior boundary, leaving no gap', () => {
+    proposeGeometry('f1', SEGMENT);
+    confirmGeometry('f1');
+
+    adjustGeometryBoundary('f1', 'column', 'tick', 'cross', 505);
+
+    // centresToBands makes bands contiguous. Moving one side alone tears a gap
+    // a tick can land in and resolve to no column at all.
+    const bands = geometryProposal('f1')!.columnBands!;
+    expect(bands.find((b) => b.key === 'tick')!.end).toBe(505);
+    expect(bands.find((b) => b.key === 'cross')!.start).toBe(505);
+    expect(geometryConfirmed('f1')).toBe(false);
+  });
+
+  it('refuses a boundary drag past either neighbour rather than inverting a band', () => {
+    proposeGeometry('f1', SEGMENT);
+    const before = geometryProposal('f1')!;
+
+    adjustGeometryBoundary('f1', 'column', 'tick', 'cross', 490); // left of tick.start
+    adjustGeometryBoundary('f1', 'column', 'tick', 'cross', 540); // right of cross.end
+
+    expect(geometryProposal('f1')).toEqual(before);
+  });
+
+  it('publishes a boundary-adjusted grid the shipped validator accepts', () => {
+    proposeGeometry('f1', SEGMENT);
+    adjustGeometryBoundary('f1', 'column', 'cross', 'na', 528);
+    confirmGeometry('f1');
+
+    const published = reviewedToFields([reviewField()])[0]!;
+    expect(resolveGeometry(published, 18).dropped).toEqual([]);
+  });
+
+  it('ignores a boundary between bands that do not exist', () => {
+    proposeGeometry('f1', SEGMENT);
+    const before = geometryProposal('f1')!;
+
+    adjustGeometryBoundary('f1', 'column', 'tick', 'nope', 505);
+
+    expect(geometryProposal('f1')).toEqual(before);
+  });
+
   it('confirming a field with no proposal does nothing', () => {
     confirmGeometry('nope');
 
@@ -677,10 +720,46 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
     for (const group of tables()) {
       expect(group.columns).toEqual(CATEGORY_A.columns);
       expect(group.answerSets).toEqual(CATEGORY_A.answerSets);
-      // The grouping the reviewer already judged on the source carries over —
-      // it is the same columns making the same claim.
-      expect(answerSetAccepted(group.id, 'as1')).toBe(answerSetAccepted('catA', 'as1'));
     }
+  });
+
+  it('carries an accepted grouping onto every group', async () => {
+    await seedSession([CATEGORY_A]);
+    acceptAnswerSet('catA', 'as1');
+
+    splitTableGroups('catA', 3);
+
+    // The groups carry the source's columns and the source's sets, making
+    // exactly the claim the reviewer already judged — re-asking three times
+    // would be noise rather than safety.
+    for (const group of tables()) expect(answerSetAccepted(group.id, 'as1')).toBe(true);
+  });
+
+  it('does not carry an UNaccepted grouping', async () => {
+    await seedSession([CATEGORY_A]);
+
+    splitTableGroups('catA', 3);
+
+    for (const group of tables()) expect(answerSetAccepted(group.id, 'as1')).toBe(false);
+  });
+
+  it('restores an accepted grouping and a confirmed grid on undo', async () => {
+    await seedSession([CATEGORY_A]);
+    acceptAnswerSet('catA', 'as1');
+    proposeGeometry('catA', SPLIT_SEGMENT);
+    confirmGeometry('catA');
+
+    splitTableGroups('catA', 3);
+    undoFieldEdit();
+
+    // Acceptance and geometry live in id-keyed stores the editor's undo
+    // snapshot never captures. Deleting the source's entries on split would
+    // make undo restore the table with its answer set silently unaccepted —
+    // publishing a table whose one-answer-per-row rule the reviewer had
+    // explicitly approved, without it.
+    expect(answerSetAccepted('catA', 'as1')).toBe(true);
+    expect(geometryConfirmed('catA')).toBe(true);
+    expect(reviewedToFields(getImportSession().fields)[0]?.geometry?.segments).toHaveLength(1);
   });
 
   it('loses no item when the count does not divide evenly', async () => {

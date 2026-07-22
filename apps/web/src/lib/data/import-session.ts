@@ -601,6 +601,45 @@ export function adjustGeometryBand(
   emit();
 }
 
+/**
+ * Move the shared boundary between two adjacent bands.
+ *
+ * `centresToBands` makes bands contiguous — `bands[i].end === bands[i+1].start`
+ * — so an interior edge belongs to two bands at once. Moving only one of them
+ * opens a gap the exporter cannot resolve: a tick printed in it falls in no
+ * column at all. The two edges are therefore one control, written together or
+ * not at all, and the same validator decides.
+ */
+export function adjustGeometryBoundary(
+  fieldId: string,
+  axis: 'column' | 'row',
+  leftKey: string,
+  rightKey: string,
+  value: number,
+): void {
+  const segment = geometryProposals.get(fieldId);
+  if (!segment) return;
+
+  const bands = (axis === 'column' ? segment.columnBands : segment.rowBands) ?? [];
+  const left = bands.find((b) => b.key === leftKey);
+  const right = bands.find((b) => b.key === rightKey);
+  if (!left || !right) return;
+  if (!(value > left.start) || !(value < right.end)) return;
+
+  const moved = bands.map((b) =>
+    b.key === leftKey ? { ...b, end: value } : b.key === rightKey ? { ...b, start: value } : b,
+  );
+  const next = growToFit({
+    ...segment,
+    ...(axis === 'column' ? { columnBands: moved } : { rowBands: moved }),
+  });
+  if (resolveGeometry({ geometry: { segments: [next] } }).segments.length !== 1) return;
+
+  geometryProposals.set(fieldId, next);
+  confirmedGeometry.delete(fieldId);
+  emit();
+}
+
 /** Reviewer accepts extraction's proposed grouping as-is. */
 export function acceptAnswerSet(fieldId: string, setKey: string): void {
   acceptedAnswerSets.add(acceptanceKey(fieldId, setKey));
@@ -803,20 +842,28 @@ export function splitTableGroups(id: string, groups: number): string[] {
     if (answerSetAccepted(id, set.key)) {
       for (const part of created) acceptedAnswerSets.add(acceptanceKey(part.id, set.key));
     }
-    acceptedAnswerSets.delete(acceptanceKey(id, set.key));
   }
 
-  // Geometry does NOT carry. It is positional: a grid confirmed over all 18
-  // items describes none of the three groups, and the ids are fresh anyway, so
-  // the only thing to do is drop what the source held (R8).
-  geometryProposals.delete(id);
-  confirmedGeometry.delete(id);
+  /*
+    Nothing the SOURCE held is deleted here, and that is deliberate.
 
-  // Nor does the extraction metadata: the groups have fresh ids and so inherit
-  // no `reviewMeta` entry, which is the behaviour we want — three new tables
-  // each awaiting their own confirmation rather than three arriving already
-  // marked resolved by a judgement made about the merged one.
-  reviewMeta.delete(id);
+    Geometry, acceptance and extraction metadata all live in id-keyed stores
+    the field-editor's undo snapshot does not capture, so deleting them would
+    make the split partly un-undoable: undo restores `catA` to the list with
+    its answer sets intact while `acceptedAnswerSets` no longer holds
+    `catA::as1`, and the table then publishes with no answer set at all — the
+    one-answer-per-row rule the reviewer explicitly accepted, silently gone.
+    Same for a confirmed grid, and for the `resolved` flag.
+
+    Leaving them costs nothing: every consumer reads these stores THROUGH the
+    current field list, so an entry for an id no longer in it is inert, and
+    `resetImportSession` clears all of them on the next extraction.
+
+    The groups still start clean, because they have FRESH ids — no geometry
+    (positional: a grid confirmed over all 18 items describes none of the three
+    groups, per R8) and no `reviewMeta`, so each arrives awaiting its own
+    confirmation rather than pre-blessed by a judgement about the merged block.
+  */
   emit();
   return created.map((f) => f.id);
 }

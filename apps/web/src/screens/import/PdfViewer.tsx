@@ -3,7 +3,7 @@ import * as pdfjs from 'pdfjs-dist';
 import { Icon } from '@formai/ui';
 import type { ExtractedField, ExtractionStatus, PageBox } from '@formai/shared';
 import type { PositionedText, TextPage } from '../../lib/pdf-geometry.js';
-import { snapEdge } from './inspector/geometry-actions.js';
+import { columnHandles, snapEdge, type BandHandle } from './inspector/geometry-actions.js';
 import {
   anchoredScrollOffset,
   clampZoom,
@@ -60,7 +60,7 @@ interface PdfViewerProps {
    */
   bandSnapTargets?: readonly number[];
   /** A band edge was dragged to `value` (PDF points). Omit to draw read-only. */
-  onBandEdge?: (key: string, edge: 'start' | 'end', value: number) => void;
+  onBandEdge?: (handle: BandHandle, value: number) => void;
   className?: string;
 }
 
@@ -90,7 +90,7 @@ function BandGrid({
   pageHeight: number;
   /** Printed edges this page offers a dragged band edge (U10). */
   snapTargets?: readonly number[];
-  onBandEdge?: (key: string, edge: 'start' | 'end', value: number) => void;
+  onBandEdge?: (handle: BandHandle, value: number) => void;
 }) {
   const surface = useRef<HTMLDivElement>(null);
   const scaleX = pageWidth / segment.pageWidth;
@@ -103,29 +103,30 @@ function BandGrid({
    * `snapEdge` supplies the coordinate from the text layer — so a 7-13pt
    * column is reachable despite the preview being scaled (KTD12). Pointer
    * capture keeps the drag alive when the cursor leaves the page image, and
-   * every move goes through `adjustGeometryBand`, so the shipped validator
-   * refuses an inverting or overlapping drag exactly as it refuses a step.
+   * every move goes through the session's validated adjustment, so the shipped
+   * validator refuses an inverting or overlapping drag exactly as it refuses a
+   * step.
    */
-  const startDrag = (key: string, edge: 'start' | 'end') => (e: React.PointerEvent) => {
+  const startDrag = (handle: BandHandle) => (e: React.PointerEvent) => {
     if (!onBandEdge) return;
     e.preventDefault();
     e.stopPropagation();
-    const handle = e.currentTarget as HTMLElement;
-    handle.setPointerCapture(e.pointerId);
+    const grip = e.currentTarget as HTMLElement;
+    grip.setPointerCapture(e.pointerId);
 
     const move = (ev: PointerEvent) => {
       const rect = surface.current?.getBoundingClientRect();
       if (!rect) return;
-      onBandEdge(key, edge, snapEdge((ev.clientX - rect.left) / scaleX, snapTargets));
+      onBandEdge(handle, snapEdge((ev.clientX - rect.left) / scaleX, snapTargets));
     };
     const stop = () => {
-      handle.removeEventListener('pointermove', move);
-      handle.removeEventListener('pointerup', stop);
-      handle.removeEventListener('pointercancel', stop);
+      grip.removeEventListener('pointermove', move);
+      grip.removeEventListener('pointerup', stop);
+      grip.removeEventListener('pointercancel', stop);
     };
-    handle.addEventListener('pointermove', move);
-    handle.addEventListener('pointerup', stop);
-    handle.addEventListener('pointercancel', stop);
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', stop);
+    grip.addEventListener('pointercancel', stop);
   };
 
   const top = pageHeight - (segment.y + segment.height) * scaleY;
@@ -161,22 +162,20 @@ function BandGrid({
         />
       ))}
       {onBandEdge &&
-        (segment.columnBands ?? []).flatMap((band) =>
-          (['start', 'end'] as const).map((edge) => (
-            <div
-              key={`h-${band.key}-${edge}`}
-              role="slider"
-              tabIndex={-1}
-              aria-label={`Drag ${band.key} ${edge} edge`}
-              aria-valuenow={Math.round(band[edge])}
-              onPointerDown={startDrag(band.key, edge)}
-              className="pointer-events-auto absolute cursor-ew-resize"
-              // Wider than the line it moves: a 1px hit target is unusable, and
-              // the drag does not need to be precise — the snap is.
-              style={{ left: band[edge] * scaleX - 5, top, width: 10, height }}
-            />
-          )),
-        )}
+        columnHandles(segment.columnBands ?? []).map((h) => (
+          <div
+            key={h.key}
+            role="slider"
+            tabIndex={-1}
+            aria-label={h.label}
+            aria-valuenow={Math.round(h.at)}
+            onPointerDown={startDrag(h)}
+            className="pointer-events-auto absolute cursor-ew-resize"
+            // Wider than the line it moves: a 1px hit target is unusable, and
+            // the drag does not need to be precise — the snap is.
+            style={{ left: h.at * scaleX - 5, top, width: 10, height }}
+          />
+        ))}
       {(segment.rowBands ?? []).map((band) => (
         <div
           key={`r-${band.key}`}

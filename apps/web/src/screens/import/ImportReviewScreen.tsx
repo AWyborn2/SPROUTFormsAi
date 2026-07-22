@@ -20,7 +20,11 @@ import {
 } from '../../lib/data/import-session.js';
 import { FIELD_META, typeOptionsFor } from '../../lib/field-editor/reducer.js';
 import type { TextPage } from '../../lib/pdf-geometry.js';
-import { adjustGeometryBand, geometryProposal } from '../../lib/data/import-session.js';
+import {
+  adjustGeometryBand,
+  adjustGeometryBoundary,
+  geometryProposal,
+} from '../../lib/data/import-session.js';
 import { snapTargets } from './inspector/geometry-actions.js';
 import { FieldInspector } from './inspector/FieldInspector.js';
 import { stripFileExtension } from './upload-validation.js';
@@ -186,7 +190,17 @@ export function ImportReviewScreen() {
                 bandSnapTargets={bandSnapTargets}
                 onBandEdge={
                   selectedFieldId
-                    ? (key, edge, value) => adjustGeometryBand(selectedFieldId, 'column', key, edge, value)
+                    ? (handle, value) => {
+                        // An interior boundary belongs to two bands and moves
+                        // as one; an outer edge belongs to one.
+                        if (handle.left && handle.right) {
+                          adjustGeometryBoundary(selectedFieldId, 'column', handle.left, handle.right, value);
+                        } else if (handle.right) {
+                          adjustGeometryBand(selectedFieldId, 'column', handle.right, 'start', value);
+                        } else if (handle.left) {
+                          adjustGeometryBand(selectedFieldId, 'column', handle.left, 'end', value);
+                        }
+                      }
                     : undefined
                 }
                 className="max-h-[70vh] lg:max-h-none lg:flex-1"

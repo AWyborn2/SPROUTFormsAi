@@ -660,3 +660,85 @@ describe('proposeTableSegments — standalone option-header rows (U8)', () => {
     }
   });
 });
+
+describe('the standalone header shape does not admit page furniture (U8 review)', () => {
+  const COLS = [
+    { key: 'item', label: 'Item', type: 'text' as const },
+    { key: 'ok', label: 'OK', type: 'boolean_yes_no' as const },
+    { key: 'na', label: 'NA', type: 'boolean_yes_no' as const },
+  ];
+
+  function propose(items: PositionedText[]) {
+    return proposeTableSegments({
+      page: 0, pageWidth: 595, pageHeight: 420, items, columns: COLS,
+    });
+  }
+
+  it('refuses a two-glyph row of equal width', () => {
+    // Two identical-width runs are uniform by construction, and with two option
+    // columns nothing is INFERRED, so the uncorroborated-inference refusal
+    // never fires to catch them. Only the item-count floor does.
+    const items: PositionedText[] = [
+      { text: '☐', x: 300, y: 306.2, width: 8.6 },
+      { text: '☐', x: 500, y: 306.2, width: 8.6 },
+      ...[0, 1, 2].map((r) => ({ text: `Item ${r}`, x: 42, y: 290 - r * 16, width: 60 })),
+    ];
+
+    expect(propose(items)).toEqual([]);
+  });
+
+  /** Two corroborating header blocks — a lone header is refused by U7 anyway. */
+  function headerAt(y: number): PositionedText[] {
+    return [
+      { text: 'OK', x: 345.7, y, width: 12.2 },
+      { text: 'NA', x: 371.1, y, width: 12.6 },
+      { text: 'OK', x: 512.6, y, width: 12.2 },
+      { text: 'NA', x: 540.7, y, width: 12.6 },
+    ];
+  }
+
+  it('takes the label margin from the table under the header, not from prose further down', () => {
+    // Six rows at x=42 under the first header, three under the second, then a
+    // ten-line instruction paragraph at x=38. A page-global mode of the left
+    // margins picks 38 for the second block and lays its grid over the
+    // paragraph — at full confidence, because corroboration keys on the option
+    // anchors, which the mistake does not touch.
+    const items: PositionedText[] = [
+      ...headerAt(306.2),
+      ...[0, 1, 2, 3, 4, 5].map((r) => ({ text: `Check ${r}`, x: 42, y: 290 - r * 16, width: 60 })),
+      ...headerAt(180),
+      ...[0, 1, 2].map((r) => ({ text: `Later ${r}`, x: 42, y: 164 - r * 16, width: 60 })),
+      ...Array.from({ length: 10 }, (_, r) => ({
+        text: `Instruction line ${r}`, x: 38, y: 100 - r * 12, width: 400,
+      })),
+    ];
+
+    const got = propose(items);
+
+    expect(got.length).toBeGreaterThan(0);
+    for (const p of got) {
+      expect(p.segment.x).toBeCloseTo(42, 5);
+    }
+  });
+
+  it('still refuses a numbered section heading printed just off the label margin', () => {
+    // 37.5 vs 38.7 is 1.2pt apart — inside LABEL_MARGIN_TOLERANCE only if the
+    // margin is rounded to an integer first.
+    const items: PositionedText[] = [
+      ...headerAt(306.2),
+      { text: 'Engine oil level', x: 37.5, y: 290, width: 60 },
+      { text: 'Park brake', x: 37.5, y: 274, width: 60 },
+      { text: '4. Section heading', x: 38.7, y: 258, width: 80 },
+      { text: 'Tyres', x: 37.5, y: 242, width: 60 },
+      ...headerAt(180),
+      { text: 'Steering', x: 37.5, y: 164, width: 60 },
+      { text: 'Horn', x: 37.5, y: 148, width: 60 },
+    ];
+
+    const got = propose(items);
+
+    expect(got.length).toBeGreaterThan(0);
+    // Three item rows in the first block; the heading is not one of them.
+    expect(got[0]!.segment.rowBands!).toHaveLength(3);
+  });
+});

@@ -12,6 +12,7 @@ import type { PositionedText } from '../../../lib/pdf-geometry.js';
 import {
   NUDGE_POINTS,
   SNAP_RANGE,
+  columnHandles,
   deriveAcrossPages,
   deriveForField,
   panelState,
@@ -289,5 +290,74 @@ describe('snapping a dragged edge to the printed page (U10, R19)', () => {
     // Snapping is gross placement; the buttons remain the fine correction.
     expect(NUDGE_POINTS).toBe(1);
     expect(snapEdge(345.7 + NUDGE_POINTS, [345.7], 0)).toBe(345.7 + NUDGE_POINTS);
+  });
+});
+
+describe('column handles are one per boundary, not two per band (U10 review)', () => {
+  // Contiguous, as centresToBands produces them: each band's end IS the next
+  // band's start.
+  const BANDS = [
+    { key: 'tick', start: 496, end: 511.7 },
+    { key: 'cross', start: 511.7, end: 531.9 },
+    { key: 'na', start: 531.9, end: 556.7 },
+  ];
+
+  it('gives one handle per edge, not one per band edge', () => {
+    // Two per band would be six, two of them stacked exactly on top of two
+    // others — the later sibling wins hit-testing, so tick's right edge and
+    // cross's right edge could never be grabbed at all.
+    const handles = columnHandles(BANDS);
+
+    expect(handles).toHaveLength(4);
+    expect(handles.map((h) => h.at)).toEqual([496, 511.7, 531.9, 556.7]);
+  });
+
+  it('makes an interior handle own BOTH bands it separates', () => {
+    const [, between] = columnHandles(BANDS);
+
+    expect(between).toMatchObject({ left: 'tick', right: 'cross' });
+  });
+
+  it('makes the outer handles own one band each', () => {
+    const handles = columnHandles(BANDS);
+
+    expect(handles[0]).toMatchObject({ right: 'tick' });
+    expect(handles[0]!.left).toBeUndefined();
+    expect(handles[3]).toMatchObject({ left: 'na' });
+    expect(handles[3]!.right).toBeUndefined();
+  });
+
+  it('orders by position even when the bands are not', () => {
+    const handles = columnHandles([BANDS[2]!, BANDS[0]!, BANDS[1]!]);
+
+    expect(handles.map((h) => h.at)).toEqual([496, 511.7, 531.9, 556.7]);
+  });
+
+  it('gives a single band its two outer edges', () => {
+    expect(columnHandles([BANDS[0]!]).map((h) => h.at)).toEqual([496, 511.7]);
+  });
+
+  it('is empty-safe', () => {
+    expect(columnHandles([])).toEqual([]);
+  });
+});
+
+describe('snapTargets survives a degenerate pdfjs measurement (U10 review)', () => {
+  it('drops a non-finite run instead of poisoning every target', () => {
+    // One NaN sorts in place, then `e - NaN > 0.5` is false for everything
+    // after it — the whole list collapses to [NaN], every snap returns NaN, the
+    // validator refuses every move, and dragging is silently dead on that page.
+    const items: PositionedText[] = [
+      { text: 'bad', x: Number.NaN, y: 306.2, width: 12.2 },
+      { text: 'OK', x: 164.5, y: 306.2, width: Number.POSITIVE_INFINITY },
+      { text: 'NA', x: 192.7, y: 306.2, width: 12.6 },
+    ];
+
+    const targets = snapTargets(items);
+
+    expect(targets).toHaveLength(2);
+    expect(targets[0]).toBeCloseTo(192.7, 5);
+    expect(targets[1]).toBeCloseTo(205.3, 5);
+    expect(snapEdge(190, targets)).toBe(192.7);
   });
 });

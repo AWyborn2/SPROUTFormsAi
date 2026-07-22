@@ -269,40 +269,39 @@ function labelledHeader(row: Row): HeaderShape | null {
  * what this unit is for.
  */
 function standaloneHeader(row: Row, rows: Row[]): HeaderShape | null {
-  if (row.items.length < 2) return null;
+  // Two uniform-width items is not evidence of anything — a running head with
+  // two glyphs of the same width satisfies it, and with two option columns the
+  // "inferred but uncorroborated" refusal never fires to catch it. Three is the
+  // smallest header the library actually prints (the dozer family's
+  // tick / cross / N-A), so it costs no real document and closes that hole.
+  if (row.items.length < 3) return null;
 
   const widths = row.items.map((i) => i.width);
   const min = Math.min(...widths);
   const max = Math.max(...widths);
   if (!(min > 0) || max / min > UNIFORM_WIDTH_RATIO) return null;
 
-  // The label column is whatever left margin the rows beneath share. Without
-  // rows there is no table, and no way to bound the label column either.
+  // The label column is the margin of the row immediately beneath the header —
+  // the first item of the table this header sits on. Deliberately NOT a mode
+  // over every row below: `rows` is the whole page, so a long instruction
+  // paragraph further down would outvote the table's own rows and the grid
+  // would be laid over prose at full confidence.
   const below = rows.filter((r) => r.y < row.y - BASELINE_TOLERANCE);
-  const labelLeft = mostCommon(below.map((r) => Math.round(r.items[0]!.x)));
+  const labelLeft = below[0]?.items[0]?.x;
   if (labelLeft === undefined) return null;
+
+  // And it has to REPEAT, or one stray line under the header would set it.
+  // Compared at full precision: the measured margin here is 37.5 and a numbered
+  // section heading sits at 38.7, so rounding to an integer would put both
+  // inside the 1pt window and count the heading as a table row.
+  const shared = below.filter((r) => Math.abs(r.items[0]!.x - labelLeft) <= LABEL_MARGIN_TOLERANCE);
+  if (shared.length < 2) return null;
 
   // Every option must sit right of the label margin, or this is not a header
   // sitting above a table.
   if (row.items.some((i) => i.x <= labelLeft)) return null;
 
   return { candidates: row.items, labelLeft, labelRight: labelLeft };
-}
-
-/** The most frequent value, or undefined for an empty list. Ties take the smallest. */
-function mostCommon(values: number[]): number | undefined {
-  const counts = new Map<number, number>();
-  for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
-
-  let best: number | undefined;
-  let bestCount = 0;
-  for (const [value, count] of [...counts.entries()].sort((a, b) => a[0] - b[0])) {
-    if (count > bestCount) {
-      best = value;
-      bestCount = count;
-    }
-  }
-  return best;
 }
 
 /**

@@ -7,7 +7,7 @@
  * grid and marks drawn onto a competency record. It belongs somewhere it can
  * be read and tested directly.
  */
-import type { FormField, PageBox } from '@formai/shared';
+import type { FormField, GeometryBand, PageBox } from '@formai/shared';
 import type { PositionedText, TableProposal, TextPage } from '../../../lib/pdf-geometry.js';
 import { proposeTableSegments } from '../../../lib/pdf-geometry.js';
 
@@ -151,6 +151,12 @@ export const SNAP_RANGE = 12;
 export function snapTargets(items: readonly PositionedText[]): number[] {
   const edges: number[] = [];
   for (const item of items) {
+    // pdfjs can report a degenerate measurement, and `toRows` already drops
+    // those for the same reason. A single NaN here would sort in place, swallow
+    // the dedupe loop's comparison and leave `[NaN]` as the whole target list —
+    // every snap would then return NaN, the validator would refuse every move,
+    // and dragging would be silently dead on that page.
+    if (!Number.isFinite(item.x) || !Number.isFinite(item.width)) continue;
     edges.push(item.x, item.x + item.width);
   }
   edges.sort((a, b) => a - b);
@@ -162,6 +168,64 @@ export function snapTargets(items: readonly PositionedText[]): number[] {
     if (unique.length === 0 || e - unique[unique.length - 1]! > 0.5) unique.push(e);
   }
   return unique;
+}
+
+/**
+ * One draggable vertical edge of a column grid.
+ *
+ * `left`/`right` name the bands the edge belongs to — an interior edge belongs
+ * to BOTH, an outer edge to one.
+ */
+export interface BandHandle {
+  key: string;
+  label: string;
+  /** Where the edge sits, in PDF points. */
+  at: number;
+  left?: string;
+  right?: string;
+}
+
+/**
+ * The draggable edges of a column grid — one per BOUNDARY, not two per band.
+ *
+ * `centresToBands` makes bands contiguous, so `bands[i].end` and
+ * `bands[i+1].start` are the same coordinate. Drawing a handle for each would
+ * stack two identical hit targets: the later one always wins, so half of them
+ * would be unreachable, and moving one band's edge alone would tear a gap in
+ * the grid that a tick can land in and resolve to no column at all. An interior
+ * boundary is therefore ONE handle that moves both bands together.
+ */
+export function columnHandles(bands: readonly GeometryBand[]): BandHandle[] {
+  const sorted = [...bands].sort((a, b) => a.start - b.start);
+  if (sorted.length === 0) return [];
+
+  const first = sorted[0]!;
+  const last = sorted[sorted.length - 1]!;
+
+  const handles: BandHandle[] = [
+    { key: `left-${first.key}`, label: `Drag the left edge of ${first.key}`, at: first.start, right: first.key },
+  ];
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const l = sorted[i]!;
+    const r = sorted[i + 1]!;
+    handles.push({
+      key: `between-${l.key}-${r.key}`,
+      label: `Drag the boundary between ${l.key} and ${r.key}`,
+      // Contiguous by construction; if a reviewer's earlier edit left a gap,
+      // the handle sits on the left band's edge rather than in mid-air.
+      at: l.end,
+      left: l.key,
+      right: r.key,
+    });
+  }
+  handles.push({
+    key: `right-${last.key}`,
+    label: `Drag the right edge of ${last.key}`,
+    at: last.end,
+    left: last.key,
+  });
+
+  return handles;
 }
 
 /** Pull a dragged coordinate onto the nearest printed edge, or leave it alone. */
