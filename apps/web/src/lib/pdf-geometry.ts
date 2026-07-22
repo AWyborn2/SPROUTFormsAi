@@ -106,8 +106,30 @@ const MAX_CLUSTER_SPREAD = 5;
 /** A sorted-gap jump of at least this ratio separates wraps from rows. */
 const GAP_SPLIT_RATIO = 1.4;
 
-/** Two headers are the same table shape when every anchor agrees within this. */
-const REPEAT_TOLERANCE = 2;
+/**
+ * Two headers are the same table shape when every anchor agrees within this.
+ *
+ * Measured across the library rather than assumed. The dozer family repeats its
+ * header at identical x on every page (variance ~0). `ADMN-FRM-111` prints its
+ * three category blocks at 512.6/540.7, 510/538.3 and 510/538.3 — a real
+ * within-document variance of 2.6pt, which a 2pt window wrongly split, refusing
+ * the largest table on the form. The discriminating case is far outside this:
+ * that form's Shift row sits 7.2pt and 12.4pt from the real columns, so 4pt
+ * admits the genuine variance while still refusing the impostor with margin.
+ */
+const REPEAT_TOLERANCE = 4;
+
+/**
+ * A header row carrying no label of its own is recognised only when its items
+ * are near-uniform in width — the widest at most this multiple of the narrowest.
+ *
+ * This is what separates an option-header row from ordinary prose. Measured:
+ * `ADMN-FRM-111`'s `OK NA OK NA OK NA` row spans 12.2-12.6 (ratio 1.03), while
+ * the label lines beneath it run 60.8, 112.1 and 94.8 on one baseline (ratio
+ * 1.84). Option glyphs are set from the same short vocabulary and are therefore
+ * almost exactly as wide as each other; running text never is.
+ */
+const UNIFORM_WIDTH_RATIO = 1.5;
 
 /**
  * How far a row's first item may sit from the label column's left margin.
@@ -192,35 +214,107 @@ function rightmostCluster(candidates: PositionedText[]): PositionedText[] {
 
 interface HeaderRow {
   row: Row;
-  labelHeader: PositionedText;
+  /** Left edge of the label column, in points. */
+  labelLeft: number;
+  /** Right edge of the label column — the leftmost an option band may start. */
+  labelRight: number;
   anchors: PositionedText[];
   /** Whether another header on the page confirms this anchor pattern. */
   corroborated?: boolean;
 }
 
+interface HeaderShape {
+  candidates: PositionedText[];
+  labelLeft: number;
+  labelRight: number;
+}
+
 /**
- * A header row is a wide label header plus a cluster of short items to its right.
+ * Shape one: a wide label header plus a cluster of short items to its right.
  *
- * Two or more anchors are required. One anchor yields no pitch, so a
- * three-column table could not be derived from it without inventing two
- * boundaries — and a single short item to the right of a wide one is an
- * extremely common shape in ordinary prose, so accepting it would find headers
- * everywhere.
+ * Two or more candidates are required. One yields no pitch, so a three-column
+ * table could not be derived from it without inventing two boundaries — and a
+ * single short item to the right of a wide one is an extremely common shape in
+ * ordinary prose, so accepting it would find headers everywhere.
+ */
+function labelledHeader(row: Row): HeaderShape | null {
+  const labelHeader = row.items.reduce((a, b) => (b.width > a.width ? b : a), row.items[0]!);
+  if (!labelHeader || labelHeader.width <= 0) return null;
+
+  const right = labelHeader.x + labelHeader.width;
+  const candidates = row.items.filter(
+    (i) => i !== labelHeader && i.x >= right && i.width <= labelHeader.width * OPTION_WIDTH_RATIO,
+  );
+  if (candidates.length < 2) return null;
+
+  return { candidates, labelLeft: labelHeader.x, labelRight: right };
+}
+
+/**
+ * Shape two: option headers on a baseline of their own, with no label text.
+ *
+ * `ADMN-FRM-111` prints `OK NA OK NA OK NA` on its own row and puts the item
+ * names on the rows beneath. Shape one cannot see that at all — it takes the
+ * widest item as the label header, then looks for candidates a quarter of that
+ * width, and among six near-identical glyphs there are none. The row was
+ * discarded and the form's Shift row accepted in its place.
+ *
+ * Recognised by width UNIFORMITY, which is what actually distinguishes a row of
+ * option glyphs from a row of running text: option labels come from the same
+ * short vocabulary and are near-identical in width, prose never is. The label
+ * column then comes from the rows beneath — the left margin they share.
+ *
+ * This is a SECOND shape, deliberately, not a relaxation of the first. Widening
+ * shape one's filter would admit more page furniture, which is the opposite of
+ * what this unit is for.
+ */
+function standaloneHeader(row: Row, rows: Row[]): HeaderShape | null {
+  // Two uniform-width items is not evidence of anything — a running head with
+  // two glyphs of the same width satisfies it, and with two option columns the
+  // "inferred but uncorroborated" refusal never fires to catch it. Three is the
+  // smallest header the library actually prints (the dozer family's
+  // tick / cross / N-A), so it costs no real document and closes that hole.
+  if (row.items.length < 3) return null;
+
+  const widths = row.items.map((i) => i.width);
+  const min = Math.min(...widths);
+  const max = Math.max(...widths);
+  if (!(min > 0) || max / min > UNIFORM_WIDTH_RATIO) return null;
+
+  // The label column is the margin of the row immediately beneath the header —
+  // the first item of the table this header sits on. Deliberately NOT a mode
+  // over every row below: `rows` is the whole page, so a long instruction
+  // paragraph further down would outvote the table's own rows and the grid
+  // would be laid over prose at full confidence.
+  const below = rows.filter((r) => r.y < row.y - BASELINE_TOLERANCE);
+  const labelLeft = below[0]?.items[0]?.x;
+  if (labelLeft === undefined) return null;
+
+  // And it has to REPEAT, or one stray line under the header would set it.
+  // Compared at full precision: the measured margin here is 37.5 and a numbered
+  // section heading sits at 38.7, so rounding to an integer would put both
+  // inside the 1pt window and count the heading as a table row.
+  const shared = below.filter((r) => Math.abs(r.items[0]!.x - labelLeft) <= LABEL_MARGIN_TOLERANCE);
+  if (shared.length < 2) return null;
+
+  // Every option must sit right of the label margin, or this is not a header
+  // sitting above a table.
+  if (row.items.some((i) => i.x <= labelLeft)) return null;
+
+  return { candidates: row.items, labelLeft, labelRight: labelLeft };
+}
+
+/**
+ * Group rows and pick out the header rows among them.
  */
 function findHeaderRows(rows: Row[]): HeaderRow[] {
   const headers: HeaderRow[] = [];
 
   for (const row of rows) {
-    const labelHeader = row.items.reduce((a, b) => (b.width > a.width ? b : a), row.items[0]!);
-    if (!labelHeader || labelHeader.width <= 0) continue;
+    const found = labelledHeader(row) ?? standaloneHeader(row, rows);
+    if (!found) continue;
 
-    const right = labelHeader.x + labelHeader.width;
-    const candidates = row.items.filter(
-      (i) => i !== labelHeader && i.x >= right && i.width <= labelHeader.width * OPTION_WIDTH_RATIO,
-    );
-    if (candidates.length < 2) continue;
-
-    const anchors = rightmostCluster(candidates);
+    const anchors = rightmostCluster(found.candidates);
     if (anchors.length < 2) continue;
 
     // Corroboration by glyph width. The gap-outlier split above needs three or
@@ -232,7 +326,7 @@ function findHeaderRows(rows: Row[]): HeaderRow[] {
     const widthSum = anchors.reduce((sum, a) => sum + a.width, 0);
     if (!(widthSum > 0) || span / widthSum > MAX_CLUSTER_SPREAD) continue;
 
-    headers.push({ row, labelHeader, anchors });
+    headers.push({ row, labelLeft: found.labelLeft, labelRight: found.labelRight, anchors });
   }
 
   // Corroboration by repetition. A printed table repeats its header per
@@ -400,7 +494,7 @@ function rowPitch(gaps: number[]): number {
  * row pitch, and counting it as two rows would offset every answer below it.
  */
 function rowBands(rows: Row[], header: HeaderRow, floor: number): GeometryBand[] {
-  const labelLeft = header.labelHeader.x;
+  const labelLeft = header.labelLeft;
   const below = rows
     .filter((r) => r.y < header.row.y - BASELINE_TOLERANCE && r.y > floor)
     // The label column has ONE left margin. A numbered section heading printed
@@ -470,11 +564,11 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
     const columnBands = centresToBands(
       resolved.centres,
       optionColumns.map((c) => c.key),
-      header.labelHeader.x + header.labelHeader.width,
+      header.labelRight,
       input.pageWidth,
     );
 
-    const left = header.labelHeader.x;
+    const left = header.labelLeft;
     const right = Math.min(columnBands[columnBands.length - 1]!.end, input.pageWidth);
     const bottom = Math.min(...bands.map((b) => b.start));
     const top = header.row.y;

@@ -9,7 +9,17 @@
 import { describe, expect, it } from 'vitest';
 import type { FormField } from '@formai/shared';
 import type { PositionedText } from '../../../lib/pdf-geometry.js';
-import { deriveAcrossPages, deriveForField, panelState, unsupportedReason } from './geometry-actions.js';
+import {
+  NUDGE_POINTS,
+  SNAP_RANGE,
+  columnHandles,
+  deriveAcrossPages,
+  deriveForField,
+  panelState,
+  snapEdge,
+  snapTargets,
+  unsupportedReason,
+} from './geometry-actions.js';
 
 const A4 = { width: 595, height: 842 };
 
@@ -196,5 +206,158 @@ describe('deriveAcrossPages', () => {
 
   it('is empty-safe before the viewer has read the PDF', () => {
     expect(deriveAcrossPages(tableField(), [])).toBeNull();
+  });
+});
+
+describe('snapping a dragged edge to the printed page (U10, R19)', () => {
+  /**
+   * `ADMN-FRM-111`'s three option-header groups as measured, at y=306.2. These
+   * are the six places a reviewer needs to be able to drag a band to; the
+   * derivation only ever offers the rightmost pair.
+   */
+  const OPTION_HEADERS: PositionedText[] = [
+    { text: 'OK', x: 164.5, y: 306.2, width: 12.2 },
+    { text: 'NA', x: 192.7, y: 306.2, width: 12.6 },
+    { text: 'OK', x: 345.7, y: 306.2, width: 12.2 },
+    { text: 'NA', x: 371.1, y: 306.2, width: 12.6 },
+    { text: 'OK', x: 512.6, y: 306.2, width: 12.2 },
+    { text: 'NA', x: 540.7, y: 306.2, width: 12.6 },
+  ];
+
+  it('offers both edges of every printed run', () => {
+    const targets = snapTargets(OPTION_HEADERS);
+
+    // Left edge of the leftmost OK and right edge of the rightmost NA — the
+    // two ends of the reachable range.
+    expect(targets[0]).toBeCloseTo(164.5, 5);
+    expect(targets[targets.length - 1]).toBeCloseTo(553.3, 5);
+    expect(targets).toHaveLength(12);
+  });
+
+  it('reaches the groups the derivation never proposes', () => {
+    // proposeTableSegments isolates the RIGHTMOST cluster by design, so its
+    // bands know 512.6/540.7 and nothing about the two groups to the left.
+    const targets = snapTargets(OPTION_HEADERS);
+
+    expect(targets).toContain(164.5);
+    expect(targets).toContain(345.7);
+  });
+
+  it('collapses a column of items printed at one x into a single target', () => {
+    const column: PositionedText[] = [0, 1, 2, 3].map((r) => ({
+      text: 'OK', x: 164.5, y: 306.2 - r * 16, width: 12.2,
+    }));
+
+    expect(snapTargets(column)).toEqual([164.5, 176.7]);
+  });
+
+  it('pulls a rough drag onto the printed column, not the pointer coordinate', () => {
+    const targets = snapTargets(OPTION_HEADERS);
+
+    // A drag that lands 3pt short of the middle group's OK.
+    expect(snapEdge(342.4, targets)).toBeCloseTo(345.7, 5);
+  });
+
+  it('takes the nearest target when two are in range', () => {
+    const targets = snapTargets(OPTION_HEADERS);
+
+    // 371.1 (NA left edge) and 357.9 (OK right edge) are both within range of
+    // 366; the nearer one wins.
+    expect(snapEdge(366, targets)).toBeCloseTo(371.1, 5);
+  });
+
+  it('leaves a drag with nothing near it exactly where it was put', () => {
+    const targets = snapTargets(OPTION_HEADERS);
+
+    // Mid-gutter, 30pt from anything printed. Jumping to a distant column here
+    // would be the overshoot the step buttons exist to avoid.
+    expect(snapEdge(280, targets)).toBe(280);
+  });
+
+  it('is empty-safe before the viewer has read the page', () => {
+    expect(snapTargets([])).toEqual([]);
+    expect(snapEdge(280, [])).toBe(280);
+  });
+
+  it('snaps within one option glyph and no further', () => {
+    // SNAP_RANGE is one option glyph wide (OK 12.2, NA 12.6, dozer N/A 13.3):
+    // inside a glyph's own width the reviewer meant that glyph.
+    expect(snapEdge(164.5 - SNAP_RANGE + 0.5, [164.5])).toBe(164.5);
+    expect(snapEdge(164.5 - SNAP_RANGE - 0.5, [164.5])).toBe(164.5 - SNAP_RANGE - 0.5);
+  });
+
+  it('still steps by 1pt after a snap, for when snapping picks wrong', () => {
+    // Snapping is gross placement; the buttons remain the fine correction.
+    expect(NUDGE_POINTS).toBe(1);
+    expect(snapEdge(345.7 + NUDGE_POINTS, [345.7], 0)).toBe(345.7 + NUDGE_POINTS);
+  });
+});
+
+describe('column handles are one per boundary, not two per band (U10 review)', () => {
+  // Contiguous, as centresToBands produces them: each band's end IS the next
+  // band's start.
+  const BANDS = [
+    { key: 'tick', start: 496, end: 511.7 },
+    { key: 'cross', start: 511.7, end: 531.9 },
+    { key: 'na', start: 531.9, end: 556.7 },
+  ];
+
+  it('gives one handle per edge, not one per band edge', () => {
+    // Two per band would be six, two of them stacked exactly on top of two
+    // others — the later sibling wins hit-testing, so tick's right edge and
+    // cross's right edge could never be grabbed at all.
+    const handles = columnHandles(BANDS);
+
+    expect(handles).toHaveLength(4);
+    expect(handles.map((h) => h.at)).toEqual([496, 511.7, 531.9, 556.7]);
+  });
+
+  it('makes an interior handle own BOTH bands it separates', () => {
+    const [, between] = columnHandles(BANDS);
+
+    expect(between).toMatchObject({ left: 'tick', right: 'cross' });
+  });
+
+  it('makes the outer handles own one band each', () => {
+    const handles = columnHandles(BANDS);
+
+    expect(handles[0]).toMatchObject({ right: 'tick' });
+    expect(handles[0]!.left).toBeUndefined();
+    expect(handles[3]).toMatchObject({ left: 'na' });
+    expect(handles[3]!.right).toBeUndefined();
+  });
+
+  it('orders by position even when the bands are not', () => {
+    const handles = columnHandles([BANDS[2]!, BANDS[0]!, BANDS[1]!]);
+
+    expect(handles.map((h) => h.at)).toEqual([496, 511.7, 531.9, 556.7]);
+  });
+
+  it('gives a single band its two outer edges', () => {
+    expect(columnHandles([BANDS[0]!]).map((h) => h.at)).toEqual([496, 511.7]);
+  });
+
+  it('is empty-safe', () => {
+    expect(columnHandles([])).toEqual([]);
+  });
+});
+
+describe('snapTargets survives a degenerate pdfjs measurement (U10 review)', () => {
+  it('drops a non-finite run instead of poisoning every target', () => {
+    // One NaN sorts in place, then `e - NaN > 0.5` is false for everything
+    // after it — the whole list collapses to [NaN], every snap returns NaN, the
+    // validator refuses every move, and dragging is silently dead on that page.
+    const items: PositionedText[] = [
+      { text: 'bad', x: Number.NaN, y: 306.2, width: 12.2 },
+      { text: 'OK', x: 164.5, y: 306.2, width: Number.POSITIVE_INFINITY },
+      { text: 'NA', x: 192.7, y: 306.2, width: 12.6 },
+    ];
+
+    const targets = snapTargets(items);
+
+    expect(targets).toHaveLength(2);
+    expect(targets[0]).toBeCloseTo(192.7, 5);
+    expect(targets[1]).toBeCloseTo(205.3, 5);
+    expect(snapEdge(190, targets)).toBe(192.7);
   });
 });

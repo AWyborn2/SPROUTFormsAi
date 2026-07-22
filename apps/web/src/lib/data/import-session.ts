@@ -601,6 +601,45 @@ export function adjustGeometryBand(
   emit();
 }
 
+/**
+ * Move the shared boundary between two adjacent bands.
+ *
+ * `centresToBands` makes bands contiguous — `bands[i].end === bands[i+1].start`
+ * — so an interior edge belongs to two bands at once. Moving only one of them
+ * opens a gap the exporter cannot resolve: a tick printed in it falls in no
+ * column at all. The two edges are therefore one control, written together or
+ * not at all, and the same validator decides.
+ */
+export function adjustGeometryBoundary(
+  fieldId: string,
+  axis: 'column' | 'row',
+  leftKey: string,
+  rightKey: string,
+  value: number,
+): void {
+  const segment = geometryProposals.get(fieldId);
+  if (!segment) return;
+
+  const bands = (axis === 'column' ? segment.columnBands : segment.rowBands) ?? [];
+  const left = bands.find((b) => b.key === leftKey);
+  const right = bands.find((b) => b.key === rightKey);
+  if (!left || !right) return;
+  if (!(value > left.start) || !(value < right.end)) return;
+
+  const moved = bands.map((b) =>
+    b.key === leftKey ? { ...b, end: value } : b.key === rightKey ? { ...b, start: value } : b,
+  );
+  const next = growToFit({
+    ...segment,
+    ...(axis === 'column' ? { columnBands: moved } : { rowBands: moved }),
+  });
+  if (resolveGeometry({ geometry: { segments: [next] } }).segments.length !== 1) return;
+
+  geometryProposals.set(fieldId, next);
+  confirmedGeometry.delete(fieldId);
+  emit();
+}
+
 /** Reviewer accepts extraction's proposed grouping as-is. */
 export function acceptAnswerSet(fieldId: string, setKey: string): void {
   acceptedAnswerSets.add(acceptanceKey(fieldId, setKey));
@@ -743,6 +782,90 @@ export function groupColumns(id: string, columnKeys: string[]): string | null {
   acceptedAnswerSets.add(acceptanceKey(id, key));
   dispatchStructural({ t: 'update', id, patch: { answerSets: [...existing, { key, columnKeys: members }] } });
   return key;
+}
+
+/**
+ * Split one extracted table into the `groups` printed groups it really is.
+ *
+ * `ADMN-FRM-111`'s Category A block prints as 6 rows × 3 side-by-side groups
+ * and extraction flattened it to one 18-item field in across-then-down order,
+ * so item `i` prints at row floor(i/3), group `i % groups`. `PageBox` is a
+ * cross product of column bands × row bands: it can say "column 2, row 5" and
+ * cannot say "the 7th answer belongs to the middle group's first row" (R18).
+ * No band adjustment reaches that, so the field is split instead — each group
+ * becomes a plain N-row grid the derivation and the exporter already handle,
+ * and each is confirmable on its own, so a misplaced middle group cannot
+ * scatter wrong answers through the whole list.
+ *
+ * The REVIEWER declares this; extraction never infers it. Production `v3` of
+ * this same form split the block into three fields while this import merged
+ * it — extraction is already inconsistent run to run on one document, which is
+ * the argument for an explicit decision by someone looking at the page rather
+ * than a silent model judgement.
+ *
+ * Refused rather than approximated when the shape cannot support it: fewer
+ * than two groups is nothing to do, more groups than items would mint a table
+ * with no rows, and a table with no captured items has nothing to distribute.
+ */
+export function splitTableGroups(id: string, groups: number): string[] {
+  const field = editorField(id);
+  const items = field?.fixedRows;
+  if (!field || !items?.length) return [];
+  if (!Number.isInteger(groups) || groups < 2 || groups > items.length) return [];
+
+  const parts = Array.from({ length: groups }, (_, g) => ({
+    label: `${field.label} (${g + 1} of ${groups})`,
+    // Reading order, not contiguous blocks: the items were captured across the
+    // page, so every `groups`-th one belongs to the same printed column. This
+    // also puts each group back in top-to-bottom order as printed.
+    fixedRows: items.filter((_item, i) => i % groups === g),
+    // Both position records described the merged block and describe none of
+    // the groups. `sourcePosition` is dropped for the same reason geometry is
+    // below — and it matters more, because `geometrySegments` falls back to it
+    // when there is no geometry, so leaving it would stack all three groups'
+    // marks on one spot at export.
+    sourcePosition: undefined,
+  }));
+
+  coalesceKey = null;
+  dispatchEdit({ t: 'splitField', id, parts });
+
+  // Answer-set acceptance carries: the groups have the source's columns and the
+  // source's sets, making exactly the claim the reviewer already judged, so
+  // re-asking three times would be noise rather than safety.
+  // The reducer leaves the first new part selected, and the parts replaced the
+  // source in place, so they are the `groups` fields from there.
+  const all = editor?.fields ?? [];
+  const at = all.findIndex((f) => f.id === editor?.selectedId);
+  const created = at < 0 ? [] : all.slice(at, at + groups);
+  for (const set of field.answerSets ?? []) {
+    if (answerSetAccepted(id, set.key)) {
+      for (const part of created) acceptedAnswerSets.add(acceptanceKey(part.id, set.key));
+    }
+  }
+
+  /*
+    Nothing the SOURCE held is deleted here, and that is deliberate.
+
+    Geometry, acceptance and extraction metadata all live in id-keyed stores
+    the field-editor's undo snapshot does not capture, so deleting them would
+    make the split partly un-undoable: undo restores `catA` to the list with
+    its answer sets intact while `acceptedAnswerSets` no longer holds
+    `catA::as1`, and the table then publishes with no answer set at all — the
+    one-answer-per-row rule the reviewer explicitly accepted, silently gone.
+    Same for a confirmed grid, and for the `resolved` flag.
+
+    Leaving them costs nothing: every consumer reads these stores THROUGH the
+    current field list, so an entry for an id no longer in it is inert, and
+    `resetImportSession` clears all of them on the next extraction.
+
+    The groups still start clean, because they have FRESH ids — no geometry
+    (positional: a grid confirmed over all 18 items describes none of the three
+    groups, per R8) and no `reviewMeta`, so each arrives awaiting its own
+    confirmation rather than pre-blessed by a judgement about the merged block.
+  */
+  emit();
+  return created.map((f) => f.id);
 }
 
 /** Dissolve one answer set — its columns return to independent cells. */

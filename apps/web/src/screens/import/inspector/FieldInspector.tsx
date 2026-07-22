@@ -26,6 +26,7 @@ import {
   removeFieldOption,
   renameField,
   setFieldOption,
+  splitTableGroups,
   useImportSession,
   type ReviewField,
 } from '../../../lib/data/import-session.js';
@@ -166,6 +167,10 @@ export function FieldInspector({ field, index, count, onSelect, textPages }: Fie
 
         {isTable && <ColumnInspector field={field} actions={importSessionColumnActions} />}
 
+        {isTable && (field.fixedRows?.length ?? 0) > 1 && (
+          <SplitGroups id={field.id} items={field.fixedRows!.length} onSelect={onSelect} />
+        )}
+
         {isTable && <GeometryInspector field={field} textPages={textPages} />}
 
         <ConditionEditor field={field} fields={fields} actions={importSessionConditionActions} />
@@ -196,6 +201,59 @@ export function FieldInspector({ field, index, count, onSelect, textPages }: Fie
           className="justify-center text-danger-text"
         >
           Delete field
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Declare that one extracted table is really N side-by-side printed groups.
+ *
+ * Offered only where it can do something: a table with captured items. The
+ * reviewer, not extraction, makes this call (KTD11) — they are looking at the
+ * page, and extraction has already been seen to merge on one run what it split
+ * on another for the same document.
+ */
+function SplitGroups({
+  id,
+  items,
+  onSelect,
+}: {
+  id: string;
+  items: number;
+  onSelect: (id: string | null) => void;
+}) {
+  const [groups, setGroups] = useState(2);
+  const max = Math.min(6, items);
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
+      <div className="text-[12.5px] font-semibold">Side-by-side groups</div>
+      <p className="text-[11.5px] leading-snug text-text-tertiary">
+        If this one table is really several columns printed next to each other, split it. Items are
+        dealt out in reading order, so each group ends up top-to-bottom as printed.
+      </p>
+      <div className="flex items-center gap-1.5">
+        <Select
+          options={Array.from({ length: max - 1 }, (_, i) => ({
+            value: String(i + 2),
+            label: `${i + 2} groups`,
+          }))}
+          value={String(groups)}
+          onChange={(e) => setGroups(Number(e.target.value))}
+          aria-label="Number of printed groups"
+        />
+        <Button
+          variant="ghost"
+          leadingIcon="columns-3"
+          onClick={() => {
+            // The split replaced this field; re-point the accordion at the
+            // first group so the panel does not sit on an id that is gone.
+            onSelect(splitTableGroups(id, groups)[0] ?? null);
+          }}
+        >
+          Split
         </Button>
       </div>
     </div>

@@ -34,7 +34,9 @@ import { apiClient, ApiError } from './api-client.js';
 import {
   acceptAnswerSet,
   addFixedRowItem,
+  answerSetAccepted,
   adjustGeometryBand,
+  adjustGeometryBoundary,
   confirmGeometry,
   fileToBase64,
   geometryConfirmed,
@@ -49,7 +51,9 @@ import {
   retryExtraction,
   reviewedToFields,
   setFieldRequired,
+  splitTableGroups,
   startExtraction,
+  undoFieldEdit,
   type ReviewField,
 } from './import-session.js';
 
@@ -223,6 +227,22 @@ const CHECKLIST: ExtractedField = {
     { key: 'na', label: 'NA', type: 'checkbox' },
   ],
   fixedRows: ['Engine oil level', 'Park brake', 'Tyres'],
+};
+
+/** A minimal valid footprint, used where the geometry's shape is not the point. */
+const SPLIT_SEGMENT: PageBox = {
+  page: 0,
+  x: 40,
+  y: 180,
+  width: 520,
+  height: 130,
+  pageWidth: 595.32,
+  pageHeight: 419.52,
+  columnBands: [
+    { key: 'ok', start: 504.5, end: 532.9 },
+    { key: 'na', start: 532.9, end: 561.2 },
+  ],
+  rowBands: [{ key: 'r0', start: 290, end: 306 }],
 };
 
 /** Seed the session store with the given extracted fields via the real pipeline. */
@@ -567,6 +587,48 @@ describe('geometry review (U4, R8)', () => {
     expect(geometryProposal('f1')?.rowBands?.find((b) => b.key === 'r1')?.start).toBe(595);
   });
 
+  it('moves both bands sharing an interior boundary, leaving no gap', () => {
+    proposeGeometry('f1', SEGMENT);
+    confirmGeometry('f1');
+
+    adjustGeometryBoundary('f1', 'column', 'tick', 'cross', 505);
+
+    // centresToBands makes bands contiguous. Moving one side alone tears a gap
+    // a tick can land in and resolve to no column at all.
+    const bands = geometryProposal('f1')!.columnBands!;
+    expect(bands.find((b) => b.key === 'tick')!.end).toBe(505);
+    expect(bands.find((b) => b.key === 'cross')!.start).toBe(505);
+    expect(geometryConfirmed('f1')).toBe(false);
+  });
+
+  it('refuses a boundary drag past either neighbour rather than inverting a band', () => {
+    proposeGeometry('f1', SEGMENT);
+    const before = geometryProposal('f1')!;
+
+    adjustGeometryBoundary('f1', 'column', 'tick', 'cross', 490); // left of tick.start
+    adjustGeometryBoundary('f1', 'column', 'tick', 'cross', 540); // right of cross.end
+
+    expect(geometryProposal('f1')).toEqual(before);
+  });
+
+  it('publishes a boundary-adjusted grid the shipped validator accepts', () => {
+    proposeGeometry('f1', SEGMENT);
+    adjustGeometryBoundary('f1', 'column', 'cross', 'na', 528);
+    confirmGeometry('f1');
+
+    const published = reviewedToFields([reviewField()])[0]!;
+    expect(resolveGeometry(published, 18).dropped).toEqual([]);
+  });
+
+  it('ignores a boundary between bands that do not exist', () => {
+    proposeGeometry('f1', SEGMENT);
+    const before = geometryProposal('f1')!;
+
+    adjustGeometryBoundary('f1', 'column', 'tick', 'nope', 505);
+
+    expect(geometryProposal('f1')).toEqual(before);
+  });
+
   it('confirming a field with no proposal does nothing', () => {
     confirmGeometry('nope');
 
@@ -585,5 +647,213 @@ describe('geometry review (U4, R8)', () => {
 
   it('leaves a field with no proposal publishing exactly as before', () => {
     expect(reviewedToFields([reviewField()])[0]?.geometry).toBeUndefined();
+  });
+});
+
+describe('splitting a table into its printed groups (U9, R18)', () => {
+  /**
+   * ADMN-FRM-111's Category A block, as extraction actually flattened it:
+   * 6 printed rows x 3 side-by-side groups, read across-then-down, so item
+   * `i` prints at row floor(i/3), group i%3. The item names are the real ones
+   * observed in the running app.
+   */
+  const CATEGORY_A: ExtractedField = {
+    id: 'catA',
+    label: "Category 'A' faults",
+    type: 'repeating_group',
+    confidence: 0.62,
+    columns: [
+      { key: 'item', label: 'Item', type: 'text' },
+      { key: 'ok', label: 'OK', type: 'checkbox' },
+      { key: 'na', label: 'NA', type: 'checkbox' },
+    ],
+    answerSets: [{ key: 'as1', columnKeys: ['ok', 'na'] }],
+    fixedRows: [
+      'Engine oil level', 'Tyre Condition/Wheel nuts', 'Brake & indicator lights',
+      'Engine coolant level', 'Park brake', 'Headlights',
+      'Hydraulic oil level', 'Service brake', 'Beacon',
+      'Transmission oil', 'Steering', 'Reverse alarm',
+      'Fuel level', 'Horn', 'Fire extinguisher',
+      'Radiator/cooling', 'Seat belt', 'First aid kit',
+    ],
+  };
+
+  const tables = () => getImportSession().fields.filter((f) => f.type === 'repeating_group');
+
+  it('turns one 18-item table into three tables of six', async () => {
+    await seedSession([CATEGORY_A]);
+
+    splitTableGroups('catA', 3);
+
+    const after = tables();
+    expect(after).toHaveLength(3);
+    expect(after.map((f) => f.fixedRows?.length)).toEqual([6, 6, 6]);
+  });
+
+  it('distributes items by reading order, not by contiguous blocks', async () => {
+    await seedSession([CATEGORY_A]);
+
+    splitTableGroups('catA', 3);
+
+    const [left, middle, right] = tables();
+    // Column 1 of the printed page is items 0, 3, 6, ... — the whole point of
+    // the split is that each group reads top-to-bottom as printed.
+    expect(left?.fixedRows).toEqual([
+      'Engine oil level', 'Engine coolant level', 'Hydraulic oil level',
+      'Transmission oil', 'Fuel level', 'Radiator/cooling',
+    ]);
+    expect(middle?.fixedRows).toEqual([
+      'Tyre Condition/Wheel nuts', 'Park brake', 'Service brake',
+      'Steering', 'Horn', 'Seat belt',
+    ]);
+    expect(right?.fixedRows).toEqual([
+      'Brake & indicator lights', 'Headlights', 'Beacon',
+      'Reverse alarm', 'Fire extinguisher', 'First aid kit',
+    ]);
+  });
+
+  it('gives every group the source table columns and answer sets', async () => {
+    await seedSession([CATEGORY_A]);
+
+    splitTableGroups('catA', 3);
+
+    for (const group of tables()) {
+      expect(group.columns).toEqual(CATEGORY_A.columns);
+      expect(group.answerSets).toEqual(CATEGORY_A.answerSets);
+    }
+  });
+
+  it('carries an accepted grouping onto every group', async () => {
+    await seedSession([CATEGORY_A]);
+    acceptAnswerSet('catA', 'as1');
+
+    splitTableGroups('catA', 3);
+
+    // The groups carry the source's columns and the source's sets, making
+    // exactly the claim the reviewer already judged — re-asking three times
+    // would be noise rather than safety.
+    for (const group of tables()) expect(answerSetAccepted(group.id, 'as1')).toBe(true);
+  });
+
+  it('does not carry an UNaccepted grouping', async () => {
+    await seedSession([CATEGORY_A]);
+
+    splitTableGroups('catA', 3);
+
+    for (const group of tables()) expect(answerSetAccepted(group.id, 'as1')).toBe(false);
+  });
+
+  it('restores an accepted grouping and a confirmed grid on undo', async () => {
+    await seedSession([CATEGORY_A]);
+    acceptAnswerSet('catA', 'as1');
+    proposeGeometry('catA', SPLIT_SEGMENT);
+    confirmGeometry('catA');
+
+    splitTableGroups('catA', 3);
+    undoFieldEdit();
+
+    // Acceptance and geometry live in id-keyed stores the editor's undo
+    // snapshot never captures. Deleting the source's entries on split would
+    // make undo restore the table with its answer set silently unaccepted —
+    // publishing a table whose one-answer-per-row rule the reviewer had
+    // explicitly approved, without it.
+    expect(answerSetAccepted('catA', 'as1')).toBe(true);
+    expect(geometryConfirmed('catA')).toBe(true);
+    expect(reviewedToFields(getImportSession().fields)[0]?.geometry?.segments).toHaveLength(1);
+  });
+
+  it('loses no item when the count does not divide evenly', async () => {
+    await seedSession([{ ...CATEGORY_A, fixedRows: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] }]);
+
+    splitTableGroups('catA', 3);
+
+    const after = tables();
+    expect(after.map((f) => f.fixedRows)).toEqual([['a', 'd', 'g'], ['b', 'e'], ['c', 'f']]);
+    expect(after.flatMap((f) => f.fixedRows ?? [])).toHaveLength(7);
+  });
+
+  it('treats a split into one group as a no-op', async () => {
+    await seedSession([CATEGORY_A]);
+
+    splitTableGroups('catA', 1);
+
+    expect(tables()).toHaveLength(1);
+    expect(tables()[0]?.id).toBe('catA');
+  });
+
+  it('refuses more groups than there are items rather than making an empty table', async () => {
+    await seedSession([{ ...CATEGORY_A, fixedRows: ['a', 'b'] }]);
+
+    splitTableGroups('catA', 3);
+
+    expect(tables()).toHaveLength(1);
+  });
+
+  it('refuses a table with no captured items — there is nothing to distribute', async () => {
+    await seedSession([{ ...CATEGORY_A, fixedRows: undefined }]);
+
+    splitTableGroups('catA', 3);
+
+    expect(tables()).toHaveLength(1);
+  });
+
+  it('undoes the whole split in one step', async () => {
+    await seedSession([CATEGORY_A]);
+
+    splitTableGroups('catA', 3);
+    expect(tables()).toHaveLength(3);
+
+    undoFieldEdit();
+
+    expect(tables()).toHaveLength(1);
+    expect(tables()[0]?.fixedRows).toEqual(CATEGORY_A.fixedRows);
+  });
+
+  it('leaves every group awaiting its own confirmation', async () => {
+    await seedSession([{ ...CATEGORY_A, note: 'Confirm this table' }]);
+    expect(getImportSession().fields[0]?.note).toBe('Confirm this table');
+
+    splitTableGroups('catA', 3);
+
+    // Fresh ids inherit no extraction metadata, which is the behaviour wanted:
+    // a judgement made about the merged block is not a judgement about a group.
+    for (const group of tables()) {
+      expect(group.resolved).toBeUndefined();
+      expect(group.note).toBeUndefined();
+    }
+  });
+
+  it('drops the merged block position so groups do not export onto one spot', async () => {
+    await seedSession([
+      {
+        ...CATEGORY_A,
+        sourcePosition: {
+          page: 0, x: 40, y: 180, width: 520, height: 130,
+          pageWidth: 595.32, pageHeight: 419.52,
+        },
+      },
+    ]);
+
+    splitTableGroups('catA', 3);
+
+    for (const published of reviewedToFields(getImportSession().fields)) {
+      expect(published.sourcePosition).toBeUndefined();
+    }
+  });
+
+  it('does not carry the source table geometry onto the groups (R8)', async () => {
+    await seedSession([CATEGORY_A]);
+    proposeGeometry('catA', SPLIT_SEGMENT);
+    confirmGeometry('catA');
+
+    splitTableGroups('catA', 3);
+
+    // Geometry is positional: a grid confirmed over all 18 items describes none
+    // of the three groups. Each group must be placed and confirmed on its own.
+    for (const group of tables()) {
+      expect(geometryProposal(group.id)).toBeUndefined();
+      expect(geometryConfirmed(group.id)).toBe(false);
+    }
+    expect(reviewedToFields(getImportSession().fields).some((f) => f.geometry)).toBe(false);
   });
 });
