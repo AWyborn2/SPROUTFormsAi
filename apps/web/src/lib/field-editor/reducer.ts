@@ -12,7 +12,7 @@
  * drifting apart.
  */
 import type { FormContainer, FormField, FormFieldType } from '@formai/shared';
-import { DEFAULT_CONTAINER } from '@formai/shared';
+import { DEFAULT_CONTAINER, FORM_FIELD_TYPES } from '@formai/shared';
 
 export const CONTAINER_ID = '__container__';
 
@@ -67,6 +67,93 @@ export const FIELD_META: Record<string, { icon: string; label: string }> = {
   repeating_group: { icon: 'table', label: 'Repeating table' },
   checkbox_group: { icon: 'list-checks', label: 'Checkbox group' },
 };
+
+/**
+ * Types that are IMPORTED, never authored. Each one carries payload that only
+ * extraction can supply — a `repeating_group` needs columns, a `checkbox_group`
+ * needs options that mean something — so conjuring one from a scalar field
+ * produces a field that renders nothing and, if required, can never be
+ * satisfied.
+ */
+const STRUCTURAL_TYPES: ReadonlySet<FormFieldType> = new Set([
+  'repeating_group',
+  'checkbox_group',
+  'boolean_yes_no',
+]);
+
+/** Types whose answer is chosen from `options`. */
+const CHOICE_TYPES: ReadonlySet<FormFieldType> = new Set(['dropdown', 'radio', 'checkbox_group']);
+
+/**
+ * Does this type answer from `options`?
+ *
+ * Exported so the editors' options panel and `retypeField`'s seeding read the
+ * SAME rule. They did not: the reducer seeded options for dropdown and radio
+ * while the import inspector rendered its editor for dropdown and radio only,
+ * so an imported `checkbox_group` had options that nothing would show. One
+ * predicate is what stops the two drifting again.
+ */
+export function isChoiceType(type: FormFieldType): boolean {
+  return CHOICE_TYPES.has(type);
+}
+
+const AUTHORABLE_TYPE_OPTIONS = FORM_FIELD_TYPES.filter((t) => !STRUCTURAL_TYPES.has(t)).map(
+  (t) => ({ label: FIELD_META[t]?.label ?? t, value: t }),
+);
+
+/**
+ * Type choices for a field, for BOTH editors.
+ *
+ * Structural types stay out of the list for a scalar field (see
+ * `STRUCTURAL_TYPES`). But an imported structural field must still see its own
+ * type, or the dropdown would show something the field is not and one stray
+ * change would destroy the table (R17).
+ *
+ * This lives here rather than in either screen because import review and the
+ * builder must not disagree about what a field may become. They did: review
+ * built its dropdowns straight from `FORM_FIELD_TYPES`, so a reviewer could
+ * turn a Date into an optionless Checkbox group that blocked every submit —
+ * the exact case the builder had guarded against since it was written.
+ */
+export function typeOptionsFor(type: FormFieldType): Array<{ label: string; value: string }> {
+  if (!STRUCTURAL_TYPES.has(type)) return AUTHORABLE_TYPE_OPTIONS;
+  return [{ label: FIELD_META[type]?.label ?? type, value: type }, ...AUTHORABLE_TYPE_OPTIONS];
+}
+
+/**
+ * Re-type a field, reconciling the payload only its OLD type could own.
+ *
+ * Spreading and overwriting `type` leaves `options` on a field that is no
+ * longer a choice and `columns`/`answerSets`/`fixedRows` on one that is no
+ * longer a table. That is invisible until the type is changed back, at which
+ * point the stale payload reappears — including an answer set a reviewer had
+ * already accepted, now attached to a table whose columns were cleared from
+ * under it. Clearing on the way out makes a retype reversible without being
+ * resurrective.
+ */
+function retypeField(f: FormField, type: FormFieldType): FormField {
+  const nf: FormField = { ...f, type };
+
+  if (CHOICE_TYPES.has(type)) {
+    // Preserve real options (an imported `checkbox_group`'s D / N); seed only
+    // when there is nothing to preserve.
+    if (!nf.options?.length) nf.options = ['Option 1', 'Option 2'];
+  } else {
+    delete nf.options;
+  }
+
+  if (type !== 'checkbox_group') delete nf.selectionType;
+
+  // `typeOptionsFor` makes ENTERING repeating_group unreachable from either
+  // editor, so in practice this only ever clears.
+  if (type !== 'repeating_group') {
+    delete nf.columns;
+    delete nf.answerSets;
+    delete nf.fixedRows;
+  }
+
+  return nf;
+}
 
 const NEW_LABELS: Partial<Record<FormFieldType, string>> = {
   text: 'Untitled question',
@@ -201,14 +288,7 @@ export function builderReducer(s: BuilderState, a: BuilderAction): BuilderState 
       };
     case 'changeType':
       return mutate(s, (fields) => ({
-        fields: fields.map((f) => {
-          if (f.id !== a.id) return f;
-          const nf: FormField = { ...f, type: a.fieldType };
-          if ((a.fieldType === 'dropdown' || a.fieldType === 'radio') && !nf.options) {
-            nf.options = ['Option 1', 'Option 2'];
-          }
-          return nf;
-        }),
+        fields: fields.map((f) => (f.id === a.id ? retypeField(f, a.fieldType) : f)),
       }));
     case 'duplicate': {
       const next = mutate(s, (fields) => {

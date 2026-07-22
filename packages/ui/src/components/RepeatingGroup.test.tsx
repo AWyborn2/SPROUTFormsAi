@@ -243,3 +243,39 @@ describe('RepeatingGroup answer sets', () => {
     }
   });
 });
+
+describe('required markers on grouped columns', () => {
+  /**
+   * `requiredColumnsFilled` in @formai/shared deliberately EXEMPTS a column
+   * that belongs to an answer set — the set requires one answer across its
+   * members, so per-member required flags cannot all be satisfied at once.
+   * Rendering an asterisk on each promised a rule validation never applies and
+   * the filler could never meet.
+   */
+  const columns: RepeatingGroupColumn[] = [
+    { key: 'item', label: 'Item', type: 'text' },
+    { key: 'ok', label: 'OK', type: 'checkbox', required: true },
+    { key: 'na', label: 'N/A', type: 'checkbox', required: true },
+    { key: 'comment', label: 'Comment', type: 'text', required: true },
+  ];
+  const sets: RepeatingGroupAnswerSet[] = [{ key: 'status', columnKeys: ['ok', 'na'] }];
+
+  it('shows no asterisk on a set member, but keeps it on an ungrouped column', () => {
+    render(<Harness columns={columns} answerSets={sets} initialRows={[{}]} />);
+    const headers = screen.getAllByRole('columnheader');
+    const text = (label: string) =>
+      headers.find((h) => h.textContent?.startsWith(label))?.textContent ?? '';
+
+    expect(text('OK')).not.toContain('*');
+    expect(text('N/A')).not.toContain('*');
+    // The ungrouped required column is unaffected — this is a targeted
+    // exemption, not the removal of required markers.
+    expect(text('Comment')).toContain('*');
+  });
+
+  it('still marks a required column when the table has no answer set', () => {
+    render(<Harness columns={columns} initialRows={[{}]} />);
+    const headers = screen.getAllByRole('columnheader');
+    expect(headers.find((h) => h.textContent?.startsWith('OK'))?.textContent).toContain('*');
+  });
+});

@@ -208,9 +208,17 @@ export function RepeatingGroup({
                 if (set) {
                   const isAnchor = setAnchor.get(set.key) === c.key;
                   const optionHead = (
+                    /*
+                      No required marker on a set member, even when the column
+                      carries `required`. `requiredColumnsFilled` deliberately
+                      exempts grouped columns — the set requires ONE answer
+                      across its members, so an asterisk on each would promise a
+                      rule the filler cannot satisfy and validation never
+                      applies. The set's own requirement is stated once, on the
+                      collapsed set header.
+                    */
                     <th key={c.key} className={cn(headClass, 'hidden sm:table-cell')}>
                       {c.label}
-                      {c.required && <span className="ml-0.5 text-danger">*</span>}
                     </th>
                   );
                   if (!isAnchor) return optionHead;

@@ -8,53 +8,52 @@
  * it an imported field's label, type, options and order were frozen until the
  * form existed, and imported tables were never editable at all.
  *
- * It is bound to `ImportReviewScreen`'s existing selection (the one that also
- * drives the PDF pane), so there is exactly one notion of "current field".
+ * It is mounted INSIDE the expanded review row, by the accordion that rides on
+ * `ImportReviewScreen`'s existing selection (the one that also drives the PDF
+ * pane) — so there is exactly one notion of "current field", and the panel is
+ * always adjacent to the row it edits. It previously floated above the list in
+ * a sticky panel, which left every edit visually detached from its target.
  */
 import { useEffect, useState } from 'react';
-import { Button, Icon, Input, Select, Switch } from '@formai/ui';
+import { Button, Icon, Input, Select } from '@formai/ui';
 import type { FormFieldType } from '@formai/shared';
-import { FORM_FIELD_TYPES } from '@formai/shared';
 import {
   addField,
   addFieldOption,
   changeFieldType,
   deleteField,
-  isChecklistTable,
   moveField,
   removeFieldOption,
   renameField,
   setFieldOption,
-  setFieldRequired,
   useImportSession,
   type ReviewField,
 } from '../../../lib/data/import-session.js';
-import { FIELD_META, PALETTE } from '../../../lib/field-editor/reducer.js';
+import { FIELD_META, PALETTE, isChoiceType, typeOptionsFor } from '../../../lib/field-editor/reducer.js';
 import { ColumnInspector } from './ColumnInspector.js';
 import { ConditionEditor } from './ConditionEditor.js';
 import { importSessionColumnActions, importSessionConditionActions } from './column-actions.js';
 
-const TYPE_OPTIONS = FORM_FIELD_TYPES.map((t) => ({ label: FIELD_META[t]?.label ?? t, value: t }));
-
 /**
- * Which of the three panel states renders. Exported (and unit-tested) because
- * the non-happy paths are the part that silently diverges: nothing selected
- * and selection-deleted must both land on the SAME persistent prompt (never a
- * collapsed panel that shifts the layout), and a section header has no type,
- * options or required flag to show.
+ * Which panel body renders. A section header has no type, options or required
+ * flag to show, so it gets label + delete only.
+ *
+ * There is no longer a "nothing selected" state: the panel is mounted by the
+ * expanded row and unmounted with it, so "no field" is not reachable. It used
+ * to exist because the panel floated above the list and had to hold its own
+ * layout when the selection was empty or deleted.
  */
-export function inspectorMode(field: ReviewField | null | undefined): 'prompt' | 'section' | 'full' {
-  if (!field) return 'prompt';
+export function inspectorMode(field: ReviewField): 'section' | 'full' {
   return field.type === 'section_header' ? 'section' : 'full';
 }
 
 export interface FieldInspectorProps {
-  /** The currently selected review row, or undefined when none/deleted. */
-  field: ReviewField | undefined;
-  /** Total field count — bounds the move-up/down affordances. */
+  /** The expanded review row. Never absent — the row owns the mount. */
+  field: ReviewField;
+  /** Position in the form; bounds the move-up/down affordances. */
   index: number;
   count: number;
-  /** Re-point the shared selection (e.g. onto a newly inserted field). */
+  /** Re-point the accordion (onto a newly inserted field, or null to close). */
   onSelect: (id: string | null) => void;
 }
 
@@ -65,22 +64,13 @@ export function FieldInspector({ field, index, count, onSelect }: FieldInspector
   // rather than taking the list through every caller.
   const { fields } = useImportSession();
 
-  if (mode === 'prompt' || !field) {
-    return (
-      <div className="rounded-md border border-border bg-surface-card p-[26px_16px] text-center shadow-xs">
-        <Icon name="mouse-pointer-click" size={18} className="mx-auto mb-2 text-text-tertiary" />
-        <div className="text-[13px] font-semibold text-text-primary">No field selected</div>
-        <p className="mt-1 text-[12px] text-text-tertiary">
-          Pick a field on the left (or in the PDF) to rename it, change its type or remove it.
-        </p>
-      </div>
-    );
-  }
-
   const meta = FIELD_META[field.type] ?? { icon: 'help-circle', label: field.type };
   const isSection = mode === 'section';
-  const isChoice = field.type === 'dropdown' || field.type === 'radio';
-  const checklist = isChecklistTable(field);
+  // Shared with the reducer's option seeding, so the panel cannot show an
+  // editor for a type the reducer never seeds (or hide one it does). That gap
+  // is why an imported `checkbox_group` — the fixture's `Shift` field, with its
+  // D / N options — was uneditable until after publish.
+  const isChoice = isChoiceType(field.type);
   // Columns and answer sets only exist on a repeating table, and only once
   // extraction actually captured a column shape.
   const isTable = field.type === 'repeating_group' && (field.columns?.length ?? 0) > 0;
@@ -117,7 +107,7 @@ export function FieldInspector({ field, index, count, onSelect }: FieldInspector
           <>
             <Select
               label="Field type"
-              options={TYPE_OPTIONS}
+              options={typeOptionsFor(field.type)}
               value={field.type}
               onChange={(e) => changeFieldType(field.id, e.target.value as FormFieldType)}
               aria-label={`Field type: ${field.label}`}
@@ -155,19 +145,14 @@ export function FieldInspector({ field, index, count, onSelect }: FieldInspector
               </div>
             )}
 
-            <div className="flex items-center justify-between gap-2.5 rounded-md border border-border-subtle bg-surface-sunken p-[9px_12px]">
-              <div>
-                <div className="text-[12.5px] font-semibold">Required</div>
-                <div className="text-[11px] text-text-tertiary">
-                  {checklist ? 'Checklists default to required' : 'Must be answered to submit'}
-                </div>
-              </div>
-              <Switch
-                checked={field.required ?? checklist}
-                onChange={(e) => setFieldRequired(field.id, e.target.checked)}
-                aria-label={`Required (inspector): ${field.label}`}
-              />
-            </div>
+            {/*
+              No Required toggle here. The row above already carries one, and
+              rendering both meant two switches for the same property a few
+              pixels apart — they needed distinct aria-labels ("Required" and
+              "Required (inspector)") just to be told apart in tests, which is
+              the tell. Required stays on the row: it is triage worth seeing
+              across every field at a glance, without opening any of them.
+            */}
           </>
         )}
 

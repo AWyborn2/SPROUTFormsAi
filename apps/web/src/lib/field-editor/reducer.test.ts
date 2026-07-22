@@ -6,7 +6,13 @@
 import { describe, expect, it } from 'vitest';
 import type { FormField } from '@formai/shared';
 import { DEFAULT_CONTAINER } from '@formai/shared';
-import { builderReducer, initialBuilderState, initialSeq } from './reducer.js';
+import {
+  builderReducer,
+  initialBuilderState,
+  initialSeq,
+  isChoiceType,
+  typeOptionsFor,
+} from './reducer.js';
 
 function field(id: string, label = id): FormField {
   return { id, type: 'text', label, required: false, source: 'built', colSpan: 12 };
@@ -162,5 +168,146 @@ describe('review finding — reordering cannot orphan a condition', () => {
     expect(s.fields.find((f) => f.id === 'sec')?.visibleWhen).toEqual({
       fieldId: 'q1', op: 'equals', value: 'A',
     });
+  });
+});
+
+/**
+ * Retyping — the guard that keeps an unpublishable field from being authored,
+ * and the payload reconciliation that makes a retype reversible.
+ *
+ * Both editors build their type dropdown from `typeOptionsFor`, so these are
+ * the rules for the builder and for import review at once. Before this, review
+ * built its dropdown straight from `FORM_FIELD_TYPES` and a reviewer could turn
+ * a Date into an optionless Checkbox group that rendered nothing and blocked
+ * every submit.
+ */
+describe('typeOptionsFor', () => {
+  const values = (type: FormField['type']) => typeOptionsFor(type).map((o) => o.value);
+
+  it('offers no structural type for a scalar field', () => {
+    const v = values('text');
+    expect(v).not.toContain('repeating_group');
+    expect(v).not.toContain('checkbox_group');
+    expect(v).not.toContain('boolean_yes_no');
+    expect(v).toContain('date');
+    expect(v).toContain('dropdown');
+  });
+
+  it('offers a structural field its OWN type, exactly once, and no other', () => {
+    const v = values('repeating_group');
+    expect(v.filter((x) => x === 'repeating_group')).toHaveLength(1);
+    expect(v).not.toContain('checkbox_group');
+    expect(v).not.toContain('boolean_yes_no');
+    // ...and it stays retypeable to any authorable type.
+    expect(v).toContain('text');
+  });
+
+  it('does the same for an imported checkbox_group (the fixture Shift field)', () => {
+    const v = values('checkbox_group');
+    expect(v.filter((x) => x === 'checkbox_group')).toHaveLength(1);
+    expect(v).not.toContain('repeating_group');
+  });
+});
+
+describe('isChoiceType', () => {
+  it('covers every type whose answer comes from options', () => {
+    expect(isChoiceType('dropdown')).toBe(true);
+    expect(isChoiceType('radio')).toBe(true);
+    // The gap that made an imported checkbox_group's options uneditable.
+    expect(isChoiceType('checkbox_group')).toBe(true);
+  });
+
+  it('excludes a lone checkbox, which is a boolean and not a choice', () => {
+    expect(isChoiceType('checkbox')).toBe(false);
+    expect(isChoiceType('text')).toBe(false);
+    expect(isChoiceType('repeating_group')).toBe(false);
+  });
+});
+
+describe('changeType payload reconciliation', () => {
+  function table(id: string): FormField {
+    return {
+      id,
+      type: 'repeating_group',
+      label: 'Category A faults',
+      required: true,
+      source: 'imported',
+      colSpan: 12,
+      columns: [
+        { key: 'item', label: 'Item', type: 'text' },
+        { key: 'ok', label: 'OK', type: 'checkbox' },
+        { key: 'na', label: 'N/A', type: 'checkbox' },
+      ],
+      answerSets: [{ key: 'status', columnKeys: ['ok', 'na'] }],
+      fixedRows: ['Engine oil level', 'Park brake'],
+    };
+  }
+
+  const retype = (f: FormField, type: FormField['type']) => {
+    const s = initialBuilderState({ formId: null, name: 'n', fields: [f] });
+    return builderReducer(s, { t: 'changeType', id: f.id, fieldType: type }).fields[0]!;
+  };
+
+  it('drops table payload when a table stops being a table', () => {
+    const nf = retype(table('t1'), 'text');
+    expect(nf.type).toBe('text');
+    expect(nf.columns).toBeUndefined();
+    expect(nf.answerSets).toBeUndefined();
+    expect(nf.fixedRows).toBeUndefined();
+  });
+
+  it('does not resurrect a cleared answer set on the way back', () => {
+    // The trap: spreading the old field kept `answerSets` alive through the
+    // round trip, so an accepted grouping reappeared attached to a table whose
+    // columns had been cleared from under it.
+    const once = retype(table('t1'), 'text');
+    const back = retype(once, 'repeating_group');
+    expect(back.columns).toBeUndefined();
+    expect(back.answerSets).toBeUndefined();
+    expect(back.fixedRows).toBeUndefined();
+  });
+
+  it('seeds options when a field becomes a choice, and clears them when it stops', () => {
+    const text = field('q');
+    const dd = retype(text, 'dropdown');
+    expect(dd.options).toEqual(['Option 1', 'Option 2']);
+    expect(retype(dd, 'text').options).toBeUndefined();
+  });
+
+  it('preserves real options rather than overwriting them with seeds', () => {
+    // The fixture's Shift field: D / N must survive being retyped to a dropdown.
+    const shift: FormField = {
+      id: 'shift',
+      type: 'checkbox_group',
+      label: 'Shift',
+      required: false,
+      source: 'imported',
+      colSpan: 12,
+      options: ['D', 'N'],
+      selectionType: 'single',
+    };
+    expect(retype(shift, 'dropdown').options).toEqual(['D', 'N']);
+  });
+
+  it('clears selectionType, which only a checkbox_group owns', () => {
+    const shift: FormField = {
+      id: 'shift',
+      type: 'checkbox_group',
+      label: 'Shift',
+      required: false,
+      source: 'imported',
+      colSpan: 12,
+      options: ['D', 'N'],
+      selectionType: 'multiple',
+    };
+    expect(retype(shift, 'dropdown').selectionType).toBeUndefined();
+  });
+
+  it('leaves a retype undoable', () => {
+    const t = table('t1');
+    const s = initialBuilderState({ formId: null, name: 'n', fields: [t] });
+    const changed = builderReducer(s, { t: 'changeType', id: 't1', fieldType: 'text' });
+    const undone = builderReducer(changed, { t: 'undo' });
+    expect(undone.fields[0]).toEqual(t);
   });
 });
