@@ -30,7 +30,9 @@ export type GeometryDropReason =
   | 'page-out-of-range'
   | 'invalid-box'
   | 'empty-band'
-  | 'overlapping-bands';
+  | 'overlapping-bands'
+  | 'duplicate-band-key'
+  | 'band-outside-box';
 
 export interface DroppedSegment {
   page: number;
@@ -44,10 +46,36 @@ export interface GeometryResolution {
   dropped: DroppedSegment[];
 }
 
-/** A band is usable only if it spans a positive distance. */
-function bandsValid(bands: GeometryBand[] | undefined): GeometryDropReason | null {
-  if (!bands || bands.length === 0) return null;
+/**
+ * Validate one axis' bands.
+ *
+ * `min`/`max` bound the segment box on that axis: a band outside it describes a
+ * cell that is not in the table, and handing that span to a renderer draws a
+ * mark somewhere nobody measured.
+ */
+function bandsValid(
+  bands: GeometryBand[] | undefined,
+  min: number,
+  max: number,
+): GeometryDropReason | null {
+  if (!Array.isArray(bands) || bands.length === 0) return null;
+  if (bands.some((b) => !b || typeof b !== 'object')) return 'empty-band';
+
+  // Duplicate keys first, mirroring `resolveAnswerSets` and for the same
+  // reason: two bands keyed 'tick' both pass every span check, and the lookup
+  // silently returns whichever was declared first. On a ✓/×/N-A table those two
+  // spans are different columns, so a duplicate key is the cheapest possible
+  // way to stamp a competency mark in the wrong one.
+  const keys = bands.map((b) => b.key);
+  if (new Set(keys).size !== keys.length) return 'duplicate-band-key';
+
+  // Non-finite bounds must die here. `NaN` fails every comparison below, so it
+  // would slip through as "no problem found" and reach pdf-lib, which serialises
+  // it as the literal token `NaN` into the content stream — a corrupt PDF rather
+  // than a blank one.
+  if (bands.some((b) => !Number.isFinite(b.start) || !Number.isFinite(b.end))) return 'empty-band';
   if (bands.some((b) => !(b.end > b.start))) return 'empty-band';
+  if (bands.some((b) => b.start < min || b.end > max)) return 'band-outside-box';
 
   // Overlap is checked on a sorted copy so declaration order cannot hide it —
   // a reviewer dragging bands around produces them in whatever order they
@@ -57,6 +85,25 @@ function bandsValid(bands: GeometryBand[] | undefined): GeometryDropReason | nul
     if (sorted[i]!.start < sorted[i - 1]!.end) return 'overlapping-bands';
   }
   return null;
+}
+
+/** Every spatial number on a box must be finite, and the page must have extent. */
+function boxValid(seg: PageBox): boolean {
+  return (
+    Number.isFinite(seg.x) &&
+    Number.isFinite(seg.y) &&
+    Number.isFinite(seg.width) &&
+    Number.isFinite(seg.height) &&
+    seg.width > 0 &&
+    seg.height > 0 &&
+    // Consumers divide by these to map points into a rendered raster; a zero or
+    // non-finite denominator yields Infinity/NaN coordinates rather than a
+    // harmlessly off-page box.
+    Number.isFinite(seg.pageWidth) &&
+    Number.isFinite(seg.pageHeight) &&
+    seg.pageWidth > 0 &&
+    seg.pageHeight > 0
+  );
 }
 
 /**
@@ -77,19 +124,29 @@ export function resolveGeometry(
   const segments: PageBox[] = [];
   const dropped: DroppedSegment[] = [];
 
-  for (const seg of field.geometry?.segments ?? []) {
+  // `segments` arrives from a JSONB column typed by a cast, and the route that
+  // writes it validates fields with a bare `z.custom<FormField>()` — which
+  // accepts anything. So this is untyped input at runtime no matter what the
+  // signature says, and `for...of` on a non-array would throw out of a function
+  // documented as total and therefore not wrapped by its callers.
+  const raw = Array.isArray(field.geometry?.segments) ? field.geometry.segments : [];
+
+  for (const seg of raw) {
+    if (!seg || typeof seg !== 'object') continue;
     const drop = (reason: GeometryDropReason) => dropped.push({ page: seg.page, reason });
 
     if (!Number.isInteger(seg.page) || seg.page < 0 || (pageCount !== undefined && seg.page >= pageCount)) {
       drop('page-out-of-range');
       continue;
     }
-    if (!(seg.width > 0) || !(seg.height > 0)) {
+    if (!boxValid(seg)) {
       drop('invalid-box');
       continue;
     }
 
-    const bandProblem = bandsValid(seg.columnBands) ?? bandsValid(seg.rowBands);
+    const bandProblem =
+      bandsValid(seg.columnBands, seg.x, seg.x + seg.width) ??
+      bandsValid(seg.rowBands, seg.y, seg.y + seg.height);
     if (bandProblem) {
       drop(bandProblem);
       continue;
@@ -119,27 +176,54 @@ function legacySegment(pos: SourcePosition): PageBox {
  *
  * Explicit geometry wins. A field carrying only the legacy `sourcePosition`
  * resolves to one band-less segment, which is exactly right: an AcroForm widget
- * is a single box with no internal structure to describe. Falling back to the
- * legacy position when explicit geometry is wholly invalid keeps a form that
- * round-tripped before this feature round-tripping after it.
+ * is a single box with no internal structure to describe.
+ *
+ * The fallback fires only when the field NEVER HAD geometry — not when it had
+ * geometry that was rejected. That distinction is the whole safety property.
+ * Consider a table whose bands were confirmed against an 18-page document, then
+ * the source PDF is replaced by a 16-page revision: every segment drops as
+ * out-of-range. Falling back would hand the exporter the legacy single box with
+ * no bands, and the exporter divides a band-less box into equal rows and columns
+ * — producing a full grid of confident marks in cells nobody measured, on a form
+ * whose layout has just changed underneath them. Rejected geometry must resolve
+ * to nothing so the field exports as data instead.
  */
 export function geometrySegments(
   field: Pick<FormField, 'geometry' | 'sourcePosition'>,
   pageCount?: number,
 ): PageBox[] {
-  const resolved = resolveGeometry(field, pageCount).segments;
-  if (resolved.length > 0) return resolved;
+  const { segments, dropped } = resolveGeometry(field, pageCount);
+  if (segments.length > 0) return segments;
+  if (dropped.length > 0) return [];
 
   const pos = field.sourcePosition;
   if (!pos) return [];
-  if (!Number.isInteger(pos.page) || pos.page < 0) return [];
-  if (pageCount !== undefined && pos.page >= pageCount) return [];
-  if (!(pos.width > 0) || !(pos.height > 0)) return [];
 
-  return [legacySegment(pos)];
+  // The legacy position is validated by the SAME resolver rather than by a
+  // second copy of the page-range and box-area rules. Two copies would drift
+  // the moment one side is tightened, and the drift would be silent — a
+  // position rejected on one path and accepted on the other still exports,
+  // just inconsistently.
+  return resolveGeometry({ geometry: { segments: [legacySegment(pos)] } }, pageCount).segments;
 }
 
-/** The band owning `key` on this segment, or undefined when it has none. */
-export function bandFor(segment: PageBox, key: string): GeometryBand | undefined {
-  return segment.columnBands?.find((b) => b.key === key) ?? segment.rowBands?.find((b) => b.key === key);
+/**
+ * Band lookup is per-axis, deliberately.
+ *
+ * A column band is an x-span and a row band is a y-span. On an A4 page both are
+ * three-digit numbers, so a single-namespace lookup that fell through from one
+ * to the other would answer a "which row?" question with a column's x-span and
+ * produce a plausible coordinate on the wrong axis — a mark in the wrong cell,
+ * which is the failure this module exists to prevent. Nothing constrains row
+ * identities and column keys to disjoint namespaces (a row keyed by item slug
+ * can easily collide with a column keyed `comments`), so the caller states the
+ * axis rather than relying on keys never colliding.
+ */
+export function columnBandFor(segment: PageBox, key: string): GeometryBand | undefined {
+  return segment.columnBands?.find((b) => b.key === key);
+}
+
+/** The row band owning `key` on this segment, or undefined when it has none. */
+export function rowBandFor(segment: PageBox, key: string): GeometryBand | undefined {
+  return segment.rowBands?.find((b) => b.key === key);
 }

@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AnthropicMessage } from './extract.js';
 import { EXTRACTION_MAX_TOKENS, extractForm, parseExtractionResponse } from './extract.js';
 import { EXTRACT_TOOL_NAME } from './tool-schema.js';
-import { makeAcroFormPdf, makeFlatPdf, makeMultiPageAcroFormPdf } from './test-pdfs.js';
+import {
+  makeAcroFormPdf,
+  makeAcroFormPdfWithoutPageRef,
+  makeFlatPdf,
+  makeMultiPageAcroFormPdf,
+} from './test-pdfs.js';
 
 /** The structured extraction a dense checklist should yield. */
 const CHECKLIST_RESULT = {
@@ -432,5 +437,18 @@ describe('extractForm — recorded page index', () => {
     const result = await extractForm(pdf, { fileName: 'acro.pdf' });
 
     expect(result.fields.every((f) => f.sourcePosition?.page === 0)).toBe(true);
+  });
+
+  it('resolves the page from /Annots when the widget carries no /P', async () => {
+    // /P is optional per the spec. Requiring it would silently drop the
+    // position of every field in a producer that omits it — the answers simply
+    // stop being drawn on export, with no error anywhere to notice.
+    const pdf = await makeAcroFormPdfWithoutPageRef();
+
+    const result = await extractForm(pdf, { fileName: 'no-page-ref.pdf' });
+
+    const supplier = result.fields.find((f) => f.label === 'supplier_name');
+    expect(supplier?.sourcePosition?.page).toBe(0);
+    expect(supplier?.sourcePosition?.pageWidth).toBe(600);
   });
 });

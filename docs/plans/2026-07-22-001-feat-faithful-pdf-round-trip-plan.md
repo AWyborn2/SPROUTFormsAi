@@ -253,6 +253,12 @@ Manual smoke against the local stack (web 5000, API 8000):
 
 ## Open Questions
 
+**Raised by U2's review, for later units — real, deliberately not fixed in U2**
+
+- **Page rotation and CropBox are ignored.** `pages[n].getSize()` returns the MediaBox and knows nothing about `/Rotate` or `/CropBox`; pdf.js — which draws the review overlay — applies both. On a `/Rotate 90` page the two extents are transposed, so every highlight box lands somewhere unrelated to the field it names. This matters most at U4, because the human confirmation step is the only thing between a proposed band and a mark on a legal record, and here the reviewer would be confirming against a misdrawn picture. Either record the rotation on `PageBox` and normalise, or refuse geometry on rotated pages until it is handled.
+- **Only the first widget of an AcroForm field is positioned.** Pre-existing, but `FieldGeometry.segments[]` is now the right shape to fix it. A radio group's options are separate widgets, and a field repeated across pages (assessor initials on all eighteen) is one field with many. Today the export draws the selected option's text at the *first* option's rectangle — a wrong-and-confident mark, not an absent one. Whichever unit populates geometry from the AcroForm path should emit one segment per widget.
+- **Row-band keys are unique within a segment but not across segments.** A continuation page authored by duplicating a segment reproduces its row keys verbatim. If a row key is meant to be a stable identity across the whole table, that is a collision; if continuation rows are legitimately distinct, the rule needs writing down. Undefined either way — settle it when the renderer defines how rows map to segments.
+
 **Raised by U1, for U3/U4 to answer**
 
 - Whether an AcroForm document should bypass derivation entirely. `ADMN-FRM-111` exists in two variants, and the fillable one carries **73 real AcroForm fields with widget rectangles**, named per cell — `OKEngine oil level` at x=157.2, `NAEngine oil level` at x=185.5, and so on. For that document the per-cell geometry is already in the file and needs no deriving at all. The catch is that the AcroForm path produces no `columns`, so the table arrives as 73 independent scalar fields rather than a grouped checklist. Reconstructing answer sets from the `OK…`/`NA…` naming pairs is a real option and probably a cheap one, but it is a *different* mechanism from text-derived bands and belongs to U3's design, not U2's model. Flagged, not decided.
