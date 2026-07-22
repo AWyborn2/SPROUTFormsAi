@@ -16,8 +16,10 @@ import type { RepeatingRowValue, SubmissionValue } from './submission.js';
  *  - text (and anything string-valued): non-whitespace;
  *  - number: any number — 0 counts;
  *  - checkbox: explicitly `true` only (an unchecked box is not an answer);
- *  - boolean_yes_no: explicit `true` OR `false` — a seeded/untouched `null`
- *    is unanswered, so an honest "No" is recordable;
+ *  - boolean_yes_no / check_cross: explicit `true` OR `false` — a
+ *    seeded/untouched `null` is unanswered, so an honest "No" (or a cross) is
+ *    recordable. This is what keeps "assessed as failing" distinct from "never
+ *    assessed", which for an audit record is the distinction that matters;
  *  - everything else: defined and non-empty.
  */
 function scalarAnswered(type: FormFieldType, value: string | number | boolean | null | undefined): boolean {

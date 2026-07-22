@@ -66,6 +66,7 @@ export const FIELD_META: Record<string, { icon: string; label: string }> = {
   textarea: { icon: 'text', label: 'Paragraph' },
   repeating_group: { icon: 'table', label: 'Repeating table' },
   checkbox_group: { icon: 'list-checks', label: 'Checkbox group' },
+  check_cross: { icon: 'check-check', label: 'Check / Cross' },
 };
 
 /**
@@ -79,6 +80,10 @@ const STRUCTURAL_TYPES: ReadonlySet<FormFieldType> = new Set([
   'repeating_group',
   'checkbox_group',
   'boolean_yes_no',
+  // A table CELL affordance, offered by `ColumnInspector`'s own list. It is
+  // not a standalone question, so it stays out of the field-type dropdown for
+  // the same reason `boolean_yes_no` does.
+  'check_cross',
 ]);
 
 /** Types whose answer is chosen from `options`. */

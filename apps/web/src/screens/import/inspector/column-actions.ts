@@ -13,6 +13,7 @@ import {
   groupColumns,
   renameColumn,
   setColumnRequired,
+  setColumnOptions,
   setColumnType,
   setFieldCondition,
   ungroupAnswerSet,
@@ -25,6 +26,7 @@ export const importSessionColumnActions: ColumnActions = {
   renameColumn,
   setColumnType,
   setColumnRequired,
+  setColumnOptions,
   groupColumns,
   ungroupAnswerSet,
   acceptAnswerSet,
@@ -50,11 +52,15 @@ export function builderConditionActions(
   };
 }
 
+/** Column types answered by picking from `options`. Mirrors `ColumnInspector`. */
+const CHOICE_COLUMN_TYPES: ReadonlySet<string> = new Set(['dropdown', 'radio']);
+const SEEDED_OPTIONS = ['Option 1', 'Option 2'];
+
 /** Patch one column of a repeating field, preserving column order and key. */
 function patchColumn(
   field: FormField,
   columnKey: string,
-  patch: Partial<{ label: string; type: FormFieldType; required: boolean }>,
+  patch: Partial<{ label: string; type: FormFieldType; required: boolean; options: string[] }>,
 ): Partial<FormField> {
   return {
     columns: (field.columns ?? []).map((c) => (c.key === columnKey ? { ...c, ...patch } : c)),
@@ -80,9 +86,18 @@ export function builderColumnActions(
       const remaining = sets()
         .map((s) => ({ ...s, columnKeys: s.columnKeys.filter((k) => k !== columnKey) }))
         .filter((s) => s.columnKeys.length >= 2);
-      update({ ...patchColumn(field, columnKey, { type }), answerSets: remaining });
+      // A choice column with no options falls through to a plain text input,
+      // so seed it — the same trap `retypeField` closes for scalar fields.
+      const existing = field.columns?.find((c) => c.key === columnKey)?.options;
+      const options =
+        CHOICE_COLUMN_TYPES.has(type) && !existing?.length ? SEEDED_OPTIONS : existing;
+      update({
+        ...patchColumn(field, columnKey, { type, ...(options ? { options } : {}) }),
+        answerSets: remaining,
+      });
     },
     setColumnRequired: (_id, columnKey, required) => update(patchColumn(field, columnKey, { required })),
+    setColumnOptions: (_id, columnKey, options) => update(patchColumn(field, columnKey, { options })),
     groupColumns: (_id, columnKeys) => {
       const labelKey = field.columns?.[0]?.key;
       const members = columnKeys.filter((k) => k !== labelKey);

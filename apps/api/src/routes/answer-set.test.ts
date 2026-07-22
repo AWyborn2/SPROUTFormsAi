@@ -172,3 +172,36 @@ describe('review findings — regressions', () => {
     expect(sets).toEqual([]);
   });
 });
+
+describe('resolveAnswerSets — check/cross columns cannot be grouped', () => {
+  const base = (type: string) => ({
+    columns: [
+      { key: 'item', label: 'Item', type: 'text' as const },
+      { key: 'ok', label: 'OK', type: type as never },
+      { key: 'na', label: 'N/A', type: type as never },
+    ],
+    answerSets: [{ key: 'status', columnKeys: ['ok', 'na'] }],
+  });
+
+  it('drops a set whose members record their own true/false', () => {
+    /*
+      A set means "these columns share ONE answer per row" — a member's falsity
+      means "not chosen". A check/cross false is its own recorded answer
+      ("assessed, failed"), so a crossed member would assert two contradictory
+      things and `selectedOption` would silently discard one.
+    */
+    const { sets, dropped } = resolveAnswerSets(base('check_cross'));
+    expect(sets).toHaveLength(0);
+    expect(dropped).toEqual([{ key: 'status', reason: 'self-answering-column' }]);
+  });
+
+  it('still groups boolean_yes_no, which is how a real OK/NA pair is typed', () => {
+    // The guard is deliberately narrower than "any boolean column". Grouping
+    // OK/NA is the established design and every imported checklist relies on it.
+    expect(resolveAnswerSets(base('boolean_yes_no')).sets).toHaveLength(1);
+  });
+
+  it('still groups plain checkboxes', () => {
+    expect(resolveAnswerSets(base('checkbox')).sets).toHaveLength(1);
+  });
+});
