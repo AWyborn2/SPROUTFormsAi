@@ -1,7 +1,7 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Db } from '@formai/db';
-import { checkDbConnection, createHealthCache } from './db.js';
+import { checkDbConnection, createHealthCache, getDbStatus } from './db.js';
 import { createApp } from './app.js';
 
 /** Minimal mock satisfying the `execute` call checkDbConnection makes. */
@@ -89,15 +89,17 @@ describe('GET /health', () => {
       expect(res.status).toBe(200);
       expect(body.status).toBe('ok');
       expect(body.service).toBe('formai-api');
-      // `db` is a module-level const resolved from DATABASE_URL at import, so
-      // the reported state depends on where the suite runs: 'unconfigured'
-      // locally and in CI, 'connected' on Replit where the Postgres module
-      // supplies a URL. Pinning one of those failed the suite in the only
-      // environment this product actually deploys to. What the test exists for
-      // — per its own name — is that /health answers 200 SYNCHRONOUSLY from the
-      // cache without altering status or service, so it asserts the db state is
-      // a legal one rather than a particular one.
-      expect(['unconfigured', 'connected', 'error']).toContain(body.db);
+      // The endpoint must report the CACHED status rather than computing its
+      // own — that is what makes the handler synchronous, which is this test's
+      // whole subject.
+      //
+      // Asserting a literal here instead ('unconfigured') was really asserting
+      // that DATABASE_URL is unset, since `db` is a module-level const resolved
+      // at import. True locally and in CI; false on Replit, where the Postgres
+      // module supplies a URL — so the suite failed in the one environment this
+      // product deploys to. Comparing against `getDbStatus()` states the real
+      // contract and holds wherever it runs.
+      expect(body.db).toBe(getDbStatus());
     } finally {
       server.close();
     }
