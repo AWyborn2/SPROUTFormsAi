@@ -134,7 +134,7 @@ export function SubmissionDetailScreen() {
             title={
               exportable
                 ? undefined
-                : "This form's source PDF doesn't carry field positions — export is available for AcroForm-imported PDFs"
+                : 'No field on this form has a confirmed position on the page — confirm one in review to enable a filled-PDF export'
             }
           >
             <Button
@@ -263,15 +263,29 @@ function PdfRoundTrip({
           <div className="mb-2 flex items-center gap-2.5">
             <Icon name="file-x" size={18} className="flex-none text-text-tertiary" />
             <span className="font-heading text-[15px] font-bold text-text-primary">
-              No filled-PDF round-trip for this form
+              No confirmed page positions on this form
             </span>
           </div>
+          {/*
+            This used to say round-trip was for AcroForm imports only, and that
+            an AI-extracted PDF had no pixel anchors to overlay onto. That
+            stopped being true once the grid could be derived from the page's
+            text layer and confirmed in review — but the copy stayed, so a
+            shipped feature read as one that did not exist. It now names the
+            actual reason (nothing confirmed yet) and the action that fixes it.
+          */}
           <p className="text-[13px] leading-relaxed text-text-secondary">
-            This form's source PDF doesn't carry field positions — it was extracted by AI, which
-            reads the fields but not their pixel anchors, so there's nothing to overlay values back
-            onto. Round-trip export is available for AcroForm-imported PDFs. The captured answers are
-            all in the <strong className="font-semibold text-text-primary">Captured data</strong> tab
-            and still export via CSV and the API.
+            None of this form&apos;s fields has a position confirmed against the original page, so
+            there is nowhere to overlay the answers. This is fixable:{' '}
+            <strong className="font-semibold text-text-primary">re-import the same PDF</strong> onto
+            this form, confirm the grid on each table in the review step, and publish. Answers
+            submitted against the new version will export as a filled copy of the original.
+          </p>
+          <p className="mt-2 text-[13px] leading-relaxed text-text-secondary">
+            This submission stays pinned to the version it was filled on, so it keeps exporting as
+            data — every captured answer is in the{' '}
+            <strong className="font-semibold text-text-primary">Captured data</strong> tab, and via
+            CSV and the API.
           </p>
         </div>
       )}
