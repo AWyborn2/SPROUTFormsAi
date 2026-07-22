@@ -8,7 +8,7 @@
  * be read and tested directly.
  */
 import type { FormField, PageBox } from '@formai/shared';
-import type { PositionedText, TableProposal } from '../../../lib/pdf-geometry.js';
+import type { PositionedText, TableProposal, TextPage } from '../../../lib/pdf-geometry.js';
 import { proposeTableSegments } from '../../../lib/pdf-geometry.js';
 
 /** What the panel should show for the selected field. */
@@ -56,6 +56,45 @@ export function deriveForField(
     if (d !== bestD) return d < bestD ? p : best;
     return p.confidence > best.confidence ? p : best;
   });
+}
+
+/**
+ * Derive a proposal for one field across EVERY page.
+ *
+ * A table extracted by the model carries no `sourcePosition` — only AcroForm
+ * fields get one — so there is no page to start from, and deriving against
+ * page 0 would silently place an eighteen-page assessment's table on its cover
+ * sheet. Every page is tried and the best single proposal wins, by the same
+ * rule `deriveForField` uses within one page: closest row count first, then
+ * confidence. Ties keep the earlier page, so a table split across a page break
+ * anchors to where it starts.
+ */
+export function deriveAcrossPages(
+  field: Pick<FormField, 'type' | 'columns' | 'fixedRows'>,
+  pages: readonly TextPage[],
+): TableProposal | null {
+  const wantRows = field.fixedRows?.length;
+  let best: TableProposal | null = null;
+
+  for (const [i, page] of pages.entries()) {
+    const p = deriveForField(field, i, page.items, page.width, page.height);
+    if (!p) continue;
+    if (!best) {
+      best = p;
+      continue;
+    }
+    if (wantRows !== undefined) {
+      const d = Math.abs((p.segment.rowBands?.length ?? 0) - wantRows);
+      const bestD = Math.abs((best.segment.rowBands?.length ?? 0) - wantRows);
+      if (d !== bestD) {
+        if (d < bestD) best = p;
+        continue;
+      }
+    }
+    if (p.confidence > best.confidence) best = p;
+  }
+
+  return best;
 }
 
 /** Why a field cannot carry a derived grid at all. */

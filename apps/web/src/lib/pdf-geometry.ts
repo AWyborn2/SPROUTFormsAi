@@ -35,6 +35,20 @@ export interface PositionedText {
   width: number;
 }
 
+/**
+ * One page's text plus its own dimensions.
+ *
+ * The size travels WITH the text because derivation needs both and a
+ * mixed-orientation document has no single page size to fall back on — the
+ * compliance library is full of them (the dozer assessment runs to eighteen
+ * pages and mixes portrait with landscape).
+ */
+export interface TextPage {
+  items: PositionedText[];
+  width: number;
+  height: number;
+}
+
 export interface TableProposal {
   /** A segment ready to hand to the geometry model — already validator-clean. */
   segment: PageBox;

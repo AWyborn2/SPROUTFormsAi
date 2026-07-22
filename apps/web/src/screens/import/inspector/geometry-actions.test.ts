@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FormField } from '@formai/shared';
 import type { PositionedText } from '../../../lib/pdf-geometry.js';
-import { deriveForField, panelState, unsupportedReason } from './geometry-actions.js';
+import { deriveAcrossPages, deriveForField, panelState, unsupportedReason } from './geometry-actions.js';
 
 const A4 = { width: 595, height: 842 };
 
@@ -152,5 +152,49 @@ describe('panelState', () => {
     const state = panelState(tableField(), proposal.segment, true, proposal);
 
     if (state.kind === 'proposed') expect(state.confirmed).toBe(true);
+  });
+});
+
+describe('deriveAcrossPages', () => {
+  /*
+    A model-extracted table carries no `sourcePosition` — only AcroForm fields
+    get one — so there is no page to start from. Deriving against page 0 would
+    place an eighteen-page assessment's table on its cover sheet.
+  */
+  const blank = { items: [], width: A4.width, height: A4.height };
+  const withTable = { items: pageText(), width: A4.width, height: A4.height };
+
+  it('finds the table on a later page, not just page 0', () => {
+    const got = deriveAcrossPages(tableField(), [blank, blank, withTable]);
+    expect(got).not.toBeNull();
+    expect(got!.segment.page).toBe(2);
+  });
+
+  it('returns null when no page yields a proposal', () => {
+    expect(deriveAcrossPages(tableField(), [blank, blank])).toBeNull();
+  });
+
+  it('returns null for a field that cannot carry a grid at all', () => {
+    expect(deriveAcrossPages(tableField({ type: 'text' }), [withTable])).toBeNull();
+  });
+
+  it('keeps the earlier page when two pages tie', () => {
+    // A table continued across a page break should anchor where it starts.
+    const got = deriveAcrossPages(tableField(), [withTable, withTable]);
+    expect(got!.segment.page).toBe(0);
+  });
+
+  it('carries each page its OWN size, so a mixed-orientation document still derives', () => {
+    // Landscape first, portrait second. If the first page's size leaked into
+    // the second, the segment box would be measured against the wrong extent.
+    const landscape = { items: [], width: A4.height, height: A4.width };
+    const got = deriveAcrossPages(tableField(), [landscape, withTable]);
+    expect(got!.segment.page).toBe(1);
+    expect(got!.segment.pageWidth).toBe(A4.width);
+    expect(got!.segment.pageHeight).toBe(A4.height);
+  });
+
+  it('is empty-safe before the viewer has read the PDF', () => {
+    expect(deriveAcrossPages(tableField(), [])).toBeNull();
   });
 });

@@ -26,7 +26,8 @@ export type AnswerSetDropReason =
   | 'unknown-column'
   | 'label-column'
   | 'duplicate-membership'
-  | 'self-answering-column';
+  | 'self-answering-column'
+  | 'non-tickable-column';
 
 export interface DroppedAnswerSet {
   key: string;
@@ -34,15 +35,31 @@ export interface DroppedAnswerSet {
 }
 
 /**
- * Column types that cannot be an answer-set member.
+ * Column types whose cell can carry a set's tick.
  *
- * `check_cross` only — NOT `boolean_yes_no`, which is exactly how a real OK/NA
- * pair is typed and whose grouping is the established design. The difference is
- * what `false` means. In a set, a member's falsity means "this option was not
- * chosen", and the set decides the row. A `check_cross` false is its own
- * recorded answer ("assessed, failed"), so a crossed member would assert two
- * contradictory things at once — and `selectedOption` would silently discard
- * one of them.
+ * A set is answered by ticking exactly one member, and `isChosen` recognises a
+ * tick as `true` / `'true'` / `1`. Nothing previously constrained membership to
+ * types that can HOLD such a value, so a Pass/Fail/NA table whose columns the
+ * model typed `text` was accepted, and then no input could ever answer it: the
+ * filler types `✓`, `isChosen` says false, the row reports unanswered, and a
+ * required table returns 400 on every submit — including on the unauthenticated
+ * fill link — with no way to clear it.
+ *
+ * Constraining membership here rather than widening `isChosen` is what keeps
+ * extraction, authoring, fill, validation and export agreeing on one definition
+ * of "answered". A mistyped column now simply fails to group, which is visible
+ * and correctable in review.
+ */
+const TICKABLE_TYPES: ReadonlySet<string> = new Set(['checkbox', 'boolean_yes_no']);
+
+/**
+ * Types excluded for a DIFFERENT reason than "cannot hold a tick", reported
+ * separately so review can say which problem it is.
+ *
+ * A `check_cross` cell can hold a boolean, but it already records its own
+ * true/false. In a set, a member's falsity means "this option was not chosen"
+ * and the set decides the row; a crossed member would assert two contradictory
+ * things at once, and `selectedOption` would silently discard one.
  */
 const SELF_ANSWERING_TYPES: ReadonlySet<string> = new Set(['check_cross']);
 
@@ -116,13 +133,17 @@ export function resolveAnswerSets(field: Pick<FormField, 'columns' | 'answerSets
       drop('duplicate-membership');
       continue;
     }
-    // A set means "these columns share ONE answer per row". A `check_cross`
-    // (or `boolean_yes_no`) column already carries its own true/false, so
-    // grouping two of them asks which of two complete answers is THE answer —
-    // a question with no coherent reading. `selectedOption` would report the
-    // first ticked member and silently discard the other's recorded value.
-    if (keys.some((k) => SELF_ANSWERING_TYPES.has(columnTypeOf(columns, k)))) {
-      drop('self-answering-column');
+    // Every member must be able to CARRY the set's tick (see TICKABLE_TYPES).
+    // Reported as two reasons because they are two different mistakes: a
+    // mistyped column the reviewer should retype, versus a column that already
+    // answers itself and should never have been grouped.
+    const badKey = keys.find((k) => !TICKABLE_TYPES.has(columnTypeOf(columns, k)));
+    if (badKey !== undefined) {
+      drop(
+        SELF_ANSWERING_TYPES.has(columnTypeOf(columns, badKey))
+          ? 'self-answering-column'
+          : 'non-tickable-column',
+      );
       continue;
     }
 

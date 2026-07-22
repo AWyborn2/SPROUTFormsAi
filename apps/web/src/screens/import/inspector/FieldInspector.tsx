@@ -30,8 +30,10 @@ import {
   type ReviewField,
 } from '../../../lib/data/import-session.js';
 import { FIELD_META, PALETTE, isChoiceType, typeOptionsFor } from '../../../lib/field-editor/reducer.js';
+import type { TextPage } from '../../../lib/pdf-geometry.js';
 import { ColumnInspector } from './ColumnInspector.js';
 import { ConditionEditor } from './ConditionEditor.js';
+import { GeometryInspector } from './GeometryInspector.js';
 import { importSessionColumnActions, importSessionConditionActions } from './column-actions.js';
 
 /**
@@ -55,9 +57,15 @@ export interface FieldInspectorProps {
   count: number;
   /** Re-point the accordion (onto a newly inserted field, or null to close). */
   onSelect: (id: string | null) => void;
+  /**
+   * Page text from the viewer, for deriving this field's grid. Threaded as a
+   * prop rather than stashed in the session because it is a view-derived cache
+   * of the PDF, not review state — nothing that publishes depends on it.
+   */
+  textPages: readonly TextPage[];
 }
 
-export function FieldInspector({ field, index, count, onSelect }: FieldInspectorProps) {
+export function FieldInspector({ field, index, count, onSelect, textPages }: FieldInspectorProps) {
   const mode = inspectorMode(field);
   // The condition panel needs the whole form to derive its source list (only
   // fields EARLIER than this one may be a source), so it reads the session
@@ -157,6 +165,8 @@ export function FieldInspector({ field, index, count, onSelect }: FieldInspector
         )}
 
         {isTable && <ColumnInspector field={field} actions={importSessionColumnActions} />}
+
+        {isTable && <GeometryInspector field={field} textPages={textPages} />}
 
         <ConditionEditor field={field} fields={fields} actions={importSessionConditionActions} />
 
