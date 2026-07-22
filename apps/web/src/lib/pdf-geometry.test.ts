@@ -519,3 +519,144 @@ describe('proposeTableSegments — band extent', () => {
     expect(bands[0]!.start).toBeGreaterThan(480);
   });
 });
+
+/**
+ * U8 — a header row that carries no label of its own (R17).
+ *
+ * Every fixture is measured from `ADMN-FRM-111 Light Vehicle Pre-start
+ * Checklist`, whose option headers sit on their own baseline with the item
+ * names on the rows beneath. That shape is invisible to the original detector,
+ * which requires a wide label header on the same baseline — so the real header
+ * was discarded and the form's Shift row was accepted in its place, putting the
+ * night-shift checkbox where the N/A column should be.
+ */
+describe('proposeTableSegments — standalone option-header rows (U8)', () => {
+  const okNaColumns: RepeatingColumn[] = [
+    { key: 'item', label: 'Item', type: 'text' },
+    { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+    { key: 'na', label: 'NA', type: 'boolean_yes_no' },
+  ];
+
+  const A5_LANDSCAPE = { pageWidth: 595, pageHeight: 420 };
+
+  /** One category block: its option-header row plus `rows` label lines. */
+  function categoryBlock(headerY: number, xs: number[], rows: number): PositionedText[] {
+    const header = xs.map((x, i) => ({
+      text: i % 2 === 0 ? 'OK' : 'NA',
+      x,
+      y: headerY,
+      width: i % 2 === 0 ? 12.2 : 12.6,
+    }));
+    const labels = Array.from({ length: rows }, (_, i) => ({
+      text: `Item ${i}`,
+      x: 42,
+      y: headerY - 13.7 - i * 14.65,
+      width: 60 + i,
+    }));
+    return [...header, ...labels];
+  }
+
+  /** The measured page: three category blocks, each with three OK/NA pairs. */
+  function admnFrm111(): PositionedText[] {
+    return [
+      ...categoryBlock(306.2, [164.5, 192.7, 345.7, 371.1, 512.6, 540.7], 6),
+      ...categoryBlock(188.3, [161.9, 190.3, 345.7, 368.7, 510, 538.3], 2),
+      ...categoryBlock(129, [161.9, 190.3, 345.7, 368.7, 510, 538.3], 2),
+    ];
+  }
+
+  /** The form's Shift row — the wrong header the old detector accepted. */
+  function shiftRow(): PositionedText[] {
+    return [
+      { text: 'HRS/KMS', x: 42, y: 339.9, width: 39.8 },
+      { text: 'Operator', x: 242.1, y: 339.9, width: 38.1 },
+      { text: 'Shift', x: 435.6, y: 339.9, width: 19.1 },
+      { text: 'D', x: 472.8, y: 339.3, width: 6.1 },
+      { text: '☐', x: 481.2, y: 339.3, width: 8.6 },
+      { text: 'N', x: 517.2, y: 339.3, width: 6.4 },
+      { text: '☐', x: 525.9, y: 339.3, width: 8.6 },
+    ];
+  }
+
+  const proposeAdmn = (items: PositionedText[]) =>
+    proposeTableSegments({ page: 0, ...A5_LANDSCAPE, items, columns: okNaColumns });
+
+  it('recognises an option-header row with no wide label on its baseline', () => {
+    // Six items of near-identical width (12.2/12.6) and no label text. The
+    // original detector took the widest as the label header and then found no
+    // candidate narrow enough to be an option, discarding the row entirely.
+    const out = proposeAdmn(admnFrm111());
+
+    expect(out.length).toBeGreaterThan(0);
+  });
+
+  it('finds one proposal per printed category block', () => {
+    expect(proposeAdmn(admnFrm111())).toHaveLength(3);
+  });
+
+  it('places the bands over real printed columns, not the gutter', () => {
+    const [first] = proposeAdmn(admnFrm111());
+    const ok = first!.segment.columnBands?.find((b) => b.key === 'ok');
+    const na = first!.segment.columnBands?.find((b) => b.key === 'na');
+
+    // Category A's rightmost pair prints at OK x=512.6 and NA x=540.7.
+    expect(ok!.start).toBeLessThanOrEqual(512.6);
+    expect(ok!.end).toBeGreaterThan(512.6);
+    expect(na!.start).toBeLessThanOrEqual(540.7);
+    expect(na!.end).toBeGreaterThan(540.7);
+  });
+
+  it('REFUSES the Shift row rather than merely ranking it lower', () => {
+    // The failure this unit exists for. Its anchors [517.2, 525.9] match no
+    // sibling header on the page, so the corroboration check already shipped in
+    // U7 rejects it — once the real headers are candidates and can corroborate
+    // each other.
+    const out = proposeAdmn([...admnFrm111(), ...shiftRow()]);
+
+    for (const proposal of out) {
+      const ok = proposal.segment.columnBands!.find((b) => b.key === 'ok')!;
+      // The Shift row would put the ok band around x=515-525.
+      expect(ok.end - ok.start).toBeGreaterThan(12);
+    }
+    expect(out).toHaveLength(3);
+  });
+
+  it('refuses the Shift row even when it is the only candidate shape present', () => {
+    // No real headers to corroborate against, so nothing confirms it.
+    const out = proposeAdmn([
+      ...shiftRow(),
+      { text: 'Engine oil level', x: 42, y: 292.5, width: 60.8 },
+      { text: 'Engine coolant level', x: 42, y: 277.9, width: 81.3 },
+    ]);
+
+    expect(out.every((p) => p.confidence < 1)).toBe(true);
+  });
+
+  it('does not mistake a row of ordinary prose for an option header', () => {
+    // Three label-column lines of differing width — the widths are what tell
+    // this apart from a header of near-uniform option glyphs.
+    const prose: PositionedText[] = [
+      { text: 'Engine oil level', x: 42, y: 292.5, width: 60.8 },
+      { text: 'Tyre Condition/ Wheel nuts', x: 218.6, y: 292.5, width: 112.1 },
+      { text: 'Brake & indicator lights', x: 397, y: 292.5, width: 94.8 },
+      { text: 'Engine coolant level', x: 42, y: 277.9, width: 81.3 },
+      { text: 'Park brake', x: 218.6, y: 277.9, width: 43.3 },
+    ];
+
+    expect(proposeAdmn(prose)).toEqual([]);
+  });
+
+  it('still proposes for the dozer shape, whose header does carry a label', () => {
+    // The first shape is unchanged; adding a second must not disturb it.
+    const [proposal] = propose(repeated(dozerPage7Table1()));
+
+    expect(proposal?.segment.columnBands?.map((b) => b.key)).toEqual(['tick', 'cross', 'na']);
+  });
+
+  it('emits proposals the shipped validator accepts', () => {
+    for (const proposal of proposeAdmn(admnFrm111())) {
+      const resolved = resolveGeometry({ geometry: { segments: [proposal.segment] } }, 1);
+      expect(resolved.dropped).toEqual([]);
+    }
+  });
+});

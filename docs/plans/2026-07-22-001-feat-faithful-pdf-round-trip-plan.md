@@ -68,6 +68,9 @@ Two consequences to state plainly rather than discover later:
 
 - R5. Geometry is derived from the source PDF's text layer: column bands from the horizontal extents of the column-header glyphs, row bands from the vertical positions of the pre-printed row labels.
 - R6. Derivation treats the header as a *cluster of positioned items*, never assuming any particular character is independently addressable, and tolerates locating fewer anchors than the table has columns. Verified across the library: the tick is an unmappable Private-Use glyph on some documents and absent from the text layer entirely on others, and `/ ×` arrives as a single combined item where it appears at all.
+- R17. Header detection recognises an option-header row that carries no label text of its own. Verified on `ADMN-FRM-111`, whose `OK NA OK NA OK NA` row has no wide item on its baseline at all — the item names are on the rows beneath it.
+- R18. A reviewer can declare that a table prints as N side-by-side groups, splitting it into N fields whose items follow the printed reading order. Extraction never decides this.
+- R19. A band edge can be placed by dragging it onto the page, snapping to printed column positions taken from the text layer. Stepping remains available for correction below snap resolution.
 - R16. A proposal is emitted only when corroborated by evidence the derivation did not itself consume. Uncorroborated means no proposal, with the reason recorded — the module's doctrine is that refusing is safe and a confident wrong grid is not, and review proved that doctrine was not being honoured.
 - R15. A proposal that the shipped geometry validator would reject is never emitted. Duplicate band keys, non-finite bounds, bands outside the segment box and overlapping bands are all dropped silently downstream, leaving the reviewer an empty grid with no stated reason — so the proposer must satisfy the validator rather than rely on it.
 - R7. A derived grid is shown overlaid on the PDF in review, marked as derived rather than settled, and the reviewer can adjust any band or reject the grid entirely.
@@ -162,6 +165,9 @@ flowchart TB
   U1["U1 text-layer spike"] --> U2["U2 geometry model + page fix"]
   U2 --> U3["U3 derive bands"]
   U3 --> U7["U7 corroborate or refuse"]
+  U7 --> U8["U8 header shapes"]
+  U4 --> U9["U9 split into groups"]
+  U4 --> U10["U10 drag + snap"]
   U7 --> U4
   U2 --> U6["U6 retrofit path"]
   U3 --> U4["U4 confirm + adjust UI"]
@@ -317,6 +323,98 @@ flowchart TB
 
 - **Verification:** `pnpm --filter @formai/web test` passes. Then run the module across **all eight** surveyed documents and record, per document, how many tables were proposed against how many were printed — including the refusals, which are the point.
 
+### U8. Recognise an option-header row that carries no label
+
+- **Goal:** Stop the derivation rejecting the real header and accepting page furniture in its place.
+- **Requirements:** R17, R16
+- **Dependencies:** U7
+- **Files:** `apps/web/src/lib/pdf-geometry.ts`, `apps/web/src/lib/pdf-geometry.test.ts`
+
+**The defect, measured on `ADMN-FRM-111`.** `findHeaderRows` requires one wide label header plus short items to its right, on the same baseline. That form's genuine option-header row has no label text on it:
+
+```
+y=306.2   OK(164.5 w12.2)  NA(192.7 w12.6)  OK(345.7 w12.2)
+          NA(371.1 w12.6)  OK(512.6 w12.2)  NA(540.7 w12.6)
+```
+
+Six items of near-identical width, so the widest is `NA` at 12.6 and the candidate filter (≤25% of that = 3.15pt) matches nothing. The row is discarded. The row that wins instead is the form's Shift row:
+
+```
+y=339.9   HRS/KMS(42 w39.8)  Operator(242.1 w38.1)  Shift(435.6 w19.1)
+y=339.3   D(472.8 w6.1)  ☐(481.2 w8.6)  N(517.2 w6.4)  ☐(525.9 w8.6)
+```
+
+`HRS/KMS` becomes the label header, the cluster splitter cuts on the 36pt gap leaving `[N, ☐]`, and two anchors for a two-option table is an *exact* match — no inference, cluster spread 1.15 passes, and with only one candidate on the page repetition cannot fire. It ships at full confidence. Confirmed against the running app, which displayed `ok L515 R525 / na L525 R535`: **the night-shift checkbox became the N/A column.** The real columns are 28pt apart at 512.6 and 540.7, so the `na` band sits in the gutter between them.
+
+- **KTD8. Add a second header shape; do not loosen the first.** A header row is *either* a wide label header plus short items to its right (today's shape), *or* a cluster of short, near-uniform items with no wide item on the baseline at all. The label column for the second shape comes from the rows beneath, not from the header row. Widening the existing filter instead would admit far more furniture — the point is a second recognised shape, not a lower bar.
+
+- **KTD9. Repetition is what refuses the Shift row — and it already exists.** U7's repetition check never got the chance to run here, because the real headers were not candidates and the Shift row was therefore alone on the page. Once the second shape is recognised, `ADMN-FRM-111` offers three OK/NA header rows (one per category block) that corroborate each other, and the Shift row matches none of them. It is refused by the mechanism already shipped, not by a new rule aimed at it. **A fix that merely out-ranks the Shift row instead of refusing it does not satisfy R16.**
+
+- **Calibrate before shipping.** A second candidate shape can only *add* candidates, so the risk is new false positives on documents that work today. Re-run the library sweep across all eight documents and compare proposal counts per document against the U7 baseline (Dozer 24, Small Loader 16, Scraper 5, Grader 1, Small Excavator 1, Tip Head 0, Escort 0, SME Theory 0). Any document whose count *rises* needs its new proposals inspected before this lands.
+
+- **Execution note:** proof-first. The measured Shift row and OK/NA row above are the two fixtures; write both as failing tests before changing detection.
+
+- **Test scenarios:**
+  - The measured `OK NA OK NA OK NA` row is recognised as a header (currently it is not).
+  - The measured Shift row yields no proposal once the OK/NA rows are candidates.
+  - Three sibling OK/NA rows on one page corroborate each other and propose.
+  - A lone standalone option-header row with no sibling is kept but marked uncorroborated, matching how a lone label-header row is already treated.
+  - A row of near-uniform short items that is really running text (page furniture, a row of dates) is refused.
+  - Every dozer-family fixture still proposes exactly as it does today — the first shape is unchanged.
+  - Library sweep: no document's proposal count rises against the U7 baseline without the new proposals being justified in the diff.
+
+- **Verification:** `pnpm --filter @formai/web test` passes, and the library sweep matches or explains every delta.
+
+### U9. Split a table into its printed groups
+
+- **Goal:** Let a reviewer state that one extracted table is really N side-by-side printed groups, so each group becomes a table the geometry model can describe.
+- **Requirements:** R18, R8
+- **Dependencies:** U4
+- **Files:** `apps/web/src/lib/data/import-session.ts`, `apps/web/src/lib/data/import-session.test.ts`, `apps/web/src/screens/import/inspector/FieldInspector.tsx`
+
+**Why the model cannot express it otherwise.** `ADMN-FRM-111`'s Category A block prints as 6 rows × 3 side-by-side groups. Extraction flattened it into one 18-item field in across-then-down order — verified in the running app: `Engine oil level, Tyre Condition/Wheel nuts, Brake & indicator lights, Engine coolant level, Park brake, Headlights, …`. So item `i` prints at row `floor(i/3)`, group `i%3`. `PageBox` is a cross product of column bands × row bands; it can say "column 2, row 5" and cannot say "the 7th answer belongs to the middle group's first row." No amount of band adjustment reaches it.
+
+- **KTD10. Split the field; do not teach geometry to interleave.** Each split table becomes a plain 6-row two-option grid that U3, U5 and U7 already handle and are tested against. Each grid is independently confirmable, so a misplaced middle group cannot scatter wrong answers through the whole list. And item order becomes top-to-bottom as printed, rather than across-then-down.
+
+- **KTD11. The reviewer declares the split; extraction never infers it.** Production `v3` of this form split it into `Left/Middle/Right Column Checklist`; the current import merged it. Extraction is already inconsistent between runs on the same document, which is the argument for making this an explicit, visible decision by someone looking at the page rather than a silent model judgement that varies per run.
+
+- **Note the fill-view consequence, because it is not neutral.** `RepeatingGroup` renders one `<table>` per field, so splitting turns one 18-row table into three stacked 6-row tables in the fill view. Neither shape reproduces the paper's 3-across layout; this trades one long list for three short labelled ones. Accepted deliberately.
+
+- **Test scenarios:**
+  - Splitting an 18-item table into 3 groups yields three fields of 6 items each.
+  - Items distribute by reading order: items 0, 3, 6… to group 1; 1, 4, 7… to group 2.
+  - Each new field keeps the source table's columns and answer sets.
+  - An item count not divisible by N distributes the remainder to the earlier groups and loses no item.
+  - Splitting into 1 group is a no-op rather than an error.
+  - The split is undoable through the existing field-editor undo.
+  - Geometry confirmed on the source table before a split does not silently carry onto the new fields.
+
+- **Verification:** `pnpm --filter @formai/web test` passes. Split `ADMN-FRM-111`'s Category A table into three and confirm each group's grid independently.
+
+### U10. Place a band by dragging, snapped to the printed page
+
+- **Goal:** Make gross placement possible at all, and keep fine placement exact.
+- **Requirements:** R19, R8
+- **Dependencies:** U4
+- **Files:** `apps/web/src/screens/import/inspector/GeometryInspector.tsx`, `apps/web/src/screens/import/PdfViewer.tsx`, `apps/web/src/screens/import/inspector/geometry-actions.ts`, `apps/web/src/screens/import/inspector/geometry-actions.test.ts`
+
+**The defect.** Placement is 1pt-per-click arrow buttons. Moving a band from x=515 to the leftmost group at x=164 is roughly 350 clicks, and this form needs it four times over. The 1pt step was chosen reasoning only about *fine correction* against 7–13pt columns; *repositioning* was never considered.
+
+- **KTD12. Snapping is what answers the objection to dragging.** `GeometryInspector` currently documents why it uses buttons: a drag over a scaled preview cannot reliably resolve a 7–13pt column. That is correct for free dragging and is exactly why the drag must not be free. Snap targets come from the text layer, which already knows this form's option headers sit at 164.5/192.7, 345.7/371.1 and 512.6/540.7 — so the pointer chooses *which* column, and the text layer supplies the coordinate. Precision no longer depends on the pointer. Stepping stays for the cases where snapping picks wrong.
+
+- **KTD13. Repeat-across, because the groups are a ruled grid.** Once one group is placed, the remaining groups follow at a detectable pitch (~174pt and ~167pt on this form). Generating them turns four placements into one. It produces proposals like any other derivation — unconfirmed, per field, per R8.
+
+- **Test scenarios:**
+  - Dragging an edge near a printed column snaps to that column's measured position, not to the raw pointer coordinate.
+  - Dragging where no snap target is within range falls back to the pointer position rather than jumping to a distant column.
+  - Stepping still adjusts by 1pt after a drag.
+  - A drag that would invert a band or overlap its neighbour is refused, matching the existing adjustment rule.
+  - Repeat-across generates the expected sibling count at the detected pitch.
+  - Repeat-across on a page with no detectable repeat offers nothing rather than guessing a pitch.
+  - Generated siblings are unconfirmed and each requires its own confirmation.
+
+- **Verification:** `pnpm --filter @formai/web test` passes. Place one group on `ADMN-FRM-111` by dragging, repeat it across, and confirm all three grids without using the step buttons.
+
 ---
 
 ## Verification Contract
@@ -324,7 +422,8 @@ flowchart TB
 | Gate | Command | Applies to |
 |---|---|---|
 | Types | `pnpm typecheck` | every unit |
-| Web tests | `pnpm --filter @formai/web test` | U3, U4, U6 |
+| Web tests | `pnpm --filter @formai/web test` | U3, U4, U6, U7, U8, U9, U10 |
+| Library sweep | derivation run across all eight surveyed documents | U7, U8 |
 | API tests | `pnpm --filter @formai/api test` | U2, U5 |
 | Full suite | `pnpm -r test` | before merge |
 
