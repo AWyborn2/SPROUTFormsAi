@@ -39,9 +39,11 @@ export function ImportPublishScreen() {
   const trimmedName = name.trim();
   const pending = publish.isPending || createVersion.isPending;
 
-  // Only AcroForm-imported PDFs carry per-field positions; AI-extracted (flat /
-  // scanned) PDFs read the fields but not their pixel anchors, so they can't be
-  // rendered back into a filled PDF. The fields still publish either way.
+  // Whether anything on this form can be PLACED on the original page — either a
+  // legacy AcroForm `sourcePosition` or geometry a reviewer confirmed in step 2.
+  // It is not a question about the extraction path: an AI-extracted PDF whose
+  // grid has been confirmed round-trips just as well. The fields publish either
+  // way. (The prose below already says this; the comment did not.)
   const canRoundTrip = canExportSubmission(reviewedToFields(session.fields));
 
   function doPublish() {
