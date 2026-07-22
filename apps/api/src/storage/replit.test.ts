@@ -11,8 +11,16 @@ import {
 
 describe('getReplitClient', () => {
   it('returns null outside a Replit deployment (REPLIT_CLUSTER unset)', () => {
-    // REPLIT_CLUSTER is not present in test/CI environments.
-    expect(getReplitClient()).toBeNull();
+    // Stub the variable rather than assume it is absent. It genuinely is absent
+    // locally and in CI — but it IS set when the suite runs inside Replit, which
+    // is the one environment this product deploys to, so assuming its absence
+    // failed the suite exactly there.
+    vi.stubEnv('REPLIT_CLUSTER', '');
+    try {
+      expect(getReplitClient()).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
