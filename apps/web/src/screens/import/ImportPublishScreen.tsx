@@ -110,7 +110,7 @@ export function ImportPublishScreen() {
           <p className="text-sm text-text-secondary">
             {canRoundTrip
               ? `All ${session.total} fields are mapped and the layout is preserved for a faithful PDF round-trip.`
-              : `All ${session.total} fields are mapped. This PDF was extracted by AI, so it won't round-trip to a filled PDF — the fields publish and collect responses either way.`}
+              : `All ${session.total} fields are mapped. No field has a confirmed position on the page yet, so submissions export as data rather than as a filled copy of this PDF. Confirm a field's position in review to change that — the form publishes and collects responses either way.`}
           </p>
         </div>
 
@@ -171,7 +171,7 @@ export function ImportPublishScreen() {
               ) : (
                 <span className="flex items-center gap-[7px] text-[13px] font-semibold text-text-secondary">
                   <Icon name="info" size={15} className="text-text-tertiary" />
-                  AI-extracted — won't round-trip
+                  No confirmed positions — exports as data
                 </span>
               )}
             </div>

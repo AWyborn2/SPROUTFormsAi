@@ -1,9 +1,9 @@
-import zlib from 'node:zlib';
+﻿import zlib from 'node:zlib';
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
 import type { FormField, SubmissionValue } from '@formai/shared';
 import { roundTripExport } from './round-trip.js';
-import { LETTERHEAD, makeFlatPdf } from './test-pdfs.js';
+import { LETTERHEAD, makeFlatPdf, makeTwoPageFlatPdf } from './test-pdfs.js';
 
 /** Decode `<hex>` PDF string literals in a content stream to plain text. */
 function decodeHexLiterals(content: string): string {
@@ -121,6 +121,37 @@ const GROUPED_POS = {
 /** Cell text x for column index `ci` in a 4-column GROUPED_POS table. */
 const cellX = (ci: number): number => GROUPED_POS.x + (GROUPED_POS.width / 4) * ci + 3;
 
+/**
+ * Explicit bands reproducing the four 100pt columns the old arithmetic implied.
+ *
+ * The exporter no longer divides a box into equal cells — equal division is
+ * only faithful on a uniform grid, and the compliance tables it exists for have
+ * a wide label column beside narrow option columns. These fixtures therefore
+ * STATE their geometry instead of having it inferred, which is what the shipped
+ * path now requires. Column positions are unchanged, so every `cellX`
+ * assertion still means exactly what it did.
+ */
+function groupedGeometry(keys: string[], rowCount = 4) {
+  const rowHeight = GROUPED_POS.height / rowCount;
+  return {
+    segments: [
+      {
+        ...GROUPED_POS,
+        columnBands: keys.map((key, i) => ({
+          key,
+          start: GROUPED_POS.x + (GROUPED_POS.width / keys.length) * i,
+          end: GROUPED_POS.x + (GROUPED_POS.width / keys.length) * (i + 1),
+        })),
+        rowBands: Array.from({ length: rowCount }, (_, i) => ({
+          key: `r${i}`,
+          start: GROUPED_POS.y + GROUPED_POS.height - rowHeight * (i + 1),
+          end: GROUPED_POS.y + GROUPED_POS.height - rowHeight * i,
+        })),
+      },
+    ],
+  };
+}
+
 const GROUPED_FIELD: FormField = {
   id: 'checks',
   type: 'repeating_group',
@@ -135,6 +166,7 @@ const GROUPED_FIELD: FormField = {
   ],
   answerSets: [{ key: 'status', columnKeys: ['ok', 'fault', 'na'] }],
   sourcePosition: { ...GROUPED_POS },
+  geometry: groupedGeometry(['item', 'ok', 'fault', 'na']),
 };
 
 const FIELDS: FormField[] = [
@@ -157,6 +189,7 @@ const FIELDS: FormField[] = [
       { key: 'pass', label: 'Pass', type: 'boolean_yes_no' },
     ],
     sourcePosition: { page: 0, x: 40, y: 400, width: 400, height: 120, pageWidth: 600, pageHeight: 800 },
+    geometry: groupedGeometry(['item', 'pass']),
   },
 ];
 
@@ -294,6 +327,7 @@ describe('roundTripExport — answer sets', () => {
         { key: 'comment', label: 'Comment', type: 'text' },
       ],
       answerSets: [{ key: 'status', columnKeys: ['ok', 'fault'] }],
+      geometry: groupedGeometry(['item', 'ok', 'fault', 'comment']),
     };
     const output = await roundTripExport({
       originalPdf: original,
@@ -416,6 +450,7 @@ describe('roundTripExport — check/cross columns', () => {
     source: 'imported',
     columns: columnsWith('check_cross') as FormField['columns'],
     sourcePosition: { ...GROUPED_POS },
+    geometry: groupedGeometry(['item', 'result', 'note', 'spare']),
   };
 
   /** Export one row, optionally overriding the result column's type. */
@@ -471,5 +506,142 @@ describe('roundTripExport — check/cross columns', () => {
       values: { checks: [{ item: 'Isolation applied', result: false }] as never },
     });
     expect(drawnGlyphs(output).filter((g) => g.text === 'N').map((g) => g.x)).toEqual([cellX(1)]);
+  });
+});
+
+/**
+ * U5 — marks land in RECORDED cells, on the right pages. The equal-division
+ * arithmetic that used to place them is gone: it was only faithful on a uniform
+ * grid, and a mark in the wrong cell of a competency record is a false
+ * statement that an operator was assessed on something nobody checked.
+ */
+describe('roundTripExport — export against real bands', () => {
+  const cols: FormField['columns'] = [
+    { key: 'item', label: 'Item', type: 'text' },
+    { key: 'tick', label: 'Tick', type: 'boolean_yes_no' },
+    { key: 'cross', label: 'Cross', type: 'boolean_yes_no' },
+  ];
+
+  /** A table continuing from page 0 onto page 1, two rows on each. */
+  function twoPageField(): FormField {
+    const band = (key: string, start: number, end: number) => ({ key, start, end });
+    const segment = (page: number) => ({
+      page,
+      x: 40,
+      y: 400,
+      width: 300,
+      height: 80,
+      pageWidth: 600,
+      pageHeight: 800,
+      columnBands: [band('item', 40, 240), band('tick', 240, 290), band('cross', 290, 340)],
+      rowBands: [band('r0', 440, 480), band('r1', 400, 440)],
+    });
+    return {
+      id: 'checks',
+      type: 'repeating_group',
+      label: 'Checks',
+      required: false,
+      source: 'imported',
+      columns: cols,
+      answerSets: [{ key: 'status', columnKeys: ['tick', 'cross'] }],
+      geometry: { segments: [segment(0), segment(1)] },
+    };
+  }
+
+  it('covers AE2 — the mark lands in the answered column and siblings stay blank', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [twoPageField()],
+      values: { checks: [{ item: 'Isolation applied', cross: true }] },
+    });
+
+    // The cross band runs 290-340, so its cell text starts at 293.
+    expect(markXs(output)).toEqual([293]);
+  });
+
+  it('covers AE1 — a table spanning two pages draws on both', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeTwoPageFlatPdf(),
+      fields: [twoPageField()],
+      values: {
+        checks: [
+          { item: 'Row one', tick: true },
+          { item: 'Row two', tick: true },
+          { item: 'Row three', tick: true },
+        ],
+      },
+    });
+
+    const doc = await PDFDocument.load(output);
+    expect(doc.getPageCount()).toBeGreaterThan(1);
+    // Three rows against two row bands per segment: two land on page 0 and the
+    // third continues onto page 1.
+    expect(markXs(output)).toEqual([243, 243, 243]);
+  });
+
+  it('skips a column that has no band rather than guessing where it sits', async () => {
+    const field = twoPageField();
+    field.geometry!.segments = field.geometry!.segments.map((s) => ({
+      ...s,
+      columnBands: s.columnBands!.filter((b) => b.key !== 'cross'),
+    }));
+
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [field],
+      values: { checks: [{ item: 'Isolation applied', cross: true }] },
+    });
+
+    expect(markXs(output)).toEqual([]);
+  });
+
+  it('covers AE4 — a table with no confirmed geometry contributes nothing, and export still succeeds', async () => {
+    const field = twoPageField();
+    delete field.geometry;
+
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [
+        field,
+        {
+          id: 'site',
+          type: 'text',
+          label: 'Site',
+          required: false,
+          source: 'imported',
+          sourcePosition: { page: 0, x: 130, y: 680, width: 200, height: 16, pageWidth: 600, pageHeight: 800 },
+        },
+      ],
+      values: { checks: [{ item: 'Isolation applied', cross: true }], site: 'Warehouse B' },
+    });
+
+    // No arithmetic fallback: the table draws nothing at all...
+    expect(markXs(output)).toEqual([]);
+    // ...while every other field still exports.
+    expect(bytesInclude(output, 'Warehouse B')).toBe(true);
+  });
+
+  it('draws nothing for rows beyond the bands the table actually has', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeTwoPageFlatPdf(),
+      fields: [twoPageField()],
+      values: {
+        checks: Array.from({ length: 9 }, (_, i) => ({ item: `Row ${i}`, tick: true })),
+      },
+    });
+
+    // Four row bands across two segments — the five extra rows have nowhere
+    // recorded to go, so they are not drawn.
+    expect(markXs(output)).toHaveLength(4);
+  });
+
+  it('still exports a legacy scalar field positioned by sourcePosition alone', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: FIELDS,
+      values: VALUES,
+    });
+
+    expect(bytesInclude(output, 'Warehouse B')).toBe(true);
   });
 });

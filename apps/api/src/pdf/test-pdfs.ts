@@ -75,6 +75,23 @@ export async function makeAcroFormPdfWithoutPageRef(): Promise<Uint8Array> {
   return doc.save();
 }
 
+/**
+ * A two-page flat PDF, for a table that continues across a page break.
+ *
+ * The single-page fixture cannot express that case at all: a segment naming
+ * page 1 is correctly dropped as out of range, so the export silently draws
+ * only half the table and the test passes for the wrong reason.
+ */
+export async function makeTwoPageFlatPdf(): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  for (let i = 0; i < 2; i++) {
+    const page = doc.addPage([600, 800]);
+    page.drawText(LETTERHEAD, { x: 40, y: 750, size: 18, font: bold });
+  }
+  return doc.save();
+}
+
 /** A flat PDF: drawn letterhead + labels only, no AcroForm fields. */
 export async function makeFlatPdf(): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
