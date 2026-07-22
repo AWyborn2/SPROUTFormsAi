@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type { FormField, RepeatingRowValue } from '@formai/shared';
 import {
   incompleteFixedRowIndices,
+  incompleteRowsByField,
   isFieldAnswered,
   missingRequiredFields,
   stripHiddenValues,
@@ -412,5 +413,147 @@ describe('review finding — per-column required is enforced', () => {
     // Requiring each member individually would demand both be ticked at once —
     // the contradiction the set exists to prevent.
     expect(incompleteFixedRowIndices(g, [{ ok: true, na: null }])).toEqual([]);
+  });
+});
+
+/**
+ * The validation cluster (review findings H3, M3, M4).
+ *
+ * All three were the same shape: a rule that held on one table shape and
+ * silently lapsed on another, so an author's marker meant something in one
+ * place and nothing in the next.
+ */
+describe('validation cluster — required columns and set-level required', () => {
+  /** An OPEN table (no fixedRows) with a mandatory comment column. */
+  const openTable = (patch: Partial<FormField> = {}): FormField => ({
+    id: 'defects',
+    type: 'repeating_group',
+    label: 'Defects noted',
+    required: true,
+    source: 'imported',
+    columns: [
+      { key: 'item', label: 'Item', type: 'text' },
+      { key: 'fail', label: 'Fail', type: 'checkbox' },
+      { key: 'comment', label: 'Corrective action', type: 'text', required: true },
+    ],
+    ...patch,
+  });
+
+  describe('H3 — required columns on an open table', () => {
+    it('rejects a row that leaves a required column empty', () => {
+      /*
+        `isFieldAnswered` short-circuited on `value.length > 0` for this shape,
+        so one blank row satisfied a required table with a mandatory column.
+        The author marked it, the filler saw the asterisk, nothing checked it.
+      */
+      const rows: RepeatingRowValue[] = [{ item: 'Cracked mirror', fail: true, comment: '' }];
+      expect(missingRequiredFields([openTable()], { defects: rows })).toEqual(['defects']);
+    });
+
+    it('accepts the same row once the required column is filled', () => {
+      const rows: RepeatingRowValue[] = [{ item: 'Cracked mirror', fail: true, comment: 'Replaced' }];
+      expect(missingRequiredFields([openTable()], { defects: rows })).toEqual([]);
+    });
+
+    it('agrees with the fixed-row shape, which always enforced this', () => {
+      // The bug was the DISAGREEMENT: same table, same blank comment, two
+      // verdicts depending only on whether fixedRows was present.
+      const rows: RepeatingRowValue[] = [{ item: 'Engine oil level', fail: true, comment: '' }];
+      const fixed = openTable({ fixedRows: ['Engine oil level'] });
+      expect(missingRequiredFields([fixed], { defects: rows })).toEqual(['defects']);
+      expect(missingRequiredFields([openTable()], { defects: rows })).toEqual(['defects']);
+    });
+
+    it('reports WHICH row, so the filler is not left rescanning the table', () => {
+      const rows: RepeatingRowValue[] = [
+        { item: 'A', fail: true, comment: 'done' },
+        { item: 'B', fail: true, comment: '' },
+      ];
+      expect(incompleteRowsByField([openTable()], { defects: rows })).toEqual({ defects: [1] });
+    });
+  });
+
+  describe('M3 — a blank row when every set is optional', () => {
+    const grouped = (patch: Partial<FormField> = {}): FormField => ({
+      id: 'checks',
+      type: 'repeating_group',
+      label: 'Pre-start checks',
+      required: true,
+      source: 'imported',
+      columns: [
+        { key: 'item', label: 'Item', type: 'text' },
+        { key: 'ok', label: 'OK', type: 'checkbox' },
+        { key: 'na', label: 'N/A', type: 'checkbox' },
+      ],
+      answerSets: [{ key: 'status', columnKeys: ['ok', 'na'], required: false }],
+      fixedRows: ['Engine oil level', 'Park brake'],
+      ...patch,
+    });
+
+    it('does not let an all-optional grouping weaken a required table', () => {
+      /*
+        `sets.filter(s => s.required !== false)` filtered to nothing, and
+        `every` over an empty list is vacuously true — so a ten-item checklist
+        passed with nothing ticked. Grouping columns must never make a table
+        easier to satisfy than leaving them ungrouped.
+      */
+      const untouched: RepeatingRowValue[] = [{ item: 'Engine oil level' }, { item: 'Park brake' }];
+      expect(missingRequiredFields([grouped()], { checks: untouched })).toEqual(['checks']);
+    });
+
+    it('accepts the rows once each carries an answer', () => {
+      const answered: RepeatingRowValue[] = [
+        { item: 'Engine oil level', ok: true },
+        { item: 'Park brake', na: true },
+      ];
+      expect(missingRequiredFields([grouped()], { checks: answered })).toEqual([]);
+    });
+
+    it('still refuses a contradictory row, regardless of required:false', () => {
+      const both: RepeatingRowValue[] = [
+        { item: 'Engine oil level', ok: true, na: true },
+        { item: 'Park brake', ok: true },
+      ];
+      expect(missingRequiredFields([grouped()], { checks: both })).toEqual(['checks']);
+    });
+  });
+
+  describe('M4 — AnswerSet.required on an OPTIONAL table', () => {
+    const optional: FormField = {
+      id: 'extras',
+      type: 'repeating_group',
+      label: 'Additional checks',
+      required: false,
+      source: 'imported',
+      columns: [
+        { key: 'item', label: 'Item', type: 'text' },
+        { key: 'ok', label: 'OK', type: 'checkbox' },
+        { key: 'na', label: 'N/A', type: 'checkbox' },
+      ],
+      answerSets: [{ key: 'status', columnKeys: ['ok', 'na'], required: true }],
+    };
+
+    it('never blocks a submit when the table was left alone', () => {
+      // "Optional" has to keep meaning optional — this is the property that
+      // makes enforcing the flag safe at all.
+      expect(missingRequiredFields([optional], {})).toEqual([]);
+      expect(missingRequiredFields([optional], { extras: [] })).toEqual([]);
+    });
+
+    it('enforces the set on a row the filler actually started', () => {
+      // Both entry points filtered on `f.required` before any row-level work,
+      // so this flag was documented as independent and was entirely inert.
+      const started: RepeatingRowValue[] = [{ item: 'Spare wheel', ok: false, na: false }];
+      expect(missingRequiredFields([optional], { extras: started })).toEqual([]);
+
+      const halfDone: RepeatingRowValue[] = [{ item: 'Spare wheel', ok: true, na: true }];
+      expect(missingRequiredFields([optional], { extras: halfDone })).toEqual(['extras']);
+      expect(incompleteRowsByField([optional], { extras: halfDone })).toEqual({ extras: [0] });
+    });
+
+    it('accepts a properly answered row on an optional table', () => {
+      const done: RepeatingRowValue[] = [{ item: 'Spare wheel', ok: true }];
+      expect(missingRequiredFields([optional], { extras: done })).toEqual([]);
+    });
   });
 });

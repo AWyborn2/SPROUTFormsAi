@@ -108,12 +108,33 @@ function isRowAnswered(field: FormField, row: unknown): boolean {
     // answered" — it never licenses recording both OK and N/A.
     if (sets.some((s) => selectedOption(s, row).malformed)) return false;
     if (!requiredColumnsFilled(field, row)) return false;
-    return sets
-      .filter((s) => s.required !== false)
-      .every((s) => selectedOption(s, row).columnKey !== null);
+    if (
+      !sets
+        .filter((s) => s.required !== false)
+        .every((s) => selectedOption(s, row).columnKey !== null)
+    ) {
+      return false;
+    }
+    // The legacy floor still applies. Without it, a table whose every set is
+    // `required: false` filtered down to an empty list, `every` over which is
+    // vacuously true — so a completely blank row reported as answered and a
+    // required ten-item checklist passed with nothing ticked. Grouping columns
+    // must never WEAKEN a table.
   }
 
   if (!requiredColumnsFilled(field, row)) return false;
+  return rowEngaged(field, row);
+}
+
+/**
+ * Has the filler put anything in this row at all?
+ *
+ * The legacy any-cell rule, named because it now means something specific: a
+ * row nobody touched is not an incomplete answer, it is an absent one. Used as
+ * the floor under every table shape, and to decide which rows of an OPTIONAL
+ * table are worth validating.
+ */
+function rowEngaged(field: FormField, row: RepeatingRowValue): boolean {
   return answerColumns(field).some((c) => isCellAnswered(c, row[c.key]));
 }
 
@@ -154,9 +175,22 @@ export function isFieldAnswered(field: FormField, value: SubmissionValue | undef
   }
   if (value === null || value === undefined) return false;
   if (Array.isArray(value)) {
-    // An open row-entry table backed by answer sets still cannot record a
-    // contradictory or blank row — the any-row rule would accept both.
-    if (field.type === 'repeating_group' && resolveAnswerSets(field).sets.length > 0) {
+    /*
+      Every open row-entry table is validated row by row, grouped or not.
+
+      It used to short-circuit here on `value.length > 0` unless the table had
+      answer sets, which meant a table's REQUIRED COLUMNS were enforced on the
+      fixed-row and grouped shapes and silently ignored on the third — a
+      `Defects` table with a required `comment` accepted one wholly blank row.
+      The author marked a column mandatory, the filler saw the asterisk, and
+      nothing checked it.
+
+      Safe to tighten because an open table has no phantom rows: `minRows`
+      defaults to 0 and `seedFixedRows` returns [] without `fixedRows`, so a row
+      exists only because the filler added it. A blank one is reported by
+      `openRowIndices`, which highlights exactly which row to fix or remove.
+    */
+    if (field.type === 'repeating_group') {
       return value.length > 0 && value.every((row) => isRowAnswered(field, row));
     }
     return value.length > 0;
@@ -178,10 +212,46 @@ export function isFieldAnswered(field: FormField, value: SubmissionValue | undef
  * `incompleteFixedRowIndices` returns [] the moment `fixedRows` is absent.
  */
 function openRowIndices(field: FormField, value: SubmissionValue | undefined): number[] {
-  if (resolveAnswerSets(field).sets.length === 0) return [];
+  // No longer gated on the table having answer sets. `isFieldAnswered` now
+  // validates every open table row by row, so gating here would report "this
+  // table is incomplete" with no row highlighted — the exact R10 gap this
+  // function exists to close, reopened for the ungrouped shape.
   const rows: unknown[] = Array.isArray(value) ? value : [];
   const out: number[] = [];
   rows.forEach((row, i) => {
+    if (!isRowAnswered(field, row)) out.push(i);
+  });
+  return out;
+}
+
+/**
+ * Rows of an OPTIONAL table that the filler started and left invalid.
+ *
+ * `AnswerSet.required` is documented as independent of the field's own
+ * `required`, but both entry points filtered on `f.required` before any
+ * row-level work ran — so an author who marked a set required on an optional
+ * table set a flag that did nothing at all, with no indication of it.
+ *
+ * "Optional" means you need not fill the table. It does not mean a row you DID
+ * fill may be left half-answered. So only rows the filler engaged with are
+ * judged: an untouched optional table still reports nothing, and can never
+ * block a submit.
+ */
+function engagedInvalidRowIndices(field: FormField, value: SubmissionValue | undefined): number[] {
+  if (field.type !== 'repeating_group') return [];
+  const sets = resolveAnswerSets(field).sets;
+  if (!sets.some((s) => s.required !== false)) return [];
+
+  const rows: unknown[] = Array.isArray(value) ? value : [];
+  const fixedCount = field.fixedRows?.length ?? 0;
+  const out: number[] = [];
+  rows.forEach((row, i) => {
+    if (!isRowRecord(row)) return;
+    // A pre-printed fixed row is "engaged" the moment it exists, since the
+    // filler did not create it — judging those would make an optional
+    // checklist mandatory by the back door.
+    if (i < fixedCount) return;
+    if (!rowEngaged(field, row)) return;
     if (!isRowAnswered(field, row)) out.push(i);
   });
   return out;
@@ -194,9 +264,10 @@ export function incompleteRowsByField(
   const out: Record<string, number[]> = {};
   // Hidden tables cannot be incomplete — the filler was never shown them (U11).
   for (const f of visibleFields(fields, values)) {
-    if (f.type !== 'repeating_group' || !f.required) continue;
-    const incomplete =
-      f.fixedRows && f.fixedRows.length > 0
+    if (f.type !== 'repeating_group') continue;
+    const incomplete = !f.required
+      ? engagedInvalidRowIndices(f, values[f.id])
+      : f.fixedRows && f.fixedRows.length > 0
         ? incompleteFixedRowIndices(f, values[f.id])
         : openRowIndices(f, values[f.id]);
     if (incomplete.length > 0) out[f.id] = incomplete;
@@ -220,7 +291,14 @@ export function missingRequiredFields(
   // expands section-header conditions across their scope, so this agrees with
   // the fill renderer field-for-field.
   return visibleFields(fields, values)
-    .filter((f) => f.type !== 'section_header' && f.required && !isFieldAnswered(f, values[f.id]))
+    .filter((f) => {
+      if (f.type === 'section_header') return false;
+      if (f.required) return !isFieldAnswered(f, values[f.id]);
+      // An OPTIONAL table still cannot record a half-answered row when the
+      // author marked one of its answer sets required — see
+      // `engagedInvalidRowIndices`. An untouched table reports nothing here.
+      return engagedInvalidRowIndices(f, values[f.id]).length > 0;
+    })
     .map((f) => f.id);
 }
 
