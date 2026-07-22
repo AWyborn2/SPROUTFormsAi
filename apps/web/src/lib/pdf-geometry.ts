@@ -85,9 +85,35 @@ interface Row {
   items: PositionedText[];
 }
 
+/**
+ * Median of a list, or undefined when empty.
+ *
+ * Every caller here works from a median gap — between header anchors, between
+ * option centres, between row baselines — but each wants a different answer for
+ * "there were no gaps", so the fallback stays with the caller.
+ */
+function median(values: number[]): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  // Mean of the middle pair on an even-length list. Taking the upper middle
+  // instead makes the median of a two-element list equal to its LARGER member,
+  // which silently disabled outlier detection wherever exactly two gaps were
+  // measured — the reference value became the outlier it was meant to catch.
+  return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+}
+
 /** Group items into printed rows by baseline. */
 function toRows(items: PositionedText[]): Row[] {
-  const sorted = [...items].filter((i) => i.text.trim() !== '' || i.width > 0).sort((a, b) => b.y - a.y);
+  const sorted = [...items]
+    // pdfjs can report a degenerate measurement, and a non-finite coordinate
+    // fails every comparison below rather than throwing — so the item would be
+    // quietly dropped from the header candidates and its column treated as
+    // MISSING rather than as unmeasured. Drop it here so a corrupt measurement
+    // cannot masquerade as an absent glyph.
+    .filter((i) => Number.isFinite(i.x) && Number.isFinite(i.y) && Number.isFinite(i.width))
+    .filter((i) => i.text.trim() !== '' || i.width > 0)
+    .sort((a, b) => b.y - a.y);
   const rows: Row[] = [];
 
   for (const item of sorted) {
@@ -117,7 +143,7 @@ function rightmostCluster(candidates: PositionedText[]): PositionedText[] {
   if (candidates.length < 3) return candidates;
 
   const gaps = candidates.slice(1).map((c, i) => c.x - candidates[i]!.x);
-  const typical = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)]!;
+  const typical = median(gaps)!;
 
   let cutAfter = -1;
   for (let i = 0; i < gaps.length; i++) {
@@ -174,10 +200,12 @@ function findHeaderRows(rows: Row[]): HeaderRow[] {
 function reconcile(
   anchors: PositionedText[],
   expected: number,
-): { centres: number[]; located: number; inferred: number } | null {
+): { centres: number[]; located: number; inferred: number; merged: number } | null {
   const centres = anchors.map((a) => a.x + a.width / 2).sort((a, b) => a - b);
 
-  if (centres.length === expected) return { centres, located: centres.length, inferred: 0 };
+  if (centres.length === expected) {
+    return { centres, located: centres.length, inferred: 0, merged: 0 };
+  }
 
   if (centres.length > expected) {
     // Merge the closest neighbours until the count matches — an over-segmented
@@ -195,21 +223,24 @@ function reconcile(
       }
       merged.splice(bestIdx - 1, 2, (merged[bestIdx - 1]! + merged[bestIdx]!) / 2);
     }
-    return { centres: merged, located: expected, inferred: 0 };
+    return { centres: merged, located: expected, inferred: 0, merged: centres.length - expected };
   }
 
   // Fewer anchors than columns: extend leftward on the median pitch. Leftward
   // because the label column bounds the left edge, so there is known room
   // there, whereas extending right would run off the page.
-  const gaps = centres.slice(1).map((c, i) => c - centres[i]!);
-  if (gaps.length === 0) return null;
-  const pitch = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)]!;
-  if (!(pitch > 0)) return null;
+  const pitch = median(centres.slice(1).map((c, i) => c - centres[i]!));
+  if (pitch === undefined || !(pitch > 0)) return null;
 
   const extended = [...centres];
   while (extended.length < expected) extended.unshift(extended[0]! - pitch);
 
-  return { centres: extended, located: centres.length, inferred: expected - centres.length };
+  return {
+    centres: extended,
+    located: centres.length,
+    inferred: expected - centres.length,
+    merged: 0,
+  };
 }
 
 /**
@@ -219,18 +250,30 @@ function reconcile(
  * inter-anchor pitch rather than reaching for the label column: anchoring the
  * first band at the label column's right edge gave the dozer's tick a 282pt
  * span across blank paper, so a mark anywhere in that emptiness would have
- * resolved as "ticked". `leftLimit` only clamps the result so the label column
- * can never be overlapped.
+ * resolved as "ticked".
+ *
+ * `leftLimit` is the label HEADER's right edge, which is not the same as the
+ * label column's — the header text is often far shorter than the longest label
+ * cell beneath it (192pt against 442pt on the measured fixture), so this bounds
+ * the bands against the header, not against the widest printed label.
+ * `rightLimit` keeps the last band on the page: the segment box is derived from
+ * that band's end, so an unclamped overhang made the box narrower than its own
+ * band and the whole proposal was then dropped by the validator with no reason
+ * surfaced.
  */
-function centresToBands(centres: number[], keys: string[], leftLimit: number): GeometryBand[] {
-  const gaps = centres.slice(1).map((c, i) => c - centres[i]!);
-  const pitch = gaps.length ? [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)]! : 12;
+function centresToBands(
+  centres: number[],
+  keys: string[],
+  leftLimit: number,
+  rightLimit: number,
+): GeometryBand[] {
+  const pitch = median(centres.slice(1).map((c, i) => c - centres[i]!)) ?? 12;
   const margin = pitch / 2;
 
   return centres.map((centre, i) => ({
     key: keys[i]!,
     start: i === 0 ? Math.max(centre - margin, leftLimit) : (centres[i - 1]! + centre) / 2,
-    end: i === centres.length - 1 ? centre + margin : (centre + centres[i + 1]!) / 2,
+    end: i === centres.length - 1 ? Math.min(centre + margin, rightLimit) : (centre + centres[i + 1]!) / 2,
   }));
 }
 
@@ -241,7 +284,8 @@ function centresToBands(centres: number[], keys: string[], leftLimit: number): G
  * `Isolates machine correctly...` wraps, leaving a 10.4pt gap against a ~16.8pt
  * row pitch, and counting it as two rows would offset every answer below it.
  */
-function rowBands(rows: Row[], header: HeaderRow, labelLeft: number, floor: number): GeometryBand[] {
+function rowBands(rows: Row[], header: HeaderRow, floor: number): GeometryBand[] {
+  const labelLeft = header.labelHeader.x;
   const below = rows
     .filter((r) => r.y < header.row.y - BASELINE_TOLERANCE && r.y > floor)
     // The label column has ONE left margin. A numbered section heading printed
@@ -251,8 +295,7 @@ function rowBands(rows: Row[], header: HeaderRow, labelLeft: number, floor: numb
     .sort((a, b) => b.y - a.y);
   if (below.length === 0) return [];
 
-  const gaps = below.slice(1).map((r, i) => below[i]!.y - r.y);
-  const pitch = gaps.length ? [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)]! : 0;
+  const pitch = median(below.slice(1).map((r, i) => below[i]!.y - r.y)) ?? 0;
 
   // Merge wrapped continuation lines into the row they belong to.
   const baselines: number[] = [];
@@ -265,7 +308,9 @@ function rowBands(rows: Row[], header: HeaderRow, labelLeft: number, floor: numb
   const step = pitch > 0 ? pitch : 12;
   return baselines.map((y, i) => {
     const next = baselines[i + 1];
-    const bottom = next !== undefined ? (y + next) / 2 : y - step / 2;
+    // Clamped to the page: the last row's band extends half a pitch below its
+    // baseline, which runs off the bottom of a table printed near the margin.
+    const bottom = Math.max(next !== undefined ? (y + next) / 2 : y - step / 2, 0);
     const top = i === 0 ? header.row.y : (baselines[i - 1]! + y) / 2;
     return { key: `r${i}`, start: bottom, end: top };
   });
@@ -296,13 +341,14 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
     // that prints 4, putting every later answer on the wrong row.
     const floor = headers[index + 1]?.row.y ?? -Infinity;
 
-    const bands = rowBands(rows, header, header.labelHeader.x, floor);
+    const bands = rowBands(rows, header, floor);
     if (bands.length === 0) continue;
 
     const columnBands = centresToBands(
       resolved.centres,
       optionColumns.map((c) => c.key),
       header.labelHeader.x + header.labelHeader.width,
+      input.pageWidth,
     );
 
     const left = header.labelHeader.x;
@@ -315,7 +361,17 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
     if (resolved.inferred > 0) {
       confidence -= 0.3 * resolved.inferred;
       notes.push(
-        `${resolved.inferred} of ${optionColumns.length} column positions inferred from pitch — the header glyphs were not in the text layer.`,
+        `${resolved.inferred} of ${optionColumns.length} column positions inferred from pitch — the header glyphs were not in the text layer. Inference assumes the MISSING columns are the leftmost ones; check the rightmost located header really is the last printed column.`,
+      );
+    }
+    if (resolved.merged > 0) {
+      // Merging is a guess, and reporting it as a clean locate inverted the one
+      // signal the reviewer has. More anchors than columns means either an
+      // over-segmented header or a non-header item taken as an anchor, and the
+      // second is the dangerous reading.
+      confidence -= 0.3 * resolved.merged;
+      notes.push(
+        `${resolved.located + resolved.merged} anchors were found for ${optionColumns.length} columns and the closest were merged — the header may be over-segmented, or something that is not a column header was taken as one.`,
       );
     }
 
