@@ -67,7 +67,7 @@ Two consequences to state plainly rather than discover later:
 **Capture**
 
 - R5. Geometry is derived from the source PDF's text layer: column bands from the horizontal extents of the column-header glyphs, row bands from the vertical positions of the pre-printed row labels.
-- R6. Derivation never depends on locating the tick glyph. `×` and `N/A` are sufficient to establish a set's bands.
+- R6. Derivation treats the header as a *cluster of positioned items*, never assuming any particular character is independently addressable. Verified against the fixture: the tick is an unmappable Private-Use glyph, and `/ ×` arrives as a single combined item.
 - R7. A derived grid is shown overlaid on the PDF in review, marked as derived rather than settled, and the reviewer can adjust any band or reject the grid entirely.
 - R8. A field whose geometry the reviewer has not confirmed is exported as data, never with a guessed mark.
 - R9. Scalar fields carry geometry too, so a round-tripped form shows names, dates and free text in place — not only table marks.
@@ -87,7 +87,7 @@ Two consequences to state plainly rather than discover later:
 
 - AE1. **Covers R1, R3.** Given a table whose rows continue from page 8 onto page 9, when the submission is exported, then rows land on both pages in their real positions.
 - AE2. **Covers R2, R10.** Given a row answered `×` in a table with a 260pt label column and three 34pt option columns, when exported, then the mark falls inside the `×` column's printed cell and the `√` and `N/A` cells are blank.
-- AE3. **Covers R6.** Given a table whose tick header does not surface in the text layer, when geometry is derived, then the bands are still established from `×` and `N/A` and the tick column is inferred from the remaining span.
+- AE3. **Covers R6.** Given the fixture's page-7 header — a Private-Use tick at x=502.6, a combined `"/ ×"` item at x=512.1, and `N/A` at x=539.9 — when geometry is derived, then three option bands are produced with the `×` band resolved from the combined item's extent rather than from a standalone `×`.
 - AE4. **Covers R8.** Given a reviewer who skipped grid confirmation, when a submission is exported, then that table contributes no marks and the export still succeeds.
 - AE5. **Covers R9.** Given a candidate name and assessment date on page 1, when exported, then both appear in their printed boxes.
 - AE6. **Covers R13, R14.** Given a form published before this ships and a submission against it, when the form is re-imported with geometry, then the old submission still exports against the old version, unchanged.
@@ -110,14 +110,27 @@ This matters more than a usual deferral list, because the fixture document conta
 
 - KTD3. **Geometry is review output, not extraction output.** It is written when a reviewer confirms a grid and travels to the published field through `reviewedToFields`, alongside `answerSets`. Extraction stays a pure AI-and-text-parsing step with no notion of confirmation. This is also what makes R8 enforceable — unconfirmed simply means absent.
 
-- KTD4. **Detection keys on the negative options, never on the tick.** Direct inspection shows `×` and `N/A` present on every observation page while the tick surfaces as `√` on some pages and not at all on others. Two anchors are enough to establish band pitch and edges; the third column is the remaining span. Keying on the tick would fail on a third of the fixture's own tables.
+- KTD4. **Detection keys on the header cluster's geometry, not on any character.** Direct inspection of the fixture's page-7 header row (y=649) shows why no character-matching rule survives contact:
+
+  | x | item | codepoints | font |
+  |---|---|---|---|
+  | 37.5 | `During the demonstration, did the candidate:` | ASCII | `g_d0_f2` |
+  | 502.6 | *(tick)* | `U+F0FC` — Private Use Area, unmappable | `g_d0_f3` |
+  | 512.1 | `/ ×` | `U+2F, U+20, U+D7` — **one combined item**, width 10.3 | `g_d0_f1` |
+  | 539.9 | `N/A` | ASCII | `g_d0_f1` |
+
+  So the tick is not missing — it is a Wingdings-style glyph pdfjs cannot map to Unicode, which is why a `√`/`✓` search finds nothing. And `×` can never be located on its own, because the slash and the cross are a single text run. An earlier draft of this plan keyed on "`×` and `N/A`, never the tick" and was wrong on both counts.
+
+  The rule that does hold: **the option columns are the cluster of short, narrow text items lying to the right of the label-column header, on the header row's baseline.** Bands come from those items' x-extents in order. Characters are used only to *label* a band after the fact, never to find one. A band whose item spans two printed columns — like `/ ×` — is split on its own advance width.
+
+- KTD4a. **Headers repeat per table, which is what makes per-segment derivation work.** The anchor row occurs twice on page 7 and three times on pages 8 and 9 — once per table, not once per page. Each segment therefore carries its own header to derive from, and a continuation table is not left inheriting bands from a different page.
 
 - KTD5. **A mark that cannot be placed is never drawn.** Where the current code would divide arithmetically and produce a confident wrong answer, the new path skips. On a competency record a mark in the wrong column is worse than no mark — it is a false statement about whether an operator was assessed as competent.
 
 ### Assumptions
 
 - The text layer is reliable for the forms in the library. Verified on the fixture: 47–75 positioned items per page, real fonts, no OCR. **Not verified for `ADMN-FRM-111`** — U1 checks it, and a scanned form falls back to manual band drawing on the same UI.
-- Column headers are printed once per table, not once per page. If a table repeats its header on continuation pages, per-segment derivation handles it; if it does not, the continuation inherits the first segment's bands. U1 records which pattern the fixture uses.
+- Column headers repeat per table occurrence — **verified**: twice on page 7, three times on pages 8 and 9. Every segment has its own anchor row, so no continuation inherits another page's bands. See KTD4a.
 - `pnpm -r test` at 880 across 60 files is the baseline. Any failure after a unit lands is caused by that unit.
 
 ### Sequencing
@@ -163,8 +176,9 @@ flowchart TB
 - **Requirements:** R5, R6
 - **Dependencies:** U2
 - **Files:** `apps/web/src/lib/pdf-geometry.ts` (new), `apps/web/src/lib/pdf-geometry.test.ts` (new)
-- **Approach:** A pure module taking positioned text items plus the field's columns, returning candidate bands with a confidence. Column bands come from clustering the header glyphs' x-extents, anchored on `×` and `N/A` per KTD4 and never on the tick. Row bands come from the y-positions of the label-column text. Pure functions over an item list — pdfjs stays in the viewer, so this is unit-testable from fixtures with no PDF in the loop.
-- **Test scenarios:** two anchors yield three evenly-pitched bands with the tick inferred; a missing tick glyph does not reduce the band count; a wide label column is not mistaken for an option column; rows whose labels wrap to two lines produce one band, not two; a table with no locatable anchors returns no proposal rather than a guess.
+- **Approach:** A pure module taking positioned text items plus the field's columns, returning candidate bands with a confidence. Column bands come from the cluster of short narrow items right of the label-column header on the header baseline, per KTD4 — geometry first, characters only as after-the-fact labels. A combined item such as `/ ×` is split on its advance width. Row bands come from the y-positions of the label-column text. Pure functions over an item list — pdfjs stays in the viewer, so this is unit-testable from fixtures with no PDF in the loop.
+- **Fixture data:** use the real page-7 header row as the primary test fixture — label header at x=37.5 (w=192), `U+F0FC` at 502.6 (w=7.1), `/ ×` at 512.1 (w=10.3), `N/A` at 539.9 (w=13.3), page 595×842. Synthetic evenly-spaced fixtures hide exactly the irregularity this unit exists to handle.
+- **Test scenarios:** the real page-7 header yields three option bands, not two or four; the combined `/ ×` item splits into two bands on its advance width; an unmappable `U+F0FC` glyph is treated as a band like any other rather than discarded; the 192pt label header is not mistaken for an option column; rows whose labels wrap to two lines produce one band, not two; a header row with no short items right of the label returns no proposal rather than a guess.
 - **Verification:** `pnpm --filter @formai/web test` passes.
 
 ### U4. Confirm and adjust the grid in review
@@ -227,8 +241,13 @@ Manual smoke against the local stack (web 5000, API 8000):
 
 **Resolve in U1**
 
-- Whether `ADMN-FRM-111` has a usable text layer. If not, manual band drawing becomes the primary path and U3 shrinks to a fallback.
-- Whether the fixture's tables repeat their column headers on continuation pages.
+- Whether `ADMN-FRM-111` has a usable text layer. If not, manual band drawing becomes the primary path and U3 shrinks to a fallback. The file is not in the fixture folder alongside the assessments and has not yet been located.
+- Whether the sibling assessments (Grader, Scraper, Small Loader, Small Excavator, Tip Head Controller) share the fixture's header encoding. They share a producer and almost certainly do, but "almost certainly" is what this plan already got wrong once.
+
+**Resolved during scoping** — recorded here so they are not re-opened:
+
+- Header repetition: per table occurrence, not per page. See KTD4a.
+- Header glyph encoding: Private-Use tick, combined `/ ×` run. See KTD4.
 
 **Deferred to implementation**
 
