@@ -67,7 +67,7 @@ Two consequences to state plainly rather than discover later:
 **Capture**
 
 - R5. Geometry is derived from the source PDF's text layer: column bands from the horizontal extents of the column-header glyphs, row bands from the vertical positions of the pre-printed row labels.
-- R6. Derivation treats the header as a *cluster of positioned items*, never assuming any particular character is independently addressable. Verified against the fixture: the tick is an unmappable Private-Use glyph, and `/ ×` arrives as a single combined item.
+- R6. Derivation treats the header as a *cluster of positioned items*, never assuming any particular character is independently addressable, and tolerates locating fewer anchors than the table has columns. Verified across the library: the tick is an unmappable Private-Use glyph on some documents and absent from the text layer entirely on others, and `/ ×` arrives as a single combined item where it appears at all.
 - R7. A derived grid is shown overlaid on the PDF in review, marked as derived rather than settled, and the reviewer can adjust any band or reject the grid entirely.
 - R8. A field whose geometry the reviewer has not confirmed is exported as data, never with a guessed mark.
 - R9. Scalar fields carry geometry too, so a round-tripped form shows names, dates and free text in place — not only table marks.
@@ -129,7 +129,21 @@ This matters more than a usual deferral list, because the fixture document conta
 
 ### Assumptions
 
-- The text layer is reliable for the forms in the library. Verified on the fixture: 47–75 positioned items per page, real fonts, no OCR. **Not verified for `ADMN-FRM-111`** — U1 checks it, and a scanned form falls back to manual band drawing on the same UI.
+- **Every form in the library has a usable text layer — verified by U1, none are scanned.** Survey of eight documents:
+
+  | Document | Pages | Text items | Header signature |
+  |---|---|---|---|
+  | Track Dozer | 18 | 1210 | matches (19 PUA ticks, 23 `/ ×`, 23 `N/A`) |
+  | Scraper | 15 | 949 | matches |
+  | Small Excavator | 13 | 916 | matches |
+  | Small Loader | 13 | 816 | **partial — 0 PUA ticks**, 18 `/ ×`, 18 `N/A` |
+  | Grader | 10 | 585 | **partial — 0 `/ ×`**, 6 `N/A` |
+  | Tip Head Controller | 3 | 194 | partial |
+  | Escort Vehicle Permit | 3 | 185 | partial |
+  | Mine Site SME Theory | 7 | 439 | partial |
+
+- **Header encoding varies per document, which is why KTD4 keys on geometry rather than characters.** Small Loader carries 18 `/ ×` and 18 `N/A` runs but *no* Private-Use tick at all; Grader carries `N/A` with no combined run. Band derivation must therefore tolerate locating fewer anchors than there are columns, and infer the remainder from pitch — it cannot require a full set.
+- `ADMN-FRM-111` is A5 landscape (595×420), single page, 67 text items, and uses ASCII `OK`/`NA` headers plus `☐` (U+2610) ballot boxes — a third encoding again.
 - Column headers repeat per table occurrence — **verified**: twice on page 7, three times on pages 8 and 9. Every segment has its own anchor row, so no continuation inherits another page's bands. See KTD4a.
 - `pnpm -r test` at 880 across 60 files is the baseline. Any failure after a unit lands is caused by that unit.
 
@@ -178,7 +192,7 @@ flowchart TB
 - **Files:** `apps/web/src/lib/pdf-geometry.ts` (new), `apps/web/src/lib/pdf-geometry.test.ts` (new)
 - **Approach:** A pure module taking positioned text items plus the field's columns, returning candidate bands with a confidence. Column bands come from the cluster of short narrow items right of the label-column header on the header baseline, per KTD4 — geometry first, characters only as after-the-fact labels. A combined item such as `/ ×` is split on its advance width. Row bands come from the y-positions of the label-column text. Pure functions over an item list — pdfjs stays in the viewer, so this is unit-testable from fixtures with no PDF in the loop.
 - **Fixture data:** use the real page-7 header row as the primary test fixture — label header at x=37.5 (w=192), `U+F0FC` at 502.6 (w=7.1), `/ ×` at 512.1 (w=10.3), `N/A` at 539.9 (w=13.3), page 595×842. Synthetic evenly-spaced fixtures hide exactly the irregularity this unit exists to handle.
-- **Test scenarios:** the real page-7 header yields three option bands, not two or four; the combined `/ ×` item splits into two bands on its advance width; an unmappable `U+F0FC` glyph is treated as a band like any other rather than discarded; the 192pt label header is not mistaken for an option column; rows whose labels wrap to two lines produce one band, not two; a header row with no short items right of the label returns no proposal rather than a guess.
+- **Test scenarios:** the real page-7 header yields three option bands, not two or four; the combined `/ ×` item splits into two bands on its advance width; an unmappable `U+F0FC` glyph is treated as a band like any other rather than discarded; a Small-Loader-shaped header with the tick missing from the text layer still yields three bands, inferring the absent one from pitch; a Grader-shaped header carrying only `N/A` returns a low-confidence proposal rather than a confident wrong one; the 192pt label header is not mistaken for an option column; `ADMN-FRM-111`'s ASCII `OK`/`NA` header yields two bands; rows whose labels wrap to two lines produce one band, not two; a header row with no short items right of the label returns no proposal rather than a guess.
 - **Verification:** `pnpm --filter @formai/web test` passes.
 
 ### U4. Confirm and adjust the grid in review
@@ -239,13 +253,14 @@ Manual smoke against the local stack (web 5000, API 8000):
 
 ## Open Questions
 
-**Resolve in U1**
+**Raised by U1, for U3/U4 to answer**
 
-- Whether `ADMN-FRM-111` has a usable text layer. If not, manual band drawing becomes the primary path and U3 shrinks to a fallback. The file is not in the fixture folder alongside the assessments and has not yet been located.
-- Whether the sibling assessments (Grader, Scraper, Small Loader, Small Excavator, Tip Head Controller) share the fixture's header encoding. They share a producer and almost certainly do, but "almost certainly" is what this plan already got wrong once.
+- Whether an AcroForm document should bypass derivation entirely. `ADMN-FRM-111` exists in two variants, and the fillable one carries **73 real AcroForm fields with widget rectangles**, named per cell — `OKEngine oil level` at x=157.2, `NAEngine oil level` at x=185.5, and so on. For that document the per-cell geometry is already in the file and needs no deriving at all. The catch is that the AcroForm path produces no `columns`, so the table arrives as 73 independent scalar fields rather than a grouped checklist. Reconstructing answer sets from the `OK…`/`NA…` naming pairs is a real option and probably a cheap one, but it is a *different* mechanism from text-derived bands and belongs to U3's design, not U2's model. Flagged, not decided.
 
-**Resolved during scoping** — recorded here so they are not re-opened:
+**Resolved — do not re-open**
 
+- `ADMN-FRM-111` text layer: **yes**, 67 items on one A5-landscape page. Also has a fillable AcroForm variant (see above).
+- Sibling encoding consistency: **no, it varies** — see Assumptions. This is now a requirement on U3, not an assumption.
 - Header repetition: per table occurrence, not per page. See KTD4a.
 - Header glyph encoding: Private-Use tick, combined `/ ×` run. See KTD4.
 
