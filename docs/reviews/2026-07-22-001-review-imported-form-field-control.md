@@ -440,21 +440,40 @@ the PR carrying this section; the remaining thirteen still reproduce.
 | M4 | Still present — `:197`, `:223`; the "Independent of the field's own `required`" doc is verbatim unchanged |
 | M5, M6 | Still present — `RepeatingGroup.tsx:283-306`, `:110-128` |
 | M7 | Still present — `visibility.ts:205` vs `:113,121` |
-| M8, M9 | Still present — **not** superseded by the geometry work |
+| M8, M9 | Still present — survive U3 (#21); see the correction below |
 | M10 | Still present — `answer-set.ts:85-87`, `:107`; both publish schemas still `z.custom` |
 | L1, L2, L3, L5 | Still present |
 
-### M8/M9 were not superseded — and the advice still holds
+### M8/M9 survive U3 — but the sequencing advice does not
 
-The geometry track (#15–#18, #20) built `geometry.ts` and wired `resolveGeometry` into the
-**web** review side, but **the exporter was never migrated**: `roundTripExport` still reads
-`field.sourcePosition`, and `geometrySegments` has zero production callers. U3 has not
-landed. So §5's advice — fix M8/M9 *as part of* U3 — is still live, not stale.
+**Corrected 2026-07-22, after #21.** This subsection originally recorded that the exporter
+had never been migrated, that `geometrySegments` had zero production callers, and that §5's
+advice to fix M8/M9 *as part of* U3 was therefore still live. That was accurate when written
+and **wrong within the hour**: [#21](https://github.com/AWyborn2/SPROUTFormsAi/pull/21)
+(*export against recorded bands, and gate on geometry not path*) is U3, and it landed
+between the re-verification and the merge of #22.
 
-M8's blast radius is now slightly **wider**. #19 added `drawMark`, `SELF_ANSWERING` and the
-"a recorded `false` must leave a mark" guarantee, but all of that sits in the **ungrouped**
-`cols.forEach` fallback, which grouped keys skip at `round-trip.ts:179`. The new guarantee
-explicitly does not hold for a grouped column.
+As of `91fa67d`:
+
+- `roundTripExport` **does** consume geometry — `round-trip.ts:104` calls `geometrySegments`.
+  The claim "zero production callers" is now false.
+- **M8 still reproduces.** Grouped keys still `continue` out of the ungrouped fallback
+  (`round-trip.ts:209`), so a grouped cell holding a value `isChosen` does not recognise is
+  still erased from the export.
+- **M9 still reproduces.** `malformed` is still discarded, with the original comment intact
+  (`round-trip.ts:200`).
+
+So the findings stand, but they are now **standalone work against the band-based exporter**,
+not something to fold into a unit that has already shipped. Do not wait for U3.
+
+M8's blast radius remains slightly **wider** than as first written. #19 added `drawMark`,
+`SELF_ANSWERING` and the "a recorded `false` must leave a mark" guarantee, but all of it sits
+in the **ungrouped** fallback that grouped keys skip. The guarantee explicitly does not hold
+for a grouped column.
+
+> Note for future readers: this file has now been wrong twice about a fast-moving branch.
+> Treat any claim here about what has or has not landed as needing a `git log` check before
+> acting on it. The *findings* have held up; the *sequencing* has not.
 
 ### A correction to note
 
@@ -485,11 +504,18 @@ tickable column; the assertions' intent is unchanged.
 
 ## 7. Recommended sequencing
 
-1. **H1, M1, M2 and L7** — web-only, self-contained, and the ones manual testing hits first.
-   Planned in [docs/plans/2026-07-22-001-fix-import-inspector-defects-plan.md](../plans/2026-07-22-001-fix-import-inspector-defects-plan.md).
-2. **H2** — one decision (constrain answer-set membership to boolean-valued columns in
-   `resolveAnswerSets`) resolves H2, M8 and most of L1's blast radius. Needs its own pass;
-   it touches the persisted model and wants a migration check for existing forms.
-3. **H3, M3, M4** — validation semantics. These want a single deliberate pass over
-   `submission-validation.ts` with a decision table, not three point fixes.
-4. **M5–M7, M9, M10** and the Low findings — individually small, no ordering constraint.
+Rewritten 2026-07-22 to reflect what has shipped. Items 1 and 2 are **done**.
+
+1. ~~**H1, M1, M2 and L7**~~ — shipped in #17.
+2. ~~**H2**~~ — shipped in #22. Membership is constrained to tickable column types
+   (`checkbox`, `boolean_yes_no`). Note this did **not** resolve M8 as originally predicted:
+   M8's grouped-cell erasure is a separate path in the exporter, not a membership question.
+3. **H3, M3, M4** — validation semantics, and the largest remaining cluster. These want a
+   single deliberate pass over `submission-validation.ts` with a decision table, not three
+   point fixes. **Next.**
+4. **M8, M9** — now standalone against the band-based exporter (see §6). No longer blocked
+   on U3, which has shipped.
+5. **M5, M6, M7, M10** and the Low findings — individually small, no ordering constraint.
+   M6 should be fixed by **deleting** the duplicated rules in `packages/ui`, not by syncing
+   them: the sole production caller already passes resolved sets, so the second rule set
+   cannot currently do anything except drift.
