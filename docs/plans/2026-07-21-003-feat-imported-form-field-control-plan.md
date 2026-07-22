@@ -164,7 +164,18 @@ flowchart TB
 
 ### Assumptions
 
-- Imported tables can reach publish today — they render as an unusable placeholder in the builder, which is why the two-independent-checkbox shape is believed to be unused rather than impossible. No data migration is planned on that basis. The belief is checkable, so U1 carries a pre-work step: query published versions for `repeating_group` fields with two or more boolean columns and record the count here. A non-zero count makes migration real work that must be scoped before U9 ships, because U9 turns those placeholders into live editable tables.
+- ~~Imported tables can reach publish today — they render as an unusable placeholder in the builder, which is why the two-independent-checkbox shape is believed to be unused rather than impossible. No data migration is planned on that basis.~~
+
+  **DISPROVED — audited 2026-07-22, after U9 shipped.** The query found **24 matching fields across three published versions of `ADMN-FRM-111 Light Vehicle Pre-start Checklist`**, twelve of them in the live `v3`, which has a submission against it. The `Category A/B/C Faults` tables are precisely the `OK`/`NA` shape answer sets exist to constrain, and on those versions they remain ungrouped.
+
+  The inference — "unusable in the builder, therefore unused" — was reasonable and wrong. What made it wrong is that the placeholder blocked *editing*, not *importing, publishing or filling*: the form went through its whole lifecycle without anyone needing to open that table in the builder.
+
+  This is not a regression, and U9 did not alter anything. Template versions are immutable by design, so `v3` legitimately keeps the shape it was published with. What the audit removes is the licence to ship U9 *without scoping a migration* — which is exactly what this assumption granted.
+
+  Consequences, in order:
+  - Rows already recorded against `v3` can be contradictory (both options ticked) or blank on a required row. Whether any actually are is a data question, not a code one — inspect the submitted rows before deciding anything.
+  - The fix going forward is a **new version**, not a mutation: re-import `ADMN-FRM-111` so `v4` carries answer sets. Existing submissions stay pinned to `v3` and keep rendering as they were filled, which is the correct behaviour for an audit record.
+  - No schema migration is needed or wanted. The shape lives in a JSONB field set, and rewriting a published version would break the pinning that makes an old submission readable as evidence of what was recorded.
 - Version history and the draft-versus-published lifecycle already exist and are relied on by R18 and F3.
 - The baseline is green as of this plan: `pnpm -r test` passes 511 tests across 44 files, and `pnpm typecheck` passes in all five projects. Any failure after a unit lands is caused by that unit.
 - Arithmetic cell division is only faithful on a uniform grid. `drawRepeatingGroup` splits the field box into equal columns and rows, which assumes the box spans exactly the printed table and that every column is the same width. The assessment tables have a wide label column and narrow option columns, so if geometry is ever populated (Roadmap item 8) marks would land in the wrong printed cells while the export still reported success. Nothing exercises this today because no repeating table carries geometry; it is recorded so item 8 does not inherit the assumption silently.
