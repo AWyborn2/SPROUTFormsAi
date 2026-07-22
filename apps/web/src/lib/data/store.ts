@@ -26,7 +26,7 @@ import type {
   SubmissionStatus,
   SubmissionValue,
 } from '@formai/shared';
-import { ROLE_LABELS } from '@formai/shared';
+import { geometrySegments, ROLE_LABELS } from '@formai/shared';
 import { ApiError, apiClient } from './api-client.js';
 import { ROLE_NAMES } from './types.js';
 import type {
@@ -184,9 +184,16 @@ function toSubmissionDetail(dto: SubmissionDetailDto): SubmissionDetail {
 
 /**
  * Whether a submission's pinned version can round-trip into a filled PDF.
+ *
+ * Keyed on whether anything can actually be PLACED, not on which extraction
+ * path produced the form. "Does any field carry a sourcePosition" was a fair
+ * proxy while only the AcroForm path ever recorded positions; it became wrong
+ * the moment a reviewer could confirm geometry on an AI-extracted form.
+ * `geometrySegments` answers the real question for both sources, so a form
+ * round-trips exactly when at least one field has somewhere recorded to draw.
  */
 export function canExportSubmission(fields: FormField[]): boolean {
-  return fields.some((f) => f.sourcePosition !== undefined);
+  return fields.some((f) => geometrySegments(f).length > 0);
 }
 
 /** `undefined` for a 404 (not found / cross-tenant), rethrows anything else. */
