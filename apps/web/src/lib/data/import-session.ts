@@ -96,7 +96,7 @@ let runId = 0;
  */
 let editor: BuilderState | null = null;
 /** Extraction metadata by field id — the part of a ReviewField that isn't a FormField. */
-const reviewMeta = new Map<string, { note?: string; resolved?: boolean }>();
+const reviewMeta = new Map<string, { note?: string; resolved?: boolean; columnGroups?: number }>();
 
 /** Editor fields + their extraction metadata, as the review UI consumes them. */
 function derivedReviewFields(): ReviewField[] {
@@ -108,6 +108,7 @@ function derivedReviewFields(): ReviewField[] {
       confidence: f.confidence ?? 1,
       ...(meta?.note !== undefined ? { note: meta.note } : {}),
       ...(meta?.resolved !== undefined ? { resolved: meta.resolved } : {}),
+      ...(meta?.columnGroups !== undefined ? { columnGroups: meta.columnGroups } : {}),
     } as ReviewField;
   });
 }
@@ -122,7 +123,13 @@ function seedEditor(fields: ExtractedField[]): ReviewField[] {
   geometryProposals.clear();
   confirmedGeometry.clear();
   const formFields: FormField[] = fields.map((f) => {
-    if (f.note !== undefined) reviewMeta.set(f.id, { note: f.note });
+    // Extraction-only metadata that must not publish but the review UI needs:
+    // the `note`, and the side-by-side `columnGroups` hint the split control
+    // pre-fills (U1). Both live here, keyed by id, exactly like `resolved`.
+    const meta: { note?: string; columnGroups?: number } = {};
+    if (f.note !== undefined) meta.note = f.note;
+    if (f.columnGroups !== undefined) meta.columnGroups = f.columnGroups;
+    if (Object.keys(meta).length > 0) reviewMeta.set(f.id, meta);
     return {
       id: f.id,
       type: f.type,
@@ -785,17 +792,62 @@ export function groupColumns(id: string, columnKeys: string[]): string | null {
 }
 
 /**
+ * How a flattened checklist was read off the page, which decides how its items
+ * deal out into printed columns when the table is split:
+ *
+ * - `down-columns` — the extractor read the whole leftmost column top-to-bottom,
+ *   then the next, so a group is a CONTIGUOUS block (`items[g·R … (g+1)·R)`).
+ * - `across-rows` — the extractor read each row left-to-right, so every `groups`-th
+ *   item shares a column and a group is a STRIDE (`i % groups === g`).
+ *
+ * Neither is universally right because the AI extraction order is not stable
+ * (the defect this exists to fix). `down-columns` is the default because the
+ * extraction prompt now pins that order (U1); the reviewer flips to `across-rows`
+ * when a run still arrives row-major.
+ */
+export type SplitReadingMode = 'down-columns' | 'across-rows';
+
+/**
+ * Deal `items` into `groups` printed columns under the given reading mode.
+ * Pure, so the split control can preview exactly what a commit will create.
+ * A remainder that does not divide evenly goes to the EARLIER groups under
+ * both modes, so no item is ever lost.
+ */
+export function distributeGroups<T>(items: readonly T[], groups: number, mode: SplitReadingMode): T[][] {
+  if (mode === 'across-rows') {
+    return Array.from({ length: groups }, (_, g) => items.filter((_item, i) => i % groups === g));
+  }
+  // down-columns: contiguous, near-equal slices. The first `remainder` groups
+  // take one extra item, matching the stride's remainder-to-earlier-groups rule.
+  const base = Math.floor(items.length / groups);
+  const remainder = items.length % groups;
+  const out: T[][] = [];
+  let cursor = 0;
+  for (let g = 0; g < groups; g += 1) {
+    const size = base + (g < remainder ? 1 : 0);
+    out.push(items.slice(cursor, cursor + size));
+    cursor += size;
+  }
+  return out;
+}
+
+/**
  * Split one extracted table into the `groups` printed groups it really is.
  *
  * `ADMN-FRM-111`'s Category A block prints as 6 rows × 3 side-by-side groups
- * and extraction flattened it to one 18-item field in across-then-down order,
- * so item `i` prints at row floor(i/3), group `i % groups`. `PageBox` is a
- * cross product of column bands × row bands: it can say "column 2, row 5" and
- * cannot say "the 7th answer belongs to the middle group's first row" (R18).
- * No band adjustment reaches that, so the field is split instead — each group
- * becomes a plain N-row grid the derivation and the exporter already handle,
- * and each is confirmable on its own, so a misplaced middle group cannot
- * scatter wrong answers through the whole list.
+ * and extraction flattened it into one 18-item field. `PageBox` is a cross
+ * product of column bands × row bands: it can say "column 2, row 5" and cannot
+ * say "the 7th answer belongs to the middle group's first row" (R18). No band
+ * adjustment reaches that, so the field is split instead — each group becomes a
+ * plain N-row grid the derivation and the exporter already handle, and each is
+ * confirmable on its own, so a misplaced middle group cannot scatter wrong
+ * answers through the whole list.
+ *
+ * `mode` decides how the flattened items deal into columns (see
+ * `distributeGroups`). It defaults to `down-columns` to agree with the pinned
+ * extraction order (U1); the reviewer overrides when a run arrives row-major.
+ * The earlier assumption that extraction is always row-major was the defect:
+ * the AI order is not stable, so a fixed stride scrambled the groups.
  *
  * The REVIEWER declares this; extraction never infers it. Production `v3` of
  * this same form split the block into three fields while this import merged
@@ -807,18 +859,20 @@ export function groupColumns(id: string, columnKeys: string[]): string | null {
  * than two groups is nothing to do, more groups than items would mint a table
  * with no rows, and a table with no captured items has nothing to distribute.
  */
-export function splitTableGroups(id: string, groups: number): string[] {
+export function splitTableGroups(
+  id: string,
+  groups: number,
+  mode: SplitReadingMode = 'down-columns',
+): string[] {
   const field = editorField(id);
   const items = field?.fixedRows;
   if (!field || !items?.length) return [];
   if (!Number.isInteger(groups) || groups < 2 || groups > items.length) return [];
 
-  const parts = Array.from({ length: groups }, (_, g) => ({
+  const membership = distributeGroups(items, groups, mode);
+  const parts = membership.map((fixedRows, g) => ({
     label: `${field.label} (${g + 1} of ${groups})`,
-    // Reading order, not contiguous blocks: the items were captured across the
-    // page, so every `groups`-th one belongs to the same printed column. This
-    // also puts each group back in top-to-bottom order as printed.
-    fixedRows: items.filter((_item, i) => i % groups === g),
+    fixedRows,
     // Both position records described the merged block and describe none of
     // the groups. `sourcePosition` is dropped for the same reason geometry is
     // below — and it matters more, because `geometrySegments` falls back to it

@@ -278,6 +278,71 @@ describe('extractForm — fixedRows normalization', () => {
   });
 });
 
+describe('extractForm — columnGroups (side-by-side checklist hint, U1)', () => {
+  const SIX = ['a', 'b', 'c', 'd', 'e', 'f'];
+
+  function fieldResponse(field: Record<string, unknown>): AnthropicMessage {
+    return {
+      content: [
+        { type: 'tool_use', name: EXTRACT_TOOL_NAME, input: { fields: [field], designNotes: [] } },
+      ],
+    };
+  }
+
+  function checklist(extra: Record<string, unknown>) {
+    return {
+      label: 'Category A checks',
+      type: 'repeating_group',
+      confidence: 0.9,
+      fixedRows: SIX,
+      columns: [
+        { key: 'item', label: 'Item', type: 'text' },
+        { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+        { key: 'na', label: 'NA', type: 'boolean_yes_no' },
+      ],
+      ...extra,
+    };
+  }
+
+  async function extract(field: Record<string, unknown>) {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(fieldResponse(field));
+    return extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+  }
+
+  it('passes a valid columnGroups hint through', async () => {
+    const result = await extract(checklist({ columnGroups: 3 }));
+    expect(result.fields[0]?.columnGroups).toBe(3);
+  });
+
+  it('normalizes an absent, sub-2, or non-integer columnGroups to undefined', async () => {
+    for (const value of [undefined, 0, 1, 2.5, 'three']) {
+      const result = await extract(checklist(value === undefined ? {} : { columnGroups: value }));
+      expect(result.fields[0]?.columnGroups).toBeUndefined();
+    }
+  });
+
+  it('drops a hint that cannot hold — more groups than items would split into empty groups', async () => {
+    const result = await extract(checklist({ fixedRows: ['a', 'b'], columnGroups: 3 }));
+    expect(result.fields[0]?.columnGroups).toBeUndefined();
+  });
+
+  it('synthesises a designNote pointing the reviewer at the split control', async () => {
+    const result = await extract(checklist({ columnGroups: 3 }));
+    expect(result.designNotes.some((n) => /side-by-side groups/.test(n) && /split/.test(n))).toBe(true);
+  });
+
+  it('adds no split note for a single-column checklist', async () => {
+    const result = await extract(checklist({}));
+    expect(result.designNotes.some((n) => /side-by-side/.test(n))).toBe(false);
+  });
+
+  it('preserves the model-emitted fixedRows order verbatim (column-major is the model\'s job)', async () => {
+    const result = await extract(checklist({ columnGroups: 3 }));
+    expect(result.fields[0]?.fixedRows).toEqual(SIX);
+  });
+});
+
 describe('extractForm — answerSets proposals', () => {
   function oneFieldResponse(field: Record<string, unknown>): AnthropicMessage {
     return {

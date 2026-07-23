@@ -37,6 +37,7 @@ import {
   answerSetAccepted,
   adjustGeometryBand,
   adjustGeometryBoundary,
+  distributeGroups,
   confirmGeometry,
   fileToBase64,
   geometryConfirmed,
@@ -650,12 +651,68 @@ describe('geometry review (U4, R8)', () => {
   });
 });
 
+describe('columnGroups hint (U1 → review, U3 pre-fill)', () => {
+  const HINTED: ExtractedField = {
+    id: 'catA',
+    label: "Category 'A' faults",
+    type: 'repeating_group',
+    confidence: 0.62,
+    columns: [
+      { key: 'item', label: 'Item', type: 'text' },
+      { key: 'ok', label: 'OK', type: 'checkbox' },
+      { key: 'na', label: 'NA', type: 'checkbox' },
+    ],
+    fixedRows: ['a', 'b', 'c', 'd', 'e', 'f'],
+    columnGroups: 3,
+  };
+
+  it('surfaces the extraction hint on the review field so the split control can pre-fill', async () => {
+    await seedSession([HINTED]);
+    expect(getImportSession().fields[0]?.columnGroups).toBe(3);
+  });
+
+  it('never lets the hint cross the publish boundary', async () => {
+    await seedSession([HINTED]);
+    const published = reviewedToFields(getImportSession().fields)[0]!;
+    expect('columnGroups' in published).toBe(false);
+  });
+
+  it('clears the hint on a fresh extraction', async () => {
+    await seedSession([HINTED]);
+    await seedSession([{ ...HINTED, columnGroups: undefined }]);
+    expect(getImportSession().fields[0]?.columnGroups).toBeUndefined();
+  });
+});
+
+describe('distributeGroups (U9/split reading modes)', () => {
+  const six = [0, 1, 2, 3, 4, 5];
+
+  it('down-columns deals contiguous blocks', () => {
+    expect(distributeGroups(six, 3, 'down-columns')).toEqual([[0, 1], [2, 3], [4, 5]]);
+  });
+
+  it('across-rows deals by stride', () => {
+    expect(distributeGroups(six, 3, 'across-rows')).toEqual([[0, 3], [1, 4], [2, 5]]);
+  });
+
+  it('down-columns puts an uneven remainder in the earlier groups, losing nothing', () => {
+    const got = distributeGroups([0, 1, 2, 3, 4, 5, 6], 3, 'down-columns');
+    expect(got).toEqual([[0, 1, 2], [3, 4], [5, 6]]);
+    expect(got.flat()).toHaveLength(7);
+  });
+
+  it('across-rows also loses nothing on an uneven count', () => {
+    expect(distributeGroups([0, 1, 2, 3, 4, 5, 6], 3, 'across-rows').flat()).toHaveLength(7);
+  });
+});
+
 describe('splitting a table into its printed groups (U9, R18)', () => {
   /**
-   * ADMN-FRM-111's Category A block, as extraction actually flattened it:
-   * 6 printed rows x 3 side-by-side groups, read across-then-down, so item
-   * `i` prints at row floor(i/3), group i%3. The item names are the real ones
-   * observed in the running app.
+   * ADMN-FRM-111's Category A block as the live extraction actually flattened
+   * it on the smoke: 6 printed rows x 3 side-by-side groups, read COLUMN-MAJOR
+   * (down the left column, then the middle, then the right). This is the order
+   * U1 now pins in the extraction prompt, so the default `down-columns` split
+   * reproduces the three printed columns without the reviewer touching a mode.
    */
   const CATEGORY_A: ExtractedField = {
     id: 'catA',
@@ -669,14 +726,40 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
     ],
     answerSets: [{ key: 'as1', columnKeys: ['ok', 'na'] }],
     fixedRows: [
-      'Engine oil level', 'Tyre Condition/Wheel nuts', 'Brake & indicator lights',
-      'Engine coolant level', 'Park brake', 'Headlights',
-      'Hydraulic oil level', 'Service brake', 'Beacon',
-      'Transmission oil', 'Steering', 'Reverse alarm',
-      'Fuel level', 'Horn', 'Fire extinguisher',
-      'Radiator/cooling', 'Seat belt', 'First aid kit',
+      'Engine oil level', 'Engine coolant level', 'Power steering fluid level',
+      'Steering', 'Locking pins on Tray', 'Collision Avoidance System',
+      'Tyre Condition/Wheel nuts', 'Park brake', 'Foot brake',
+      'Seat belts', '2-way radio', 'Horn',
+      'Brake & indicator lights', 'Headlights', 'Flashing light',
+      'Flag (if required)', 'Fire extinguisher', 'Reverse Alarm',
     ],
   };
+
+  /** The same block if a run instead read it row-major (across-then-down). */
+  const CATEGORY_A_ROWMAJOR: ExtractedField = {
+    ...CATEGORY_A,
+    fixedRows: [
+      'Engine oil level', 'Tyre Condition/Wheel nuts', 'Brake & indicator lights',
+      'Engine coolant level', 'Park brake', 'Headlights',
+      'Power steering fluid level', 'Foot brake', 'Flashing light',
+      'Steering', 'Seat belts', 'Flag (if required)',
+      'Locking pins on Tray', '2-way radio', 'Fire extinguisher',
+      'Collision Avoidance System', 'Horn', 'Reverse Alarm',
+    ],
+  };
+
+  const LEFT_COLUMN = [
+    'Engine oil level', 'Engine coolant level', 'Power steering fluid level',
+    'Steering', 'Locking pins on Tray', 'Collision Avoidance System',
+  ];
+  const MIDDLE_COLUMN = [
+    'Tyre Condition/Wheel nuts', 'Park brake', 'Foot brake',
+    'Seat belts', '2-way radio', 'Horn',
+  ];
+  const RIGHT_COLUMN = [
+    'Brake & indicator lights', 'Headlights', 'Flashing light',
+    'Flag (if required)', 'Fire extinguisher', 'Reverse Alarm',
+  ];
 
   const tables = () => getImportSession().fields.filter((f) => f.type === 'repeating_group');
 
@@ -690,26 +773,37 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
     expect(after.map((f) => f.fixedRows?.length)).toEqual([6, 6, 6]);
   });
 
-  it('distributes items by reading order, not by contiguous blocks', async () => {
+  it('down-columns (default) yields the printed columns for a column-major extraction', async () => {
     await seedSession([CATEGORY_A]);
 
     splitTableGroups('catA', 3);
 
     const [left, middle, right] = tables();
-    // Column 1 of the printed page is items 0, 3, 6, ... — the whole point of
-    // the split is that each group reads top-to-bottom as printed.
-    expect(left?.fixedRows).toEqual([
-      'Engine oil level', 'Engine coolant level', 'Hydraulic oil level',
-      'Transmission oil', 'Fuel level', 'Radiator/cooling',
-    ]);
-    expect(middle?.fixedRows).toEqual([
-      'Tyre Condition/Wheel nuts', 'Park brake', 'Service brake',
-      'Steering', 'Horn', 'Seat belt',
-    ]);
-    expect(right?.fixedRows).toEqual([
-      'Brake & indicator lights', 'Headlights', 'Beacon',
-      'Reverse alarm', 'Fire extinguisher', 'First aid kit',
-    ]);
+    expect(left?.fixedRows).toEqual(LEFT_COLUMN);
+    expect(middle?.fixedRows).toEqual(MIDDLE_COLUMN);
+    expect(right?.fixedRows).toEqual(RIGHT_COLUMN);
+  });
+
+  it('across-rows recovers the printed columns for a row-major extraction', async () => {
+    await seedSession([CATEGORY_A_ROWMAJOR]);
+
+    splitTableGroups('catA', 3, 'across-rows');
+
+    const [left, middle, right] = tables();
+    expect(left?.fixedRows).toEqual(LEFT_COLUMN);
+    expect(middle?.fixedRows).toEqual(MIDDLE_COLUMN);
+    expect(right?.fixedRows).toEqual(RIGHT_COLUMN);
+  });
+
+  it('down-columns on a row-major extraction scrambles — the reason the toggle exists', async () => {
+    await seedSession([CATEGORY_A_ROWMAJOR]);
+
+    splitTableGroups('catA', 3); // wrong mode for this order
+
+    // Group 1 becomes the first two printed rows, not a printed column — which
+    // is exactly the smoke defect the down-columns default fixes for a
+    // column-major run and the toggle fixes for a row-major one.
+    expect(tables()[0]?.fixedRows).not.toEqual(LEFT_COLUMN);
   });
 
   it('gives every group the source table columns and answer sets', async () => {
@@ -762,10 +856,20 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
     expect(reviewedToFields(getImportSession().fields)[0]?.geometry?.segments).toHaveLength(1);
   });
 
-  it('loses no item when the count does not divide evenly', async () => {
+  it('loses no item when the count does not divide evenly (down-columns, remainder to earlier groups)', async () => {
     await seedSession([{ ...CATEGORY_A, fixedRows: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] }]);
 
     splitTableGroups('catA', 3);
+
+    const after = tables();
+    expect(after.map((f) => f.fixedRows)).toEqual([['a', 'b', 'c'], ['d', 'e'], ['f', 'g']]);
+    expect(after.flatMap((f) => f.fixedRows ?? [])).toHaveLength(7);
+  });
+
+  it('loses no item under across-rows either (remainder to earlier groups)', async () => {
+    await seedSession([{ ...CATEGORY_A, fixedRows: ['a', 'b', 'c', 'd', 'e', 'f', 'g'] }]);
+
+    splitTableGroups('catA', 3, 'across-rows');
 
     const after = tables();
     expect(after.map((f) => f.fixedRows)).toEqual([['a', 'd', 'g'], ['b', 'e'], ['c', 'f']]);

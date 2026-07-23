@@ -27,6 +27,8 @@ import {
   renameField,
   setFieldOption,
   splitTableGroups,
+  distributeGroups,
+  type SplitReadingMode,
   useImportSession,
   type ReviewField,
 } from '../../../lib/data/import-session.js';
@@ -168,7 +170,12 @@ export function FieldInspector({ field, index, count, onSelect, textPages }: Fie
         {isTable && <ColumnInspector field={field} actions={importSessionColumnActions} />}
 
         {isTable && (field.fixedRows?.length ?? 0) > 1 && (
-          <SplitGroups id={field.id} items={field.fixedRows!.length} onSelect={onSelect} />
+          <SplitGroups
+            id={field.id}
+            labels={field.fixedRows!}
+            columnGroups={field.columnGroups}
+            onSelect={onSelect}
+          />
         )}
 
         {isTable && <GeometryInspector field={field} textPages={textPages} />}
@@ -217,22 +224,32 @@ export function FieldInspector({ field, index, count, onSelect, textPages }: Fie
  */
 function SplitGroups({
   id,
-  items,
+  labels,
+  columnGroups,
   onSelect,
 }: {
   id: string;
-  items: number;
+  labels: string[];
+  /** Extraction's side-by-side group hint, pre-filling the count when present. */
+  columnGroups?: number;
   onSelect: (id: string | null) => void;
 }) {
-  const [groups, setGroups] = useState(2);
-  const max = Math.min(6, items);
+  const max = Math.min(6, labels.length);
+  const [groups, setGroups] = useState(() =>
+    Math.min(max, columnGroups && columnGroups >= 2 ? columnGroups : 2),
+  );
+  const [mode, setMode] = useState<SplitReadingMode>('down-columns');
+
+  // The preview IS the commit's distribution, so what the reviewer sees is
+  // exactly what Split will create — the two cannot disagree.
+  const preview = distributeGroups(labels, groups, mode);
 
   return (
     <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
       <div className="text-[12.5px] font-semibold">Side-by-side groups</div>
       <p className="text-[11.5px] leading-snug text-text-tertiary">
-        If this one table is really several columns printed next to each other, split it. Items are
-        dealt out in reading order, so each group ends up top-to-bottom as printed.
+        If this one table is really several columns printed next to each other, split it. Check the
+        preview and pick the reading order that gives clean columns.
       </p>
       <div className="flex items-center gap-1.5">
         <Select
@@ -244,18 +261,44 @@ function SplitGroups({
           onChange={(e) => setGroups(Number(e.target.value))}
           aria-label="Number of printed groups"
         />
-        <Button
-          variant="ghost"
-          leadingIcon="columns-3"
-          onClick={() => {
-            // The split replaced this field; re-point the accordion at the
-            // first group so the panel does not sit on an id that is gone.
-            onSelect(splitTableGroups(id, groups)[0] ?? null);
-          }}
-        >
-          Split
-        </Button>
+        <Select
+          options={[
+            { value: 'down-columns', label: 'Read down columns' },
+            { value: 'across-rows', label: 'Read across rows' },
+          ]}
+          value={mode}
+          onChange={(e) => setMode(e.target.value as SplitReadingMode)}
+          aria-label="Reading order"
+        />
       </div>
+
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3" aria-label="Split preview">
+        {preview.map((groupItems, g) => (
+          <div key={g} className="rounded-sm border border-border-subtle bg-surface-sunken p-[6px_8px]">
+            <div className="mb-1 text-[10.5px] font-semibold text-text-secondary">Group {g + 1}</div>
+            <ol className="flex flex-col gap-0.5">
+              {groupItems.map((label, i) => (
+                <li key={i} className="truncate text-[10.5px] leading-snug text-text-tertiary">
+                  {label}
+                </li>
+              ))}
+            </ol>
+          </div>
+        ))}
+      </div>
+
+      <Button
+        variant="ghost"
+        leadingIcon="columns-3"
+        className="justify-center"
+        onClick={() => {
+          // The split replaced this field; re-point the accordion at the
+          // first group so the panel does not sit on an id that is gone.
+          onSelect(splitTableGroups(id, groups, mode)[0] ?? null);
+        }}
+      >
+        Split into {groups}
+      </Button>
     </div>
   );
 }
