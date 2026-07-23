@@ -12,6 +12,7 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import {
   columnBandFor,
   geometrySegments,
+  markPlacement,
   resolveAnswerSets,
   selectedOption,
   visibleFields,
@@ -179,16 +180,15 @@ function drawRepeatingGroup(
       rowCursor += 1;
       if (!row) return; // fewer answered rows than the table prints
 
-      const height = rowBand.end - rowBand.start;
-      const size = Math.max(4, Math.min(9, height - 3));
-      const y = rowBand.start + 3;
-
       /** Place text in a column's own recorded band, or nowhere. */
       const mark = (columnKey: string, text: string) => {
         const band = columnBandFor(segment, columnKey);
         if (!band) return; // no band for this column — placing it would be a guess
+        // Placement is the shared `markPlacement` (@formai/shared) so the
+        // exported mark lands exactly where the review preview draws it.
+        const { x, y, size } = markPlacement(rowBand, band);
         page.drawText(text, {
-          x: band.start + 3,
+          x,
           y,
           size,
           font,
@@ -215,7 +215,10 @@ function drawRepeatingGroup(
           if (typeof raw !== 'boolean') continue;
           if (col.type === 'check_cross') {
             const band = columnBandFor(segment, col.key);
-            if (band) drawMark(page, raw ? 'tick' : 'cross', band.start + 3, y, size);
+            if (band) {
+              const { x, y, size } = markPlacement(rowBand, band);
+              drawMark(page, raw ? 'tick' : 'cross', x, y, size);
+            }
           } else {
             // boolean_yes_no keeps its existing 'X' for true; 'N' is the fix for
             // a false that used to export as an empty cell.

@@ -227,3 +227,39 @@ export function columnBandFor(segment: PageBox, key: string): GeometryBand | und
 export function rowBandFor(segment: PageBox, key: string): GeometryBand | undefined {
   return segment.rowBands?.find((b) => b.key === key);
 }
+
+/** The smallest and largest a placed mark may be, in PDF points. */
+export const MARK_SIZE_FLOOR = 4;
+export const MARK_SIZE_CEIL = 9;
+/** Inset from a cell's left/bottom edge to the mark's origin, in PDF points. */
+export const MARK_INSET = 3;
+
+/** Where a mark sits inside one cell, in PDF point space. */
+export interface MarkPlacement {
+  /** Left edge of the mark (origin x). */
+  x: number;
+  /** Bottom edge of the mark (origin y). */
+  y: number;
+  /** Square extent of the mark. */
+  size: number;
+}
+
+/**
+ * Where the exporter draws a mark inside one grid cell — the SINGLE source of
+ * truth for placement, consumed by both the round-trip exporter and the review
+ * preview so what a reviewer sees cannot drift from what the filled PDF prints.
+ *
+ * Pure geometry in, plain object out: no pdf-lib types, so the same function
+ * runs in the browser overlay and the server exporter. The mark is inset a few
+ * points from the cell's left/bottom edge and sized from the row's height,
+ * clamped so a tall row does not print a giant tick and a degenerate (or
+ * zero-height) row still yields a visible, finite mark rather than nothing.
+ */
+export function markPlacement(rowBand: GeometryBand, columnBand: GeometryBand): MarkPlacement {
+  const height = rowBand.end - rowBand.start;
+  return {
+    x: columnBand.start + MARK_INSET,
+    y: rowBand.start + MARK_INSET,
+    size: Math.max(MARK_SIZE_FLOOR, Math.min(MARK_SIZE_CEIL, height - MARK_INSET)),
+  };
+}
