@@ -136,25 +136,23 @@ describe('table-aware selection: ordinal, then refuse-on-ambiguity (U2, R1/R2/R3
   const split = (index: number, count: number): DerivableField =>
     tableField({ groupOrdinal: { index, count } });
 
-  it('Covers AE1. three ordinal-stamped groups each derive their OWN block, ordered by position', () => {
-    // Three structurally-identical tables surface as three proposals; a
-    // no-ordinal field would refuse (they are indistinguishable), but each split
-    // group carries which one it is, so each derives a distinct block and none
-    // lands on another's area.
+  it('refuses ordinal-matching proposals that are vertically STACKED, not side-by-side (ADMN regression)', () => {
+    // The regression this guards: three proposals arise only from STACKED tables
+    // (`proposeTableSegments` returns more than one proposal only when copies
+    // share an x column and their headers corroborate). On the real
+    // `ADMN-FRM-111` those three are Categories A, B and C — three different
+    // tables that merely NUMBER three, matching a 3-way split. Counting alone,
+    // `3 === 3` fired and the ordinal mapped Category A's groups onto Categories
+    // B and C — a grid on the wrong table. Side-by-side groups share a baseline
+    // (same y, different x); these are the opposite, so every ordinal must
+    // refuse rather than mis-place. Genuine per-group placement is deferred to
+    // the per-group-proposal work — until then a split group refuses and is
+    // hand-placed.
     const page = [...measuredTable(0, 4), ...measuredTable(200, 4), ...measuredTable(400, 4)];
 
-    const g0 = deriveForField(split(0, 3), 0, page, A4.width, A4.height);
-    const g1 = deriveForField(split(1, 3), 0, page, A4.width, A4.height);
-    const g2 = deriveForField(split(2, 3), 0, page, A4.width, A4.height);
-
-    expect(g0).not.toBeNull();
-    expect(g1).not.toBeNull();
-    expect(g2).not.toBeNull();
-    // Ordered top-to-bottom on the page (larger y is higher), and all three are
-    // distinct — no two groups derive the same block.
-    expect(g0!.segment.y).toBeGreaterThan(g1!.segment.y);
-    expect(g1!.segment.y).toBeGreaterThan(g2!.segment.y);
-    expect(new Set([g0!.segment.y, g1!.segment.y, g2!.segment.y]).size).toBe(3);
+    expect(deriveForField(split(0, 3), 0, page, A4.width, A4.height)).toBeNull();
+    expect(deriveForField(split(1, 3), 0, page, A4.width, A4.height)).toBeNull();
+    expect(deriveForField(split(2, 3), 0, page, A4.width, A4.height)).toBeNull();
   });
 
   it('refuses an ordinal with no matching set of blocks rather than indexing past the end', () => {
