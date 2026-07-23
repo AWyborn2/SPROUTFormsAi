@@ -7,10 +7,99 @@
  * grid and marks drawn onto a competency record. It belongs somewhere it can
  * be read and tested directly.
  */
-import type { FormField, GeometryBand, PageBox } from '@formai/shared';
+import type { FormField, GeometryBand, GroupOrdinal, PageBox } from '@formai/shared';
 import { markPlacement } from '@formai/shared';
 import type { PositionedText, TableProposal, TextPage } from '../../../lib/pdf-geometry.js';
 import { proposeTableSegments } from '../../../lib/pdf-geometry.js';
+
+/**
+ * The part of a field grid derivation reads: its shape, its row count, and —
+ * when the reviewer split a side-by-side block — which printed group it is.
+ * `groupOrdinal` is not a `FormField` property (it is review-only, carried in
+ * `reviewMeta`), so it is spelled out here rather than picked from `FormField`.
+ */
+export type DerivableField = Pick<FormField, 'type' | 'columns' | 'fixedRows'> & {
+  groupOrdinal?: GroupOrdinal;
+};
+
+/**
+ * How much more confident the best row-count match must be than an equally
+ * close rival before derivation trusts it over refusing (KTD2/R1).
+ *
+ * Measured across the library. Derivation confidence is built from discrete
+ * penalties in `proposeTableSegments`: a corroborated, fully-located header
+ * scores 1.0; losing corroboration costs 0.2; each inferred or merged column
+ * costs 0.3. So the separations that actually occur between two same-row-count
+ * candidates are: 0.0 (two structurally-identical corroborated tables — the
+ * `ADMN-FRM-111` category blocks and the dozer's repeated per-page tables both
+ * land here), 0.2 (a corroborated winner over an uncorroborated rival), and
+ * 0.3+ (a clean locate over an inferred/merged one). A band of 0.15 sits in the
+ * empty gap between the 0.0 ties it must refuse and the ≥0.2 genuine winners it
+ * must keep — so no real single-region derivation is lost (R5) while a true
+ * coin-flip between indistinguishable tables refuses.
+ */
+export const NEAR_EQUAL_CONFIDENCE = 0.15;
+
+/** A proposal's leftmost option-column x — the key the ordinal orders on. */
+function optionLeftX(proposal: TableProposal): number {
+  const cols = proposal.segment.columnBands ?? [];
+  return cols.length > 0 ? Math.min(...cols.map((c) => c.start)) : proposal.segment.x;
+}
+
+/**
+ * Order a page's proposals left-to-right by their option columns, top-to-bottom
+ * on a tie. The proposals that survive `proposeTableSegments`' corroboration
+ * filter on one page share a column x (only matching header shapes are kept), so
+ * in practice the x key ties and the y tie-break — larger `y` is higher on the
+ * page — gives a stable printed reading order for the ordinal to index into.
+ */
+function orderedByColumn(proposals: readonly TableProposal[]): TableProposal[] {
+  return [...proposals].sort((a, b) => {
+    const dx = optionLeftX(a) - optionLeftX(b);
+    return dx !== 0 ? dx : b.segment.y - a.segment.y;
+  });
+}
+
+/**
+ * Select the proposal a group ordinal points at, or refuse.
+ *
+ * The page must surface exactly as many proposals as there were groups: then
+ * ordinal `index` names the index-th in printed order unambiguously. Any other
+ * count means the page did not lay the groups out the way the split recorded
+ * them — most often because a side-by-side block collapsed to a single derived
+ * table — and there is no honest mapping from group to proposal, so it refuses
+ * (R1) rather than index into a set of the wrong size.
+ */
+function selectByOrdinal(proposals: readonly TableProposal[], ordinal: GroupOrdinal): TableProposal | null {
+  if (proposals.length !== ordinal.count) return null;
+  if (ordinal.index < 0 || ordinal.index >= proposals.length) return null;
+  return orderedByColumn(proposals)[ordinal.index]!;
+}
+
+/**
+ * Pick the proposal whose row count is closest to the field's, refusing when the
+ * winner is not clearly better than an equally-close rival (R1/KTD2).
+ */
+function selectByRowCount(proposals: readonly TableProposal[], wantRows: number): TableProposal | null {
+  const delta = (p: TableProposal) => Math.abs((p.segment.rowBands?.length ?? 0) - wantRows);
+  const best = proposals.reduce((b, p) => {
+    const d = delta(p);
+    const bd = delta(b);
+    if (d !== bd) return d < bd ? p : b;
+    return p.confidence > b.confidence ? p : b;
+  });
+
+  // A rival matches the row count exactly as well. If it is within the near-equal
+  // band, the two are indistinguishable on every signal derivation has and
+  // picking one would be a coin-flip on table identity — so refuse.
+  const bestDelta = delta(best);
+  const rivalConfidence = proposals
+    .filter((p) => p !== best && delta(p) === bestDelta)
+    .reduce((max, p) => Math.max(max, p.confidence), -Infinity);
+  if (best.confidence - rivalConfidence < NEAR_EQUAL_CONFIDENCE) return null;
+
+  return best;
+}
 
 /** What the panel should show for the selected field. */
 export type GeometryPanelState =
@@ -21,15 +110,24 @@ export type GeometryPanelState =
 /**
  * Derive a proposal for one field from a page's text.
  *
- * Returns the best proposal only. A page carries several tables and the
- * derivation cannot say which belongs to *this* field — so it picks the
- * proposal whose row count is closest to the field's own row count, and where
- * that is unknowable, the highest-confidence one. The reviewer confirms or
- * rejects either way, which is why a wrong pick is recoverable and a silent
- * one would not be.
+ * A page carries several tables and derivation cannot see which printed table a
+ * field belongs to, so selection is table-aware or it refuses (parent R16
+ * extended to table identity):
+ *
+ *   1. A split-group field carries its printed-group ordinal — order the page's
+ *      proposals left-to-right and take the ordinal-th (`selectByOrdinal`).
+ *   2. Otherwise match on row count, but refuse when the winner is not clearly
+ *      better than an equally-close rival (`selectByRowCount`).
+ *   3. A field with no row count AND no ordinal has nothing to tie it to any one
+ *      table, so it refuses rather than grabbing the best-confidence proposal
+ *      from an unrelated table (R3/KTD3 — the `FAULTS` sliver bug).
+ *
+ * A refusal returns null and surfaces through the `no-proposal` panel state: the
+ * field exports as data and can be hand-placed. A confidently-wrong grid on a
+ * competency record is worse than none.
  */
 export function deriveForField(
-  field: Pick<FormField, 'type' | 'columns' | 'fixedRows'>,
+  field: DerivableField,
   pageIndex: number,
   pageText: PositionedText[],
   pageWidth: number,
@@ -46,17 +144,12 @@ export function deriveForField(
   });
   if (proposals.length === 0) return null;
 
-  const wantRows = field.fixedRows?.length;
-  if (wantRows === undefined) {
-    return proposals.reduce((best, p) => (p.confidence > best.confidence ? p : best));
-  }
+  if (field.groupOrdinal) return selectByOrdinal(proposals, field.groupOrdinal);
 
-  return proposals.reduce((best, p) => {
-    const d = Math.abs((p.segment.rowBands?.length ?? 0) - wantRows);
-    const bestD = Math.abs((best.segment.rowBands?.length ?? 0) - wantRows);
-    if (d !== bestD) return d < bestD ? p : best;
-    return p.confidence > best.confidence ? p : best;
-  });
+  const wantRows = field.fixedRows?.length;
+  if (wantRows === undefined) return null;
+
+  return selectByRowCount(proposals, wantRows);
 }
 
 /**
@@ -65,15 +158,26 @@ export function deriveForField(
  * A table extracted by the model carries no `sourcePosition` — only AcroForm
  * fields get one — so there is no page to start from, and deriving against
  * page 0 would silently place an eighteen-page assessment's table on its cover
- * sheet. Every page is tried and the best single proposal wins, by the same
- * rule `deriveForField` uses within one page: closest row count first, then
- * confidence. Ties keep the earlier page, so a table split across a page break
- * anchors to where it starts.
+ * sheet. Every page is tried; the table-awareness lives in `deriveForField`,
+ * which already refuses within a page it cannot resolve, so this only combines
+ * the per-page picks.
+ *
+ * An ordinal field resolves entirely inside one page (the ordinal orders THAT
+ * page's proposals), so the first page that yields a pick wins — the same
+ * "anchor where it starts" rule the row-count path uses on a tie.
  */
 export function deriveAcrossPages(
-  field: Pick<FormField, 'type' | 'columns' | 'fixedRows'>,
+  field: DerivableField,
   pages: readonly TextPage[],
 ): TableProposal | null {
+  if (field.groupOrdinal) {
+    for (const [i, page] of pages.entries()) {
+      const p = deriveForField(field, i, page.items, page.width, page.height);
+      if (p) return p;
+    }
+    return null;
+  }
+
   const wantRows = field.fixedRows?.length;
   let best: TableProposal | null = null;
 

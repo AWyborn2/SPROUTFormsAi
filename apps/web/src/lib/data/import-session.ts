@@ -18,6 +18,7 @@ import type {
   FieldGeometry,
   FormField,
   FormFieldType,
+  GroupOrdinal,
   PageBox,
   RepeatingColumn,
   VisibilityCondition,
@@ -38,6 +39,12 @@ export interface ReviewField extends ExtractedField {
   resolved?: boolean;
   /** Editor-side properties that publish but have no extraction equivalent. */
   visibleWhen?: VisibilityCondition;
+  /**
+   * For a field produced by `splitTableGroups` — which of the printed groups it
+   * is (left-to-right). Review-only, like the other metadata here: derivation
+   * reads it to pick the right table, and `reviewedToFields` never carries it.
+   */
+  groupOrdinal?: GroupOrdinal;
 }
 
 export type ImportSessionStatus = 'idle' | 'uploading' | 'extracting' | 'ready' | 'error';
@@ -96,7 +103,10 @@ let runId = 0;
  */
 let editor: BuilderState | null = null;
 /** Extraction metadata by field id — the part of a ReviewField that isn't a FormField. */
-const reviewMeta = new Map<string, { note?: string; resolved?: boolean; columnGroups?: number }>();
+const reviewMeta = new Map<
+  string,
+  { note?: string; resolved?: boolean; columnGroups?: number; groupOrdinal?: GroupOrdinal }
+>();
 
 /** Editor fields + their extraction metadata, as the review UI consumes them. */
 function derivedReviewFields(): ReviewField[] {
@@ -109,6 +119,7 @@ function derivedReviewFields(): ReviewField[] {
       ...(meta?.note !== undefined ? { note: meta.note } : {}),
       ...(meta?.resolved !== undefined ? { resolved: meta.resolved } : {}),
       ...(meta?.columnGroups !== undefined ? { columnGroups: meta.columnGroups } : {}),
+      ...(meta?.groupOrdinal !== undefined ? { groupOrdinal: meta.groupOrdinal } : {}),
     } as ReviewField;
   });
 }
@@ -912,6 +923,18 @@ export function splitTableGroups(
       for (const part of created) acceptedAnswerSets.add(acceptanceKey(part.id, set.key));
     }
   }
+
+  // Stamp each group with its printed-group ordinal (U1/R2). `created` is in the
+  // same printed left-to-right order the split dealt the items (`distributeGroups`
+  // returns group g as the g-th printed column under both reading modes), so the
+  // index here IS the printed position. This rides in `reviewMeta` exactly like
+  // `columnGroups` — review-only, surfaced on the review field, dropped at the
+  // `reviewedToFields` publish boundary, and cleared by `reviewMeta.clear()` on
+  // reset / re-extraction. Grid derivation reads it to select the
+  // correspondingly-positioned table instead of colliding on a structural tie.
+  created.forEach((part, index) => {
+    reviewMeta.set(part.id, { ...reviewMeta.get(part.id), groupOrdinal: { index, count: groups } });
+  });
 
   /*
     Nothing the SOURCE held is deleted here, and that is deliberate.
