@@ -47,11 +47,10 @@ function optionLeftX(proposal: TableProposal): number {
 }
 
 /**
- * Order a page's proposals left-to-right by their option columns, top-to-bottom
- * on a tie. The proposals that survive `proposeTableSegments`' corroboration
- * filter on one page share a column x (only matching header shapes are kept), so
- * in practice the x key ties and the y tie-break — larger `y` is higher on the
- * page — gives a stable printed reading order for the ordinal to index into.
+ * Order side-by-side proposals left-to-right by their option columns, taking the
+ * higher one first on an x tie. Only reached after `selectByOrdinal` has
+ * established the proposals really are side-by-side (x-spread over y-spread), so
+ * the x key carries the ordering and the y tie-break is just a stable fallback.
  */
 function orderedByColumn(proposals: readonly TableProposal[]): TableProposal[] {
   return [...proposals].sort((a, b) => {
@@ -63,16 +62,31 @@ function orderedByColumn(proposals: readonly TableProposal[]): TableProposal[] {
 /**
  * Select the proposal a group ordinal points at, or refuse.
  *
- * The page must surface exactly as many proposals as there were groups: then
- * ordinal `index` names the index-th in printed order unambiguously. Any other
- * count means the page did not lay the groups out the way the split recorded
- * them — most often because a side-by-side block collapsed to a single derived
- * table — and there is no honest mapping from group to proposal, so it refuses
- * (R1) rather than index into a set of the wrong size.
+ * The count matching is necessary but NOT sufficient, and getting that wrong
+ * mis-placed grids on the real form. A split records N side-by-side groups, so
+ * the ordinal only means something when the page surfaces N proposals that are
+ * genuinely side-by-side: on ONE baseline, spread across the page in x. The
+ * failure it must refuse is N proposals that merely happen to number N while
+ * being VERTICALLY STACKED — e.g. `ADMN-FRM-111`, whose three category blocks
+ * (A, B, C) each collapse to one proposal, giving three proposals that share an
+ * x column and differ only in y. Counting alone, `3 === 3` matched and the
+ * ordinal mapped Category A's groups onto Categories B and C. Side-by-side
+ * groups share a header row (same y, different x); stacked categories are the
+ * opposite. So the proposals must be arranged more horizontally than
+ * vertically, or there is no honest group→proposal mapping and it refuses.
  */
 function selectByOrdinal(proposals: readonly TableProposal[], ordinal: GroupOrdinal): TableProposal | null {
   if (proposals.length !== ordinal.count) return null;
   if (ordinal.index < 0 || ordinal.index >= proposals.length) return null;
+
+  const xs = proposals.map(optionLeftX);
+  const ys = proposals.map((p) => p.segment.y);
+  const xSpread = Math.max(...xs) - Math.min(...xs);
+  const ySpread = Math.max(...ys) - Math.min(...ys);
+  // Side-by-side ⇒ x varies far more than y. Stacked (different tables that
+  // merely count the same as the groups) ⇒ refuse rather than mis-place.
+  if (xSpread <= ySpread) return null;
+
   return orderedByColumn(proposals)[ordinal.index]!;
 }
 
