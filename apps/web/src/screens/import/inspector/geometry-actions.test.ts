@@ -7,13 +7,15 @@
  * irregularity.
  */
 import { describe, expect, it } from 'vitest';
-import type { FormField, PageBox } from '@formai/shared';
+import type { FormField, GroupOrdinal, PageBox } from '@formai/shared';
 import { markPlacement } from '@formai/shared';
 import type { PositionedText } from '../../../lib/pdf-geometry.js';
 import {
+  NEAR_EQUAL_CONFIDENCE,
   NUDGE_POINTS,
   SNAP_RANGE,
   columnHandles,
+  type DerivableField,
   deriveAcrossPages,
   deriveForField,
   handleAdjustment,
@@ -27,26 +29,34 @@ import {
 
 const A4 = { width: 595, height: 842 };
 
-function tableField(patch: Partial<FormField> = {}): FormField {
+/**
+ * A repeating table field. Carries a 4-row `fixedRows` by default so it matches
+ * the 4-row table in `pageText()` — a field with no row count AND no ordinal now
+ * refuses (R3), so tests that want a derivation must give it an anchor. Pass
+ * `fixedRows: undefined` to exercise the no-anchor refusal.
+ */
+function tableField(patch: Partial<FormField> & { groupOrdinal?: GroupOrdinal } = {}): DerivableField {
   return {
-    id: 'f1',
     type: 'repeating_group',
-    label: 'Operational requirements',
-    required: false,
-    source: 'imported',
     columns: [
       { key: 'item', label: 'Item', type: 'text' },
       { key: 'tick', label: '✓', type: 'boolean_yes_no' },
       { key: 'cross', label: '×', type: 'boolean_yes_no' },
       { key: 'na', label: 'N/A', type: 'boolean_yes_no' },
     ],
+    fixedRows: ['r0', 'r1', 'r2', 'r3'],
     ...patch,
   };
 }
 
-/** Two occurrences of the measured page-7 table, so headers corroborate. */
-function pageText(): PositionedText[] {
-  const table = (dy: number, rows: number): PositionedText[] => [
+/**
+ * One occurrence of the measured page-7 table, shifted down the page by `dy`.
+ * Stacking copies keeps them at identical x, so their headers corroborate the
+ * same shape — the only way `proposeTableSegments` returns more than one
+ * proposal for a page (a non-matching header is dropped as furniture).
+ */
+function measuredTable(dy: number, rows: number): PositionedText[] {
+  return [
     { text: 'N/A', x: 539.9, y: 648.6 - dy, width: 13.3 },
     { text: 'During the demonstration, did the candidate:', x: 37.5, y: 647.7 - dy, width: 192 },
     { text: '', x: 502.6, y: 647.7 - dy, width: 7.1 },
@@ -58,7 +68,11 @@ function pageText(): PositionedText[] {
       width: 120,
     })),
   ];
-  return [...table(0, 4), ...table(200, 2)];
+}
+
+/** Two occurrences of the measured page-7 table, so headers corroborate. */
+function pageText(): PositionedText[] {
+  return [...measuredTable(0, 4), ...measuredTable(200, 2)];
 }
 
 describe('unsupportedReason', () => {
@@ -98,7 +112,8 @@ describe('deriveForField', () => {
 
   it('picks the proposal whose row count matches the field, not merely the first', () => {
     // A page carries several tables and the derivation cannot say which belongs
-    // to this field. Row count is the strongest available signal.
+    // to this field. Row count is the strongest available signal, and here the
+    // 2-row table is the unique closest match — no rival ties it, so it derives.
     const field = tableField({ fixedRows: ['a', 'b'] });
 
     const proposal = deriveForField(field, 6, pageText(), A4.width, A4.height);
@@ -106,10 +121,82 @@ describe('deriveForField', () => {
     expect(proposal?.segment.rowBands).toHaveLength(2);
   });
 
-  it('falls back to the most confident proposal when row count is unknowable', () => {
-    const proposal = deriveForField(tableField(), 6, pageText(), A4.width, A4.height);
+  it('refuses a field with no row count and no ordinal (R3/KTD3 — the FAULTS sliver)', () => {
+    // An open blank-entry table has no row count, and with no split ordinal
+    // there is nothing to tie it to any one table on the page. The old fallback
+    // grabbed the highest-confidence proposal anywhere — a sliver from an
+    // unrelated table. Refusing is the honest output.
+    const field = tableField({ fixedRows: undefined });
 
-    expect(proposal?.confidence).toBe(1);
+    expect(deriveForField(field, 6, pageText(), A4.width, A4.height)).toBeNull();
+  });
+});
+
+describe('table-aware selection: ordinal, then refuse-on-ambiguity (U2, R1/R2/R3)', () => {
+  const split = (index: number, count: number): DerivableField =>
+    tableField({ groupOrdinal: { index, count } });
+
+  it('Covers AE1. three ordinal-stamped groups each derive their OWN block, ordered by position', () => {
+    // Three structurally-identical tables surface as three proposals; a
+    // no-ordinal field would refuse (they are indistinguishable), but each split
+    // group carries which one it is, so each derives a distinct block and none
+    // lands on another's area.
+    const page = [...measuredTable(0, 4), ...measuredTable(200, 4), ...measuredTable(400, 4)];
+
+    const g0 = deriveForField(split(0, 3), 0, page, A4.width, A4.height);
+    const g1 = deriveForField(split(1, 3), 0, page, A4.width, A4.height);
+    const g2 = deriveForField(split(2, 3), 0, page, A4.width, A4.height);
+
+    expect(g0).not.toBeNull();
+    expect(g1).not.toBeNull();
+    expect(g2).not.toBeNull();
+    // Ordered top-to-bottom on the page (larger y is higher), and all three are
+    // distinct — no two groups derive the same block.
+    expect(g0!.segment.y).toBeGreaterThan(g1!.segment.y);
+    expect(g1!.segment.y).toBeGreaterThan(g2!.segment.y);
+    expect(new Set([g0!.segment.y, g1!.segment.y, g2!.segment.y]).size).toBe(3);
+  });
+
+  it('refuses an ordinal with no matching set of blocks rather than indexing past the end', () => {
+    // The page yields only two proposals, but the field was split into three
+    // groups. There is no honest group-to-block mapping, so every ordinal
+    // refuses instead of placing a grid on the wrong table.
+    const page = pageText(); // two tables → two proposals
+
+    expect(deriveForField(split(0, 3), 6, page, A4.width, A4.height)).toBeNull();
+    expect(deriveForField(split(2, 3), 6, page, A4.width, A4.height)).toBeNull();
+  });
+
+  it('Covers AE3. refuses when two identical tables match a no-ordinal field equally', () => {
+    // Two corroborated 4-row tables at full, identical confidence. A field with
+    // the same row count and no ordinal cannot tell them apart — a coin-flip on
+    // table identity, so it refuses (R1/KTD2).
+    const page = [...measuredTable(0, 4), ...measuredTable(200, 4)];
+    const field = tableField({ fixedRows: ['a', 'b', 'c', 'd'] });
+
+    expect(deriveForField(field, 6, page, A4.width, A4.height)).toBeNull();
+  });
+
+  it('Covers AE4. still derives when one table is the unique row-count match (no false refusal)', () => {
+    // The 4-row and 2-row tables are different shapes; a field wanting four rows
+    // has exactly one closest match, so it derives as before — the refusal must
+    // not fire on a genuine single winner (R5).
+    const field = tableField({ fixedRows: ['a', 'b', 'c', 'd'] });
+
+    const proposal = deriveForField(field, 6, pageText(), A4.width, A4.height);
+
+    expect(proposal).not.toBeNull();
+    expect(proposal!.segment.rowBands).toHaveLength(4);
+  });
+
+  it('the near-equal band is positive and below the smallest genuine-winner separation', () => {
+    // Reachable same-row-count rivals on one page are equi-confident (0.0 apart:
+    // matching headers corroborate to the same score, non-matching ones are
+    // dropped), so the band need only be > 0 to refuse every real tie. It is
+    // also held below 0.2 — a corroborated winner over an uncorroborated rival —
+    // so a genuine winner would still derive.
+    expect(NEAR_EQUAL_CONFIDENCE).toBeGreaterThan(0);
+    expect(NEAR_EQUAL_CONFIDENCE).toBeLessThan(0.2);
   });
 });
 

@@ -10,6 +10,22 @@ import type { AnswerSet, FormFieldType, RepeatingColumn, SourcePosition } from '
 export type ExtractionStatus = 'ok' | 'review' | 'low';
 
 /**
+ * Which of the N printed groups a split-table field is, in left-to-right order.
+ *
+ * Review-only, produced by `splitTableGroups` when the reviewer breaks one
+ * flattened side-by-side block into its printed groups — never emitted by
+ * extraction and never published. It rides on the review field so grid
+ * derivation can select the correspondingly-positioned proposal on the page
+ * instead of coin-flipping between structurally-identical tables (R2).
+ */
+export interface GroupOrdinal {
+  /** 0-based position among the groups, in printed left-to-right order. */
+  index: number;
+  /** How many groups the source table was split into (the ordinal's range). */
+  count: number;
+}
+
+/**
  * A single extracted field. Superset of the built-field shape — carries a
  * confidence score and (where known) the source position for round-trip.
  */

@@ -960,4 +960,41 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
     }
     expect(reviewedToFields(getImportSession().fields).some((f) => f.geometry)).toBe(false);
   });
+
+  describe('printed-group ordinal (U1, R2)', () => {
+    it('stamps ordinals 0,1,2 on the three groups in printed order', async () => {
+      await seedSession([CATEGORY_A]);
+
+      splitTableGroups('catA', 3);
+
+      // The ordinal is what lets grid derivation pick the correspondingly-placed
+      // table instead of colliding on a structural tie.
+      expect(tables().map((g) => g.groupOrdinal)).toEqual([
+        { index: 0, count: 3 },
+        { index: 1, count: 3 },
+        { index: 2, count: 3 },
+      ]);
+    });
+
+    it('surfaces on the review field but never crosses the publish boundary', async () => {
+      await seedSession([CATEGORY_A]);
+
+      splitTableGroups('catA', 3);
+
+      expect(tables()[0]?.groupOrdinal).toEqual({ index: 0, count: 3 });
+      // Review-only, exactly like columnGroups: the publish whitelist drops it.
+      for (const published of reviewedToFields(getImportSession().fields)) {
+        expect('groupOrdinal' in published).toBe(false);
+      }
+    });
+
+    it('clears on a fresh extraction (lives in reviewMeta)', async () => {
+      await seedSession([CATEGORY_A]);
+      splitTableGroups('catA', 3);
+
+      await seedSession([CATEGORY_A]);
+
+      expect(getImportSession().fields.every((f) => f.groupOrdinal === undefined)).toBe(true);
+    });
+  });
 });
