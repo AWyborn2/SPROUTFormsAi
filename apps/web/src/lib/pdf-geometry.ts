@@ -139,6 +139,26 @@ const UNIFORM_WIDTH_RATIO = 1.5;
  */
 const LABEL_MARGIN_TOLERANCE = 1;
 
+/**
+ * How far a line's run may reach toward the first option column before it is
+ * read as a heading rather than an item label, in points.
+ *
+ * The signal that ends a table is geometric, not textual (KTD1/KTD4): an item
+ * label's run at the label margin stays LEFT of the first option column, while a
+ * between-tables section heading is a single wide run that crosses INTO the
+ * option region. Measured clearance between the widest kept item label and its
+ * leftmost option glyph is comfortable and consistent across the library — the
+ * `ADMN-FRM-111` Category A label `Collision Avoidance System` ends at 146.8
+ * against the option at 164.5 (17.7pt), Category B's widest ends at 141.9
+ * against 161.9 (20.0pt), and the dozer's longest wrapping label ends at 480.2
+ * against 502.6 (22.4pt). The headings that must be cut overshoot by hundreds of
+ * points (Category B's run ends at 521.4, Category C's at 436.8). A 4pt window
+ * sits far inside every real label's clearance while still catching a heading
+ * that stopped a touch short of the column — the same measured-tolerance scale
+ * as REPEAT_TOLERANCE.
+ */
+const OPTION_INTRUSION_TOLERANCE = 4;
+
 interface Row {
   y: number;
   items: PositionedText[];
@@ -495,20 +515,58 @@ function rowPitch(gaps: number[]): number {
  */
 function rowBands(rows: Row[], header: HeaderRow, floor: number): GeometryBand[] {
   const labelLeft = header.labelLeft;
+  const marginRun = (r: Row) => r.items.find((i) => Math.abs(i.x - labelLeft) <= LABEL_MARGIN_TOLERANCE);
   const below = rows
     .filter((r) => r.y < header.row.y - BASELINE_TOLERANCE && r.y > floor)
     // The label column has ONE left margin. A numbered section heading printed
     // at x=38.7 against the label column's 37.5 is close enough to pass a loose
     // tolerance, and counting it as a row offsets every answer after it.
-    .filter((r) => r.items.some((i) => Math.abs(i.x - labelLeft) <= LABEL_MARGIN_TOLERANCE))
+    .filter((r) => marginRun(r) !== undefined)
     .sort((a, b) => b.y - a.y);
   if (below.length === 0) return [];
 
-  const pitch = rowPitch(below.slice(1).map((r, i) => below[i]!.y - r.y));
+  // Stop at the last genuine item row (U1, R1/R2). A between-tables section
+  // heading — `Category 'B' faults: …` on ADMN-FRM-111 — prints at the SAME
+  // left margin as the item labels, so the margin filter above cannot exclude
+  // it; on a 6-row table it was counted as a 7th row and the overlay leaked into
+  // the next section. The discriminator is horizontal extent, never text
+  // (KTD1): an item label's run at the margin stays left of the first option
+  // column, while the heading is a single wide run that crosses into the option
+  // region. Once such a line appears the table has ended, so cut there rather
+  // than skipping it (KTD2): a genuine item never follows the next section's
+  // heading.
+  //
+  // The reference is where THIS table's first option column sits — the column an
+  // intruding heading is measured against — and the two header shapes locate it
+  // differently:
+  //   - A standalone option-header row (ADMN-FRM-111) carries only option glyphs
+  //     and no label of its own, so the first option is the leftmost glyph on the
+  //     row (164.5). The reconciled anchors are the WRONG reference here: that
+  //     form is a three-up checklist and rightmostCluster keeps only its
+  //     rightmost OK/NA pair (512.6), but a heading in the middle block runs only
+  //     to 436.8 and must still be judged against the FIRST column it crosses.
+  //   - A labelled header (the dozer) carries a wide label whose cells beneath
+  //     legitimately run long (to 480.2), so the reference must be the option
+  //     cluster, not the label. The reconciled anchors are exactly that, with any
+  //     stray already stripped — the ':' at x=228 that shares the label's right
+  //     edge would otherwise be mistaken for the first option and cut every row.
+  const isStandalone = header.labelRight === header.labelLeft;
+  const optionLeft = isStandalone
+    ? Math.min(...header.row.items.map((i) => i.x))
+    : (header.anchors[0]?.x ?? Infinity);
+  const intrusion = optionLeft - OPTION_INTRUSION_TOLERANCE;
+  const headingAt = below.findIndex((r) => {
+    const run = marginRun(r)!;
+    return run.x + run.width >= intrusion;
+  });
+  if (headingAt === 0) return [];
+  const rowsOnly = headingAt > 0 ? below.slice(0, headingAt) : below;
+
+  const pitch = rowPitch(rowsOnly.slice(1).map((r, i) => rowsOnly[i]!.y - r.y));
 
   // Merge wrapped continuation lines into the row they belong to.
   const baselines: number[] = [];
-  for (const row of below) {
+  for (const row of rowsOnly) {
     const prev = baselines[baselines.length - 1];
     if (prev !== undefined && pitch > 0 && prev - row.y < pitch * WRAP_PITCH_RATIO) continue;
     baselines.push(row.y);

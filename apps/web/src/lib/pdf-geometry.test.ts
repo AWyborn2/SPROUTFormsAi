@@ -661,6 +661,108 @@ describe('proposeTableSegments — standalone option-header rows (U8)', () => {
   });
 });
 
+/**
+ * U1 — a between-tables section heading printed at the label margin must not
+ * be counted as a final row (R1, R2).
+ *
+ * Every coordinate below is MEASURED from page 1 of `ADMN-FRM-111 Light Vehicle
+ * Pre-start Checklist`, verbatim from its text layer. Category A is a three-up
+ * checklist: item labels sit in three sub-columns (x=42, 218.6, 397) answered
+ * by three OK/NA pairs (164.5/192.7, 345.7/371.1, 512.6/540.7). Between the last
+ * Category A item and the Category B block sits a single wide run,
+ * `Category 'B' faults: …`, printed at x=42 — the SAME left margin as the item
+ * labels. It passes the label-margin filter and was counted as a seventh row,
+ * so the derived grid ran one row too far and the overlay leaked into the
+ * heading. The discriminator is geometric: an item label's run at the margin
+ * stays left of the first option column (ends by 146.8, against the leftmost
+ * option glyph at 164.5), while the heading run crosses far into the option
+ * region (ends at 521.4).
+ */
+describe('proposeTableSegments — row-band tightening at the table end (U1)', () => {
+  const okNaColumns: RepeatingColumn[] = [
+    { key: 'item', label: 'Item', type: 'text' },
+    { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+    { key: 'na', label: 'NA', type: 'boolean_yes_no' },
+  ];
+  const A5_LANDSCAPE = { pageWidth: 595.32, pageHeight: 419.52 };
+
+  /** Category A, verbatim: the OK/NA header, six three-column item rows, then
+   * the wide `Category 'B' faults:` heading that shares the label margin. */
+  function categoryABlock(): PositionedText[] {
+    return [
+      // Option-header row (three OK/NA pairs on their own baseline).
+      { text: 'OK', x: 164.5, y: 306.2, width: 12.2 },
+      { text: 'NA', x: 192.7, y: 306.2, width: 12.6 },
+      { text: 'OK', x: 345.7, y: 306.2, width: 12.2 },
+      { text: 'NA', x: 371.1, y: 306.2, width: 12.6 },
+      { text: 'OK', x: 512.6, y: 306.2, width: 12.2 },
+      { text: 'NA', x: 540.7, y: 306.2, width: 12.6 },
+      // Six item rows, each three real columns wide.
+      { text: 'Engine oil level', x: 42, y: 292.5, width: 60.8 },
+      { text: 'Tyre Condition/ Wheel nuts', x: 218.6, y: 292.5, width: 112.1 },
+      { text: 'Brake & indicator lights', x: 397, y: 292.5, width: 94.8 },
+      { text: 'Engine coolant level', x: 42, y: 277.9, width: 81.3 },
+      { text: 'Park brake', x: 218.6, y: 277.9, width: 43.3 },
+      { text: 'Headlights', x: 397, y: 277.9, width: 43.0 },
+      { text: 'Power steering fluid level', x: 42, y: 263.2, width: 102.8 },
+      { text: 'Foot brake', x: 218.6, y: 263.2, width: 43.8 },
+      { text: 'Flashing light', x: 397, y: 263.2, width: 53.2 },
+      { text: 'Steering', x: 42, y: 248.6, width: 33.5 },
+      { text: 'Seat belts', x: 218.6, y: 248.6, width: 39.6 },
+      { text: 'Flag (if required)', x: 397, y: 248.6, width: 67.2 },
+      { text: 'Locking pins on Tray', x: 42, y: 233.9, width: 82.2 },
+      { text: '2-way radio', x: 218.6, y: 233.9, width: 47.8 },
+      { text: 'Fire extinguisher', x: 397, y: 233.9, width: 67.5 },
+      { text: 'Collision Avoidance System', x: 42, y: 219.4, width: 104.8 },
+      { text: 'Horn', x: 218.6, y: 219.3, width: 20.2 },
+      { text: 'Reverse Alarm', x: 397, y: 219.3, width: 58.8 },
+      // The between-tables heading at the label margin — NOT a seventh row.
+      {
+        text: "Category 'B' faults: The machine MUST NOT be operated unless fault is rectified or operation is APPROVED by competent person",
+        x: 42,
+        y: 200.8,
+        width: 479.4,
+      },
+    ];
+  }
+
+  const proposeA = (items: PositionedText[]) =>
+    proposeTableSegments({ page: 0, ...A5_LANDSCAPE, items, columns: okNaColumns });
+
+  it('derives six row bands for Category A, excluding the Category B heading', () => {
+    const [proposal] = proposeA(categoryABlock());
+
+    // Six printed item rows, not seven — the wide heading at y=200.8 is not a row.
+    expect(proposal?.segment.rowBands).toHaveLength(6);
+  });
+
+  it('leaves no row band covering the heading line', () => {
+    const [proposal] = proposeA(categoryABlock());
+    const bands = proposal!.segment.rowBands!;
+
+    // The heading baseline is 200.8; no band may reach down onto it.
+    for (const band of bands) {
+      expect(band.start).toBeGreaterThan(200.8);
+    }
+  });
+
+  it('keeps every genuine item row when the table is the last thing on the page', () => {
+    // No trailing heading — the six items are the whole table. Nothing is cut.
+    const noHeading = categoryABlock().filter((i) => !i.text.startsWith("Category 'B'"));
+    const [proposal] = proposeA(noHeading);
+
+    expect(proposal?.segment.rowBands).toHaveLength(6);
+  });
+
+  it('still merges a wrapped continuation line rather than cutting at it', () => {
+    // The dozer wrap: a real label spilling onto a second line stays within the
+    // label column, so it is merged, not read as a heading and cut.
+    const [proposal] = propose(dozerPage7Table2Header());
+
+    expect(proposal?.segment.rowBands).toHaveLength(3);
+  });
+});
+
 describe('the standalone header shape does not admit page furniture (U8 review)', () => {
   const COLS = [
     { key: 'item', label: 'Item', type: 'text' as const },
