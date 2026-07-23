@@ -29,9 +29,13 @@ export interface GeometryInspectorProps {
   field: ReviewField;
   /** Page text from the viewer; empty until the PDF has been read. */
   textPages: readonly TextPage[];
+  /** Whether draw mode is currently armed for this field (owned by the screen). */
+  drawArmed?: boolean;
+  /** Arm/disarm the draw gesture on the PDF overlay (KTD5 — explicit toggle). */
+  onToggleDraw?: () => void;
 }
 
-export function GeometryInspector({ field, textPages }: GeometryInspectorProps) {
+export function GeometryInspector({ field, textPages, drawArmed = false, onToggleDraw }: GeometryInspectorProps) {
   const proposal = geometryProposal(field.id);
   const confirmed = geometryConfirmed(field.id);
 
@@ -60,11 +64,36 @@ export function GeometryInspector({ field, textPages }: GeometryInspectorProps) 
 
   if (state.kind === 'unsupported') return null;
 
+  // A scalar carries a single placement box; a table carries a grid. The panel
+  // names whichever it actually is, so the copy never promises the wrong tool.
+  const isTable = field.type === 'repeating_group';
+  const noun = isTable ? 'grid' : 'box';
+
+  // The arm/disarm control (KTD5). Present in every drawable state — before the
+  // first box, and afterwards to redraw. `onToggleDraw` is only wired for the
+  // expanded field, so its absence hides the button rather than arming nothing.
+  const drawButton = onToggleDraw && (
+    <Button
+      variant={drawArmed ? 'primary' : 'ghost'}
+      leadingIcon={drawArmed ? 'x' : 'pencil'}
+      onClick={onToggleDraw}
+      className="justify-center"
+    >
+      {drawArmed
+        ? 'Cancel — drag on the PDF to draw'
+        : proposal
+          ? `Redraw the ${noun}`
+          : `Draw the ${noun} on the PDF`}
+    </Button>
+  );
+
   return (
     <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
       <div className="flex items-center gap-1.5">
-        <Icon name="grid-2x2" size={14} className="text-text-tertiary" />
-        <span className="text-[12.5px] font-semibold">Grid on the original PDF</span>
+        <Icon name={isTable ? 'grid-2x2' : 'square-dashed'} size={14} className="text-text-tertiary" />
+        <span className="text-[12.5px] font-semibold">
+          {isTable ? 'Grid on the original PDF' : 'Placement on the original PDF'}
+        </span>
         {state.kind === 'proposed' && state.confirmed && (
           <span className="ml-auto inline-flex items-center gap-1 rounded-pill bg-success-soft px-2 py-0.5 text-[10.5px] font-semibold text-success-text">
             <Icon name="check" size={11} />
@@ -73,7 +102,12 @@ export function GeometryInspector({ field, textPages }: GeometryInspectorProps) 
         )}
       </div>
 
-      {state.kind === 'no-proposal' ? (
+      {state.kind === 'draw-only' ? (
+        <>
+          <p className="text-[11.5px] leading-snug text-text-tertiary">{state.reason}</p>
+          {drawButton}
+        </>
+      ) : state.kind === 'no-proposal' ? (
         <>
           <p className="text-[11.5px] leading-snug text-text-tertiary">{state.reason}</p>
           {derived && (
@@ -86,13 +120,14 @@ export function GeometryInspector({ field, textPages }: GeometryInspectorProps) 
               Use the derived grid
             </Button>
           )}
+          {drawButton}
         </>
       ) : (
         <>
           <p className="text-[11.5px] leading-snug text-text-tertiary">
             {state.confirmed
-              ? 'This grid will place answers on the exported PDF.'
-              : 'Check the overlay against the printed table, then confirm. Until you do, this form exports its answers as data.'}
+              ? `This ${noun} will place ${isTable ? 'answers' : 'this value'} on the exported PDF.`
+              : `Check the overlay against the printed ${isTable ? 'table' : 'field'}, then confirm. Until you do, this form exports ${isTable ? 'its answers' : 'this answer'} as data.`}
           </p>
 
           {state.notes.length > 0 && (
@@ -107,10 +142,12 @@ export function GeometryInspector({ field, textPages }: GeometryInspectorProps) 
 
           <BandNudger fieldId={field.id} segment={state.segment} />
 
+          {drawButton}
+
           <div className="flex items-center gap-1.5">
             {!state.confirmed && (
               <Button leadingIcon="check" onClick={() => confirmGeometry(field.id)} className="flex-1 justify-center">
-                Confirm grid
+                Confirm {noun}
               </Button>
             )}
             <Button
@@ -119,7 +156,7 @@ export function GeometryInspector({ field, textPages }: GeometryInspectorProps) 
               onClick={() => rejectGeometry(field.id)}
               className="flex-1 justify-center text-danger-text"
             >
-              Discard grid
+              Discard {noun}
             </Button>
           </div>
         </>

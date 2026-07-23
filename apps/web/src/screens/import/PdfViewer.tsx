@@ -7,7 +7,10 @@ import {
   columnHandles,
   nudgedEdge,
   previewMarks,
+  snapDrawnBox,
   snapEdge,
+  snapTargets,
+  snapTargetsY,
   type BandHandle,
 } from './inspector/geometry-actions.js';
 import {
@@ -67,6 +70,14 @@ interface PdfViewerProps {
   bandSnapTargets?: readonly number[];
   /** A band edge was dragged to `value` (PDF points). Omit to draw read-only. */
   onBandEdge?: (handle: BandHandle, value: number) => void;
+  /**
+   * Whether draw mode is armed (U1/KTD5). While armed, a pointer-down + drag on
+   * a page rubber-bands a rectangle instead of panning; on release the two
+   * corners are snapped to the text layer and reported via `onDrawBox`.
+   */
+  drawArmed?: boolean;
+  /** A hand-drawn, snapped, page-clamped placement box for the selected field. */
+  onDrawBox?: (box: PageBox) => void;
   className?: string;
 }
 
@@ -271,6 +282,120 @@ function BandGrid({
   );
 }
 
+/**
+ * The armed draw surface: rubber-band a rectangle over one page and report a
+ * snapped, page-clamped `PageBox` on release (U1, R1).
+ *
+ * It only mounts while draw mode is armed, so when it is absent the viewport's
+ * pan/select gesture runs exactly as before (KTD5 — draw never fights pan). Its
+ * pointer-down stops propagation, so the pan handler on the scroll viewport
+ * never sees the press.
+ *
+ * Precision is NOT the pointer's job (the U10 lesson): the pointer places the
+ * box roughly and `snapDrawnBox` pulls each edge onto the nearest text-layer
+ * edge, using this page's own natural (PDF-point) size for the screen→points
+ * conversion and the vertical flip. The live rectangle is drawn in screen px
+ * straight from the pointer, so it tracks the cursor without any conversion.
+ */
+function DrawSurface({
+  pageIndex,
+  pageWidth,
+  pageHeight,
+  naturalWidth,
+  naturalHeight,
+  items,
+  onDrawBox,
+}: {
+  pageIndex: number;
+  /** Rendered page size in CSS px (tracks zoom). */
+  pageWidth: number;
+  pageHeight: number;
+  /** Page size in PDF points — the space geometry is stored in. */
+  naturalWidth: number;
+  naturalHeight: number;
+  /** This page's positioned text, for edge snapping. */
+  items: readonly PositionedText[];
+  onDrawBox?: (box: PageBox) => void;
+}) {
+  const surface = useRef<HTMLDivElement>(null);
+  // The live rectangle in CSS px, or null when not dragging.
+  const [rect, setRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+
+  const scaleX = pageWidth / naturalWidth;
+  const scaleY = pageHeight / naturalHeight;
+  // Screen px (top-left origin) → PDF points (bottom-left origin, y flipped).
+  const toPoints = (sx: number, sy: number) => ({ x: sx / scaleX, y: naturalHeight - sy / scaleY });
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    // Keep the scroll-viewport pan gesture from also firing (KTD5).
+    e.stopPropagation();
+    const el = surface.current;
+    if (!el) return;
+    el.setPointerCapture(e.pointerId);
+    const bounds = el.getBoundingClientRect();
+    const start = { x: e.clientX - bounds.left, y: e.clientY - bounds.top };
+    setRect({ x: start.x, y: start.y, w: 0, h: 0 });
+
+    const move = (ev: PointerEvent) => {
+      const cx = ev.clientX - bounds.left;
+      const cy = ev.clientY - bounds.top;
+      setRect({ x: Math.min(start.x, cx), y: Math.min(start.y, cy), w: Math.abs(cx - start.x), h: Math.abs(cy - start.y) });
+    };
+    const finish = (ev: PointerEvent, commit: boolean) => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      el.removeEventListener('pointercancel', cancel);
+      setRect(null);
+      if (!commit || !onDrawBox) return;
+      const endX = ev.clientX - bounds.left;
+      const endY = ev.clientY - bounds.top;
+      // A press that barely moved is a mis-click, not a box — ignore it rather
+      // than emit a degenerate rectangle.
+      if (Math.hypot(endX - start.x, endY - start.y) < DRAG_THRESHOLD) return;
+      const box = snapDrawnBox(
+        toPoints(start.x, start.y),
+        toPoints(endX, endY),
+        { page: pageIndex, pageWidth: naturalWidth, pageHeight: naturalHeight },
+        snapTargets(items),
+        snapTargetsY(items),
+      );
+      onDrawBox(box);
+    };
+    const up = (ev: PointerEvent) => finish(ev, true);
+    const cancel = (ev: PointerEvent) => finish(ev, false);
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', cancel);
+  };
+
+  return (
+    <div
+      ref={surface}
+      onPointerDown={onPointerDown}
+      className="absolute inset-0 z-10 cursor-crosshair"
+      // A faint tint marks the page as armed, so it is obvious a drag will draw
+      // rather than pan.
+      style={{ backgroundColor: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}
+    >
+      {rect && (
+        <div
+          className="absolute rounded-[2px]"
+          style={{
+            left: rect.x,
+            top: rect.y,
+            width: rect.w,
+            height: rect.h,
+            border: '1.5px dashed var(--accent)',
+            backgroundColor: 'color-mix(in srgb, var(--accent) 12%, transparent)',
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 export function PdfViewer({
   pdfBase64,
   assetId,
@@ -281,6 +406,8 @@ export function PdfViewer({
   bandOverlay,
   bandSnapTargets,
   onBandEdge,
+  drawArmed = false,
+  onDrawBox,
   className = '',
 }: PdfViewerProps) {
   const [pages, setPages] = useState<PageRender[]>([]);
@@ -296,6 +423,9 @@ export function PdfViewer({
   // point under the cursor (or viewport centre) stays put while scaling.
   const anchorRef = useRef<{ x: number; y: number; prevZoom: number } | null>(null);
   const didDragRef = useRef(false);
+  // The loaded text layer, kept so the draw gesture can snap a released
+  // rectangle to the printed edges of whichever page it was drawn on (U1).
+  const textPagesRef = useRef<TextPage[]>([]);
 
   const widestPage = pages.reduce((w, p) => Math.max(w, p.naturalWidth), 0);
   const fit = fitWidthZoom(containerWidth - VIEWPORT_PADDING * 2, widestPage);
@@ -361,6 +491,7 @@ export function PdfViewer({
         });
       }
       setPages(rendered);
+      textPagesRef.current = textPages;
       onTextLayer?.(textPages);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to render PDF');
@@ -614,6 +745,22 @@ export function PdfViewer({
                     onBandEdge={onBandEdge}
                     pageWidth={pageWidth}
                     pageHeight={pageHeight}
+                  />
+                )}
+                {/*
+                  Draw surface last so, while armed, it sits above the band
+                  overlay and captures the rubber-band gesture. Absent when
+                  disarmed, leaving pan/select untouched (KTD5).
+                */}
+                {drawArmed && (
+                  <DrawSurface
+                    pageIndex={pageIndex}
+                    pageWidth={pageWidth}
+                    pageHeight={pageHeight}
+                    naturalWidth={page.naturalWidth}
+                    naturalHeight={page.naturalHeight}
+                    items={textPagesRef.current[pageIndex]?.items ?? []}
+                    onDrawBox={onDrawBox}
                   />
                 )}
               </div>

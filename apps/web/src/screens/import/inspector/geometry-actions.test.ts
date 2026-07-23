@@ -78,8 +78,10 @@ function pageText(): PositionedText[] {
 }
 
 describe('unsupportedReason', () => {
-  it('rejects a non-table field', () => {
-    expect(unsupportedReason(tableField({ type: 'text' }))).toMatch(/Only a table/);
+  it('does NOT reject a non-table field — a scalar is draw-only, not unsupported (U2/R9)', () => {
+    // A scalar has no derived grid, but it can carry a hand-drawn placement box,
+    // so it is no longer a hard block — `panelState` routes it to `draw-only`.
+    expect(unsupportedReason(tableField({ type: 'text' }))).toBeNull();
   });
 
   it('rejects a table with no option columns', () => {
@@ -203,10 +205,50 @@ describe('table-aware selection: ordinal, then refuse-on-ambiguity (U2, R1/R2/R3
 describe('panelState', () => {
   const derived = () => deriveForField(tableField(), 6, pageText(), A4.width, A4.height);
 
-  it('reports unsupported for a scalar field', () => {
+  it('reports draw-only for a scalar field, with no derivation offered (U2/R9/R5)', () => {
     const state = panelState(tableField({ type: 'text' }), undefined, false, null);
 
+    expect(state.kind).toBe('draw-only');
+    if (state.kind === 'draw-only') {
+      // Names drawing a box, never a column grid, and reassures publishing works.
+      expect(state.reason).toMatch(/Draw a box/);
+      expect(state.reason).not.toMatch(/grid/);
+      expect(state.reason).toMatch(/still publishes/);
+    }
+  });
+
+  it('reports unsupported for a table whose extraction captured no option columns', () => {
+    const state = panelState(
+      tableField({ columns: [{ key: 'item', label: 'Item', type: 'text' }] }),
+      undefined,
+      false,
+      null,
+    );
+
     expect(state.kind).toBe('unsupported');
+  });
+
+  it('surfaces a proposed scalar box (no bands) as a confirmable proposal', () => {
+    // A scalar's proposal is a band-less PageBox — the same `proposed` state a
+    // table uses, so it gets confirm/adjust; there is simply no grid to nudge.
+    const box: PageBox = {
+      page: 0,
+      x: 100,
+      y: 200,
+      width: 120,
+      height: 16,
+      pageWidth: 595,
+      pageHeight: 842,
+    };
+    const state = panelState(tableField({ type: 'text' }), box, false, null);
+
+    expect(state.kind).toBe('proposed');
+    if (state.kind === 'proposed') {
+      expect(state.segment.columnBands).toBeUndefined();
+      expect(state.confirmed).toBe(false);
+    }
+    // …and that band-less box is valid geometry the publish boundary accepts.
+    expect(resolveGeometry({ geometry: { segments: [box] } }, 1).segments).toHaveLength(1);
   });
 
   it('explains that publishing still works when nothing is proposed', () => {

@@ -118,6 +118,7 @@ function selectByRowCount(proposals: readonly TableProposal[], wantRows: number)
 /** What the panel should show for the selected field. */
 export type GeometryPanelState =
   | { kind: 'unsupported'; reason: string }
+  | { kind: 'draw-only'; reason: string }
   | { kind: 'no-proposal'; reason: string }
   | { kind: 'proposed'; segment: PageBox; confidence: number; notes: string[]; confirmed: boolean };
 
@@ -216,14 +217,21 @@ export function deriveAcrossPages(
   return best;
 }
 
-/** Why a field cannot carry a derived grid at all. */
+/**
+ * Why a field has NO geometry path at all — neither a derived grid nor a
+ * hand-drawn box.
+ *
+ * A non-table field is deliberately NOT unsupported any more (U2/R9): it cannot
+ * carry a *derived* grid — there is nothing to derive for a scalar — but it can
+ * carry a hand-drawn single-box placement, surfaced through the `draw-only`
+ * panel state and confirmed exactly like a grid. The only true dead-end left is
+ * a repeating table whose extraction captured no option columns: there is no
+ * grid to confirm and no per-cell placement to draw.
+ */
 export function unsupportedReason(
   field: Pick<FormField, 'type' | 'columns'>,
 ): string | null {
-  if (field.type !== 'repeating_group') {
-    return 'Only a table can carry a column grid. Other fields export at their own position.';
-  }
-  if (!field.columns || field.columns.length < 2) {
+  if (field.type === 'repeating_group' && (!field.columns || field.columns.length < 2)) {
     return 'This table has no option columns to place, so there is no grid to confirm.';
   }
   return null;
@@ -518,6 +526,17 @@ export function panelState(
       confidence: derived?.confidence ?? 1,
       notes: derived?.notes ?? [],
       confirmed,
+    };
+  }
+
+  // A non-table field has nothing to derive — its value prints in one place.
+  // Offer the draw tool directly rather than the "derived grid" language a
+  // table uses, so the copy only ever names the action actually available (R5).
+  if (field.type !== 'repeating_group') {
+    return {
+      kind: 'draw-only',
+      reason:
+        'Draw a box on the PDF where this field’s value should print, then confirm it. Until you do, the form still publishes and exports this answer as data.',
     };
   }
 

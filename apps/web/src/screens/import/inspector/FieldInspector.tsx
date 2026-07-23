@@ -66,9 +66,13 @@ export interface FieldInspectorProps {
    * of the PDF, not review state — nothing that publishes depends on it.
    */
   textPages: readonly TextPage[];
+  /** Whether draw mode is armed for this field (owned by the review screen). */
+  drawArmed: boolean;
+  /** Arm/disarm the draw gesture, so the geometry panel can offer the toggle. */
+  onToggleDraw: () => void;
 }
 
-export function FieldInspector({ field, index, count, onSelect, textPages }: FieldInspectorProps) {
+export function FieldInspector({ field, index, count, onSelect, textPages, drawArmed, onToggleDraw }: FieldInspectorProps) {
   const mode = inspectorMode(field);
   // The condition panel needs the whole form to derive its source list (only
   // fields EARLIER than this one may be a source), so it reads the session
@@ -178,7 +182,21 @@ export function FieldInspector({ field, index, count, onSelect, textPages }: Fie
           />
         )}
 
-        {isTable && <GeometryInspector field={field} textPages={textPages} />}
+        {/*
+          Mounted for every non-section field, not only tables (U2/R9). A scalar
+          gets a draw-only geometry panel — a hand-drawn placement box — while a
+          table still gets its derivable grid. `GeometryInspector` returns null
+          when there is genuinely no geometry path (a table with no option
+          columns), so gating on `!isSection` here is safe.
+        */}
+        {!isSection && (
+          <GeometryInspector
+            field={field}
+            textPages={textPages}
+            drawArmed={drawArmed}
+            onToggleDraw={onToggleDraw}
+          />
+        )}
 
         <ConditionEditor field={field} fields={fields} actions={importSessionConditionActions} />
 
