@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { FormField, GroupOrdinal, PageBox } from '@formai/shared';
-import { markPlacement } from '@formai/shared';
+import { markPlacement, resolveGeometry } from '@formai/shared';
 import type { PositionedText } from '../../../lib/pdf-geometry.js';
 import {
   NEAR_EQUAL_CONFIDENCE,
@@ -22,8 +22,10 @@ import {
   nudgedEdge,
   panelState,
   previewMarks,
+  snapDrawnBox,
   snapEdge,
   snapTargets,
+  snapTargetsY,
   unsupportedReason,
 } from './geometry-actions.js';
 
@@ -542,5 +544,69 @@ describe('snapTargets survives a degenerate pdfjs measurement (U10 review)', () 
     expect(targets[0]).toBeCloseTo(192.7, 5);
     expect(targets[1]).toBeCloseTo(205.3, 5);
     expect(snapEdge(190, targets)).toBe(192.7);
+  });
+});
+
+describe('draw-a-box: snap a dragged rectangle to the page (U1, R1)', () => {
+  // ADMN-FRM-111 scalar-cell anchors (measured): the Date value cell sits to the
+  // right of the "Date" label at x=37.5; printed run edges nearby give the snap
+  // targets a rough drag lands on.
+  const items: PositionedText[] = [
+    { text: 'Date', x: 37.5, y: 306, width: 22 },
+    { text: 'Asset No', x: 250, y: 306, width: 40 },
+    { text: 'Site', x: 460, y: 306, width: 20 },
+    { text: 'HRS/KMS', x: 37.5, y: 288, width: 44 },
+  ];
+  const page = { page: 0, pageWidth: 595.32, pageHeight: 419.52 };
+
+  it('snaps each edge of a rough drag onto the nearest printed edge', () => {
+    const xs = snapTargets(items);
+    const ys = snapTargetsY(items);
+    // A sloppy drag near the Asset No cell: left ~3pt off 290 (Asset No right
+    // edge), right ~2pt off 460 (Site left edge), bottom near the 288 baseline.
+    const box = snapDrawnBox({ x: 293, y: 290 }, { x: 458, y: 305 }, page, xs, ys);
+
+    expect(box.x).toBeCloseTo(290, 5); // Asset No right edge
+    expect(box.x + box.width).toBeCloseTo(460, 5); // Site left edge
+    expect(box.y).toBeCloseTo(288, 5); // HRS/KMS baseline
+    expect(box.columnBands).toBeUndefined(); // a scalar placement box has no bands
+  });
+
+  it('normalises an inverted drag (released up-and-left of the start)', () => {
+    const box = snapDrawnBox({ x: 400, y: 310 }, { x: 200, y: 250 }, page, [], []);
+    expect(box.width).toBeGreaterThan(0);
+    expect(box.height).toBeGreaterThan(0);
+    expect(box.x).toBe(200);
+    expect(box.y).toBe(250);
+  });
+
+  it('clamps a drag that runs off the page', () => {
+    const box = snapDrawnBox({ x: -50, y: -20 }, { x: 9000, y: 9000 }, page, [], []);
+    expect(box.x).toBe(0);
+    expect(box.y).toBe(0);
+    expect(box.x + box.width).toBeCloseTo(page.pageWidth, 5);
+    expect(box.y + box.height).toBeCloseTo(page.pageHeight, 5);
+  });
+
+  it('does not let a snap collapse an axis onto one target', () => {
+    // Both edges within range of the same single target (100). Snapping both
+    // would give a zero-width box; the axis must keep the raw drag instead.
+    const box = snapDrawnBox({ x: 98, y: 200 }, { x: 104, y: 260 }, page, [100], []);
+    expect(box.width).toBeGreaterThanOrEqual(1);
+  });
+
+  it('produces a box the shipped validator accepts', () => {
+    const box = snapDrawnBox({ x: 100, y: 100 }, { x: 200, y: 140 }, page, [], []);
+    expect(resolveGeometry({ geometry: { segments: [box] } }, 1).segments).toHaveLength(1);
+  });
+
+  it('snapTargetsY dedupes baselines and drops non-finite ys', () => {
+    const rows: PositionedText[] = [
+      { text: 'a', x: 10, y: 300, width: 5 },
+      { text: 'b', x: 80, y: 300, width: 5 }, // same baseline → one target
+      { text: 'c', x: 10, y: 284, width: 5 },
+      { text: 'bad', x: 10, y: Number.NaN, width: 5 },
+    ];
+    expect(snapTargetsY(rows)).toEqual([284, 300]);
   });
 });

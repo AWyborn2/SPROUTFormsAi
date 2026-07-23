@@ -424,6 +424,83 @@ export function snapEdge(value: number, targets: readonly number[], range = SNAP
   return best ?? value;
 }
 
+/**
+ * Vertical snap targets: the printed text baselines on a page (U1).
+ *
+ * The horizontal `snapTargets` gives the left/right edges a column-band drag
+ * lands on; a hand-drawn box also needs to snap its TOP and BOTTOM, so this is
+ * the y counterpart. `PositionedText` carries only a baseline y (no glyph
+ * height), so a baseline is the one honest vertical anchor — a scalar value
+ * prints on the same baseline as its printed label. Same NaN guard and
+ * dedupe as `snapTargets`, for the same reason.
+ */
+export function snapTargetsY(items: readonly PositionedText[]): number[] {
+  const ys: number[] = [];
+  for (const item of items) {
+    if (!Number.isFinite(item.y)) continue;
+    ys.push(item.y);
+  }
+  ys.sort((a, b) => a - b);
+  const unique: number[] = [];
+  for (const y of ys) {
+    if (unique.length === 0 || y - unique[unique.length - 1]! > 0.5) unique.push(y);
+  }
+  return unique;
+}
+
+/**
+ * Turn two dragged corners into a snapped, page-clamped box (U1).
+ *
+ * The pure core of draw-a-box: the component converts the pointer's two corners
+ * from screen pixels into PDF points (flipping y, which is bottom-up in PDF
+ * space) and hands them here. Precision is the U10 lesson — a free drag over a
+ * scaled preview cannot resolve a 7-13pt column, so each edge snaps to the
+ * text layer (`snapEdge`) and the pointer only has to get within range. The box
+ * is normalised (an inverted drag is fine), clamped to the page, and returned
+ * with NO bands: it is a scalar placement box, or the outer box a table's
+ * subdivision (U4) will fill in.
+ *
+ * A snap is applied per axis only when it keeps the box non-degenerate —
+ * snapping both edges of an axis onto one target would collapse it, so that
+ * axis keeps the raw drag instead.
+ */
+export function snapDrawnBox(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  page: { page: number; pageWidth: number; pageHeight: number },
+  xTargets: readonly number[],
+  yTargets: readonly number[],
+): PageBox {
+  const clamp = (v: number, max: number) => Math.min(Math.max(v, 0), max);
+  let left = clamp(Math.min(a.x, b.x), page.pageWidth);
+  let right = clamp(Math.max(a.x, b.x), page.pageWidth);
+  let bottom = clamp(Math.min(a.y, b.y), page.pageHeight);
+  let top = clamp(Math.max(a.y, b.y), page.pageHeight);
+
+  const sLeft = snapEdge(left, xTargets);
+  const sRight = snapEdge(right, xTargets);
+  if (sRight - sLeft >= 1) {
+    left = sLeft;
+    right = sRight;
+  }
+  const sBottom = snapEdge(bottom, yTargets);
+  const sTop = snapEdge(top, yTargets);
+  if (sTop - sBottom >= 1) {
+    bottom = sBottom;
+    top = sTop;
+  }
+
+  return {
+    page: page.page,
+    x: left,
+    y: bottom,
+    width: right - left,
+    height: top - bottom,
+    pageWidth: page.pageWidth,
+    pageHeight: page.pageHeight,
+  };
+}
+
 /** The panel state for a field, given what has been proposed and confirmed. */
 export function panelState(
   field: Pick<FormField, 'type' | 'columns'>,
