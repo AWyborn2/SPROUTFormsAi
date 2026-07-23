@@ -22,6 +22,7 @@ import {
   nudgedEdge,
   panelState,
   previewMarks,
+  rowHandles,
   snapDrawnBox,
   snapEdge,
   snapTargets,
@@ -430,6 +431,63 @@ describe('column handles are one per boundary, not two per band (U10 review)', (
 
   it('is empty-safe', () => {
     expect(columnHandles([])).toEqual([]);
+  });
+});
+
+describe('row handles are one per boundary, not two per band (U3)', () => {
+  // Contiguous in y, as centresToBands produces them: each band's end IS the
+  // next band's start. `start`/`end` are the band's bottom/top y (bottom-up).
+  const BANDS = [
+    { key: 'r0', start: 400, end: 440 },
+    { key: 'r1', start: 440, end: 480 },
+    { key: 'r2', start: 480, end: 524 },
+  ];
+
+  it('gives one handle per edge, not one per band edge', () => {
+    const handles = rowHandles(BANDS);
+
+    expect(handles).toHaveLength(4);
+    expect(handles.map((h) => h.at)).toEqual([400, 440, 480, 524]);
+  });
+
+  it('makes an interior handle own BOTH bands it separates', () => {
+    const [, between] = rowHandles(BANDS);
+
+    expect(between).toMatchObject({ left: 'r0', right: 'r1' });
+  });
+
+  it('makes the outer handles own one band each', () => {
+    const handles = rowHandles(BANDS);
+
+    expect(handles[0]).toMatchObject({ right: 'r0' });
+    expect(handles[0]!.left).toBeUndefined();
+    expect(handles[3]).toMatchObject({ left: 'r2' });
+    expect(handles[3]!.right).toBeUndefined();
+  });
+
+  it('orders by position even when the bands are not', () => {
+    const handles = rowHandles([BANDS[2]!, BANDS[0]!, BANDS[1]!]);
+
+    expect(handles.map((h) => h.at)).toEqual([400, 440, 480, 524]);
+  });
+
+  it('gives a single band its two outer edges', () => {
+    expect(rowHandles([BANDS[0]!]).map((h) => h.at)).toEqual([400, 440]);
+  });
+
+  it('resolves outer/interior handles to the same adjustments the row steppers drive', () => {
+    const handles = rowHandles(BANDS);
+    // Bottom handle owns r0's START; top handle owns r2's END — the button path's
+    // adjustGeometryBand(field, 'row', key, 'start'|'end', ...).
+    expect(handleAdjustment(handles[0]!)).toEqual({ kind: 'edge', key: 'r0', edge: 'start' });
+    expect(handleAdjustment(handles[3]!)).toEqual({ kind: 'edge', key: 'r2', edge: 'end' });
+    // Interior handle writes both bands' shared edge — adjustGeometryBoundary.
+    expect(handleAdjustment(handles[1]!)).toEqual({ kind: 'boundary', leftKey: 'r0', rightKey: 'r1' });
+    expect(nudgedEdge(handles[1]!, 1)).toBeCloseTo(440 + NUDGE_POINTS, 5);
+  });
+
+  it('is empty-safe', () => {
+    expect(rowHandles([])).toEqual([]);
   });
 });
 
