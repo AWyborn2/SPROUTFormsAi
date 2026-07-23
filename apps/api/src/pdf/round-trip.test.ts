@@ -107,6 +107,94 @@ function markXs(bytes: Uint8Array): number[] {
     .sort((a, b) => a - b);
 }
 
+/** X positions of every glyph whose text is exactly `ch`, sorted. */
+function glyphXs(bytes: Uint8Array, ch: string): number[] {
+  return drawnGlyphs(bytes)
+    .filter((g) => g.text === ch)
+    .map((g) => g.x)
+    .sort((a, b) => a - b);
+}
+
+interface Stroke {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/**
+ * Every stroked line segment on the page. `drawMark` (the tick/cross vector
+ * glyph) is the only thing in these fixtures that strokes lines — the base PDFs
+ * draw text only — so every segment here belongs to a mark. pdf-lib emits each
+ * `drawLine` as `<x1> <y1> m  <x1> <y1> m  <x2> <y2> l  S` (the move is
+ * repeated), which this regex reads back.
+ */
+function strokes(bytes: Uint8Array): Stroke[] {
+  const buf = Buffer.from(bytes);
+  const hay = buf.toString('latin1');
+  const out: Stroke[] = [];
+  let pos = 0;
+  while ((pos = hay.indexOf('stream', pos)) !== -1) {
+    if (hay.slice(pos - 3, pos + 6) === 'endstream') {
+      pos += 9;
+      continue;
+    }
+    let dataStart = pos + 6;
+    if (hay[dataStart] === '\r') dataStart++;
+    if (hay[dataStart] === '\n') dataStart++;
+    const end = hay.indexOf('endstream', dataStart);
+    if (end === -1) break;
+    let content: string;
+    try {
+      content = zlib.inflateSync(buf.subarray(dataStart, end)).toString('latin1');
+    } catch {
+      pos = end + 9;
+      continue;
+    }
+    const re = /(-?[\d.]+) (-?[\d.]+) m\s+(-?[\d.]+) (-?[\d.]+) m\s+(-?[\d.]+) (-?[\d.]+) l\s+S/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(content)) !== null) {
+      out.push({ x1: Number(m[1]), y1: Number(m[2]), x2: Number(m[5]), y2: Number(m[6]) });
+    }
+    pos = end + 9;
+  }
+  return out;
+}
+
+interface Mark {
+  kind: 'tick' | 'cross';
+  x: number;
+  y: number;
+}
+
+/**
+ * Every vector mark (`drawMark`) drawn on the page. Each mark is two
+ * consecutive line segments; a tick's second segment starts where its first
+ * ended (the elbow), a cross's two segments do not meet — that is how the two
+ * are told apart. The anchor `x` is the first segment's start, which is the
+ * mark's leftmost point and equals the shared `markPlacement` x — so a tick's
+ * `x` lands at exactly the same column position an `X` text mark used to.
+ */
+function drawnMarks(bytes: Uint8Array): Mark[] {
+  const s = strokes(bytes);
+  const out: Mark[] = [];
+  for (let i = 0; i + 1 < s.length; i += 2) {
+    const a = s[i]!;
+    const b = s[i + 1]!;
+    const elbow = Math.abs(a.x2 - b.x1) < 0.01 && Math.abs(a.y2 - b.y1) < 0.01;
+    out.push({ kind: elbow ? 'tick' : 'cross', x: a.x1, y: a.y1 });
+  }
+  return out;
+}
+
+/** X positions of every tick drawn, sorted. */
+function tickXs(bytes: Uint8Array): number[] {
+  return drawnMarks(bytes)
+    .filter((m) => m.kind === 'tick')
+    .map((m) => m.x)
+    .sort((a, b) => a - b);
+}
+
 /** Table box used by the grouped fixtures: 4 columns of 100pt each from x=40. */
 const GROUPED_POS = {
   page: 0,
@@ -261,11 +349,14 @@ describe('roundTripExport', () => {
     expect(bytesInclude(output, 'Fire extinguishers tagged')).toBe(true);
   });
 
-  it('exports an ungrouped table with one mark per truthy cell', async () => {
+  it('exports an ungrouped boolean_yes_no table with Y per truthy cell', async () => {
     const original = await makeFlatPdf();
     const output = await roundTripExport({ originalPdf: original, fields: FIELDS, values: VALUES });
-    // Both rows tick the single `pass` column (index 1 of 2 columns, width 200).
-    expect(markXs(output)).toEqual([40 + 200 + 3, 40 + 200 + 3]);
+    // `pass` is a boolean_yes_no column, so true renders the literal answer `Y`
+    // (not `X`). Both rows draw it in the single option column (index 1 of 2,
+    // width 200), and nothing draws a bare `X` any more.
+    expect(glyphXs(output, 'Y')).toEqual([40 + 200 + 3, 40 + 200 + 3]);
+    expect(markXs(output)).toEqual([]);
   });
 });
 
@@ -284,12 +375,16 @@ describe('roundTripExport — answer sets', () => {
         ],
       },
     });
-    // The third member column (`na`, column index 3) is marked…
-    expect(markXs(output)).toEqual([cellX(1), cellX(3)]);
+    // A chosen answer-set member is a ticked checkbox, so it renders as a tick
+    // (vector, via drawMark) — never a literal `X`. Placement is unchanged: the
+    // ticks land at the same column x the old `X` marks used (`na` = index 3,
+    // `ok` = index 1).
+    expect(tickXs(output)).toEqual([cellX(1), cellX(3)]);
+    expect(markXs(output)).toEqual([]);
     // …and on that row (the topmost, so the highest y) its two siblings are blank.
-    const marks = drawnGlyphs(output).filter((g) => g.text === 'X');
-    const topY = Math.max(...marks.map((g) => g.y));
-    const firstRow = marks.filter((g) => g.y === topY).map((g) => g.x);
+    const marks = drawnMarks(output).filter((m) => m.kind === 'tick');
+    const topY = Math.max(...marks.map((m) => m.y));
+    const firstRow = marks.filter((m) => m.y === topY).map((m) => m.x);
     expect(firstRow).toEqual([cellX(3)]);
     expect(bytesInclude(output, 'Engine oil level')).toBe(true);
   });
@@ -302,6 +397,7 @@ describe('roundTripExport — answer sets', () => {
       values: { checks: [{ item: 'Engine oil level', ok: false, fault: null }] },
     });
     expect(markXs(output)).toEqual([]);
+    expect(drawnMarks(output)).toEqual([]);
     expect(bytesInclude(output, 'Engine oil level')).toBe(true);
   });
 
@@ -313,7 +409,9 @@ describe('roundTripExport — answer sets', () => {
       values: { checks: [{ item: 'Engine oil level', ok: true, fault: true }] },
     });
     // `selectedOption` reports the first truthy member; the sibling stays blank.
-    expect(markXs(output)).toEqual([cellX(1)]);
+    // The chosen member renders as a single tick.
+    expect(tickXs(output)).toEqual([cellX(1)]);
+    expect(markXs(output)).toEqual([]);
   });
 
   it('renders a grouped set and an ungrouped free-text column together', async () => {
@@ -334,7 +432,9 @@ describe('roundTripExport — answer sets', () => {
       fields: [field],
       values: { checks: [{ item: 'Engine oil level', fault: true, comment: 'Topped up' }] },
     });
-    expect(markXs(output)).toEqual([cellX(2)]);
+    // The chosen set member (`fault`, index 2) draws a tick; the free-text
+    // column keeps drawing its literal text at its own column.
+    expect(tickXs(output)).toEqual([cellX(2)]);
     const comment = drawnGlyphs(output).find((g) => g.text === 'Topped up');
     expect(comment?.x).toBe(cellX(3));
   });
@@ -507,6 +607,63 @@ describe('roundTripExport — check/cross columns', () => {
     });
     expect(drawnGlyphs(output).filter((g) => g.text === 'N').map((g) => g.x)).toEqual([cellX(1)]);
   });
+
+  it('covers AE3 — marks a boolean_yes_no true as Y, not X', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [{ ...CHECK_FIELD, columns: columnsWith('boolean_yes_no') as FormField['columns'] }],
+      values: { checks: [{ item: 'Isolation applied', result: true }] as never },
+    });
+    // A yes/no answer renders its literal glyph: Y for true. Never a bare `X`.
+    expect(glyphXs(output, 'Y')).toEqual([cellX(1)]);
+    expect(markXs(output)).toEqual([]);
+  });
+
+  it('covers AE2 — an independent checkbox true draws a tick, not X', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [{ ...CHECK_FIELD, columns: columnsWith('checkbox') as FormField['columns'] }],
+      values: { checks: [{ item: 'Isolation applied', result: true }] as never },
+    });
+    // A ticked checkbox renders as a vector tick (the page font has no `✓`),
+    // at the same column x a text mark would use. No literal `X` is drawn.
+    expect(tickXs(output)).toEqual([cellX(1)]);
+    expect(markXs(output)).toEqual([]);
+  });
+
+  it('covers AE4 — check_cross still draws a tick for true and a cross for false', async () => {
+    const trueOut = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [CHECK_FIELD],
+      values: { checks: [{ item: 'Isolation applied', result: true }] as never },
+    });
+    const falseOut = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [CHECK_FIELD],
+      values: { checks: [{ item: 'Isolation applied', result: false }] as never },
+    });
+    // Unchanged behaviour, now pinned on the drawn marks themselves: one tick
+    // for true, one cross for false, both at the result column.
+    expect(drawnMarks(trueOut)).toEqual([{ kind: 'tick', x: cellX(1), y: expect.any(Number) }]);
+    expect(drawnMarks(falseOut)).toEqual([{ kind: 'cross', x: cellX(1), y: expect.any(Number) }]);
+  });
+
+  it('places every column type at the same column x — only the glyph differs', async () => {
+    const row = { item: 'Isolation applied', result: true } as never;
+    const tickOut = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [{ ...CHECK_FIELD, columns: columnsWith('checkbox') as FormField['columns'] }],
+      values: { checks: [row] },
+    });
+    const yesNoOut = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [{ ...CHECK_FIELD, columns: columnsWith('boolean_yes_no') as FormField['columns'] }],
+      values: { checks: [row] },
+    });
+    // The tick's anchor x and the `Y` glyph's x are identical — placement is
+    // shared across glyph types, so swapping the glyph never moves the mark.
+    expect(tickXs(tickOut)).toEqual(glyphXs(yesNoOut, 'Y'));
+  });
 });
 
 /**
@@ -555,8 +712,11 @@ describe('roundTripExport — export against real bands', () => {
       values: { checks: [{ item: 'Isolation applied', cross: true }] },
     });
 
-    // The cross band runs 290-340, so its cell text starts at 293.
-    expect(markXs(output)).toEqual([293]);
+    // `cross` is the chosen answer-set member, so it renders as a tick. The
+    // cross band runs 290-340, so the tick anchors at 293 — the same x the old
+    // `X` text mark used.
+    expect(tickXs(output)).toEqual([293]);
+    expect(markXs(output)).toEqual([]);
   });
 
   it('covers AE1 — a table spanning two pages draws on both', async () => {
@@ -575,8 +735,10 @@ describe('roundTripExport — export against real bands', () => {
     const doc = await PDFDocument.load(output);
     expect(doc.getPageCount()).toBeGreaterThan(1);
     // Three rows against two row bands per segment: two land on page 0 and the
-    // third continues onto page 1.
-    expect(markXs(output)).toEqual([243, 243, 243]);
+    // third continues onto page 1. Each chosen `tick` member renders as a tick
+    // at the tick band's x (240-290 → 243) — placement unchanged.
+    expect(tickXs(output)).toEqual([243, 243, 243]);
+    expect(markXs(output)).toEqual([]);
   });
 
   it('skips a column that has no band rather than guessing where it sits', async () => {
@@ -592,7 +754,8 @@ describe('roundTripExport — export against real bands', () => {
       values: { checks: [{ item: 'Isolation applied', cross: true }] },
     });
 
-    expect(markXs(output)).toEqual([]);
+    expect(tickXs(output)).toEqual([]);
+    expect(drawnMarks(output)).toEqual([]);
   });
 
   it('covers AE4 — a table with no confirmed geometry contributes nothing, and export still succeeds', async () => {
@@ -616,7 +779,8 @@ describe('roundTripExport — export against real bands', () => {
     });
 
     // No arithmetic fallback: the table draws nothing at all...
-    expect(markXs(output)).toEqual([]);
+    expect(tickXs(output)).toEqual([]);
+    expect(drawnMarks(output)).toEqual([]);
     // ...while every other field still exports.
     expect(bytesInclude(output, 'Warehouse B')).toBe(true);
   });
@@ -632,7 +796,7 @@ describe('roundTripExport — export against real bands', () => {
 
     // Four row bands across two segments — the five extra rows have nowhere
     // recorded to go, so they are not drawn.
-    expect(markXs(output)).toHaveLength(4);
+    expect(tickXs(output)).toHaveLength(4);
   });
 
   it('still exports a legacy scalar field positioned by sourcePosition alone', async () => {
