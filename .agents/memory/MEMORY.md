@@ -4,4 +4,5 @@
 - [Replit OIDC auth](replit-oidc-auth.md) — full OIDC (openid-client v6) replaced auth_with_repl_site; PKCE state sealed into _oidc cookie, fai_session issued after callback.
 - [Custom auth / Clerk removed](clerk-auth-setup.md) — Clerk fully removed; bcryptjs email+password auth; Backend API workflow must use configureWorkflow with no waitForPort.
 - [Drizzle migration journal ordering pitfall](drizzle-migration-journal-order.md) — journal written before SQL = migration recorded but DDL never executed; fix by applying ALTER TABLE directly via psql.
+- [npm placeholder node_modules](npm-placeholder-node-modules.md) — empty placeholder dirs make `npm install` a no-op; rm -rf node_modules first when binaries are missing.
 - [Replit Object Storage sidecar pattern](replit-object-storage-sidecar.md) — SDK uses local sidecar at :1106, NOT a REPLIT_DEFAULT_BUCKET_URL env var; guard with REPLIT_CLUSTER instead.
