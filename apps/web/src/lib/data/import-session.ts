@@ -336,6 +336,21 @@ export function setFieldRequired(id: string, required: boolean): void {
   dispatchEdit({ t: 'update', id, patch: { required } });
 }
 
+/**
+ * Confirm a flagged field as correct as-is, for any field type.
+ *
+ * A review-metadata change only: it sets `resolved`, which `reviewStatus` reads
+ * as `ok`, so the field drops out of the "needs review" count without touching
+ * its type or any published property (`reviewedToFields` strips `resolved`).
+ * The type-specific confirmations (`confirmTable`, `remapSignature`) set the
+ * same flag; this is the generic "looks right" the flagged-field card needs so
+ * a low-confidence field of any type can be affirmed rather than only corrected.
+ * Idempotent — confirming an already-resolved field leaves it resolved.
+ */
+export function confirmField(id: string): void {
+  setMeta(id, { resolved: true });
+}
+
 /** Rename one captured checklist item in place; out-of-range indices ignored. */
 export function renameFixedRowItem(id: string, index: number, label: string): void {
   const current = editorField(id)?.fixedRows;

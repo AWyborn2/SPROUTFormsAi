@@ -37,9 +37,11 @@ import {
   answerSetAccepted,
   adjustGeometryBand,
   adjustGeometryBoundary,
+  confirmField,
   distributeGroups,
   confirmGeometry,
   fileToBase64,
+  reviewStatus,
   geometryConfirmed,
   geometryProposal,
   getImportSession,
@@ -359,6 +361,56 @@ describe('review actions — required toggle + fixed-row item editing', () => {
 
     removeFixedRowItem('chk', 0);
     expect(getImportSession().fields[0]!.fixedRows).toBeUndefined();
+  });
+});
+
+describe('confirmField — a plain "looks right" on a flagged field (R1/R3/AE1/AE3)', () => {
+  it('marks a low-confidence repeating table resolved and reads it as ok, type unchanged', async () => {
+    await seedSession([{ ...CHECKLIST, confidence: 0.4 }]);
+    const before = getImportSession().fields[0]!;
+    expect(reviewStatus(before)).toBe('low');
+
+    confirmField('chk');
+
+    const after = getImportSession().fields[0]!;
+    expect(after.resolved).toBe(true);
+    expect(reviewStatus(after)).toBe('ok');
+    // Confirm is not a correction — the type is left exactly as extracted.
+    expect(after.type).toBe('repeating_group');
+  });
+
+  it('drops the field out of the needs-review count', async () => {
+    await seedSession([{ ...CHECKLIST, confidence: 0.4 }]);
+    const needReview = () =>
+      getImportSession().fields.filter((f) => reviewStatus(f) !== 'ok').length;
+    expect(needReview()).toBe(1);
+
+    confirmField('chk');
+
+    expect(needReview()).toBe(0);
+  });
+
+  it('publishes the field identically — resolving is metadata-only (AE3)', async () => {
+    await seedSession([{ ...CHECKLIST, confidence: 0.4 }]);
+    const beforePublish = reviewedToFields(getImportSession().fields)[0]!;
+
+    confirmField('chk');
+
+    const afterPublish = reviewedToFields(getImportSession().fields)[0]!;
+    expect(afterPublish).toEqual(beforePublish);
+    expect('resolved' in afterPublish).toBe(false);
+    expect('note' in afterPublish).toBe(false);
+  });
+
+  it('is idempotent — confirming an already-resolved field leaves it resolved', async () => {
+    await seedSession([{ ...CHECKLIST, confidence: 0.4 }]);
+
+    confirmField('chk');
+    confirmField('chk');
+
+    const field = getImportSession().fields[0]!;
+    expect(field.resolved).toBe(true);
+    expect(reviewStatus(field)).toBe('ok');
   });
 });
 

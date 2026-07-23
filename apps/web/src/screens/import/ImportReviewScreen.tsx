@@ -6,6 +6,7 @@ import {
   addFixedRowItem,
   canRedoFieldEdit,
   canUndoFieldEdit,
+  confirmField,
   isChecklistTable,
   lowestUnresolvedField,
   removeFixedRowItem,
@@ -50,6 +51,17 @@ function statusBadge(status: ExtractionStatus) {
 /** Document title for the source-preview header — the file name minus its extension. */
 export function displayTitleFromFileName(fileName: string): string {
   return stripFileExtension(fileName) || 'Imported document';
+}
+
+/**
+ * Whether the flagged-field card offers the "Remap to Signature" shortcut (R2).
+ * It is the correction for a text field the model should have typed as a
+ * signature, so it is meaningful only for a `text` field; on a repeating table
+ * or any other type it is nonsensical and the card hides it, leaving the type
+ * dropdown for genuine corrections.
+ */
+export function offersSignatureRemap(field: Pick<ReviewField, 'type'>): boolean {
+  return field.type === 'text';
 }
 
 /** Import step 2 — review the extracted fields, correct low-confidence ones. */
@@ -319,6 +331,7 @@ export function ImportReviewScreen() {
                     textPages={textPages}
                     onRemapSignature={() => session.remapSignature(f.id)}
                     onSetType={(type) => session.setType(f.id, type)}
+                    onConfirm={() => confirmField(f.id)}
                     onConfirmTable={() => session.confirmTable(f.id)}
                   />
                 ))}
@@ -380,6 +393,7 @@ function ReviewRow({
   textPages,
   onRemapSignature,
   onSetType,
+  onConfirm,
   onConfirmTable,
 }: {
   id: string;
@@ -395,6 +409,8 @@ function ReviewRow({
   textPages: readonly TextPage[];
   onRemapSignature: () => void;
   onSetType: (type: ExtractedField['type']) => void;
+  /** Affirm a flagged field as-is (metadata-only resolve, type unchanged). */
+  onConfirm: () => void;
   onConfirmTable: () => void;
 }) {
   const st = reviewStatus(field);
@@ -488,14 +504,31 @@ function ReviewRow({
             <span>{field.note}</span>
           </div>
           <div className="flex flex-wrap items-center gap-2.5">
+            {/* A plain "this is correct" affirm — resolves the field without
+                changing its type, so a reviewer who has judged a flagged field
+                right can clear it from the review count instead of being forced
+                to pick a correction. */}
             <button
-              onClick={onRemapSignature}
-              className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-[#12321f]"
+              onClick={onConfirm}
+              className="inline-flex items-center gap-1.5 rounded-md bg-brand-slate px-3 py-1.5 text-[12.5px] font-semibold text-white"
             >
-              <Icon name="pen-tool" size={14} />
-              Remap to Signature
+              <Icon name="check" size={14} />
+              Looks right
             </button>
-            <span className="text-xs text-text-tertiary">or</span>
+            <span className="text-xs text-text-tertiary">or fix:</span>
+            {/* "Remap to Signature" is the correction for a text field the model
+                should have typed as a signature — nonsensical on a repeating
+                table or any other type, so it is gated to text. The type
+                dropdown stays for every genuine type correction. */}
+            {offersSignatureRemap(field) && (
+              <button
+                onClick={onRemapSignature}
+                className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-[#12321f]"
+              >
+                <Icon name="pen-tool" size={14} />
+                Remap to Signature
+              </button>
+            )}
             <div className="w-[160px]">
               <Select
                 options={typeOptionsFor(field.type)}

@@ -3,7 +3,23 @@
  * the plan's browser smoke pass (vitest here runs in node without jsdom/RTL).
  */
 import { describe, expect, it } from 'vitest';
-import { displayTitleFromFileName } from './ImportReviewScreen.js';
+import { displayTitleFromFileName, offersSignatureRemap } from './ImportReviewScreen.js';
+
+describe('offersSignatureRemap — the flagged-card remap gating (R2/AE2)', () => {
+  it('offers the signature remap for a text field', () => {
+    expect(offersSignatureRemap({ type: 'text' })).toBe(true);
+  });
+
+  it('hides it for a repeating table, where a signature remap is nonsensical', () => {
+    expect(offersSignatureRemap({ type: 'repeating_group' })).toBe(false);
+  });
+
+  it('hides it for every other non-text type', () => {
+    for (const type of ['dropdown', 'checkbox', 'date', 'number', 'section_header'] as const) {
+      expect(offersSignatureRemap({ type })).toBe(false);
+    }
+  });
+});
 
 describe('displayTitleFromFileName', () => {
   it('strips the file extension', () => {
