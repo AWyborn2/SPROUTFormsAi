@@ -14,9 +14,11 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "rm -rf dist *.tsbuildinfo && tsc"
+    "build": "rm -rf dist *.tsbuildinfo && tsc -p tsconfig.build.json",
+    "test": "vitest run"
   },
   "devDependencies": {
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.10"
   }
 }

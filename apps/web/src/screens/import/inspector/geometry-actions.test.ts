@@ -7,7 +7,8 @@
  * irregularity.
  */
 import { describe, expect, it } from 'vitest';
-import type { FormField } from '@formai/shared';
+import type { FormField, PageBox } from '@formai/shared';
+import { markPlacement } from '@formai/shared';
 import type { PositionedText } from '../../../lib/pdf-geometry.js';
 import {
   NUDGE_POINTS,
@@ -15,7 +16,10 @@ import {
   columnHandles,
   deriveAcrossPages,
   deriveForField,
+  handleAdjustment,
+  nudgedEdge,
   panelState,
+  previewMarks,
   snapEdge,
   snapTargets,
   unsupportedReason,
@@ -339,6 +343,100 @@ describe('column handles are one per boundary, not two per band (U10 review)', (
 
   it('is empty-safe', () => {
     expect(columnHandles([])).toEqual([]);
+  });
+});
+
+describe('keyboard nudge on a focused band edge (U1, R1/AE1)', () => {
+  // Contiguous, as centresToBands produces them.
+  const BANDS = [
+    { key: 'tick', start: 496, end: 511.7 },
+    { key: 'cross', start: 511.7, end: 531.9 },
+    { key: 'na', start: 531.9, end: 556.7 },
+  ];
+
+  it('moves a focused edge by exactly one NUDGE_POINTS step, right and left', () => {
+    const leftEdge = columnHandles(BANDS)[0]!;
+
+    expect(nudgedEdge(leftEdge, 1)).toBeCloseTo(leftEdge.at + NUDGE_POINTS, 5);
+    expect(nudgedEdge(leftEdge, -1)).toBeCloseTo(leftEdge.at - NUDGE_POINTS, 5);
+  });
+
+  it('resolves an outer handle to the same single-band edge the stepper button drives', () => {
+    const handles = columnHandles(BANDS);
+    const leftEdge = handles[0]!;
+    const rightEdge = handles[handles.length - 1]!;
+
+    // The left-most handle owns `tick`'s START — identical to the button path's
+    // adjustGeometryBand(field, 'column', 'tick', 'start', tick.start ± 1).
+    expect(handleAdjustment(leftEdge)).toEqual({ kind: 'edge', key: 'tick', edge: 'start' });
+    expect(nudgedEdge(leftEdge, 1)).toBeCloseTo(496 + NUDGE_POINTS, 5);
+
+    // The right-most handle owns `na`'s END.
+    expect(handleAdjustment(rightEdge)).toEqual({ kind: 'edge', key: 'na', edge: 'end' });
+    expect(nudgedEdge(rightEdge, -1)).toBeCloseTo(556.7 - NUDGE_POINTS, 5);
+  });
+
+  it('resolves an interior handle to the boundary that moves BOTH adjacent bands', () => {
+    const between = columnHandles(BANDS)[1]!;
+
+    // One coordinate written to both bands' shared edge — no gap a tick can fall
+    // into, matching the boundary-drag behaviour (adjustGeometryBoundary).
+    expect(handleAdjustment(between)).toEqual({ kind: 'boundary', leftKey: 'tick', rightKey: 'cross' });
+    expect(nudgedEdge(between, 1)).toBeCloseTo(511.7 + NUDGE_POINTS, 5);
+  });
+});
+
+describe('live glyph preview marks (U3, R2/R3/AE2/AE5)', () => {
+  const segment: PageBox = {
+    page: 0,
+    x: 40,
+    y: 400,
+    width: 300,
+    height: 80,
+    pageWidth: 600,
+    pageHeight: 800,
+    columnBands: [
+      { key: 'item', start: 40, end: 240 },
+      { key: 'tick', start: 240, end: 290 },
+      { key: 'cross', start: 290, end: 340 },
+    ],
+    rowBands: [
+      { key: 'r0', start: 440, end: 480 },
+      { key: 'r1', start: 400, end: 440 },
+    ],
+  };
+
+  it('emits one representative mark per row × column cell', () => {
+    expect(previewMarks(segment)).toHaveLength(3 * 2);
+  });
+
+  it('positions every mark at markPlacement for its cell — preview and export cannot drift', () => {
+    for (const m of previewMarks(segment)) {
+      const row = segment.rowBands!.find((b) => b.key === m.rowKey)!;
+      const col = segment.columnBands!.find((b) => b.key === m.columnKey)!;
+
+      expect({ x: m.x, y: m.y, size: m.size }).toEqual(markPlacement(row, col));
+    }
+  });
+
+  it('renders nothing for a segment with no columns or no rows (a field with no grid)', () => {
+    expect(previewMarks({ ...segment, columnBands: [] })).toEqual([]);
+    expect(previewMarks({ ...segment, rowBands: [] })).toEqual([]);
+    expect(previewMarks({ ...segment, columnBands: undefined, rowBands: undefined })).toEqual([]);
+  });
+
+  it('tracks a moved band — a cell mark follows its column edge (AE5)', () => {
+    const cell = (marks: ReturnType<typeof previewMarks>) =>
+      marks.find((m) => m.columnKey === 'tick' && m.rowKey === 'r0')!;
+
+    const before = cell(previewMarks(segment));
+    const moved: PageBox = {
+      ...segment,
+      columnBands: segment.columnBands!.map((b) => (b.key === 'tick' ? { ...b, start: 250 } : b)),
+    };
+
+    // start 240 → 250 shifts this cell's mark 10pt right, nothing else needed.
+    expect(cell(previewMarks(moved)).x).toBeCloseTo(before.x + 10, 5);
   });
 });
 

@@ -8,6 +8,7 @@
  * be read and tested directly.
  */
 import type { FormField, GeometryBand, PageBox } from '@formai/shared';
+import { markPlacement } from '@formai/shared';
 import type { PositionedText, TableProposal, TextPage } from '../../../lib/pdf-geometry.js';
 import { proposeTableSegments } from '../../../lib/pdf-geometry.js';
 
@@ -226,6 +227,73 @@ export function columnHandles(bands: readonly GeometryBand[]): BandHandle[] {
   });
 
   return handles;
+}
+
+/**
+ * Which validated adjustment a handle maps to (KTD4).
+ *
+ * The routing mirrors the drag path in `ImportReviewScreen`'s `onBandEdge` and
+ * the button path in `GeometryInspector` exactly: an interior boundary owns
+ * BOTH adjacent bands and moves as one (`adjustGeometryBoundary`), while an
+ * outer edge owns a single band's `start` or `end` (`adjustGeometryBand`).
+ * Extracting it as a pure value is what lets a keyboard nudge and a pointer drag
+ * be proven to resolve to the identical call, with no DOM.
+ */
+export type HandleAdjustment =
+  | { kind: 'boundary'; leftKey: string; rightKey: string }
+  | { kind: 'edge'; key: string; edge: 'start' | 'end' };
+
+export function handleAdjustment(handle: BandHandle): HandleAdjustment | null {
+  if (handle.left && handle.right) return { kind: 'boundary', leftKey: handle.left, rightKey: handle.right };
+  if (handle.right) return { kind: 'edge', key: handle.right, edge: 'start' };
+  if (handle.left) return { kind: 'edge', key: handle.left, edge: 'end' };
+  return null;
+}
+
+/**
+ * The coordinate a keyboard nudge moves a focused handle to (R1/AE1).
+ *
+ * The same `NUDGE_POINTS` step the stepper buttons use, so an arrow key and a
+ * button click land the edge in the same place. The result is fed through the
+ * SAME `onBandEdge` path the drag uses, so the shipped validator refuses an
+ * inverting or overlapping nudge exactly as it refuses a drag or a step — no new
+ * movement or validation path is introduced.
+ */
+export function nudgedEdge(handle: BandHandle, direction: -1 | 1, step = NUDGE_POINTS): number {
+  return handle.at + direction * step;
+}
+
+/**
+ * A representative mark per target cell of a grid, in PDF point space (R2/R3).
+ *
+ * Every row band × every column band, each placed by the shared `markPlacement`
+ * — the exact function the exporter draws with — so the preview and the exported
+ * PDF agree cell-for-cell and cannot drift (AE2/AE3). Empty when the segment
+ * carries no rows or no columns, so a field with no grid renders nothing
+ * (KTD5).
+ */
+export interface PreviewMark {
+  /** Stable React key: `${rowKey}::${columnKey}`. */
+  key: string;
+  rowKey: string;
+  columnKey: string;
+  /** Mark origin/size in PDF points — identical to `markPlacement`. */
+  x: number;
+  y: number;
+  size: number;
+}
+
+export function previewMarks(segment: PageBox): PreviewMark[] {
+  const rows = segment.rowBands ?? [];
+  const cols = segment.columnBands ?? [];
+  const marks: PreviewMark[] = [];
+  for (const row of rows) {
+    for (const col of cols) {
+      const { x, y, size } = markPlacement(row, col);
+      marks.push({ key: `${row.key}::${col.key}`, rowKey: row.key, columnKey: col.key, x, y, size });
+    }
+  }
+  return marks;
 }
 
 /** Pull a dragged coordinate onto the nearest printed edge, or leave it alone. */

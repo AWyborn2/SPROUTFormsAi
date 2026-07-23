@@ -3,7 +3,13 @@ import * as pdfjs from 'pdfjs-dist';
 import { Icon } from '@formai/ui';
 import type { ExtractedField, ExtractionStatus, PageBox } from '@formai/shared';
 import type { PositionedText, TextPage } from '../../lib/pdf-geometry.js';
-import { columnHandles, snapEdge, type BandHandle } from './inspector/geometry-actions.js';
+import {
+  columnHandles,
+  nudgedEdge,
+  previewMarks,
+  snapEdge,
+  type BandHandle,
+} from './inspector/geometry-actions.js';
 import {
   anchoredScrollOffset,
   clampZoom,
@@ -129,10 +135,33 @@ function BandGrid({
     grip.addEventListener('pointercancel', stop);
   };
 
+  /**
+   * Nudge a focused edge with the arrow keys (U1, R1).
+   *
+   * Left/Right move the edge by `NUDGE_POINTS` through the very same
+   * `onBandEdge` path a drag or a stepper button uses — so re-snapping,
+   * inversion/overlap refusal and un-confirm-on-edit all behave identically to a
+   * button nudge, and there is no second movement or validation path to keep in
+   * step.
+   */
+  const nudge = (handle: BandHandle) => (e: React.KeyboardEvent) => {
+    if (!onBandEdge) return;
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    e.stopPropagation();
+    onBandEdge(handle, nudgedEdge(handle, e.key === 'ArrowRight' ? 1 : -1));
+  };
+
   const top = pageHeight - (segment.y + segment.height) * scaleY;
   const height = segment.height * scaleY;
   const left = segment.x * scaleX;
   const width = segment.width * scaleX;
+
+  // A representative mark in every target cell, at the SAME placement the
+  // exporter draws with (U3). Empty when the grid has no rows or no columns, so
+  // this renders nothing rather than guessing. Display-only and never a recorded
+  // answer — see the guide styling and caption below (R4/R6).
+  const marks = previewMarks(segment);
 
   return (
     <div ref={surface} aria-hidden className="pointer-events-none absolute inset-0">
@@ -166,11 +195,15 @@ function BandGrid({
           <div
             key={h.key}
             role="slider"
-            tabIndex={-1}
+            // Tab-reachable so the edge can be nudged with the arrow keys, not
+            // just dragged (U1). role="slider" makes Left/Right the expected
+            // interaction for assistive tech.
+            tabIndex={0}
             aria-label={h.label}
             aria-valuenow={Math.round(h.at)}
             onPointerDown={startDrag(h)}
-            className="pointer-events-auto absolute cursor-ew-resize"
+            onKeyDown={nudge(h)}
+            className="pointer-events-auto absolute cursor-ew-resize rounded-[1px] outline-none focus-visible:bg-accent/25 focus-visible:ring-2 focus-visible:ring-accent"
             // Wider than the line it moves: a 1px hit target is unusable, and
             // the drag does not need to be precise — the snap is.
             style={{ left: h.at * scaleX - 5, top, width: 10, height }}
@@ -189,6 +222,51 @@ function BandGrid({
           }}
         />
       ))}
+
+      {/*
+        Live glyph preview (U3). One representative tick per target cell, drawn
+        at the shared `markPlacement` position/size and scaled like the bands, so
+        it tracks zoom and every band move for free. Deliberately a DASHED, muted
+        stroke — distinct from the solid accent band RULES and reading as a
+        placement guide, not a recorded answer (R4). `pointer-events: none` keeps
+        it from ever intercepting a drag.
+      */}
+      {marks.map((m) => (
+        <svg
+          key={`p-${m.key}`}
+          viewBox="0 0 10 10"
+          width={Math.max(2, m.size * scaleX)}
+          height={Math.max(2, m.size * scaleY)}
+          className="pointer-events-none absolute overflow-visible"
+          style={{
+            left: m.x * scaleX,
+            top: pageHeight - (m.y + m.size) * scaleY,
+            color: 'var(--accent)',
+            opacity: 0.6,
+          }}
+          aria-hidden
+        >
+          {/* Stroke width is in viewBox units, so it scales with the cell. */}
+          <polyline
+            points="1,5.5 4,8.5 9,1.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeDasharray="2 1.4"
+          />
+        </svg>
+      ))}
+
+      {marks.length > 0 && (
+        <div
+          className="absolute whitespace-nowrap rounded-pill bg-surface/90 px-1.5 py-0.5 text-[9px] font-medium text-text-tertiary shadow-sm"
+          style={{ left, top: Math.max(0, top - 15) }}
+        >
+          Preview — representative marks show where ticks will print
+        </div>
+      )}
     </div>
   );
 }
