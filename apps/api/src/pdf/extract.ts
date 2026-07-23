@@ -62,8 +62,12 @@ const EXTRACTION_PROMPT =
   'by calling the extract_form_fields tool. Extract any repeating table once as a repeating_group ' +
   'with its columns — do not list blank rows. However, if a table’s rows carry PRE-PRINTED item ' +
   'labels (a fixed-item checklist such as "Engine oil level", "Park brake"), those are not blank ' +
-  'rows: emit the item labels in order as fixedRows, and still list the item/label column as the ' +
-  'FIRST columns entry (type text). If a line looks like plain text but is really a ' +
+  'rows: emit the item labels as fixedRows, and still list the item/label column as the ' +
+  'FIRST columns entry (type text). When such a checklist is printed as several SIDE-BY-SIDE ' +
+  'column groups under one shared header (e.g. three OK/NA column-pairs across the page), read it ' +
+  'COLUMN-MAJOR — emit the whole leftmost printed column top-to-bottom, then the next column, and ' +
+  'so on, not across each row — and set columnGroups to the number of side-by-side groups (omit ' +
+  'columnGroups for a single column of items). If a line looks like plain text but is really a ' +
   'signature, still classify it and add a note. In a table, distinguish columns that are ' +
   'INDEPENDENT checkboxes (each can be ticked on its own, e.g. "Cleaned" and "Inspected") from ' +
   'columns that are ALTERNATIVES sharing ONE answer per row — exactly one may be ticked. The ' +
@@ -273,6 +277,17 @@ function toFixedRows(raw: unknown): string[] | undefined {
 }
 
 /**
+ * The side-by-side group count of a multi-column checklist. A whole number ≥ 2
+ * or nothing: a single column of items (or a bad value) carries no hint, the
+ * same tolerance `toFixedRows` shows an empty array. It is only ever a
+ * reviewer-facing pre-fill, so a wrong value costs a dropdown correction.
+ */
+function toColumnGroups(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 2) return undefined;
+  return raw;
+}
+
+/**
  * Coerce the model's answerSets proposal. Malformed entries collapse to
  * `undefined` rather than throwing — the same tolerance as `toColumns`.
  */
@@ -291,6 +306,12 @@ function toAnswerSets(raw: unknown): AnswerSet[] | undefined {
 
 function normalizeField(raw: Record<string, unknown>, index: number): ExtractedField {
   const fixedRows = toFixedRows(raw.fixedRows);
+  // Only a checklist with more items than groups can actually split into that
+  // many non-empty groups; a hint that cannot hold is dropped rather than
+  // pre-filling the reviewer a count that would be refused.
+  const rawColumnGroups = toColumnGroups(raw.columnGroups);
+  const columnGroups =
+    rawColumnGroups && fixedRows && fixedRows.length >= rawColumnGroups ? rawColumnGroups : undefined;
   let columns = toColumns(raw.columns);
   // KTD1 invariant: a fixed-row checklist's labels live in the FIRST column,
   // which must be text. Guard against the model omitting it. The synthetic
@@ -334,6 +355,7 @@ function normalizeField(raw: Record<string, unknown>, index: number): ExtractedF
     ...(columns ? { columns } : {}),
     ...(answerSets ? { answerSets } : {}),
     ...(fixedRows ? { fixedRows } : {}),
+    ...(columnGroups ? { columnGroups } : {}),
     ...(typeof raw.note === 'string' ? { note: raw.note } : {}),
   };
 }
@@ -366,13 +388,25 @@ async function extractWithAI(
 
   const parsed = parseExtractionResponse(message);
   const rawFields = Array.isArray(parsed.fields) ? parsed.fields : [];
+  const fields = rawFields.map(normalizeField);
+  const modelNotes = Array.isArray(parsed.designNotes) ? parsed.designNotes.map(String) : [];
+
+  // Point the reviewer at the split control for any checklist the model read as
+  // several side-by-side groups. Synthesised here rather than left to the model
+  // so the prompt for the split is deterministic — the fix that motivates
+  // column-major reading is worthless if the reviewer never notices the field
+  // should be split.
+  const splitNotes = fields
+    .filter((f) => f.columnGroups)
+    .map((f) => `"${f.label}" appears to print as ${f.columnGroups} side-by-side groups — split it in review.`);
+
   return {
     sourceType: 'pdf_import',
     path: 'ai',
     fileName: opts.fileName,
     pageCount: doc.getPageCount(),
-    fields: rawFields.map(normalizeField),
-    designNotes: Array.isArray(parsed.designNotes) ? parsed.designNotes.map(String) : [],
+    fields,
+    designNotes: [...modelNotes, ...splitNotes],
   };
 }
 

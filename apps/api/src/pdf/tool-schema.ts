@@ -11,7 +11,7 @@ export const EXTRACT_TOOL_NAME = 'extract_form_fields';
 export const extractFormFieldsTool = {
   name: EXTRACT_TOOL_NAME,
   description:
-    'Return every input field found in the form. Extract repeating tables ONCE as a repeating_group with its columns — never enumerate blank paper rows. But when a table has PRE-PRINTED item labels in its rows (a fixed-item checklist, e.g. "Engine oil level", "Park brake"), also emit those labels in order as fixedRows; the item/label column must still be the FIRST columns entry (type text). Distinguish boolean_yes_no from checkbox, and give checkbox_group a selectionType. Include a confidence score in [0,1] for every field, and add designNotes for anything a human reviewer should double-check.',
+    'Return every input field found in the form. Extract repeating tables ONCE as a repeating_group with its columns — never enumerate blank paper rows. But when a table has PRE-PRINTED item labels in its rows (a fixed-item checklist, e.g. "Engine oil level", "Park brake"), also emit those labels as fixedRows. When such a checklist is printed as several SIDE-BY-SIDE column groups under one shared header (e.g. three OK/NA column-pairs across the page), read it COLUMN-MAJOR: emit every item of the LEFTMOST printed column top-to-bottom, then the next column top-to-bottom, and so on — not across each row — and set columnGroups to the number of side-by-side groups. A checklist that is a single column of items has no columnGroups. The item/label column must still be the FIRST columns entry (type text). Distinguish boolean_yes_no from checkbox, and give checkbox_group a selectionType. Include a confidence score in [0,1] for every field, and add designNotes for anything a human reviewer should double-check.',
   input_schema: {
     type: 'object',
     properties: {
@@ -89,7 +89,13 @@ export const extractFormFieldsTool = {
               type: 'array',
               items: { type: 'string' },
               description:
-                'For repeating_group only — the pre-printed item labels of a fixed-item checklist table, in row order. Omit for tables with genuinely blank entry rows. When present, the item/label column must still appear as the FIRST columns entry (type text).',
+                'For repeating_group only — the pre-printed item labels of a fixed-item checklist table. Omit for tables with genuinely blank entry rows. When present, the item/label column must still appear as the FIRST columns entry (type text). For a single-column checklist, list the items top-to-bottom. For a checklist printed as several side-by-side column groups, list them COLUMN-MAJOR: the whole leftmost printed column top-to-bottom, then the next column, and so on.',
+            },
+            columnGroups: {
+              type: 'integer',
+              minimum: 2,
+              description:
+                'For a fixed-item checklist printed as N side-by-side column groups sharing one header — the number of those groups. Omit for a single column of items. When set, fixedRows must be listed column-major (see fixedRows).',
             },
             note: {
               type: 'string',

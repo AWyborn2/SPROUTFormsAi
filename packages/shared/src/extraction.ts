@@ -38,6 +38,14 @@ export interface ExtractedField {
    * for open row-entry tables; never an empty array.
    */
   fixedRows?: string[];
+  /**
+   * For a fixed-item checklist printed as N side-by-side column groups sharing
+   * one header — the number of those groups. A reviewer-facing hint the split
+   * control pre-fills, never a value applied on its own: extraction proposes it,
+   * the reviewer chooses the final count. Absent when the table is a single
+   * column of items; never `< 2`.
+   */
+  columnGroups?: number;
   sourcePosition?: SourcePosition;
   /** Reviewer-facing note, e.g. "detected as text — likely a signature field". */
   note?: string;
