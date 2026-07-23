@@ -197,12 +197,28 @@ function drawRepeatingGroup(
         });
       };
 
+      /**
+       * Draw a vector tick in a column's own recorded band, or nowhere. A
+       * checkbox — grouped answer-set member or independent — renders as a
+       * checkmark, and the page font (Helvetica/WinAnsi) has no `✓`, so the
+       * mark is drawn with `drawMark`, exactly as `check_cross` already does,
+       * at the same `markPlacement` coordinates `mark` uses. Placement is
+       * therefore identical to text marks — only the glyph differs.
+       */
+      const markTick = (columnKey: string) => {
+        const band = columnBandFor(segment, columnKey);
+        if (!band) return; // no band for this column — placing it would be a guess
+        const { x, y, size } = markPlacement(rowBand, band);
+        drawMark(page, 'tick', x, y, size);
+      };
+
       // One mark per answer set — a malformed row (two truthy members) still
-      // yields a single cell, because `selectedOption` picks the first.
+      // yields a single cell, because `selectedOption` picks the first. The
+      // chosen member is a ticked checkbox, so it renders as a tick.
       for (const set of sets) {
         const { columnKey } = selectedOption(set, row);
         if (columnKey === null) continue; // unanswered — the whole set stays blank
-        mark(columnKey, 'X');
+        markTick(columnKey);
       }
 
       for (const col of cols) {
@@ -220,15 +236,23 @@ function drawRepeatingGroup(
               drawMark(page, raw ? 'tick' : 'cross', x, y, size);
             }
           } else {
-            // boolean_yes_no keeps its existing 'X' for true; 'N' is the fix for
-            // a false that used to export as an empty cell.
-            mark(col.key, raw ? 'X' : 'N');
+            // boolean_yes_no renders the literal answer the field represents:
+            // Y for true, N for false. (Both are recorded answers; only
+            // null/'' — filtered above — stays blank.)
+            mark(col.key, raw ? 'Y' : 'N');
           }
           continue;
         }
 
-        const text =
-          typeof raw === 'boolean' ? (raw ? 'X' : '') : raw === null || raw === undefined ? '' : String(raw);
+        // Independent (non-self-answering) columns. A boolean is a checkbox:
+        // true is a ticked box and renders as a checkmark via `drawMark` (the
+        // page font has no `✓`), false leaves the cell blank. Anything else is
+        // free text drawn as-is.
+        if (typeof raw === 'boolean') {
+          if (raw) markTick(col.key);
+          continue;
+        }
+        const text = raw === null || raw === undefined ? '' : String(raw);
         if (!text) continue;
         mark(col.key, text);
       }
