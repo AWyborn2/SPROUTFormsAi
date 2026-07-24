@@ -11,6 +11,7 @@
  * behaves identically on both sides of publishing, instead of two editors
  * drifting apart.
  */
+import { isChoiceField } from '@formai/shared';
 import type { FormContainer, FormField, FormFieldType } from '@formai/shared';
 import { DEFAULT_CONTAINER, FORM_FIELD_TYPES } from '@formai/shared';
 
@@ -86,20 +87,18 @@ const STRUCTURAL_TYPES: ReadonlySet<FormFieldType> = new Set([
   'check_cross',
 ]);
 
-/** Types whose answer is chosen from `options`. */
-const CHOICE_TYPES: ReadonlySet<FormFieldType> = new Set(['dropdown', 'radio', 'checkbox_group']);
-
 /**
  * Does this type answer from `options`?
  *
- * Exported so the editors' options panel and `retypeField`'s seeding read the
- * SAME rule. They did not: the reducer seeded options for dropdown and radio
- * while the import inspector rendered its editor for dropdown and radio only,
- * so an imported `checkbox_group` had options that nothing would show. One
- * predicate is what stops the two drifting again.
+ * Re-exported from the shared `isChoiceField` so the editors' options panel,
+ * `retypeField`'s seeding, AND the geometry path's per-option placement all read
+ * the SAME rule. They did not once: the reducer seeded options for dropdown and
+ * radio while the import inspector rendered its editor for dropdown and radio
+ * only, so an imported `checkbox_group` had options that nothing would show. One
+ * predicate is what stops those drifting again.
  */
 export function isChoiceType(type: FormFieldType): boolean {
-  return CHOICE_TYPES.has(type);
+  return isChoiceField(type);
 }
 
 const AUTHORABLE_TYPE_OPTIONS = FORM_FIELD_TYPES.filter((t) => !STRUCTURAL_TYPES.has(t)).map(
@@ -139,7 +138,7 @@ export function typeOptionsFor(type: FormFieldType): Array<{ label: string; valu
 function retypeField(f: FormField, type: FormFieldType): FormField {
   const nf: FormField = { ...f, type };
 
-  if (CHOICE_TYPES.has(type)) {
+  if (isChoiceField(type)) {
     // Preserve real options (an imported `checkbox_group`'s D / N); seed only
     // when there is nothing to preserve.
     if (!nf.options?.length) nf.options = ['Option 1', 'Option 2'];

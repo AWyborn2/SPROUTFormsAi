@@ -35,6 +35,22 @@ export const FORM_FIELD_TYPES = [
 ] as const;
 export type FormFieldType = (typeof FORM_FIELD_TYPES)[number];
 
+/**
+ * The types whose answer is chosen from an `options` list — dropdown, radio
+ * ("multiple choice") and checkbox_group.
+ *
+ * The single source of truth for "is this a choice field", shared by the editor
+ * (which seeds and renders `options`) and the geometry path (which lets each
+ * option carry its own placement box, drawn as a checkmark on export). One
+ * predicate is what keeps those consumers from drifting apart.
+ */
+export const CHOICE_FIELD_TYPES: readonly FormFieldType[] = ['dropdown', 'radio', 'checkbox_group'];
+
+/** Does this field answer from `options`? */
+export function isChoiceField(type: FormFieldType): boolean {
+  return CHOICE_FIELD_TYPES.includes(type);
+}
+
 /** Field source — how it got into the template. */
 export type FieldSource = 'built' | 'imported';
 

@@ -1107,3 +1107,29 @@ describe('checkbox-group per-option geometry (publish boundary)', () => {
     expect(optionSlotId('shift', 'D')).not.toBe('shift');
   });
 })
+
+describe('per-option geometry applies to radio and dropdown, not only checkbox_group', () => {
+  const optBox = (): PageBox => ({
+    page: 0, x: 200, y: 500, width: 14, height: 14, pageWidth: 600, pageHeight: 800,
+  });
+
+  const choice = (type: ReviewField['type']): ReviewField => ({
+    id: 'shift',
+    label: 'Shift',
+    type,
+    confidence: 0.9,
+    options: ['Day', 'Night'],
+  });
+
+  for (const type of ['radio', 'dropdown'] as const) {
+    it(`publishes a confirmed option box for a ${type}, stamped with its optionKey`, () => {
+      proposeGeometry(optionSlotId('shift', 'Day'), optBox());
+      confirmGeometry(optionSlotId('shift', 'Day'));
+
+      const published = reviewedToFields([choice(type)])[0]!;
+
+      expect(published.geometry?.segments).toHaveLength(1);
+      expect(published.geometry?.segments[0]?.optionKey).toBe('Day');
+    });
+  }
+})
