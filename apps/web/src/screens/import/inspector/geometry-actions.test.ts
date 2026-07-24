@@ -15,10 +15,13 @@ import {
   NUDGE_POINTS,
   SNAP_RANGE,
   columnHandles,
+  deleteRowBand,
   type DerivableField,
   deriveAcrossPages,
   deriveForField,
+  evenGrid,
   handleAdjustment,
+  itemsInBox,
   nudgedEdge,
   panelState,
   previewMarks,
@@ -27,6 +30,8 @@ import {
   snapEdge,
   snapTargets,
   snapTargetsY,
+  splitRowBand,
+  subdivideBox,
   unsupportedReason,
 } from './geometry-actions.js';
 
@@ -708,5 +713,187 @@ describe('draw-a-box: snap a dragged rectangle to the page (U1, R1)', () => {
       { text: 'bad', x: 10, y: Number.NaN, width: 5 },
     ];
     expect(snapTargetsY(rows)).toEqual([284, 300]);
+  });
+});
+
+describe('bounded subdivision inside a drawn box (U4, R4/R7/AE5/AE6)', () => {
+  // Two structurally identical OK/NA groups printed side by side on ONE page,
+  // sharing the header baseline (y=306) and every row baseline — the shape the
+  // collision fix (2026-07-23-007) refuses page-wide, because `rightmostCluster`
+  // would take whichever group sits furthest right. The reviewer's box is what
+  // says WHICH group this field is, so detection must run over only the runs
+  // inside it.
+  const OK_NA = [
+    { key: 'item', label: 'Item', type: 'text' as const },
+    { key: 'ok', label: 'OK', type: 'boolean_yes_no' as const },
+    { key: 'na', label: 'NA', type: 'boolean_yes_no' as const },
+  ];
+
+  /** One 4-row OK/NA group whose label column starts at `x0`. */
+  function group(x0: number): PositionedText[] {
+    return [
+      { text: 'Checklist', x: x0, y: 306, width: 60 },
+      { text: 'OK', x: x0 + 80, y: 306, width: 12 },
+      { text: 'NA', x: x0 + 110, y: 306, width: 12 },
+      ...Array.from({ length: 4 }, (_, i) => ({ text: `Item ${i}`, x: x0, y: 290 - i * 16, width: 40 })),
+    ];
+  }
+
+  // Left group at x=40 (options 120/150), right group at x=270 (options 350/380).
+  // Neither fits on a 595pt page beside the dozer's full-width table, which is
+  // exactly the compact 3-up shape ADMN-FRM-111 prints.
+  const sideBySide = (): PositionedText[] => [...group(40), ...group(270)];
+
+  const leftBox: PageBox = { page: 0, x: 20, y: 220, width: 180, height: 100, pageWidth: 595, pageHeight: 842 };
+  const rightBox: PageBox = { page: 0, x: 250, y: 220, width: 180, height: 100, pageWidth: 595, pageHeight: 842 };
+
+  it('keeps only the runs whose midpoint is inside the box (AE5 scoping primitive)', () => {
+    const inside = itemsInBox(sideBySide(), leftBox);
+
+    // The left group's header (3) plus its 4 rows — and nothing from the right.
+    expect(inside).toHaveLength(7);
+    expect(inside.every((i) => i.x < 250)).toBe(true);
+  });
+
+  it('Covers AE5. detects the boxed group’s columns from inside-box glyphs only', () => {
+    const result = subdivideBox({ box: leftBox, items: sideBySide(), columns: OK_NA, wantRows: 4 });
+
+    expect(result).not.toBeNull();
+    expect(result!.segment.columnBands?.map((b) => b.key)).toEqual(['ok', 'na']);
+    // Every band sits in the LEFT group — the right group at x≥350 contributed
+    // nothing, which is the whole point of scoping to the drawn box.
+    expect(Math.max(...result!.segment.columnBands!.map((b) => b.end))).toBeLessThan(250);
+    expect(result!.segment.rowBands).toHaveLength(4);
+  });
+
+  it('the SAME page, boxed around the other group, detects THAT group instead', () => {
+    // Proof the box — not the page — selects the table: page-wide derivation
+    // would always take the rightmost cluster, but the left box gave the left
+    // group and the right box gives the right one.
+    const result = subdivideBox({ box: rightBox, items: sideBySide(), columns: OK_NA, wantRows: 4 });
+
+    expect(result).not.toBeNull();
+    expect(Math.min(...result!.segment.columnBands!.map((b) => b.start))).toBeGreaterThan(250);
+  });
+
+  it('Covers AE6. returns null over a region with no detectable table', () => {
+    const prose: PositionedText[] = [{ text: 'A sentence running across the page', x: 40, y: 280, width: 220 }];
+
+    expect(subdivideBox({ box: leftBox, items: prose, columns: OK_NA })).toBeNull();
+  });
+
+  it('returns null when the box encloses nothing', () => {
+    expect(subdivideBox({ box: leftBox, items: [], columns: OK_NA })).toBeNull();
+    const empty: PageBox = { ...leftBox, x: 560, width: 20 }; // off to the side of everything
+    expect(subdivideBox({ box: empty, items: sideBySide(), columns: OK_NA })).toBeNull();
+  });
+
+  it('the detected grid survives the shipped validator (R6)', () => {
+    const result = subdivideBox({ box: leftBox, items: sideBySide(), columns: OK_NA, wantRows: 4 })!;
+
+    expect(resolveGeometry({ geometry: { segments: [result.segment] } }, 1).segments).toHaveLength(1);
+  });
+});
+
+describe('manual even-seed fallback and row dividers (U4, R4/AE6)', () => {
+  const box: PageBox = { page: 0, x: 100, y: 200, width: 300, height: 120, pageWidth: 595, pageHeight: 842 };
+
+  it('splits the box into N option columns, reserving the leftmost for the label', () => {
+    const grid = evenGrid(box, ['ok', 'na'], ['r0', 'r1', 'r2']);
+
+    // Three equal parts across 300pt; the label takes parts[0] (100–200), the
+    // two options take 200–300 and 300–400.
+    expect(grid.columnBands?.map((b) => b.key)).toEqual(['ok', 'na']);
+    expect(grid.columnBands![0]!.start).toBeCloseTo(200, 5);
+    expect(grid.columnBands![0]!.end).toBeCloseTo(300, 5);
+    expect(grid.columnBands![1]!.end).toBeCloseTo(400, 5); // the box's right edge
+  });
+
+  it('divides the height evenly with r0 the TOP row (matches the exporter’s order)', () => {
+    const grid = evenGrid(box, ['ok', 'na'], ['r0', 'r1', 'r2']);
+
+    expect(grid.rowBands).toHaveLength(3);
+    // Top of the box is y = 200 + 120 = 320; the top row's band reaches it.
+    expect(grid.rowBands![0]!.end).toBeCloseTo(320, 5);
+    expect(grid.rowBands![0]!.start).toBeCloseTo(280, 5);
+    // Bottom row reaches the box's bottom edge.
+    expect(grid.rowBands![2]!.start).toBeCloseTo(200, 5);
+  });
+
+  it('seeds a grid the validator accepts, then each divider snaps onto a printed line', () => {
+    const grid = evenGrid(box, ['ok', 'na'], ['r0', 'r1', 'r2']);
+    expect(resolveGeometry({ geometry: { segments: [grid] } }, 1).segments).toHaveLength(1);
+
+    // The seed is scaffolding — a seeded edge at 200 snaps onto a printed run at
+    // 205 exactly as a derived edge would (R4).
+    expect(snapEdge(grid.columnBands![0]!.start, [205])).toBeCloseTo(205, 5);
+  });
+
+  it('adds a row divider by splitting one band in two, re-keyed top-to-bottom', () => {
+    const grid = evenGrid(box, ['ok', 'na'], ['r0', 'r1']);
+
+    const split = splitRowBand(grid, 'r0');
+
+    expect(split.rowBands).toHaveLength(3);
+    expect(split.rowBands!.map((b) => b.key)).toEqual(['r0', 'r1', 'r2']);
+    // Still contiguous and in range.
+    const sorted = [...split.rowBands!].sort((a, b) => a.start - b.start);
+    for (let i = 1; i < sorted.length; i++) expect(sorted[i]!.start).toBeCloseTo(sorted[i - 1]!.end, 5);
+    expect(resolveGeometry({ geometry: { segments: [split] } }, 1).segments).toHaveLength(1);
+  });
+
+  it('deletes a row divider by closing the gap, keeping the grid contiguous', () => {
+    const grid = splitRowBand(evenGrid(box, ['ok', 'na'], ['r0', 'r1']), 'r0'); // 3 rows
+
+    const del = deleteRowBand(grid, 'r1');
+
+    expect(del.rowBands).toHaveLength(2);
+    const sorted = [...del.rowBands!].sort((a, b) => a.start - b.start);
+    for (let i = 1; i < sorted.length; i++) expect(sorted[i]!.start).toBeCloseTo(sorted[i - 1]!.end, 5);
+    expect(resolveGeometry({ geometry: { segments: [del] } }, 1).segments).toHaveLength(1);
+  });
+
+  it('refuses to delete the only row — a table needs at least one', () => {
+    const grid = evenGrid(box, ['ok'], ['r0']);
+
+    expect(deleteRowBand(grid, 'r0').rowBands).toHaveLength(1);
+  });
+});
+
+describe('panelState routes a drawn table box to subdivision (U4)', () => {
+  it('a table with a drawn box but no grid needs subdivision, not confirmation', () => {
+    const box: PageBox = { page: 0, x: 40, y: 400, width: 200, height: 80, pageWidth: 595, pageHeight: 842 };
+
+    const state = panelState(tableField(), box, false, null);
+
+    expect(state.kind).toBe('needs-subdivision');
+    if (state.kind === 'needs-subdivision') {
+      expect(state.box).toBe(box);
+      expect(state.reason).toMatch(/Detect the grid/);
+    }
+  });
+
+  it('a table WITH a grid is proposed, not needs-subdivision', () => {
+    const proposal = deriveForField(tableField(), 6, pageText(), A4.width, A4.height)!;
+
+    const state = panelState(tableField(), proposal.segment, false, proposal);
+
+    expect(state.kind).toBe('proposed');
+  });
+
+  it('a scalar’s band-less box stays a confirmable proposal, never subdivision', () => {
+    const box: PageBox = { page: 0, x: 100, y: 200, width: 120, height: 16, pageWidth: 595, pageHeight: 842 };
+
+    expect(panelState(tableField({ type: 'text' }), box, false, null).kind).toBe('proposed');
+  });
+
+  it('no-proposal copy now names drawing the box, not a promise of future placement (R5)', () => {
+    const state = panelState(tableField(), undefined, false, null);
+
+    expect(state.kind).toBe('no-proposal');
+    if (state.kind === 'no-proposal') {
+      expect(state.reason).toMatch(/draw the table’s box/);
+      expect(state.reason).not.toMatch(/coming/);
+    }
   });
 });

@@ -10,7 +10,7 @@
  * panels, so the grid is confirmed against the same PDF page the overlay is
  * drawing on.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Button, Icon } from '@formai/ui';
 import type { GeometryBand, PageBox } from '@formai/shared';
 import type { TextPage } from '../../../lib/pdf-geometry.js';
@@ -23,7 +23,15 @@ import {
   rejectGeometry,
   type ReviewField,
 } from '../../../lib/data/import-session.js';
-import { NUDGE_POINTS, deriveAcrossPages, panelState } from './geometry-actions.js';
+import {
+  NUDGE_POINTS,
+  deleteRowBand,
+  deriveAcrossPages,
+  evenGrid,
+  panelState,
+  splitRowBand,
+  subdivideBox,
+} from './geometry-actions.js';
 
 export interface GeometryInspectorProps {
   field: ReviewField;
@@ -62,7 +70,36 @@ export function GeometryInspector({ field, textPages, drawArmed = false, onToggl
 
   const state = panelState(field, proposal, confirmed, derived);
 
+  // A transient note shown when bounded subdivision found no grid inside the
+  // drawn box, so the reviewer knows the seed path is the way forward (AE6).
+  const [seedNote, setSeedNote] = useState<string | null>(null);
+
   if (state.kind === 'unsupported') return null;
+
+  // Detect the grid INSIDE the drawn outer box (U4). Scoped to that box's page
+  // text; a hit becomes an unconfirmed grid proposal, a miss routes to seeding.
+  const detectGrid = (box: PageBox) => {
+    const items = textPages[box.page]?.items ?? [];
+    const result = subdivideBox({ box, items, columns: field.columns ?? [], wantRows: field.fixedRows?.length });
+    if (result) {
+      proposeGeometry(field.id, result.segment);
+      setSeedNote(null);
+    } else {
+      setSeedNote(
+        'No grid could be detected inside that box. Seed it below, then drag each divider onto the printed line.',
+      );
+    }
+  };
+
+  // Seed an even grid the reviewer then corrects — the manual fallback (AE6).
+  // Rows default to the extracted row count, or three to start when unknown.
+  const seedGrid = (box: PageBox) => {
+    const optionKeys = (field.columns ?? []).slice(1).map((c) => c.key);
+    const rowCount = field.fixedRows?.length && field.fixedRows.length > 0 ? field.fixedRows.length : 3;
+    const rowKeys = Array.from({ length: rowCount }, (_, i) => `r${i}`);
+    proposeGeometry(field.id, evenGrid(box, optionKeys, rowKeys));
+    setSeedNote(null);
+  };
 
   // A scalar carries a single placement box; a table carries a grid. The panel
   // names whichever it actually is, so the copy never promises the wrong tool.
@@ -106,6 +143,37 @@ export function GeometryInspector({ field, textPages, drawArmed = false, onToggl
         <>
           <p className="text-[11.5px] leading-snug text-text-tertiary">{state.reason}</p>
           {drawButton}
+        </>
+      ) : state.kind === 'needs-subdivision' ? (
+        <>
+          <p className="text-[11.5px] leading-snug text-text-tertiary">{state.reason}</p>
+          <div className="flex items-center gap-1.5">
+            <Button
+              leadingIcon="grid-2x2"
+              onClick={() => detectGrid(state.box)}
+              className="flex-1 justify-center"
+            >
+              Detect the grid
+            </Button>
+            <Button
+              variant="ghost"
+              leadingIcon="plus"
+              onClick={() => seedGrid(state.box)}
+              className="flex-1 justify-center"
+            >
+              Seed by hand
+            </Button>
+          </div>
+          {seedNote && <p className="text-[11px] leading-snug text-warning-text">{seedNote}</p>}
+          {drawButton}
+          <Button
+            variant="ghost"
+            leadingIcon="x"
+            onClick={() => rejectGeometry(field.id)}
+            className="justify-center text-danger-text"
+          >
+            Discard box
+          </Button>
         </>
       ) : state.kind === 'no-proposal' ? (
         <>
@@ -237,6 +305,14 @@ function RowNudger({ fieldId, segment }: { fieldId: string; segment: PageBox }) 
   const rows = segment.rowBands ?? [];
   if (rows.length === 0) return null;
 
+  // "Add a row" splits the bottom band (lowest y = smallest `start`) in two — a
+  // printed row read as two — routed through the same proposal path so it
+  // un-confirms and is re-validated (U4, R4).
+  const addRow = () => {
+    const bottom = [...rows].sort((a, b) => a.start - b.start)[0];
+    if (bottom) proposeGeometry(fieldId, splitRowBand(segment, bottom.key));
+  };
+
   return (
     <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
       <div className="mb-1.5 text-[11px] font-semibold text-text-secondary">
@@ -244,14 +320,32 @@ function RowNudger({ fieldId, segment }: { fieldId: string; segment: PageBox }) 
       </div>
       <div className="flex flex-col gap-1">
         {rows.map((band) => (
-          <RowBandRow key={band.key} fieldId={fieldId} band={band} />
+          <RowBandRow key={band.key} fieldId={fieldId} segment={segment} band={band} canDelete={rows.length > 1} />
         ))}
       </div>
+      <button
+        onClick={addRow}
+        aria-label="Add a row divider"
+        className="mt-1.5 flex w-full items-center justify-center gap-1 rounded-sm border border-dashed border-border py-1 text-[11px] text-text-tertiary hover:bg-surface-hover"
+      >
+        <Icon name="plus" size={11} />
+        Add row
+      </button>
     </div>
   );
 }
 
-function RowBandRow({ fieldId, band }: { fieldId: string; band: GeometryBand }) {
+function RowBandRow({
+  fieldId,
+  segment,
+  band,
+  canDelete,
+}: {
+  fieldId: string;
+  segment: PageBox;
+  band: GeometryBand;
+  canDelete: boolean;
+}) {
   // PDF space is bottom-up: `start` is the band's bottom edge, `end` its top.
   const nudge = (edge: 'start' | 'end', dir: -1 | 1) =>
     adjustGeometryBand(fieldId, 'row', band.key, edge, band[edge] + dir * NUDGE_POINTS);
@@ -280,6 +374,15 @@ function RowBandRow({ fieldId, band }: { fieldId: string; band: GeometryBand }) 
           </button>
         </span>
       ))}
+      {canDelete && (
+        <button
+          onClick={() => proposeGeometry(fieldId, deleteRowBand(segment, band.key))}
+          aria-label={`Delete row ${band.key}`}
+          className="grid h-6 w-6 flex-none place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover hover:text-danger-text"
+        >
+          <Icon name="trash-2" size={11} />
+        </button>
+      )}
     </div>
   );
 }
