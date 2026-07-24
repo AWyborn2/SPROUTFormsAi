@@ -14,6 +14,8 @@ import {
   NEAR_EQUAL_CONFIDENCE,
   NUDGE_POINTS,
   SNAP_RANGE,
+  DRAW_SNAP_RANGE,
+  applyMatrix,
   columnHandles,
   deleteRowBand,
   type DerivableField,
@@ -22,10 +24,13 @@ import {
   evenGrid,
   handleAdjustment,
   itemsInBox,
+  matrixMultiply,
   nudgedEdge,
   panelState,
   previewMarks,
   rowHandles,
+  rulesFromSegments,
+  segmentsFromDrawOps,
   snapDrawnBox,
   snapEdge,
   snapTargets,
@@ -897,3 +902,85 @@ describe('panelState routes a drawn table box to subdivision (U4)', () => {
     }
   });
 });
+
+describe('draw-box snapping is tight, so a trace no longer jumps to distant text (draw-jump fix)', () => {
+  const page = { page: 0, pageWidth: 595, pageHeight: 842 };
+
+  it('does NOT pull an edge onto a text edge 10pt away (the old 12pt jump)', () => {
+    // A careful trace of a cell whose border sits 10pt from the "Date" label's
+    // edge used to be yanked onto the label. At DRAW_SNAP_RANGE the box stays.
+    const box = snapDrawnBox({ x: 300, y: 500 }, { x: 400, y: 520 }, page, [290], []);
+    expect(box.x).toBe(300); // stayed where drawn, not snapped to 290
+  });
+
+  it('still settles onto an edge the reviewer was already touching (within range)', () => {
+    const box = snapDrawnBox({ x: 292, y: 500 }, { x: 400, y: 520 }, page, [290], []);
+    expect(box.x).toBeCloseTo(290, 5); // 2pt away → snaps
+  });
+
+  it('honours a wider range when snapping to rule-lines', () => {
+    // A rule-line is the correct target, so a rough 6pt trace should lock on when
+    // the caller passes the rule range.
+    const box = snapDrawnBox({ x: 296, y: 500 }, { x: 400, y: 520 }, page, [290], [], 8);
+    expect(box.x).toBeCloseTo(290, 5);
+  });
+
+  it('DRAW_SNAP_RANGE is far tighter than the band-edge SNAP_RANGE', () => {
+    expect(DRAW_SNAP_RANGE).toBeLessThan(SNAP_RANGE);
+  });
+});
+
+describe('rule-line extraction from a page path (draw-jump: snap to the grid)', () => {
+  it('reads a straight lineTo as one segment', () => {
+    // moveTo(40,700) lineTo(555,700) — a horizontal rule.
+    const segs = segmentsFromDrawOps([0, 40, 700, 1, 555, 700]);
+    expect(segs).toEqual([{ x1: 40, y1: 700, x2: 555, y2: 700 }]);
+  });
+
+  it('closes a stroked rectangle into four sides', () => {
+    // moveTo + 3 lineTo + closePath — a cell rectangle.
+    const segs = segmentsFromDrawOps([0, 10, 10, 1, 20, 10, 1, 20, 20, 1, 10, 20, 4]);
+    expect(segs).toHaveLength(4);
+    // The closePath side runs from the last point back to the start.
+    expect(segs[3]).toEqual({ x1: 10, y1: 20, x2: 10, y2: 10 });
+  });
+
+  it('advances the cursor across a curve without emitting a segment', () => {
+    // moveTo(0,0) curveTo(c1,c2,end=5,5) lineTo(9,5) — the curve is not a rule,
+    // but the lineTo after it starts from the curve's end point.
+    const segs = segmentsFromDrawOps([0, 0, 0, 2, 1, 1, 2, 2, 5, 5, 1, 9, 5]);
+    expect(segs).toEqual([{ x1: 5, y1: 5, x2: 9, y2: 5 }]);
+  });
+
+  it('classifies vertical and horizontal rules and drops short strokes', () => {
+    const { xs, ys } = rulesFromSegments(
+      [
+        { x1: 100, y1: 200, x2: 100, y2: 260 }, // vertical rule at x=100
+        { x1: 40, y1: 500, x2: 555, y2: 500 }, // horizontal rule at y=500
+        { x1: 10, y1: 10, x2: 13, y2: 10 }, // 3pt stroke — too short
+      ],
+      { minLength: 12 },
+    );
+    expect(xs).toEqual([100]);
+    expect(ys).toEqual([500]);
+  });
+
+  it('dedupes doubled rules within tolerance', () => {
+    const { xs } = rulesFromSegments([
+      { x1: 100, y1: 0, x2: 100, y2: 60 },
+      { x1: 100.2, y1: 0, x2: 100.2, y2: 60 }, // overdrawn same rule
+      { x1: 300, y1: 0, x2: 300, y2: 60 },
+    ]);
+    expect(xs).toEqual([100, 300]);
+  });
+
+  it('applyMatrix and matrixMultiply place a rule in page space', () => {
+    // A translate-by-(40,700) matrix maps the local origin to the page point.
+    const translate = [1, 0, 0, 1, 40, 700] as const;
+    expect(applyMatrix(translate, 0, 0)).toEqual([40, 700]);
+    // Composing with a scale-by-2 then applying: local (5,5) → (50, 710).
+    const scale = [2, 0, 0, 2, 0, 0] as const;
+    const ctm = matrixMultiply(translate, scale);
+    expect(applyMatrix(ctm, 5, 5)).toEqual([50, 710]);
+  });
+})
