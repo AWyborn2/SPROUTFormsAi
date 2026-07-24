@@ -7,6 +7,7 @@ import {
   columnHandles,
   nudgedEdge,
   previewMarks,
+  rowHandles,
   snapDrawnBox,
   snapEdge,
   snapTargets,
@@ -68,6 +69,11 @@ interface PdfViewerProps {
    * (U10). Supplied by the screen, which already holds the text layer.
    */
   bandSnapTargets?: readonly number[];
+  /**
+   * Printed text baselines on the overlay's page a dragged ROW edge may snap to
+   * (U3) — the vertical counterpart of `bandSnapTargets`. Supplied by the screen.
+   */
+  bandSnapTargetsY?: readonly number[];
   /** A band edge was dragged to `value` (PDF points). Omit to draw read-only. */
   onBandEdge?: (handle: BandHandle, value: number) => void;
   /**
@@ -100,13 +106,16 @@ function BandGrid({
   pageWidth,
   pageHeight,
   snapTargets = [],
+  snapTargetsY = [],
   onBandEdge,
 }: {
   segment: PageBox;
   pageWidth: number;
   pageHeight: number;
-  /** Printed edges this page offers a dragged band edge (U10). */
+  /** Printed column edges this page offers a dragged band edge (U10). */
   snapTargets?: readonly number[];
+  /** Printed row baselines this page offers a dragged ROW edge (U3). */
+  snapTargetsY?: readonly number[];
   onBandEdge?: (handle: BandHandle, value: number) => void;
 }) {
   const surface = useRef<HTMLDivElement>(null);
@@ -134,7 +143,14 @@ function BandGrid({
     const move = (ev: PointerEvent) => {
       const rect = surface.current?.getBoundingClientRect();
       if (!rect) return;
-      onBandEdge(handle, snapEdge((ev.clientX - rect.left) / scaleX, snapTargets));
+      // A row edge moves in y — the page is bottom-up in PDF space, so flip the
+      // pointer's offset and snap to the printed baselines instead of the column
+      // edges. A column edge is the unchanged horizontal path.
+      const value =
+        handle.axis === 'row'
+          ? snapEdge((pageHeight - (ev.clientY - rect.top)) / scaleY, snapTargetsY)
+          : snapEdge((ev.clientX - rect.left) / scaleX, snapTargets);
+      onBandEdge(handle, value);
     };
     const stop = () => {
       grip.removeEventListener('pointermove', move);
@@ -147,20 +163,22 @@ function BandGrid({
   };
 
   /**
-   * Nudge a focused edge with the arrow keys (U1, R1).
+   * Nudge a focused edge with the arrow keys (U1/U3, R1).
    *
-   * Left/Right move the edge by `NUDGE_POINTS` through the very same
-   * `onBandEdge` path a drag or a stepper button uses — so re-snapping,
+   * A column edge answers Left/Right; a row edge answers Down/Up (matching the
+   * axis it moves on). Either way the move goes by `NUDGE_POINTS` through the
+   * very same `onBandEdge` path a drag or a stepper button uses — so re-snapping,
    * inversion/overlap refusal and un-confirm-on-edit all behave identically to a
    * button nudge, and there is no second movement or validation path to keep in
    * step.
    */
   const nudge = (handle: BandHandle) => (e: React.KeyboardEvent) => {
     if (!onBandEdge) return;
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    const [inc, dec] = handle.axis === 'row' ? ['ArrowUp', 'ArrowDown'] : ['ArrowRight', 'ArrowLeft'];
+    if (e.key !== inc && e.key !== dec) return;
     e.preventDefault();
     e.stopPropagation();
-    onBandEdge(handle, nudgedEdge(handle, e.key === 'ArrowRight' ? 1 : -1));
+    onBandEdge(handle, nudgedEdge(handle, e.key === inc ? 1 : -1));
   };
 
   const top = pageHeight - (segment.y + segment.height) * scaleY;
@@ -218,6 +236,26 @@ function BandGrid({
             // Wider than the line it moves: a 1px hit target is unusable, and
             // the drag does not need to be precise — the snap is.
             style={{ left: h.at * scaleX - 5, top, width: 10, height }}
+          />
+        ))}
+      {onBandEdge &&
+        rowHandles(segment.rowBands ?? []).map((h) => (
+          <div
+            key={h.key}
+            role="slider"
+            // Tab-reachable so the edge can be nudged with Up/Down, not just
+            // dragged (U3). role="slider" makes the arrow keys the expected
+            // interaction for assistive tech.
+            tabIndex={0}
+            aria-label={h.label}
+            aria-orientation="vertical"
+            aria-valuenow={Math.round(h.at)}
+            onPointerDown={startDrag(h)}
+            onKeyDown={nudge(h)}
+            className="pointer-events-auto absolute cursor-ns-resize rounded-[1px] outline-none focus-visible:bg-accent/25 focus-visible:ring-2 focus-visible:ring-accent"
+            // Taller than the line it moves, for the same reason as the column
+            // grips. `h.at` is a bottom-up y, so flip it to a CSS top.
+            style={{ left, top: pageHeight - h.at * scaleY - 5, width, height: 10 }}
           />
         ))}
       {(segment.rowBands ?? []).map((band) => (
@@ -405,6 +443,7 @@ export function PdfViewer({
   onTextLayer,
   bandOverlay,
   bandSnapTargets,
+  bandSnapTargetsY,
   onBandEdge,
   drawArmed = false,
   onDrawBox,
@@ -742,6 +781,7 @@ export function PdfViewer({
                   <BandGrid
                     segment={bandOverlay}
                     snapTargets={bandSnapTargets}
+                    snapTargetsY={bandSnapTargetsY}
                     onBandEdge={onBandEdge}
                     pageWidth={pageWidth}
                     pageHeight={pageHeight}

@@ -308,6 +308,8 @@ export interface BandHandle {
   label: string;
   /** Where the edge sits, in PDF points. */
   at: number;
+  /** Which grid axis the edge belongs to — routes the validated adjustment. */
+  axis: 'column' | 'row';
   left?: string;
   right?: string;
 }
@@ -330,7 +332,7 @@ export function columnHandles(bands: readonly GeometryBand[]): BandHandle[] {
   const last = sorted[sorted.length - 1]!;
 
   const handles: BandHandle[] = [
-    { key: `left-${first.key}`, label: `Drag the left edge of ${first.key}`, at: first.start, right: first.key },
+    { key: `left-${first.key}`, label: `Drag the left edge of ${first.key}`, at: first.start, axis: 'column', right: first.key },
   ];
   for (let i = 0; i < sorted.length - 1; i++) {
     const l = sorted[i]!;
@@ -341,6 +343,7 @@ export function columnHandles(bands: readonly GeometryBand[]): BandHandle[] {
       // Contiguous by construction; if a reviewer's earlier edit left a gap,
       // the handle sits on the left band's edge rather than in mid-air.
       at: l.end,
+      axis: 'column',
       left: l.key,
       right: r.key,
     });
@@ -349,6 +352,53 @@ export function columnHandles(bands: readonly GeometryBand[]): BandHandle[] {
     key: `right-${last.key}`,
     label: `Drag the right edge of ${last.key}`,
     at: last.end,
+    axis: 'column',
+    left: last.key,
+  });
+
+  return handles;
+}
+
+/**
+ * The draggable edges of a ROW grid — one per BOUNDARY, mirroring `columnHandles`.
+ *
+ * Row bands are contiguous in y exactly as column bands are in x
+ * (`centresToBands` again), so the same "one handle per boundary, interior
+ * boundary owns both bands" rule holds — drawing a handle per band edge would
+ * stack two identical hit targets and let a reviewer tear a gap a tick can fall
+ * into. `start`/`end` are the band's bottom/top y in PDF points (bottom-up), so
+ * sorting by `start` runs the handles bottom-to-top and the outer handles are
+ * the bottommost band's bottom edge and the topmost band's top edge.
+ */
+export function rowHandles(bands: readonly GeometryBand[]): BandHandle[] {
+  const sorted = [...bands].sort((a, b) => a.start - b.start);
+  if (sorted.length === 0) return [];
+
+  const first = sorted[0]!;
+  const last = sorted[sorted.length - 1]!;
+
+  const handles: BandHandle[] = [
+    { key: `bottom-${first.key}`, label: `Drag the bottom edge of ${first.key}`, at: first.start, axis: 'row', right: first.key },
+  ];
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const l = sorted[i]!;
+    const r = sorted[i + 1]!;
+    handles.push({
+      key: `between-${l.key}-${r.key}`,
+      label: `Drag the boundary between ${l.key} and ${r.key}`,
+      // Contiguous by construction; if a reviewer's earlier edit left a gap,
+      // the handle sits on the lower band's edge rather than in mid-air.
+      at: l.end,
+      axis: 'row',
+      left: l.key,
+      right: r.key,
+    });
+  }
+  handles.push({
+    key: `top-${last.key}`,
+    label: `Drag the top edge of ${last.key}`,
+    at: last.end,
+    axis: 'row',
     left: last.key,
   });
 
@@ -543,6 +593,6 @@ export function panelState(
   return {
     kind: 'no-proposal',
     reason:
-      'The page did not give enough signal to place this table confidently, so nothing is proposed. Draw the grid by hand, or leave it — the form still publishes and exports its answers as data.',
+      'The page did not give enough signal to place this table confidently, so nothing could be placed automatically. That is fine to leave — the form still publishes and exports its answers as data. (Hand placement is coming.)',
   };
 }
