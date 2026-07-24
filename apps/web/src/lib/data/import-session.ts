@@ -348,6 +348,19 @@ export function setFieldRequired(id: string, required: boolean): void {
 }
 
 /**
+ * Choose how a choice field's answer prints: its selected VALUE as text in one
+ * box (`true`), or a checkmark in each selected option's own box (`false`).
+ *
+ * A field-property change, so it travels to publish through the
+ * `reviewedToFields` whitelist. The two modes read different geometry (a single
+ * box vs per-option boxes), so flipping it re-points which boxes matter; any
+ * boxes drawn for the other mode simply go unused rather than being published.
+ */
+export function setFieldPrintSelectedValue(id: string, printSelectedValue: boolean): void {
+  dispatchEdit({ t: 'update', id, patch: { printSelectedValue } });
+}
+
+/**
  * Confirm a flagged field as correct as-is, for any field type.
  *
  * A review-metadata change only: it sets `resolved`, which `reviewStatus` reads
@@ -1054,6 +1067,7 @@ export function reviewedToFields(fields: ReviewField[]): FormField[] {
     ...(f.description ? { description: f.description } : {}),
     ...(f.options ? { options: f.options } : {}),
     ...(f.selectionType ? { selectionType: f.selectionType } : {}),
+    ...(f.printSelectedValue ? { printSelectedValue: true } : {}),
     ...(f.columns ? { columns: f.columns } : {}),
     // This whitelist is the publish boundary: a property missing here is
     // silently dropped even though review displayed it correctly.
@@ -1095,14 +1109,16 @@ export function optionSlotId(fieldId: string, optionKey: string): string {
 /**
  * A field's geometry, but only once the reviewer has confirmed it.
  *
- * A choice field (checkbox_group / radio / dropdown) has no single box: it
- * gathers every option whose own box the reviewer confirmed, stamping each
- * segment with its `optionKey` so the exporter can draw a mark in the box of
- * every selected option (R8 still holds per box — an unconfirmed option
- * contributes nothing).
+ * A choice field (checkbox_group / radio / dropdown) that ticks per option has
+ * no single box: it gathers every option whose own box the reviewer confirmed,
+ * stamping each segment with its `optionKey` so the exporter can draw a mark in
+ * the box of every selected option (R8 still holds per box — an unconfirmed
+ * option contributes nothing). A choice field set to `printSelectedValue`
+ * instead carries ONE box (its value prints there as text), so it skips this
+ * branch and uses the single-box path below, exactly like a scalar.
  */
 function publishableGeometry(field: ReviewField): FieldGeometry | undefined {
-  if (isChoiceField(field.type) && (field.options?.length ?? 0) > 0) {
+  if (isChoiceField(field.type) && !field.printSelectedValue && (field.options?.length ?? 0) > 0) {
     const segments: PageBox[] = [];
     for (const option of field.options!) {
       const slot = optionSlotId(field.id, option);

@@ -999,3 +999,48 @@ describe('roundTripExport — per-option checkmarks for radio and dropdown', () 
     });
   }
 })
+
+/**
+ * A choice field the reviewer set to `printSelectedValue` draws its selected
+ * value as TEXT in one box, not a checkmark per option — the write-in dropdown
+ * case (a PDF with one blank for the chosen value, not a row of tick boxes).
+ */
+describe('roundTripExport — a printSelectedValue dropdown writes its value as text', () => {
+  const BOX: PageBox = {
+    page: 0, x: 200, y: 500, width: 120, height: 16, pageWidth: 600, pageHeight: 800,
+  };
+
+  const dropdown = (printSelectedValue: boolean, geometry: PageBox[]): FormField => ({
+    id: 'shift',
+    type: 'dropdown',
+    label: 'Shift',
+    required: false,
+    source: 'imported',
+    options: ['Day', 'Night'],
+    printSelectedValue,
+    geometry: { segments: geometry },
+  });
+
+  it('draws the value as text and no checkmark when printSelectedValue is set', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [dropdown(true, [BOX])], // one box, no optionKey — a scalar placement
+      values: { shift: 'Night' },
+    });
+
+    expect(bytesInclude(output, 'Night')).toBe(true); // the value, printed as text
+    expect(tickXs(output)).toHaveLength(0); // and NOT a tick
+  });
+
+  it('still ticks per option when printSelectedValue is off (default)', async () => {
+    const NIGHT_BOX: PageBox = { ...BOX, width: 14, optionKey: 'Night' };
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [dropdown(false, [NIGHT_BOX])],
+      values: { shift: 'Night' },
+    });
+
+    expect(tickXs(output)).toHaveLength(1); // a tick in the Night box
+    expect(bytesInclude(output, 'Night')).toBe(false); // not the letter/word
+  });
+})

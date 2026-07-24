@@ -195,6 +195,15 @@ export interface FormField {
   /** For checkbox_group. */
   selectionType?: 'single' | 'multiple';
 
+  /**
+   * For a choice field (dropdown / radio): draw the SELECTED VALUE as text in a
+   * single hand-drawn placement box, instead of a checkmark in each selected
+   * option's own box. Absent/false is the default — per-option marks. This is
+   * the write-in case: a PDF with one blank to print the chosen value into,
+   * rather than a row of tick boxes.
+   */
+  printSelectedValue?: boolean;
+
   validation?: FieldValidation;
 
   /** For repeating_group — the column shape, extracted once. */

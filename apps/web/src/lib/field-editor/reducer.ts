@@ -147,6 +147,9 @@ function retypeField(f: FormField, type: FormFieldType): FormField {
   }
 
   if (type !== 'checkbox_group') delete nf.selectionType;
+  // `printSelectedValue` is a choice-field-only output mode; a field that stops
+  // being a choice field cannot carry it.
+  if (!isChoiceField(type)) delete nf.printSelectedValue;
 
   // `typeOptionsFor` makes ENTERING repeating_group unreachable from either
   // editor, so in practice this only ever clears.

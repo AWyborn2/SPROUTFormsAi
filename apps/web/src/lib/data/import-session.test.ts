@@ -1133,3 +1133,38 @@ describe('per-option geometry applies to radio and dropdown, not only checkbox_g
     });
   }
 })
+
+describe('a printSelectedValue choice field publishes a single value box, not per-option', () => {
+  const box = (): PageBox => ({
+    page: 0, x: 200, y: 500, width: 120, height: 16, pageWidth: 600, pageHeight: 800,
+  });
+
+  const dropdown = (): ReviewField => ({
+    id: 'shift',
+    label: 'Shift',
+    type: 'dropdown',
+    confidence: 0.9,
+    options: ['Day', 'Night'],
+    printSelectedValue: true,
+  });
+
+  it('publishes the confirmed single box (no optionKey) and carries the flag', () => {
+    // Drawn under the FIELD id, like a scalar — not an option slot.
+    proposeGeometry('shift', box());
+    confirmGeometry('shift');
+
+    const published = reviewedToFields([dropdown()])[0]!;
+
+    expect(published.printSelectedValue).toBe(true);
+    expect(published.geometry?.segments).toHaveLength(1);
+    expect(published.geometry?.segments[0]?.optionKey).toBeUndefined();
+  });
+
+  it('ignores any per-option boxes while in printSelectedValue mode', () => {
+    // A stray option box from a previous mode must not leak into publish.
+    proposeGeometry(optionSlotId('shift', 'Day'), box());
+    confirmGeometry(optionSlotId('shift', 'Day'));
+
+    expect(reviewedToFields([dropdown()])[0]?.geometry).toBeUndefined();
+  });
+})

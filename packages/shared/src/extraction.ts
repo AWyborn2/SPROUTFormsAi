@@ -40,6 +40,12 @@ export interface ExtractedField {
   description?: string;
   options?: string[];
   selectionType?: 'single' | 'multiple';
+  /**
+   * For a choice field — a reviewer decision (never extracted): print the
+   * selected value as text in one box instead of a checkmark per option. Mirrors
+   * `FormField.printSelectedValue` so it survives the review round-trip.
+   */
+  printSelectedValue?: boolean;
   /** For repeating_group — extracted once, never per blank row. */
   columns?: RepeatingColumn[];
   /**
