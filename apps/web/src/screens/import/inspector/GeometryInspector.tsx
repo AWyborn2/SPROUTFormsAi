@@ -106,6 +106,7 @@ export function GeometryInspector({ field, textPages }: GeometryInspectorProps) 
           )}
 
           <BandNudger fieldId={field.id} segment={state.segment} />
+          <RowNudger fieldId={field.id} segment={state.segment} />
 
           <div className="flex items-center gap-1.5">
             {!state.confirmed && (
@@ -179,6 +180,66 @@ function BandRow({ fieldId, band }: { fieldId: string; band: GeometryBand }) {
             className="grid h-6 w-6 place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover"
           >
             <Icon name="chevron-right" size={11} />
+          </button>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Nudge one ROW band edge at a time — the vertical mirror of `BandNudger`.
+ *
+ * Same argument as the columns: a drag over a scaled preview cannot reliably
+ * resolve a printed row, so a 1pt stepper is the finest visible correction. The
+ * edit routes through `adjustGeometryBand(..., 'row', ...)`, so an inverting or
+ * overlapping move is refused and the field un-confirms exactly as the column
+ * path does — the same validator, the other axis.
+ */
+function RowNudger({ fieldId, segment }: { fieldId: string; segment: PageBox }) {
+  const rows = segment.rowBands ?? [];
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+      <div className="mb-1.5 text-[11px] font-semibold text-text-secondary">
+        Row edges ({NUDGE_POINTS}pt per step)
+      </div>
+      <div className="flex flex-col gap-1">
+        {rows.map((band) => (
+          <RowBandRow key={band.key} fieldId={fieldId} band={band} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RowBandRow({ fieldId, band }: { fieldId: string; band: GeometryBand }) {
+  // PDF space is bottom-up: `start` is the band's bottom edge, `end` its top.
+  const nudge = (edge: 'start' | 'end', dir: -1 | 1) =>
+    adjustGeometryBand(fieldId, 'row', band.key, edge, band[edge] + dir * NUDGE_POINTS);
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-secondary">{band.key}</span>
+      {(['start', 'end'] as const).map((edge) => (
+        <span key={edge} className="flex flex-none items-center gap-0.5">
+          <span className="w-[34px] text-right font-mono text-[10.5px] text-text-tertiary">
+            {edge === 'start' ? 'B' : 'T'} {Math.round(band[edge])}
+          </span>
+          <button
+            onClick={() => nudge(edge, -1)}
+            aria-label={`Move ${band.key} ${edge} edge down`}
+            className="grid h-6 w-6 place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover"
+          >
+            <Icon name="chevron-down" size={11} />
+          </button>
+          <button
+            onClick={() => nudge(edge, 1)}
+            aria-label={`Move ${band.key} ${edge} edge up`}
+            className="grid h-6 w-6 place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover"
+          >
+            <Icon name="chevron-up" size={11} />
           </button>
         </span>
       ))}

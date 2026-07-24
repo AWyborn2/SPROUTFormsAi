@@ -26,7 +26,7 @@ import {
   adjustGeometryBoundary,
   geometryProposal,
 } from '../../lib/data/import-session.js';
-import { snapTargets } from './inspector/geometry-actions.js';
+import { snapTargets, snapTargetsY } from './inspector/geometry-actions.js';
 import { FieldInspector } from './inspector/FieldInspector.js';
 import { stripFileExtension } from './upload-validation.js';
 import { ImportStepper } from './ImportStepper.js';
@@ -85,6 +85,13 @@ export function ImportReviewScreen() {
    */
   const bandSnapTargets = useMemo(
     () => (bandOverlay ? snapTargets(textPages[bandOverlay.page]?.items ?? []) : []),
+    [bandOverlay?.page, textPages],
+  );
+  // The vertical counterpart, for a dragged ROW edge (U3): the printed baselines
+  // on the overlay page. Same reasoning as `bandSnapTargets` — the screen holds
+  // the text layer, the viewer only reports a coordinate.
+  const bandSnapTargetsY = useMemo(
+    () => (bandOverlay ? snapTargetsY(textPages[bandOverlay.page]?.items ?? []) : []),
     [bandOverlay?.page, textPages],
   );
   const fieldListRef = useRef<HTMLDivElement>(null);
@@ -200,17 +207,19 @@ export function ImportReviewScreen() {
                 onTextLayer={setTextPages}
                 bandOverlay={bandOverlay}
                 bandSnapTargets={bandSnapTargets}
+                bandSnapTargetsY={bandSnapTargetsY}
                 onBandEdge={
                   selectedFieldId
                     ? (handle, value) => {
                         // An interior boundary belongs to two bands and moves
-                        // as one; an outer edge belongs to one.
+                        // as one; an outer edge belongs to one. `handle.axis`
+                        // routes the identical rule to the column or row axis.
                         if (handle.left && handle.right) {
-                          adjustGeometryBoundary(selectedFieldId, 'column', handle.left, handle.right, value);
+                          adjustGeometryBoundary(selectedFieldId, handle.axis, handle.left, handle.right, value);
                         } else if (handle.right) {
-                          adjustGeometryBand(selectedFieldId, 'column', handle.right, 'start', value);
+                          adjustGeometryBand(selectedFieldId, handle.axis, handle.right, 'start', value);
                         } else if (handle.left) {
-                          adjustGeometryBand(selectedFieldId, 'column', handle.left, 'end', value);
+                          adjustGeometryBand(selectedFieldId, handle.axis, handle.left, 'end', value);
                         }
                       }
                     : undefined
