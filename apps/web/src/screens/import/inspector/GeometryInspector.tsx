@@ -12,6 +12,7 @@
  */
 import { useMemo, useState } from 'react';
 import { Button, Icon } from '@formai/ui';
+import { isChoiceField } from '@formai/shared';
 import type { GeometryBand, PageBox } from '@formai/shared';
 import type { TextPage } from '../../../lib/pdf-geometry.js';
 import {
@@ -79,13 +80,14 @@ export function GeometryInspector({ field, textPages, activeDrawSlot = null, onT
   // drawn box, so the reviewer knows the seed path is the way forward (AE6).
   const [seedNote, setSeedNote] = useState<string | null>(null);
 
-  // A checkbox / choice group draws one box PER OPTION, each rendered as a
-  // checkmark on export (not the option's text) — so it gets a per-option panel
-  // rather than the single-box scalar treatment. All hooks above have already
-  // run, so this early return is safe.
-  if (field.type === 'checkbox_group' && (field.options?.length ?? 0) > 0) {
+  // A choice field — checkbox_group, radio ("multiple choice") or dropdown —
+  // draws one box PER OPTION, each rendered as a checkmark on export (not the
+  // option's text), so it gets a per-option panel rather than the single-box
+  // scalar treatment. All hooks above have already run, so this early return is
+  // safe.
+  if (isChoiceField(field.type) && (field.options?.length ?? 0) > 0) {
     return (
-      <CheckboxOptionsGeometry field={field} activeDrawSlot={activeDrawSlot} onToggleDrawSlot={onToggleDrawSlot} />
+      <OptionBoxesGeometry field={field} activeDrawSlot={activeDrawSlot} onToggleDrawSlot={onToggleDrawSlot} />
     );
   }
 
@@ -403,15 +405,15 @@ function RowBandRow({
 }
 
 /**
- * Per-option placement for a checkbox / choice group.
+ * Per-option placement for a choice field — checkbox_group, radio or dropdown.
  *
- * A checkbox group prints a row of ☐ boxes; the reviewer draws one box per
- * option, and each SELECTED option exports as a checkmark in its own box, never
- * the option's letter. Each option's box lives under its own draw slot
+ * These print a set of options to tick; the reviewer draws one box per option,
+ * and each SELECTED option exports as a checkmark in its own box, never the
+ * option's text. Each option's box lives under its own draw slot
  * (`optionSlotId`), reusing the whole propose/confirm pipeline, so an option is
  * published only once its own box is confirmed (R8, held per box).
  */
-function CheckboxOptionsGeometry({
+function OptionBoxesGeometry({
   field,
   activeDrawSlot,
   onToggleDrawSlot,
@@ -429,12 +431,12 @@ function CheckboxOptionsGeometry({
         <span className="text-[12.5px] font-semibold">Checkmark placement on the original PDF</span>
       </div>
       <p className="text-[11.5px] leading-snug text-text-tertiary">
-        Draw a box over each option’s tick box on the PDF. Every option the filler selects then prints a ✓ in
-        its box. Until an option is confirmed, this form still publishes and exports the answer as data.
+        Draw a box over each option on the PDF. Every option the filler selects then prints a ✓ in its box.
+        Until an option is confirmed, this form still publishes and exports the answer as data.
       </p>
       <div className="flex flex-col gap-1.5">
         {options.map((option) => (
-          <CheckboxOptionRow
+          <OptionBoxRow
             key={option}
             fieldId={field.id}
             option={option}
@@ -447,7 +449,7 @@ function CheckboxOptionsGeometry({
   );
 }
 
-function CheckboxOptionRow({
+function OptionBoxRow({
   fieldId,
   option,
   armed,

@@ -23,7 +23,7 @@ import type {
   RepeatingColumn,
   VisibilityCondition,
 } from '@formai/shared';
-import { resolveGeometry, statusForConfidence } from '@formai/shared';
+import { isChoiceField, resolveGeometry, statusForConfidence } from '@formai/shared';
 import type { BuilderAction, BuilderState } from '../field-editor/reducer.js';
 import { builderReducer, initialBuilderState } from '../field-editor/reducer.js';
 import { ApiError, apiClient } from './api-client.js';
@@ -1095,13 +1095,14 @@ export function optionSlotId(fieldId: string, optionKey: string): string {
 /**
  * A field's geometry, but only once the reviewer has confirmed it.
  *
- * A checkbox group has no single box: it gathers every option whose own box the
- * reviewer confirmed, stamping each segment with its `optionKey` so the exporter
- * can draw a mark in the box of every selected option (R8 still holds per box —
- * an unconfirmed option contributes nothing).
+ * A choice field (checkbox_group / radio / dropdown) has no single box: it
+ * gathers every option whose own box the reviewer confirmed, stamping each
+ * segment with its `optionKey` so the exporter can draw a mark in the box of
+ * every selected option (R8 still holds per box — an unconfirmed option
+ * contributes nothing).
  */
 function publishableGeometry(field: ReviewField): FieldGeometry | undefined {
-  if (field.type === 'checkbox_group' && (field.options?.length ?? 0) > 0) {
+  if (isChoiceField(field.type) && (field.options?.length ?? 0) > 0) {
     const segments: PageBox[] = [];
     for (const option of field.options!) {
       const slot = optionSlotId(field.id, option);

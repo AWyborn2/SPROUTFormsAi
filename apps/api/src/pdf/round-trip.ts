@@ -15,6 +15,7 @@ import {
   MARK_SIZE_FLOOR,
   columnBandFor,
   geometrySegments,
+  isChoiceField,
   markPlacement,
   resolveAnswerSets,
   selectedOption,
@@ -115,11 +116,12 @@ export async function roundTripExport({
       continue;
     }
 
-    // A checkbox/choice field draws a CHECKMARK in each selected option's own
-    // box — not the option's text. Each segment names its option via
-    // `optionKey`; a field with no per-option geometry falls through to the
-    // scalar text path below (legacy single box, or none).
-    if (field.type === 'checkbox_group') {
+    // A choice field — checkbox_group, radio ("multiple choice") or dropdown —
+    // draws a CHECKMARK in each selected option's own box, not the option's
+    // text. Each segment names its option via `optionKey`; a field with no
+    // per-option geometry falls through to the scalar text path below (a legacy
+    // single box, or none).
+    if (isChoiceField(field.type)) {
       const optionSegments = segments.filter((s) => s.optionKey !== undefined);
       if (optionSegments.length > 0) {
         drawCheckboxOptions(pages, value, optionSegments);

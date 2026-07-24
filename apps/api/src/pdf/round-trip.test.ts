@@ -950,3 +950,52 @@ describe('roundTripExport — checkbox-group per-option checkmarks', () => {
     expect(tickXs(output)).toHaveLength(0);
   });
 })
+
+/**
+ * The same per-option checkmark path serves radio ("multiple choice") and
+ * dropdown, not only checkbox_group — every choice field can carry one box per
+ * option and tick the selected one, rather than printing its text.
+ */
+describe('roundTripExport — per-option checkmarks for radio and dropdown', () => {
+  const A_BOX: PageBox = {
+    page: 0, x: 200, y: 500, width: 14, height: 14, pageWidth: 600, pageHeight: 800, optionKey: 'Day',
+  };
+  const B_BOX: PageBox = {
+    page: 0, x: 260, y: 500, width: 14, height: 14, pageWidth: 600, pageHeight: 800, optionKey: 'Night',
+  };
+
+  const choiceField = (type: FormField['type']): FormField => ({
+    id: 'shift',
+    type,
+    label: 'Shift',
+    required: false,
+    source: 'imported',
+    options: ['Day', 'Night'],
+    geometry: { segments: [A_BOX, B_BOX] },
+  });
+
+  for (const type of ['radio', 'dropdown'] as const) {
+    it(`ticks the selected option's box for a ${type} (single string value)`, async () => {
+      const output = await roundTripExport({
+        originalPdf: await makeFlatPdf(),
+        fields: [choiceField(type)],
+        values: { shift: 'Night' },
+      });
+
+      const xs = tickXs(output);
+      expect(xs).toHaveLength(1);
+      expect(xs[0]).toBeCloseTo(B_BOX.x + 2.5, 5); // the Night box, not Day
+    });
+
+    it(`draws nothing for a ${type} with no per-option geometry`, async () => {
+      const field = choiceField(type);
+      const output = await roundTripExport({
+        originalPdf: await makeFlatPdf(),
+        fields: [{ ...field, geometry: undefined }],
+        values: { shift: 'Night' },
+      });
+
+      expect(tickXs(output)).toHaveLength(0);
+    });
+  }
+})
