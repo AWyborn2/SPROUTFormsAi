@@ -4,15 +4,23 @@ import { Icon } from '@formai/ui';
 import type { ExtractedField, ExtractionStatus, PageBox } from '@formai/shared';
 import type { PositionedText, TextPage } from '../../lib/pdf-geometry.js';
 import {
+  DRAW_SNAP_RANGE,
+  type Matrix,
+  RULE_SNAP_RANGE,
+  applyMatrix,
   columnHandles,
+  matrixMultiply,
   nudgedEdge,
   previewMarks,
   rowHandles,
+  rulesFromSegments,
+  segmentsFromDrawOps,
   snapDrawnBox,
   snapEdge,
   snapTargets,
   snapTargetsY,
   type BandHandle,
+  type DrawSegment,
 } from './inspector/geometry-actions.js';
 import {
   anchoredScrollOffset,
@@ -46,6 +54,76 @@ interface PageRender {
   /** Page size at pdfjs scale 1, i.e. PDF units — the same space as sourcePosition. */
   naturalWidth: number;
   naturalHeight: number;
+  /** x of every vertical printed rule-line, for snapping a drawn box (draw-jump). */
+  ruleXs: number[];
+  /** y of every horizontal printed rule-line. */
+  ruleYs: number[];
+}
+
+const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
+
+/**
+ * The flat pdf.js `constructPath` draw-op array out of one operator entry.
+ *
+ * The operand packing has moved across pdf.js versions (the flat op array has
+ * sat at index 0 and index 1), so rather than pin a position we pick the
+ * array-like member that begins with a `moveTo` (op 0) — the way every path
+ * starts. The `minMax` bounds array is length-4 and starts with a coordinate,
+ * and the paint-op constant is a scalar, so neither is mistaken for the path.
+ */
+function drawOpsOf(args: unknown): ArrayLike<number> | null {
+  if (!Array.isArray(args)) return null;
+  for (const el of args) {
+    const arr = el as ArrayLike<number> | null;
+    if (arr && typeof arr.length === 'number' && arr.length >= 3 && arr[0] === 0) return arr;
+  }
+  return null;
+}
+
+/**
+ * Pull the printed grid rule-lines off a page (draw-jump fix).
+ *
+ * A drawn placement box should lock onto the table's actual rules, not the
+ * nearest caption. pdf.js hands us the page's vector paths through
+ * `getOperatorList`; we track the CTM across `save`/`restore`/`transform` so the
+ * line coordinates come out in the page's own point space, then keep only the
+ * long axis-aligned segments (`rulesFromSegments`) — real grid lines, never a
+ * glyph stroke. Best-effort and fully guarded: any failure yields no rules and
+ * the caller falls back to the tightened text snap, so drawing never breaks.
+ */
+async function extractRuleLines(page: pdfjs.PDFPageProxy): Promise<{ xs: number[]; ys: number[] }> {
+  try {
+    const { fnArray, argsArray } = await page.getOperatorList();
+    const segments: DrawSegment[] = [];
+    let ctm: Matrix = IDENTITY;
+    const stack: Matrix[] = [];
+
+    for (let i = 0; i < fnArray.length; i++) {
+      const fn = fnArray[i];
+      if (fn === pdfjs.OPS.save) {
+        stack.push(ctm);
+      } else if (fn === pdfjs.OPS.restore) {
+        ctm = stack.pop() ?? IDENTITY;
+      } else if (fn === pdfjs.OPS.transform) {
+        const a = argsArray[i] as number[] | undefined;
+        if (a && a.length >= 6) ctm = matrixMultiply(ctm, [a[0]!, a[1]!, a[2]!, a[3]!, a[4]!, a[5]!]);
+      } else if (fn === pdfjs.OPS.constructPath) {
+        const ops = drawOpsOf(argsArray[i]);
+        if (!ops) continue;
+        for (const s of segmentsFromDrawOps(ops)) {
+          const [x1, y1] = applyMatrix(ctm, s.x1, s.y1);
+          const [x2, y2] = applyMatrix(ctm, s.x2, s.y2);
+          segments.push({ x1, y1, x2, y2 });
+        }
+      }
+    }
+
+    // 18pt floor: real table rules run tens to hundreds of points; nothing a
+    // glyph stroke or a checkbox tick could reach, so only grid lines survive.
+    return rulesFromSegments(segments, { minLength: 18 });
+  } catch {
+    return { xs: [], ys: [] };
+  }
 }
 
 interface FieldHighlight {
@@ -342,6 +420,8 @@ function DrawSurface({
   naturalWidth,
   naturalHeight,
   items,
+  ruleXs,
+  ruleYs,
   onDrawBox,
 }: {
   pageIndex: number;
@@ -351,8 +431,11 @@ function DrawSurface({
   /** Page size in PDF points — the space geometry is stored in. */
   naturalWidth: number;
   naturalHeight: number;
-  /** This page's positioned text, for edge snapping. */
+  /** This page's positioned text, for edge snapping when there are no rules. */
   items: readonly PositionedText[];
+  /** Printed vertical/horizontal rule-lines — the preferred snap targets. */
+  ruleXs: readonly number[];
+  ruleYs: readonly number[];
   onDrawBox?: (box: PageBox) => void;
 }) {
   const surface = useRef<HTMLDivElement>(null);
@@ -392,12 +475,17 @@ function DrawSurface({
       // A press that barely moved is a mis-click, not a box — ignore it rather
       // than emit a degenerate rectangle.
       if (Math.hypot(endX - start.x, endY - start.y) < DRAG_THRESHOLD) return;
+      // Prefer the printed rule-lines — the actual grid the reviewer is tracing —
+      // and only fall back to text edges (tightly) when a page carried no rules,
+      // so a drawn box no longer jumps to a nearby caption (draw-jump fix).
+      const hasRules = ruleXs.length > 0 || ruleYs.length > 0;
       const box = snapDrawnBox(
         toPoints(start.x, start.y),
         toPoints(endX, endY),
         { page: pageIndex, pageWidth: naturalWidth, pageHeight: naturalHeight },
-        snapTargets(items),
-        snapTargetsY(items),
+        ruleXs.length > 0 ? ruleXs : snapTargets(items),
+        ruleYs.length > 0 ? ruleYs : snapTargetsY(items),
+        hasRules ? RULE_SNAP_RANGE : DRAW_SNAP_RANGE,
       );
       onDrawBox(box);
     };
@@ -517,6 +605,10 @@ export function PdfViewer({
           height: natural.height,
         });
 
+        // Printed grid rule-lines, so a hand-drawn box snaps to the real cell
+        // borders rather than the nearest caption (draw-jump fix). Best-effort.
+        const rules = await extractRuleLines(page);
+
         const viewport = page.getViewport({ scale: RENDER_SCALE });
         const canvas = document.createElement('canvas');
         canvas.width = viewport.width;
@@ -527,6 +619,8 @@ export function PdfViewer({
           dataUrl: canvas.toDataURL('image/png'),
           naturalWidth: natural.width,
           naturalHeight: natural.height,
+          ruleXs: rules.xs,
+          ruleYs: rules.ys,
         });
       }
       setPages(rendered);
@@ -800,6 +894,8 @@ export function PdfViewer({
                     naturalWidth={page.naturalWidth}
                     naturalHeight={page.naturalHeight}
                     items={textPagesRef.current[pageIndex]?.items ?? []}
+                    ruleXs={page.ruleXs}
+                    ruleYs={page.ruleYs}
                     onDrawBox={onDrawBox}
                   />
                 )}

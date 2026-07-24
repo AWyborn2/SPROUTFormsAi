@@ -267,6 +267,163 @@ export const NUDGE_POINTS = 1;
 export const SNAP_RANGE = 12;
 
 /**
+ * How far a hand-DRAWN box edge snaps to a printed TEXT edge.
+ *
+ * Deliberately far tighter than `SNAP_RANGE`. A band-edge drag is choosing WHICH
+ * option column it means, so a wide catch is right. A drawn placement box is
+ * being traced onto the page, and pulling its edge onto a label 12pt away — the
+ * "Date" caption beside the cell being boxed — is the visible JUMP that made a
+ * careful trace land somewhere else. At 4pt the box stays where it was drawn and
+ * only settles onto a printed edge the reviewer was already touching; the
+ * steppers do the fine alignment.
+ */
+export const DRAW_SNAP_RANGE = 4;
+
+/**
+ * How far a drawn box edge snaps to a printed RULE-LINE.
+ *
+ * Rule-lines are the table's actual grid, which is what a reviewer traces a box
+ * against, so a more generous catch than text is right — a rough trace should
+ * lock onto the cell border it was aiming for. Still well under a cell's height,
+ * so it never crosses to the next rule.
+ */
+export const RULE_SNAP_RANGE = 8;
+
+/** A 2-D affine transform, as pdf.js reports it: [a, b, c, d, e, f]. */
+export type Matrix = readonly [number, number, number, number, number, number];
+
+/** Map a point through an affine matrix (pdf.js `Util.applyTransform`). */
+export function applyMatrix(m: Matrix, x: number, y: number): [number, number] {
+  return [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+}
+
+/**
+ * Compose two affine transforms (pdf.js `Util.transform(m1, m2)`).
+ *
+ * Used to fold a content-stream `transform` op into the running CTM, in the same
+ * order pdf.js does, so the rule-line coordinates we extract land in the page's
+ * own point space — the space geometry is stored in.
+ */
+export function matrixMultiply(m1: Matrix, m2: Matrix): Matrix {
+  return [
+    m1[0] * m2[0] + m1[2] * m2[1],
+    m1[1] * m2[0] + m1[3] * m2[1],
+    m1[0] * m2[2] + m1[2] * m2[3],
+    m1[1] * m2[2] + m1[3] * m2[3],
+    m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
+    m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
+  ];
+}
+
+/** One straight edge of a drawn path, in whatever space its points are given. */
+export interface DrawSegment {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/** pdf.js `DrawOPS` — the path-segment opcodes packed into a `constructPath`. */
+const DRAW_OP = { moveTo: 0, lineTo: 1, curveTo: 2, quadraticCurveTo: 3, closePath: 4 } as const;
+
+/**
+ * Turn one pdf.js `constructPath` operand — a flat `[op, x, y, …]` array — into
+ * its straight line segments.
+ *
+ * pdf.js packs a whole path as `moveTo x y`, `lineTo x y`, `curveTo …` (6
+ * coords), `quadraticCurveTo …` (4 coords) and `closePath` (0 coords). Table
+ * rules and cell rectangles are all `lineTo`/`closePath`, so every grid edge is
+ * a straight segment here; curves advance the cursor to their end point but emit
+ * no segment (a grid is never a curve). A `closePath` re-emits the segment back
+ * to the subpath's start, which is how a stroked cell rectangle yields its
+ * fourth side.
+ */
+export function segmentsFromDrawOps(ops: ArrayLike<number>): DrawSegment[] {
+  const segments: DrawSegment[] = [];
+  let startX = 0;
+  let startY = 0;
+  let curX = 0;
+  let curY = 0;
+  let i = 0;
+
+  while (i < ops.length) {
+    const op = ops[i++];
+    if (op === DRAW_OP.moveTo) {
+      curX = startX = ops[i++]!;
+      curY = startY = ops[i++]!;
+    } else if (op === DRAW_OP.lineTo) {
+      const x = ops[i++]!;
+      const y = ops[i++]!;
+      segments.push({ x1: curX, y1: curY, x2: x, y2: y });
+      curX = x;
+      curY = y;
+    } else if (op === DRAW_OP.curveTo) {
+      i += 4; // two control points…
+      curX = ops[i++]!; // …then the end point the cursor moves to
+      curY = ops[i++]!;
+    } else if (op === DRAW_OP.quadraticCurveTo) {
+      i += 2; // one control point…
+      curX = ops[i++]!;
+      curY = ops[i++]!;
+    } else if (op === DRAW_OP.closePath) {
+      if (curX !== startX || curY !== startY) {
+        segments.push({ x1: curX, y1: curY, x2: startX, y2: startY });
+      }
+      curX = startX;
+      curY = startY;
+    } else {
+      break; // an opcode we do not model — stop rather than mis-read coords
+    }
+  }
+  return segments;
+}
+
+/** Axis-aligned rule-lines pulled out of a set of path segments. */
+export interface RuleLines {
+  /** x of every vertical rule. */
+  xs: number[];
+  /** y of every horizontal rule. */
+  ys: number[];
+}
+
+/**
+ * Collect the axis-aligned rule-lines from a set of segments (U-draw).
+ *
+ * A segment counts as a vertical rule when its endpoints share an x (within a
+ * hair) and it is at least `minLength` tall, and a horizontal rule by the mirror
+ * test. Short segments — a checkbox tick, a glyph stroke, the cap on a letter —
+ * are ignored so only real grid lines become snap targets. Coordinates are
+ * deduped within `tolerance` so a doubled or overdrawn rule contributes one
+ * target, exactly as `snapTargets` dedupes text edges.
+ */
+export function rulesFromSegments(
+  segments: readonly DrawSegment[],
+  { minLength = 12, tolerance = 0.5 }: { minLength?: number; tolerance?: number } = {},
+): RuleLines {
+  const xs: number[] = [];
+  const ys: number[] = [];
+
+  for (const s of segments) {
+    if (![s.x1, s.y1, s.x2, s.y2].every(Number.isFinite)) continue;
+    const dx = Math.abs(s.x2 - s.x1);
+    const dy = Math.abs(s.y2 - s.y1);
+    if (dx <= tolerance && dy >= minLength) xs.push((s.x1 + s.x2) / 2);
+    else if (dy <= tolerance && dx >= minLength) ys.push((s.y1 + s.y2) / 2);
+  }
+
+  const dedupe = (values: number[]): number[] => {
+    values.sort((a, b) => a - b);
+    const out: number[] = [];
+    for (const v of values) {
+      if (out.length === 0 || v - out[out.length - 1]! > tolerance) out.push(v);
+    }
+    return out;
+  };
+
+  return { xs: dedupe(xs), ys: dedupe(ys) };
+}
+
+/**
  * Where a dragged edge may land: both edges of every printed run on the page.
  *
  * Deliberately the raw text layer rather than the derivation's own output.
@@ -529,6 +686,7 @@ export function snapDrawnBox(
   page: { page: number; pageWidth: number; pageHeight: number },
   xTargets: readonly number[],
   yTargets: readonly number[],
+  range: number = DRAW_SNAP_RANGE,
 ): PageBox {
   const clamp = (v: number, max: number) => Math.min(Math.max(v, 0), max);
   let left = clamp(Math.min(a.x, b.x), page.pageWidth);
@@ -536,14 +694,14 @@ export function snapDrawnBox(
   let bottom = clamp(Math.min(a.y, b.y), page.pageHeight);
   let top = clamp(Math.max(a.y, b.y), page.pageHeight);
 
-  const sLeft = snapEdge(left, xTargets);
-  const sRight = snapEdge(right, xTargets);
+  const sLeft = snapEdge(left, xTargets, range);
+  const sRight = snapEdge(right, xTargets, range);
   if (sRight - sLeft >= 1) {
     left = sLeft;
     right = sRight;
   }
-  const sBottom = snapEdge(bottom, yTargets);
-  const sTop = snapEdge(top, yTargets);
+  const sBottom = snapEdge(bottom, yTargets, range);
+  const sTop = snapEdge(top, yTargets, range);
   if (sTop - sBottom >= 1) {
     bottom = sBottom;
     top = sTop;
