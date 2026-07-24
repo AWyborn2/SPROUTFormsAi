@@ -46,6 +46,7 @@ import {
   geometryProposal,
   getImportSession,
   lowestUnresolvedField,
+  optionSlotId,
   proposeGeometry,
   rejectGeometry,
   removeFixedRowItem,
@@ -1050,3 +1051,59 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
     });
   });
 });
+
+describe('checkbox-group per-option geometry (publish boundary)', () => {
+  const optionBox = (optionKey: string): PageBox => ({
+    page: 0,
+    x: optionKey === 'D' ? 200 : 260,
+    y: 500,
+    width: 14,
+    height: 14,
+    pageWidth: 600,
+    pageHeight: 800,
+  });
+
+  const shift = (): ReviewField => ({
+    id: 'shift',
+    label: 'Shift',
+    type: 'checkbox_group',
+    confidence: 0.9,
+    options: ['D', 'N'],
+    selectionType: 'single',
+  });
+
+  it('publishes only the option boxes the reviewer confirmed, each stamped with its optionKey', () => {
+    proposeGeometry(optionSlotId('shift', 'D'), optionBox('D'));
+    confirmGeometry(optionSlotId('shift', 'D'));
+    // N is drawn but NOT confirmed — it must not cross the publish boundary (R8).
+    proposeGeometry(optionSlotId('shift', 'N'), optionBox('N'));
+
+    const published = reviewedToFields([shift()])[0]!;
+
+    expect(published.geometry?.segments).toHaveLength(1);
+    expect(published.geometry?.segments[0]?.optionKey).toBe('D');
+  });
+
+  it('publishes a box per confirmed option once both are confirmed', () => {
+    for (const opt of ['D', 'N']) {
+      proposeGeometry(optionSlotId('shift', opt), optionBox(opt));
+      confirmGeometry(optionSlotId('shift', opt));
+    }
+
+    const segments = reviewedToFields([shift()])[0]!.geometry?.segments ?? [];
+
+    expect(segments.map((s) => s.optionKey).sort()).toEqual(['D', 'N']);
+  });
+
+  it('leaves the field data-only when no option box is confirmed', () => {
+    proposeGeometry(optionSlotId('shift', 'D'), optionBox('D')); // drawn, not confirmed
+
+    expect(reviewedToFields([shift()])[0]?.geometry).toBeUndefined();
+  });
+
+  it('option slots never collide with a plain field-level box', () => {
+    // A scalar/table box is stored under the bare field id; an option under a
+    // composite slot. The two must be independent stores.
+    expect(optionSlotId('shift', 'D')).not.toBe('shift');
+  });
+})

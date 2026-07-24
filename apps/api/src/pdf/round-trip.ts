@@ -10,6 +10,9 @@
  */
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import {
+  MARK_INSET,
+  MARK_SIZE_CEIL,
+  MARK_SIZE_FLOOR,
   columnBandFor,
   geometrySegments,
   markPlacement,
@@ -112,6 +115,18 @@ export async function roundTripExport({
       continue;
     }
 
+    // A checkbox/choice field draws a CHECKMARK in each selected option's own
+    // box — not the option's text. Each segment names its option via
+    // `optionKey`; a field with no per-option geometry falls through to the
+    // scalar text path below (legacy single box, or none).
+    if (field.type === 'checkbox_group') {
+      const optionSegments = segments.filter((s) => s.optionKey !== undefined);
+      if (optionSegments.length > 0) {
+        drawCheckboxOptions(pages, value, optionSegments);
+        continue;
+      }
+    }
+
     // A scalar field occupies one box; if geometry ever gives it several, the
     // first is its anchor.
     const pos = segments[0]!;
@@ -134,6 +149,51 @@ export async function roundTripExport({
   }
 
   return doc.save();
+}
+
+/** Where a centred mark sits inside a standalone option box, in PDF points. */
+function boxMarkPlacement(box: PageBox): { x: number; y: number; size: number } {
+  const size = Math.max(MARK_SIZE_FLOOR, Math.min(MARK_SIZE_CEIL, Math.min(box.width, box.height) - MARK_INSET));
+  return {
+    x: box.x + Math.max(0, (box.width - size) / 2),
+    y: box.y + Math.max(0, (box.height - size) / 2),
+    size,
+  };
+}
+
+/**
+ * Draw a checkmark in each SELECTED option's own recorded box.
+ *
+ * A checkbox group prints a row of `☐` boxes; the reviewer has drawn one
+ * geometry segment per option (each carrying its `optionKey`), and every option
+ * the submission selected is ticked in its own box. This is why a `Shift` field
+ * answered `D` draws a ✓ in the D box rather than printing the letter "D" — the
+ * mark is the answer, exactly as it is in a repeating table's option column.
+ *
+ * The value may be an array (multi-select) or a single string; both resolve to
+ * the set of chosen option keys. An option with no matching selection is left
+ * blank — an unticked box, which is a recorded "not this one", not a guess.
+ */
+function drawCheckboxOptions(
+  pages: import('pdf-lib').PDFPage[],
+  value: SubmissionValue | undefined,
+  segments: PageBox[],
+): void {
+  const selected = new Set(
+    Array.isArray(value)
+      ? (value as unknown[]).map(String)
+      : value === null || value === undefined || value === ''
+        ? []
+        : [String(value)],
+  );
+
+  for (const seg of segments) {
+    if (seg.optionKey === undefined || !selected.has(seg.optionKey)) continue;
+    const page = pages[seg.page];
+    if (!page) continue;
+    const { x, y, size } = boxMarkPlacement(seg);
+    drawMark(page, 'tick', x, y, size);
+  }
 }
 
 /**

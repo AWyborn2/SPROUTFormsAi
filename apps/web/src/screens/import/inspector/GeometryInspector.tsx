@@ -19,6 +19,7 @@ import {
   confirmGeometry,
   geometryConfirmed,
   geometryProposal,
+  optionSlotId,
   proposeGeometry,
   rejectGeometry,
   type ReviewField,
@@ -37,15 +38,19 @@ export interface GeometryInspectorProps {
   field: ReviewField;
   /** Page text from the viewer; empty until the PDF has been read. */
   textPages: readonly TextPage[];
-  /** Whether draw mode is currently armed for this field (owned by the screen). */
-  drawArmed?: boolean;
-  /** Arm/disarm the draw gesture on the PDF overlay (KTD5 — explicit toggle). */
-  onToggleDraw?: () => void;
+  /** The draw-armed slot (this field's id, or a checkbox option's `optionSlotId`). */
+  activeDrawSlot?: string | null;
+  /** Arm/disarm the draw gesture for one slot on the PDF overlay (KTD5). */
+  onToggleDrawSlot?: (slot: string) => void;
 }
 
-export function GeometryInspector({ field, textPages, drawArmed = false, onToggleDraw }: GeometryInspectorProps) {
+export function GeometryInspector({ field, textPages, activeDrawSlot = null, onToggleDrawSlot }: GeometryInspectorProps) {
   const proposal = geometryProposal(field.id);
   const confirmed = geometryConfirmed(field.id);
+  // This field's own box is armed when the active slot IS the field id; a
+  // checkbox option uses its own slot, handled in the per-option panel below.
+  const drawArmed = activeDrawSlot === field.id;
+  const onToggleDraw = onToggleDrawSlot ? () => onToggleDrawSlot(field.id) : undefined;
 
   /*
     Derivation is memoized because the panel re-renders far more often than its
@@ -73,6 +78,16 @@ export function GeometryInspector({ field, textPages, drawArmed = false, onToggl
   // A transient note shown when bounded subdivision found no grid inside the
   // drawn box, so the reviewer knows the seed path is the way forward (AE6).
   const [seedNote, setSeedNote] = useState<string | null>(null);
+
+  // A checkbox / choice group draws one box PER OPTION, each rendered as a
+  // checkmark on export (not the option's text) — so it gets a per-option panel
+  // rather than the single-box scalar treatment. All hooks above have already
+  // run, so this early return is safe.
+  if (field.type === 'checkbox_group' && (field.options?.length ?? 0) > 0) {
+    return (
+      <CheckboxOptionsGeometry field={field} activeDrawSlot={activeDrawSlot} onToggleDrawSlot={onToggleDrawSlot} />
+    );
+  }
 
   if (state.kind === 'unsupported') return null;
 
@@ -383,6 +398,110 @@ function RowBandRow({
           <Icon name="trash-2" size={11} />
         </button>
       )}
+    </div>
+  );
+}
+
+/**
+ * Per-option placement for a checkbox / choice group.
+ *
+ * A checkbox group prints a row of ☐ boxes; the reviewer draws one box per
+ * option, and each SELECTED option exports as a checkmark in its own box, never
+ * the option's letter. Each option's box lives under its own draw slot
+ * (`optionSlotId`), reusing the whole propose/confirm pipeline, so an option is
+ * published only once its own box is confirmed (R8, held per box).
+ */
+function CheckboxOptionsGeometry({
+  field,
+  activeDrawSlot,
+  onToggleDrawSlot,
+}: {
+  field: ReviewField;
+  activeDrawSlot: string | null;
+  onToggleDrawSlot?: (slot: string) => void;
+}) {
+  const options = field.options ?? [];
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
+      <div className="flex items-center gap-1.5">
+        <Icon name="square-dashed" size={14} className="text-text-tertiary" />
+        <span className="text-[12.5px] font-semibold">Checkmark placement on the original PDF</span>
+      </div>
+      <p className="text-[11.5px] leading-snug text-text-tertiary">
+        Draw a box over each option’s tick box on the PDF. Every option the filler selects then prints a ✓ in
+        its box. Until an option is confirmed, this form still publishes and exports the answer as data.
+      </p>
+      <div className="flex flex-col gap-1.5">
+        {options.map((option) => (
+          <CheckboxOptionRow
+            key={option}
+            fieldId={field.id}
+            option={option}
+            armed={activeDrawSlot === optionSlotId(field.id, option)}
+            onToggleDraw={onToggleDrawSlot ? () => onToggleDrawSlot(optionSlotId(field.id, option)) : undefined}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CheckboxOptionRow({
+  fieldId,
+  option,
+  armed,
+  onToggleDraw,
+}: {
+  fieldId: string;
+  option: string;
+  armed: boolean;
+  onToggleDraw?: () => void;
+}) {
+  const slot = optionSlotId(fieldId, option);
+  const box = geometryProposal(slot);
+  const confirmed = geometryConfirmed(slot);
+
+  return (
+    <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold">{option}</span>
+        {box && confirmed && (
+          <span className="inline-flex items-center gap-1 rounded-pill bg-success-soft px-2 py-0.5 text-[10.5px] font-semibold text-success-text">
+            <Icon name="check" size={11} />
+            Confirmed
+          </span>
+        )}
+        {box && !confirmed && <span className="text-[10.5px] font-semibold text-warning-text">Drawn — confirm it</span>}
+        {!box && <span className="text-[10.5px] text-text-tertiary">No box yet</span>}
+      </div>
+      <div className="flex items-center gap-1.5">
+        {onToggleDraw && (
+          <Button
+            variant={armed ? 'primary' : 'ghost'}
+            leadingIcon={armed ? 'x' : 'pencil'}
+            onClick={onToggleDraw}
+            className="flex-1 justify-center"
+          >
+            {armed ? 'Cancel — drag on the PDF' : box ? 'Redraw' : 'Draw the box'}
+          </Button>
+        )}
+        {box && !confirmed && (
+          <Button leadingIcon="check" onClick={() => confirmGeometry(slot)} className="flex-1 justify-center">
+            Confirm
+          </Button>
+        )}
+        {box && (
+          <Button
+            variant="ghost"
+            leadingIcon="x"
+            onClick={() => rejectGeometry(slot)}
+            className="flex-none justify-center text-danger-text"
+          >
+            Discard
+          </Button>
+        )}
+      </div>
     </div>
   );
 }

@@ -76,13 +76,17 @@ export function ImportReviewScreen() {
   // needs to derive a grid. Held here rather than in the session because it is
   // a cache of the source document, not review state.
   const [textPages, setTextPages] = useState<readonly TextPage[]>([]);
-  // Draw mode is armed per selected field (KTD5). Held here — the one owner of
-  // "current field" — and threaded to the PDF overlay (which rubber-bands) and
-  // the geometry panel (which toggles it). A drawn box lands as an UNCONFIRMED
-  // proposal via the existing `proposeGeometry` path; the reviewer then confirms.
-  const [drawArmed, setDrawArmed] = useState(false);
+  // Draw mode is armed for one SLOT (KTD5) — a field's own box (slot === field
+  // id), or, for a checkbox group, one option's box (slot === optionSlotId).
+  // Held here — the one owner of "current field" — and threaded to the PDF
+  // overlay (which rubber-bands) and the geometry panel (which toggles it). A
+  // drawn box lands as an UNCONFIRMED proposal under that slot; then confirmed.
+  const [drawSlot, setDrawSlot] = useState<string | null>(null);
 
-  const bandOverlay = selectedFieldId ? (geometryProposal(selectedFieldId) ?? null) : null;
+  // The overlay follows the armed slot while drawing (so a checkbox option's box
+  // appears as it is placed), and otherwise the selected field's own box.
+  const overlaySlot = drawSlot ?? selectedFieldId;
+  const bandOverlay = overlaySlot ? (geometryProposal(overlaySlot) ?? null) : null;
   /**
    * Where a dragged band edge may land, from the overlay page's own text (U10).
    * Derived here rather than in the viewer because the screen already holds the
@@ -134,7 +138,7 @@ export function ImportReviewScreen() {
   // Disarm draw mode whenever the selected field changes — an armed gesture
   // belongs to the field it was armed on, never the next one opened.
   useEffect(() => {
-    setDrawArmed(false);
+    setDrawSlot(null);
   }, [selectedFieldId]);
 
   if (session.status === 'idle') return null;
@@ -219,15 +223,16 @@ export function ImportReviewScreen() {
                 onTextLayer={setTextPages}
                 bandOverlay={bandOverlay}
                 bandSnapTargets={bandSnapTargets}
-                drawArmed={drawArmed && selectedFieldId != null}
+                drawArmed={drawSlot != null}
                 onDrawBox={
-                  selectedFieldId
+                  drawSlot
                     ? (box) => {
-                        // The drawn box is an UNCONFIRMED proposal — the same
-                        // pipeline a derived grid uses (KTD2). Disarm after one
-                        // box so the reviewer moves straight to confirming it.
-                        proposeGeometry(selectedFieldId, box);
-                        setDrawArmed(false);
+                        // The drawn box is an UNCONFIRMED proposal under the armed
+                        // slot — the same pipeline a derived grid uses (KTD2).
+                        // Disarm after one box so the reviewer moves straight to
+                        // confirming it.
+                        proposeGeometry(drawSlot, box);
+                        setDrawSlot(null);
                       }
                     : undefined
                 }
@@ -362,8 +367,8 @@ export function ImportReviewScreen() {
                     onToggle={() => handleSelectField(f.id)}
                     onSelect={setSelectedFieldId}
                     textPages={textPages}
-                    drawArmed={drawArmed}
-                    onToggleDraw={() => setDrawArmed((a) => !a)}
+                    activeDrawSlot={drawSlot}
+                    onToggleDrawSlot={(slot) => setDrawSlot((s) => (s === slot ? null : slot))}
                     onRemapSignature={() => session.remapSignature(f.id)}
                     onSetType={(type) => session.setType(f.id, type)}
                     onConfirm={() => confirmField(f.id)}
@@ -426,8 +431,8 @@ function ReviewRow({
   onToggle,
   onSelect,
   textPages,
-  drawArmed,
-  onToggleDraw,
+  activeDrawSlot,
+  onToggleDrawSlot,
   onRemapSignature,
   onSetType,
   onConfirm,
@@ -444,10 +449,10 @@ function ReviewRow({
   onSelect: (id: string | null) => void;
   /** PDF text layer, forwarded to the geometry panel. */
   textPages: readonly TextPage[];
-  /** Whether draw mode is armed (only meaningful for the expanded field). */
-  drawArmed: boolean;
-  /** Arm/disarm the draw gesture, forwarded to the geometry panel. */
-  onToggleDraw: () => void;
+  /** The draw-armed slot (a field id, or a checkbox option's `optionSlotId`). */
+  activeDrawSlot: string | null;
+  /** Arm/disarm the draw gesture for one slot, forwarded to the geometry panel. */
+  onToggleDrawSlot: (slot: string) => void;
   onRemapSignature: () => void;
   onSetType: (type: ExtractedField['type']) => void;
   /** Affirm a flagged field as-is (metadata-only resolve, type unchanged). */
@@ -699,8 +704,8 @@ function ReviewRow({
             count={count}
             onSelect={onSelect}
             textPages={textPages}
-            drawArmed={drawArmed}
-            onToggleDraw={onToggleDraw}
+            activeDrawSlot={activeDrawSlot}
+            onToggleDrawSlot={onToggleDrawSlot}
           />
         </div>
       )}

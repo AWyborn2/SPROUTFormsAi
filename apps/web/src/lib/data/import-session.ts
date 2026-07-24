@@ -1078,8 +1078,40 @@ export function reviewedToFields(fields: ReviewField[]): FormField[] {
   }));
 }
 
-/** A field's geometry, but only once the reviewer has confirmed it. */
+/**
+ * The draw-store key for one option's placement box on a checkbox/choice field.
+ *
+ * A field carries at most one box today (`geometryProposals` is keyed by field
+ * id), but a checkbox group needs one per option. Rather than a second store,
+ * each option's box is proposed/confirmed under a COMPOSITE slot id, reusing the
+ * whole `proposeGeometry`/`confirmGeometry`/`rejectGeometry` pipeline unchanged.
+ * The ` ` separator cannot occur in a field id or option value, so the slot
+ * can never collide with a real field id (a plain scalar/table draw).
+ */
+export function optionSlotId(fieldId: string, optionKey: string): string {
+  return `${fieldId} opt ${optionKey}`;
+}
+
+/**
+ * A field's geometry, but only once the reviewer has confirmed it.
+ *
+ * A checkbox group has no single box: it gathers every option whose own box the
+ * reviewer confirmed, stamping each segment with its `optionKey` so the exporter
+ * can draw a mark in the box of every selected option (R8 still holds per box —
+ * an unconfirmed option contributes nothing).
+ */
 function publishableGeometry(field: ReviewField): FieldGeometry | undefined {
+  if (field.type === 'checkbox_group' && (field.options?.length ?? 0) > 0) {
+    const segments: PageBox[] = [];
+    for (const option of field.options!) {
+      const slot = optionSlotId(field.id, option);
+      if (!geometryConfirmed(slot)) continue;
+      const box = geometryProposals.get(slot);
+      if (box) segments.push({ ...box, optionKey: option });
+    }
+    return segments.length > 0 ? { segments } : undefined;
+  }
+
   if (!geometryConfirmed(field.id)) return undefined;
   const segment = geometryProposals.get(field.id);
   return segment ? { segments: [segment] } : undefined;

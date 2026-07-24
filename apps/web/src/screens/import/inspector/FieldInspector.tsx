@@ -66,13 +66,13 @@ export interface FieldInspectorProps {
    * of the PDF, not review state — nothing that publishes depends on it.
    */
   textPages: readonly TextPage[];
-  /** Whether draw mode is armed for this field (owned by the review screen). */
-  drawArmed: boolean;
-  /** Arm/disarm the draw gesture, so the geometry panel can offer the toggle. */
-  onToggleDraw: () => void;
+  /** The draw-armed slot (a field id, or a checkbox option's `optionSlotId`). */
+  activeDrawSlot: string | null;
+  /** Arm/disarm the draw gesture for one slot, so the geometry panel can toggle it. */
+  onToggleDrawSlot: (slot: string) => void;
 }
 
-export function FieldInspector({ field, index, count, onSelect, textPages, drawArmed, onToggleDraw }: FieldInspectorProps) {
+export function FieldInspector({ field, index, count, onSelect, textPages, activeDrawSlot, onToggleDrawSlot }: FieldInspectorProps) {
   const mode = inspectorMode(field);
   // The condition panel needs the whole form to derive its source list (only
   // fields EARLIER than this one may be a source), so it reads the session
@@ -193,8 +193,8 @@ export function FieldInspector({ field, index, count, onSelect, textPages, drawA
           <GeometryInspector
             field={field}
             textPages={textPages}
-            drawArmed={drawArmed}
-            onToggleDraw={onToggleDraw}
+            activeDrawSlot={activeDrawSlot}
+            onToggleDrawSlot={onToggleDrawSlot}
           />
         )}
 
