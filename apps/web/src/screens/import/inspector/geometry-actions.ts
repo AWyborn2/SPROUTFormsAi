@@ -7,7 +7,7 @@
  * grid and marks drawn onto a competency record. It belongs somewhere it can
  * be read and tested directly.
  */
-import type { FormField, GeometryBand, GroupOrdinal, PageBox } from '@formai/shared';
+import type { FormField, GeometryBand, GroupOrdinal, PageBox, RepeatingColumn } from '@formai/shared';
 import { markPlacement } from '@formai/shared';
 import type { PositionedText, TableProposal, TextPage } from '../../../lib/pdf-geometry.js';
 import { proposeTableSegments } from '../../../lib/pdf-geometry.js';
@@ -120,6 +120,7 @@ export type GeometryPanelState =
   | { kind: 'unsupported'; reason: string }
   | { kind: 'draw-only'; reason: string }
   | { kind: 'no-proposal'; reason: string }
+  | { kind: 'needs-subdivision'; box: PageBox; reason: string }
   | { kind: 'proposed'; segment: PageBox; confidence: number; notes: string[]; confirmed: boolean };
 
 /**
@@ -559,6 +560,192 @@ export function snapDrawnBox(
   };
 }
 
+/**
+ * The text runs that fall inside a drawn box (U4).
+ *
+ * Bounded subdivision's whole safety property is that detection runs over ONLY
+ * the glyphs the reviewer's box encloses (KTD4/R7): the drawn box is the
+ * corroboration that scopes detection to one table, so two structurally
+ * identical tables on a page cannot bleed into each other where page-wide
+ * derivation would have chosen the wrong one. An item counts as inside when its
+ * baseline sits within the box's y-range and its horizontal MIDPOINT sits within
+ * its x-range — the midpoint rather than either edge so a run straddling the
+ * drawn edge is assigned to the box it mostly lies in, and a neighbouring
+ * table's runs, which lie wholly outside, are excluded with margin. Same
+ * non-finite guard `toRows`/`snapTargets` use, for the same reason.
+ */
+export function itemsInBox(items: readonly PositionedText[], box: PageBox): PositionedText[] {
+  const right = box.x + box.width;
+  const top = box.y + box.height;
+  return items.filter((i) => {
+    if (!Number.isFinite(i.x) || !Number.isFinite(i.y) || !Number.isFinite(i.width)) return false;
+    const midX = i.x + i.width / 2;
+    return midX >= box.x && midX <= right && i.y >= box.y && i.y <= top;
+  });
+}
+
+export interface SubdivideInput {
+  box: PageBox;
+  items: readonly PositionedText[];
+  columns: readonly RepeatingColumn[];
+  /** The field's printed row count, when known, to break a multi-header tie. */
+  wantRows?: number;
+}
+
+/**
+ * Detect a table's grid INSIDE a drawn box (U4, R4/R7).
+ *
+ * The reviewer draws the outer box first, so this filters the page's text to
+ * that box and runs the shipped `proposeTableSegments` over only those runs.
+ * The box is the region-scoping the page-wide derivation lacked — the collision
+ * bug was derivation scanning the whole page and choosing the wrong table
+ * (`2026-07-23-007`), and here the human has already said which table this is —
+ * so detection-within-box is safe where page-wide derivation was not (KTD4).
+ * Returns null when nothing usable is inside the box, which routes the panel to
+ * the manual `evenGrid` fallback (AE6) rather than a guess.
+ *
+ * A well-drawn box holds one table, so there is normally one proposal; when a
+ * box happens to catch a repeated header, the row-count match breaks the tie,
+ * then confidence.
+ */
+export function subdivideBox({ box, items, columns, wantRows }: SubdivideInput): TableProposal | null {
+  const inside = itemsInBox(items, box);
+  if (inside.length === 0) return null;
+
+  const proposals = proposeTableSegments({
+    page: box.page,
+    pageWidth: box.pageWidth,
+    pageHeight: box.pageHeight,
+    items: inside,
+    columns: [...columns],
+  });
+  if (proposals.length === 0) return null;
+
+  return proposals.reduce((best, p) => {
+    if (wantRows !== undefined) {
+      const d = Math.abs((p.segment.rowBands?.length ?? 0) - wantRows);
+      const bd = Math.abs((best.segment.rowBands?.length ?? 0) - wantRows);
+      if (d !== bd) return d < bd ? p : best;
+    }
+    return p.confidence > best.confidence ? p : best;
+  });
+}
+
+/**
+ * An evenly-divided grid inside a drawn box — the manual fallback (U4, R4/AE6).
+ *
+ * When bounded subdivision detects nothing usable inside the box, the reviewer
+ * seeds the grid by count and then snaps/nudges each divider onto the printed
+ * line (the same drag-snap and steppers a derived grid gets). It is scaffolding
+ * the human immediately corrects, so it is deliberately blunt: the box is split
+ * into `optionKeys.length + 1` equal columns and the LEFTMOST is reserved for
+ * the label column (which carries no band, exactly as a derived grid's does),
+ * because a box drawn around a whole table includes its row labels — the same
+ * runs `subdivideBox` needs to see to detect rows at all. Rows split the full
+ * height evenly, top-to-bottom so `r0` is the top row, matching both
+ * `centresToBands` and the exporter's positional row order.
+ *
+ * Contiguous and inside the box by construction, so it survives `resolveGeometry`
+ * (R6); no glyphs are consulted, because the whole point of this path is that
+ * there were none to consult.
+ */
+export function evenGrid(box: PageBox, optionKeys: readonly string[], rowKeys: readonly string[]): PageBox {
+  const left = box.x;
+  const right = box.x + box.width;
+  const bottom = box.y;
+  const top = box.y + box.height;
+
+  const parts = optionKeys.length + 1; // parts[0] is the reserved label column
+  const colWidth = (right - left) / parts;
+  const columnBands: GeometryBand[] = optionKeys.map((key, i) => ({
+    key,
+    start: left + colWidth * (i + 1),
+    end: left + colWidth * (i + 2),
+  }));
+
+  const rowHeight = rowKeys.length > 0 ? (top - bottom) / rowKeys.length : 0;
+  const rowBands: GeometryBand[] = rowKeys.map((key, i) => ({
+    key,
+    // i = 0 is the TOP row (highest y): its slice runs from just below the top
+    // edge to the top edge.
+    start: top - rowHeight * (i + 1),
+    end: top - rowHeight * i,
+  }));
+
+  return { ...box, columnBands, rowBands };
+}
+
+/**
+ * Re-key row bands `r0..r{n-1}` top-to-bottom (U4).
+ *
+ * The exporter matches a row band to an answered row by ARRAY ORDER, not by key
+ * (`round-trip.ts` — `rowCursor` walks `segment.rowBands`), so after adding or
+ * deleting a divider the bands must be returned top-to-bottom (highest y first)
+ * with sequential positional keys, or a later edit would draw answers on the
+ * wrong rows.
+ */
+function resequenceRows(bands: readonly GeometryBand[]): GeometryBand[] {
+  return [...bands]
+    .sort((a, b) => b.end - a.end)
+    .map((b, i) => ({ ...b, key: `r${i}` }));
+}
+
+/**
+ * Add a row divider by splitting one row band in two at its midpoint (U4, R4).
+ *
+ * "Add a divider" is one printed row read as two — the escape hatch for a
+ * detected or seeded grid that merged two rows, or a hand grid that needs one
+ * more. The two halves stay contiguous with each other and with their
+ * neighbours, so the grid is never torn, and the whole list is re-keyed
+ * top-to-bottom for the exporter.
+ */
+export function splitRowBand(box: PageBox, key: string): PageBox {
+  const rows = box.rowBands ?? [];
+  const target = rows.find((b) => b.key === key);
+  if (!target) return box;
+
+  const mid = (target.start + target.end) / 2;
+  if (!(mid > target.start) || !(mid < target.end)) return box; // too thin to split
+
+  const halves: GeometryBand[] = [
+    { key: `${target.key}-top`, start: mid, end: target.end },
+    { key: `${target.key}-bottom`, start: target.start, end: mid },
+  ];
+  const next = rows.flatMap((b) => (b.key === key ? halves : [b]));
+  return { ...box, rowBands: resequenceRows(next) };
+}
+
+/**
+ * Delete a row divider by removing one band and closing the gap (U4, R4).
+ *
+ * The removed band's span is absorbed by a neighbour so the grid stays
+ * contiguous — the band below extends up over it, or, for the bottom row, the
+ * band above extends down. Refuses to delete the only row (a table needs at
+ * least one). Re-keyed top-to-bottom, as `splitRowBand`.
+ */
+export function deleteRowBand(box: PageBox, key: string): PageBox {
+  const sorted = [...(box.rowBands ?? [])].sort((a, b) => b.end - a.end); // top-to-bottom
+  if (sorted.length <= 1) return box;
+
+  const idx = sorted.findIndex((b) => b.key === key);
+  if (idx < 0) return box;
+
+  const target = sorted[idx]!;
+  const next = sorted.filter((b) => b.key !== key);
+  if (idx < sorted.length - 1) {
+    // Extend the band below upward to cover the vacated span.
+    const below = sorted[idx + 1]!;
+    const j = next.findIndex((b) => b.key === below.key);
+    next[j] = { ...below, end: target.end };
+  } else {
+    // The bottom row: the band above extends down instead.
+    const above = sorted[idx - 1]!;
+    const j = next.findIndex((b) => b.key === above.key);
+    next[j] = { ...above, start: target.start };
+  }
+  return { ...box, rowBands: resequenceRows(next) };
+}
+
 /** The panel state for a field, given what has been proposed and confirmed. */
 export function panelState(
   field: Pick<FormField, 'type' | 'columns'>,
@@ -570,6 +757,18 @@ export function panelState(
   if (unsupported) return { kind: 'unsupported', reason: unsupported };
 
   if (proposal) {
+    // A table whose proposal carries no columns is a drawn OUTER box awaiting
+    // its grid (U4) — offer subdivision, not confirm. A scalar's band-less box
+    // is its final placement and stays `proposed`, so this only diverts tables.
+    const hasGrid = (proposal.columnBands?.length ?? 0) > 0;
+    if (field.type === 'repeating_group' && !hasGrid) {
+      return {
+        kind: 'needs-subdivision',
+        box: proposal,
+        reason:
+          'You’ve drawn this table’s box. Detect the grid inside it, or seed the rows and columns and adjust them by hand. Nothing is placed on the export until you confirm.',
+      };
+    }
     return {
       kind: 'proposed',
       segment: proposal,
@@ -593,6 +792,6 @@ export function panelState(
   return {
     kind: 'no-proposal',
     reason:
-      'The page did not give enough signal to place this table confidently, so nothing could be placed automatically. That is fine to leave — the form still publishes and exports its answers as data. (Hand placement is coming.)',
+      'The page did not give enough signal to place this table confidently, so nothing could be placed automatically. That is fine to leave — the form still publishes and exports its answers as data. To place it yourself, draw the table’s box on the PDF and lay out its grid inside it.',
   };
 }
