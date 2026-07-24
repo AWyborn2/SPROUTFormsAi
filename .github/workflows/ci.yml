@@ -41,6 +41,13 @@ jobs:
       - name: Test api (PDF pipeline golden files)
         run: pnpm --filter @formai/api test
 
+      - name: Test web (unit)
+        # The web suite (vitest/jsdom) covers the import-review geometry logic —
+        # band derivation, per-option placement, draw-box snapping — which only
+        # ran locally before. Fast and deterministic, so it gates PRs like the
+        # api suite does; a web regression should not be able to merge green.
+        run: pnpm --filter @formai/web test
+
       - name: Smoke-test compiled API boots under plain node
         # Guards the deploy runtime specifically: `apps/api/dist` must be able
         # to boot with `node` (no tsx/ts-node), which requires @formai/db and
