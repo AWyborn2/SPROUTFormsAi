@@ -91,6 +91,13 @@ export interface PageBox {
   columnBands?: GeometryBand[];
   /** Explicit row spans. Absent on a scalar field. */
   rowBands?: GeometryBand[];
+  /**
+   * For a checkbox_group / choice field: which option this box targets. A
+   * multi-option field carries one segment per option, each naming its option
+   * here, so the exporter draws a mark in the box of every SELECTED option.
+   * Absent on a scalar or table segment, which targets the field as a whole.
+   */
+  optionKey?: string;
 }
 
 /**

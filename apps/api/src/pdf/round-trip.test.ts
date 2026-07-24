@@ -865,3 +865,88 @@ describe('roundTripExport — scalar hand-drawn geometry (R9)', () => {
     expect(bytesInclude(output, LETTERHEAD)).toBe(true);
   });
 });
+
+/**
+ * Checkbox-group per-option geometry. A checkbox group prints a row of `☐`
+ * boxes; the reviewer draws one box per option (each carrying its `optionKey`),
+ * and every SELECTED option is drawn as a checkmark in its own box — not as the
+ * option's letter. This is the `Shift` (D / N) fix: answering `D` draws a ✓ in
+ * the D box, where the old scalar path printed the literal "D".
+ */
+describe('roundTripExport — checkbox-group per-option checkmarks', () => {
+  const D_BOX: PageBox = {
+    page: 0, x: 200, y: 500, width: 14, height: 14, pageWidth: 600, pageHeight: 800, optionKey: 'D',
+  };
+  const N_BOX: PageBox = {
+    page: 0, x: 260, y: 500, width: 14, height: 14, pageWidth: 600, pageHeight: 800, optionKey: 'N',
+  };
+
+  const shiftField = (geometry?: PageBox[]): FormField => ({
+    id: 'shift',
+    type: 'checkbox_group',
+    label: 'Shift',
+    required: false,
+    source: 'imported',
+    options: ['D', 'N'],
+    selectionType: 'single',
+    ...(geometry ? { geometry: { segments: geometry } } : {}),
+  });
+
+  // The tick's own origin x, centred inside a 14pt box: size = clamp(14-3)=9,
+  // so x = boxX + (14 - 9) / 2 = boxX + 2.5.
+  const tickCentreX = (boxX: number) => boxX + 2.5;
+
+  it('draws a ✓ in the SELECTED option’s box and nothing in the other', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [shiftField([D_BOX, N_BOX])],
+      values: { shift: ['D'] },
+    });
+
+    const xs = tickXs(output);
+    expect(xs).toHaveLength(1);
+    expect(xs[0]).toBeCloseTo(tickCentreX(D_BOX.x), 5); // the D box, not the N box
+  });
+
+  it('accepts a single string value as well as an array', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [shiftField([D_BOX, N_BOX])],
+      values: { shift: 'N' },
+    });
+
+    const xs = tickXs(output);
+    expect(xs).toHaveLength(1);
+    expect(xs[0]).toBeCloseTo(tickCentreX(N_BOX.x), 5);
+  });
+
+  it('ticks every selected option on a multi-select', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [{ ...shiftField([D_BOX, N_BOX]), selectionType: 'multiple' }],
+      values: { shift: ['D', 'N'] },
+    });
+
+    expect(tickXs(output)).toHaveLength(2);
+  });
+
+  it('draws nothing when no option is selected', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [shiftField([D_BOX, N_BOX])],
+      values: { shift: [] },
+    });
+
+    expect(tickXs(output)).toHaveLength(0);
+  });
+
+  it('exports as data (no mark) when the field has no per-option geometry', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [shiftField(undefined)],
+      values: { shift: ['D'] },
+    });
+
+    expect(tickXs(output)).toHaveLength(0);
+  });
+})
