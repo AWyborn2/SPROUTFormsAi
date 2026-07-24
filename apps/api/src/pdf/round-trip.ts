@@ -118,10 +118,12 @@ export async function roundTripExport({
 
     // A choice field — checkbox_group, radio ("multiple choice") or dropdown —
     // draws a CHECKMARK in each selected option's own box, not the option's
-    // text. Each segment names its option via `optionKey`; a field with no
-    // per-option geometry falls through to the scalar text path below (a legacy
-    // single box, or none).
-    if (isChoiceField(field.type)) {
+    // text. Each segment names its option via `optionKey`. The exception is a
+    // field the reviewer set to print its selected value as TEXT
+    // (`printSelectedValue`): that falls through to the scalar text path below,
+    // which draws the value in its single box. A field with no per-option
+    // geometry also falls through (a legacy single box, or none).
+    if (isChoiceField(field.type) && !field.printSelectedValue) {
       const optionSegments = segments.filter((s) => s.optionKey !== undefined);
       if (optionSegments.length > 0) {
         drawCheckboxOptions(pages, value, optionSegments);

@@ -11,7 +11,7 @@
  * drawing on.
  */
 import { useMemo, useState } from 'react';
-import { Button, Icon } from '@formai/ui';
+import { Button, Icon, Switch } from '@formai/ui';
 import { isChoiceField } from '@formai/shared';
 import type { GeometryBand, PageBox } from '@formai/shared';
 import type { TextPage } from '../../../lib/pdf-geometry.js';
@@ -23,6 +23,7 @@ import {
   optionSlotId,
   proposeGeometry,
   rejectGeometry,
+  setFieldPrintSelectedValue,
   type ReviewField,
 } from '../../../lib/data/import-session.js';
 import {
@@ -84,10 +85,19 @@ export function GeometryInspector({ field, textPages, activeDrawSlot = null, onT
   // draws one box PER OPTION, each rendered as a checkmark on export (not the
   // option's text), so it gets a per-option panel rather than the single-box
   // scalar treatment. All hooks above have already run, so this early return is
-  // safe.
-  if (isChoiceField(field.type) && (field.options?.length ?? 0) > 0) {
+  // safe. A single-select choice (dropdown / radio) may instead print its
+  // selected VALUE as text — `printSelectedValue` — in which case it falls
+  // through to the scalar single-box body below, carrying the mode toggle.
+  const isChoice = isChoiceField(field.type) && (field.options?.length ?? 0) > 0;
+  const singleSelectChoice = isChoice && (field.type === 'dropdown' || field.type === 'radio');
+  if (isChoice && !field.printSelectedValue) {
     return (
-      <OptionBoxesGeometry field={field} activeDrawSlot={activeDrawSlot} onToggleDrawSlot={onToggleDrawSlot} />
+      <OptionBoxesGeometry
+        field={field}
+        activeDrawSlot={activeDrawSlot}
+        onToggleDrawSlot={onToggleDrawSlot}
+        showValueToggle={singleSelectChoice}
+      />
     );
   }
 
@@ -155,6 +165,10 @@ export function GeometryInspector({ field, textPages, activeDrawSlot = null, onT
           </span>
         )}
       </div>
+
+      {/* A single-select choice printing its value as text reaches this scalar
+          body; the toggle lets the reviewer switch back to per-option marks. */}
+      {singleSelectChoice && <ChoiceRenderToggle field={field} />}
 
       {state.kind === 'draw-only' ? (
         <>
@@ -417,10 +431,13 @@ function OptionBoxesGeometry({
   field,
   activeDrawSlot,
   onToggleDrawSlot,
+  showValueToggle = false,
 }: {
   field: ReviewField;
   activeDrawSlot: string | null;
   onToggleDrawSlot?: (slot: string) => void;
+  /** Offer the "print value as text" switch (single-select dropdown / radio). */
+  showValueToggle?: boolean;
 }) {
   const options = field.options ?? [];
 
@@ -430,6 +447,7 @@ function OptionBoxesGeometry({
         <Icon name="square-dashed" size={14} className="text-text-tertiary" />
         <span className="text-[12.5px] font-semibold">Checkmark placement on the original PDF</span>
       </div>
+      {showValueToggle && <ChoiceRenderToggle field={field} />}
       <p className="text-[11.5px] leading-snug text-text-tertiary">
         Draw a box over each option on the PDF. Every option the filler selects then prints a ✓ in its box.
         Until an option is confirmed, this form still publishes and exports the answer as data.
@@ -505,5 +523,25 @@ function OptionBoxRow({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Switch a single-select choice field between drawing a checkmark per option
+ * and printing its selected value as TEXT in one box (`printSelectedValue`).
+ *
+ * The two modes read different geometry (per-option boxes vs a single box), so
+ * flipping this re-points the whole panel — the routing in `GeometryInspector`
+ * chooses `OptionBoxesGeometry` or the scalar single-box body off this flag.
+ */
+function ChoiceRenderToggle({ field }: { field: ReviewField }) {
+  const on = field.printSelectedValue === true;
+  return (
+    <label className="flex items-center gap-2 rounded-sm border border-border-subtle bg-surface-sunken p-[7px_9px]">
+      <Switch checked={on} onChange={(e) => setFieldPrintSelectedValue(field.id, e.currentTarget.checked)} />
+      <span className="flex-1 text-[11.5px] leading-snug text-text-secondary">
+        Print the selected value as text (instead of a ✓ in each option’s box)
+      </span>
+    </label>
   );
 }
