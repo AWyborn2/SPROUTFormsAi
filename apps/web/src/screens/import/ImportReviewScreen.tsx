@@ -25,6 +25,7 @@ import {
   adjustGeometryBand,
   adjustGeometryBoundary,
   geometryProposal,
+  proposeGeometry,
 } from '../../lib/data/import-session.js';
 import { snapTargets, snapTargetsY } from './inspector/geometry-actions.js';
 import { FieldInspector } from './inspector/FieldInspector.js';
@@ -75,6 +76,11 @@ export function ImportReviewScreen() {
   // needs to derive a grid. Held here rather than in the session because it is
   // a cache of the source document, not review state.
   const [textPages, setTextPages] = useState<readonly TextPage[]>([]);
+  // Draw mode is armed per selected field (KTD5). Held here — the one owner of
+  // "current field" — and threaded to the PDF overlay (which rubber-bands) and
+  // the geometry panel (which toggles it). A drawn box lands as an UNCONFIRMED
+  // proposal via the existing `proposeGeometry` path; the reviewer then confirms.
+  const [drawArmed, setDrawArmed] = useState(false);
 
   const bandOverlay = selectedFieldId ? (geometryProposal(selectedFieldId) ?? null) : null;
   /**
@@ -123,6 +129,12 @@ export function ImportReviewScreen() {
         ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFieldId]);
+
+  // Disarm draw mode whenever the selected field changes — an armed gesture
+  // belongs to the field it was armed on, never the next one opened.
+  useEffect(() => {
+    setDrawArmed(false);
   }, [selectedFieldId]);
 
   if (session.status === 'idle') return null;
@@ -207,6 +219,18 @@ export function ImportReviewScreen() {
                 onTextLayer={setTextPages}
                 bandOverlay={bandOverlay}
                 bandSnapTargets={bandSnapTargets}
+                drawArmed={drawArmed && selectedFieldId != null}
+                onDrawBox={
+                  selectedFieldId
+                    ? (box) => {
+                        // The drawn box is an UNCONFIRMED proposal — the same
+                        // pipeline a derived grid uses (KTD2). Disarm after one
+                        // box so the reviewer moves straight to confirming it.
+                        proposeGeometry(selectedFieldId, box);
+                        setDrawArmed(false);
+                      }
+                    : undefined
+                }
                 bandSnapTargetsY={bandSnapTargetsY}
                 onBandEdge={
                   selectedFieldId
@@ -338,6 +362,8 @@ export function ImportReviewScreen() {
                     onToggle={() => handleSelectField(f.id)}
                     onSelect={setSelectedFieldId}
                     textPages={textPages}
+                    drawArmed={drawArmed}
+                    onToggleDraw={() => setDrawArmed((a) => !a)}
                     onRemapSignature={() => session.remapSignature(f.id)}
                     onSetType={(type) => session.setType(f.id, type)}
                     onConfirm={() => confirmField(f.id)}
@@ -400,6 +426,8 @@ function ReviewRow({
   onToggle,
   onSelect,
   textPages,
+  drawArmed,
+  onToggleDraw,
   onRemapSignature,
   onSetType,
   onConfirm,
@@ -416,6 +444,10 @@ function ReviewRow({
   onSelect: (id: string | null) => void;
   /** PDF text layer, forwarded to the geometry panel. */
   textPages: readonly TextPage[];
+  /** Whether draw mode is armed (only meaningful for the expanded field). */
+  drawArmed: boolean;
+  /** Arm/disarm the draw gesture, forwarded to the geometry panel. */
+  onToggleDraw: () => void;
   onRemapSignature: () => void;
   onSetType: (type: ExtractedField['type']) => void;
   /** Affirm a flagged field as-is (metadata-only resolve, type unchanged). */
@@ -667,6 +699,8 @@ function ReviewRow({
             count={count}
             onSelect={onSelect}
             textPages={textPages}
+            drawArmed={drawArmed}
+            onToggleDraw={onToggleDraw}
           />
         </div>
       )}

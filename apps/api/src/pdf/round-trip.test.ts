@@ -1,7 +1,7 @@
 ﻿import zlib from 'node:zlib';
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
-import type { FormField, SubmissionValue } from '@formai/shared';
+import type { FormField, PageBox, SubmissionValue } from '@formai/shared';
 import { roundTripExport } from './round-trip.js';
 import { LETTERHEAD, makeFlatPdf, makeTwoPageFlatPdf } from './test-pdfs.js';
 
@@ -807,5 +807,61 @@ describe('roundTripExport — export against real bands', () => {
     });
 
     expect(bytesInclude(output, 'Warehouse B')).toBe(true);
+  });
+});
+
+/**
+ * U2 / parent R9 — the closure lock. A scalar field on an AI-extracted flat
+ * form has NO `sourcePosition` (only AcroForm fields ever get one), so the only
+ * place its value can print is the reviewer's hand-drawn, confirmed box. The
+ * export side was already built; this proves the loop is genuinely closed —
+ * confirmed single-box geometry renders the value, and a scalar with no
+ * geometry is skipped exactly as before.
+ */
+describe('roundTripExport — scalar hand-drawn geometry (R9)', () => {
+  const BOX: PageBox = {
+    page: 0,
+    x: 120,
+    y: 300,
+    width: 90,
+    height: 16,
+    pageWidth: 600,
+    pageHeight: 800,
+  };
+
+  const drawnScalar = (geometry?: PageBox): FormField => ({
+    id: 'date',
+    type: 'text',
+    label: 'Date',
+    required: false,
+    source: 'imported',
+    // Deliberately no `sourcePosition` — the AI-extracted state R9 is about.
+    ...(geometry ? { geometry: { segments: [geometry] } } : {}),
+  });
+
+  it('draws a confirmed scalar box’s value inside the drawn box', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [drawnScalar(BOX)],
+      values: { date: '23/07/2026' },
+    });
+
+    // The value landed on the page, at the box's own x (the scalar draw path
+    // insets by 3pt) — proof it rendered at the hand-drawn placement, not a
+    // legacy sourcePosition.
+    const glyph = drawnGlyphs(output).find((g) => g.text === '23/07/2026');
+    expect(glyph).toBeDefined();
+    expect(glyph!.x).toBeCloseTo(BOX.x + 3, 5);
+  });
+
+  it('skips the same scalar when it carries no geometry (unchanged)', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [drawnScalar(undefined)],
+      values: { date: '23/07/2026' },
+    });
+
+    expect(bytesInclude(output, '23/07/2026')).toBe(false);
+    expect(bytesInclude(output, LETTERHEAD)).toBe(true);
   });
 });
