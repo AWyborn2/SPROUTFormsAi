@@ -37,8 +37,11 @@ import { respondSmartFill, smartFillTranscriptSchema } from './voice.js';
  * preserved because a submission pins the exact version the visitor filled
  * (the client echoes the `versionId` it was served).
  *
- * Residual risk (documented, deliberately out of scope for this unit): no
- * rate limiting on the public routes.
+ * Residual risk (documented, deliberately out of scope for this unit): no rate
+ * limiting on the public GET or on the public submit. That was written when
+ * every public route cost a lookup and an insert; `POST /:token/smart-fill`
+ * spends money per request, so it carries its own limit below rather than
+ * inheriting the gap.
  */
 export const formFillLinksRouter: Router = Router();
 export const publicFillRouter: Router = Router();
@@ -237,6 +240,45 @@ async function resolveLiveLink(token: string) {
 function orgSmartFillEnabled(planTier: string | null | undefined): boolean {
   const tier = (planTier ?? 'business') as PlanTier;
   return (PLAN_CONFIG[tier] ?? PLAN_CONFIG.business).features.smartFill;
+}
+
+/**
+ * Per-org ceiling on the session-less Smart Fill door.
+ *
+ * This is the first endpoint in the product that spends money with no session
+ * behind it: a fill link is a bearer token meant to be emailed, printed on a
+ * noticeboard or QR-coded, `expiresAt` may be null forever, and each accepted
+ * request bills the distributing org for one model call whose input carries a
+ * tool variant per form field. Without a counter, anyone the URL ever reaches
+ * can loop it — draining that org's budget and, because the whole deployment
+ * shares one memoized Anthropic client, pushing every other tenant's PDF
+ * extraction into 429s alongside it.
+ *
+ * Keyed on the link's ORG, not the caller. `req.ip` is worthless here — the app
+ * runs behind `trust proxy: true`, so the client picks its own value — and the
+ * token is attacker-chosen key space that would grow this map without bound.
+ * The org id is neither: it comes from a row the caller had to hold a live
+ * token to reach, and the org is the party actually being billed.
+ *
+ * The ceiling is deliberately far above real use (one press per respondent per
+ * form, spread over the minutes it takes to speak) so a busy crew never meets
+ * it, and a 429 degrades to the client's transient branch — the mic stays and
+ * the respondent types. Deliberately in-process, matching `scanRateLimited`:
+ * this API runs as a single instance today.
+ */
+const SMART_FILL_WINDOW_MS = 60_000;
+export const SMART_FILL_MAX_PER_WINDOW = 30;
+const smartFillHits = new Map<string, number[]>();
+
+function smartFillRateLimited(orgId: string, now = Date.now()): boolean {
+  const recent = (smartFillHits.get(orgId) ?? []).filter((t) => now - t < SMART_FILL_WINDOW_MS);
+  if (recent.length >= SMART_FILL_MAX_PER_WINDOW) {
+    smartFillHits.set(orgId, recent);
+    return true;
+  }
+  recent.push(now);
+  smartFillHits.set(orgId, recent);
+  return false;
 }
 
 publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
@@ -469,6 +511,15 @@ publicFillRouter.post('/:token/smart-fill', withErrorHandling(async (req, res) =
   const parsed = publicSmartFillBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return;
+  }
+
+  // Counted here, once the request is one that could actually reach the model:
+  // a malformed body costs nothing to refuse, and charging it against the org
+  // would let a stranger lock out real respondents with junk.
+  if (smartFillRateLimited(link.orgId)) {
+    res.setHeader('Retry-After', String(Math.ceil(SMART_FILL_WINDOW_MS / 1000)));
+    res.status(429).json({ error: 'rate_limited' });
     return;
   }
 

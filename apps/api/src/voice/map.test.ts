@@ -246,6 +246,56 @@ describe('mapTranscriptToFields — adversarial model output', () => {
     ).toEqual([]);
   });
 
+  /**
+   * A date is the one string type where "not blank" is not enough. `2025-13-01`
+   * is what a transposed day and month looks like, and the picker that renders
+   * the field indexes a twelve-entry month table — it throws on the way past
+   * twelve, taking the whole fill page and every unsaved answer with it.
+   */
+  it('drops a date that is not a real calendar day', async () => {
+    expect(
+      await mappings({
+        mappings: [
+          { fieldId: 'day', value: '2025-13-01', confidence: 0.9 },
+          { fieldId: 'day', value: '2025-00-05', confidence: 0.9 },
+          { fieldId: 'day', value: '2025-02-31', confidence: 0.9 },
+          { fieldId: 'day', value: '2026-02-29', confidence: 0.9 },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it('drops a date the picker cannot parse, however confidently it was offered', async () => {
+    expect(
+      await mappings({
+        mappings: [
+          { fieldId: 'day', value: 'middle of next week', confidence: 1 },
+          { fieldId: 'day', value: 'March 5, 2025', confidence: 1 },
+          { fieldId: 'day', value: '05/03/2025', confidence: 1 },
+          { fieldId: 'day', value: '2025-3-5', confidence: 1 },
+          { fieldId: 'day', value: ' 2025-03-05 ', confidence: 1 },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it('keeps a well-formed date, including a real leap day', async () => {
+    expect(
+      await mappings({ mappings: [{ fieldId: 'day', value: '2028-02-29', confidence: 0.9 }] }),
+    ).toEqual([{ fieldId: 'day', value: '2028-02-29', confidence: 0.9 }]);
+  });
+
+  /**
+   * The fence path is why the check lives in `coerceValue` rather than in the
+   * tool schema: nothing validates what comes out of a ```json block.
+   */
+  it('drops an out-of-range date arriving through the fenced-JSON fallback', async () => {
+    const { result } = run(
+      jsonFence({ mappings: [{ fieldId: 'day', value: '2025-13-01', confidence: 0.9 }] }),
+    );
+    expect((await result).mappings).toEqual([]);
+  });
+
   it('drops a choice value that is not one of the field’s options', async () => {
     expect(
       await mappings({ mappings: [{ fieldId: 'shift', value: 'Swing', confidence: 0.9 }] }),

@@ -120,6 +120,22 @@ const NUMBER_WORDS: Record<string, number> = {
 
 const NEGATED = /\b(?:minus|negative)\b/;
 
+/** How a word-level recogniser renders a decimal point: "three point five". */
+const DECIMAL_WORD = 'point';
+
+/**
+ * What the least significant non-zero digit of `n` is worth — 125 -> 5,
+ * 120 -> 20, 100 -> 100, 19 -> 9. `Infinity` for zero, which has no such digit
+ * and so accepts any word as the start of a run.
+ */
+function smallestPart(n: number): number {
+  for (let place = 1; place <= n; place *= 10) {
+    const digit = Math.floor(n / place) % 10;
+    if (digit !== 0) return digit * place;
+  }
+  return Infinity;
+}
+
 /**
  * Accumulate spelled-out digits ("twenty five" -> 25, "one hundred and five" -> 105).
  *
@@ -135,6 +151,11 @@ function wordsToNumber(tokens: readonly string[]): number | null {
   for (const token of tokens) {
     const small = NUMBER_WORDS[token];
     if (small !== undefined) {
+      // A word may only fill a place the run has not used yet. Without that,
+      // "nineteen ninety" added to 109 and "twenty twenty five" to 45 — two
+      // spoken numbers silently turned into arithmetic nobody said, which on a
+      // "year of manufacture" field is a plausible-looking wrong answer.
+      if (small >= smallestPart(current)) return null;
       current += small;
       started = true;
       continue;
@@ -156,12 +177,50 @@ function wordsToNumber(tokens: readonly string[]): number | null {
   return started ? total + current : null;
 }
 
+/**
+ * The digits after "point", concatenated as spoken — "two five" is .25, not
+ * .7. Refused when the tail is not a plain digit run: "one point fifteen" has
+ * two readings (1.15 and 1.fifteen-as-15) and neither is worth guessing at.
+ */
+function fractionDigits(tokens: readonly string[]): string | null {
+  let digits = '';
+  for (const token of tokens) {
+    const value = NUMBER_WORDS[token];
+    // A non-number word closes the fraction exactly as it closes the integer
+    // run above — it is the unit, as in "three point five hours".
+    if (value === undefined) break;
+    if (value > 9) return null;
+    digits += String(value);
+  }
+  return digits === '' ? null : digits;
+}
+
+/**
+ * A spelled-out magnitude, decimal marker included.
+ *
+ * `wordsToNumber` on its own stops dead at "point" and returns the integer
+ * part, so "three point five" read as 3 — and that is the shape EVERY dictated
+ * decimal takes: the small Vosk model has no inverse text normalisation, so a
+ * spoken 3.5 never arrives as digits. Truncating it is the one outcome this
+ * module exists to prevent, since 3 looks like an answer a human chose.
+ */
+function spokenMagnitude(tokens: readonly string[]): number | null {
+  const point = tokens.indexOf(DECIMAL_WORD);
+  if (point === -1) return wordsToNumber(tokens);
+
+  // "point five" is 0.5; reading the fraction as the whole number made it 5.
+  const whole = point === 0 ? 0 : wordsToNumber(tokens.slice(0, point));
+  const fraction = fractionDigits(tokens.slice(point + 1));
+  if (whole === null || fraction === null) return null;
+  return Number(`${whole}.${fraction}`);
+}
+
 function coerceNumber(spoken: string): number | null {
   // Thousands separators are spoken as nothing but arrive from keyboards and
   // from models that emit digits, and "1,500" must not read as 1.
   const lowered = spoken.toLowerCase().replace(/(\d),(?=\d{3}\b)/g, '$1');
   const digits = lowered.match(/\d+(?:\.\d+)?/);
-  const magnitude = digits ? Number(digits[0]) : wordsToNumber(tokenize(spoken));
+  const magnitude = digits ? Number(digits[0]) : spokenMagnitude(tokenize(spoken));
 
   if (magnitude === null || !Number.isFinite(magnitude)) return null;
   return NEGATED.test(lowered) || lowered.trimStart().startsWith('-') ? -magnitude : magnitude;
@@ -364,12 +423,21 @@ function matchOption(options: readonly string[], phrase: string): string | null 
   const exact = candidates.find((c) => c.norm === phraseNorm);
   if (exact) return exact.option;
 
-  // Longest wins so "pass with defects" is not truncated to "pass".
+  // Longest wins so "pass with defects" is not truncated to "pass" — but only
+  // when the shorter matches are PARTS of the longest, which is the whole of
+  // what that rule was for. Two unrelated options both spoken ("medium to
+  // high") is an ambiguity, and length is nothing but spelling: it answered
+  // Medium there and would answer High if the author had abbreviated to "Med".
   const contained = candidates
     .filter((c) => containsPhrase(phraseNorm, c.norm))
     .sort((a, b) => b.norm.length - a.norm.length);
-  const runnerUpLength = contained[1]?.norm.length ?? -1;
-  if (contained[0] && contained[0].norm.length > runnerUpLength) return contained[0].option;
+  const longest = contained[0];
+  if (
+    longest &&
+    contained.every((c) => c === longest || (c.norm !== longest.norm && containsPhrase(longest.norm, c.norm)))
+  ) {
+    return longest.option;
+  }
 
   const expansions = candidates.filter((c) => containsPhrase(c.norm, phraseNorm));
   if (expansions.length === 1) return expansions[0]!.option;

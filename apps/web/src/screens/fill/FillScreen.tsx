@@ -146,9 +146,10 @@ export function FillScreen() {
     try {
       return await smartFill.mutateAsync({ token: token!, transcript });
     } catch (err) {
-      // A timed-out request surfaces as `ApiError(0)` (api-client's 30s abort),
-      // which lands on the transient branch — the mic stays and the respondent
-      // is told to try again or type, rather than the promise rejecting loose.
+      // A timed-out request surfaces as `ApiError(0)` (api-client's abort,
+      // raised to 60s for this endpoint — see SMART_FILL_TIMEOUT_MS), which
+      // lands on the transient branch — the mic stays and the respondent is
+      // told to try again or type, rather than the promise rejecting loose.
       const failure = smartFillFailure(err instanceof ApiError ? err.status : 0);
       if (failure.hide) setSmartFillRetired(true);
       toast({ variant: failure.hide ? 'warning' : 'danger', message: failure.message });
@@ -307,6 +308,7 @@ export function FillScreen() {
         {isConversational ? (
           <ConversationalFill
             fields={visibleFillFields(fill.fields, values)}
+            allFields={fill.fields}
             values={values}
             errors={errors}
             setValue={setValue}

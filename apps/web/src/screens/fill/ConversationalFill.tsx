@@ -16,9 +16,16 @@ import {
   partitionByConfidence,
   smartFillSummary,
 } from '../../lib/voice/smart-fill.js';
+import { smartFillTargets } from '../../lib/voice/smart-fill-targets.js';
 
 interface ConversationalFillProps {
   fields: FormField[];
+  /**
+   * The whole form, hidden fields included. `fields` above is already filtered
+   * to what is visible NOW, which is the right list to step through and the
+   * wrong one to judge a Smart Fill result against — see `runSmartFill`.
+   */
+  allFields: FormField[];
   values: Record<string, SubmissionValue>;
   errors: Record<string, string>;
   setValue: (id: string, value: SubmissionValue) => void;
@@ -90,6 +97,7 @@ const VOICE_TONE = {
  */
 export function ConversationalFill({
   fields,
+  allFields,
   values,
   errors,
   setValue,
@@ -112,10 +120,12 @@ export function ConversationalFill({
    * stopped speaking. The model round-trip takes seconds, and anything typed
    * during the wait — including an answer that changes which fields are
    * visible — would otherwise be judged against, and overwritten from, a
-   * snapshot that has since moved on.
+   * snapshot that has since moved on. The UNFILTERED field list is held here
+   * for the same reason `smartFillTargets` needs it: which fields are visible
+   * is an answer to a question the reply itself changes.
    */
-  const latest = useRef({ values, fields });
-  latest.current = { values, fields };
+  const latest = useRef({ values, allFields });
+  latest.current = { values, allFields };
 
   const onReview = index >= steps.length;
   const step = steps[index];
@@ -133,13 +143,21 @@ export function ConversationalFill({
     void smartFill(transcript)
       .then((result) => {
         if (!result) return;
-        // Smart Fill may only write fields this screen actually renders a
+        // Smart Fill may only write fields this screen will actually render a
         // control for: an answer nobody can see or correct by hand would make
-        // speaking the only way to give it.
+        // speaking the only way to give it. "Will", not "does" — one sentence
+        // routinely answers a gating question and the section it opens, and
+        // judging that section against the form as it looked a moment ago threw
+        // the second half of what they said away with nothing to show for it.
         const { changes } = applyMappings(
           latest.current.values,
           result.mappings,
-          latest.current.fields.filter(canDictateField),
+          smartFillTargets(
+            latest.current.allFields,
+            latest.current.values,
+            result.mappings,
+            canDictateField,
+          ),
         );
         const changed = new Set(changes.map((c) => c.fieldId));
         const uncertain = partitionByConfidence(result.mappings)

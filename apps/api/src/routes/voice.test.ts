@@ -30,6 +30,7 @@ vi.mock('../voice/map.js', async (importActual) => {
 
 const { createApp } = await import('../app.js');
 const { SmartFillError } = await import('../voice/map.js');
+const { SMART_FILL_MAX_PER_WINDOW } = await import('./fill-links.js');
 ({ sealSession } = await import('../auth/workos.js'));
 
 function startApp() {
@@ -369,6 +370,61 @@ describe('POST /fill/:token/smart-fill (public)', () => {
     const { server, base } = startApp();
     try {
       expect((await post(base, ACTIVE_LINK.token, { transcript: 'Site B' })).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * The only endpoint in the product that spends money with nothing but a
+   * bearer link behind it. A link is meant to be handed out widely and may
+   * never expire, so anyone it reaches can loop it — and the whole deployment
+   * shares one Anthropic key, so an unbounded loop here is every other
+   * tenant's problem too.
+   */
+  it('rate limits repeated calls per org, and stops calling the model', async () => {
+    mockMapTranscript.mockResolvedValue(MAPPED);
+    // Its own org: the limiter's window is per-org and in-process, so a shared
+    // key would make this test depend on how many requests ran before it.
+    mockDbValue = fakeDb({
+      planTier: 'business',
+      fillLinksFindFirst: { ...ACTIVE_LINK, orgId: 'org-flood', token: 'tok_flood' },
+      formTemplatesFindFirst: TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+    });
+    const { server, base } = startApp();
+    try {
+      const statuses: number[] = [];
+      for (let i = 0; i < SMART_FILL_MAX_PER_WINDOW + 3; i++) {
+        statuses.push((await post(base, 'tok_flood', { transcript: 'Warehouse B' })).status);
+      }
+      expect(statuses.filter((s) => s === 200)).toHaveLength(SMART_FILL_MAX_PER_WINDOW);
+      expect(statuses.filter((s) => s === 429)).toHaveLength(3);
+      // The point of the limit: the refused requests never reached the model.
+      expect(mockMapTranscript).toHaveBeenCalledTimes(SMART_FILL_MAX_PER_WINDOW);
+
+      const refused = await post(base, 'tok_flood', { transcript: 'Warehouse B' });
+      expect(refused.status).toBe(429);
+      expect(await refused.json()).toEqual({ error: 'rate_limited' });
+      expect(refused.headers.get('retry-after')).toBe('60');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not spend an org’s budget on a request that could never reach the model', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: { ...ACTIVE_LINK, orgId: 'org-junk', token: 'tok_junk' },
+      formTemplatesFindFirst: TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+    });
+    const { server, base } = startApp();
+    try {
+      for (let i = 0; i < SMART_FILL_MAX_PER_WINDOW + 3; i++) {
+        expect((await post(base, 'tok_junk', { transcript: '' })).status).toBe(400);
+      }
+      mockMapTranscript.mockResolvedValue(MAPPED);
+      expect((await post(base, 'tok_junk', { transcript: 'Warehouse B' })).status).toBe(200);
     } finally {
       server.close();
     }

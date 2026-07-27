@@ -70,6 +70,41 @@ describe('coerceSpokenValue — number', () => {
     expect(coerceSpokenValue(field('number'), '3.5 hours')).toBe(3.5);
   });
 
+  /**
+   * The recogniser has no inverse text normalisation, so this — not "3.5" — is
+   * how every dictated decimal actually arrives. Truncating it to 3 wrote a
+   * confidently wrong depth or hours-worked onto a compliance record.
+   */
+  it('reads a spoken decimal rather than truncating it to the whole part', () => {
+    expect(coerceSpokenValue(field('number'), 'three point five')).toBe(3.5);
+    expect(coerceSpokenValue(field('number'), 'one point two five')).toBe(1.25);
+    expect(coerceSpokenValue(field('number'), 'twelve point seven five')).toBe(12.75);
+    expect(coerceSpokenValue(field('number'), 'zero point five')).toBe(0.5);
+    expect(coerceSpokenValue(field('number'), 'three point five hours')).toBe(3.5);
+    expect(coerceSpokenValue(field('number'), 'minus one point five')).toBe(-1.5);
+  });
+
+  it('reads a bare fraction as a fraction, not as its digits', () => {
+    expect(coerceSpokenValue(field('number'), 'point five')).toBe(0.5);
+  });
+
+  it('refuses a fraction it cannot read one digit at a time', () => {
+    expect(coerceSpokenValue(field('number'), 'one point fifteen')).toBeNull();
+    expect(coerceSpokenValue(field('number'), 'nought point eight')).toBeNull();
+    expect(coerceSpokenValue(field('number'), 'three point')).toBeNull();
+  });
+
+  /**
+   * Two spoken numbers in a row are two numbers. Adding them turned a year into
+   * arithmetic nobody said — and a refusal shows the respondent the phrase back
+   * so they can type it, where 109 just looks like an answer they gave.
+   */
+  it('refuses two numbers running together instead of adding them', () => {
+    expect(coerceSpokenValue(field('number'), 'nineteen ninety')).toBeNull();
+    expect(coerceSpokenValue(field('number'), 'nineteen ninety nine')).toBeNull();
+    expect(coerceSpokenValue(field('number'), 'twenty twenty five')).toBeNull();
+  });
+
   it('parses spelled-out numbers from zero to twenty', () => {
     const spoken = [
       'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
@@ -228,6 +263,24 @@ describe('coerceSpokenValue — radio and dropdown', () => {
   it('refuses when two options are equally good', () => {
     const sites = field('radio', { options: ['Site supervisor', 'Site manager'] });
     expect(coerceSpokenValue(sites, 'site')).toBeNull();
+  });
+
+  /**
+   * The longest-contained rule is for NESTED labels ("pass" inside "pass with
+   * defects"). Two unrelated options both spoken is an ambiguity, and letting
+   * label length settle it made the answer depend on how the form author spelt
+   * the option rather than on anything the respondent said.
+   */
+  it('refuses when two unrelated options both appear in the phrase', () => {
+    const severity = field('dropdown', { options: ['Low', 'Medium', 'High'] });
+    expect(coerceSpokenValue(severity, 'medium to high')).toBeNull();
+    expect(coerceSpokenValue(severity, 'somewhere between low and medium')).toBeNull();
+
+    const yesNo = field('dropdown', { options: ['Yes', 'No'] });
+    expect(coerceSpokenValue(yesNo, 'no, not yes')).toBeNull();
+
+    const shifts = field('radio', { options: ['Day shift', 'Night'] });
+    expect(coerceSpokenValue(shifts, 'day shift then night')).toBeNull();
   });
 
   it('refuses when the field has no options at all', () => {

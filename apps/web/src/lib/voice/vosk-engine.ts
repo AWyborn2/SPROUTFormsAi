@@ -9,8 +9,11 @@
  *
  * Kept deliberately small — start/stop/dispose plus a handful of callbacks — so
  * a different engine can be dropped in behind the same shape without touching
- * the hook or the coercion rules. Nothing in here is unit-tested; it is all
- * browser API plumbing, and every decision lives in `coerce.ts`/`transcript.ts`.
+ * the hook or the coercion rules. The browser API plumbing is not unit-tested —
+ * every decision about what speech MEANS lives in `coerce.ts`/`transcript.ts` —
+ * but the mic-ownership and disposal invariants below are, because getting them
+ * wrong writes one field's dictation into another and leaves the recording
+ * indicator lit (see `vosk-engine.test.ts`).
  */
 import type { KaldiRecognizer, Model } from 'vosk-browser';
 
@@ -122,6 +125,31 @@ function voiceError(code: VoiceErrorCode, message: string): VoiceError {
  * decoding the same voice — so starting one stops whichever was running.
  */
 let activeRecognizer: Recognizer | null = null;
+
+/**
+ * Starts run one at a time, process-wide.
+ *
+ * That takeover is a check-then-act spanning `getUserMedia`, and two mic
+ * buttons pressed while the shared model downloads resume from the SAME model
+ * promise in one microtask drain: both read `activeRecognizer` as null, both
+ * open a stream, and the one that loses the slot is never stopped by the other.
+ * It keeps decoding into a field nobody is watching until some later mic press
+ * flushes it — writing the sentence dictated for the first field into the
+ * second. Queueing makes the check and the claim atomic without a lock every
+ * caller would have to remember to take.
+ */
+let startQueue: Promise<unknown> = Promise.resolve();
+
+function queueStart<T>(run: () => Promise<T>): Promise<T> {
+  const next = startQueue.then(run, run);
+  // The queue advances on rejection as well: one field's failed start must not
+  // wedge every other mic on the page behind it.
+  startQueue = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
 
 function audioContextCtor(): typeof AudioContext {
   return window.AudioContext ?? (window.webkitAudioContext as typeof AudioContext);
@@ -259,6 +287,25 @@ export async function createRecognizer(
     context = null;
   }
 
+  function closed(): VoiceResult<void> {
+    return { ok: false, error: voiceError('recognition-failed', 'This recogniser has been closed.') };
+  }
+
+  /**
+   * Give back whatever this start had already opened, for a `dispose()` that
+   * landed mid-await.
+   *
+   * `dispose()` is idempotent, so the caller's own follow-up call is a no-op and
+   * nobody else will close the stream: the disposed start has to undo itself or
+   * the mic stays open, indicator lit, on behalf of a component that is gone.
+   */
+  function abandon(): VoiceResult<void> {
+    teardownAudio();
+    recognizer?.remove();
+    recognizer = null;
+    return closed();
+  }
+
   const handle: Recognizer = {
     onPartial(listener) {
       partialListener = listener;
@@ -273,83 +320,93 @@ export async function createRecognizer(
       stoppedListener = listener;
     },
 
-    async start() {
-      if (disposed) {
-        return { ok: false, error: voiceError('recognition-failed', 'This recogniser has been closed.') };
-      }
-      if (activeRecognizer && activeRecognizer !== handle) await activeRecognizer.stop();
-      if (stream) return { ok: true, value: undefined };
+    // Queued rather than run straight away: the takeover below and the claim at
+    // the end straddle two awaits, and starts that interleave both open a mic.
+    start() {
+      return queueStart(async (): Promise<VoiceResult<void>> => {
+        if (disposed) return closed();
+        if (activeRecognizer && activeRecognizer !== handle) await activeRecognizer.stop();
+        // The flush above can take a second and a half, which is plenty of time
+        // for the respondent to leave the question this recogniser belongs to.
+        if (disposed) return abandon();
+        if (stream) return { ok: true, value: undefined };
 
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            channelCount: 1,
-            sampleRate: requestedRate,
-          },
-          video: false,
-        });
-      } catch {
-        return {
-          ok: false,
-          error: voiceError('permission-denied', 'Microphone access was blocked. Allow it in your browser to dictate.'),
-        };
-      }
-
-      try {
-        const AudioCtor = audioContextCtor();
-        // Firefox throws rather than resampling for rates it dislikes, and the
-        // recogniser is built from whatever rate we end up with anyway.
         try {
-          context = new AudioCtor({ sampleRate: requestedRate });
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              channelCount: 1,
+              sampleRate: requestedRate,
+            },
+            video: false,
+          });
         } catch {
-          context = new AudioCtor();
+          return {
+            ok: false,
+            error: voiceError('permission-denied', 'Microphone access was blocked. Allow it in your browser to dictate.'),
+          };
         }
-        // iOS hands back a suspended context even inside a click handler, and a
-        // suspended context never fires `onaudioprocess` — a silently dead mic.
-        if (context.state === 'suspended') await context.resume();
+        // The permission prompt is the longest gap in the whole flow, and a
+        // `dispose()` that lands inside it tears nothing down — `stream` was
+        // still unassigned when its `stop()` looked.
+        if (disposed) return abandon();
 
-        // Recreated per session against the rate actually granted, so a device
-        // that refused 16 kHz still decodes correctly.
-        recognizer = new model.KaldiRecognizer(context.sampleRate);
-        recognizer.on('partialresult', (message) => {
-          if ('result' in message && 'partial' in message.result) partialListener(message.result.partial);
-        });
-        recognizer.on('result', (message) => {
-          if ('result' in message && 'text' in message.result) finalListener(message.result.text);
-          awaitFinal?.();
-        });
-        recognizer.on('error', () => {
-          errorListener(voiceError('recognition-failed', 'Dictation stopped unexpectedly. Try again.'));
-          awaitFinal?.();
-        });
-
-        // ScriptProcessor is deprecated but it is the node `acceptWaveform`
-        // takes an AudioBuffer from; an AudioWorklet would need its own module
-        // file in the bundle for no gain at one 4096-frame callback per field.
-        processor = context.createScriptProcessor(CAPTURE_BUFFER_SIZE, 1, 1);
-        processor.onaudioprocess = (event) => {
+        try {
+          const AudioCtor = audioContextCtor();
+          // Firefox throws rather than resampling for rates it dislikes, and the
+          // recogniser is built from whatever rate we end up with anyway.
           try {
-            recognizer?.acceptWaveform(event.inputBuffer);
+            context = new AudioCtor({ sampleRate: requestedRate });
           } catch {
-            // A dropped buffer is a lost syllable, not a broken session — the
-            // worker recovers on the next callback, so never surface it.
+            context = new AudioCtor();
           }
-        };
-        source = context.createMediaStreamSource(stream);
-        source.connect(processor);
-        // Chrome will not run a ScriptProcessor that reaches no destination.
-        processor.connect(context.destination);
-      } catch {
-        teardownAudio();
-        recognizer?.remove();
-        recognizer = null;
-        return { ok: false, error: voiceError('audio-failed', 'Could not start recording on this device.') };
-      }
+          // iOS hands back a suspended context even inside a click handler, and a
+          // suspended context never fires `onaudioprocess` — a silently dead mic.
+          if (context.state === 'suspended') await context.resume();
+          if (disposed) return abandon();
 
-      activeRecognizer = handle;
-      return { ok: true, value: undefined };
+          // Recreated per session against the rate actually granted, so a device
+          // that refused 16 kHz still decodes correctly.
+          recognizer = new model.KaldiRecognizer(context.sampleRate);
+          recognizer.on('partialresult', (message) => {
+            if ('result' in message && 'partial' in message.result) partialListener(message.result.partial);
+          });
+          recognizer.on('result', (message) => {
+            if ('result' in message && 'text' in message.result) finalListener(message.result.text);
+            awaitFinal?.();
+          });
+          recognizer.on('error', () => {
+            errorListener(voiceError('recognition-failed', 'Dictation stopped unexpectedly. Try again.'));
+            awaitFinal?.();
+          });
+
+          // ScriptProcessor is deprecated but it is the node `acceptWaveform`
+          // takes an AudioBuffer from; an AudioWorklet would need its own module
+          // file in the bundle for no gain at one 4096-frame callback per field.
+          processor = context.createScriptProcessor(CAPTURE_BUFFER_SIZE, 1, 1);
+          processor.onaudioprocess = (event) => {
+            try {
+              recognizer?.acceptWaveform(event.inputBuffer);
+            } catch {
+              // A dropped buffer is a lost syllable, not a broken session — the
+              // worker recovers on the next callback, so never surface it.
+            }
+          };
+          source = context.createMediaStreamSource(stream);
+          source.connect(processor);
+          // Chrome will not run a ScriptProcessor that reaches no destination.
+          processor.connect(context.destination);
+        } catch {
+          teardownAudio();
+          recognizer?.remove();
+          recognizer = null;
+          return { ok: false, error: voiceError('audio-failed', 'Could not start recording on this device.') };
+        }
+
+        activeRecognizer = handle;
+        return { ok: true, value: undefined };
+      });
     },
 
     async stop() {

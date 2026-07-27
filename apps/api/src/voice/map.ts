@@ -153,16 +153,50 @@ function coerceValue(field: FormField, value: unknown): SubmissionValue | undefi
     }
     case 'text':
     case 'textarea':
-    case 'date':
       // A blank string is not an answer; it would stage an empty proposal over
       // whatever the filler had already typed.
       return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+    case 'date':
+      // Not grouped with the free text above: a date field is the one place a
+      // merely non-blank string is still the wrong type. Only `yyyy-mm-dd` can
+      // be shown, corrected in the picker, or read by anything downstream.
+      return typeof value === 'string' && isCalendarDate(value) ? value : undefined;
     default:
       // signature / file_upload / section_header / repeating_group were never
       // offered as targets (see tool-schema.ts), so any mapping onto one is
       // fabricated.
       return undefined;
   }
+}
+
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/** Computed rather than read off a `Date` so a four-digit year below 100 is not silently shifted into the 1900s. */
+function daysInMonth(year: number, month: number): number {
+  if (month !== 2) return DAYS_IN_MONTH[month - 1]!;
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+}
+
+/**
+ * A real calendar day, written the way the date control reads and writes it.
+ *
+ * The tool schema only DESCRIBES the format in prose and the ```json fence
+ * fallback above is bound by no schema at all, so "2025-13-01" from a
+ * transposed day and month, or a plain "middle of next week", both arrive here
+ * routinely. Neither survives the field they would land on: the picker indexes
+ * a twelve-entry month table with whatever month it parses, and a string it
+ * cannot parse renders as the empty placeholder while still counting as
+ * answered for required validation — an apparently blank date that submits.
+ * The free per-field path has always refused both (`coerceDate` in the web
+ * app); this is the paid path holding the same line.
+ */
+function isCalendarDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month);
 }
 
 function clampConfidence(raw: unknown): number {

@@ -341,6 +341,9 @@ function DictationRow({ field, onChange, children }: DictationRowProps) {
     (unread === null
       ? null
       : `Heard “${unread}” — that didn't fill anything in. Say it again, or type your answer.`);
+  // Empty while listening: what is being heard is announced by MicButton, and
+  // the partial above is deliberately kept out of the accessibility tree.
+  const announcement = listening ? '' : (problem ?? '');
 
   return (
     <div>
@@ -363,11 +366,16 @@ function DictationRow({ field, onChange, children }: DictationRowProps) {
         <p aria-hidden="true" className="mt-1 truncate text-xs text-text-tertiary">
           {dictation.text || 'Listening…'}
         </p>
-      ) : problem ? (
-        <p role="status" className="mt-1 text-xs text-warning-text">
-          {problem}
-        </p>
       ) : null}
+
+      {/* One live region, always mounted (same rule as SmartFillPanel's): a
+          `role="status"` node inserted at the moment it gains its text is
+          frequently missed by screen readers. MicButton's own region says only
+          "Recording stopped.", so without this the respondent hears that the
+          mic worked and is never told why the field stayed empty. */}
+      <p role="status" className={`text-xs text-warning-text ${announcement ? 'mt-1' : ''}`}>
+        {announcement}
+      </p>
     </div>
   );
 }
