@@ -27,6 +27,11 @@ export const SMART_FILL_SKIPPED_TYPES: readonly FormFieldType[] = [
   'file_upload',
   'section_header',
   'repeating_group',
+  // `time` demands a strict `HH:MM` 24-hour string. Offering it as a plain
+  // string target invites "9:30am" or "half nine" into a field the time input
+  // cannot render — the same silent corruption the date range-check closes.
+  // The client refuses spoken times for the matching reason (see coerce.ts).
+  'time',
 ];
 
 /** A JSON-Schema fragment, as Anthropic's `input_schema` consumes it. */

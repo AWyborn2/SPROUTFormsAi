@@ -16,10 +16,12 @@ import {
   Select,
   SignaturePad,
   Textarea,
+  currentTimeHHMM,
   type RepeatingRow,
 } from '@formai/ui';
 import type { FormField, SubmissionValue } from '@formai/shared';
 import {
+  applyCalcs,
   applySelection,
   incompleteFixedRowIndices,
   resolveAnswerSets,
@@ -137,6 +139,31 @@ export function FieldInput({
         return (
           <DateTimePicker value={asString(value)} onChange={(v) => onChange(v)} disabled={disabled} />
         );
+      case 'time':
+        // A time-stamp question: "Now" writes the current time, and the value
+        // stays an ordinary time input the respondent can adjust afterwards.
+        return (
+          <div className="flex items-center gap-1.5">
+            <Input
+              type="time"
+              value={asString(value)}
+              error={error}
+              disabled={disabled}
+              aria-label={field.label}
+              onChange={(e) => onChange(e.target.value)}
+            />
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onChange(currentTimeHHMM())}
+              aria-label={`Stamp current time: ${field.label}`}
+              className="flex h-9 flex-none items-center gap-1 rounded-md border border-border-strong bg-surface-card px-2.5 text-[12.5px] font-semibold text-text-secondary hover:bg-surface-hover focus-visible:shadow-focus disabled:opacity-40"
+            >
+              <Icon name="clock" size={14} />
+              Now
+            </button>
+          </div>
+        );
       case 'dropdown':
         return (
           <Select
@@ -228,20 +255,29 @@ export function FieldInput({
         // Answer-set resolution stays here: @formai/ui is dependency-free, so
         // the component is handed the surviving sets plus a resolved selection.
         const sets = resolveAnswerSets(field).sets;
+        // Calc semantics live in @formai/shared for the same reason: the
+        // component only knows a column is `computed` (read-only); the value
+        // is recomputed and STORED on every row change here, so validation,
+        // the detail view and the PDF export all read the same figure.
+        const columns = (field.columns ?? []).map((c) => (c.calc ? { ...c, computed: true } : c));
+        const withCalcs = (next: readonly RepeatingRow[]) =>
+          applyCalcs(field.columns, next as RepeatingRowValue[]) as RepeatingRow[];
         return (
           <RepeatingGroup
-            columns={field.columns ?? []}
+            columns={columns}
             rows={rows as RepeatingRow[]}
-            onChange={(next) => onChange(next)}
+            onChange={(next) => onChange(withCalcs(next))}
             readOnly={disabled}
             fixedRows={field.fixedRows}
             answerSets={sets}
             answerSelection={(ri, set) => selectedOption(set, rows[ri]).columnKey}
             onAnswerSelect={(ri, set, columnKey) =>
               onChange(
-                rows.map((r, i) =>
-                  i === ri ? applySelection(set, r as RepeatingRowValue, columnKey) : r,
-                ) as RepeatingRow[],
+                withCalcs(
+                  rows.map((r, i) =>
+                    i === ri ? applySelection(set, r as RepeatingRowValue, columnKey) : r,
+                  ) as RepeatingRow[],
+                ),
               )
             }
             errorRowIndexes={

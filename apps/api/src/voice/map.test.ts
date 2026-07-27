@@ -188,6 +188,21 @@ describe('mapTranscriptToFields — no AI call is made', () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  // A `time` field is `HH:MM` or nothing. If it were ever offered as a target
+  // the model would answer it as prose ("9:30am") and that string would reach a
+  // time input that cannot render it — so assert it never reaches the model at
+  // all, rather than relying on a downstream check to catch the shape.
+  it('never offers a time field to the model', async () => {
+    const { anthropic, create } = clientReturning(toolUse({ mappings: [] }));
+    const result = await mapTranscriptToFields({
+      transcript: TRANSCRIPT,
+      fields: [{ ...FIELDS[0]!, id: 'started', type: 'time', label: 'Start time' }],
+      anthropic,
+    });
+    expect(result).toEqual({ mappings: [] });
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('throws smart_fill_unavailable when no client is configured', async () => {
     await expect(
       mapTranscriptToFields({ transcript: TRANSCRIPT, fields: FIELDS }),

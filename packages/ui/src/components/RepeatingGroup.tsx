@@ -15,6 +15,13 @@ export interface RepeatingGroupColumn {
   type: string;
   options?: string[];
   required?: boolean;
+  /**
+   * The cell auto-computes from the row's other cells and renders read-only.
+   * WHAT it computes belongs to the caller (@formai/shared's `applyCalcs`
+   * writes the value into the row on change) — this component only refuses
+   * direct edits, exactly as answer-set semantics are resolved by the caller.
+   */
+  computed?: boolean;
 }
 
 /**
@@ -514,6 +521,12 @@ function AnswerSetCell({
   );
 }
 
+/** The current local time as `HH:MM` — the native time input's value format. */
+export function currentTimeHHMM(): string {
+  const now = new Date();
+  return `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+}
+
 /**
  * Two-state column types and the labels their buttons carry.
  *
@@ -615,6 +628,46 @@ function RepeatingCell({
           className="h-4 w-4 cursor-pointer appearance-none rounded-[4px] border border-border-strong bg-surface-card checked:border-accent checked:bg-accent focus-visible:shadow-focus"
         />
       </label>
+    );
+  }
+
+  // A computed cell (e.g. auto-totalled hours) is display-only: the caller
+  // writes its value into the row whenever an input cell changes, so editing
+  // it here would just be overwritten — and a filler "correcting" a total
+  // that then silently recomputed would be worse than refusing the edit.
+  if (column.computed) {
+    return (
+      <span
+        aria-label={column.label}
+        className="block min-w-[80px] px-2.5 text-right text-[13px] font-semibold tabular-nums text-text-primary"
+      >
+        {(value ?? '') === '' ? '—' : String(value)}
+      </span>
+    );
+  }
+
+  if (column.type === 'time') {
+    return (
+      <span className="flex items-center gap-1">
+        <input
+          type="time"
+          value={String(value ?? '')}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={column.label}
+          aria-invalid={invalid || undefined}
+          className={cn(cellClass, 'min-w-[96px]')}
+        />
+        <button
+          type="button"
+          onClick={() => onChange(currentTimeHHMM())}
+          aria-label={`Stamp current time: ${column.label}`}
+          title="Stamp the current time"
+          className="flex h-9 flex-none items-center gap-1 rounded-md border border-border-strong bg-surface-card px-2 text-[12px] font-semibold text-text-secondary hover:bg-surface-hover focus-visible:shadow-focus"
+        >
+          <Icon name="clock" size={13} />
+          Now
+        </button>
+      </span>
     );
   }
 

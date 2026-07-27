@@ -29,8 +29,9 @@ describe('isDictatable', () => {
     ]);
   });
 
-  it('withholds it from types that need a physical act or take no answer', () => {
+  it('withholds it from types that need a physical act, take no answer, or need a format speech cannot pin down', () => {
     expect(FORM_FIELD_TYPES.filter((t) => !isDictatable(t))).toEqual([
+      'time',
       'signature',
       'file_upload',
       'section_header',
@@ -332,5 +333,17 @@ describe('coerceSpokenValue — undictatable types', () => {
     for (const type of ['signature', 'file_upload', 'section_header', 'repeating_group'] as const) {
       expect(coerceSpokenValue(field(type), 'yes March fifth 42')).toBeNull();
     }
+  });
+
+  // `time` is `HH:MM` only. Anything looser reaches the native time input as an
+  // unrenderable value, so a spoken time must be refused rather than approximated.
+  it('refuses a spoken time rather than approximating HH:MM', () => {
+    for (const said of ['half nine', 'quarter to five', '9:30am', 'nine thirty', '0930']) {
+      expect(coerceSpokenValue(field('time'), said)).toBeNull();
+    }
+  });
+
+  it('offers no mic for time', () => {
+    expect(isDictatable('time')).toBe(false);
   });
 });

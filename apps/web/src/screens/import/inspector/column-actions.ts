@@ -6,14 +6,16 @@
  * reducer. Keeping both adapters here means the difference between the two is
  * one small file rather than two diverging copies of the panel.
  */
-import type { FormField, FormFieldType, VisibilityCondition } from '@formai/shared';
+import type { ColumnCalc, FormField, FormFieldType, VisibilityCondition } from '@formai/shared';
 import {
   acceptAnswerSet,
   addColumn,
   answerSetAccepted,
   groupColumns,
+  moveColumn,
   removeColumn,
   renameColumn,
+  setColumnCalc,
   setColumnRequired,
   setColumnOptions,
   setColumnType,
@@ -37,6 +39,8 @@ export const importSessionColumnActions: ColumnActions = {
   setLabelColumn: setTableLabelColumn,
   addColumn,
   removeColumn,
+  moveColumn,
+  setColumnCalc,
 };
 
 /** Pre-publish: the condition is written into the reviewed field list. */
@@ -102,8 +106,15 @@ export function builderColumnActions(
       const existing = field.columns?.find((c) => c.key === columnKey)?.options;
       const options =
         CHOICE_COLUMN_TYPES.has(type) && !existing?.length ? SEEDED_OPTIONS : existing;
+      const patched = patchColumn(field, columnKey, { type, ...(options ? { options } : {}) });
       update({
-        ...patchColumn(field, columnKey, { type, ...(options ? { options } : {}) }),
+        // Retyping a calc column drops its calc — the session host does the
+        // same; the two must agree.
+        columns: (patched.columns ?? []).map((c) => {
+          if (c.key !== columnKey || !c.calc) return c;
+          const { calc: _dropped, ...rest } = c;
+          return rest;
+        }),
         answerSets: remaining,
       });
     },
@@ -156,6 +167,30 @@ export function builderColumnActions(
         answerSets: sets()
           .map((s) => ({ ...s, columnKeys: s.columnKeys.filter((k) => k !== columnKey) }))
           .filter((s) => s.columnKeys.length >= 2),
+      });
+    },
+    moveColumn: (_id, columnKey, dir) => {
+      // Reorder by array position; the `key` is unchanged, so answer sets and
+      // row values are untouched. `columns[0]` is pinned — the checklist label /
+      // row-identity column — so nothing crosses index 0 on a checklist.
+      const columns = cols();
+      const i = columns.findIndex((c) => c.key === columnKey);
+      const floor = isChecklist ? 1 : 0;
+      const j = i + dir;
+      if (i < 0 || i < floor || j < floor || j >= columns.length) return;
+      const next = columns.slice();
+      [next[i], next[j]] = [next[j]!, next[i]!];
+      update({ columns: next });
+    },
+    setColumnCalc: (_id, columnKey, calc) => {
+      const columns = cols();
+      if (!columns.some((c) => c.key === columnKey) || columnKey === rowIdentityKey) return;
+      update({
+        columns: columns.map((c) => {
+          if (c.key !== columnKey) return c;
+          const { calc: _dropped, ...rest } = c;
+          return calc ? { ...rest, calc } : rest;
+        }),
       });
     },
   };

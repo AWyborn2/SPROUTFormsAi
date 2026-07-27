@@ -12,6 +12,7 @@
 import { useSyncExternalStore } from 'react';
 import type {
   AnswerSet,
+  ColumnCalc,
   ExtractedField,
   ExtractionResult,
   ExtractionStatus,
@@ -834,6 +835,14 @@ export function setColumnType(id: string, key: string, type: FormFieldType): voi
       c.key === key ? { ...c, options: ['Option 1', 'Option 2'] } : c,
     );
   }
+  // An explicit retype of an auto-calculated column is the reviewer saying
+  // "this is a plain cell now" — keeping the calc would leave the new cell
+  // read-only and self-overwriting, an edit that visibly does nothing.
+  patch.columns = (patch.columns ?? columns).map((c) => {
+    if (c.key !== key || !c.calc) return c;
+    const { calc: _dropped, ...rest } = c;
+    return rest;
+  });
   dispatchStructural({ t: 'update', id, patch });
 }
 
@@ -843,6 +852,29 @@ export function setColumnOptions(id: string, key: string, options: string[]): vo
   const columns = patchColumn(id, key, { options });
   if (!columns) return;
   dispatchStructural({ t: 'update', id, patch: { columns } });
+}
+
+/**
+ * Set (or clear, with null) a column's auto-calculation.
+ *
+ * The config references other columns BY KEY (`startKey`/`finishKey`/
+ * `lunchKey`), so it survives renames and reorders for free. A referenced
+ * column later removed or retyped leaves the calc unable to compute —
+ * `totalHoursFor` returns null and the cell reads blank, which is visible and
+ * correctable in this same panel rather than silently wrong.
+ */
+export function setColumnCalc(id: string, key: string, calc: ColumnCalc | null): void {
+  const columns = columnsOf(id);
+  // `columns[0]` is the row-identity column in BOTH table kinds — a computed
+  // row label would collapse every row's identity to a number. The builder
+  // host refuses the same key; the two must agree.
+  if (!columns.some((c) => c.key === key) || key === columns[0]?.key) return;
+  const next = columns.map((c) => {
+    if (c.key !== key) return c;
+    const { calc: _dropped, ...rest } = c;
+    return calc ? { ...rest, calc } : rest;
+  });
+  dispatchStructural({ t: 'update', id, patch: { columns: next } });
 }
 
 /** One column of a reviewed repeating field, by key. */
@@ -1123,6 +1155,28 @@ export function removeColumn(id: string, key: string): void {
     id,
     patch: { columns: columns.filter((c) => c.key !== key), answerSets },
   });
+}
+
+/**
+ * Move a column one place left (-1) or right (1) in the printed order.
+ *
+ * Column identity is the `key`, so answer sets and row values are untouched by a
+ * reorder — only the display/placement order changes. `columns[0]` is pinned:
+ * on a checklist it is the pre-printed label, and everywhere it is the
+ * row-identity column, so it cannot move and nothing may move past it into
+ * index 0. An out-of-range move (off either end, or the pinned slot) is a no-op.
+ */
+export function moveColumn(id: string, key: string, dir: -1 | 1): void {
+  const field = editorField(id);
+  if (!field) return;
+  const columns = field.columns ?? [];
+  const i = columns.findIndex((c) => c.key === key);
+  const floor = (field.fixedRows?.length ?? 0) > 0 ? 1 : 0; // label stays at 0 on a checklist
+  const j = i + dir;
+  if (i < 0 || i < floor || j < floor || j >= columns.length) return;
+  const next = columns.slice();
+  [next[i], next[j]] = [next[j]!, next[i]!];
+  dispatchStructural({ t: 'update', id, patch: { columns: next } });
 }
 
 export function undoFieldEdit(): void {

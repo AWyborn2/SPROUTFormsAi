@@ -23,8 +23,10 @@ import {
   answerSetAccepted,
   getImportSession,
   groupColumns,
+  moveColumn,
   removeColumn,
   renameColumn,
+  setColumnCalc,
   resetImportSession,
   reviewedToFields,
   setColumnRequired,
@@ -273,6 +275,50 @@ describe('label-column override and add/remove column', () => {
   it('refuses to remove the checklist label column', () => {
     removeColumn('t1', 'item'); // t1 is a checklist
     expect(field('t1').columns![0]!.key).toBe('item');
+  });
+
+  it('reorders an open table column and pins a checklist label', () => {
+    // t2 is open: its first column can move.
+    moveColumn('t2', 'desc', 1);
+    expect(field('t2').columns!.map((c) => c.key)).toEqual(['yes', 'desc', 'no', 'na', 'note']);
+
+    // t1 is a checklist: 'item' is pinned and nothing crosses index 0.
+    moveColumn('t1', 'item', 1);
+    expect(field('t1').columns![0]!.key).toBe('item');
+    moveColumn('t1', 'ok', -1);
+    expect(field('t1').columns!.map((c) => c.key)).toEqual(['item', 'ok', 'na', 'fault', 'spare', 'notes']);
+  });
+
+  it('sets a total-hours calc, publishes it, and drops it on retype', () => {
+    // Make t2 a timesheet: retype two cells to time, then calc the note column.
+    setColumnType('t2', 'yes', 'time');
+    setColumnType('t2', 'no', 'time');
+    const calc = { kind: 'total_hours' as const, startKey: 'yes', finishKey: 'no' };
+    setColumnCalc('t2', 'note', calc);
+
+    expect(field('t2').columns!.find((c) => c.key === 'note')!.calc).toEqual(calc);
+    // The calc crosses the publish boundary with its column.
+    expect(published('t2').columns!.find((c) => c.key === 'note')!.calc).toEqual(calc);
+
+    // Retyping the calc column clears it.
+    setColumnType('t2', 'note', 'number');
+    expect(field('t2').columns!.find((c) => c.key === 'note')!.calc).toBeUndefined();
+    // The row-identity column refuses a calc in both table kinds.
+    setColumnCalc('t2', 'desc', calc); // open table's first column
+    expect(field('t2').columns![0]!.calc).toBeUndefined();
+    setColumnCalc('t1', 'item', calc); // checklist label column
+    expect(field('t1').columns![0]!.calc).toBeUndefined();
+  });
+
+  it('exposes move affordances that honor the pinned first column', () => {
+    const open = columnRows(field('t2'), answerSetAccepted);
+    expect(open[0]).toMatchObject({ canMoveUp: false, canMoveDown: true });
+    expect(open[1]!.canMoveUp).toBe(true);
+    expect(open.at(-1)!.canMoveDown).toBe(false);
+
+    const checklist = columnRows(field('t1'), answerSetAccepted);
+    expect(checklist[0]).toMatchObject({ canMoveUp: false, canMoveDown: false }); // label pinned
+    expect(checklist[1]).toMatchObject({ canMoveUp: false, canMoveDown: true }); // can't cross the label
   });
 });
 

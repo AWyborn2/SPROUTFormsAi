@@ -37,6 +37,7 @@ export {
 } from './components/DataGrid.js';
 export {
   RepeatingGroup,
+  currentTimeHHMM,
   type RepeatingGroupProps,
   type RepeatingGroupColumn,
   type RepeatingGroupAnswerSet,

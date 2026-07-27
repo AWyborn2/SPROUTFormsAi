@@ -11,6 +11,7 @@ export * from './google-fonts-catalog.js';
 export * from './form-field.js';
 export * from './geometry.js';
 export * from './answer-set.js';
+export * from './time-calc.js';
 export * from './visibility.js';
 export * from './extraction.js';
 export * from './template.js';

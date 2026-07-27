@@ -71,6 +71,13 @@ export function coerceSpokenValue(
     case 'section_header':
     case 'repeating_group':
       return null;
+    // `time` stores a strict `HH:MM` 24-hour string. Reading one out of speech
+    // ("half nine", "quarter to five", am/pm) is its own parser with its own
+    // ambiguities, and a timesheet that silently records the wrong hour is
+    // worse than one the respondent types. Refused until that parser exists —
+    // it is absent from DICTATABLE_TYPES too, so no mic is offered either.
+    case 'time':
+      return null;
   }
 }
 

@@ -12,6 +12,12 @@ export const FORM_FIELD_TYPES = [
   'text',
   'number',
   'date',
+  /**
+   * Time of day, stored as an `HH:MM` 24-hour string (the native time input's
+   * value format). Renders with a "Now" stamp button on fill surfaces; the
+   * stamped value stays manually adjustable.
+   */
+  'time',
   'checkbox',
   'radio',
   'dropdown',
@@ -170,6 +176,29 @@ export interface VisibilityCondition {
   value: string;
 }
 
+/**
+ * Auto-calculation config for a repeating column — the cell computes itself
+ * from the row's other cells and renders read-only on fill surfaces.
+ *
+ * One kind only, deliberately: `total_hours` is the timesheet shape
+ * (finish − start − lunch, in decimal hours). A general formula engine would
+ * need its own parser, cycle rules and error surface; a named calculation is
+ * one tested function. The semantics live in `time-calc.ts`.
+ */
+export interface ColumnCalc {
+  kind: 'total_hours';
+  /** Key of the start-time column (`HH:MM`). */
+  startKey: string;
+  /** Key of the finish-time column (`HH:MM`). */
+  finishKey: string;
+  /**
+   * Key of the lunch column, subtracted as a DURATION — `HH:MM` or a plain
+   * decimal-hours number. Optional: absent, blank or zero subtracts nothing
+   * (a task finished before any break).
+   */
+  lunchKey?: string;
+}
+
 /** A column definition inside a repeating group (never enumerates blank rows). */
 export interface RepeatingColumn {
   key: string;
@@ -177,6 +206,8 @@ export interface RepeatingColumn {
   type: FormFieldType;
   options?: string[];
   required?: boolean;
+  /** Present ⇒ the cell auto-computes and is read-only on fill surfaces. */
+  calc?: ColumnCalc;
 }
 
 export interface FormField {
