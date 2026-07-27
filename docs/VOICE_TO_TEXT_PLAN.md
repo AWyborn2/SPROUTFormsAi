@@ -354,7 +354,56 @@ sequence it *after* a dictation MVP proves demand.
 
 ---
 
-## 6. Recommendation
+## 6. Mobile compatibility
+
+FormAI's fill flows are heavily used **in the field on phones and tablets**, so
+mobile support is decisive. One clarification first: FormAI's "mobile" today is a
+**responsive web/PWA route** — the same React SPA rendered in a phone browser
+(`apps/web/src/screens/mobile/MobileScreen.tsx`), per the implementation plan's
+Phase 5. A **native app (Expo/React Native)** is explicitly a later phase. That
+distinction changes the answer per option.
+
+### On mobile web (what exists now — iOS Safari + Android Chrome)
+
+| Option | Mobile web verdict |
+|---|---|
+| **1 · Web Speech API** | ⚠️ **Partial.** Works well on Android Chrome (Google backend). On **iOS Safari** it exists (14.5+) but is flaky — requires a tap to start, no reliable continuous mode, cuts off after pauses. Not in Firefox mobile. Usable but inconsistent. |
+| **2 · Vosk (on-device WASM)** | ✅ **Works** on iOS Safari + Android Chrome (both support WASM + `getUserMedia`). Caveat: the ~50 MB model download and on-device CPU are **heavier on phones** — fine on modern devices, sluggish on low-end ones, and it uses battery. But it is the only **offline** option, the strongest fit for field work with no signal. |
+| **3 · Self-hosted Whisper** | ✅ **Works well.** The phone only records with `MediaRecorder` (supported on Android Chrome + iOS Safari 14.3+) and uploads the clip; the server transcribes. Browser STT support is irrelevant. |
+| **4 · Managed API (Deepgram/AssemblyAI)** | ✅ **Works well** — same record-and-upload (or stream-and-upload) model as #3. |
+| **5 · Smart Fill** | ✅ Inherits whichever engine above; behaves the same on mobile web. |
+
+**Key insight:** the **record-and-upload options (3, 4, 5) are the most
+mobile-robust**, because they do not depend on the phone browser's own speech
+engine — which is exactly where mobile web is weakest and most inconsistent.
+Option 1 is the *only* one with real mobile-browser caveats; Option 2 works but
+taxes the device.
+
+### On a future native app (Expo/React Native)
+
+**All five work — several get *better* natively:**
+- **1 →** becomes `@react-native-voice/voice`, wrapping iOS `SFSpeechRecognizer`
+  / Android `SpeechRecognizer` — more reliable than the browser API, often
+  on-device.
+- **2 (Vosk) →** has proper native Android/iOS SDKs — fully offline, no WASM
+  download penalty. Excellent native fit.
+- **3 (Whisper) →** `whisper.cpp` runs on-device on iOS/Android, *or* upload to
+  the server as on web.
+- **4 / 5 →** vendors ship mobile SDKs; the Claude mapping layer is server-side
+  and unchanged.
+
+### Mobile bottom line
+
+Voice works on mobile in every case. For the **current responsive-web mobile
+app**, favour **Option 4 (Deepgram, record/stream-and-upload)** for the best
+experience with least friction, or **Option 2 (Vosk)** where offline field use
+is the priority; **avoid leaning on Option 1** as the mobile primary because of
+iOS Safari's quirks. When FormAI eventually goes native, the same engine choices
+carry over and mostly improve.
+
+---
+
+## 7. Recommendation
 
 **A two-track sequence, not a single pick** — because dictation and smart-fill
 serve different needs and the codebase makes staging cheap:
@@ -392,7 +441,7 @@ machinery almost wholesale.*
 
 ---
 
-## 7. Cross-cutting concerns (apply to whichever options are built)
+## 8. Cross-cutting concerns (apply to whichever options are built)
 
 - **Keyboard & a11y first.** The repo is keyboard-operable by design. The mic
   button must be focusable, have an accessible label, and voice must never be the
