@@ -19,14 +19,17 @@ vi.mock('../../../lib/data/api-client.js', async (importOriginal) => {
 import { apiClient } from '../../../lib/data/api-client.js';
 import {
   acceptAnswerSet,
+  addColumn,
   answerSetAccepted,
   getImportSession,
   groupColumns,
+  removeColumn,
   renameColumn,
   resetImportSession,
   reviewedToFields,
   setColumnRequired,
   setColumnType,
+  setTableLabelColumn,
   startExtraction,
   ungroupAnswerSet,
   type ReviewField,
@@ -146,17 +149,33 @@ describe('grouping', () => {
     expect(published('t2').answerSets).toHaveLength(1);
   });
 
-  it('never lets the label column join a set', () => {
-    groupColumns('t2', ['desc', 'yes', 'no']);
+  it('never lets the checklist label column join a set', () => {
+    // t1 is a checklist (fixedRows present), so `item` is the pre-printed label.
+    resetGroups('t1'); // free every tickable column
+    groupColumns('t1', ['item', 'ok', 'na']);
 
-    const set = resolveAnswerSets(field('t2')).sets[0]!;
-    expect(set.columnKeys).toEqual(['yes', 'no']);
+    const set = resolveAnswerSets(field('t1')).sets[0]!;
+    expect(set.columnKeys).toEqual(['ok', 'na']);
 
     // And a request that is only the label column plus one other cannot form a set.
-    resetGroups('t2');
-    expect(groupColumns('t2', ['desc', 'yes'])).toBeNull();
-    expect(field('t2').answerSets ?? []).toEqual([]);
-    expect(columnRows(field('t2'), importSessionColumnActions.answerSetAccepted)[0]!.groupable).toBe(false);
+    resetGroups('t1');
+    expect(groupColumns('t1', ['item', 'ok'])).toBeNull();
+    expect(field('t1').answerSets ?? []).toEqual([]);
+    expect(columnRows(field('t1'), importSessionColumnActions.answerSetAccepted)[0]!.groupable).toBe(false);
+  });
+
+  it('leaves the first column of an OPEN table editable (not a locked label)', () => {
+    // t2 has no fixedRows: it is an open row-entry table, so its first column
+    // ("Description") is not a pre-printed label — the exact case that froze
+    // "Work Order #". It edits freely, though it stays the row-identity column
+    // (not a tick-group option), so `groupable` is still false.
+    const rows = columnRows(field('t2'), importSessionColumnActions.answerSetAccepted);
+    expect(rows[0]!.isLabel).toBe(false);
+    expect(rows[0]!.groupable).toBe(false);
+
+    // Retyping the first column is refused on a checklist but allowed here.
+    setColumnType('t2', 'desc', 'number');
+    expect(field('t2').columns!.find((c) => c.key === 'desc')!.type).toBe('number');
   });
 
   it('moves a column already in another set rather than duplicating membership', () => {
@@ -218,6 +237,42 @@ describe('column edits', () => {
   it('leaves the label column untouched by retype requests', () => {
     setColumnType('t1', 'item', 'checkbox');
     expect(field('t1').columns![0]!.type).toBe('text');
+  });
+});
+
+describe('label-column override and add/remove column', () => {
+  it('toggles an open table into a checklist and back', () => {
+    // t2 has no fixedRows — its first column is fillable, not a label.
+    expect(columnRows(field('t2'), answerSetAccepted)[0]!.isLabel).toBe(false);
+
+    setTableLabelColumn('t2', true);
+    expect(field('t2').fixedRows).toEqual(['']);
+    expect(columnRows(field('t2'), answerSetAccepted)[0]!.isLabel).toBe(true);
+
+    setTableLabelColumn('t2', false);
+    expect(field('t2').fixedRows).toBeUndefined();
+    expect(columnRows(field('t2'), answerSetAccepted)[0]!.isLabel).toBe(false);
+  });
+
+  it('appends a new fillable column that survives publish', () => {
+    addColumn('t2'); // t2 starts with five columns
+    const cols = field('t2').columns!;
+    expect(cols).toHaveLength(6);
+    expect(cols.at(-1)).toEqual({ key: 'col6', label: 'Column 6', type: 'text' });
+    expect(published('t2').columns!.at(-1)!.key).toBe('col6');
+  });
+
+  it('removes a column and strips it from its answer set', () => {
+    groupColumns('t2', ['yes', 'no', 'na']);
+    removeColumn('t2', 'na');
+
+    expect(field('t2').columns!.some((c) => c.key === 'na')).toBe(false);
+    expect(resolveAnswerSets(field('t2')).sets[0]!.columnKeys).toEqual(['yes', 'no']);
+  });
+
+  it('refuses to remove the checklist label column', () => {
+    removeColumn('t1', 'item'); // t1 is a checklist
+    expect(field('t1').columns![0]!.key).toBe('item');
   });
 });
 

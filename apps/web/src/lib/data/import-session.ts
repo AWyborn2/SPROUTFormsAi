@@ -697,9 +697,17 @@ function columnsOf(id: string): RepeatingColumn[] {
   return editorField(id)?.columns ?? [];
 }
 
-/** The label column key — `columns[0]`, never answerable, never groupable. */
+/**
+ * The label column key — `columns[0]` of a CHECKLIST, never answerable, never
+ * groupable, never retyped. An open row-entry table (no `fixedRows`) has no
+ * label column: its first column is a fillable cell like any other, so this
+ * returns undefined and every column edits freely. Gating on `fixedRows` here
+ * is what unlocks an open table's first column, which position-only logic froze.
+ */
 function labelKeyOf(id: string): string | undefined {
-  return columnsOf(id)[0]?.key;
+  const field = editorField(id);
+  if (!field || (field.fixedRows?.length ?? 0) === 0) return undefined;
+  return field.columns?.[0]?.key;
 }
 
 /**
@@ -814,11 +822,16 @@ export function groupColumns(id: string, columnKeys: string[]): string | null {
   const field = editorField(id);
   if (!field) return null;
   const known = new Set((field.columns ?? []).map((c) => c.key));
-  const labelKey = labelKeyOf(id);
+  // `columns[0]` is the row-identity column and can never be a set member —
+  // `resolveAnswerSets` drops any set that names it regardless of `fixedRows`,
+  // so it is excluded here whether or not the table is a checklist. (This is a
+  // different rule from the retype/remove lock, which applies only to a
+  // checklist's pre-printed label — hence `columns[0]` rather than `labelKeyOf`.)
+  const rowIdentityKey = columnsOf(id)[0]?.key;
 
   const members: string[] = [];
   for (const k of columnKeys) {
-    if (k === labelKey || !known.has(k) || members.includes(k)) continue;
+    if (k === rowIdentityKey || !known.has(k) || members.includes(k)) continue;
     members.push(k);
   }
   if (members.length < 2) return null;
@@ -982,6 +995,83 @@ export function ungroupAnswerSet(id: string, setKey: string): void {
     t: 'update',
     id,
     patch: { answerSets: field.answerSets.filter((s) => s.key !== setKey) },
+  });
+}
+
+/**
+ * Override the extractor's read of the first column (R6 for the label column:
+ * a proposal the reviewer can correct, not a silent fact).
+ *
+ * `isLabel === true` makes the table a fixed-item checklist — the first column
+ * becomes pre-printed item text (KTD1: always type `text`, and it leaves any
+ * answer set it was grouped into), and a single blank item is seeded so the
+ * checklist-items editor appears for the reviewer to type the printed labels.
+ * `isLabel === false` drops `fixedRows`, turning the table back into an open
+ * row-entry table whose first column is fillable like any other — the case that
+ * unfreezes a "Work Order #" the AI wrongly locked. No-op when already in the
+ * requested state, or when the table has no columns to relabel.
+ */
+export function setTableLabelColumn(id: string, isLabel: boolean): void {
+  const field = editorField(id);
+  const columns = field?.columns ?? [];
+  if (!field || columns.length === 0) return;
+  if (isLabel === (field.fixedRows?.length ?? 0) > 0) return;
+
+  if (!isLabel) {
+    dispatchStructural({ t: 'update', id, patch: { fixedRows: undefined } });
+    return;
+  }
+
+  const firstKey = columns[0]!.key;
+  const nextColumns: RepeatingColumn[] = columns.map((c, i) =>
+    i === 0 ? { key: c.key, label: c.label, type: 'text' } : c,
+  );
+  const answerSets = withoutMembers(id, field.answerSets ?? [], new Set([firstKey]));
+  dispatchStructural({
+    t: 'update',
+    id,
+    patch: { columns: nextColumns, fixedRows: [''], answerSets },
+  });
+}
+
+/** Mint a column key unique within the table. */
+function nextColumnKey(columns: RepeatingColumn[]): string {
+  const taken = new Set(columns.map((c) => c.key));
+  let n = columns.length + 1;
+  while (taken.has(`col${n}`)) n += 1;
+  return `col${n}`;
+}
+
+/** Append a new fillable text column to a repeating table. */
+export function addColumn(id: string): void {
+  const field = editorField(id);
+  if (!field) return;
+  const columns = field.columns ?? [];
+  const key = nextColumnKey(columns);
+  dispatchStructural({
+    t: 'update',
+    id,
+    patch: { columns: [...columns, { key, label: `Column ${columns.length + 1}`, type: 'text' }] },
+  });
+}
+
+/**
+ * Remove a column, stripping it from any answer set (a set left with fewer than
+ * two members dissolves, per `withoutMembers`). Refused for `columns[0]` — the
+ * row-identity column, pre-printed label on a checklist and the row label
+ * everywhere else — and for the last remaining column, since a table with no
+ * columns renders nothing.
+ */
+export function removeColumn(id: string, key: string): void {
+  const field = editorField(id);
+  if (!field) return;
+  const columns = field.columns ?? [];
+  if (columns.length <= 1 || key === columns[0]?.key || !columns.some((c) => c.key === key)) return;
+  const answerSets = withoutMembers(id, field.answerSets ?? [], new Set([key]));
+  dispatchStructural({
+    t: 'update',
+    id,
+    patch: { columns: columns.filter((c) => c.key !== key), answerSets },
   });
 }
 

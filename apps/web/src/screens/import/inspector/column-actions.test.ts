@@ -25,6 +25,23 @@ const table: FormField = {
     { key: 'na', label: 'N-A', type: 'checkbox' },
   ],
   answerSets: [{ key: 'verdict', columnKeys: ['ok', 'no', 'na'] }],
+  // A fixed-item checklist: `item` is the pre-printed label column. Without
+  // fixedRows this is an OPEN table and `item` is a fillable cell like the rest.
+  fixedRows: ['Engine oil level'],
+};
+
+/** An open row-entry table — no fixedRows, so no pre-printed label column. */
+const openTable: FormField = {
+  id: 'timesheet',
+  type: 'repeating_group',
+  label: 'Daily timesheet',
+  required: false,
+  source: 'imported',
+  columns: [
+    { key: 'wo', label: 'Work Order #', type: 'text' },
+    { key: 'plant', label: 'Plant ID', type: 'text' },
+    { key: 'hours', label: 'Total Hours', type: 'number' },
+  ],
 };
 
 /** Apply one action and return the resulting field. */
@@ -115,5 +132,72 @@ describe('builderColumnActions', () => {
     // left to accept, so the builder must never render "Accept grouping".
     const actions = builderColumnActions(table, () => {});
     expect(actions.answerSetAccepted(table.id, 'verdict')).toBe(true);
+  });
+
+  it('excludes the first column from grouping even in an open table (row identity, not a set option)', () => {
+    // columns[0] is the row-identity column; `resolveAnswerSets` never accepts
+    // it as a set member, so grouping filters it out and groups the rest.
+    const openTickable: FormField = {
+      ...openTable,
+      columns: [
+        { key: 'wo', label: 'Work Order #', type: 'checkbox' },
+        { key: 'am', label: 'AM', type: 'checkbox' },
+        { key: 'pm', label: 'PM', type: 'checkbox' },
+      ],
+    };
+    const next = afterAction(openTickable, (a) => a.groupColumns(openTickable.id, ['wo', 'am', 'pm']));
+    expect(resolveAnswerSets(next).sets[0]?.columnKeys).toEqual(['am', 'pm']);
+  });
+
+  describe('setLabelColumn', () => {
+    it('drops fixedRows to turn a checklist into an open table', () => {
+      const next = afterAction(table, (a) => a.setLabelColumn(table.id, false));
+      expect(next.fixedRows).toBeUndefined();
+      expect(next.columns?.map((c) => c.key)).toEqual(['item', 'ok', 'no', 'na']);
+    });
+
+    it('seeds a blank checklist and frees the first column of its set turning an open table into a checklist', () => {
+      const grouped: FormField = {
+        ...openTable,
+        columns: [
+          { key: 'wo', label: 'Work Order #', type: 'checkbox' },
+          { key: 'plant', label: 'Plant ID', type: 'checkbox' },
+          { key: 'hours', label: 'Total Hours', type: 'checkbox' },
+        ],
+        answerSets: [{ key: 's', columnKeys: ['wo', 'plant', 'hours'] }],
+      };
+      const next = afterAction(grouped, (a) => a.setLabelColumn(grouped.id, true));
+      expect(next.fixedRows).toEqual(['']);
+      expect(next.columns?.[0]).toEqual({ key: 'wo', label: 'Work Order #', type: 'text' });
+      // wo left the set, leaving a still-valid two-member group.
+      expect(resolveAnswerSets(next).sets[0]?.columnKeys).toEqual(['plant', 'hours']);
+    });
+
+    it('is a no-op when the table is already in the requested state', () => {
+      let called = false;
+      builderColumnActions(table, () => {
+        called = true;
+      }).setLabelColumn(table.id, true);
+      expect(called).toBe(false);
+    });
+  });
+
+  describe('add / remove column', () => {
+    it('appends a fillable text column with a unique key', () => {
+      const next = afterAction(openTable, (a) => a.addColumn(openTable.id));
+      expect(next.columns).toHaveLength(4);
+      expect(next.columns?.at(-1)).toEqual({ key: 'col4', label: 'Column 4', type: 'text' });
+    });
+
+    it('removes a column and strips it from any answer set', () => {
+      const next = afterAction(table, (a) => a.removeColumn(table.id, 'na'));
+      expect(next.columns?.map((c) => c.key)).toEqual(['item', 'ok', 'no']);
+      expect(resolveAnswerSets(next).sets[0]?.columnKeys).toEqual(['ok', 'no']);
+    });
+
+    it('refuses to remove the checklist label column', () => {
+      const next = afterAction(table, (a) => a.removeColumn(table.id, 'item'));
+      expect(next.columns?.map((c) => c.key)).toEqual(['item', 'ok', 'no', 'na']);
+    });
   });
 });
