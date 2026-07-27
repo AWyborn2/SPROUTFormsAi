@@ -52,6 +52,45 @@ export function discardImpactOf(
 }
 
 /**
+ * What applying a whole patch of answers at once would discard.
+ *
+ * Voice's Smart Fill lands several answers in one action, and the single-field
+ * function above cannot describe that: run per mapping it asks the respondent
+ * up to N separate times, and each question is computed against the values as
+ * they were BEFORE any of the patch applied — so a mapping that only hides a
+ * section once an earlier mapping has landed is never counted, and one that
+ * hides a section the patch immediately re-answers is counted twice over. This
+ * evaluates visibility once, against the merged result, and asks once.
+ *
+ * Unlike a typed change there is no keystroke problem here — every value in the
+ * patch is a finished proposal — so `isCommittedChange` deliberately has no say
+ * over which patched fields are considered.
+ */
+export function discardImpactOfPatch(
+  fields: FormField[],
+  values: Record<string, SubmissionValue>,
+  patch: Record<string, SubmissionValue>,
+): DiscardImpact {
+  const ids = Object.keys(patch);
+  // Same cheap exit as the single-field path: nothing can hide unless the patch
+  // touches a field some rule reads.
+  if (!fields.some((f) => f.visibleWhen && ids.includes(f.visibleWhen.fieldId))) return NO_IMPACT;
+
+  const before = visibleFields(fields, values);
+  const after = new Set(visibleFields(fields, { ...values, ...patch }).map((f) => f.id));
+
+  // Judged on the PRE-patch answer on purpose: what is at stake is work the
+  // respondent already did. An answer the patch itself proposes and then hides
+  // was never theirs to lose, and warning about it would put a modal in front
+  // of a spoken sentence that cost them nothing.
+  const lost = before.filter(
+    (f) => f.type !== 'section_header' && !after.has(f.id) && holdsWork(f, values[f.id]),
+  );
+
+  return lost.length > 0 ? { fields: lost, count: lost.length } : NO_IMPACT;
+}
+
+/**
  * Whether a field carries work worth warning about — ANY answered content, not
  * a complete answer.
  *

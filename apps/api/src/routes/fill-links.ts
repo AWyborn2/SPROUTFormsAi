@@ -2,7 +2,9 @@ import { randomBytes } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
 import { and, desc, eq } from 'drizzle-orm';
-import { schema } from '@formai/db';
+import { PLAN_CONFIG, schema } from '@formai/db';
+import type { PlanTier } from '@formai/db';
+import type { FormField } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
@@ -17,6 +19,9 @@ import {
 // The authed POST /submissions validates with the same runtime schema —
 // single SubmissionValue contract, two doors.
 import { submissionValueSchema } from './submissions.js';
+// Smart Fill's authed door owns the mapper wiring and the transcript cap; this
+// file adds only the second, session-less way in.
+import { respondSmartFill, smartFillTranscriptSchema } from './voice.js';
 
 /**
  * Fill links — public distribution of a form template.
@@ -32,8 +37,11 @@ import { submissionValueSchema } from './submissions.js';
  * preserved because a submission pins the exact version the visitor filled
  * (the client echoes the `versionId` it was served).
  *
- * Residual risk (documented, deliberately out of scope for this unit): no
- * rate limiting on the public routes.
+ * Residual risk (documented, deliberately out of scope for this unit): no rate
+ * limiting on the public GET or on the public submit. That was written when
+ * every public route cost a lookup and an insert; `POST /:token/smart-fill`
+ * spends money per request, so it carries its own limit below rather than
+ * inheriting the gap.
  */
 export const formFillLinksRouter: Router = Router();
 export const publicFillRouter: Router = Router();
@@ -221,6 +229,58 @@ async function resolveLiveLink(token: string) {
   return link;
 }
 
+/**
+ * Whether the link's org is entitled to Smart Fill.
+ *
+ * Both public doors read the tier through here so the GET that decides whether
+ * to OFFER the mic and the POST that answers it cannot disagree: an entry point
+ * that 403s on press is worse than one that was never drawn. An unset or
+ * unrecognised tier falls back exactly as `requirePlanFeature` does.
+ */
+function orgSmartFillEnabled(planTier: string | null | undefined): boolean {
+  const tier = (planTier ?? 'business') as PlanTier;
+  return (PLAN_CONFIG[tier] ?? PLAN_CONFIG.business).features.smartFill;
+}
+
+/**
+ * Per-org ceiling on the session-less Smart Fill door.
+ *
+ * This is the first endpoint in the product that spends money with no session
+ * behind it: a fill link is a bearer token meant to be emailed, printed on a
+ * noticeboard or QR-coded, `expiresAt` may be null forever, and each accepted
+ * request bills the distributing org for one model call whose input carries a
+ * tool variant per form field. Without a counter, anyone the URL ever reaches
+ * can loop it — draining that org's budget and, because the whole deployment
+ * shares one memoized Anthropic client, pushing every other tenant's PDF
+ * extraction into 429s alongside it.
+ *
+ * Keyed on the link's ORG, not the caller. `req.ip` is worthless here — the app
+ * runs behind `trust proxy: true`, so the client picks its own value — and the
+ * token is attacker-chosen key space that would grow this map without bound.
+ * The org id is neither: it comes from a row the caller had to hold a live
+ * token to reach, and the org is the party actually being billed.
+ *
+ * The ceiling is deliberately far above real use (one press per respondent per
+ * form, spread over the minutes it takes to speak) so a busy crew never meets
+ * it, and a 429 degrades to the client's transient branch — the mic stays and
+ * the respondent types. Deliberately in-process, matching `scanRateLimited`:
+ * this API runs as a single instance today.
+ */
+const SMART_FILL_WINDOW_MS = 60_000;
+export const SMART_FILL_MAX_PER_WINDOW = 30;
+const smartFillHits = new Map<string, number[]>();
+
+function smartFillRateLimited(orgId: string, now = Date.now()): boolean {
+  const recent = (smartFillHits.get(orgId) ?? []).filter((t) => now - t < SMART_FILL_WINDOW_MS);
+  if (recent.length >= SMART_FILL_MAX_PER_WINDOW) {
+    smartFillHits.set(orgId, recent);
+    return true;
+  }
+  recent.push(now);
+  smartFillHits.set(orgId, recent);
+  return false;
+}
+
 publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
   if (!db) {
     res.status(503).json({ error: 'db_unavailable' });
@@ -252,7 +312,10 @@ publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
   }
 
   // Deliberately narrow payload: name + branding + the form itself. No org
-  // ids, plan, members, or anything else internal.
+  // ids, members, or anything else internal — and `smartFillEnabled` is a bare
+  // yes/no, never the tier or the feature map, because it exists only so the
+  // anonymous page can decide whether to draw a control, not to describe the
+  // org's plan to a stranger.
   //
   // The theme is resolved server-side (org theme <- this form's override) so
   // the public page receives one already-merged object and never has to apply
@@ -278,6 +341,7 @@ publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
     versionId: version.id,
     fields: version.fields,
     container: version.container,
+    smartFillEnabled: orgSmartFillEnabled(org?.planTier),
   });
 }));
 
@@ -408,4 +472,83 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
     status: row.status,
     createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
   });
+}));
+
+const publicSmartFillBody = z.object({
+  /**
+   * Transcript only. The form is identified by the token in the path, so a
+   * caller cannot hand the model field definitions of its own choosing.
+   */
+  transcript: smartFillTranscriptSchema,
+});
+
+/**
+ * Smart Fill on the public path — the paid tier, reached with no session.
+ *
+ * Plan enforcement is INLINE rather than `requirePlanFeature`, which reads
+ * `req.tenant` and so cannot run here at all. The link's `orgId` is the
+ * entitlement holder: the respondent is anonymous, but the org that
+ * distributed the link is the one paying for the AI call.
+ *
+ * Fields come from the same version `GET /fill/:token` serves — resolved now,
+ * not frozen at link creation — so a mapping's field ids are the ones the
+ * respondent's page was rendered from. A client holding a version that has
+ * since been replaced is safe by construction: the mapper drops every field id
+ * it does not recognise.
+ */
+publicFillRouter.post('/:token/smart-fill', withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const link = await resolveLiveLink(req.params.token!);
+  // Unknown, revoked and expired tokens answer identically to the sibling
+  // routes — a probe must not learn that a token once existed.
+  if (!link) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+  const parsed = publicSmartFillBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return;
+  }
+
+  // Counted here, once the request is one that could actually reach the model:
+  // a malformed body costs nothing to refuse, and charging it against the org
+  // would let a stranger lock out real respondents with junk.
+  if (smartFillRateLimited(link.orgId)) {
+    res.setHeader('Retry-After', String(Math.ceil(SMART_FILL_WINDOW_MS / 1000)));
+    res.status(429).json({ error: 'rate_limited' });
+    return;
+  }
+
+  const org = await db.query.organizations.findFirst({
+    where: eq(schema.organizations.id, link.orgId),
+  });
+  if (!orgSmartFillEnabled(org?.planTier)) {
+    // Names the feature but NOT the tier, and carries no upgrade copy: the
+    // authed 403 is addressed to someone who holds the plan, this one to an
+    // anonymous respondent who does not. GET /fill/:token discloses the same
+    // single boolean and no more, for the same reason.
+    res.status(403).json({ error: 'feature_not_available', feature: 'smartFill' });
+    return;
+  }
+
+  const template = await db.query.formTemplates.findFirst({
+    where: eq(schema.formTemplates.id, link.templateId),
+  });
+  const version = template?.currentVersionId
+    ? await db.query.formTemplateVersions.findFirst({
+        where: eq(schema.formTemplateVersions.id, template.currentVersionId),
+      })
+    : undefined;
+  // Nothing fillable is nothing to dictate into: same opaque 404 as GET.
+  if (!template || !version || version.state !== 'published') {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+
+  const fields: FormField[] = Array.isArray(version.fields) ? version.fields : [];
+  await respondSmartFill(res, { fields, transcript: parsed.data.transcript });
 }));

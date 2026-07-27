@@ -1,11 +1,17 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Icon, Input, useToast } from '@formai/ui';
-import type { SubmissionValue } from '@formai/shared';
+import type { SmartFillResult, SubmissionValue } from '@formai/shared';
 import { resolveTheme } from '@formai/shared';
 import { ApiError } from '../../lib/data/api-client.js';
-import { discardImpactOf, discardWarningMessage, isCommittedChange } from '../../lib/discard-warning.js';
-import { useFillForm, useSubmitFill } from '../../lib/data/hooks.js';
+import {
+  discardImpactOf,
+  discardImpactOfPatch,
+  discardWarningMessage,
+  isCommittedChange,
+} from '../../lib/discard-warning.js';
+import { useFillForm, usePublicSmartFill, useSubmitFill } from '../../lib/data/hooks.js';
+import { smartFillFailure } from '../../lib/voice/smart-fill.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
 import {
@@ -18,6 +24,7 @@ import { FormLayoutFrame } from './FormLayoutFrame.js';
 import { ConversationalFill } from './ConversationalFill.js';
 import {
   EMAIL_RE,
+  clearedErrors,
   requiredFieldErrors,
   requiredFieldsMissingIds,
   validateRequired,
@@ -39,14 +46,39 @@ import { ExternalShell } from './ExternalShell.js';
  * lives on the authed competency screen
  * (`screens/enterprise/CompetencyScreen.tsx`); fill-view gating would
  * return on an authed internal fill surface.
+ *
+ * Voice is offered here in two tiers and is only ever an enhancement: a mic on
+ * each field (free, transcribed on-device, no audio leaves the browser) and
+ * Smart Fill (paid), which posts one transcript and gets proposed answers back.
+ * Neither can submit — the same Submit button below is still the only way.
  */
 export function FillScreen() {
   const { token } = useParams<{ token: string }>();
   const { toast } = useToast();
   const { data: fill, isLoading, isError } = useFillForm(token);
   const submit = useSubmitFill();
+  const smartFill = usePublicSmartFill();
+  /**
+   * Entitlement comes from the served payload's `smartFillEnabled` — the one
+   * plan detail `GET /fill/:token` discloses, and only as a yes/no. This page
+   * is logged out, so there is no `useBilling()` to ask instead.
+   *
+   * `smartFillRetired` still exists on top of it for the failures a boolean
+   * cannot predict: no model configured server-side (422), or a plan that
+   * lapsed between the load and the press. Both are fixed for this page load,
+   * so the entry point goes away rather than staying to fail again.
+   */
+  const [smartFillRetired, setSmartFillRetired] = useState(false);
+  const smartFillOffered = (fill?.smartFillEnabled ?? false) && !smartFillRetired;
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
+  /**
+   * What `applyValues` weighs its discard warning against. Only the paths that
+   * resume after an `await` need it — a synchronous change handler's closure is
+   * current by definition — and the merge itself is functional either way.
+   */
+  const latestValues = useRef(values);
+  latestValues.current = values;
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitterName, setSubmitterName] = useState('');
   const [submitterEmail, setSubmitterEmail] = useState('');
@@ -71,6 +103,58 @@ export function FillScreen() {
 
     setValues((v) => ({ ...v, [fieldId]: value }));
     setErrors((e) => (e[fieldId] ? { ...e, [fieldId]: '' } : e));
+  }
+
+  /**
+   * Apply several answers as ONE change — Smart Fill's whole result.
+   *
+   * Deliberately not a loop over `setValue`. That raised a blocking
+   * `window.confirm` per mapping for a single spoken sentence, and every one of
+   * them weighed the change against the same pre-merge `values` closure, so
+   * each question described a form state that never existed and the later
+   * writes clobbered the earlier ones' reasoning. One merge, one discard check
+   * against the merged result, one prompt.
+   *
+   * Returns whether the patch was applied: a respondent who declines the
+   * discard warning has changed nothing, and the caller must not go on to
+   * report answers as filled.
+   */
+  function applyValues(patch: Record<string, SubmissionValue>): boolean {
+    const ids = Object.keys(patch);
+    if (ids.length === 0) return true;
+
+    // Read through the ref, not the closure: unlike `setValue` this is called
+    // from a promise the respondent kicked off seconds earlier, so the captured
+    // `values` may predate whatever they typed while the model was thinking.
+    const impact = discardImpactOfPatch(fill?.fields ?? [], latestValues.current, patch);
+    if (impact.count > 0 && !window.confirm(discardWarningMessage(impact))) return false;
+
+    setValues((v) => ({ ...v, ...patch }));
+    setErrors((e) => clearedErrors(e, ids));
+    return true;
+  }
+
+  /**
+   * Post one spoken description of the form and resolve the proposed answers.
+   * `null` means the attempt failed and the respondent has already been told —
+   * the caller applies nothing and the form is exactly as they left it.
+   *
+   * The transcript is text produced on-device; no audio is uploaded, and the
+   * link token stays the only credential this page holds.
+   */
+  async function runSmartFill(transcript: string): Promise<SmartFillResult | null> {
+    try {
+      return await smartFill.mutateAsync({ token: token!, transcript });
+    } catch (err) {
+      // A timed-out request surfaces as `ApiError(0)` (api-client's abort,
+      // raised to 60s for this endpoint — see SMART_FILL_TIMEOUT_MS), which
+      // lands on the transient branch — the mic stays and the respondent is
+      // told to try again or type, rather than the promise rejecting loose.
+      const failure = smartFillFailure(err instanceof ApiError ? err.status : 0);
+      if (failure.hide) setSmartFillRetired(true);
+      toast({ variant: failure.hide ? 'warning' : 'danger', message: failure.message });
+      return null;
+    }
   }
 
   function onSubmit(form: PublicFillForm) {
@@ -224,12 +308,16 @@ export function FillScreen() {
         {isConversational ? (
           <ConversationalFill
             fields={visibleFillFields(fill.fields, values)}
+            allFields={fill.fields}
             values={values}
             errors={errors}
             setValue={setValue}
+            applyValues={applyValues}
             onSubmit={() => onSubmit(fill)}
             submitting={submit.isPending}
             header={identityBlock}
+            dictation
+            smartFill={smartFillOffered ? runSmartFill : undefined}
           />
         ) : (
           <>
@@ -247,6 +335,7 @@ export function FillScreen() {
                     value={values[f.id] ?? null}
                     error={errors[f.id] || undefined}
                     incompleteRowIndexes={incompleteRows[f.id]}
+                    dictation
                     onChange={(v) => setValue(f.id, v)}
                   />
                 </div>

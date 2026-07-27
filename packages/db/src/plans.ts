@@ -12,6 +12,12 @@ export interface PlanFeatures {
   branding: boolean;
   /** Remove "Powered by" attribution / full white-label. Business+ only. */
   whiteLabel: boolean;
+  /**
+   * Smart Fill — AI mapping of a spoken transcript onto many fields at once.
+   * Business+ only. Gates the AI step alone: on-device dictation into a single
+   * field is free at every tier and never checks this.
+   */
+  smartFill: boolean;
   sso: boolean;
   auditExport: boolean;
   competencyGating: boolean;
@@ -28,6 +34,7 @@ export const PLAN_CONFIG: Record<PlanTier, PlanConfig> = {
     features: {
       branding: true,
       whiteLabel: false,
+      smartFill: false,
       sso: false,
       auditExport: false,
       competencyGating: false,
@@ -38,6 +45,7 @@ export const PLAN_CONFIG: Record<PlanTier, PlanConfig> = {
     features: {
       branding: true,
       whiteLabel: false,
+      smartFill: false,
       sso: false,
       auditExport: false,
       competencyGating: false,
@@ -48,6 +56,7 @@ export const PLAN_CONFIG: Record<PlanTier, PlanConfig> = {
     features: {
       branding: true,
       whiteLabel: true,
+      smartFill: true,
       sso: false,
       auditExport: true,
       competencyGating: false,
@@ -58,6 +67,7 @@ export const PLAN_CONFIG: Record<PlanTier, PlanConfig> = {
     features: {
       branding: true,
       whiteLabel: true,
+      smartFill: true,
       sso: true,
       auditExport: true,
       competencyGating: true,

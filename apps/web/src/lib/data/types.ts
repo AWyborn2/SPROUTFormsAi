@@ -192,11 +192,27 @@ export type PermState = Record<RoleName, Record<string, Partial<Record<PermActio
 
 export type PlanTier = 'individual' | 'team' | 'business' | 'enterprise';
 
+/**
+ * Mirror of `PlanFeatures` in `packages/db/src/plans.ts`, which `GET /org/billing`
+ * serves verbatim.
+ *
+ * Duplicated on purpose — `apps/web` does not depend on `@formai/db`, and it
+ * must not: pulling the DB package into the browser bundle would drag drizzle
+ * and the schema along with it. The cost is that the two definitions can drift,
+ * so a flag added there has to be added here in the same change or the payload
+ * quietly grows a key no screen can read.
+ */
 export interface PlanFeatures {
   /** Logo, colours and font on forms. Free at every tier (R9). */
   branding: boolean;
   /** Custom domain / sender address / badge removal. Business+ only. */
   whiteLabel: boolean;
+  /**
+   * Smart Fill — AI mapping of one spoken transcript onto many fields at once.
+   * Business+ only. Gates the AI step alone; on-device dictation into a single
+   * field is free at every tier and never reads this.
+   */
+  smartFill: boolean;
   sso: boolean;
   auditExport: boolean;
   competencyGating: boolean;
@@ -238,11 +254,6 @@ export interface FillLink {
   createdAt: string;
 }
 
-/**
- * What the public `GET /fill/:token` serves an anonymous visitor: the form
- * itself plus just enough org identity to brand the page. `versionId` pins
- * the exact published version served — the submit echoes it back.
- */
 /** What `GET /invites/:token` discloses before sign-in: enough to decide, nothing more. */
 export interface PublicInvite {
   orgName: string;
@@ -251,6 +262,11 @@ export interface PublicInvite {
   email: string;
 }
 
+/**
+ * What the public `GET /fill/:token` serves an anonymous visitor: the form
+ * itself plus just enough org identity to brand the page. `versionId` pins
+ * the exact published version served — the submit echoes it back.
+ */
 export interface PublicFillForm {
   formName: string;
   orgName: string;
@@ -258,6 +274,14 @@ export interface PublicFillForm {
   versionId: string;
   fields: FormField[];
   container: FormContainer;
+  /**
+   * Whether this org's plan includes Smart Fill. The only plan detail on the
+   * anonymous payload, and deliberately a bare boolean: this page has no
+   * session and no `useBilling()`, so without it the mic can only be offered
+   * optimistically and withdrawn after the first 403 — a control that fails on
+   * press. The tier itself stays server-side.
+   */
+  smartFillEnabled: boolean;
 }
 
 /**

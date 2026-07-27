@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Badge, Button, Icon, useToast } from '@formai/ui';
 import { useBilling, useSession, useUpdatePlan } from '../../lib/data/hooks.js';
-import type { PlanTier } from '../../lib/data/types.js';
+import type { PlanFeatures, PlanTier } from '../../lib/data/types.js';
 
 const TIER_LABELS: Record<PlanTier, string> = {
   individual: 'Individual',
@@ -10,8 +10,18 @@ const TIER_LABELS: Record<PlanTier, string> = {
   enterprise: 'Enterprise',
 };
 
-const FEATURE_LABELS: Record<string, string> = {
+/**
+ * Keyed by `PlanFeatures` rather than by `string` so adding an entitlement
+ * fails the build here instead of rendering its raw camelCase key on all four
+ * plan cards — which is exactly how `whiteLabel` and, briefly, `smartFill` got
+ * shown to owners.
+ */
+const FEATURE_LABELS: Record<keyof PlanFeatures, string> = {
   branding: 'Custom branding',
+  whiteLabel: 'White-label & custom domain',
+  // Not "voice": per-field dictation is free at every tier, so an X against
+  // anything voice-shaped here would read as a lie on the lower plans.
+  smartFill: 'Smart Fill (AI)',
   sso: 'SSO / SAML',
   auditExport: 'Audit log export',
   competencyGating: 'Competency gating',
@@ -113,7 +123,10 @@ export function BillingScreen() {
             Included features
           </div>
           <div className="grid grid-cols-2 gap-x-6 gap-y-1.5">
-            {(Object.entries(billing.features) as [string, boolean][]).map(([key, enabled]) => (
+            {/* The `?? key` below stays despite the exhaustive map: these are
+                runtime keys off the wire, so a server that ships a flag ahead
+                of the client still renders something rather than blank. */}
+            {(Object.entries(billing.features) as [keyof PlanFeatures, boolean][]).map(([key, enabled]) => (
               <div key={key} className="flex items-center gap-2">
                 <span style={{ color: enabled ? 'var(--accent)' : 'var(--text-tertiary)' }}>
                   <Icon name={enabled ? 'check' : 'x'} size={13} />
@@ -166,7 +179,7 @@ export function BillingScreen() {
               </div>
 
               <div className="mb-4 flex-1 space-y-1">
-                {(Object.entries(config.features) as [string, boolean][]).map(([key, on]) => (
+                {(Object.entries(config.features) as [keyof PlanFeatures, boolean][]).map(([key, on]) => (
                   <div key={key} className="flex items-center gap-1.5">
                     <span style={{ color: on ? 'var(--accent)' : 'var(--text-tertiary)', flexShrink: 0 }}>
                       <Icon name={on ? 'check' : 'x'} size={11} />

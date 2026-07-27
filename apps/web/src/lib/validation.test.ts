@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FormField } from '@formai/shared';
 import {
+  clearedErrors,
   inputFields,
   requiredFieldErrors,
   requiredFieldsMissingIds,
@@ -115,5 +116,29 @@ describe('incompleteRowsByFieldFrom', () => {
         incompleteRows: { good: [0, 2], bad: ['x', -1, 1.5], empty: [] },
       }),
     ).toEqual({ good: [0, 2] });
+  });
+});
+
+describe('clearedErrors', () => {
+  it('blanks every named field that was carrying an error', () => {
+    expect(clearedErrors({ name: 'This field is required', notes: 'Too long' }, ['name', 'notes'])).toEqual({
+      name: '',
+      notes: '',
+    });
+  });
+
+  it('leaves fields it was not asked about alone', () => {
+    expect(clearedErrors({ name: 'This field is required', notes: 'Too long' }, ['name'])).toEqual({
+      name: '',
+      notes: 'Too long',
+    });
+  });
+
+  // Identity, not equality: the result goes straight into `setErrors`, and a
+  // new object for a no-op re-renders the field the respondent is typing in.
+  it('returns the same object when none of the named fields had an error', () => {
+    const errors = { name: 'This field is required' };
+    expect(clearedErrors(errors, ['notes', 'consent'])).toBe(errors);
+    expect(clearedErrors(errors, [])).toBe(errors);
   });
 });

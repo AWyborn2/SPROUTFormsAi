@@ -46,3 +46,4 @@ export {
 export { SignaturePad, type SignaturePadProps } from './components/SignaturePad.js';
 export { FileDropzone, type FileDropzoneProps } from './components/FileDropzone.js';
 export { DateTimePicker, type DateTimePickerProps } from './components/DateTimePicker.js';
+export { MicButton, type MicButtonProps, type MicButtonStatus } from './components/MicButton.js';
