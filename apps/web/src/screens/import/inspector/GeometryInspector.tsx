@@ -121,11 +121,17 @@ export function GeometryInspector({ field, textPages, activeDrawSlot = null, onT
 
   // Seed an even grid the reviewer then corrects — the manual fallback (AE6).
   // Rows default to the extracted row count, or three to start when unknown.
+  //
+  // A CHECKLIST reserves its pre-printed first column (label text we don't
+  // place); an OPEN table has no such column, so ALL columns are banded — the
+  // first one ("Work Order #") included, or its cells would never export.
   const seedGrid = (box: PageBox) => {
-    const optionKeys = (field.columns ?? []).slice(1).map((c) => c.key);
+    const isChecklist = (field.fixedRows?.length ?? 0) > 0;
+    const bandColumns = isChecklist ? (field.columns ?? []).slice(1) : (field.columns ?? []);
+    const optionKeys = bandColumns.map((c) => c.key);
     const rowCount = field.fixedRows?.length && field.fixedRows.length > 0 ? field.fixedRows.length : 3;
     const rowKeys = Array.from({ length: rowCount }, (_, i) => `r${i}`);
-    proposeGeometry(field.id, evenGrid(box, optionKeys, rowKeys));
+    proposeGeometry(field.id, evenGrid(box, optionKeys, rowKeys, isChecklist));
     setSeedNote(null);
   };
 
