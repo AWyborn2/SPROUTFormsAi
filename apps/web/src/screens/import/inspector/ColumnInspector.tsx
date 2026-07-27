@@ -22,7 +22,7 @@
  */
 import { useState } from 'react';
 import { Icon, Select, Switch } from '@formai/ui';
-import type { AnswerSet, FormField, FormFieldType, RepeatingColumn } from '@formai/shared';
+import type { AnswerSet, ColumnCalc, FormField, FormFieldType, RepeatingColumn } from '@formai/shared';
 import { resolveAnswerSets } from '@formai/shared';
 /**
  * The panel needs only these three properties, and taking them structurally is
@@ -69,6 +69,8 @@ export interface ColumnActions {
   removeColumn(fieldId: string, columnKey: string): void;
   /** Move a column one place left (-1) or right (1) in the printed order. */
   moveColumn(fieldId: string, columnKey: string, dir: -1 | 1): void;
+  /** Set (or clear, with null) a column's auto-calculation. */
+  setColumnCalc(fieldId: string, columnKey: string, calc: ColumnCalc | null): void;
 }
 
 /** Types a table cell can sensibly take (a column is never a section header). */
@@ -85,6 +87,8 @@ const COLUMN_TYPE_OPTIONS: Array<{ label: string; value: FormFieldType }> = [
   { label: 'Dropdown', value: 'dropdown' },
   { label: 'Number', value: 'number' },
   { label: 'Date', value: 'date' },
+  /* Time of day (HH:MM) with a "Now" stamp button on fill surfaces. */
+  { label: 'Time', value: 'time' },
   { label: 'Signature', value: 'signature' },
 ];
 
@@ -299,6 +303,17 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
                 onChange={actions.setColumnOptions}
               />
             )}
+
+            {/* index 0 is the row-identity column in both table kinds — the
+                calc action refuses it, so the editor never offers it. */}
+            {row.index !== 0 && (
+              <ColumnCalcEditor
+                fieldId={field.id}
+                column={row.column}
+                columns={field.columns ?? []}
+                onChange={actions.setColumnCalc}
+              />
+            )}
           </div>
         ))}
       </div>
@@ -370,6 +385,109 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Auto-calculation config for one column: none, or "Total hours"
+ * (finish − start − lunch, lunch optional).
+ *
+ * Offered only where it can compute — the table needs at least two TIME
+ * columns to be the start and finish — except that an EXISTING calc always
+ * renders, even dangling (a referenced column retyped or removed), so it can
+ * be seen and cleared rather than silently doing nothing. Lunch may be a time
+ * column (HH:MM duration) or a number column (decimal hours); blank/zero
+ * subtracts nothing.
+ */
+function ColumnCalcEditor({
+  fieldId,
+  column,
+  columns,
+  onChange,
+}: {
+  fieldId: string;
+  column: RepeatingColumn;
+  columns: RepeatingColumn[];
+  onChange: (fieldId: string, columnKey: string, calc: ColumnCalc | null) => void;
+}) {
+  const timeColumns = columns.filter((c) => c.type === 'time' && c.key !== column.key);
+  const lunchColumns = columns.filter(
+    (c) => (c.type === 'time' || c.type === 'number') && c.key !== column.key && !c.calc,
+  );
+  const calc = column.calc;
+  if (!calc && timeColumns.length < 2) return null;
+
+  const timeOptions = timeColumns.map((c) => ({ label: c.label, value: c.key }));
+  /** The stored calc, or a fresh one seeded from the first two time columns. */
+  const base = (): ColumnCalc => ({
+    kind: 'total_hours',
+    startKey: calc?.startKey ?? timeColumns[0]!.key,
+    finishKey: calc?.finishKey ?? timeColumns[1]?.key ?? timeColumns[0]!.key,
+    ...(calc?.lunchKey !== undefined ? { lunchKey: calc.lunchKey } : {}),
+  });
+  const write = (patch: Partial<ColumnCalc>) => onChange(fieldId, column.key, { ...base(), ...patch });
+  const clearLunch = () => {
+    const { lunchKey: _dropped, ...rest } = base();
+    onChange(fieldId, column.key, rest as ColumnCalc);
+  };
+
+  return (
+    <div className="mt-1.5 rounded-sm border border-border-subtle bg-surface-card p-[8px_9px]">
+      <div className="flex items-center gap-2">
+        <span className="flex-1 text-[11px] font-semibold text-text-secondary">
+          Auto-calculate
+        </span>
+        <div className="w-[150px]">
+          <Select
+            options={[
+              { label: 'None', value: 'none' },
+              { label: 'Total hours', value: 'total_hours' },
+            ]}
+            value={calc ? 'total_hours' : 'none'}
+            onChange={(e) =>
+              e.target.value === 'none' ? onChange(fieldId, column.key, null) : write({})
+            }
+            aria-label={`Auto-calculate: ${column.label}`}
+          />
+        </div>
+      </div>
+      {calc && (
+        <div className="mt-1.5 flex flex-col gap-1.5">
+          <p className="text-[10.5px] leading-snug text-text-tertiary">
+            Finish − start − lunch, in decimal hours. The cell fills itself and can&apos;t be
+            typed into. Lunch left blank or zero subtracts nothing.
+          </p>
+          <div className="grid grid-cols-3 gap-1.5">
+            <Select
+              label="Start"
+              options={timeOptions}
+              value={calc.startKey}
+              onChange={(e) => write({ startKey: e.target.value })}
+              aria-label={`Total hours start column: ${column.label}`}
+            />
+            <Select
+              label="Finish"
+              options={timeOptions}
+              value={calc.finishKey}
+              onChange={(e) => write({ finishKey: e.target.value })}
+              aria-label={`Total hours finish column: ${column.label}`}
+            />
+            <Select
+              label="Lunch"
+              options={[
+                { label: 'None', value: '' },
+                ...lunchColumns.map((c) => ({ label: c.label, value: c.key })),
+              ]}
+              value={calc.lunchKey ?? ''}
+              onChange={(e) =>
+                e.target.value === '' ? clearLunch() : write({ lunchKey: e.target.value })
+              }
+              aria-label={`Total hours lunch column: ${column.label}`}
+            />
+          </div>
         </div>
       )}
     </div>

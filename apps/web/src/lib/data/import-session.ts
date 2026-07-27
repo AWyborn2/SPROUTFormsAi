@@ -12,6 +12,7 @@
 import { useSyncExternalStore } from 'react';
 import type {
   AnswerSet,
+  ColumnCalc,
   ExtractedField,
   ExtractionResult,
   ExtractionStatus,
@@ -834,6 +835,14 @@ export function setColumnType(id: string, key: string, type: FormFieldType): voi
       c.key === key ? { ...c, options: ['Option 1', 'Option 2'] } : c,
     );
   }
+  // An explicit retype of an auto-calculated column is the reviewer saying
+  // "this is a plain cell now" — keeping the calc would leave the new cell
+  // read-only and self-overwriting, an edit that visibly does nothing.
+  patch.columns = (patch.columns ?? columns).map((c) => {
+    if (c.key !== key || !c.calc) return c;
+    const { calc: _dropped, ...rest } = c;
+    return rest;
+  });
   dispatchStructural({ t: 'update', id, patch });
 }
 
@@ -843,6 +852,29 @@ export function setColumnOptions(id: string, key: string, options: string[]): vo
   const columns = patchColumn(id, key, { options });
   if (!columns) return;
   dispatchStructural({ t: 'update', id, patch: { columns } });
+}
+
+/**
+ * Set (or clear, with null) a column's auto-calculation.
+ *
+ * The config references other columns BY KEY (`startKey`/`finishKey`/
+ * `lunchKey`), so it survives renames and reorders for free. A referenced
+ * column later removed or retyped leaves the calc unable to compute —
+ * `totalHoursFor` returns null and the cell reads blank, which is visible and
+ * correctable in this same panel rather than silently wrong.
+ */
+export function setColumnCalc(id: string, key: string, calc: ColumnCalc | null): void {
+  const columns = columnsOf(id);
+  // `columns[0]` is the row-identity column in BOTH table kinds — a computed
+  // row label would collapse every row's identity to a number. The builder
+  // host refuses the same key; the two must agree.
+  if (!columns.some((c) => c.key === key) || key === columns[0]?.key) return;
+  const next = columns.map((c) => {
+    if (c.key !== key) return c;
+    const { calc: _dropped, ...rest } = c;
+    return calc ? { ...rest, calc } : rest;
+  });
+  dispatchStructural({ t: 'update', id, patch: { columns: next } });
 }
 
 /** One column of a reviewed repeating field, by key. */
