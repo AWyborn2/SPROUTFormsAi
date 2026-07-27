@@ -120,6 +120,7 @@ pdfRouter.post(
         fileName: parsed.data.fileName,
         anthropic,
         model: env.ANTHROPIC_EXTRACTION_MODEL,
+        pageBatchSize: env.ANTHROPIC_EXTRACTION_PAGE_BATCH,
       });
       res.json(result);
     } catch (err) {
@@ -187,7 +188,9 @@ pdfRouter.post(
     const version = await db.query.formTemplateVersions.findFirst({
       where: eq(schema.formTemplateVersions.id, submission.templateVersionId),
     });
-    const fields: FormField[] = Array.isArray(version?.fields) ? (version.fields as FormField[]) : [];
+    const fields: FormField[] = Array.isArray(version?.fields)
+      ? (version.fields as FormField[])
+      : [];
     if (!version?.sourcePdfAssetId) {
       // Built-from-scratch (or AI-extracted) forms have no original page to
       // draw on. Well-formed request, unprocessable subject: 422.

@@ -1,12 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AnthropicMessage } from './extract.js';
-import { EXTRACTION_MAX_TOKENS, extractForm, parseExtractionResponse } from './extract.js';
+import {
+  EXTRACTION_MAX_TOKENS,
+  EXTRACTION_PAGE_BATCH_SIZE,
+  extractForm,
+  parseExtractionResponse,
+} from './extract.js';
 import { EXTRACT_TOOL_NAME } from './tool-schema.js';
 import {
   makeAcroFormPdf,
   makeAcroFormPdfWithoutPageRef,
   makeFlatPdf,
   makeMultiPageAcroFormPdf,
+  makeMultiPageFlatPdf,
 } from './test-pdfs.js';
 
 /** The structured extraction a dense checklist should yield. */
@@ -38,9 +44,7 @@ const CHECKLIST_RESULT = {
 
 function toolUseResponse(): AnthropicMessage {
   return {
-    content: [
-      { type: 'tool_use', name: EXTRACT_TOOL_NAME, input: CHECKLIST_RESULT },
-    ],
+    content: [{ type: 'tool_use', name: EXTRACT_TOOL_NAME, input: CHECKLIST_RESULT }],
   };
 }
 
@@ -113,8 +117,95 @@ describe('extractForm — flat PDF AI path', () => {
   });
 
   it('errors when neither a tool_use block nor JSON is present', () => {
-    const message: AnthropicMessage = { content: [{ type: 'text', text: 'I could not read this.' }] };
+    const message: AnthropicMessage = {
+      content: [{ type: 'text', text: 'I could not read this.' }],
+    };
     expect(() => parseExtractionResponse(message)).toThrow(/extraction_failed/);
+  });
+});
+
+describe('extractForm — AI path page batching', () => {
+  /** A tool_use response carrying one text field per label. */
+  function fieldsResponse(labels: string[]): AnthropicMessage {
+    return {
+      content: [
+        {
+          type: 'tool_use',
+          name: EXTRACT_TOOL_NAME,
+          input: {
+            fields: labels.map((label) => ({ label, type: 'text', confidence: 0.9 })),
+            designNotes: [],
+          },
+        },
+      ],
+    };
+  }
+
+  it('leaves a document no longer than one group as a single call', async () => {
+    const pdf = await makeMultiPageFlatPdf(EXTRACTION_PAGE_BATCH_SIZE);
+    const create = vi.fn().mockResolvedValue(fieldsResponse(['Only field']));
+
+    const result = await extractForm(pdf, {
+      fileName: 'short.pdf',
+      anthropic: { messages: { create } },
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    // No batching note when the whole document fits in one group.
+    expect(result.designNotes.some((n) => /page-groups/.test(n))).toBe(false);
+    expect(result.fields.map((f) => f.label)).toEqual(['Only field']);
+  });
+
+  it('splits a longer document into groups and merges the fields in page order', async () => {
+    const pdf = await makeMultiPageFlatPdf(5); // batchSize 2 → 3 groups
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce(fieldsResponse(['A1', 'A2']))
+      .mockResolvedValueOnce(fieldsResponse(['B1']))
+      .mockResolvedValueOnce(fieldsResponse(['C1', 'C2']));
+
+    const result = await extractForm(pdf, {
+      fileName: 'long.pdf',
+      anthropic: { messages: { create } },
+      pageBatchSize: 2,
+    });
+
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(result.pageCount).toBe(5);
+    expect(result.fields.map((f) => f.label)).toEqual(['A1', 'A2', 'B1', 'C1', 'C2']);
+    // Ids are re-sequenced globally so nothing collides across groups.
+    expect(result.fields.map((f) => f.id)).toEqual(['ai_1', 'ai_2', 'ai_3', 'ai_4', 'ai_5']);
+    expect(result.designNotes.some((n) => /read in 3 page-groups/.test(n))).toBe(true);
+  });
+
+  it('skips a failed group with a note naming the page range, keeping the rest', async () => {
+    const pdf = await makeMultiPageFlatPdf(4); // batchSize 2 → 2 groups
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce(fieldsResponse(['A1', 'A2']))
+      .mockRejectedValueOnce(new Error('boom'));
+
+    const result = await extractForm(pdf, {
+      fileName: 'partial.pdf',
+      anthropic: { messages: { create } },
+      pageBatchSize: 2,
+    });
+
+    expect(result.fields.map((f) => f.label)).toEqual(['A1', 'A2']);
+    expect(result.designNotes.some((n) => /Pages 3–4 could not be extracted/.test(n))).toBe(true);
+  });
+
+  it('errors when every group fails, rather than returning an empty form', async () => {
+    const pdf = await makeMultiPageFlatPdf(4); // batchSize 2 → 2 groups
+    const create = vi.fn().mockRejectedValue(new Error('boom'));
+
+    await expect(
+      extractForm(pdf, {
+        fileName: 'all-fail.pdf',
+        anthropic: { messages: { create } },
+        pageBatchSize: 2,
+      }),
+    ).rejects.toThrow(/extraction_failed/);
   });
 });
 
@@ -148,7 +239,10 @@ describe('extractForm — fixedRows normalization', () => {
       }),
     );
 
-    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+    const result = await extractForm(pdf, {
+      fileName: 'flat.pdf',
+      anthropic: { messages: { create } },
+    });
 
     expect(result.fields[0]?.fixedRows).toEqual(FIXED_ROWS);
   });
@@ -157,7 +251,10 @@ describe('extractForm — fixedRows normalization', () => {
     const pdf = await makeFlatPdf();
     const create = vi.fn().mockResolvedValue(toolUseResponse());
 
-    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+    const result = await extractForm(pdf, {
+      fileName: 'flat.pdf',
+      anthropic: { messages: { create } },
+    });
 
     expect(result.fields.every((f) => f.fixedRows === undefined)).toBe(true);
   });
@@ -174,7 +271,10 @@ describe('extractForm — fixedRows normalization', () => {
       }),
     );
 
-    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+    const result = await extractForm(pdf, {
+      fileName: 'flat.pdf',
+      anthropic: { messages: { create } },
+    });
 
     expect(result.fields[0]?.fixedRows).toBeUndefined();
   });
@@ -194,7 +294,10 @@ describe('extractForm — fixedRows normalization', () => {
       }),
     );
 
-    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+    const result = await extractForm(pdf, {
+      fileName: 'flat.pdf',
+      anthropic: { messages: { create } },
+    });
 
     const columns = result.fields[0]?.columns;
     expect(columns?.[0]).toEqual({ key: 'item', label: 'Item', type: 'text' });
@@ -231,7 +334,10 @@ describe('extractForm — fixedRows normalization', () => {
       ],
     } satisfies AnthropicMessage);
 
-    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+    const result = await extractForm(pdf, {
+      fileName: 'flat.pdf',
+      anthropic: { messages: { create } },
+    });
 
     expect('required' in result.fields[0]!).toBe(false);
     expect(result.fields[1]?.required).toBe(false);
@@ -252,7 +358,10 @@ describe('extractForm — fixedRows normalization', () => {
       }),
     );
 
-    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+    const result = await extractForm(pdf, {
+      fileName: 'flat.pdf',
+      anthropic: { messages: { create } },
+    });
 
     const columns = result.fields[0]?.columns;
     // A duplicate 'item' key would make the seeded label readable as an answer.
@@ -271,7 +380,10 @@ describe('extractForm — fixedRows normalization', () => {
       }),
     );
 
-    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+    const result = await extractForm(pdf, {
+      fileName: 'flat.pdf',
+      anthropic: { messages: { create } },
+    });
 
     expect(result.fields[0]?.columns?.[0]).toEqual({ key: 'item', label: 'Item', type: 'text' });
     expect(result.fields[0]?.fixedRows).toEqual(FIXED_ROWS);
@@ -329,7 +441,9 @@ describe('extractForm — columnGroups (side-by-side checklist hint, U1)', () =>
 
   it('synthesises a designNote pointing the reviewer at the split control', async () => {
     const result = await extract(checklist({ columnGroups: 3 }));
-    expect(result.designNotes.some((n) => /side-by-side groups/.test(n) && /split/.test(n))).toBe(true);
+    expect(result.designNotes.some((n) => /side-by-side groups/.test(n) && /split/.test(n))).toBe(
+      true,
+    );
   });
 
   it('adds no split note for a single-column checklist', async () => {
@@ -337,7 +451,7 @@ describe('extractForm — columnGroups (side-by-side checklist hint, U1)', () =>
     expect(result.designNotes.some((n) => /side-by-side/.test(n))).toBe(false);
   });
 
-  it('preserves the model-emitted fixedRows order verbatim (column-major is the model\'s job)', async () => {
+  it("preserves the model-emitted fixedRows order verbatim (column-major is the model's job)", async () => {
     const result = await extract(checklist({ columnGroups: 3 }));
     expect(result.fields[0]?.fixedRows).toEqual(SIX);
   });
@@ -460,7 +574,10 @@ describe('extractForm — answerSets proposals', () => {
     const pdf = await makeFlatPdf();
     const create = vi.fn().mockResolvedValue(toolUseResponse());
 
-    const result = await extractForm(pdf, { fileName: 'flat.pdf', anthropic: { messages: { create } } });
+    const result = await extractForm(pdf, {
+      fileName: 'flat.pdf',
+      anthropic: { messages: { create } },
+    });
 
     expect(result.fields.every((f) => f.answerSets === undefined)).toBe(true);
   });

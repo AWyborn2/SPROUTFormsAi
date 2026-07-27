@@ -4,6 +4,7 @@ export {
   parseExtractionResponse,
   parseJsonFence,
   EXTRACTION_MAX_TOKENS,
+  EXTRACTION_PAGE_BATCH_SIZE,
   type AnthropicLike,
   type AnthropicMessage,
   type ExtractOptions,
