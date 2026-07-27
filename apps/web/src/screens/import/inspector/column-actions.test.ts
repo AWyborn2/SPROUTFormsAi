@@ -201,6 +201,34 @@ describe('builderColumnActions', () => {
     });
   });
 
+  describe('setColumnCalc', () => {
+    /** A timesheet-shaped open table: two time columns and a total. */
+    const timesheet: FormField = {
+      ...openTable,
+      columns: [
+        { key: 'wo', label: 'Work Order #', type: 'text' },
+        { key: 'start', label: 'Start Time', type: 'time' },
+        { key: 'finish', label: 'Finish Time', type: 'time' },
+        { key: 'total', label: 'Total Hours', type: 'number' },
+      ],
+    };
+    const calc = { kind: 'total_hours', startKey: 'start', finishKey: 'finish' } as const;
+
+    it('sets and clears a column calc', () => {
+      const withCalc = afterAction(timesheet, (a) => a.setColumnCalc(timesheet.id, 'total', calc));
+      expect(withCalc.columns?.find((c) => c.key === 'total')?.calc).toEqual(calc);
+
+      const cleared = afterAction(withCalc, (a) => a.setColumnCalc(timesheet.id, 'total', null));
+      expect(cleared.columns?.find((c) => c.key === 'total')?.calc).toBeUndefined();
+    });
+
+    it('retyping a calc column drops its calc', () => {
+      const withCalc = afterAction(timesheet, (a) => a.setColumnCalc(timesheet.id, 'total', calc));
+      const retyped = afterAction(withCalc, (a) => a.setColumnType(withCalc.id, 'total', 'text'));
+      expect(retyped.columns?.find((c) => c.key === 'total')?.calc).toBeUndefined();
+    });
+  });
+
   describe('moveColumn', () => {
     it('reorders columns in an open table, keys (and any sets) intact', () => {
       const next = afterAction(openTable, (a) => a.moveColumn(openTable.id, 'plant', -1));

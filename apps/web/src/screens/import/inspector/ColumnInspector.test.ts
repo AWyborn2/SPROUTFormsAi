@@ -26,6 +26,7 @@ import {
   moveColumn,
   removeColumn,
   renameColumn,
+  setColumnCalc,
   resetImportSession,
   reviewedToFields,
   setColumnRequired,
@@ -286,6 +287,27 @@ describe('label-column override and add/remove column', () => {
     expect(field('t1').columns![0]!.key).toBe('item');
     moveColumn('t1', 'ok', -1);
     expect(field('t1').columns!.map((c) => c.key)).toEqual(['item', 'ok', 'na', 'fault', 'spare', 'notes']);
+  });
+
+  it('sets a total-hours calc, publishes it, and drops it on retype', () => {
+    // Make t2 a timesheet: retype two cells to time, then calc the note column.
+    setColumnType('t2', 'yes', 'time');
+    setColumnType('t2', 'no', 'time');
+    const calc = { kind: 'total_hours' as const, startKey: 'yes', finishKey: 'no' };
+    setColumnCalc('t2', 'note', calc);
+
+    expect(field('t2').columns!.find((c) => c.key === 'note')!.calc).toEqual(calc);
+    // The calc crosses the publish boundary with its column.
+    expect(published('t2').columns!.find((c) => c.key === 'note')!.calc).toEqual(calc);
+
+    // Retyping the calc column clears it.
+    setColumnType('t2', 'note', 'number');
+    expect(field('t2').columns!.find((c) => c.key === 'note')!.calc).toBeUndefined();
+    // The row-identity column refuses a calc in both table kinds.
+    setColumnCalc('t2', 'desc', calc); // open table's first column
+    expect(field('t2').columns![0]!.calc).toBeUndefined();
+    setColumnCalc('t1', 'item', calc); // checklist label column
+    expect(field('t1').columns![0]!.calc).toBeUndefined();
   });
 
   it('exposes move affordances that honor the pinned first column', () => {

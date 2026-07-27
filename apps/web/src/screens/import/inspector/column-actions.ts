@@ -6,7 +6,7 @@
  * reducer. Keeping both adapters here means the difference between the two is
  * one small file rather than two diverging copies of the panel.
  */
-import type { FormField, FormFieldType, VisibilityCondition } from '@formai/shared';
+import type { ColumnCalc, FormField, FormFieldType, VisibilityCondition } from '@formai/shared';
 import {
   acceptAnswerSet,
   addColumn,
@@ -15,6 +15,7 @@ import {
   moveColumn,
   removeColumn,
   renameColumn,
+  setColumnCalc,
   setColumnRequired,
   setColumnOptions,
   setColumnType,
@@ -39,6 +40,7 @@ export const importSessionColumnActions: ColumnActions = {
   addColumn,
   removeColumn,
   moveColumn,
+  setColumnCalc,
 };
 
 /** Pre-publish: the condition is written into the reviewed field list. */
@@ -104,8 +106,15 @@ export function builderColumnActions(
       const existing = field.columns?.find((c) => c.key === columnKey)?.options;
       const options =
         CHOICE_COLUMN_TYPES.has(type) && !existing?.length ? SEEDED_OPTIONS : existing;
+      const patched = patchColumn(field, columnKey, { type, ...(options ? { options } : {}) });
       update({
-        ...patchColumn(field, columnKey, { type, ...(options ? { options } : {}) }),
+        // Retyping a calc column drops its calc — the session host does the
+        // same; the two must agree.
+        columns: (patched.columns ?? []).map((c) => {
+          if (c.key !== columnKey || !c.calc) return c;
+          const { calc: _dropped, ...rest } = c;
+          return rest;
+        }),
         answerSets: remaining,
       });
     },
@@ -172,6 +181,17 @@ export function builderColumnActions(
       const next = columns.slice();
       [next[i], next[j]] = [next[j]!, next[i]!];
       update({ columns: next });
+    },
+    setColumnCalc: (_id, columnKey, calc) => {
+      const columns = cols();
+      if (!columns.some((c) => c.key === columnKey) || columnKey === rowIdentityKey) return;
+      update({
+        columns: columns.map((c) => {
+          if (c.key !== columnKey) return c;
+          const { calc: _dropped, ...rest } = c;
+          return calc ? { ...rest, calc } : rest;
+        }),
+      });
     },
   };
 }
