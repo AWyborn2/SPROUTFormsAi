@@ -30,10 +30,15 @@ import {
   stepZoom,
 } from '../../lib/pdf-zoom.js';
 
-// Vite resolves the worker asset to a served URL.
-import workerSrc from 'pdfjs-dist/build/pdf.worker.mjs?url';
-
-pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
+// Load the pdf.js worker from a CDN URL pinned to the installed pdfjs-dist
+// version. Vite's `?url` import resolves to an `/@fs/` path in dev, which
+// breaks the worker's internal dynamic imports (Vite rewrites them with
+// `?import`, unresolvable from a Worker context behind the dev-server proxy).
+// A direct CDN URL is an absolute, always-reachable location that sidesteps
+// `/@fs/` resolution entirely, and the pinned version keeps the worker and
+// library compatible.
+pdfjs.GlobalWorkerOptions.workerSrc =
+  'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.1.200/build/pdf.worker.mjs';
 
 /**
  * Pages are rasterised once at this scale and then CSS-scaled to the current
