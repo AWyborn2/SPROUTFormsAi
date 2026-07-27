@@ -4,9 +4,22 @@
  * so the async data source stays behind the seam: Query gives them loading /
  * error state, caching, and invalidation on mutation.
  */
-import { QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { BrandingKit, FormContainer, FormField, SessionInfo, SubmissionValue } from '@formai/shared';
-import { apiClient } from './api-client.js';
+import {
+  MutationCache,
+  QueryCache,
+  QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
+import type {
+  BrandingKit,
+  FormContainer,
+  FormField,
+  SessionInfo,
+  SubmissionValue,
+} from '@formai/shared';
+import { ApiError, apiClient } from './api-client.js';
 import { store } from './store.js';
 import type {
   FormDetail,
@@ -20,10 +33,29 @@ import type {
   SubmissionRow,
 } from './types.js';
 
+/**
+ * A 401 from any request means the `fai_session` cookie has expired or gone
+ * missing mid-session. The route guards (`RequireAuth`) only re-decide when the
+ * cached session changes, so without this a stale-but-truthy session left the
+ * user on `/app` while every request quietly 401'd — surfacing as misleading
+ * per-feature errors like the import wizard's generic "Import failed". Clearing
+ * the cached session flips `useSession` to unauthenticated, which redirects to
+ * `/login` where the cookie is re-minted. `/auth/me`'s own logged-out 401 lands
+ * here too, but setting the session to undefined there is exactly what already
+ * happens — idempotent, and it triggers no refetch, so there is no loop.
+ */
+function handleUnauthorized(error: unknown): void {
+  if (error instanceof ApiError && error.status === 401) {
+    queryClient.setQueryData(keys.session, undefined);
+  }
+}
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: { staleTime: 30_000, refetchOnWindowFocus: false, retry: false },
   },
+  queryCache: new QueryCache({ onError: handleUnauthorized }),
+  mutationCache: new MutationCache({ onError: handleUnauthorized }),
 });
 
 const keys = {
@@ -181,8 +213,12 @@ export function usePublishImport() {
 export function useCreateVersionFromImport() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { formId: string; fields: FormField[]; sourcePdfAssetId?: string; publish: boolean }) =>
-      store.createVersionFromImport(input),
+    mutationFn: async (input: {
+      formId: string;
+      fields: FormField[];
+      sourcePdfAssetId?: string;
+      publish: boolean;
+    }) => store.createVersionFromImport(input),
     onSuccess: (_summary, input) => {
       qc.invalidateQueries({ queryKey: keys.forms });
       qc.invalidateQueries({ queryKey: keys.form(input.formId) });
@@ -195,7 +231,8 @@ export function useCreateVersionFromImport() {
 export function usePublishFormVersion() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { formId: string; versionId: string }) => store.publishFormVersion(input),
+    mutationFn: async (input: { formId: string; versionId: string }) =>
+      store.publishFormVersion(input),
     onSuccess: (_summary, input) => {
       qc.invalidateQueries({ queryKey: keys.forms });
       qc.invalidateQueries({ queryKey: keys.form(input.formId) });
