@@ -1125,6 +1125,28 @@ export function removeColumn(id: string, key: string): void {
   });
 }
 
+/**
+ * Move a column one place left (-1) or right (1) in the printed order.
+ *
+ * Column identity is the `key`, so answer sets and row values are untouched by a
+ * reorder — only the display/placement order changes. `columns[0]` is pinned:
+ * on a checklist it is the pre-printed label, and everywhere it is the
+ * row-identity column, so it cannot move and nothing may move past it into
+ * index 0. An out-of-range move (off either end, or the pinned slot) is a no-op.
+ */
+export function moveColumn(id: string, key: string, dir: -1 | 1): void {
+  const field = editorField(id);
+  if (!field) return;
+  const columns = field.columns ?? [];
+  const i = columns.findIndex((c) => c.key === key);
+  const floor = (field.fixedRows?.length ?? 0) > 0 ? 1 : 0; // label stays at 0 on a checklist
+  const j = i + dir;
+  if (i < 0 || i < floor || j < floor || j >= columns.length) return;
+  const next = columns.slice();
+  [next[i], next[j]] = [next[j]!, next[i]!];
+  dispatchStructural({ t: 'update', id, patch: { columns: next } });
+}
+
 export function undoFieldEdit(): void {
   dispatchStructural({ t: 'undo' });
 }

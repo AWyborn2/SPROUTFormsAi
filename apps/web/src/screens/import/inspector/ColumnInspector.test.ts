@@ -23,6 +23,7 @@ import {
   answerSetAccepted,
   getImportSession,
   groupColumns,
+  moveColumn,
   removeColumn,
   renameColumn,
   resetImportSession,
@@ -273,6 +274,29 @@ describe('label-column override and add/remove column', () => {
   it('refuses to remove the checklist label column', () => {
     removeColumn('t1', 'item'); // t1 is a checklist
     expect(field('t1').columns![0]!.key).toBe('item');
+  });
+
+  it('reorders an open table column and pins a checklist label', () => {
+    // t2 is open: its first column can move.
+    moveColumn('t2', 'desc', 1);
+    expect(field('t2').columns!.map((c) => c.key)).toEqual(['yes', 'desc', 'no', 'na', 'note']);
+
+    // t1 is a checklist: 'item' is pinned and nothing crosses index 0.
+    moveColumn('t1', 'item', 1);
+    expect(field('t1').columns![0]!.key).toBe('item');
+    moveColumn('t1', 'ok', -1);
+    expect(field('t1').columns!.map((c) => c.key)).toEqual(['item', 'ok', 'na', 'fault', 'spare', 'notes']);
+  });
+
+  it('exposes move affordances that honor the pinned first column', () => {
+    const open = columnRows(field('t2'), answerSetAccepted);
+    expect(open[0]).toMatchObject({ canMoveUp: false, canMoveDown: true });
+    expect(open[1]!.canMoveUp).toBe(true);
+    expect(open.at(-1)!.canMoveDown).toBe(false);
+
+    const checklist = columnRows(field('t1'), answerSetAccepted);
+    expect(checklist[0]).toMatchObject({ canMoveUp: false, canMoveDown: false }); // label pinned
+    expect(checklist[1]).toMatchObject({ canMoveUp: false, canMoveDown: true }); // can't cross the label
   });
 });
 

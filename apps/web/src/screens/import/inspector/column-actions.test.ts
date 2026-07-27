@@ -200,4 +200,25 @@ describe('builderColumnActions', () => {
       expect(next.columns?.map((c) => c.key)).toEqual(['item', 'ok', 'no', 'na']);
     });
   });
+
+  describe('moveColumn', () => {
+    it('reorders columns in an open table, keys (and any sets) intact', () => {
+      const next = afterAction(openTable, (a) => a.moveColumn(openTable.id, 'plant', -1));
+      expect(next.columns?.map((c) => c.key)).toEqual(['plant', 'wo', 'hours']);
+    });
+
+    it('pins the checklist label column — it cannot move and nothing crosses index 0', () => {
+      const labelStays = afterAction(table, (a) => a.moveColumn(table.id, 'item', 1));
+      expect(labelStays.columns?.map((c) => c.key)).toEqual(['item', 'ok', 'no', 'na']);
+
+      const noCross = afterAction(table, (a) => a.moveColumn(table.id, 'ok', -1));
+      expect(noCross.columns?.map((c) => c.key)).toEqual(['item', 'ok', 'no', 'na']);
+    });
+
+    it('moves a non-label column and preserves its answer-set membership', () => {
+      const next = afterAction(table, (a) => a.moveColumn(table.id, 'ok', 1));
+      expect(next.columns?.map((c) => c.key)).toEqual(['item', 'no', 'ok', 'na']);
+      expect(resolveAnswerSets(next).sets[0]?.columnKeys).toEqual(['ok', 'no', 'na']);
+    });
+  });
 });
