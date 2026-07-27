@@ -874,6 +874,43 @@ export function splitRowBand(box: PageBox, key: string): PageBox {
 }
 
 /**
+ * Append a new row of the SAME height directly below the bottom row (U4, R4).
+ *
+ * The "extend this table down the page" gesture, distinct from `splitRowBand`'s
+ * "one printed row read as two": drawing the outer box seeds a few rows, and
+ * this replicates their spacing so a long grid is finished one uniform row at a
+ * time instead of splitting a band into ever-smaller halves. The pitch is the
+ * current rows' AVERAGE height, so it matches an even seed exactly and stays
+ * sensible after manual nudges.
+ *
+ * The new band drops straight below the bottom row and the segment box grows
+ * down to contain it, clamped to the page bottom (PDF y=0). If less than a
+ * point of room remains the box is returned unchanged — a row cannot spill off
+ * the page. Re-keyed top-to-bottom for the exporter, like the other row edits.
+ */
+export function appendRowBelow(box: PageBox): PageBox {
+  const rows = box.rowBands ?? [];
+  if (rows.length === 0) return box;
+
+  // `start` is a band's bottom edge (PDF is bottom-up), so the smallest `start`
+  // is the visually lowest row. Bands are contiguous, so the average height is
+  // the uniform pitch when the grid is even and a fair pitch when it is not.
+  const bottom = rows.reduce((lo, b) => (b.start < lo.start ? b : lo), rows[0]!);
+  const avgHeight = rows.reduce((sum, b) => sum + (b.end - b.start), 0) / rows.length;
+
+  const newStart = Math.max(bottom.start - avgHeight, 0);
+  if (bottom.start - newStart < 1) return box; // no room left below on the page
+
+  const appended: GeometryBand = { key: 'r-appended', start: newStart, end: bottom.start };
+  const rowBands = resequenceRows([...rows, appended]);
+
+  // Grow the box downward to hold the new band; never shrink it, clamp to page.
+  const top = box.y + box.height;
+  const y = Math.max(Math.min(box.y, newStart), 0);
+  return { ...box, y, height: top - y, rowBands };
+}
+
+/**
  * Delete a row divider by removing one band and closing the gap (U4, R4).
  *
  * The removed band's span is absorbed by a neighbour so the grid stays

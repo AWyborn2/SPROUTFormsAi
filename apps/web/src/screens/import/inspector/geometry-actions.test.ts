@@ -15,6 +15,7 @@ import {
   NUDGE_POINTS,
   SNAP_RANGE,
   DRAW_SNAP_RANGE,
+  appendRowBelow,
   applyMatrix,
   columnHandles,
   deleteRowBand,
@@ -862,6 +863,44 @@ describe('manual even-seed fallback and row dividers (U4, R4/AE6)', () => {
     const grid = evenGrid(box, ['ok'], ['r0']);
 
     expect(deleteRowBand(grid, 'r0').rowBands).toHaveLength(1);
+  });
+
+  describe('appendRowBelow — extend the table down with even spacing', () => {
+    it('adds one row of the same height directly below the bottom row', () => {
+      // 3 even rows over 120pt → 40pt each; box spans y 200–320.
+      const grid = evenGrid(box, ['ok', 'na'], ['r0', 'r1', 'r2']);
+      const next = appendRowBelow(grid);
+
+      expect(next.rowBands).toHaveLength(4);
+      // The new bottom row is 40pt tall and sits directly under the old bottom
+      // (which reached y=200), so it spans 160–200.
+      const sorted = [...next.rowBands!].sort((a, b) => a.start - b.start);
+      expect(sorted[0]!.start).toBeCloseTo(160, 5);
+      expect(sorted[0]!.end).toBeCloseTo(200, 5);
+      // Every row stays 40pt — the spacing is preserved, not halved.
+      for (const b of sorted) expect(b.end - b.start).toBeCloseTo(40, 5);
+    });
+
+    it('grows the segment box downward to contain the new row and re-keys top-to-bottom', () => {
+      const grid = evenGrid(box, ['ok', 'na'], ['r0', 'r1']); // 60pt rows, y 200–320
+      const next = appendRowBelow(grid);
+
+      expect(next.y).toBeCloseTo(140, 5); // 200 - 60
+      expect(next.height).toBeCloseTo(180, 5); // 320 - 140
+      expect(next.rowBands!.map((b) => b.key)).toEqual(['r0', 'r1', 'r2']);
+      // Contiguous and accepted by the shipped validator.
+      const sorted = [...next.rowBands!].sort((a, b) => a.start - b.start);
+      for (let i = 1; i < sorted.length; i++) expect(sorted[i]!.start).toBeCloseTo(sorted[i - 1]!.end, 5);
+      expect(resolveGeometry({ geometry: { segments: [next] } }, 1).segments).toHaveLength(1);
+    });
+
+    it('clamps the new row to the page bottom, leaving the box unchanged when there is no room', () => {
+      // A grid whose bottom row already sits on the page bottom (y=0).
+      const atFloor: PageBox = { page: 0, x: 100, y: 0, width: 300, height: 40, pageWidth: 595, pageHeight: 842 };
+      const grid = evenGrid(atFloor, ['ok'], ['r0']);
+
+      expect(appendRowBelow(grid)).toEqual(grid);
+    });
   });
 });
 
