@@ -67,6 +67,8 @@ export interface ColumnActions {
   addColumn(fieldId: string): void;
   /** Remove a column. Never the pre-printed label column of a checklist. */
   removeColumn(fieldId: string, columnKey: string): void;
+  /** Move a column one place left (-1) or right (1) in the printed order. */
+  moveColumn(fieldId: string, columnKey: string, dir: -1 | 1): void;
 }
 
 /** Types a table cell can sensibly take (a column is never a section header). */
@@ -108,6 +110,10 @@ export interface ColumnRow {
   groupable: boolean;
   /** Whether this column may be deleted (never the first/row-identity column; never the last one). */
   removable: boolean;
+  /** Whether this column can move one place left — never past the pinned first column. */
+  canMoveUp: boolean;
+  /** Whether this column can move one place right. */
+  canMoveDown: boolean;
   membership: ColumnMembership;
   /** The valid set owning this column, when any. */
   set?: AnswerSet;
@@ -125,6 +131,9 @@ export function columnRows(
   const columns = field.columns ?? [];
   const { sets } = resolveAnswerSets(field);
   const labelled = hasLabelColumn(field);
+  // The pinned first slot: a checklist's label column stays at index 0, so
+  // reordering (and grouping) starts one column in. An open table pins nothing.
+  const floor = labelled ? 1 : 0;
 
   return columns.map((column, index) => {
     const set = sets.find((s) => s.columnKeys.includes(column.key));
@@ -140,6 +149,8 @@ export function columnRows(
       // yet still isn't a tick-group option.
       groupable: index !== 0,
       removable: index !== 0 && columns.length > 1,
+      canMoveUp: index > floor,
+      canMoveDown: index >= floor && index < columns.length - 1,
       membership: !set ? 'none' : isAccepted(field.id, set.key) ? 'accepted' : 'proposed',
       ...(set ? { set } : {}),
     };
@@ -231,6 +242,26 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
               >
                 {MEMBERSHIP_TEXT[row.membership]}
               </span>
+              {(row.canMoveUp || row.canMoveDown) && (
+                <span className="flex flex-none items-center gap-0.5">
+                  <button
+                    onClick={() => actions.moveColumn(field.id, row.column.key, -1)}
+                    disabled={!row.canMoveUp}
+                    aria-label={`Move column left: ${row.column.label}`}
+                    className="grid h-7 w-7 place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Icon name="chevron-up" size={12} />
+                  </button>
+                  <button
+                    onClick={() => actions.moveColumn(field.id, row.column.key, 1)}
+                    disabled={!row.canMoveDown}
+                    aria-label={`Move column right: ${row.column.label}`}
+                    className="grid h-7 w-7 place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Icon name="chevron-down" size={12} />
+                  </button>
+                </span>
+              )}
               {row.removable && (
                 <button
                   onClick={() => actions.removeColumn(field.id, row.column.key)}

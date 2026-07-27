@@ -12,6 +12,7 @@ import {
   addColumn,
   answerSetAccepted,
   groupColumns,
+  moveColumn,
   removeColumn,
   renameColumn,
   setColumnRequired,
@@ -37,6 +38,7 @@ export const importSessionColumnActions: ColumnActions = {
   setLabelColumn: setTableLabelColumn,
   addColumn,
   removeColumn,
+  moveColumn,
 };
 
 /** Pre-publish: the condition is written into the reviewed field list. */
@@ -157,6 +159,19 @@ export function builderColumnActions(
           .map((s) => ({ ...s, columnKeys: s.columnKeys.filter((k) => k !== columnKey) }))
           .filter((s) => s.columnKeys.length >= 2),
       });
+    },
+    moveColumn: (_id, columnKey, dir) => {
+      // Reorder by array position; the `key` is unchanged, so answer sets and
+      // row values are untouched. `columns[0]` is pinned — the checklist label /
+      // row-identity column — so nothing crosses index 0 on a checklist.
+      const columns = cols();
+      const i = columns.findIndex((c) => c.key === columnKey);
+      const floor = isChecklist ? 1 : 0;
+      const j = i + dir;
+      if (i < 0 || i < floor || j < floor || j >= columns.length) return;
+      const next = columns.slice();
+      [next[i], next[j]] = [next[j]!, next[i]!];
+      update({ columns: next });
     },
   };
 }
