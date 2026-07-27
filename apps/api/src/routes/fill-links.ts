@@ -2,7 +2,9 @@ import { randomBytes } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
 import { and, desc, eq } from 'drizzle-orm';
-import { schema } from '@formai/db';
+import { PLAN_CONFIG, schema } from '@formai/db';
+import type { PlanTier } from '@formai/db';
+import type { FormField } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
@@ -17,6 +19,9 @@ import {
 // The authed POST /submissions validates with the same runtime schema —
 // single SubmissionValue contract, two doors.
 import { submissionValueSchema } from './submissions.js';
+// Smart Fill's authed door owns the mapper wiring and the transcript cap; this
+// file adds only the second, session-less way in.
+import { respondSmartFill, smartFillTranscriptSchema } from './voice.js';
 
 /**
  * Fill links — public distribution of a form template.
@@ -408,4 +413,78 @@ publicFillRouter.post('/:token/submissions', withErrorHandling(async (req, res) 
     status: row.status,
     createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
   });
+}));
+
+const publicSmartFillBody = z.object({
+  /**
+   * Transcript only. The form is identified by the token in the path, so a
+   * caller cannot hand the model field definitions of its own choosing.
+   */
+  transcript: smartFillTranscriptSchema,
+});
+
+/**
+ * Smart Fill on the public path — the paid tier, reached with no session.
+ *
+ * Plan enforcement is INLINE rather than `requirePlanFeature`, which reads
+ * `req.tenant` and so cannot run here at all. The link's `orgId` is the
+ * entitlement holder: the respondent is anonymous, but the org that
+ * distributed the link is the one paying for the AI call.
+ *
+ * Fields come from the same version `GET /fill/:token` serves — resolved now,
+ * not frozen at link creation — so a mapping's field ids are the ones the
+ * respondent's page was rendered from. A client holding a version that has
+ * since been replaced is safe by construction: the mapper drops every field id
+ * it does not recognise.
+ */
+publicFillRouter.post('/:token/smart-fill', withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const link = await resolveLiveLink(req.params.token!);
+  // Unknown, revoked and expired tokens answer identically to the sibling
+  // routes — a probe must not learn that a token once existed.
+  if (!link) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+  const parsed = publicSmartFillBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return;
+  }
+
+  const org = await db.query.organizations.findFirst({
+    where: eq(schema.organizations.id, link.orgId),
+  });
+  // Same fallback as `requirePlanFeature`, so both doors read an unset or
+  // unrecognised tier the same way.
+  const tier = (org?.planTier ?? 'business') as PlanTier;
+  const config = PLAN_CONFIG[tier] ?? PLAN_CONFIG.business;
+  if (!config.features.smartFill) {
+    // Names the feature but NOT the tier, and carries no upgrade copy: the
+    // authed 403 is addressed to someone who holds the plan, this one to an
+    // anonymous respondent who does not. GET /fill/:token keeps plan out of
+    // its payload for the same reason and this must not reintroduce it.
+    res.status(403).json({ error: 'feature_not_available', feature: 'smartFill' });
+    return;
+  }
+
+  const template = await db.query.formTemplates.findFirst({
+    where: eq(schema.formTemplates.id, link.templateId),
+  });
+  const version = template?.currentVersionId
+    ? await db.query.formTemplateVersions.findFirst({
+        where: eq(schema.formTemplateVersions.id, template.currentVersionId),
+      })
+    : undefined;
+  // Nothing fillable is nothing to dictate into: same opaque 404 as GET.
+  if (!template || !version || version.state !== 'published') {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+
+  const fields: FormField[] = Array.isArray(version.fields) ? version.fields : [];
+  await respondSmartFill(res, { fields, transcript: parsed.data.transcript });
 }));

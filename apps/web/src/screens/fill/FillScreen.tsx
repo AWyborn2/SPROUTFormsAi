@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Icon, Input, useToast } from '@formai/ui';
-import type { SubmissionValue } from '@formai/shared';
+import type { SmartFillResult, SubmissionValue } from '@formai/shared';
 import { resolveTheme } from '@formai/shared';
 import { ApiError } from '../../lib/data/api-client.js';
 import { discardImpactOf, discardWarningMessage, isCommittedChange } from '../../lib/discard-warning.js';
-import { useFillForm, useSubmitFill } from '../../lib/data/hooks.js';
+import { useFillForm, usePublicSmartFill, useSubmitFill } from '../../lib/data/hooks.js';
+import { smartFillFailure } from '../../lib/voice/smart-fill.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
 import {
@@ -39,12 +40,24 @@ import { ExternalShell } from './ExternalShell.js';
  * lives on the authed competency screen
  * (`screens/enterprise/CompetencyScreen.tsx`); fill-view gating would
  * return on an authed internal fill surface.
+ *
+ * Voice is offered here in two tiers and is only ever an enhancement: a mic on
+ * each field (free, transcribed on-device, no audio leaves the browser) and
+ * Smart Fill (paid), which posts one transcript and gets proposed answers back.
+ * Neither can submit — the same Submit button below is still the only way.
  */
 export function FillScreen() {
   const { token } = useParams<{ token: string }>();
   const { toast } = useToast();
   const { data: fill, isLoading, isError } = useFillForm(token);
   const submit = useSubmitFill();
+  const smartFill = usePublicSmartFill();
+  /**
+   * Optimistic: `GET /fill/:token` deliberately keeps plan out of its payload,
+   * so entitlement is only knowable by asking. The first refusal retires the
+   * entry point for good rather than leaving a control that fails on press.
+   */
+  const [smartFillOffered, setSmartFillOffered] = useState(true);
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -71,6 +84,25 @@ export function FillScreen() {
 
     setValues((v) => ({ ...v, [fieldId]: value }));
     setErrors((e) => (e[fieldId] ? { ...e, [fieldId]: '' } : e));
+  }
+
+  /**
+   * Post one spoken description of the form and resolve the proposed answers.
+   * `null` means the attempt failed and the respondent has already been told —
+   * the caller applies nothing and the form is exactly as they left it.
+   *
+   * The transcript is text produced on-device; no audio is uploaded, and the
+   * link token stays the only credential this page holds.
+   */
+  async function runSmartFill(transcript: string): Promise<SmartFillResult | null> {
+    try {
+      return await smartFill.mutateAsync({ token: token!, transcript });
+    } catch (err) {
+      const failure = smartFillFailure(err instanceof ApiError ? err.status : 0);
+      if (failure.hide) setSmartFillOffered(false);
+      toast({ variant: failure.hide ? 'warning' : 'danger', message: failure.message });
+      return null;
+    }
   }
 
   function onSubmit(form: PublicFillForm) {
@@ -230,6 +262,8 @@ export function FillScreen() {
             onSubmit={() => onSubmit(fill)}
             submitting={submit.isPending}
             header={identityBlock}
+            dictation
+            smartFill={smartFillOffered ? runSmartFill : undefined}
           />
         ) : (
           <>
@@ -247,6 +281,7 @@ export function FillScreen() {
                     value={values[f.id] ?? null}
                     error={errors[f.id] || undefined}
                     incompleteRowIndexes={incompleteRows[f.id]}
+                    dictation
                     onChange={(v) => setValue(f.id, v)}
                   />
                 </div>

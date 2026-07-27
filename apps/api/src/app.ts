@@ -16,6 +16,7 @@ import { orgRouter } from './routes/org.js';
 import { pdfRouter } from './routes/pdf.js';
 import { submissionsRouter } from './routes/submissions.js';
 import { teamRouter } from './routes/team.js';
+import { voiceRouter } from './routes/voice.js';
 
 /**
  * Builds the Express app. Route groups (auth, forms, import, submissions,
@@ -69,6 +70,9 @@ export function createApp(): Express {
   app.use('/dashboard', dashboardRouter);
   app.use('/competencies', competenciesRouter);
   app.use('/competency-rules', competencyRulesRouter);
+  // Smart Fill for authed surfaces. The public respondent's door is
+  // POST /fill/:token/smart-fill, mounted with the rest of publicFillRouter.
+  app.use('/voice', voiceRouter);
 
   // Fallthrough 404.
   app.use((_req, res) => {

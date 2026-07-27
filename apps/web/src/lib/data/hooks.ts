@@ -305,6 +305,30 @@ export function useSubmitFill() {
   });
 }
 
+/* ── Voice: Smart Fill ───────────────────────────────────────────────────── */
+
+/**
+ * Whole-utterance Smart Fill on a public fill link.
+ *
+ * Nothing is persisted — the API answers with proposals the respondent still
+ * has to review and submit — so there is deliberately nothing to invalidate.
+ * The transcript is produced on-device; no audio is uploaded.
+ */
+export function usePublicSmartFill() {
+  return useMutation({
+    mutationFn: async (input: { token: string; transcript: string }) =>
+      store.smartFillPublic(input),
+  });
+}
+
+/** The authed door (builder preview / mobile inspection): session + plan gated. */
+export function useSmartFill() {
+  return useMutation({
+    mutationFn: async (input: { templateVersionId: string; transcript: string }) =>
+      store.smartFill(input),
+  });
+}
+
 export function useInvite(token: string | undefined) {
   return useQuery({
     queryKey: keys.invite(token ?? ''),

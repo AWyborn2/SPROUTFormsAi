@@ -23,6 +23,8 @@ import type {
   PermissionCategory,
   PermissionMatrix,
   Role,
+  SmartFillRequest,
+  SmartFillResult,
   SubmissionStatus,
   SubmissionValue,
 } from '@formai/shared';
@@ -282,6 +284,14 @@ function toAuditEntry(dto: AuditEntryDto): AuditEntry {
   };
 }
 
+/**
+ * Smart Fill waits on a model round-trip over a transcript that can run to the
+ * API's 4000-character cap, which outlasts the client's 30s default often
+ * enough to matter. A timeout here reads to the respondent as "voice is
+ * broken", so it is raised rather than left to abort a call that was working.
+ */
+const SMART_FILL_TIMEOUT_MS = 60_000;
+
 const COMPETENCY_COLOR_PALETTE = ['var(--warning)', 'var(--info)', 'var(--danger)', 'var(--accent)'];
 function colorForCompetency(id: string): string {
   let hash = 0;
@@ -434,6 +444,35 @@ export const store = {
       values: input.values,
       ...(input.submitterName ? { submitterName: input.submitterName } : {}),
       ...(input.submitterEmail ? { submitterEmail: input.submitterEmail } : {}),
+    });
+  },
+
+  /**
+   * Smart Fill on the PUBLIC path. Transcript only — the audio never left the
+   * device, and the form's identity comes from the route, so a caller cannot
+   * hand the model a field list of its own. The link's org is the entitlement
+   * holder, which the API resolves from the token; there is no session here to
+   * check a plan against.
+   *
+   * A 403 `feature_not_available` is the org's plan answering, not a failure.
+   */
+  smartFillPublic(input: { token: string; transcript: string }): Promise<SmartFillResult> {
+    const body: SmartFillRequest = { transcript: input.transcript };
+    return apiClient.post<SmartFillResult>(
+      `/fill/${encodeURIComponent(input.token)}/smart-fill`,
+      body,
+      { timeoutMs: SMART_FILL_TIMEOUT_MS },
+    );
+  },
+
+  /**
+   * Smart Fill on an AUTHED surface (builder preview, mobile inspection), where
+   * the session's org carries the entitlement. Draft versions are accepted so a
+   * builder can try the feature before publishing.
+   */
+  smartFill(input: { templateVersionId: string; transcript: string }): Promise<SmartFillResult> {
+    return apiClient.post<SmartFillResult>('/voice/smart-fill', input, {
+      timeoutMs: SMART_FILL_TIMEOUT_MS,
     });
   },
 

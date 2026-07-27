@@ -11,6 +11,7 @@ const FEATURES: Record<PlanTier, PlanFeatures> = {
   individual: {
     branding: true,
     whiteLabel: false,
+    smartFill: false,
     sso: false,
     auditExport: false,
     competencyGating: false,
@@ -18,6 +19,7 @@ const FEATURES: Record<PlanTier, PlanFeatures> = {
   team: {
     branding: true,
     whiteLabel: false,
+    smartFill: false,
     sso: false,
     auditExport: false,
     competencyGating: false,
@@ -25,6 +27,7 @@ const FEATURES: Record<PlanTier, PlanFeatures> = {
   business: {
     branding: true,
     whiteLabel: true,
+    smartFill: true,
     sso: false,
     auditExport: true,
     competencyGating: false,
@@ -32,6 +35,7 @@ const FEATURES: Record<PlanTier, PlanFeatures> = {
   enterprise: {
     branding: true,
     whiteLabel: true,
+    smartFill: true,
     sso: true,
     auditExport: true,
     competencyGating: true,

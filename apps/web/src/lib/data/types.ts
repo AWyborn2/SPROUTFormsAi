@@ -197,6 +197,12 @@ export interface PlanFeatures {
   branding: boolean;
   /** Custom domain / sender address / badge removal. Business+ only. */
   whiteLabel: boolean;
+  /**
+   * Smart Fill — AI mapping of one spoken transcript onto many fields at once.
+   * Business+ only. Gates the AI step alone; on-device dictation into a single
+   * field is free at every tier and never reads this.
+   */
+  smartFill: boolean;
   sso: boolean;
   auditExport: boolean;
   competencyGating: boolean;

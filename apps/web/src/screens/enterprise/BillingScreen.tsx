@@ -12,6 +12,9 @@ const TIER_LABELS: Record<PlanTier, string> = {
 
 const FEATURE_LABELS: Record<string, string> = {
   branding: 'Custom branding',
+  // Not "voice": per-field dictation is free at every tier, so an X against
+  // anything voice-shaped here would read as a lie on the lower plans.
+  smartFill: 'Smart Fill (AI)',
   sso: 'SSO / SAML',
   auditExport: 'Audit log export',
   competencyGating: 'Competency gating',

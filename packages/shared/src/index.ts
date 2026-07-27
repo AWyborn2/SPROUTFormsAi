@@ -19,3 +19,4 @@ export * from './submission-validation.js';
 export * from './org.js';
 export * from './competency.js';
 export * from './audit.js';
+export * from './voice.js';
