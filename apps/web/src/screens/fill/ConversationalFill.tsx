@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Icon } from '@formai/ui';
 import type { FormField, SubmissionValue } from '@formai/shared';
 import { FieldInput } from '../fields/FieldRenderer.js';
+import { fillSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
 import {
   buildSteps,
   canAdvance,
@@ -127,18 +128,25 @@ export function ConversationalFill({
               {step.title}
             </div>
           )}
-          <div className="flex flex-col gap-5">
+          {/* The builder's 12-col grid (KTD7), exactly as the card layout
+              renders it — `fill-layout.ts` names all fill surfaces as routing
+              through `resolveFillSpan`, and this one didn't: a step's fields
+              stacked full-width, so Half/Third/Quarter widths chosen in the
+              builder silently changed nothing on a conversational form. Spans
+              collapse to one column below `sm`, same as the card path. */}
+          <div className="grid grid-cols-12 gap-5">
             {step?.fields.map((f) => (
-              <FieldInput
-                key={f.id}
-                field={f}
-                value={(values[f.id] ?? null) as never}
-                error={
-                  errors[f.id] ||
-                  (touched && blocking.includes(f.id) ? 'This question is required.' : undefined)
-                }
-                onChange={(v) => setValue(f.id, v)}
-              />
+              <div key={f.id} className={fillSpanClass(resolveFillSpan(f, false))}>
+                <FieldInput
+                  field={f}
+                  value={(values[f.id] ?? null) as never}
+                  error={
+                    errors[f.id] ||
+                    (touched && blocking.includes(f.id) ? 'This question is required.' : undefined)
+                  }
+                  onChange={(v) => setValue(f.id, v)}
+                />
+              </div>
             ))}
           </div>
         </div>

@@ -4,11 +4,13 @@
  * is the grid fillers see. Pure module — no React, no DOM (the @formai/shared
  * import happens to be type-only, but value imports work fine too).
  *
- * All three fill surfaces route through `resolveFillSpan`, but they collapse
+ * Every fill surface routes through `resolveFillSpan`, but they collapse
  * to a single column differently because two of them are CONTAINERS where
  * viewport breakpoints would lie:
- * - Public fill (real viewport): `fillSpanClass` — always `col-span-12`, with
- *   the resolved span applied from `sm:` up.
+ * - Public fill (real viewport), card AND conversational bodies alike:
+ *   `fillSpanClass` — always `col-span-12`, with the resolved span applied
+ *   from `sm:` up. (Conversational once stacked its step fields full-width,
+ *   so builder-chosen widths silently changed nothing there.)
  * - Mobile frame (390px container): pass `narrow: true`; everything resolves
  *   to 12.
  * - Builder preview (container-width slider): pass
