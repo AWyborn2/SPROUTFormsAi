@@ -28,6 +28,7 @@ import {
 } from '../../../lib/data/import-session.js';
 import {
   NUDGE_POINTS,
+  appendRowBelow,
   deleteRowBand,
   deriveAcrossPages,
   evenGrid,
@@ -336,10 +337,16 @@ function RowNudger({ fieldId, segment }: { fieldId: string; segment: PageBox }) 
   const rows = segment.rowBands ?? [];
   if (rows.length === 0) return null;
 
-  // "Add a row" splits the bottom band (lowest y = smallest `start`) in two — a
-  // printed row read as two — routed through the same proposal path so it
+  // "Add row" extends the table DOWN the page: it measures the current rows'
+  // uniform spacing and lays one more of the same height directly below the
+  // bottom row (`appendRowBelow`), so a long grid is finished a row at a time
+  // rather than by halving a band. Routed through the same proposal path so it
   // un-confirms and is re-validated (U4, R4).
-  const addRow = () => {
+  const addRow = () => proposeGeometry(fieldId, appendRowBelow(segment));
+
+  // "Split bottom row" keeps the other gesture — one printed row the grid read
+  // as a single band that is really two — dividing the bottom band in half.
+  const splitBottom = () => {
     const bottom = [...rows].sort((a, b) => a.start - b.start)[0];
     if (bottom) proposeGeometry(fieldId, splitRowBand(segment, bottom.key));
   };
@@ -354,14 +361,24 @@ function RowNudger({ fieldId, segment }: { fieldId: string; segment: PageBox }) 
           <RowBandRow key={band.key} fieldId={fieldId} segment={segment} band={band} canDelete={rows.length > 1} />
         ))}
       </div>
-      <button
-        onClick={addRow}
-        aria-label="Add a row divider"
-        className="mt-1.5 flex w-full items-center justify-center gap-1 rounded-sm border border-dashed border-border py-1 text-[11px] text-text-tertiary hover:bg-surface-hover"
-      >
-        <Icon name="plus" size={11} />
-        Add row
-      </button>
+      <div className="mt-1.5 flex items-center gap-1.5">
+        <button
+          onClick={addRow}
+          aria-label="Add a row below with the same spacing"
+          className="flex flex-1 items-center justify-center gap-1 rounded-sm border border-dashed border-border py-1 text-[11px] text-text-tertiary hover:bg-surface-hover"
+        >
+          <Icon name="plus" size={11} />
+          Add row
+        </button>
+        <button
+          onClick={splitBottom}
+          aria-label="Split the bottom row into two"
+          className="flex flex-none items-center justify-center gap-1 rounded-sm border border-border px-2 py-1 text-[11px] text-text-tertiary hover:bg-surface-hover"
+        >
+          <Icon name="separator-horizontal" size={11} />
+          Split bottom
+        </button>
+      </div>
     </div>
   );
 }
