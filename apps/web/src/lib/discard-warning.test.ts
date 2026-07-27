@@ -7,7 +7,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { FormField, SubmissionValue } from '@formai/shared';
-import { discardImpactOf, discardWarningMessage, isCommittedChange } from './discard-warning.js';
+import {
+  discardImpactOf,
+  discardImpactOfPatch,
+  discardWarningMessage,
+  isCommittedChange,
+} from './discard-warning.js';
 
 const location: FormField = {
   id: 'loc',
@@ -121,6 +126,109 @@ describe('discardImpactOf', () => {
       'Raw Materials',
     );
 
+    expect(impact.fields.map((f) => f.id)).toEqual(['bbm-1']);
+  });
+});
+
+/**
+ * Smart Fill applies many answers as one action. Applying them one at a time
+ * through the single-field path asked the respondent once per mapping and
+ * judged every question against the pre-merge values — so the count was wrong
+ * in both directions and the modals were unanswerable.
+ */
+describe('discardImpactOfPatch', () => {
+  const shift: FormField = {
+    id: 'shift',
+    type: 'dropdown',
+    label: 'Shift',
+    required: false,
+    source: 'imported',
+    options: ['Day', 'Night'],
+  };
+  const night: FormField = {
+    id: 'night-1',
+    type: 'text',
+    label: 'Night notes',
+    required: false,
+    source: 'imported',
+    visibleWhen: { fieldId: 'shift', op: 'equals', value: 'Night' },
+  };
+  const TWO_SOURCE_FIELDS: FormField[] = [location, bbm, raw, shift, night];
+
+  it('reports one combined impact when the patch hides sections behind two sources', () => {
+    const impact = discardImpactOfPatch(
+      TWO_SOURCE_FIELDS,
+      { loc: 'BBM Mining', 'bbm-1': 'seized', shift: 'Night', 'night-1': 'gate left open' },
+      { loc: 'Raw Materials', shift: 'Day' },
+    );
+
+    // One decision covering both — the per-field loop this replaced raised a
+    // separate blocking confirm for each source in the same Smart Fill run.
+    expect(impact.count).toBe(2);
+    expect(impact.fields.map((f) => f.id)).toEqual(['bbm-1', 'night-1']);
+  });
+
+  it('judges visibility against the merged result, not the values it started from', () => {
+    // `raw-1` is hidden before the patch and visible after, so nothing about it
+    // is lost — even though a mapping applied on its own, against the pre-merge
+    // values, would have been weighed while it was still out of view.
+    const impact = discardImpactOfPatch(
+      TWO_SOURCE_FIELDS,
+      { loc: 'BBM Mining', 'raw-1': 'stale' },
+      { loc: 'Raw Materials', 'raw-1': 'heard this' },
+    );
+
+    expect(impact).toEqual({ fields: [], count: 0 });
+  });
+
+  it('warns about work the respondent already did, not about the patch hiding its own proposal', () => {
+    const values = { loc: 'BBM Mining' };
+    const patch = { loc: 'Raw Materials', 'bbm-1': 'heard this' };
+    // bbm-1 is only ever going to hold something the model just proposed, and
+    // the server strips it on save regardless — a modal here would put a
+    // blocking question in front of a sentence that cost nobody anything.
+    expect(discardImpactOfPatch(TWO_SOURCE_FIELDS, values, patch)).toEqual({ fields: [], count: 0 });
+
+    // The same patch over an answer they typed themselves does warn.
+    const typed = discardImpactOfPatch(TWO_SOURCE_FIELDS, { ...values, 'bbm-1': 'seized' }, patch);
+    expect(typed.fields.map((f) => f.id)).toEqual(['bbm-1']);
+  });
+
+  it('stays silent when no rule reads any patched field', () => {
+    expect(
+      discardImpactOfPatch(FIELDS, { loc: 'BBM Mining', 'bbm-1': 'seized' }, { 'bbm-1': 'other' }),
+    ).toEqual({ fields: [], count: 0 });
+  });
+
+  it('stays silent for an empty patch', () => {
+    expect(discardImpactOfPatch(FIELDS, { loc: 'BBM Mining', 'bbm-1': 'seized' }, {})).toEqual({
+      fields: [],
+      count: 0,
+    });
+  });
+
+  // Free-text sources are excluded from the typed path by `isCommittedChange`
+  // (a per-keystroke modal makes the field uneditable). A patch has no
+  // keystrokes, so that exemption must not carry over.
+  it('counts a free-text source, which the per-keystroke path deliberately skips', () => {
+    const textSource: FormField = {
+      id: 'loc-text',
+      type: 'text',
+      label: 'Location',
+      required: false,
+      source: 'imported',
+    };
+    const scopedToText: FormField = {
+      ...bbm,
+      visibleWhen: { fieldId: 'loc-text', op: 'equals', value: 'BBM Mining' },
+    };
+    const impact = discardImpactOfPatch(
+      [textSource, scopedToText],
+      { 'loc-text': 'BBM Mining', 'bbm-1': 'seized' },
+      { 'loc-text': 'Raw Materials' },
+    );
+
+    expect(isCommittedChange([textSource], 'loc-text')).toBe(false);
     expect(impact.fields.map((f) => f.id)).toEqual(['bbm-1']);
   });
 });

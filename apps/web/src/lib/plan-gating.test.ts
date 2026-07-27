@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PlanFeatures, PlanTier } from './data/types.js';
-import { brandingBlockAccess, whiteLabelBlockAccess } from './plan-gating.js';
+import { brandingBlockAccess, smartFillBlockAccess, whiteLabelBlockAccess } from './plan-gating.js';
 
 /**
  * Mirrors `PLAN_CONFIG` in `packages/db/src/plans.ts` for the two flags this
@@ -77,5 +77,35 @@ describe('white-label block access', () => {
   it('fails closed when the feature set is unknown', () => {
     expect(whiteLabelBlockAccess(undefined).editable).toBe(false);
     expect(whiteLabelBlockAccess(null).editable).toBe(false);
+  });
+});
+
+describe('Smart Fill block access', () => {
+  it('is gated with an upgrade hint on individual and team tiers', () => {
+    for (const tier of ['individual', 'team'] as const) {
+      const access = smartFillBlockAccess(FEATURES[tier]);
+      expect(access.editable).toBe(false);
+      expect(access.upgradeHint).toBeTruthy();
+    }
+  });
+
+  it('is editable on business and enterprise', () => {
+    for (const tier of ['business', 'enterprise'] as const) {
+      expect(smartFillBlockAccess(FEATURES[tier])).toEqual({ editable: true, upgradeHint: null });
+    }
+  });
+
+  // Paid and metered: an optimistic mic during a slow billing read would spend
+  // a model call the org has not bought, and the API would 403 it anyway.
+  it('fails closed when the feature set is unknown', () => {
+    expect(smartFillBlockAccess(undefined).editable).toBe(false);
+    expect(smartFillBlockAccess(null).editable).toBe(false);
+  });
+
+  // Voice is two features, only one of them paid. The hint has to say so, or a
+  // reader on the free tiers concludes the mic they can already use is gone.
+  it('tells the gated tiers that per-field dictation is still free', () => {
+    const hint = smartFillBlockAccess(FEATURES.individual).upgradeHint ?? '';
+    expect(hint.toLowerCase()).toContain('single field');
   });
 });

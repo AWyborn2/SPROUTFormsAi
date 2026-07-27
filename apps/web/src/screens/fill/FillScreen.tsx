@@ -1,10 +1,15 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Icon, Input, useToast } from '@formai/ui';
 import type { SmartFillResult, SubmissionValue } from '@formai/shared';
 import { resolveTheme } from '@formai/shared';
 import { ApiError } from '../../lib/data/api-client.js';
-import { discardImpactOf, discardWarningMessage, isCommittedChange } from '../../lib/discard-warning.js';
+import {
+  discardImpactOf,
+  discardImpactOfPatch,
+  discardWarningMessage,
+  isCommittedChange,
+} from '../../lib/discard-warning.js';
 import { useFillForm, usePublicSmartFill, useSubmitFill } from '../../lib/data/hooks.js';
 import { smartFillFailure } from '../../lib/voice/smart-fill.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
@@ -19,6 +24,7 @@ import { FormLayoutFrame } from './FormLayoutFrame.js';
 import { ConversationalFill } from './ConversationalFill.js';
 import {
   EMAIL_RE,
+  clearedErrors,
   requiredFieldErrors,
   requiredFieldsMissingIds,
   validateRequired,
@@ -53,11 +59,17 @@ export function FillScreen() {
   const submit = useSubmitFill();
   const smartFill = usePublicSmartFill();
   /**
-   * Optimistic: `GET /fill/:token` deliberately keeps plan out of its payload,
-   * so entitlement is only knowable by asking. The first refusal retires the
-   * entry point for good rather than leaving a control that fails on press.
+   * Entitlement comes from the served payload's `smartFillEnabled` — the one
+   * plan detail `GET /fill/:token` discloses, and only as a yes/no. This page
+   * is logged out, so there is no `useBilling()` to ask instead.
+   *
+   * `smartFillRetired` still exists on top of it for the failures a boolean
+   * cannot predict: no model configured server-side (422), or a plan that
+   * lapsed between the load and the press. Both are fixed for this page load,
+   * so the entry point goes away rather than staying to fail again.
    */
-  const [smartFillOffered, setSmartFillOffered] = useState(true);
+  const [smartFillRetired, setSmartFillRetired] = useState(false);
+  const smartFillOffered = (fill?.smartFillEnabled ?? false) && !smartFillRetired;
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -87,6 +99,32 @@ export function FillScreen() {
   }
 
   /**
+   * Apply several answers as ONE change — Smart Fill's whole result.
+   *
+   * Deliberately not a loop over `setValue`. That raised a blocking
+   * `window.confirm` per mapping for a single spoken sentence, and every one of
+   * them weighed the change against the same pre-merge `values` closure, so
+   * each question described a form state that never existed and the later
+   * writes clobbered the earlier ones' reasoning. One merge, one discard check
+   * against the merged result, one prompt.
+   *
+   * Returns whether the patch was applied: a respondent who declines the
+   * discard warning has changed nothing, and the caller must not go on to
+   * report answers as filled.
+   */
+  function applyValues(patch: Record<string, SubmissionValue>): boolean {
+    const ids = Object.keys(patch);
+    if (ids.length === 0) return true;
+
+    const impact = discardImpactOfPatch(fill?.fields ?? [], values, patch);
+    if (impact.count > 0 && !window.confirm(discardWarningMessage(impact))) return false;
+
+    setValues((v) => ({ ...v, ...patch }));
+    setErrors((e) => clearedErrors(e, ids));
+    return true;
+  }
+
+  /**
    * Post one spoken description of the form and resolve the proposed answers.
    * `null` means the attempt failed and the respondent has already been told —
    * the caller applies nothing and the form is exactly as they left it.
@@ -98,8 +136,11 @@ export function FillScreen() {
     try {
       return await smartFill.mutateAsync({ token: token!, transcript });
     } catch (err) {
+      // A timed-out request surfaces as `ApiError(0)` (api-client's 30s abort),
+      // which lands on the transient branch — the mic stays and the respondent
+      // is told to try again or type, rather than the promise rejecting loose.
       const failure = smartFillFailure(err instanceof ApiError ? err.status : 0);
-      if (failure.hide) setSmartFillOffered(false);
+      if (failure.hide) setSmartFillRetired(true);
       toast({ variant: failure.hide ? 'warning' : 'danger', message: failure.message });
       return null;
     }
@@ -259,6 +300,7 @@ export function FillScreen() {
             values={values}
             errors={errors}
             setValue={setValue}
+            applyValues={applyValues}
             onSubmit={() => onSubmit(fill)}
             submitting={submit.isPending}
             header={identityBlock}

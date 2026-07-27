@@ -226,6 +226,19 @@ async function resolveLiveLink(token: string) {
   return link;
 }
 
+/**
+ * Whether the link's org is entitled to Smart Fill.
+ *
+ * Both public doors read the tier through here so the GET that decides whether
+ * to OFFER the mic and the POST that answers it cannot disagree: an entry point
+ * that 403s on press is worse than one that was never drawn. An unset or
+ * unrecognised tier falls back exactly as `requirePlanFeature` does.
+ */
+function orgSmartFillEnabled(planTier: string | null | undefined): boolean {
+  const tier = (planTier ?? 'business') as PlanTier;
+  return (PLAN_CONFIG[tier] ?? PLAN_CONFIG.business).features.smartFill;
+}
+
 publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
   if (!db) {
     res.status(503).json({ error: 'db_unavailable' });
@@ -257,7 +270,10 @@ publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
   }
 
   // Deliberately narrow payload: name + branding + the form itself. No org
-  // ids, plan, members, or anything else internal.
+  // ids, members, or anything else internal — and `smartFillEnabled` is a bare
+  // yes/no, never the tier or the feature map, because it exists only so the
+  // anonymous page can decide whether to draw a control, not to describe the
+  // org's plan to a stranger.
   //
   // The theme is resolved server-side (org theme <- this form's override) so
   // the public page receives one already-merged object and never has to apply
@@ -283,6 +299,7 @@ publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
     versionId: version.id,
     fields: version.fields,
     container: version.container,
+    smartFillEnabled: orgSmartFillEnabled(org?.planTier),
   });
 }));
 
@@ -458,15 +475,11 @@ publicFillRouter.post('/:token/smart-fill', withErrorHandling(async (req, res) =
   const org = await db.query.organizations.findFirst({
     where: eq(schema.organizations.id, link.orgId),
   });
-  // Same fallback as `requirePlanFeature`, so both doors read an unset or
-  // unrecognised tier the same way.
-  const tier = (org?.planTier ?? 'business') as PlanTier;
-  const config = PLAN_CONFIG[tier] ?? PLAN_CONFIG.business;
-  if (!config.features.smartFill) {
+  if (!orgSmartFillEnabled(org?.planTier)) {
     // Names the feature but NOT the tier, and carries no upgrade copy: the
     // authed 403 is addressed to someone who holds the plan, this one to an
-    // anonymous respondent who does not. GET /fill/:token keeps plan out of
-    // its payload for the same reason and this must not reintroduce it.
+    // anonymous respondent who does not. GET /fill/:token discloses the same
+    // single boolean and no more, for the same reason.
     res.status(403).json({ error: 'feature_not_available', feature: 'smartFill' });
     return;
   }

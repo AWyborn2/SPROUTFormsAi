@@ -471,10 +471,61 @@ describe('GET /fill/:token (public, no auth)', () => {
         versionId: 'v1',
         fields: PUBLISHED_V1.fields,
         container: CONTAINER,
+        smartFillEnabled: true,
       });
       // Never leak org internals beyond name/branding.
       expect(body.plan).toBeUndefined();
       expect(body.orgId).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * The anonymous page has no session and no billing read, so this flag is the
+   * only way it can know not to draw the Smart Fill mic. It has to stay a bare
+   * boolean: the tier and the rest of the feature map are the org's business,
+   * not the respondent's.
+   */
+  it('reports smartFillEnabled false on a plan without it, and still names no tier', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Charles Hull',
+        planTier: 'individual',
+        branding: BRANDING,
+      },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.smartFillEnabled).toBe(false);
+      expect(body.planTier).toBeUndefined();
+      expect(body.features).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  // Matches the fallback in `requirePlanFeature` and in the sibling
+  // POST /fill/:token/smart-fill gate — an offered mic that then 403s would be
+  // a worse failure than either answer on its own.
+  it('falls back to the business entitlement when the org has no tier set', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: { id: 'org-1', name: 'Charles Hull', branding: BRANDING },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as { smartFillEnabled: boolean };
+      expect(body.smartFillEnabled).toBe(true);
     } finally {
       server.close();
     }

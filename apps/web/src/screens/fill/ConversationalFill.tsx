@@ -22,6 +22,13 @@ interface ConversationalFillProps {
   values: Record<string, SubmissionValue>;
   errors: Record<string, string>;
   setValue: (id: string, value: SubmissionValue) => void;
+  /**
+   * Apply a whole set of answers as one change, returning false if the screen
+   * refused it (the respondent declined its discard warning). Smart Fill lands
+   * many answers at once and must go through here rather than through
+   * `setValue` per field — see the note on `runSmartFill` below.
+   */
+  applyValues: (patch: Record<string, SubmissionValue>) => boolean;
   onSubmit: () => void;
   submitting: boolean;
   /** Rendered on the first screen so identity is captured before questions. */
@@ -77,14 +84,16 @@ const VOICE_TONE = {
  *
  * The submitted payload is identical to the single-page layout's: same fields,
  * same values, same endpoint. Only the pacing differs. Voice changes neither:
- * it writes through the same `setValue`, and the review step below is still
- * the only way to submit.
+ * it writes through the screen's own setters — `setValue` per dictated field,
+ * `applyValues` for a whole Smart Fill result — and the review step below is
+ * still the only way to submit.
  */
 export function ConversationalFill({
   fields,
   values,
   errors,
   setValue,
+  applyValues,
   onSubmit,
   submitting,
   header,
@@ -137,10 +146,16 @@ export function ConversationalFill({
           .uncertain.map((m) => m.fieldId)
           .filter((id) => changed.has(id));
 
-        // One field at a time through the caller's own `setValue`, so a spoken
-        // answer passes exactly the guards a typed one does (R22's
-        // hide-a-section discard warning among them).
-        for (const change of changes) setValue(change.fieldId, change.next);
+        // One merge through the caller, not a `setValue` per mapping: a spoken
+        // answer still passes every guard a typed one does (R22's
+        // hide-a-section warning among them), but it is asked ONCE and about
+        // the form as it will actually stand — N prompts computed against a
+        // pre-merge snapshot were both unanswerable and wrong.
+        const patch: Record<string, SubmissionValue> = {};
+        for (const change of changes) patch[change.fieldId] = change.next;
+        // Declining that warning means nothing was applied, so there is
+        // nothing to announce or highlight — the form is as they left it.
+        if (!applyValues(patch)) return;
 
         setOutcome({
           filled: changes.map((c) => c.fieldId),

@@ -35,6 +35,30 @@ export function requiredFieldErrors(ids: string[]): Record<string, string> {
 }
 
 /**
+ * The error map with every named field's message cleared, or the SAME object
+ * back when none of them was carrying one.
+ *
+ * Identity is the point. This feeds a `setErrors` updater, and handing back a
+ * fresh object re-renders every field on the screen — including the one being
+ * typed in — to say nothing changed. The single-field path guards the same way
+ * inline; a Smart Fill patch touches many ids in one go and has to check across
+ * all of them at once.
+ *
+ * Blanked rather than deleted, matching the rest of this module: consumers read
+ * `errors[id] || undefined`, so the two are equivalent to them, and keeping the
+ * key makes the map's shape independent of which path last wrote it.
+ */
+export function clearedErrors(
+  errors: Record<string, string>,
+  ids: readonly string[],
+): Record<string, string> {
+  if (!ids.some((id) => errors[id])) return errors;
+  const next = { ...errors };
+  for (const id of ids) if (next[id]) next[id] = '';
+  return next;
+}
+
+/**
  * Field ids from a server `400 {error:'required_fields_missing', fields:[…]}`
  * body (KTD4), or null when the body is some other error shape. Fill surfaces
  * feed the ids into their per-field `errors` state instead of a generic toast.
