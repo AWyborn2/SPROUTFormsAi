@@ -45,6 +45,7 @@ import {
   geometryConfirmed,
   geometryProposal,
   getImportSession,
+  IMPORT_REQUEST_TIMEOUT_MS,
   lowestUnresolvedField,
   optionSlotId,
   proposeGeometry,
@@ -130,11 +131,18 @@ describe('startExtraction', () => {
     expect(session.extraction).toEqual(EXTRACTION);
     expect(session.error).toBeNull();
 
-    expect(postMock).toHaveBeenNthCalledWith(1, '/pdf/upload', { pdfBase64: 'JVBERi0=' });
-    expect(postMock).toHaveBeenNthCalledWith(2, '/pdf/extract', {
-      assetId: 'asset-123',
-      fileName: 'site-safety-audit.pdf',
-    });
+    expect(postMock).toHaveBeenNthCalledWith(
+      1,
+      '/pdf/upload',
+      { pdfBase64: 'JVBERi0=' },
+      { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+    );
+    expect(postMock).toHaveBeenNthCalledWith(
+      2,
+      '/pdf/extract',
+      { assetId: 'asset-123', fileName: 'site-safety-audit.pdf' },
+      { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+    );
   });
 
   it('maps a 422 extraction_unavailable on extract to the AI-unavailable message, keeping the file name', async () => {
@@ -170,8 +178,29 @@ describe('startExtraction', () => {
     await startExtraction(makeFile());
 
     expect(getImportSession().status).toBe('error');
+    expect(getImportSession().error).toBe('This PDF is too large to import — the limit is 25 MB.');
+  });
+
+  it('maps a 401 to the session-expired message rather than the generic one', async () => {
+    postMock.mockRejectedValueOnce(new ApiError(401, { error: 'unauthenticated' }));
+
+    await startExtraction(makeFile());
+
+    const session = getImportSession();
+    expect(session.status).toBe('error');
+    expect(session.error).toBe('Your session has expired — sign in again, then retry the import.');
+    expect(session.fileName).toBe('site-safety-audit.pdf');
+  });
+
+  it('maps a client-side timeout abort to the timeout message', async () => {
+    // The api-client aborts a slow request as ApiError(0, { error: 'request_timeout' }).
+    postMock.mockRejectedValueOnce(new ApiError(0, { error: 'request_timeout' }));
+
+    await startExtraction(makeFile());
+
+    expect(getImportSession().status).toBe('error');
     expect(getImportSession().error).toBe(
-      'This PDF is too large to import — the limit is 25 MB.',
+      'The import timed out. Very large PDFs can take a while — please try again.',
     );
   });
 
@@ -201,10 +230,11 @@ describe('retryExtraction', () => {
     expect(session.status).toBe('ready');
     expect(session.assetId).toBe('asset-456');
     expect(session.fields).toHaveLength(2);
-    expect(postMock).toHaveBeenLastCalledWith('/pdf/extract', {
-      assetId: 'asset-456',
-      fileName: 'site-safety-audit.pdf',
-    });
+    expect(postMock).toHaveBeenLastCalledWith(
+      '/pdf/extract',
+      { assetId: 'asset-456', fileName: 'site-safety-audit.pdf' },
+      { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+    );
   });
 
   it('is a no-op when nothing was ever started', async () => {
@@ -532,7 +562,12 @@ describe('geometry review (U4, R8)', () => {
   };
 
   function reviewField(): ReviewField {
-    return { id: 'f1', label: 'Operational requirements', type: 'repeating_group', confidence: 0.9 };
+    return {
+      id: 'f1',
+      label: 'Operational requirements',
+      type: 'repeating_group',
+      confidence: 0.9,
+    };
   }
 
   it('does not publish a proposal the reviewer never confirmed', () => {
@@ -741,16 +776,28 @@ describe('distributeGroups (U9/split reading modes)', () => {
   const six = [0, 1, 2, 3, 4, 5];
 
   it('down-columns deals contiguous blocks', () => {
-    expect(distributeGroups(six, 3, 'down-columns')).toEqual([[0, 1], [2, 3], [4, 5]]);
+    expect(distributeGroups(six, 3, 'down-columns')).toEqual([
+      [0, 1],
+      [2, 3],
+      [4, 5],
+    ]);
   });
 
   it('across-rows deals by stride', () => {
-    expect(distributeGroups(six, 3, 'across-rows')).toEqual([[0, 3], [1, 4], [2, 5]]);
+    expect(distributeGroups(six, 3, 'across-rows')).toEqual([
+      [0, 3],
+      [1, 4],
+      [2, 5],
+    ]);
   });
 
   it('down-columns puts an uneven remainder in the earlier groups, losing nothing', () => {
     const got = distributeGroups([0, 1, 2, 3, 4, 5, 6], 3, 'down-columns');
-    expect(got).toEqual([[0, 1, 2], [3, 4], [5, 6]]);
+    expect(got).toEqual([
+      [0, 1, 2],
+      [3, 4],
+      [5, 6],
+    ]);
     expect(got.flat()).toHaveLength(7);
   });
 
@@ -779,12 +826,24 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
     ],
     answerSets: [{ key: 'as1', columnKeys: ['ok', 'na'] }],
     fixedRows: [
-      'Engine oil level', 'Engine coolant level', 'Power steering fluid level',
-      'Steering', 'Locking pins on Tray', 'Collision Avoidance System',
-      'Tyre Condition/Wheel nuts', 'Park brake', 'Foot brake',
-      'Seat belts', '2-way radio', 'Horn',
-      'Brake & indicator lights', 'Headlights', 'Flashing light',
-      'Flag (if required)', 'Fire extinguisher', 'Reverse Alarm',
+      'Engine oil level',
+      'Engine coolant level',
+      'Power steering fluid level',
+      'Steering',
+      'Locking pins on Tray',
+      'Collision Avoidance System',
+      'Tyre Condition/Wheel nuts',
+      'Park brake',
+      'Foot brake',
+      'Seat belts',
+      '2-way radio',
+      'Horn',
+      'Brake & indicator lights',
+      'Headlights',
+      'Flashing light',
+      'Flag (if required)',
+      'Fire extinguisher',
+      'Reverse Alarm',
     ],
   };
 
@@ -792,26 +851,50 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
   const CATEGORY_A_ROWMAJOR: ExtractedField = {
     ...CATEGORY_A,
     fixedRows: [
-      'Engine oil level', 'Tyre Condition/Wheel nuts', 'Brake & indicator lights',
-      'Engine coolant level', 'Park brake', 'Headlights',
-      'Power steering fluid level', 'Foot brake', 'Flashing light',
-      'Steering', 'Seat belts', 'Flag (if required)',
-      'Locking pins on Tray', '2-way radio', 'Fire extinguisher',
-      'Collision Avoidance System', 'Horn', 'Reverse Alarm',
+      'Engine oil level',
+      'Tyre Condition/Wheel nuts',
+      'Brake & indicator lights',
+      'Engine coolant level',
+      'Park brake',
+      'Headlights',
+      'Power steering fluid level',
+      'Foot brake',
+      'Flashing light',
+      'Steering',
+      'Seat belts',
+      'Flag (if required)',
+      'Locking pins on Tray',
+      '2-way radio',
+      'Fire extinguisher',
+      'Collision Avoidance System',
+      'Horn',
+      'Reverse Alarm',
     ],
   };
 
   const LEFT_COLUMN = [
-    'Engine oil level', 'Engine coolant level', 'Power steering fluid level',
-    'Steering', 'Locking pins on Tray', 'Collision Avoidance System',
+    'Engine oil level',
+    'Engine coolant level',
+    'Power steering fluid level',
+    'Steering',
+    'Locking pins on Tray',
+    'Collision Avoidance System',
   ];
   const MIDDLE_COLUMN = [
-    'Tyre Condition/Wheel nuts', 'Park brake', 'Foot brake',
-    'Seat belts', '2-way radio', 'Horn',
+    'Tyre Condition/Wheel nuts',
+    'Park brake',
+    'Foot brake',
+    'Seat belts',
+    '2-way radio',
+    'Horn',
   ];
   const RIGHT_COLUMN = [
-    'Brake & indicator lights', 'Headlights', 'Flashing light',
-    'Flag (if required)', 'Fire extinguisher', 'Reverse Alarm',
+    'Brake & indicator lights',
+    'Headlights',
+    'Flashing light',
+    'Flag (if required)',
+    'Fire extinguisher',
+    'Reverse Alarm',
   ];
 
   const tables = () => getImportSession().fields.filter((f) => f.type === 'repeating_group');
@@ -915,7 +998,11 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
     splitTableGroups('catA', 3);
 
     const after = tables();
-    expect(after.map((f) => f.fixedRows)).toEqual([['a', 'b', 'c'], ['d', 'e'], ['f', 'g']]);
+    expect(after.map((f) => f.fixedRows)).toEqual([
+      ['a', 'b', 'c'],
+      ['d', 'e'],
+      ['f', 'g'],
+    ]);
     expect(after.flatMap((f) => f.fixedRows ?? [])).toHaveLength(7);
   });
 
@@ -925,7 +1012,11 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
     splitTableGroups('catA', 3, 'across-rows');
 
     const after = tables();
-    expect(after.map((f) => f.fixedRows)).toEqual([['a', 'd', 'g'], ['b', 'e'], ['c', 'f']]);
+    expect(after.map((f) => f.fixedRows)).toEqual([
+      ['a', 'd', 'g'],
+      ['b', 'e'],
+      ['c', 'f'],
+    ]);
     expect(after.flatMap((f) => f.fixedRows ?? [])).toHaveLength(7);
   });
 
@@ -985,8 +1076,13 @@ describe('splitting a table into its printed groups (U9, R18)', () => {
       {
         ...CATEGORY_A,
         sourcePosition: {
-          page: 0, x: 40, y: 180, width: 520, height: 130,
-          pageWidth: 595.32, pageHeight: 419.52,
+          page: 0,
+          x: 40,
+          y: 180,
+          width: 520,
+          height: 130,
+          pageWidth: 595.32,
+          pageHeight: 419.52,
         },
       },
     ]);
@@ -1106,11 +1202,17 @@ describe('checkbox-group per-option geometry (publish boundary)', () => {
     // composite slot. The two must be independent stores.
     expect(optionSlotId('shift', 'D')).not.toBe('shift');
   });
-})
+});
 
 describe('per-option geometry applies to radio and dropdown, not only checkbox_group', () => {
   const optBox = (): PageBox => ({
-    page: 0, x: 200, y: 500, width: 14, height: 14, pageWidth: 600, pageHeight: 800,
+    page: 0,
+    x: 200,
+    y: 500,
+    width: 14,
+    height: 14,
+    pageWidth: 600,
+    pageHeight: 800,
   });
 
   const choice = (type: ReviewField['type']): ReviewField => ({
@@ -1132,11 +1234,17 @@ describe('per-option geometry applies to radio and dropdown, not only checkbox_g
       expect(published.geometry?.segments[0]?.optionKey).toBe('Day');
     });
   }
-})
+});
 
 describe('a printSelectedValue choice field publishes a single value box, not per-option', () => {
   const box = (): PageBox => ({
-    page: 0, x: 200, y: 500, width: 120, height: 16, pageWidth: 600, pageHeight: 800,
+    page: 0,
+    x: 200,
+    y: 500,
+    width: 120,
+    height: 16,
+    pageWidth: 600,
+    pageHeight: 800,
   });
 
   const dropdown = (): ReviewField => ({
@@ -1167,4 +1275,4 @@ describe('a printSelectedValue choice field publishes a single value box, not pe
 
     expect(reviewedToFields([dropdown()])[0]?.geometry).toBeUndefined();
   });
-})
+});

@@ -220,10 +220,21 @@ export function setImportTarget(formId: string | null) {
 
 export const MAX_UPLOAD_MB = 25;
 
+/**
+ * Upload + extract get a longer ceiling than the api-client's 30s default. A
+ * multi-page PDF is extracted in several batched model calls (see the API's
+ * `extractWithAI`), which routinely runs past 30s for a long assessment; the
+ * default timeout aborted the request and surfaced as a generic "Import failed"
+ * before extraction could finish.
+ */
+export const IMPORT_REQUEST_TIMEOUT_MS = 120_000;
+
 const ERROR_MESSAGES = {
   aiUnavailable: "This PDF needs AI extraction, which isn't configured on the server yet.",
   storageUnavailable: "File storage isn't available right now — try again shortly.",
   tooLarge: `This PDF is too large to import — the limit is ${MAX_UPLOAD_MB} MB.`,
+  sessionExpired: 'Your session has expired — sign in again, then retry the import.',
+  timeout: 'The import timed out. Very large PDFs can take a while — please try again.',
   generic: 'Something went wrong importing this PDF. Please try again.',
 } as const;
 
@@ -233,11 +244,17 @@ function messageForError(err: unknown): string {
       typeof err.body === 'object' && err.body !== null && 'error' in err.body
         ? String((err.body as { error: unknown }).error)
         : '';
+    // A 401 means the session lapsed mid-import (the global handler in `hooks`
+    // clears it and the guards send the user to /login); say so plainly rather
+    // than blaming the PDF.
+    if (err.status === 401) return ERROR_MESSAGES.sessionExpired;
     if (err.status === 422 && bodyError.startsWith('extraction_unavailable')) {
       return ERROR_MESSAGES.aiUnavailable;
     }
     if (err.status === 503) return ERROR_MESSAGES.storageUnavailable;
     if (err.status === 413) return ERROR_MESSAGES.tooLarge;
+    // The api-client aborts on timeout as ApiError(0, { error: 'request_timeout' }).
+    if (err.status === 0 && bodyError === 'request_timeout') return ERROR_MESSAGES.timeout;
   }
   return ERROR_MESSAGES.generic;
 }
@@ -263,7 +280,12 @@ export async function startExtraction(file: File): Promise<void> {
   heldBase64 = null;
   // Starting over with a new file keeps the re-extract target — the target is
   // wizard-scoped (cleared by reset on step-1 entry), not file-scoped.
-  update({ ...emptySession(), targetFormId: session.targetFormId, status: 'uploading', fileName: file.name });
+  update({
+    ...emptySession(),
+    targetFormId: session.targetFormId,
+    status: 'uploading',
+    fileName: file.name,
+  });
 
   let base64: string;
   try {
@@ -288,13 +310,19 @@ export async function retryExtraction(): Promise<void> {
 
 async function runPipeline(run: number, fileName: string, base64: string): Promise<void> {
   try {
-    const { assetId } = await apiClient.post<{ assetId: string }>('/pdf/upload', {
-      pdfBase64: base64,
-    });
+    const { assetId } = await apiClient.post<{ assetId: string }>(
+      '/pdf/upload',
+      { pdfBase64: base64 },
+      { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+    );
     if (run !== runId) return;
     update({ status: 'extracting', assetId });
 
-    const result = await apiClient.post<ExtractionResult>('/pdf/extract', { assetId, fileName });
+    const result = await apiClient.post<ExtractionResult>(
+      '/pdf/extract',
+      { assetId, fileName },
+      { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+    );
     if (run !== runId) return;
     update({
       status: 'ready',
@@ -400,7 +428,11 @@ export function removeFixedRowItem(id: string, index: number): void {
   const current = editorField(id)?.fixedRows;
   if (!current || index < 0 || index >= current.length) return;
   const fixedRows = current.filter((_, i) => i !== index);
-  dispatchEdit({ t: 'update', id, patch: { fixedRows: fixedRows.length > 0 ? fixedRows : undefined } });
+  dispatchEdit({
+    t: 'update',
+    id,
+    patch: { fixedRows: fixedRows.length > 0 ? fixedRows : undefined },
+  });
 }
 
 /**
@@ -560,9 +592,15 @@ function growToFit(segment: PageBox): PageBox {
   const rows = segment.rowBands ?? [];
 
   const left = Math.max(Math.min(segment.x, ...cols.map((b) => b.start)), 0);
-  const right = Math.min(Math.max(segment.x + segment.width, ...cols.map((b) => b.end)), segment.pageWidth);
+  const right = Math.min(
+    Math.max(segment.x + segment.width, ...cols.map((b) => b.end)),
+    segment.pageWidth,
+  );
   const bottom = Math.max(Math.min(segment.y, ...rows.map((b) => b.start)), 0);
-  const top = Math.min(Math.max(segment.y + segment.height, ...rows.map((b) => b.end)), segment.pageHeight);
+  const top = Math.min(
+    Math.max(segment.y + segment.height, ...rows.map((b) => b.end)),
+    segment.pageHeight,
+  );
 
   return { ...segment, x: left, y: bottom, width: right - left, height: top - bottom };
 }
@@ -715,7 +753,11 @@ function labelKeyOf(id: string): string | undefined {
  * identity a row value and any answer set naming it are stored under, so a
  * rename must move only the display `label`.
  */
-function patchColumn(id: string, key: string, patch: Partial<Omit<RepeatingColumn, 'key'>>): RepeatingColumn[] | null {
+function patchColumn(
+  id: string,
+  key: string,
+  patch: Partial<Omit<RepeatingColumn, 'key'>>,
+): RepeatingColumn[] | null {
   const columns = columnsOf(id);
   if (!columns.some((c) => c.key === key)) return null;
   return columns.map((c) => (c.key === key ? { ...c, ...patch } : c));
@@ -839,7 +881,11 @@ export function groupColumns(id: string, columnKeys: string[]): string | null {
   const existing = withoutMembers(id, field.answerSets ?? [], new Set(members));
   const key = nextAnswerSetKey(field.answerSets ?? []);
   acceptedAnswerSets.add(acceptanceKey(id, key));
-  dispatchStructural({ t: 'update', id, patch: { answerSets: [...existing, { key, columnKeys: members }] } });
+  dispatchStructural({
+    t: 'update',
+    id,
+    patch: { answerSets: [...existing, { key, columnKeys: members }] },
+  });
   return key;
 }
 
@@ -865,7 +911,11 @@ export type SplitReadingMode = 'down-columns' | 'across-rows';
  * A remainder that does not divide evenly goes to the EARLIER groups under
  * both modes, so no item is ever lost.
  */
-export function distributeGroups<T>(items: readonly T[], groups: number, mode: SplitReadingMode): T[][] {
+export function distributeGroups<T>(
+  items: readonly T[],
+  groups: number,
+  mode: SplitReadingMode,
+): T[][] {
   if (mode === 'across-rows') {
     return Array.from({ length: groups }, (_, g) => items.filter((_item, i) => i % groups === g));
   }

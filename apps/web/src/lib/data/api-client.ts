@@ -18,11 +18,16 @@ export class ApiError extends Error {
 /** Hard ceiling on any single request — a stalled export must not hang forever. */
 const REQUEST_TIMEOUT_MS = 30_000;
 
-async function send(method: string, path: string, body?: unknown): Promise<Response> {
+async function send(
+  method: string,
+  path: string,
+  body?: unknown,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<Response> {
   // Abort a request that outruns the timeout and surface it as an ApiError so
   // callers' onError paths fire (rather than an unhandled DOMException/hang).
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   let res: Response;
   try {
@@ -50,15 +55,26 @@ async function send(method: string, path: string, body?: unknown): Promise<Respo
   return res;
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await send(method, path, body);
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  timeoutMs?: number,
+): Promise<T> {
+  const res = await send(method, path, body, timeoutMs);
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
 
+/** Per-call overrides. `timeoutMs` raises the default ceiling for slow endpoints. */
+export interface RequestOptions {
+  timeoutMs?: number;
+}
+
 export const apiClient = {
   get: <T>(path: string): Promise<T> => request<T>('GET', path),
-  post: <T>(path: string, body?: unknown): Promise<T> => request<T>('POST', path, body),
+  post: <T>(path: string, body?: unknown, opts?: RequestOptions): Promise<T> =>
+    request<T>('POST', path, body, opts?.timeoutMs),
   patch: <T>(path: string, body?: unknown): Promise<T> => request<T>('PATCH', path, body),
   delete: <T>(path: string): Promise<T> => request<T>('DELETE', path),
   /** POST to an endpoint that answers with a binary body (e.g. a PDF) instead of JSON. */
