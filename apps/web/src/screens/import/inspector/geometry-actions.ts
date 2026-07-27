@@ -806,19 +806,34 @@ export function subdivideBox({ box, items, columns, wantRows }: SubdivideInput):
  * Contiguous and inside the box by construction, so it survives `resolveGeometry`
  * (R6); no glyphs are consulted, because the whole point of this path is that
  * there were none to consult.
+ *
+ * `reserveLabel` controls the leftmost part. A fixed-item CHECKLIST prints its
+ * item text down the first column and that text is not something we place, so
+ * the leftmost part is reserved (no band) and the option columns start one part
+ * in. An OPEN row-entry table (a timesheet) has no pre-printed label column —
+ * every column is a fillable cell whose value must export — so nothing is
+ * reserved and `optionKeys` should be ALL the columns, banded left-to-right
+ * across the full box. Reserving a phantom label there is what left the first
+ * column ("Work Order #") with no band, so its cells never placed on export.
  */
-export function evenGrid(box: PageBox, optionKeys: readonly string[], rowKeys: readonly string[]): PageBox {
+export function evenGrid(
+  box: PageBox,
+  optionKeys: readonly string[],
+  rowKeys: readonly string[],
+  reserveLabel = true,
+): PageBox {
   const left = box.x;
   const right = box.x + box.width;
   const bottom = box.y;
   const top = box.y + box.height;
 
-  const parts = optionKeys.length + 1; // parts[0] is the reserved label column
-  const colWidth = (right - left) / parts;
+  const reserved = reserveLabel ? 1 : 0;
+  const parts = optionKeys.length + reserved;
+  const colWidth = parts > 0 ? (right - left) / parts : 0;
   const columnBands: GeometryBand[] = optionKeys.map((key, i) => ({
     key,
-    start: left + colWidth * (i + 1),
-    end: left + colWidth * (i + 2),
+    start: left + colWidth * (i + reserved),
+    end: left + colWidth * (i + reserved + 1),
   }));
 
   const rowHeight = rowKeys.length > 0 ? (top - bottom) / rowKeys.length : 0;

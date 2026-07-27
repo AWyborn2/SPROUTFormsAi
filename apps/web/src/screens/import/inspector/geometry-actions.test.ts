@@ -815,6 +815,20 @@ describe('manual even-seed fallback and row dividers (U4, R4/AE6)', () => {
     expect(grid.columnBands![1]!.end).toBeCloseTo(400, 5); // the box's right edge
   });
 
+  it('bands EVERY column across the full width when no label is reserved (open table)', () => {
+    // An open row-entry table: all three columns are fillable, so all three get
+    // bands spanning the box left-to-right — no phantom leftmost label part.
+    const grid = evenGrid(box, ['wo', 'plant', 'hours'], ['r0'], false);
+
+    expect(grid.columnBands?.map((b) => b.key)).toEqual(['wo', 'plant', 'hours']);
+    // 300pt / 3 = 100pt each, starting at the box's own left edge (100).
+    expect(grid.columnBands![0]!.start).toBeCloseTo(100, 5);
+    expect(grid.columnBands![0]!.end).toBeCloseTo(200, 5);
+    expect(grid.columnBands![2]!.end).toBeCloseTo(400, 5); // the box's right edge
+    // The first column now carries a band, so the exporter can place its value.
+    expect(resolveGeometry({ geometry: { segments: [grid] } }, 1).segments).toHaveLength(1);
+  });
+
   it('divides the height evenly with r0 the TOP row (matches the exporter’s order)', () => {
     const grid = evenGrid(box, ['ok', 'na'], ['r0', 'r1', 'r2']);
 
