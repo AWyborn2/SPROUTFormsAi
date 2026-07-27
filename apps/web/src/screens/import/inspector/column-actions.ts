@@ -9,13 +9,16 @@
 import type { FormField, FormFieldType, VisibilityCondition } from '@formai/shared';
 import {
   acceptAnswerSet,
+  addColumn,
   answerSetAccepted,
   groupColumns,
+  removeColumn,
   renameColumn,
   setColumnRequired,
   setColumnOptions,
   setColumnType,
   setFieldCondition,
+  setTableLabelColumn,
   ungroupAnswerSet,
 } from '../../../lib/data/import-session.js';
 import type { ColumnActions } from './ColumnInspector.js';
@@ -31,6 +34,9 @@ export const importSessionColumnActions: ColumnActions = {
   ungroupAnswerSet,
   acceptAnswerSet,
   answerSetAccepted,
+  setLabelColumn: setTableLabelColumn,
+  addColumn,
+  removeColumn,
 };
 
 /** Pre-publish: the condition is written into the reviewed field list. */
@@ -78,6 +84,11 @@ export function builderColumnActions(
   update: (patch: Partial<FormField>) => void,
 ): ColumnActions {
   const sets = () => field.answerSets ?? [];
+  const isChecklist = (field.fixedRows?.length ?? 0) > 0;
+  const cols = () => field.columns ?? [];
+  // `columns[0]` is the row-identity column: never a set member (matches
+  // `resolveAnswerSets`) and never removable, checklist or not.
+  const rowIdentityKey = field.columns?.[0]?.key;
   return {
     renameColumn: (_id, columnKey, label) => update(patchColumn(field, columnKey, { label })),
     setColumnType: (_id, columnKey, type) => {
@@ -99,8 +110,7 @@ export function builderColumnActions(
     setColumnRequired: (_id, columnKey, required) => update(patchColumn(field, columnKey, { required })),
     setColumnOptions: (_id, columnKey, options) => update(patchColumn(field, columnKey, { options })),
     groupColumns: (_id, columnKeys) => {
-      const labelKey = field.columns?.[0]?.key;
-      const members = columnKeys.filter((k) => k !== labelKey);
+      const members = columnKeys.filter((k) => k !== rowIdentityKey);
       if (members.length < 2) return null;
       const key = `set-${members.join('-')}`;
       const others = sets()
@@ -112,5 +122,41 @@ export function builderColumnActions(
     ungroupAnswerSet: (_id, setKey) => update({ answerSets: sets().filter((s) => s.key !== setKey) }),
     acceptAnswerSet: () => {},
     answerSetAccepted: () => true,
+    setLabelColumn: (_id, wantLabel) => {
+      if (wantLabel === isChecklist) return;
+      if (!wantLabel) {
+        update({ fixedRows: undefined });
+        return;
+      }
+      // Open → checklist: the first column becomes pre-printed text (KTD1) and
+      // leaves any answer set; a single blank item seeds the checklist.
+      const columns = cols();
+      if (columns.length === 0) return;
+      const firstKey = columns[0]!.key;
+      update({
+        columns: columns.map((c, i) => (i === 0 ? { key: c.key, label: c.label, type: 'text' } : c)),
+        fixedRows: [''],
+        answerSets: sets()
+          .map((s) => ({ ...s, columnKeys: s.columnKeys.filter((k) => k !== firstKey) }))
+          .filter((s) => s.columnKeys.length >= 2),
+      });
+    },
+    addColumn: () => {
+      const columns = cols();
+      const taken = new Set(columns.map((c) => c.key));
+      let n = columns.length + 1;
+      while (taken.has(`col${n}`)) n += 1;
+      update({ columns: [...columns, { key: `col${n}`, label: `Column ${columns.length + 1}`, type: 'text' }] });
+    },
+    removeColumn: (_id, columnKey) => {
+      const columns = cols();
+      if (columns.length <= 1 || columnKey === rowIdentityKey || !columns.some((c) => c.key === columnKey)) return;
+      update({
+        columns: columns.filter((c) => c.key !== columnKey),
+        answerSets: sets()
+          .map((s) => ({ ...s, columnKeys: s.columnKeys.filter((k) => k !== columnKey) }))
+          .filter((s) => s.columnKeys.length >= 2),
+      });
+    },
   };
 }

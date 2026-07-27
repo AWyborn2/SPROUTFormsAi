@@ -30,7 +30,12 @@ import { resolveAnswerSets } from '@formai/shared';
  * published field does not, so requiring `ReviewField` would lock the builder
  * out of the very inspector R17 says it must share.
  */
-export type ColumnInspectorField = Pick<FormField, 'id' | 'columns' | 'answerSets'>;
+export type ColumnInspectorField = Pick<FormField, 'id' | 'columns' | 'answerSets' | 'fixedRows'>;
+
+/** A table has a pre-printed label column exactly when it is a fixed-item checklist. */
+export function hasLabelColumn(field: ColumnInspectorField): boolean {
+  return (field.fixedRows?.length ?? 0) > 0;
+}
 
 /**
  * The edits this panel performs, supplied by whoever mounts it.
@@ -51,6 +56,17 @@ export interface ColumnActions {
   ungroupAnswerSet(fieldId: string, setKey: string): void;
   acceptAnswerSet(fieldId: string, setKey: string): void;
   answerSetAccepted(fieldId: string, setKey: string): boolean;
+  /**
+   * Override the extractor's read of the first column: `true` makes it a
+   * pre-printed label (a fixed-item checklist), `false` makes every column a
+   * fillable cell (an open row-entry table). The AI can misclassify either way;
+   * this is the reviewer's correction.
+   */
+  setLabelColumn(fieldId: string, isLabel: boolean): void;
+  /** Append a new fillable text column to the table. */
+  addColumn(fieldId: string): void;
+  /** Remove a column. Never the pre-printed label column of a checklist. */
+  removeColumn(fieldId: string, columnKey: string): void;
 }
 
 /** Types a table cell can sensibly take (a column is never a section header). */
@@ -79,10 +95,19 @@ export type ColumnMembership = 'none' | 'proposed' | 'accepted';
 export interface ColumnRow {
   column: RepeatingColumn;
   index: number;
-  /** `columns[0]` — the pre-printed item text. Displayed, never edited structurally. */
+  /**
+   * `columns[0]` of a CHECKLIST — the pre-printed item text. Displayed, never
+   * edited structurally. An open row-entry table (no `fixedRows`) has no label
+   * column: its first column is a fillable cell like any other, which is why
+   * this is gated on the table actually being a checklist rather than on
+   * position alone. Treating column 0 as a label unconditionally is what froze
+   * an open table's first column ("Work Order #") out of every edit.
+   */
   isLabel: boolean;
   /** Whether this column may join an answer set at all. */
   groupable: boolean;
+  /** Whether this column may be deleted (never the first/row-identity column; never the last one). */
+  removable: boolean;
   membership: ColumnMembership;
   /** The valid set owning this column, when any. */
   set?: AnswerSet;
@@ -99,15 +124,22 @@ export function columnRows(
 ): ColumnRow[] {
   const columns = field.columns ?? [];
   const { sets } = resolveAnswerSets(field);
+  const labelled = hasLabelColumn(field);
 
   return columns.map((column, index) => {
     const set = sets.find((s) => s.columnKeys.includes(column.key));
-    const isLabel = index === 0;
+    const isLabel = index === 0 && labelled;
     return {
       column,
       index,
       isLabel,
-      groupable: !isLabel,
+      // `columns[0]` is the row-identity column and is never a set member —
+      // `resolveAnswerSets` (the single authority) drops any set that includes
+      // it, checklist or not. Groupability tracks that rule, independent of the
+      // editing lock: an OPEN table's first column edits freely (isLabel:false)
+      // yet still isn't a tick-group option.
+      groupable: index !== 0,
+      removable: index !== 0 && columns.length > 1,
       membership: !set ? 'none' : isAccepted(field.id, set.key) ? 'accepted' : 'proposed',
       ...(set ? { set } : {}),
     };
@@ -134,14 +166,40 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
   const toggle = (key: string) =>
     setPicked((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
 
+  const labelled = hasLabelColumn(field);
+
   return (
     <div className="flex flex-col gap-3 border-t border-border-subtle pt-3">
       <div>
         <div className="text-[12.5px] font-semibold">Table columns</div>
         <p className="mt-0.5 text-[11px] text-text-tertiary">
-          The first column is the pre-printed item text — it can&apos;t be retyped or grouped.
+          {labelled
+            ? "The first column is the pre-printed item text — it can't be retyped or grouped."
+            : 'Every column is a fillable cell that repeats down the table.'}
         </p>
       </div>
+
+      {/*
+        The reviewer's override of the extractor's first-column read. Extraction
+        can lock a fillable column as a "pre-printed label" (the case that froze
+        "Work Order #"), or miss a genuinely pre-printed one. Turning this on
+        makes the first column a fixed checklist label; off makes it fillable.
+      */}
+      <label className="flex items-center gap-2 rounded-md border border-border-subtle bg-surface-sunken p-[9px_10px]">
+        <Switch
+          checked={labelled}
+          onChange={(e) => actions.setLabelColumn(field.id, e.target.checked)}
+          aria-label="First column is a pre-printed label"
+        />
+        <span className="min-w-0 flex-1">
+          <span className="block text-[12px] font-medium text-text-primary">
+            First column is a pre-printed label
+          </span>
+          <span className="block text-[11px] text-text-tertiary">
+            Turn off if the first column is filled in per row (a timesheet, a log).
+          </span>
+        </span>
+      </label>
 
       <div className="flex flex-col gap-2">
         {rows.map((row) => (
@@ -173,6 +231,15 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
               >
                 {MEMBERSHIP_TEXT[row.membership]}
               </span>
+              {row.removable && (
+                <button
+                  onClick={() => actions.removeColumn(field.id, row.column.key)}
+                  aria-label={`Remove column: ${row.column.label}`}
+                  className="grid h-7 w-7 flex-none place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover hover:text-danger-text"
+                >
+                  <Icon name="x" size={12} />
+                </button>
+              )}
             </div>
 
             {!row.isLabel && (
@@ -204,6 +271,14 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
           </div>
         ))}
       </div>
+
+      <button
+        onClick={() => actions.addColumn(field.id)}
+        className="inline-flex items-center justify-center gap-1.5 rounded-sm border border-dashed border-border-strong px-2.5 py-1.5 text-[12px] font-semibold text-text-secondary hover:bg-surface-hover"
+      >
+        <Icon name="plus" size={13} />
+        Add column
+      </button>
 
       <button
         onClick={() => {
