@@ -12,6 +12,12 @@ const schema = z.object({
 
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_EXTRACTION_MODEL: z.string().default('claude-sonnet-5'),
+  /**
+   * Page-group size for AI extraction of long PDFs. Documents with more pages
+   * than this are split into groups of this width, one model call each, so a
+   * dense multi-page form does not overrun the output-token cap in one call.
+   */
+  ANTHROPIC_EXTRACTION_PAGE_BATCH: z.coerce.number().int().min(1).default(4),
 
   /** Unset means invite emails silently degrade (`emailSent: false`) — never an error. */
   RESEND_API_KEY: z.string().optional(),

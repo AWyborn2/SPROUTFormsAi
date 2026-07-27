@@ -8,6 +8,16 @@
  *     tool. Parsing is robust: check for a `tool_use` block first, then fall
  *     back to a ```json fence in text — forced `tool_choice` is not 100%
  *     reliable. `max_tokens` is deliberately large; dense forms carry 50+ defs.
+ *
+ * Long documents on the AI path are split into page-range BATCHES, each
+ * extracted in its own forced-tool call, and the results merged. A single call
+ * over a whole 18-page assessment reliably overran the `max_tokens` cap: the
+ * tool response truncated mid-JSON, parsing threw, and the reviewer saw only a
+ * generic "Import failed". Batching keeps each call's field list well under the
+ * cap and lets the calls run concurrently, so wall-clock drops too. Batches are
+ * a few pages wide (not one page each) so that a checklist spanning a page
+ * break usually stays whole inside one call; a table that still straddles a
+ * batch boundary is flagged in `designNotes` for the reviewer to merge.
  */
 import {
   PDFCheckBox,
@@ -30,6 +40,23 @@ import { EXTRACT_TOOL_NAME, extractFormFieldsTool } from './tool-schema.js';
 
 /** Minimum tokens for the forced tool call — undersizing makes it fail outright. */
 export const EXTRACTION_MAX_TOKENS = 16000;
+
+/**
+ * Default page-group size for the AI path. A document with more pages than this
+ * is split into page ranges of this width, one forced-tool call each. Four is a
+ * balance: small enough that a group's field list stays well under
+ * `EXTRACTION_MAX_TOKENS`, wide enough that most checklists/tables (typically
+ * 1–2 pages) survive inside a single group rather than being torn at every page
+ * boundary. Override per-call via `ExtractOptions.pageBatchSize`.
+ */
+export const EXTRACTION_PAGE_BATCH_SIZE = 4;
+
+/**
+ * How many batch calls run at once. Bounded so a long document does not fan out
+ * dozens of simultaneous requests into a rate limit; the Anthropic SDK's own
+ * retry/backoff still covers transient 429s within each call.
+ */
+export const EXTRACTION_BATCH_CONCURRENCY = 3;
 
 /** The subset of the Anthropic client we depend on (keeps the service testable). */
 export interface AnthropicLike {
@@ -55,6 +82,12 @@ export interface ExtractOptions {
   model?: string;
   /** Override for the max_tokens sent on the flat path (defaults to 16000). */
   maxTokens?: number;
+  /**
+   * Page-group size for the AI path (defaults to {@link EXTRACTION_PAGE_BATCH_SIZE}).
+   * Documents with more pages than this are split into groups of this width and
+   * extracted one call each. A value ≤ 0 or non-finite falls back to the default.
+   */
+  pageBatchSize?: number;
 }
 
 const EXTRACTION_PROMPT =
@@ -254,7 +287,9 @@ export function parseExtractionResponse(message: AnthropicMessage): ParsedToolRe
     const parsed = parseJsonFence(textBlock.text);
     if (parsed) return parsed;
   }
-  throw new Error('extraction_failed: response contained neither a tool_use block nor parseable JSON');
+  throw new Error(
+    'extraction_failed: response contained neither a tool_use block nor parseable JSON',
+  );
 }
 
 function toColumns(raw: unknown): RepeatingColumn[] | undefined {
@@ -311,7 +346,9 @@ function normalizeField(raw: Record<string, unknown>, index: number): ExtractedF
   // pre-filling the reviewer a count that would be refused.
   const rawColumnGroups = toColumnGroups(raw.columnGroups);
   const columnGroups =
-    rawColumnGroups && fixedRows && fixedRows.length >= rawColumnGroups ? rawColumnGroups : undefined;
+    rawColumnGroups && fixedRows && fixedRows.length >= rawColumnGroups
+      ? rawColumnGroups
+      : undefined;
   let columns = toColumns(raw.columns);
   // KTD1 invariant: a fixed-row checklist's labels live in the FIRST column,
   // which must be text. Guard against the model omitting it. The synthetic
@@ -360,17 +397,24 @@ function normalizeField(raw: Record<string, unknown>, index: number): ExtractedF
   };
 }
 
-/** Flat-PDF path — one forced tool call, robust parsing. */
-async function extractWithAI(
+/** The normalized output of one forced-tool call over a single PDF. */
+interface BatchResult {
+  fields: ExtractedField[];
+  modelNotes: string[];
+}
+
+/**
+ * One forced-tool extraction call over a single PDF — the whole document on the
+ * short path, or one page-range group on the batched path. Ids are assigned
+ * batch-locally here and re-sequenced globally by the caller after merge.
+ */
+async function extractBatch(
   pdfBytes: Uint8Array,
-  doc: PDFDocument,
+  anthropic: AnthropicLike,
   opts: ExtractOptions,
-): Promise<ExtractionResult> {
-  if (!opts.anthropic) {
-    throw new Error('extraction_unavailable: flat PDF requires an Anthropic client / API key');
-  }
+): Promise<BatchResult> {
   const base64 = Buffer.from(pdfBytes).toString('base64');
-  const message = await opts.anthropic.messages.create({
+  const message = await anthropic.messages.create({
     model: opts.model ?? 'claude-sonnet-5',
     max_tokens: opts.maxTokens ?? EXTRACTION_MAX_TOKENS,
     tools: [extractFormFieldsTool],
@@ -379,7 +423,10 @@ async function extractWithAI(
       {
         role: 'user',
         content: [
-          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
+          {
+            type: 'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: base64 },
+          },
           { type: 'text', text: EXTRACTION_PROMPT },
         ],
       },
@@ -390,6 +437,127 @@ async function extractWithAI(
   const rawFields = Array.isArray(parsed.fields) ? parsed.fields : [];
   const fields = rawFields.map(normalizeField);
   const modelNotes = Array.isArray(parsed.designNotes) ? parsed.designNotes.map(String) : [];
+  return { fields, modelNotes };
+}
+
+/**
+ * Split a document into consecutive page-range groups, each a standalone PDF.
+ * Page content is copied verbatim, so the model sees each group's pages exactly
+ * as they appear in the source.
+ */
+async function splitIntoBatches(doc: PDFDocument, batchSize: number): Promise<Uint8Array[]> {
+  const total = doc.getPageCount();
+  const batches: Uint8Array[] = [];
+  for (let start = 0; start < total; start += batchSize) {
+    const indices: number[] = [];
+    for (let p = start; p < Math.min(start + batchSize, total); p++) indices.push(p);
+    const sub = await PDFDocument.create();
+    const copied = await sub.copyPages(doc, indices);
+    copied.forEach((page) => sub.addPage(page));
+    batches.push(await sub.save());
+  }
+  return batches;
+}
+
+/**
+ * Map over items with a bounded number of in-flight calls, preserving input
+ * order in the results. Kept tiny and dependency-free — the only consumer is
+ * the batch fan-out below.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const runner = async (): Promise<void> => {
+    for (let i = cursor++; i < items.length; i = cursor++) {
+      results[i] = await fn(items[i]!, i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner));
+  return results;
+}
+
+/**
+ * Flat-PDF path. Short documents take a single forced-tool call (unchanged);
+ * longer ones are split into page-range groups, extracted concurrently, and
+ * merged. A failed group is skipped with a loud `designNote` naming the page
+ * range rather than failing the whole import — but if EVERY group fails the
+ * import still errors, so the reviewer never lands on a silently empty form.
+ */
+async function extractWithAI(
+  pdfBytes: Uint8Array,
+  doc: PDFDocument,
+  opts: ExtractOptions,
+): Promise<ExtractionResult> {
+  if (!opts.anthropic) {
+    throw new Error('extraction_unavailable: flat PDF requires an Anthropic client / API key');
+  }
+  const anthropic = opts.anthropic;
+  const pageCount = doc.getPageCount();
+  const batchSize =
+    opts.pageBatchSize && Number.isFinite(opts.pageBatchSize) && opts.pageBatchSize > 0
+      ? Math.floor(opts.pageBatchSize)
+      : EXTRACTION_PAGE_BATCH_SIZE;
+
+  let fields: ExtractedField[];
+  let modelNotes: string[];
+  const batchNotes: string[] = [];
+
+  if (pageCount <= batchSize) {
+    // Short document: one call over the original bytes — the pre-batching path.
+    const out = await extractBatch(pdfBytes, anthropic, opts);
+    fields = out.fields;
+    modelNotes = out.modelNotes;
+  } else {
+    const batches = await splitIntoBatches(doc, batchSize);
+    const settled = await mapWithConcurrency(
+      batches,
+      EXTRACTION_BATCH_CONCURRENCY,
+      async (bytes, i) => {
+        try {
+          const out = await extractBatch(bytes, anthropic, opts);
+          return { ok: true as const, ...out };
+        } catch (err) {
+          const from = i * batchSize + 1;
+          const to = Math.min((i + 1) * batchSize, pageCount);
+          return {
+            ok: false as const,
+            note: `Pages ${from}–${to} could not be extracted and were skipped — re-run the import or add those fields by hand.`,
+          };
+        }
+      },
+    );
+
+    fields = [];
+    modelNotes = [];
+    let failed = 0;
+    for (const r of settled) {
+      if (r.ok) {
+        fields.push(...r.fields);
+        modelNotes.push(...r.modelNotes);
+      } else {
+        failed += 1;
+        batchNotes.push(r.note);
+      }
+    }
+    // Every group failing is indistinguishable from a broken document — surface
+    // it as an error rather than an empty form the reviewer would publish blank.
+    if (failed === batches.length) {
+      throw new Error('extraction_failed: every page group failed to extract');
+    }
+    // One up-front note so the reviewer knows to watch for a table split across
+    // a group boundary — the one correctness cost batching introduces.
+    batchNotes.unshift(
+      `This ${pageCount}-page PDF was read in ${batches.length} page-groups; a table spanning a group boundary can appear as two partial tables — merge them in review.`,
+    );
+  }
+
+  // Ids are assigned batch-locally in `extractBatch`; re-sequence them once
+  // across the merged list so every field carries a unique, stable id.
+  fields = fields.map((field, i) => ({ ...field, id: `ai_${i + 1}` }));
 
   // Point the reviewer at the split control for any checklist the model read as
   // several side-by-side groups. Synthesised here rather than left to the model
@@ -398,15 +566,18 @@ async function extractWithAI(
   // should be split.
   const splitNotes = fields
     .filter((f) => f.columnGroups)
-    .map((f) => `"${f.label}" appears to print as ${f.columnGroups} side-by-side groups — split it in review.`);
+    .map(
+      (f) =>
+        `"${f.label}" appears to print as ${f.columnGroups} side-by-side groups — split it in review.`,
+    );
 
   return {
     sourceType: 'pdf_import',
     path: 'ai',
     fileName: opts.fileName,
-    pageCount: doc.getPageCount(),
+    pageCount,
     fields,
-    designNotes: [...modelNotes, ...splitNotes],
+    designNotes: [...modelNotes, ...batchNotes, ...splitNotes],
   };
 }
 

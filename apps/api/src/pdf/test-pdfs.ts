@@ -92,6 +92,26 @@ export async function makeTwoPageFlatPdf(): Promise<Uint8Array> {
   return doc.save();
 }
 
+/**
+ * An N-page flat PDF (no AcroForm), each page carrying distinct drawn text.
+ *
+ * Drives the AI-path batching tests: a document longer than the page-group size
+ * is split into several standalone PDFs, so the fixture needs enough real pages
+ * to produce more than one group. The dozer assessment that motivated batching
+ * is eighteen.
+ */
+export async function makeMultiPageFlatPdf(pageCount: number): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (let i = 0; i < pageCount; i++) {
+    const page = doc.addPage([600, 800]);
+    page.drawText(LETTERHEAD, { x: 40, y: 750, size: 18, font: bold });
+    page.drawText(`Assessment page ${i + 1}`, { x: 40, y: 720, size: 12, font });
+  }
+  return doc.save();
+}
+
 /** A flat PDF: drawn letterhead + labels only, no AcroForm fields. */
 export async function makeFlatPdf(): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
