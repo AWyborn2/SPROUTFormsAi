@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { Badge, Icon } from '@formai/ui';
+import { Badge, Button, Icon } from '@formai/ui';
 import { useDashboard, useForms } from '../lib/data/hooks.js';
 import { FORM_ICON_STYLE } from '../lib/data/fixtures.js';
 import { useOnboarding } from '../lib/onboarding.js';
@@ -28,10 +28,33 @@ export function DashboardScreen() {
 
   return (
     <div className="fai-rise mx-auto max-w-[1120px] p-[30px_28px_60px]">
+      {/* Header actions — same create/import entry points as the form library,
+          so a workspace that already has forms can still start a new one without
+          detouring through the library or the empty state. */}
+      <div className="mb-[22px] flex items-center justify-between gap-4">
+        <p className="text-sm text-text-secondary">Your workspace at a glance.</p>
+        <div className="flex flex-none gap-2.5">
+          <Button
+            variant="outline"
+            size="sm"
+            leadingIcon="file-up"
+            onClick={() => navigate('/app/import')}
+          >
+            Import PDF
+          </Button>
+          <Button size="sm" leadingIcon="plus" onClick={() => navigate('/app/forms/build')}>
+            New form
+          </Button>
+        </div>
+      </div>
+
       {/* Stat cards */}
       <div className="mb-[22px] grid grid-cols-1 gap-4 sm:grid-cols-3">
         {stats.map((s) => (
-          <div key={s.label} className="rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs">
+          <div
+            key={s.label}
+            className="rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs"
+          >
             <div className="mb-3 flex items-center justify-between">
               <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">
                 {s.label}
@@ -48,20 +71,29 @@ export function DashboardScreen() {
         <div className="rounded-lg border border-border bg-surface-card shadow-xs">
           <div className="flex items-center justify-between border-b border-border-subtle p-[18px_22px]">
             <span className="font-heading text-[15px] font-bold">Your forms</span>
-            <button onClick={() => navigate('/app/forms')} className="text-[12.5px] font-semibold text-text-accent">
+            <button
+              onClick={() => navigate('/app/forms')}
+              className="text-[12.5px] font-semibold text-text-accent"
+            >
               View all
             </button>
           </div>
           <div>
             {forms.slice(0, 4).map((f) => {
-              const style = FORM_ICON_STYLE[f.icon] ?? { bg: 'var(--surface-sunken)', color: 'var(--text-secondary)' };
+              const style = FORM_ICON_STYLE[f.icon] ?? {
+                bg: 'var(--surface-sunken)',
+                color: 'var(--text-secondary)',
+              };
               return (
                 <button
                   key={f.id}
                   onClick={() => navigate(f.status === 'draft' ? '/app/forms/build' : '/app/forms')}
                   className="fai-row flex w-full items-center gap-[14px] border-b border-border-subtle p-[14px_22px] text-left last:border-b-0 hover:bg-surface-hover"
                 >
-                  <span className="grid h-9 w-9 flex-none place-items-center rounded-[9px]" style={{ background: style.bg }}>
+                  <span
+                    className="grid h-9 w-9 flex-none place-items-center rounded-[9px]"
+                    style={{ background: style.bg }}
+                  >
                     <Icon name={f.icon} size={18} color={style.color} />
                   </span>
                   <span className="min-w-0 flex-1">
@@ -77,7 +109,9 @@ export function DashboardScreen() {
                   ) : (
                     <Badge variant="neutral">Draft</Badge>
                   )}
-                  <span className="w-[52px] text-right font-heading text-[15px] font-bold">{f.submissions}</span>
+                  <span className="w-[52px] text-right font-heading text-[15px] font-bold">
+                    {f.submissions}
+                  </span>
                 </button>
               );
             })}
