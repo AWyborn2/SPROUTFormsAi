@@ -72,6 +72,13 @@ export function FillScreen() {
   const smartFillOffered = (fill?.smartFillEnabled ?? false) && !smartFillRetired;
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
+  /**
+   * What `applyValues` weighs its discard warning against. Only the paths that
+   * resume after an `await` need it — a synchronous change handler's closure is
+   * current by definition — and the merge itself is functional either way.
+   */
+  const latestValues = useRef(values);
+  latestValues.current = values;
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitterName, setSubmitterName] = useState('');
   const [submitterEmail, setSubmitterEmail] = useState('');
@@ -116,7 +123,10 @@ export function FillScreen() {
     const ids = Object.keys(patch);
     if (ids.length === 0) return true;
 
-    const impact = discardImpactOfPatch(fill?.fields ?? [], values, patch);
+    // Read through the ref, not the closure: unlike `setValue` this is called
+    // from a promise the respondent kicked off seconds earlier, so the captured
+    // `values` may predate whatever they typed while the model was thinking.
+    const impact = discardImpactOfPatch(fill?.fields ?? [], latestValues.current, patch);
     if (impact.count > 0 && !window.confirm(discardWarningMessage(impact))) return false;
 
     setValues((v) => ({ ...v, ...patch }));
