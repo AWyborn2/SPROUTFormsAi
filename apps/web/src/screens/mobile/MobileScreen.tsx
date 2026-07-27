@@ -554,11 +554,17 @@ function FillView({
           <div className="grid grid-cols-12 gap-[16px]">
             {visibleFillFields(form.fields, values).map((f) => (
               <div key={f.id} className={previewSpanClass(resolveFillSpan(f, true))}>
+                {/* Dictation is on here and off in the builder preview: this is
+                    the surface someone actually fills standing at a machine,
+                    often gloved, where typing is the slow part. The preview
+                    renders the same component purely to show a layout, so it
+                    must never open the mic. */}
                 <FieldInput
                   field={f}
                   value={values[f.id] ?? null}
                   error={errors[f.id] || undefined}
                   incompleteRowIndexes={incompleteRows[f.id]}
+                  dictation
                   onChange={(v) => onChange(f.id, v)}
                 />
               </div>
