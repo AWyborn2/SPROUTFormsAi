@@ -428,10 +428,24 @@ assessmentCasesRouter.get(
     const attempts = await attemptsFor(db, row.id);
     const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
 
+    // Appeals AGAINST this case — the superseding record must be visible from
+    // the superseded one, or a reviewer reading the original would take a
+    // disputed outcome at face value. The extra in-code filter is a no-op on a
+    // real database and keeps the predicate exact.
+    const appeals = (
+      await db.query.assessmentCases.findMany({
+        where: and(
+          eq(schema.assessmentCases.orgId, tenant.orgId),
+          eq(schema.assessmentCases.appealOfCaseId, row.id),
+        ),
+      })
+    ).filter((c) => c.appealOfCaseId === row.id);
+
     res.json({
       id: row.id,
       toolId: tool.id,
       toolName: tool.name,
+      appeals: appeals.map((c) => ({ id: c.id, state: c.state, createdAt: c.createdAt })),
       candidateUserId: row.candidateUserId,
       assessorUserId: row.assessorUserId,
       pathway: row.pathway,
@@ -814,6 +828,119 @@ assessmentCasesRouter.post(
       }
       throw err;
     }
+  }),
+);
+
+const appealBody = z.object({
+  assessorUserId: z.string().uuid(),
+  reason: z.string().min(1),
+});
+
+/**
+ * Appeal a case's outcome: a NEW case, linked to the disputed one, run by a
+ * different assessor. The later outcome supersedes for display while both
+ * cases remain queryable — the appeal does not edit or hide the original,
+ * because a disputed record that vanishes is exactly what an audit cannot
+ * accept.
+ *
+ * Two constraints carry the integrity:
+ *
+ * - Only an administrator may initiate. The source document gives this
+ *   authority to the Training Supervisor; at Business tier that is an admin,
+ *   and the distinct role arrives with the Enterprise panel work.
+ * - The initiator must not be the assessor whose decision is disputed
+ *   (R30/AE8). Without this, an admin who is also an assessor could
+ *   adjudicate a dispute about their own assessment.
+ *
+ * The panel-review arm is Enterprise-only and deliberately NOT modelled here —
+ * no endpoint exists, so there is nothing to gate. It arrives with panel
+ * membership and per-member verdicts as its own unit of work.
+ */
+assessmentCasesRouter.post(
+  '/:id/appeal',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (tenant.role !== 'owner' && tenant.role !== 'admin') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = appealBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const disputed = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!disputed) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    // The conflict constraint, both sides of it: the initiating admin must not
+    // be the disputed assessor, and the appeal must go to a DIFFERENT assessor
+    // — "an independent Assessor" in the source document's words.
+    if (disputed.assessorUserId === tenant.userId) {
+      res.status(409).json({
+        error: 'appeal_conflict',
+        message: 'The assessor whose decision is disputed cannot initiate the appeal.',
+      });
+      return;
+    }
+    if (parsed.data.assessorUserId === disputed.assessorUserId) {
+      res.status(409).json({
+        error: 'appeal_assessor_not_independent',
+        message: 'An appeal must be assessed by someone other than the disputed assessor.',
+      });
+      return;
+    }
+
+    const tool = await loadTool(db, disputed.toolId, tenant.orgId);
+    if (!tool) {
+      res.status(409).json({ error: 'tool_missing' });
+      return;
+    }
+    const template = await db.query.formTemplates.findFirst({
+      where: eq(schema.formTemplates.id, tool.templateId),
+    });
+    if (!template?.currentVersionId) {
+      res.status(409).json({ error: 'template_not_published' });
+      return;
+    }
+
+    const [appeal] = await db
+      .insert(schema.assessmentCases)
+      .values({
+        orgId: tenant.orgId,
+        toolId: disputed.toolId,
+        candidateUserId: disputed.candidateUserId,
+        assessorUserId: parsed.data.assessorUserId,
+        pathway: disputed.pathway,
+        locationStream: disputed.locationStream,
+        currentVersionId: template.currentVersionId,
+        appealOfCaseId: disputed.id,
+        appealReason: parsed.data.reason,
+        rplJustification: disputed.rplJustification,
+      })
+      .returning();
+    if (!appeal) throw new Error('appeal_create_failed: insert returned no row');
+
+    await recordAudit(db, tenant, {
+      action: 'Opened appeal',
+      target: `${disputed.id} → ${appeal.id}: ${parsed.data.reason}`,
+      category: 'submissions',
+      icon: 'scale',
+    });
+
+    res.status(201).json({
+      id: appeal.id,
+      appealOfCaseId: disputed.id,
+      assessorUserId: parsed.data.assessorUserId,
+      pathway: appeal.pathway,
+    });
   }),
 );
 

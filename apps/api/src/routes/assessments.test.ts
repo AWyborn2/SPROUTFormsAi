@@ -952,3 +952,146 @@ describe('logbook duration integrity', () => {
     }
   });
 });
+
+/**
+ * An appeal is a NEW case linked to the disputed one — never an edit of it.
+ * The two conflict rules are the integrity of the whole mechanism (R29/R30,
+ * AE8): the disputed assessor can neither initiate the appeal nor be assigned
+ * to assess it, so nobody adjudicates a dispute about their own decision.
+ */
+describe('POST /assessment-cases/:id/appeal', () => {
+  const DISPUTED_ASSESSOR = '00000000-0000-4000-8000-0000000000e1';
+  const INDEPENDENT = '00000000-0000-4000-8000-0000000000e2';
+
+  async function disputedCase(base: string) {
+    const tool = await seedTool(base);
+    return (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          toolId: tool.id,
+          candidateUserId: CANDIDATE,
+          assessorUserId: DISPUTED_ASSESSOR,
+          pathway: 'experienced',
+        }),
+      })
+    ).json()) as { id: string };
+  }
+
+  it('opens a linked case with an independent assessor, keeping both', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await disputedCase(base);
+
+      const res = await fetch(`${base}/assessment-cases/${c.id}/appeal`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ assessorUserId: INDEPENDENT, reason: 'Candidate disputes Part 2 outcome' }),
+      });
+
+      expect(res.status).toBe(201);
+      const appeal = (await res.json()) as { id: string; appealOfCaseId: string };
+      expect(appeal.appealOfCaseId).toBe(c.id);
+
+      const cases = store.assessmentCases ?? [];
+      expect(cases).toHaveLength(2);
+      expect(cases.find((x) => x.id === c.id)).toBeDefined();
+      const appealRow = cases.find((x) => x.id === appeal.id);
+      expect(appealRow?.appealReason).toBe('Candidate disputes Part 2 outcome');
+      expect(appealRow?.candidateUserId).toBe(CANDIDATE);
+
+      // The original's detail surfaces the superseding record.
+      const detail = (await (await fetch(`${base}/assessment-cases/${c.id}`, { headers: auth() })).json()) as {
+        appeals: { id: string }[];
+      };
+      expect(detail.appeals.map((a) => a.id)).toContain(appeal.id);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses the disputed assessor as initiator, even as an admin', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      // The disputed case is assessed by THE ADMIN calling the appeal route.
+      const c = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
+        })
+      ).json()) as { id: string };
+
+      const res = await fetch(`${base}/assessment-cases/${c.id}/appeal`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ assessorUserId: INDEPENDENT, reason: 'Disputed' }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('appeal_conflict');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses assigning the appeal back to the disputed assessor', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const c = await disputedCase(base);
+
+      const res = await fetch(`${base}/assessment-cases/${c.id}/appeal`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ assessorUserId: DISPUTED_ASSESSOR, reason: 'Disputed' }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('appeal_assessor_not_independent');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a non-admin initiator', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const c = await disputedCase(base);
+
+      const res = await fetch(`${base}/assessment-cases/${c.id}/appeal`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: JSON.stringify({ assessorUserId: INDEPENDENT, reason: 'Disputed' }),
+      });
+
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('requires a reason', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const c = await disputedCase(base);
+
+      const res = await fetch(`${base}/assessment-cases/${c.id}/appeal`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ assessorUserId: INDEPENDENT }),
+      });
+
+      expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+});
