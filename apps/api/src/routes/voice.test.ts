@@ -165,6 +165,43 @@ describe('POST /voice/smart-fill (authed)', () => {
     }
   });
 
+  it('403s when the FORM pins voice off, whatever the workspace default says', async () => {
+    mockDbValue = fakeDb({
+      planTier: 'business',
+      // Workspace default on (no branding key at all) — the form's own
+      // override is the top of the precedence chain.
+      formTemplatesFindFirst: { ...TEMPLATE, voiceInput: false },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { templateVersionId: 'v1', transcript: 'Warehouse B' });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe('voice_disabled');
+      expect(mockMapTranscript).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('serves a form pinned ON even when the workspace default is off', async () => {
+    mockMapTranscript.mockResolvedValueOnce(MAPPED);
+    mockDbValue = fakeDb({
+      planTier: 'business',
+      branding: { voiceInput: false },
+      formTemplatesFindFirst: { ...TEMPLATE, voiceInput: true },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { templateVersionId: 'v1', transcript: 'Warehouse B' });
+      expect(res.status).toBe(200);
+      expect(mockMapTranscript).toHaveBeenCalledOnce();
+    } finally {
+      server.close();
+    }
+  });
+
   it('400s on a missing versionId, an empty transcript, or one over the cap', async () => {
     mockDbValue = fakeDb({ formTemplatesFindFirst: TEMPLATE, formTemplateVersionsFindFirst: PUBLISHED_V1 });
     const { server, base } = startApp();

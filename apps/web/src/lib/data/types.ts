@@ -55,6 +55,11 @@ export interface FormDetail extends FormSummary {
   fields: FormField[];
   container: FormContainer;
   versions: FormVersionSummary[];
+  /**
+   * Per-form voice-input override: null inherits the workspace default,
+   * true/false pins this form. Edited from the form library rail.
+   */
+  voiceInput: boolean | null;
 }
 
 /** A submissions-table row. */
@@ -282,6 +287,13 @@ export interface PublicFillForm {
    * press. The tier itself stays server-side.
    */
   smartFillEnabled: boolean;
+  /**
+   * Voice input for THIS form, already resolved server-side (form override <-
+   * workspace default <- on), exactly as the theme arrives pre-merged. Gates
+   * the per-field dictation mics; Smart Fill folds the same flag into
+   * `smartFillEnabled` above.
+   */
+  voiceInputEnabled: boolean;
 }
 
 /**

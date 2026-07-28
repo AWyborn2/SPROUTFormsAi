@@ -1,5 +1,5 @@
 import { relations } from 'drizzle-orm';
-import { index, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { boolean, index, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import type { FormContainer, FormField, ThemeTokens } from '@formai/shared';
 import { formSourceTypeEnum, templateStatusEnum, versionStateEnum } from './enums.ts';
 import { organizations, users } from './organizations.ts';
@@ -45,6 +45,16 @@ export const formTemplates = pgTable(
      * forms stale until someone republished them.
      */
     themeOverride: jsonb('theme_override').$type<ThemeTokens>(),
+    /**
+     * Per-form voice-input override, three-state by design: NULL inherits the
+     * workspace default (`organizations.branding.voiceInput`, absent = on),
+     * true/false pins this form regardless of it. Same reasoning as
+     * `themeOverride` for living on the mutable template rather than a
+     * version: flipping voice off must take effect on live fill links
+     * immediately, not after a republish. Resolution is `resolveVoiceInput`
+     * in @formai/shared — the one rule every enforcement door shares.
+     */
+    voiceInput: boolean('voice_input'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },

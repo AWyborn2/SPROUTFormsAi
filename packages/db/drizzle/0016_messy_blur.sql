@@ -1,0 +1,1 @@
+ALTER TABLE "form_templates" ADD COLUMN "voice_input" boolean;
