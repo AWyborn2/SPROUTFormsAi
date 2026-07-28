@@ -405,7 +405,7 @@ describe('competency holders', () => {
       });
 
       expect(res.status).toBe(404);
-      expect((await res.json()).error).toBe('user_not_in_org');
+      expect(((await res.json()) as { error: string }).error).toBe('user_not_in_org');
     } finally {
       server.close();
     }
