@@ -3,7 +3,7 @@
  * preview and the external fill flow, so a field looks and behaves identically
  * wherever it appears. Values use the shared SubmissionValue union.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import {
   Checkbox,
   DateTimePicker,
@@ -87,6 +87,14 @@ export function canDictateField(field: FormField): boolean {
   return isDictatable(field.type) && field.type !== 'check_cross';
 }
 
+/** Types whose control is one labelable element that accepts an `id`. */
+const LABELABLE_TYPES: ReadonlySet<FormField['type']> = new Set([
+  'text',
+  'number',
+  'textarea',
+  'dropdown',
+]);
+
 function asString(v: SubmissionValue): string {
   if (v === null || v === undefined || Array.isArray(v)) return '';
   // A file ref is an object; `String(...)` on one yields "[object Object]",
@@ -114,23 +122,55 @@ export function FieldInput({
     );
   }
 
-  const label = (
-    <div className="mb-1.5 text-[13px] font-semibold text-text-primary">
+  // Association wiring. The @formai/ui text controls (Input / Select /
+  // Textarea) are labelable and accept an `id`, so those four types get a real
+  // <label htmlFor> — a screen reader then announces the question on focus
+  // instead of an anonymous input. Option groups have no single labelable
+  // element; their container gets a role + `aria-labelledby` pointing at the
+  // caption instead. Everything else keeps the caption as a styled div
+  // (signature and the time row already label themselves via `aria-label`).
+  const controlId = useId();
+  const labelId = `${controlId}-label`;
+  const labelable = LABELABLE_TYPES.has(field.type);
+  const groupRole =
+    field.type === 'radio' || field.type === 'boolean_yes_no'
+      ? ('radiogroup' as const)
+      : field.type === 'checkbox_group'
+        ? ('group' as const)
+        : null;
+
+  const caption = (
+    <>
       {field.label}
       {field.required && <span className="ml-0.5 text-danger">*</span>}
+    </>
+  );
+  const label = labelable ? (
+    <label htmlFor={controlId} className="mb-1.5 block text-[13px] font-semibold text-text-primary">
+      {caption}
+    </label>
+  ) : (
+    <div id={groupRole ? labelId : undefined} className="mb-1.5 text-[13px] font-semibold text-text-primary">
+      {caption}
     </div>
   );
-  const helpErr = error ? (
-    <p className="mt-1 text-xs text-danger-text">{error}</p>
-  ) : field.help ? (
-    <p className="mt-1 text-xs text-text-tertiary">{field.help}</p>
-  ) : null;
+  // The labelable controls render the error themselves (with their own
+  // `aria-describedby` wiring), so repeating it here printed every error
+  // twice — identical red text, twice, on every fill surface. Their branch
+  // only falls back to help; the rest keep the original behaviour.
+  const helpErr =
+    error && !labelable ? (
+      <p className="mt-1 text-xs text-danger-text">{error}</p>
+    ) : field.help ? (
+      <p className="mt-1 text-xs text-text-tertiary">{field.help}</p>
+    ) : null;
 
   const body = (() => {
     switch (field.type) {
       case 'text':
         return (
           <Input
+            id={controlId}
             value={asString(value)}
             placeholder={field.placeholder}
             error={error}
@@ -141,6 +181,7 @@ export function FieldInput({
       case 'number':
         return (
           <Input
+            id={controlId}
             type="number"
             value={asString(value)}
             placeholder={field.placeholder}
@@ -152,6 +193,7 @@ export function FieldInput({
       case 'textarea':
         return (
           <Textarea
+            id={controlId}
             value={asString(value)}
             placeholder={field.placeholder}
             error={error}
@@ -191,6 +233,7 @@ export function FieldInput({
       case 'dropdown':
         return (
           <Select
+            id={controlId}
             options={field.options ?? []}
             value={asString(value)}
             placeholder="Select an option…"
@@ -201,7 +244,7 @@ export function FieldInput({
         );
       case 'radio':
         return (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2" role="radiogroup" aria-labelledby={labelId}>
             {(field.options ?? []).map((o) => (
               <Radio
                 key={o}
@@ -216,7 +259,7 @@ export function FieldInput({
         );
       case 'boolean_yes_no':
         return (
-          <div className="flex gap-4">
+          <div className="flex gap-4" role="radiogroup" aria-labelledby={labelId}>
             {['Yes', 'No'].map((o) => (
               <Radio
                 key={o}
@@ -241,7 +284,7 @@ export function FieldInput({
       case 'checkbox_group': {
         const selected = Array.isArray(value) ? (value as string[]) : [];
         return (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2" role="group" aria-labelledby={labelId}>
             {(field.options ?? []).map((o) => (
               <Checkbox
                 key={o}
@@ -590,11 +633,14 @@ function FileUploadField({
           <span className="truncate">
             {ref.fileName} · {formatBytes(ref.size)}
           </span>
+          {/* Padded to a ~44px hit target, negative margins cancelling the
+              layout cost — this row renders on the mobile field app too. */}
           {!disabled && (
             <button
               type="button"
               onClick={clear}
-              className="ml-auto shrink-0 font-semibold text-text-accent hover:underline"
+              aria-label={`Remove ${ref.fileName}`}
+              className="-my-3.5 ml-auto shrink-0 px-2 py-3.5 font-semibold text-text-accent hover:underline"
             >
               Remove
             </button>

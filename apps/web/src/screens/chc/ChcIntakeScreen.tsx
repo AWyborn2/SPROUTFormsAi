@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { Children, cloneElement, isValidElement, useId, useMemo, useState } from 'react';
 import {
   CHC_ABN,
   CHC_DEPARTMENT_NAMES,
@@ -217,6 +217,20 @@ export function ChcIntakeScreen() {
     <div className="chc-root">
       <style>{CHC_INTAKE_CSS}</style>
 
+      {/* Always-mounted live region (same rule as the fill surfaces'): a
+          `role="status"` node inserted at the moment it gains text is often
+          missed by screen readers. Without this, the sending → document swap
+          is silent — the respondent is never told the submission completed. */}
+      <p role="status" className="sr-only">
+        {view === 'sending'
+          ? 'Recording your submission.'
+          : view === 'document'
+            ? submissionRef
+              ? 'Submission recorded. The completed intake document is shown.'
+              : 'Intake document ready. It was not recorded — print or email it.'
+            : ''}
+      </p>
+
       <header
         className="chc-no-print"
         style={{
@@ -298,7 +312,7 @@ export function ChcIntakeScreen() {
               />
             </Field>
 
-            <Field label="Gender" required error={errors.gender}>
+            <Field label="Gender" required error={errors.gender} group="radiogroup">
               <ChoiceRow
                 name="gender"
                 options={[...CHC_GENDERS]}
@@ -311,6 +325,7 @@ export function ChcIntakeScreen() {
               label="Indigenous (Aboriginal or Torres Strait Islander)?"
               required
               error={errors.indigenous}
+              group="radiogroup"
               last
             >
               <ChoiceRow
@@ -323,7 +338,12 @@ export function ChcIntakeScreen() {
           </Card>
 
           <Card title="Employment Details">
-            <Field label="New starter or transfer?" required error={errors.starter_type}>
+            <Field
+              label="New starter or transfer?"
+              required
+              error={errors.starter_type}
+              group="radiogroup"
+            >
               <ChoiceRow
                 name="starter_type"
                 options={[...CHC_STARTER_TYPES]}
@@ -378,6 +398,7 @@ export function ChcIntakeScreen() {
               label="Details already in Beakon (with photo & licence)?"
               required
               error={errors.in_beakon}
+              group="radiogroup"
               last
             >
               <ChoiceRow
@@ -749,12 +770,33 @@ function Row({ children }: { children: React.ReactNode }) {
   );
 }
 
+const fieldLabelStyle: React.CSSProperties = {
+  display: 'block',
+  fontSize: 13,
+  fontWeight: 600,
+  color: '#333',
+  marginBottom: 6,
+};
+
+/**
+ * Labelled field wrapper, now with the association a visible label alone does
+ * not provide. The single child control receives an `id` the `<label>` points
+ * at, plus `aria-invalid` and an `aria-describedby` linking the hint and the
+ * error — so a screen reader announces the label on focus and the error the
+ * moment it appears, instead of an anonymous input next to an unclaimed alert.
+ *
+ * `group` switches the wiring for compound controls (the radio rows and the
+ * multi-role checkbox list): those have no single labelable element, so the
+ * child instead gets `role` + `aria-labelledby` pointing at the caption, which
+ * becomes a span — a `<label>` may only reference a labelable element.
+ */
 function Field({
   label,
   required,
   error,
   hint,
   last,
+  group,
   children,
 }: {
   label: string;
@@ -762,26 +804,57 @@ function Field({
   error?: string;
   hint?: string;
   last?: boolean;
+  /** Compound-control role; absent for single labelable controls. */
+  group?: 'radiogroup' | 'group';
   children: React.ReactNode;
 }) {
+  const id = useId();
+  const controlId = `${id}-control`;
+  const labelId = `${id}-label`;
+  const describedBy =
+    [hint ? `${id}-hint` : null, error ? `${id}-err` : null].filter(Boolean).join(' ') ||
+    undefined;
+
+  const only = Children.only(children);
+  const control = isValidElement(only)
+    ? cloneElement(
+        only as React.ReactElement<Record<string, unknown>>,
+        group
+          ? { role: group, 'aria-labelledby': labelId, 'aria-describedby': describedBy }
+          : {
+              id: controlId,
+              'aria-invalid': error ? true : undefined,
+              'aria-describedby': describedBy,
+            },
+      )
+    : children;
+
+  const caption = (
+    <>
+      {label}
+      {required && <span style={{ color: CHC_RED }}> *</span>}
+    </>
+  );
+
   return (
     <div style={{ marginBottom: last ? 0 : 16 }} data-chc-error={error ? 'true' : undefined}>
-      <label
-        style={{
-          display: 'block',
-          fontSize: 13,
-          fontWeight: 600,
-          color: '#333',
-          marginBottom: 6,
-        }}
-      >
-        {label}
-        {required && <span style={{ color: CHC_RED }}> *</span>}
-      </label>
-      {children}
-      {hint && <div style={{ fontSize: 11, color: '#888', marginTop: 3 }}>{hint}</div>}
+      {group ? (
+        <span id={labelId} style={fieldLabelStyle}>
+          {caption}
+        </span>
+      ) : (
+        <label htmlFor={controlId} style={fieldLabelStyle}>
+          {caption}
+        </label>
+      )}
+      {control}
+      {hint && (
+        <div id={`${id}-hint`} style={{ fontSize: 11, color: '#767676', marginTop: 3 }}>
+          {hint}
+        </div>
+      )}
       {error && (
-        <div role="alert" style={{ color: CHC_RED, fontSize: 12, marginTop: 3 }}>
+        <div id={`${id}-err`} role="alert" style={{ color: CHC_RED, fontSize: 12, marginTop: 3 }}>
           {error}
         </div>
       )}
@@ -789,20 +862,28 @@ function Field({
   );
 }
 
-/** The prototype's pill-shaped radio row. */
+/**
+ * The prototype's pill-shaped radio row. `rest` carries the `role` and aria
+ * attributes `Field` injects for group labelling — forwarded onto the root so
+ * the row announces as one named radiogroup rather than loose radios.
+ */
 function ChoiceRow({
   name,
   options,
   value,
   onChange,
+  ...rest
 }: {
   name: string;
   options: string[];
   value: string;
   onChange: (value: string) => void;
+  role?: string;
+  'aria-labelledby'?: string;
+  'aria-describedby'?: string;
 }) {
   return (
-    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }} {...rest}>
       {options.map((o) => (
         <label
           key={o}
@@ -854,15 +935,17 @@ function RoleField({
   const roles = rolesForDepartment(department);
 
   if (!department) {
+    // `group`: the placeholder is a div, and a label's `for` may only
+    // reference a labelable element — this names it without pretending.
     return (
-      <Field label="Role" required last>
+      <Field label="Role" required group="group" last>
         <div
           style={{
             padding: '10px 12px',
             border: '1px solid #E2E8F0',
             borderRadius: 6,
             fontSize: 14,
-            color: '#A0AEC0',
+            color: '#64748B',
             background: '#FAFBFC',
           }}
         >
@@ -898,6 +981,7 @@ function RoleField({
       required
       error={error}
       hint="Select one or more — dual roles are permitted for Operations."
+      group="group"
       last
     >
       <div
@@ -1026,7 +1110,8 @@ function ChcDocument({
           background: '#fff',
           borderRadius: 4,
           boxShadow: '0 2px 12px rgba(0,0,0,0.1)',
-          padding: '40px 48px',
+          // Padding comes from .chc-doc (chc-intake-styles) so the phone
+          // breakpoint can shrink it — inline padding would always win.
           color: '#1A202C',
         }}
       >
@@ -1040,7 +1125,7 @@ function ChcDocument({
             <div
               style={{
                 fontSize: 9,
-                color: '#888',
+                color: '#767676',
                 textTransform: 'uppercase',
                 letterSpacing: '0.5px',
                 fontWeight: 600,
@@ -1103,7 +1188,7 @@ function ChcDocument({
         </DocGrid>
 
         {recorded && (
-          <div style={{ fontSize: 9, color: '#888', marginTop: 10 }}>
+          <div style={{ fontSize: 9, color: '#767676', marginTop: 10 }}>
             Submission reference: {submissionRef}
           </div>
         )}
@@ -1111,7 +1196,7 @@ function ChcDocument({
         <div
           style={{
             fontSize: 8,
-            color: '#aaa',
+            color: '#767676',
             textAlign: 'center',
             paddingTop: 8,
             marginTop: 14,
@@ -1198,7 +1283,7 @@ function DocCell({ label, value, span }: { label: string; value: string; span?: 
         style={{
           fontSize: 8,
           fontWeight: 700,
-          color: '#888',
+          color: '#767676',
           textTransform: 'uppercase',
           letterSpacing: '0.4px',
           marginBottom: 2,

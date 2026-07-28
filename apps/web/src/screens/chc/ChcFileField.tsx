@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import {
   ALLOWED_ATTACHMENT_TYPES,
   MAX_ATTACHMENT_BYTES,
@@ -42,6 +42,13 @@ export function ChcFileField({
   const [preview, setPreview] = useState('');
   const previewRef = useRef('');
   const inputRef = useRef<HTMLInputElement>(null);
+  // Programmatic association: the visible caption alone names nothing for a
+  // screen reader — the input needs the label's `for`, and the hint and error
+  // linked so they announce with the field rather than as loose text.
+  const id = useId();
+  const describedBy =
+    [`${id}-hint`, localError || error ? `${id}-err` : null].filter(Boolean).join(' ') ||
+    undefined;
 
   useEffect(
     () => () => {
@@ -107,6 +114,7 @@ export function ChcFileField({
   return (
     <div data-chc-error={shown ? 'true' : undefined}>
       <label
+        htmlFor={id}
         style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#333', marginBottom: 6 }}
       >
         {label}
@@ -115,9 +123,12 @@ export function ChcFileField({
 
       <input
         ref={inputRef}
+        id={id}
         type="file"
         accept={accept}
         disabled={uploading}
+        aria-invalid={shown ? true : undefined}
+        aria-describedby={describedBy}
         onChange={(e) => void onPick(e.target.files?.[0])}
         style={{
           width: '100%',
@@ -131,7 +142,9 @@ export function ChcFileField({
           background: '#FAFBFC',
         }}
       />
-      <div style={{ fontSize: 11, color: '#888', marginTop: 3 }}>{hint}</div>
+      <div id={`${id}-hint`} style={{ fontSize: 11, color: '#767676', marginTop: 3 }}>
+        {hint}
+      </div>
 
       {preview && (
         <img
@@ -174,7 +187,7 @@ export function ChcFileField({
               }}
             />
           </div>
-          <div style={{ fontSize: 11, color: '#888', marginTop: 3 }}>Uploading… {progress}%</div>
+          <div style={{ fontSize: 11, color: '#767676', marginTop: 3 }}>Uploading… {progress}%</div>
         </div>
       )}
 
@@ -199,15 +212,19 @@ export function ChcFileField({
           >
             ✓ {value.fileName} · {formatBytes(value.size)}
           </span>
+          {/* Padded to a ~44px hit target with negative margins cancelling the
+              layout cost — this form is filled from phones in site offices, and
+              a 15px text link is a miss-tap next to a licence you just chose. */}
           <button
             type="button"
             onClick={clear}
+            aria-label={`Remove ${value.fileName}`}
             style={{
-              marginLeft: 'auto',
+              margin: '-14px 0 -14px auto',
+              padding: '14px 10px',
               flexShrink: 0,
               background: 'none',
               border: 'none',
-              padding: 0,
               color: CHC_RED,
               fontSize: 11,
               fontWeight: 600,
@@ -221,7 +238,7 @@ export function ChcFileField({
       )}
 
       {shown && (
-        <div role="alert" style={{ color: CHC_RED, fontSize: 12, marginTop: 3 }}>
+        <div id={`${id}-err`} role="alert" style={{ color: CHC_RED, fontSize: 12, marginTop: 3 }}>
           {shown}
         </div>
       )}
