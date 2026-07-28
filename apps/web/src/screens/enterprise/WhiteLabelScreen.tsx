@@ -102,6 +102,24 @@ export function WhiteLabelScreen() {
               onPick={(family) => setBranding({ formFont: family })}
             />
 
+            {/* Voice input. Lives in the free branding block — it is an org
+                preference about its own forms, not a paid feature; the PLAN
+                gate on Smart Fill stays server-side and separate. Saved with
+                the kit by the same button, enforced on both Smart Fill doors. */}
+            <div className="mt-[22px] flex items-center justify-between gap-2.5 rounded-md border border-border-subtle bg-surface-sunken px-3.5 py-3">
+              <div>
+                <div className="text-[13px] font-semibold">Voice input on forms</div>
+                <div className="text-[11.5px] text-text-tertiary">
+                  Microphone dictation and AI Smart Fill on fill pages
+                </div>
+              </div>
+              <Switch
+                checked={branding.voiceInput !== false}
+                onChange={(e) => setBranding({ voiceInput: e.target.checked })}
+                aria-label="Voice input on forms"
+              />
+            </div>
+
             {/* Everything finer lives behind one expander, so the landing view
                 stays a preset gallery rather than a wall of controls. */}
             <button

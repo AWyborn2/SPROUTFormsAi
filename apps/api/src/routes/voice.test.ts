@@ -74,6 +74,8 @@ const MAPPED = {
 
 function fakeDb(opts: {
   planTier?: string;
+  /** Org branding kit; absent mirrors a pre-voiceInput org (voice enabled). */
+  branding?: unknown;
   formTemplatesFindFirst?: unknown;
   formTemplateVersionsFindFirst?: unknown;
   fillLinksFindFirst?: unknown;
@@ -81,7 +83,11 @@ function fakeDb(opts: {
   return {
     query: {
       organizations: {
-        findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: opts.planTier ?? 'business' }),
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'org-1',
+          planTier: opts.planTier ?? 'business',
+          ...(opts.branding !== undefined ? { branding: opts.branding } : {}),
+        }),
       },
       formTemplates: { findFirst: vi.fn().mockResolvedValue(opts.formTemplatesFindFirst) },
       formTemplateVersions: {
@@ -133,6 +139,26 @@ describe('POST /voice/smart-fill (authed)', () => {
       const body = (await res.json()) as { error: string; feature: string };
       expect(body.error).toBe('feature_not_available');
       expect(body.feature).toBe('smartFill');
+      expect(mockMapTranscript).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s with voice_disabled when the org switched voice input off', async () => {
+    // Plan INCLUDES Smart Fill — the refusal is the org's own choice, and the
+    // distinct code lets the client say "turned off in settings", not "upgrade".
+    mockDbValue = fakeDb({
+      planTier: 'business',
+      branding: { voiceInput: false },
+      formTemplatesFindFirst: TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { templateVersionId: 'v1', transcript: 'Warehouse B' });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe('voice_disabled');
       expect(mockMapTranscript).not.toHaveBeenCalled();
     } finally {
       server.close();
@@ -303,6 +329,26 @@ describe('POST /fill/:token/smart-fill (public)', () => {
       // No planTier and no upgrade copy — an anonymous respondent is not the
       // plan holder, and GET /fill/:token keeps plan out of its payload too.
       expect(await res.json()).toEqual({ error: 'feature_not_available', feature: 'smartFill' });
+      expect(mockMapTranscript).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s when the org switched voice input off, even on an entitled plan', async () => {
+    // Same helper as GET /fill/:token's `smartFillEnabled`, so the mic the page
+    // no longer draws and the POST that would answer it agree by construction.
+    mockDbValue = fakeDb({
+      planTier: 'business',
+      branding: { voiceInput: false },
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, ACTIVE_LINK.token, { transcript: 'Warehouse B' });
+      expect(res.status).toBe(403);
       expect(mockMapTranscript).not.toHaveBeenCalled();
     } finally {
       server.close();

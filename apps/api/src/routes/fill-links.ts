@@ -231,15 +231,20 @@ async function resolveLiveLink(token: string) {
 }
 
 /**
- * Whether the link's org is entitled to Smart Fill.
+ * Whether the link's org offers Smart Fill: the PLAN must include it AND the
+ * org must not have switched voice input off (`branding.voiceInput`, absent
+ * meaning on — see BrandingKit).
  *
- * Both public doors read the tier through here so the GET that decides whether
- * to OFFER the mic and the POST that answers it cannot disagree: an entry point
- * that 403s on press is worse than one that was never drawn. An unset or
- * unrecognised tier falls back exactly as `requirePlanFeature` does.
+ * Both public doors read the answer through here so the GET that decides
+ * whether to OFFER the mic and the POST that answers it cannot disagree: an
+ * entry point that 403s on press is worse than one that was never drawn. An
+ * unset or unrecognised tier falls back exactly as `requirePlanFeature` does.
  */
-function orgSmartFillEnabled(planTier: string | null | undefined): boolean {
-  const tier = (planTier ?? 'business') as PlanTier;
+function orgSmartFillEnabled(
+  org: { planTier?: string | null; branding?: { voiceInput?: boolean } | null } | undefined,
+): boolean {
+  if (org?.branding?.voiceInput === false) return false;
+  const tier = (org?.planTier ?? 'business') as PlanTier;
   return (PLAN_CONFIG[tier] ?? PLAN_CONFIG.business).features.smartFill;
 }
 
@@ -342,7 +347,7 @@ publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
     versionId: version.id,
     fields: version.fields,
     container: version.container,
-    smartFillEnabled: orgSmartFillEnabled(org?.planTier),
+    smartFillEnabled: orgSmartFillEnabled(org),
   });
 }));
 
@@ -560,7 +565,7 @@ publicFillRouter.post('/:token/smart-fill', withErrorHandling(async (req, res) =
   const org = await db.query.organizations.findFirst({
     where: eq(schema.organizations.id, link.orgId),
   });
-  if (!orgSmartFillEnabled(org?.planTier)) {
+  if (!orgSmartFillEnabled(org)) {
     // Names the feature but NOT the tier, and carries no upgrade copy: the
     // authed 403 is addressed to someone who holds the plan, this one to an
     // anonymous respondent who does not. GET /fill/:token discloses the same

@@ -67,15 +67,57 @@ export function DateTimePicker({
 }: DateTimePickerProps) {
   const id = useId();
   const [open, setOpen] = useState(false);
+  /**
+   * Whether the popover renders above the trigger instead of below. Decided
+   * once per open from the trigger's viewport position: a picker near the
+   * bottom of the screen (the conversational fill card, a short mobile
+   * viewport) otherwise draws its calendar past the bottom edge, where it is
+   * clipped and half the month cannot be tapped.
+   */
+  const [openUp, setOpenUp] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
 
+  /** Popover height budget: calendar ≈340px (376 with the time row) + margin. */
+  const popoverBudget = withTime ? 392 : 356;
+
+  function toggleOpen() {
+    setOpen((wasOpen) => {
+      if (!wasOpen && wrapRef.current) {
+        const rect = wrapRef.current.getBoundingClientRect();
+        const below = window.innerHeight - rect.bottom;
+        // Flip only when below genuinely lacks room AND above has more of it —
+        // when neither side fits, below at least clips the far rows, not the
+        // month controls.
+        setOpenUp(below < popoverBudget && rect.top > below);
+      }
+      return !wasOpen;
+    });
+  }
+
   const parsed = parseDate(value);
-  const today = { y: 2026, m: 6, d: 15 }; // deterministic "today" anchor (2026-07-15)
+  // The REAL today, captured once per mount so a session crossing midnight
+  // keeps a stable anchor. This was a hardcoded 2026-07-15 "deterministic
+  // anchor" — which meant the today-highlight (and the month an empty picker
+  // opened on) was wrong on every day except that one, drifting further wrong
+  // forever after.
+  const [today] = useState(() => {
+    const now = new Date();
+    return { y: now.getFullYear(), m: now.getMonth(), d: now.getDate() };
+  });
   const [view, setView] = useState<{ y: number; m: number }>(() =>
     parsed ? { y: parsed.y, m: parsed.m } : { y: today.y, m: today.m },
   );
   const [focusDay, setFocusDay] = useState<number>(parsed?.d ?? today.d);
+
+  // Month/year jump lists. A date of birth is decades back and a licence
+  // expiry years forward; the chevrons alone made both a click-per-month
+  // slog. The year list absorbs an out-of-range `view.y` (reachable by
+  // chevron) so the select never shows a value it has no option for.
+  const yearFloor = Math.min(1900, view.y);
+  const yearCeil = Math.max(today.y + 30, view.y);
+  const years: number[] = [];
+  for (let y = yearFloor; y <= yearCeil; y++) years.push(y);
 
   const time = withTime ? (value?.match(/T(\d{2}:\d{2})/)?.[1] ?? '09:00') : undefined;
 
@@ -110,6 +152,17 @@ export function DateTimePicker({
       const total = v.y * 12 + v.m + delta;
       return { y: Math.floor(total / 12), m: ((total % 12) + 12) % 12 };
     });
+  }
+
+  /**
+   * Jump straight to a month/year from the header selects. Unlike the ±1
+   * chevrons, a jump can land in a shorter month, so the focused day clamps —
+   * otherwise a focus on the 31st jumping to June leaves the roving tabindex
+   * pointing at a day button that does not exist.
+   */
+  function jumpTo(y: number, m: number) {
+    setView({ y, m });
+    setFocusDay((d) => Math.min(d, daysInMonth(y, m)));
   }
 
   function moveFocus(delta: number) {
@@ -172,7 +225,7 @@ export function DateTimePicker({
           id={id}
           type="button"
           disabled={disabled}
-          onClick={() => setOpen((o) => !o)}
+          onClick={toggleOpen}
           aria-haspopup="dialog"
           aria-expanded={open}
           className={cn(
@@ -190,7 +243,10 @@ export function DateTimePicker({
           <div
             role="dialog"
             aria-label="Choose date"
-            className="absolute left-0 top-[calc(100%+6px)] z-40 w-[280px] rounded-lg border border-border bg-surface-card p-3 shadow-lg"
+            className={cn(
+              'absolute left-0 z-40 w-[280px] rounded-lg border border-border bg-surface-card p-3 shadow-lg',
+              openUp ? 'bottom-[calc(100%+6px)]' : 'top-[calc(100%+6px)]',
+            )}
             style={{ animation: 'faiPop var(--duration-fast) var(--ease-entrance)' }}
           >
             <div className="mb-2 flex items-center justify-between">
@@ -202,9 +258,35 @@ export function DateTimePicker({
               >
                 <Icon name="chevron-left" size={16} />
               </button>
-              <span className="font-ui text-[13.5px] font-semibold">
-                {MONTHS[view.m]} {view.y}
-              </span>
+              {/* Selects, not a static caption: a DOB is decades back and a
+                  licence expiry years forward — month-at-a-time chevrons made
+                  those hundreds of clicks. */}
+              <div className="flex items-center gap-1">
+                <select
+                  value={view.m}
+                  onChange={(e) => jumpTo(view.y, Number(e.target.value))}
+                  aria-label="Month"
+                  className="h-7 cursor-pointer rounded-md border border-border-strong bg-surface-card px-1.5 font-ui text-[13px] font-semibold text-text-primary focus:outline-none focus-visible:border-border-accent focus-visible:shadow-focus"
+                >
+                  {MONTHS.map((mo, i) => (
+                    <option key={mo} value={i}>
+                      {mo.slice(0, 3)}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={view.y}
+                  onChange={(e) => jumpTo(Number(e.target.value), view.m)}
+                  aria-label="Year"
+                  className="h-7 cursor-pointer rounded-md border border-border-strong bg-surface-card px-1.5 font-ui text-[13px] font-semibold text-text-primary focus:outline-none focus-visible:border-border-accent focus-visible:shadow-focus"
+                >
+                  {years.map((y) => (
+                    <option key={y} value={y}>
+                      {y}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <button
                 type="button"
                 onClick={() => shiftMonth(1)}

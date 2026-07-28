@@ -70,6 +70,13 @@ export function FillScreen() {
    */
   const [smartFillRetired, setSmartFillRetired] = useState(false);
   const smartFillOffered = (fill?.smartFillEnabled ?? false) && !smartFillRetired;
+  /**
+   * The org's voice off-switch (BrandingKit.voiceInput, absent = on) gates the
+   * per-field dictation mics. Smart Fill needs no client read: the server
+   * already folds the same flag into `smartFillEnabled`, and drawing the mic
+   * from the payload's own branding keeps the two doors agreeing here too.
+   */
+  const voiceOffered = fill?.orgBranding?.voiceInput !== false;
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   /**
@@ -334,7 +341,7 @@ export function FillScreen() {
             onSubmit={() => onSubmit(fill)}
             submitting={submit.isPending}
             header={identityBlock}
-            dictation
+            dictation={voiceOffered}
             smartFill={smartFillOffered ? runSmartFill : undefined}
             uploadPath={`/fill/${token}/uploads`}
           />
@@ -354,7 +361,7 @@ export function FillScreen() {
                     value={values[f.id] ?? null}
                     error={errors[f.id] || undefined}
                     incompleteRowIndexes={incompleteRows[f.id]}
-                    dictation
+                    dictation={voiceOffered}
                     onChange={(v) => setValue(f.id, v)}
                     uploadPath={`/fill/${token}/uploads`}
                   />
