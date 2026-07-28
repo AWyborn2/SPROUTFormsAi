@@ -301,11 +301,16 @@ export function ConversationalFill({
               // The Smart Fill tone box sits INSIDE the grid cell rather than
               // on it: its `-mx-2` bleed would widen the grid item past the
               // column the builder asked for.
+              //
+              // A full hairline border, not a thick left tab (#56): the tone
+              // already carries a tinted background, an icon, and a labelled
+              // note, so the border only needs to close the shape — matching
+              // the review screen's badge, which uses the same tokens.
               return (
                 <div key={f.id} className={fillSpanClass(resolveFillSpan(f, false))}>
                   <div
                     className={
-                      tone ? `-mx-2 rounded-md border-l-2 px-2 py-2 ${VOICE_TONE[tone].box}` : undefined
+                      tone ? `-mx-2 rounded-md border px-2 py-2 ${VOICE_TONE[tone].box}` : undefined
                     }
                   >
                     {tone && (
