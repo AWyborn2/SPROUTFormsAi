@@ -36,6 +36,27 @@ export const submissionStatusEnum = pgEnum('submission_status', [
   'pending',
 ]);
 
+export const assessmentPathwayEnum = pgEnum('assessment_pathway', [
+  'experienced',
+  'new',
+  'rpl',
+]);
+
+export const partOutcomeEnum = pgEnum('part_outcome', ['satisfactory', 'not_satisfactory']);
+
+export const nsDispositionEnum = pgEnum('ns_disposition', [
+  'retry',
+  'coaching_then_retry',
+  'change_pathway',
+  'not_yet_competent',
+]);
+
+export const assessmentCaseStateEnum = pgEnum('assessment_case_state', [
+  'open',
+  'competent',
+  'closed',
+]);
+
 export const auditCategoryEnum = pgEnum('audit_category', [
   'forms',
   'submissions',
