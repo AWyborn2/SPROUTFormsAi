@@ -16,6 +16,7 @@ import { orgRouter } from './routes/org.js';
 import { pdfRouter } from './routes/pdf.js';
 import { submissionsRouter } from './routes/submissions.js';
 import { teamRouter } from './routes/team.js';
+import { uploadsRouter } from './routes/uploads.js';
 import { voiceRouter } from './routes/voice.js';
 
 /**
@@ -40,6 +41,15 @@ export function createApp(): Express {
   // size check could return a meaningful error. Scoped to /org/logo so the
   // rest of /org keeps the tighter global limit.
   app.use('/org/logo', express.json({ limit: '8mb' }), orgLogoRouter);
+
+  // Same registration-order reason again: a 10 MB attachment (MAX_ATTACHMENT_BYTES)
+  // is ~13.4 MB base64, so both upload doors need their parser mounted before the
+  // global 2 MB one — otherwise a phone-camera licence photo 413s with a body the
+  // route's own size check never got to write. Scoped to the two upload paths so
+  // /fill's submit and the rest of the API keep the tighter global limit.
+  const attachmentJson = express.json({ limit: '16mb' });
+  app.use('/uploads', attachmentJson, uploadsRouter);
+  app.use('/fill/:token/uploads', attachmentJson);
 
   app.use(express.json({ limit: '2mb' }));
 

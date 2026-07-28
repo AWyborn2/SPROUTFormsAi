@@ -71,6 +71,81 @@ export interface RequestOptions {
   timeoutMs?: number;
 }
 
+/**
+ * Reads a File into the base64 the upload routes expect (no `data:` prefix).
+ * `readAsDataURL` is used rather than `arrayBuffer` + manual encoding because
+ * the browser's own base64 is both faster and immune to the stack-overflow
+ * that `String.fromCharCode(...bytes)` hits on multi-megabyte inputs.
+ */
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new ApiError(0, { error: 'file_read_failed' }));
+    reader.onload = () => {
+      const result = String(reader.result ?? '');
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Uploads one submission attachment and resolves to the stored ref.
+ *
+ * Deliberately XHR rather than `fetch`: a licence photo off a phone is
+ * routinely 5–8 MB, and `fetch` still cannot report upload progress in any
+ * browser this app supports. A respondent on a site connection staring at a
+ * frozen control for thirty seconds will assume it broke and pick the file
+ * again — so real percentages are a correctness matter for the flow, not
+ * decoration. It also means no `REQUEST_TIMEOUT_MS`: the 30 s ceiling that
+ * protects ordinary JSON calls would abort a legitimate large upload.
+ *
+ * `path` selects the door: `/uploads` for authenticated surfaces,
+ * `/fill/:token/uploads` for a public fill link.
+ */
+export function uploadAttachment<T>(
+  path: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<T> {
+  return fileToBase64(file).then(
+    (fileBase64) =>
+      new Promise<T>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `/api${path}`);
+        xhr.withCredentials = true;
+        xhr.setRequestHeader('content-type', 'application/json');
+
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable && onProgress) {
+            onProgress(Math.round((e.loaded / e.total) * 100));
+          }
+        };
+        xhr.onerror = () => reject(new ApiError(0, { error: 'network_error' }));
+        xhr.onabort = () => reject(new ApiError(0, { error: 'aborted' }));
+        xhr.onload = () => {
+          let body: unknown;
+          try {
+            body = JSON.parse(xhr.responseText);
+          } catch {
+            body = undefined;
+          }
+          if (xhr.status >= 200 && xhr.status < 300) {
+            onProgress?.(100);
+            resolve(body as T);
+          } else {
+            reject(new ApiError(xhr.status, body));
+          }
+        };
+
+        xhr.send(
+          JSON.stringify({ fileBase64, mimeType: file.type, fileName: file.name }),
+        );
+      }),
+  );
+}
+
 export const apiClient = {
   get: <T>(path: string): Promise<T> => request<T>('GET', path),
   post: <T>(path: string, body?: unknown, opts?: RequestOptions): Promise<T> =>

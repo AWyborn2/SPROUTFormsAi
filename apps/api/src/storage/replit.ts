@@ -94,6 +94,33 @@ export async function uploadImage(
 }
 
 /**
+ * Uploads a respondent's submission attachment and returns the object key.
+ *
+ * Flat and org-prefixed for the same reason as `uploadImage` — `deletePrefix`
+ * lists a single level, so anything nested would survive org deletion as an
+ * unreachable orphan. The namespace infix is `upload-`, NOT `logo-`, and that
+ * distinction is load-bearing: the public `GET /assets/logo/*` route keys off
+ * the `logo-` infix, so an attachment can never be replayed through the
+ * unauthenticated door. Licence photos and ID images are exactly the class of
+ * object that must stay behind a tenant check.
+ */
+export async function uploadAttachment(
+  client: ReplitStorageClient,
+  orgId: string,
+  bytes: Uint8Array,
+  _contentType: string,
+  ext: string,
+): Promise<string> {
+  const key = `${orgId}/upload-${randomUUID()}.${ext}`;
+  // Already a Buffer on the upload path; re-wrapping would memcpy the payload.
+  const result = await client.uploadFromBytes(key, Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes));
+  if (!result.ok) {
+    throw new Error(`storage_upload_failed: ${describeStorageError(result.error)}`, { cause: result.error });
+  }
+  return key;
+}
+
+/**
  * Deletes a single object, scoped to `orgId` — used to reap a superseded
  * logo when branding changes. A key outside the org's prefix is ignored
  * rather than acted on, matching `downloadPdf`'s tenant check.

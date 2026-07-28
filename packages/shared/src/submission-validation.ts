@@ -9,6 +9,7 @@
 import { groupedColumnKeys, resolveAnswerSets, selectedOption } from './answer-set.js';
 import { visibleFields } from './visibility.js';
 import type { FormField, FormFieldType, RepeatingColumn } from './form-field.js';
+import { isFileRef } from './submission.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 
 /**
@@ -174,6 +175,11 @@ export function isFieldAnswered(field: FormField, value: SubmissionValue | undef
     return incompleteFixedRowIndices(field, value).length === 0;
   }
   if (value === null || value === undefined) return false;
+  // A file answer is answered when real bytes are behind it. The key is minted
+  // by the upload route AFTER storage accepted the object, so a ref carrying
+  // one is proof of a stored file — whereas the old filename-string answer was
+  // satisfied by any text at all, including a file that never left the browser.
+  if (isFileRef(value)) return value.key.trim() !== '';
   if (Array.isArray(value)) {
     /*
       Every open row-entry table is validated row by row, grouped or not.

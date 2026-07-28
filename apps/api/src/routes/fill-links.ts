@@ -19,6 +19,7 @@ import {
 // The authed POST /submissions validates with the same runtime schema —
 // single SubmissionValue contract, two doors.
 import { submissionValueSchema } from './submissions.js';
+import { storeAttachment } from './uploads.js';
 // Smart Fill's authed door owns the mapper wiring and the transcript cap; this
 // file adds only the second, session-less way in.
 import { respondSmartFill, smartFillTranscriptSchema } from './voice.js';
@@ -343,6 +344,39 @@ publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
     container: version.container,
     smartFillEnabled: orgSmartFillEnabled(org?.planTier),
   });
+}));
+
+/**
+ * The anonymous door to attachment upload. Mirrors `POST /uploads` exactly —
+ * same `storeAttachment`, same limits, same magic-number check — with the link
+ * token standing in for the session, as it does for `GET /:token` and the
+ * submit below.
+ *
+ * The org is taken from the LINK, never from the request body: a respondent
+ * chooses a file, not a tenant. `resolveLiveLink` also means a revoked or
+ * expired link stops accepting uploads at the same moment it stops accepting
+ * submissions, rather than leaving a write primitive open behind it.
+ *
+ * There is deliberately no matching public GET. An anonymous respondent
+ * previews their own file from the `File` object the browser already holds, so
+ * nothing here hands out a way to read attachments back without a session.
+ */
+publicFillRouter.post('/:token/uploads', withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const link = await resolveLiveLink(req.params.token!);
+  if (!link) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+  const result = await storeAttachment(link.orgId, req.body);
+  if (!result.ok) {
+    res.status(result.failure.status).json(result.failure.body);
+    return;
+  }
+  res.status(201).json(result.ref);
 }));
 
 const publicSubmitBody = z.object({

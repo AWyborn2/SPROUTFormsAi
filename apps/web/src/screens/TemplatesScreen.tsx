@@ -207,6 +207,17 @@ export function TemplatesScreen() {
           version history.
         </p>
         <div className="flex flex-none gap-2.5">
+          {/* Opens the builder pre-seeded with the CHC intake field set. It
+              lands as an ordinary unsaved draft, so every field stays editable
+              and publishing it creates a normal template. */}
+          <Button
+            variant="outline"
+            size="sm"
+            leadingIcon="hard-hat"
+            onClick={() => navigate('/app/forms/build?preset=chc-intake')}
+          >
+            CHC intake
+          </Button>
           <Button variant="outline" size="sm" leadingIcon="file-up" onClick={() => navigate('/app/import')}>
             Import PDF
           </Button>

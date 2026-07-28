@@ -121,12 +121,32 @@ const repeatingRowValueSchema: z.ZodType<RepeatingRowValue> = z.record(
  * JSON out of the `values` JSONB column. Shared with the public fill-link
  * submit route (fill-links.ts).
  */
+/**
+ * A stored file answer. Kept STRICT — the client may only echo back a ref the
+ * upload route minted, and every field is re-shaped here rather than trusted
+ * wholesale, so a caller cannot smuggle extra keys into the JSONB column.
+ *
+ * The `key` pattern is the same namespace check `GET /uploads/file/*` enforces.
+ * Validating it on the way IN matters independently: without it a submission
+ * could record a key pointing at another org's PDF asset, and while the serving
+ * route would refuse to hand those bytes over, the stored record would still
+ * carry a dangling reference that every later reader has to reason about.
+ */
+const submissionFileRefSchema = z.object({
+  kind: z.literal('file'),
+  key: z.string().regex(/^[^/]+\/upload-[^/]+\.(png|jpe?g|webp|pdf)$/),
+  fileName: z.string().max(120),
+  contentType: z.string().max(100),
+  size: z.number().int().nonnegative(),
+});
+
 export const submissionValueSchema: z.ZodType<SubmissionValue> = z.union([
   z.string(),
   z.number(),
   z.boolean(),
   z.array(z.string()),
   z.array(repeatingRowValueSchema),
+  submissionFileRefSchema,
   z.null(),
 ]);
 

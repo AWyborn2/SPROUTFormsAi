@@ -16,6 +16,7 @@ import {
   columnBandFor,
   geometrySegments,
   isChoiceField,
+  isFileRef,
   markPlacement,
   resolveAnswerSets,
   selectedOption,
@@ -69,6 +70,11 @@ function drawMark(
 function scalarText(value: SubmissionValue | undefined): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'boolean') return value ? 'X' : '';
+  // An attachment has no scalar rendering — the bytes live in storage, not on
+  // the page. Draw the file's name so the exported evidence PDF records THAT a
+  // file was supplied and which one, rather than "[object Object]" (which is
+  // what `String(...)` below would otherwise stamp onto the form).
+  if (isFileRef(value)) return value.fileName;
   if (Array.isArray(value)) {
     // string[] (checkbox group) — join; repeating rows are handled separately.
     if (value.every((v) => typeof v === 'string')) return (value as string[]).join(', ');

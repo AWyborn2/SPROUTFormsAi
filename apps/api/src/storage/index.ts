@@ -4,6 +4,7 @@ import {
   deletePrefix as deletePrefixReplit,
   downloadPdf as downloadReplit,
   getReplitClient,
+  uploadAttachment as uploadAttachmentReplit,
   uploadImage as uploadImageReplit,
   uploadPdf as uploadReplit,
 } from './replit.js';
@@ -12,6 +13,7 @@ import {
   deletePrefix as deletePrefixSupabase,
   downloadPdf as downloadSupabase,
   getSupabaseClient,
+  uploadAttachment as uploadAttachmentSupabase,
   uploadImage as uploadImageSupabase,
   uploadPdf as uploadSupabase,
 } from './supabase.js';
@@ -25,6 +27,18 @@ export interface StorageClient {
    * `ext` is authoritative, since serving re-derives the type from the key.
    */
   uploadImage(orgId: string, bytes: Uint8Array, contentType: string, ext: string): Promise<string>;
+  /**
+   * Uploads a submission attachment under the org's flat `upload-` namespace
+   * and returns the object key. Separate from `uploadImage` because the
+   * namespace decides reachability: `logo-` objects are servable without a
+   * session, `upload-` objects never are.
+   */
+  uploadAttachment(
+    orgId: string,
+    bytes: Uint8Array,
+    contentType: string,
+    ext: string,
+  ): Promise<string>;
   download(orgId: string, assetId: string): Promise<Buffer | null>;
   /** Deletes one object, scoped to the org's prefix — superseded-logo cleanup. */
   deleteObject(orgId: string, key: string): Promise<void>;
@@ -49,6 +63,8 @@ export function getStorageClient(): StorageClient | null {
       upload: (orgId, bytes) => uploadSupabase(client, orgId, bytes),
       uploadImage: (orgId, bytes, contentType, ext) =>
         uploadImageSupabase(client, orgId, bytes, contentType, ext),
+      uploadAttachment: (orgId, bytes, contentType, ext) =>
+        uploadAttachmentSupabase(client, orgId, bytes, contentType, ext),
       download: (orgId, assetId) => downloadSupabase(client, orgId, assetId),
       deleteObject: (orgId, key) => deleteObjectSupabase(client, orgId, key),
       deletePrefix: (orgId) => deletePrefixSupabase(client, orgId),
@@ -60,6 +76,8 @@ export function getStorageClient(): StorageClient | null {
     upload: (orgId, bytes) => uploadReplit(client, orgId, bytes),
     uploadImage: (orgId, bytes, contentType, ext) =>
       uploadImageReplit(client, orgId, bytes, contentType, ext),
+    uploadAttachment: (orgId, bytes, contentType, ext) =>
+      uploadAttachmentReplit(client, orgId, bytes, contentType, ext),
     download: (orgId, assetId) => downloadReplit(client, orgId, assetId),
     deleteObject: (orgId, key) => deleteObjectReplit(client, orgId, key),
     deletePrefix: (orgId) => deletePrefixReplit(client, orgId),

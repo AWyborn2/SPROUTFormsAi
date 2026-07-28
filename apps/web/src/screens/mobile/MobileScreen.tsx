@@ -495,7 +495,10 @@ function FillView({
   const shownFields = visibleFillFields(form.fields, values);
   const total = inputFields(shownFields).length;
   const done = answeredCount(shownFields, values);
-  const progressPct = `${total === 0 ? 0 : Math.round((done / total) * 100)}%`;
+  // 0..1 rather than a percentage string: the bar below scales rather than
+  // widens, so that a form with many fields does not re-run layout on every
+  // keystroke that changes the answered count.
+  const progressFraction = total === 0 ? 0 : done / total;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -526,9 +529,11 @@ function FillView({
           className="mt-[13px] h-1.5 overflow-hidden rounded-pill"
           style={{ background: SCRIM }}
         >
+          {/* The pill radius lives on the clipping parent above — putting it
+              here too would distort under scaleX. */}
           <div
-            className="h-full rounded-pill transition-[width] duration-300"
-            style={{ width: progressPct, background: 'var(--org-accent)' }}
+            className="h-full w-full origin-left transition-transform duration-300"
+            style={{ transform: `scaleX(${progressFraction})`, background: 'var(--org-accent)' }}
           />
         </div>
       </div>

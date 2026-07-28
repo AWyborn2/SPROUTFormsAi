@@ -90,6 +90,32 @@ export async function uploadImage(
 }
 
 /**
+ * Uploads a respondent's submission attachment and returns the object key.
+ *
+ * Flat and org-prefixed for the same reason as `uploadImage` — `deletePrefix`
+ * lists a single level, so anything nested would survive org deletion as an
+ * unreachable orphan. The namespace infix is `upload-`, NOT `logo-`, and that
+ * distinction is load-bearing: the public `GET /assets/logo/*` route keys off
+ * the `logo-` infix, so an attachment can never be replayed through the
+ * unauthenticated door. Licence photos and ID images are exactly the class of
+ * object that must stay behind a tenant check.
+ */
+export async function uploadAttachment(
+  client: SupabaseStorageClient,
+  orgId: string,
+  bytes: Uint8Array,
+  contentType: string,
+  ext: string,
+): Promise<string> {
+  const key = `${orgId}/upload-${randomUUID()}.${ext}`;
+  const { error } = await client.storage
+    .from(env.SUPABASE_STORAGE_BUCKET_PDFS)
+    .upload(key, bytes, { contentType });
+  if (error) throw new Error(`storage_upload_failed: ${describeStorageError(error)}`, { cause: error });
+  return key;
+}
+
+/**
  * Deletes a single object, scoped to `orgId` — used to reap a superseded
  * logo when branding changes. A key outside the org's prefix is ignored
  * rather than acted on, matching `downloadPdf`'s tenant check.

@@ -103,9 +103,14 @@ export function FileDropzone({
             <span>{Math.round(progress!)}%</span>
           </div>
           <div className="h-1.5 overflow-hidden rounded-pill bg-surface-sunken">
+            {/* Scaled, not widened: `width` is a layout property, so animating
+                it re-runs layout on every progress tick — and those arrive
+                continuously through a large upload. `transform` composites.
+                The pill radius lives on the clipping parent; putting it on the
+                bar too would distort under scaleX. */}
             <div
-              className="h-full rounded-pill bg-accent transition-[width] duration-base"
-              style={{ width: `${progress}%` }}
+              className="h-full w-full origin-left bg-accent transition-transform duration-base"
+              style={{ transform: `scaleX(${Math.min(Math.max(progress! / 100, 0), 1)})` }}
             />
           </div>
         </div>

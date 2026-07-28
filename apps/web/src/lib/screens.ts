@@ -40,6 +40,12 @@ export const SCREENS: ScreenDef[] = [
   // invitee must be able to read what they're joining before signing in.
   { key: 'invite', path: '/invite/:token', group: 'Onboarding & account', label: 'Accept invite', icon: 'user-plus', shell: 'external' },
 
+  // CHC @ BBM — the purpose-built intake form. `shell: 'app'` (authenticated):
+  // it records real submissions and uploads identity documents, so it is never
+  // a public surface. The same form also exists as an editable template,
+  // reachable from the form library.
+  { key: 'chc-intake', path: '/app/chc-intake', group: 'Core product loop', label: 'CHC induction intake', icon: 'hard-hat', shell: 'app', inNav: true },
+
   // Enterprise & org
   { key: 'team', path: '/app/team', group: 'Enterprise & org', label: 'Team management', icon: 'users', shell: 'app', inNav: true },
   { key: 'roles', path: '/app/roles', group: 'Enterprise & org', label: 'Roles & permissions', icon: 'shield', shell: 'app', inNav: true },

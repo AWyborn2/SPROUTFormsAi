@@ -5,13 +5,14 @@
  * routes are the enforcement consumers of this exact contract (KTD2/R6).
  */
 import { describe, expect, it } from 'vitest';
-import type { FormField, RepeatingRowValue } from '@formai/shared';
+import type { FormField, RepeatingRowValue, SubmissionFileRef } from '@formai/shared';
 import {
   incompleteFixedRowIndices,
   incompleteRowsByField,
   isFieldAnswered,
   missingRequiredFields,
   stripHiddenValues,
+  visibleFields,
 } from '@formai/shared';
 
 const text: FormField = { id: 'name', type: 'text', label: 'Name', required: true, source: 'built' };
@@ -555,5 +556,60 @@ describe('validation cluster — required columns and set-level required', () =>
       const done: RepeatingRowValue[] = [{ item: 'Spare wheel', ok: true }];
       expect(missingRequiredFields([optional], { extras: done })).toEqual([]);
     });
+  });
+});
+
+/* ── File answers (SubmissionFileRef) ─────────────────────────────────────── */
+
+const upload: FormField = {
+  id: 'licence',
+  type: 'file_upload',
+  label: "Driver's licence",
+  required: true,
+  source: 'built',
+};
+
+const storedFile: SubmissionFileRef = {
+  kind: 'file',
+  key: 'org-1/upload-abc.jpg',
+  fileName: 'licence.jpg',
+  contentType: 'image/jpeg',
+  size: 4096,
+};
+
+describe('file_upload answers', () => {
+  it('counts as answered only once a stored key is behind it', () => {
+    expect(isFieldAnswered(upload, storedFile)).toBe(true);
+    expect(isFieldAnswered(upload, null)).toBe(false);
+    expect(isFieldAnswered(upload, undefined)).toBe(false);
+    // A ref with no key is not a stored file, whatever else it carries.
+    expect(isFieldAnswered(upload, { ...storedFile, key: '   ' })).toBe(false);
+  });
+
+  it('blocks a submit while the required file is missing, and releases it once stored', () => {
+    expect(missingRequiredFields([upload], {})).toEqual(['licence']);
+    expect(missingRequiredFields([upload], { licence: storedFile })).toEqual([]);
+  });
+
+  it('is treated as unevaluatable by a visibility condition, so dependents FAIL OPEN', () => {
+    // "Show the follow-up when the licence equals <something>" has no honest
+    // answer over a file. Rule 1 says visible — and critically NOT hidden,
+    // which is what an object silently reading as "unanswered" would cause.
+    const dependent: FormField = {
+      id: 'notes',
+      type: 'text',
+      label: 'Notes',
+      required: true,
+      source: 'built',
+      visibleWhen: { fieldId: 'licence', op: 'equals', value: 'licence.jpg' },
+    };
+    const visible = visibleFields([upload, dependent], { licence: storedFile });
+    expect(visible.map((f) => f.id)).toEqual(['licence', 'notes']);
+  });
+
+  it('survives stripHiddenValues untouched when its section is visible', () => {
+    const { values, discarded } = stripHiddenValues([upload], { licence: storedFile });
+    expect(discarded).toEqual([]);
+    expect(values.licence).toEqual(storedFile);
   });
 });
