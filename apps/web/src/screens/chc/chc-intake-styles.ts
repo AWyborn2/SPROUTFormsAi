@@ -42,6 +42,14 @@ export const CHC_INTAKE_CSS = `
 .chc-spin { animation: chc-spin 1s linear infinite; }
 @keyframes chc-spin { to { transform: rotate(360deg); } }
 
+/* Document padding lives here, not inline, so the phone breakpoint can win:
+   48px gutters leave a 375px viewport ~280px of content. The print rule below
+   still zeroes it — paper supplies its own margins. */
+.chc-doc { padding: 40px 48px; }
+@media (max-width: 640px) {
+  .chc-doc { padding: 24px 16px; }
+}
+
 @media print {
   /* The printed page IS the deliverable here, so backgrounds and rules must
      survive the browser's default ink-saving. */
