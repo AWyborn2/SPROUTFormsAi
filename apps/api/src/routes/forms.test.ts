@@ -645,6 +645,97 @@ describe('POST /forms/:id/versions/:versionId/publish', () => {
   });
 });
 
+describe('PATCH /forms/:id/voice-input', () => {
+  const published = { id: 't1', name: 'Vendor onboarding', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
+
+  function patch(base: string, body: unknown, headers = authHeader()) {
+    return fetch(`${base}/forms/t1/voice-input`, {
+      method: 'PATCH',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('pins the override and echoes it back', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: published,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patch(base, { voiceInput: false });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ id: 't1', voiceInput: false });
+      const templateUpdate = updateSet.mock.calls.find(([table]) => table === schema.formTemplates);
+      expect(templateUpdate?.[1]).toMatchObject({ voiceInput: false });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('null returns the form to the workspace default', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: published,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patch(base, { voiceInput: null });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ id: 't1', voiceInput: null });
+      const templateUpdate = updateSet.mock.calls.find(([table]) => table === schema.formTemplates);
+      expect(templateUpdate?.[1]).toMatchObject({ voiceInput: null });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a role without forms.edit, and writes nothing', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: published,
+      rolePermissionsFindFirst: VIEWER_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      expect((await patch(base, { voiceInput: false })).status).toBe(403);
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it("404s another org's form", async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: undefined,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      expect((await patch(base, { voiceInput: true })).status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a non-boolean override', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: published,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      expect((await patch(base, { voiceInput: 'sometimes' })).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('POST /forms/:id/archive and /restore', () => {
   const published = { id: 't1', name: 'Vendor onboarding', status: 'published', currentVersionId: 'v1', updatedAt: new Date('2026-07-01T00:00:00Z') };
 

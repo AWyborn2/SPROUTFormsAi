@@ -69,6 +69,25 @@ export interface BrandingKit {
   voiceInput?: boolean;
 }
 
+/**
+ * Whether voice input (dictation + Smart Fill) is on for ONE form: the form's
+ * own override wins, then the workspace default, then on.
+ *
+ * The one rule every door shares — the public fill payload, both Smart Fill
+ * POST routes, and any UI showing the effective state. Three consumers
+ * hand-writing `form ?? org ?? true` is three chances to disagree about which
+ * layer wins, on a control that exists to be an off-switch.
+ *
+ * `formOverride` is the template's nullable `voiceInput` column: null/undefined
+ * means inherit, an explicit boolean pins the form regardless of the workspace.
+ */
+export function resolveVoiceInput(
+  formOverride: boolean | null | undefined,
+  branding: { voiceInput?: boolean } | null | undefined,
+): boolean {
+  return formOverride ?? branding?.voiceInput ?? true;
+}
+
 /** FormAI's own defaults, mirroring the prototype's initial brand state. */
 export const DEFAULT_BRANDING: BrandingKit = {
   logoAssetUrl: null,

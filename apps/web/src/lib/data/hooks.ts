@@ -259,6 +259,19 @@ export function usePublishFormVersion() {
   });
 }
 
+/** Set or clear a form's voice-input override; live fill links react at once. */
+export function useSetFormVoiceInput() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { formId: string; voiceInput: boolean | null }) =>
+      store.setFormVoiceInput(input),
+    onSuccess: (_void, input) => {
+      qc.invalidateQueries({ queryKey: keys.form(input.formId) });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
 export function useArchiveForm() {
   const qc = useQueryClient();
   return useMutation({

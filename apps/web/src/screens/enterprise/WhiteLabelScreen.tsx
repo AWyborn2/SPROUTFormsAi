@@ -110,7 +110,7 @@ export function WhiteLabelScreen() {
               <div>
                 <div className="text-[13px] font-semibold">Voice input on forms</div>
                 <div className="text-[11.5px] text-text-tertiary">
-                  Microphone dictation and AI Smart Fill on fill pages
+                  Default for all forms — individual forms can override it in the form library
                 </div>
               </div>
               <Switch

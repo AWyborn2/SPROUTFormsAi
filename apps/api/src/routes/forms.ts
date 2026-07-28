@@ -216,6 +216,8 @@ formsRouter.get('/:id', requireTenant, withErrorHandling(async (req, res) => {
     container: current?.container,
     /** Sparse per-form patch over the org theme; null when never restyled. */
     themeOverride: template.themeOverride ?? null,
+    /** Per-form voice override; null means inherit the workspace default. */
+    voiceInput: template.voiceInput ?? null,
     versions: versions.map((v) => ({
       id: v.id,
       label: v.versionLabel,
@@ -417,6 +419,59 @@ formsRouter.patch('/:id/theme', requireTenant, withErrorHandling(async (req, res
   });
 
   res.json({ id: template.id, themeOverride: parsed.data.themeOverride });
+}));
+
+/**
+ * Per-form voice-input override — the same shape as the theme override above:
+ * on the mutable template (live links react immediately, no republish), null
+ * meaning "inherit the workspace default". Enforcement reads it through
+ * `resolveVoiceInput`; this endpoint only stores the choice.
+ */
+const voiceInputBody = z.object({
+  voiceInput: z.boolean().nullable(),
+});
+
+formsRouter.patch('/:id/voice-input', requireTenant, withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const tenant = req.tenant!;
+  if (!(await hasPermission(tenant, 'forms', 'edit'))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  const parsed = voiceInputBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return;
+  }
+  const template = await db.query.formTemplates.findFirst({
+    where: and(eq(schema.formTemplates.id, req.params.id!), eq(schema.formTemplates.orgId, tenant.orgId)),
+  });
+  if (!template) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+
+  await db
+    .update(schema.formTemplates)
+    .set({ voiceInput: parsed.data.voiceInput, updatedAt: new Date() })
+    .where(eq(schema.formTemplates.id, template.id));
+
+  await recordAudit(db, tenant, {
+    action:
+      parsed.data.voiceInput === null
+        ? 'Reset form voice input to workspace default'
+        : parsed.data.voiceInput
+          ? 'Enabled voice input for form'
+          : 'Disabled voice input for form',
+    target: template.name,
+    category: 'forms',
+    icon: 'settings',
+  });
+
+  res.json({ id: template.id, voiceInput: parsed.data.voiceInput });
 }));
 
 formsRouter.post('/:id/archive', requireTenant, withErrorHandling(async (req, res) => {

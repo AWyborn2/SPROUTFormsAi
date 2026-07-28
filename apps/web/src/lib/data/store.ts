@@ -82,6 +82,8 @@ interface FormSummaryDto {
 interface FormDetailDto extends FormSummaryDto {
   fields: FormField[];
   container: FormContainer;
+  /** Per-form voice override; null (or absent on older payloads) = inherit. */
+  voiceInput?: boolean | null;
   versions: Array<{
     id: string;
     label: string;
@@ -149,6 +151,7 @@ function toFormDetail(dto: FormDetailDto): FormDetail {
     ...toFormSummary(dto),
     fields: dto.fields,
     container: dto.container,
+    voiceInput: dto.voiceInput ?? null,
     versions: dto.versions.map((v) => ({
       id: v.id,
       label: v.label,
@@ -427,6 +430,20 @@ export const store = {
     return apiClient
       .post<FormSummaryDto>(`/forms/${input.formId}/versions/${input.versionId}/publish`, {})
       .then(toFormSummary);
+  },
+
+  /**
+   * Per-form voice override: true/false pins the form, null returns it to the
+   * workspace default. Takes effect on live fill links immediately — the
+   * setting lives on the mutable template, not a frozen version.
+   */
+  setFormVoiceInput(input: { formId: string; voiceInput: boolean | null }): Promise<void> {
+    return apiClient
+      .patch<{ id: string; voiceInput: boolean | null }>(
+        `/forms/${input.formId}/voice-input`,
+        { voiceInput: input.voiceInput },
+      )
+      .then(() => undefined);
   },
 
   archiveForm(id: string): Promise<FormSummary> {

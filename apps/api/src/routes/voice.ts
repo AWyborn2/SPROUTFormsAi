@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import type { FormField } from '@formai/shared';
+import { resolveVoiceInput } from '@formai/shared';
 import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
@@ -109,15 +110,16 @@ voiceRouter.post(
       return;
     }
 
-    // The org's own off-switch, checked AFTER the plan gate: `requirePlanFeature`
-    // answers "does the plan include it", this answers "did the org turn it
-    // off" (`branding.voiceInput`, absent = on). Enforced here as well as on
-    // the public door so a disabled org's members cannot keep spending model
-    // calls from the builder preview that respondents can no longer make.
+    // The voice off-switch, checked AFTER the plan gate: `requirePlanFeature`
+    // answers "does the plan include it", this answers "is voice off for THIS
+    // form" — the template's own override first, then the workspace default
+    // (`resolveVoiceInput`). Enforced here as well as on the public door so a
+    // disabled form's own builders cannot keep spending model calls from the
+    // preview that respondents can no longer make.
     const org = await db.query.organizations.findFirst({
       where: eq(schema.organizations.id, tenant.orgId),
     });
-    if (org?.branding?.voiceInput === false) {
+    if (!resolveVoiceInput(template.voiceInput, org?.branding)) {
       res.status(403).json({ error: 'voice_disabled' });
       return;
     }

@@ -71,12 +71,12 @@ export function FillScreen() {
   const [smartFillRetired, setSmartFillRetired] = useState(false);
   const smartFillOffered = (fill?.smartFillEnabled ?? false) && !smartFillRetired;
   /**
-   * The org's voice off-switch (BrandingKit.voiceInput, absent = on) gates the
-   * per-field dictation mics. Smart Fill needs no client read: the server
-   * already folds the same flag into `smartFillEnabled`, and drawing the mic
-   * from the payload's own branding keeps the two doors agreeing here too.
+   * Voice for THIS form, resolved server-side (form override <- workspace
+   * default <- on) and delivered as one boolean — the page never applies the
+   * precedence rule itself, exactly as with the pre-merged theme. Gates the
+   * per-field mics; Smart Fill folds the same flag into `smartFillEnabled`.
    */
-  const voiceOffered = fill?.orgBranding?.voiceInput !== false;
+  const voiceOffered = fill?.voiceInputEnabled !== false;
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   /**

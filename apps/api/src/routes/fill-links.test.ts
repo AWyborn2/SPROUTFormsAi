@@ -472,6 +472,7 @@ describe('GET /fill/:token (public, no auth)', () => {
         fields: PUBLISHED_V1.fields,
         container: CONTAINER,
         smartFillEnabled: true,
+        voiceInputEnabled: true,
       });
       // Never leak org internals beyond name/branding.
       expect(body.plan).toBeUndefined();
@@ -532,10 +533,10 @@ describe('GET /fill/:token (public, no auth)', () => {
   });
 
   /**
-   * The org's voice off-switch wins over an entitled plan: `smartFillEnabled`
-   * goes false so the page never draws the Smart Fill entry point, and the
-   * branding payload carries `voiceInput: false` so the per-field mics are not
-   * drawn either — the flag rides in `orgBranding`, no new wire field.
+   * The workspace voice off-switch wins over an entitled plan when the form
+   * doesn't override it: `smartFillEnabled` goes false so the page never draws
+   * the Smart Fill entry point. (The resolved `voiceInputEnabled` wire field is
+   * covered by the override tests below.)
    */
   it('reports smartFillEnabled false when the org disabled voice input', async () => {
     mockDbValue = fakeDb({
@@ -558,6 +559,58 @@ describe('GET /fill/:token (public, no auth)', () => {
       };
       expect(body.smartFillEnabled).toBe(false);
       expect(body.orgBranding.voiceInput).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * The per-form override is the top of the precedence chain, both directions:
+   * a form pinned OFF ignores a workspace that allows voice, and a form pinned
+   * ON restores it against a workspace default of off. `voiceInputEnabled` is
+   * the resolved answer the anonymous page draws mics from.
+   */
+  it('lets a form override voice OFF against a workspace default of on', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: { ...PUBLISHED_TEMPLATE, voiceInput: false },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Charles Hull',
+        planTier: 'business',
+        branding: BRANDING, // no voiceInput key — workspace default ON
+      },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as { smartFillEnabled: boolean; voiceInputEnabled: boolean };
+      expect(body.voiceInputEnabled).toBe(false);
+      expect(body.smartFillEnabled).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets a form override voice ON against a workspace default of off', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: { ...PUBLISHED_TEMPLATE, voiceInput: true },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Charles Hull',
+        planTier: 'business',
+        branding: { ...BRANDING, voiceInput: false },
+      },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as { smartFillEnabled: boolean; voiceInputEnabled: boolean };
+      expect(body.voiceInputEnabled).toBe(true);
+      expect(body.smartFillEnabled).toBe(true);
     } finally {
       server.close();
     }

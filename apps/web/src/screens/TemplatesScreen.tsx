@@ -12,6 +12,7 @@ import {
   usePublishFormVersion,
   useRestoreForm,
   useRevokeFillLink,
+  useSetFormVoiceInput,
 } from '../lib/data/hooks.js';
 import { FORM_ICON_STYLE } from '../lib/data/fixtures.js';
 import { fillLinkUrl } from '../lib/fill-link-url.js';
@@ -65,6 +66,7 @@ export function TemplatesScreen() {
   const restoreForm = useRestoreForm();
   const deleteForm = useDeleteForm();
   const publishVersion = usePublishFormVersion();
+  const setVoiceInput = useSetFormVoiceInput();
   const publishTarget = selected?.versions.find((v) => v.id === publishTargetId);
 
   // Newest active link (the API lists active only, newest first).
@@ -99,6 +101,34 @@ export function TemplatesScreen() {
         toast({ variant: 'danger', message: 'Could not copy the fill link — try again.' });
       }
     }
+  }
+
+  /** 'inherit' → null (workspace default), 'true'/'false' → a pinned override. */
+  function onSetVoiceInput(value: string) {
+    if (!selected) return;
+    const voiceInput = value === 'inherit' ? null : value === 'true';
+    setVoiceInput.mutate(
+      { formId: selected.id, voiceInput },
+      {
+        onSuccess: () =>
+          toast({
+            variant: 'success',
+            message:
+              voiceInput === null
+                ? 'Voice input follows the workspace setting again.'
+                : voiceInput
+                  ? 'Voice input on for this form — live links updated.'
+                  : 'Voice input off for this form — live links updated.',
+          }),
+        onError: (err) => {
+          if (err instanceof ApiError && err.status === 403) {
+            toast({ variant: 'warning', message: "You don't have permission to change form settings." });
+          } else {
+            toast({ variant: 'danger', message: 'Could not update voice input — try again.' });
+          }
+        },
+      },
+    );
   }
 
   function onRevoke(linkId: string) {
@@ -365,6 +395,33 @@ export function TemplatesScreen() {
                 >
                   Delete draft
                 </Button>
+              )}
+              {selected && (
+                <div className="flex items-center justify-between gap-2 rounded-md border border-border-subtle bg-surface-sunken p-[8px_10px]">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-[12.5px] font-semibold">
+                      <Icon name="mic" size={13} className="flex-none text-text-tertiary" />
+                      Voice input
+                    </div>
+                    <div className="text-[11px] text-text-tertiary">
+                      Dictation &amp; Smart Fill on this form
+                    </div>
+                  </div>
+                  {/* Three states on purpose: the workspace switch stays the
+                      default, and this pins one form either way. Applies to
+                      live fill links immediately — no republish. */}
+                  <select
+                    value={selected.voiceInput === null ? 'inherit' : String(selected.voiceInput)}
+                    disabled={setVoiceInput.isPending}
+                    aria-label="Voice input for this form"
+                    onChange={(e) => onSetVoiceInput(e.target.value)}
+                    className="h-8 flex-none cursor-pointer rounded-md border border-border-strong bg-surface-card px-2 font-ui text-[12.5px] font-semibold text-text-primary focus:outline-none focus-visible:border-border-accent focus-visible:shadow-focus disabled:opacity-60"
+                  >
+                    <option value="inherit">Workspace default</option>
+                    <option value="true">On</option>
+                    <option value="false">Off</option>
+                  </select>
+                </div>
               )}
               {activeLink && (
                 <div className="flex items-center gap-2 rounded-md border border-border-subtle bg-surface-sunken p-[8px_10px]">
