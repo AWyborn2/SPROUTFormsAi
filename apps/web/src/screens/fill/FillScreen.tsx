@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Icon, Input, useToast } from '@formai/ui';
 import type { SmartFillResult, SubmissionValue } from '@formai/shared';
@@ -10,7 +10,7 @@ import {
   discardWarningMessage,
   isCommittedChange,
 } from '../../lib/discard-warning.js';
-import { useFillForm, usePublicSmartFill, useSubmitFill } from '../../lib/data/hooks.js';
+import { useFillForm, usePublicSmartFill, useSession, useSubmitFill } from '../../lib/data/hooks.js';
 import { smartFillFailure } from '../../lib/voice/smart-fill.js';
 import type { PublicFillForm } from '../../lib/data/types.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
@@ -82,6 +82,22 @@ export function FillScreen() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitterName, setSubmitterName] = useState('');
   const [submitterEmail, setSubmitterEmail] = useState('');
+
+  /**
+   * Prefill identity for a SIGNED-IN visitor. This page is public and usually
+   * anonymous (`/auth/me` 401s and `session` stays undefined), but a member
+   * opening a fill link while logged in shouldn't retype a name and email the
+   * app already knows. Prefill only into still-empty fields — the functional
+   * check means anything the visitor typed before the session resolved wins —
+   * and both fields stay editable: on this token path the submitted values are
+   * a free-text claim either way, shown unverified in the submission detail.
+   */
+  const { data: session } = useSession();
+  useEffect(() => {
+    if (!session) return;
+    setSubmitterName((prev) => prev || session.userName);
+    setSubmitterEmail((prev) => prev || session.userEmail);
+  }, [session]);
   /** Per-field incomplete row indexes from the last failed submit (R10). */
   const [incompleteRows, setIncompleteRows] = useState<Record<string, number[]>>({});
   const [emailError, setEmailError] = useState('');
@@ -263,10 +279,12 @@ export function FillScreen() {
         Your details
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {/* No example-person placeholder: a real-looking name in the box reads
+            as a prefilled value, and this is the identity line on a public
+            form. The label carries the field on its own. */}
         <Input
           label="Your name"
           value={submitterName}
-          placeholder="Rebecca Hsu"
           onChange={(e) => setSubmitterName(e.target.value)}
         />
         <Input
