@@ -25,6 +25,8 @@ import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission, permissionScope } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
+import { CaseExportError, exportCasePdf } from '../pdf/index.js';
+import { getStorageClient } from '../storage/index.js';
 import { db } from '../db.js';
 
 /**
@@ -141,7 +143,10 @@ const partSchema = z.object({
 const toolBody = z.object({
   templateId: z.string().uuid(),
   name: z.string().min(1),
-  manifest: z.object({ parts: z.array(partSchema).min(1) }),
+  manifest: z.object({
+    parts: z.array(partSchema).min(1),
+    locationStreamFieldId: z.string().optional(),
+  }),
   candidatePrerequisiteIds: z.array(z.string().uuid()).optional(),
   assessorCompetencyIds: z.array(z.string().uuid()).optional(),
 });
@@ -681,6 +686,93 @@ assessmentCasesRouter.patch(
     }
 
     res.json({ id: attempt.id, hours, thresholdReached });
+  }),
+);
+
+/**
+ * Regenerate the case's evidence document.
+ *
+ * Takes a case id and NOTHING else, for the same reason the submission export
+ * does: a filled assessment paper is read as proof of what was recorded, so
+ * every input — which attempts count, which fields exist, which page they land
+ * on — is resolved server-side from the stored case. There is deliberately no
+ * "render these values" variant.
+ *
+ * Export is gated on `export`, not `view`: a candidate may read their own case
+ * without being able to mint the document that certifies them.
+ */
+assessmentCasesRouter.post(
+  '/:id/export',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await hasPermission(tenant, 'assessments', 'export'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const tool = await loadTool(db, row.toolId, tenant.orgId);
+    if (!tool) {
+      res.status(409).json({ error: 'tool_missing' });
+      return;
+    }
+
+    const version = await db.query.formTemplateVersions.findFirst({
+      where: eq(schema.formTemplateVersions.id, row.currentVersionId),
+    });
+    if (!version?.sourcePdfAssetId) {
+      res.status(422).json({ error: 'no_source_pdf' });
+      return;
+    }
+
+    const client = getStorageClient();
+    if (!client) {
+      res.status(503).json({ error: 'storage_unavailable' });
+      return;
+    }
+    const original = await client.download(tenant.orgId, version.sourcePdfAssetId);
+    if (!original) {
+      res.status(404).json({ error: 'asset_not_found' });
+      return;
+    }
+
+    const attempts = await attemptsFor(db, row.id);
+
+    try {
+      const out = await exportCasePdf({
+        originalPdf: original,
+        fields: (version.fields ?? []) as FormField[],
+        manifest: tool.manifest,
+        pathway: row.pathway as AssessmentPathway,
+        locationStream: row.locationStream,
+        attempts: attempts.map((a) => ({
+          partKey: a.partKey,
+          attemptNumber: a.attemptNumber,
+          outcome: a.outcome,
+          values: a.values,
+        })),
+      });
+      res.setHeader('Content-Type', 'application/pdf');
+      res.send(Buffer.from(out));
+    } catch (err) {
+      // A mismatched manifest is a 409 rather than a 500: the request is well
+      // formed and the server is healthy — the tool's part structure no longer
+      // matches the version it is being exported against, which is a data
+      // problem an author can fix.
+      if (err instanceof CaseExportError) {
+        res.status(409).json({ error: err.message, problems: err.problems });
+        return;
+      }
+      throw err;
+    }
   }),
 );
 

@@ -765,3 +765,71 @@ describe('full case lifecycle', () => {
     }
   });
 });
+
+/**
+ * The document-generation logic lives in `pdf/case-export.test.ts`, which runs
+ * against real PDFs. These cover the ROUTE's gates — who may mint an evidence
+ * document, and what happens when the template cannot produce one.
+ */
+describe('POST /assessment-cases/:id/export', () => {
+  async function openExperiencedCase(base: string) {
+    const tool = await seedTool(base);
+    return (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
+      })
+    ).json()) as { id: string };
+  }
+
+  it('refuses a candidate, who may read their case but not certify it', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const c = await openExperiencedCase(base);
+
+      const res = await fetch(`${base}/assessment-cases/${c.id}/export`, {
+        method: 'POST',
+        headers: auth(candidate),
+      });
+
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('422s when the template has no source PDF to draw on', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const c = await openExperiencedCase(base);
+
+      const res = await fetch(`${base}/assessment-cases/${c.id}/export`, {
+        method: 'POST',
+        headers: auth(),
+      });
+
+      expect(res.status).toBe(422);
+      expect(((await res.json()) as { error: string }).error).toBe('no_source_pdf');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for a case in another org', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-cases/00000000-0000-4000-8000-0000000000ff/export`, {
+        method: 'POST',
+        headers: auth(),
+      });
+
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+});

@@ -98,6 +98,15 @@ export interface AssessmentPart {
 /** The part structure of one assessment tool, against one template. */
 export interface AssessmentToolManifest {
   parts: AssessmentPart[];
+  /**
+   * Field whose answer selects the location stream, e.g. Mining vs Raw
+   * Materials. Named here so the export can seed it from the case rather than
+   * trusting whatever a filler typed: the stream decided which sections
+   * applied during the assessment, so it must decide which sections render on
+   * the evidence document too. Absent on a tool with no location-specific
+   * content.
+   */
+  locationStreamFieldId?: string;
 }
 
 /**
