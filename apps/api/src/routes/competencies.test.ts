@@ -111,7 +111,10 @@ afterEach(() => {
 
 describe('GET /competencies', () => {
   it('403s with feature_not_available when the org plan lacks competencyGating', async () => {
-    mockDbValue = fakeDb({ planTier: 'business' }).db;
+    // 'team', not 'business': competency gating moved down to Business when
+    // multi-part assessments shipped, because assessor eligibility depends on
+    // it and assessments start at Business.
+    mockDbValue = fakeDb({ planTier: 'team' }).db;
     const { server, base } = startApp();
     try {
       const res = await fetch(`${base}/competencies`, { headers: authHeader() });

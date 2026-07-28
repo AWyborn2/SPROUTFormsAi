@@ -25,8 +25,19 @@ export const organizations = pgTable('organizations', {
   createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   /** Plan tier: 'individual' | 'team' | 'business' | 'enterprise'. Controls feature access and seat limits. */
   planTier: text('plan_tier').notNull().default('business'),
-  /** Maximum active memberships allowed by the current plan. */
+  /** Maximum active STAFF memberships allowed by the current plan. */
   seatLimit: integer('seat_limit').notNull().default(15),
+  /**
+   * Maximum active candidate memberships. Counted apart from `seatLimit`
+   * because operators outnumber trainers by an order of magnitude — see
+   * PlanConfig.candidateSeatLimit.
+   *
+   * Null means INHERIT FROM THE TIER, not unlimited — the same fallback
+   * `seatLimit` uses for rows written before its column existed. Unlimited is
+   * expressed by the tier config resolving to null (enterprise), so a legacy
+   * enterprise row and an explicitly-unlimited one both land on unlimited.
+   */
+  candidateSeatLimit: integer('candidate_seat_limit'),
   /** Whether this is a solo workspace ('individual') or a shared team ('team'). */
   accountKind: text('account_kind').notNull().default('team'),
   /** Self-reported team size bucket from signup (e.g. '2-5'). Display/analytics only. */

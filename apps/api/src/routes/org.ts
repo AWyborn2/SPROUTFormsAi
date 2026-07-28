@@ -403,7 +403,11 @@ orgRouter.post(
 
     await db
       .update(schema.organizations)
-      .set({ planTier, seatLimit: config.seatLimit })
+      .set({
+        planTier,
+        seatLimit: config.seatLimit,
+        candidateSeatLimit: config.candidateSeatLimit,
+      })
       .where(eq(schema.organizations.id, tenant.orgId));
 
     await recordAudit(db, tenant, {
@@ -413,6 +417,11 @@ orgRouter.post(
       icon: 'credit-card',
     });
 
-    res.json({ planTier, seatLimit: config.seatLimit, features: config.features });
+    res.json({
+      planTier,
+      seatLimit: config.seatLimit,
+      candidateSeatLimit: config.candidateSeatLimit,
+      features: config.features,
+    });
   }),
 );

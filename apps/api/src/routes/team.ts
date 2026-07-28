@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
-import { and, count, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, count, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
 import { PLAN_CONFIG, schema, type PlanConfig, type PlanTier } from '@formai/db';
 import { PERMISSION_CATEGORIES, ROLES, type PermissionMatrix, type Role } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
@@ -114,8 +114,18 @@ teamRouter.post(
     });
     if (org) {
       const tierConfig: PlanConfig | undefined = PLAN_CONFIG[org.planTier as PlanTier];
-      const seatLimit = (org.seatLimit as number | null) ?? tierConfig?.seatLimit;
+      // Candidates are metered on their own allowance; every other role draws
+      // on the staff seats. Counting them together would let a few hundred
+      // operators exhaust the seats the trainers need.
+      const invitingCandidate = role === 'candidate';
+      const seatLimit = invitingCandidate
+        ? ((org.candidateSeatLimit as number | null) ?? tierConfig?.candidateSeatLimit)
+        : ((org.seatLimit as number | null) ?? tierConfig?.seatLimit);
+
       if (seatLimit != null && Number.isFinite(seatLimit)) {
+        const roleFilter = invitingCandidate
+          ? eq(schema.memberships.role, 'candidate')
+          : ne(schema.memberships.role, 'candidate');
         const [activeSeatResult] = await db
           .select({ count: count() })
           .from(schema.memberships)
@@ -123,13 +133,16 @@ teamRouter.post(
             and(
               eq(schema.memberships.orgId, tenant.orgId),
               eq(schema.memberships.status, 'active'),
+              roleFilter,
             ),
           );
         const activeSeats = activeSeatResult?.count ?? 0;
         if (activeSeats >= seatLimit) {
           res.status(403).json({
-            error: 'seat_limit_reached',
-            message: `Your ${org.planTier} plan allows ${seatLimit} seat${seatLimit === 1 ? '' : 's'}. Remove a member or upgrade your plan to invite more people.`,
+            error: invitingCandidate ? 'candidate_limit_reached' : 'seat_limit_reached',
+            message: invitingCandidate
+              ? `Your ${org.planTier} plan allows ${seatLimit} candidate${seatLimit === 1 ? '' : 's'}. Remove a candidate or upgrade your plan to enrol more.`
+              : `Your ${org.planTier} plan allows ${seatLimit} seat${seatLimit === 1 ? '' : 's'}. Remove a member or upgrade your plan to invite more people.`,
             seatLimit,
             seatUsed: activeSeats,
           });
