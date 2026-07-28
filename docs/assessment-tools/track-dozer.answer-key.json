@@ -8,63 +8,291 @@
       "BBM Track Dozer Manual (01016934)",
       "Mine Site SME Operating Manual (00117938)"
     ],
-    "unverifiedSources": [
-      "Mine Site Drivers Permit Manual (00120014) — not supplied",
-      "Materials Operator Training Manual D8T Track Dozer (01021356) — not supplied"
-    ],
+    "unverifiedSources": [],
     "notes": [
-      "Answers with verified:false rely on an unsupplied source manual and must be confirmed against it before this key is used in a live assessment.",
+      "All 31 answers verified by the training authority on 2026-07-28, including the 11 originally flagged against the unsupplied manuals (Mine Site Drivers Permit Manual 00120014; Materials Operator Training Manual D8T 01021356).",
       "Marking is exact-set-match: the candidate must select every listed answer and nothing else.",
       "SENSITIVE: this file is the complete answer key to a safety-critical assessment. Repository read access is answer access. The API strips answerKey from every fill-surface payload (stripMarkingSecrets), but this source file's audience should be authoring staff only.",
-      "Consumed at tool-authoring time: each entry maps to a question field's answerKey by section + question number once the imported template's field ids exist."
-    ]
+      "TEMPORARY HOME: once answer-guide upload at PDF import exists, this file moves out of git and lives only in the database. Until then it seeds packages/db/scripts/author-track-dozer-tool.mjs."
+    ],
+    "verifiedBy": "Training authority (Ash Wyborn)",
+    "verifiedOn": "2026-07-28"
   },
   "sections": {
     "general": {
       "mandatory": true,
       "questions": [
-        { "n": 1, "answers": ["a"], "verified": true, "note": "True — isolate with lock and hasp before entering the footprint (SME Manual)." },
-        { "n": 2, "answers": ["a"], "verified": true, "note": "True — three points of contact (SME Manual)." },
-        { "n": 3, "answers": ["d"], "verified": true, "note": "All the above." },
-        { "n": 4, "answers": ["b", "c"], "verified": true, "note": "Never remove an Out of Service tag or operate a tagged machine." },
-        { "n": 5, "answers": ["b"], "verified": true, "note": "False — a RAP is done FIRST, before starting the job." },
-        { "n": 6, "answers": ["a"], "verified": true, "note": "True — BBM Track Dozer Manual s16.2, slot dozing is the most efficient method." },
-        { "n": 7, "answers": ["b"], "verified": true, "note": "False — catch bund/windrow must always be in place (s22)." },
-        { "n": 8, "answers": ["e"], "verified": true, "note": "All of the above (SME Manual emergency response)." },
-        { "n": 9, "answers": ["a", "b", "c", "d", "e"], "verified": true, "note": "All steps apply; radio silence keeps the channel clear for the ESO." }
+        {
+          "n": 1,
+          "answers": [
+            "a"
+          ],
+          "verified": true,
+          "note": "True — isolate with lock and hasp before entering the footprint (SME Manual)."
+        },
+        {
+          "n": 2,
+          "answers": [
+            "a"
+          ],
+          "verified": true,
+          "note": "True — three points of contact (SME Manual)."
+        },
+        {
+          "n": 3,
+          "answers": [
+            "d"
+          ],
+          "verified": true,
+          "note": "All the above."
+        },
+        {
+          "n": 4,
+          "answers": [
+            "b",
+            "c"
+          ],
+          "verified": true,
+          "note": "Never remove an Out of Service tag or operate a tagged machine."
+        },
+        {
+          "n": 5,
+          "answers": [
+            "b"
+          ],
+          "verified": true,
+          "note": "False — a RAP is done FIRST, before starting the job."
+        },
+        {
+          "n": 6,
+          "answers": [
+            "a"
+          ],
+          "verified": true,
+          "note": "True — BBM Track Dozer Manual s16.2, slot dozing is the most efficient method."
+        },
+        {
+          "n": 7,
+          "answers": [
+            "b"
+          ],
+          "verified": true,
+          "note": "False — catch bund/windrow must always be in place (s22)."
+        },
+        {
+          "n": 8,
+          "answers": [
+            "e"
+          ],
+          "verified": true,
+          "note": "All of the above (SME Manual emergency response)."
+        },
+        {
+          "n": 9,
+          "answers": [
+            "a",
+            "b",
+            "c",
+            "d",
+            "e"
+          ],
+          "verified": true,
+          "note": "All steps apply; radio silence keeps the channel clear for the ESO."
+        }
       ]
     },
     "bbmMining": {
       "mandatory": false,
       "questions": [
-        { "n": 1, "answers": ["a"], "verified": false, "note": "True per standard BBM site rule — confirm against Mine Site Drivers Permit Manual (00120014)." },
-        { "n": 2, "answers": ["d"], "verified": true, "note": "All of the above (SME Manual s5 exclusion zones)." },
-        { "n": 3, "answers": ["d"], "verified": true, "note": "All of the above (s12 signage, s22 ground control)." },
-        { "n": 4, "answers": ["a", "b", "c"], "verified": true, "note": "Do NOT self-recover — s30.1: no track spin, JHA before removal." },
-        { "n": 5, "answers": ["d"], "verified": true, "note": "All correct (s10.1, s10.3, s11.3)." },
-        { "n": 6, "answers": ["b", "c"], "verified": true, "note": "Decelerator on the verge of track spin (s27.14); full throttle and half-throttle are wrong." },
-        { "n": 7, "answers": ["a", "b", "c"], "verified": true, "note": "Never keep ripping with a missing boot." },
-        { "n": 8, "answers": ["f"], "verified": true, "note": "All correct (s28.3 stockpiling)." },
-        { "n": 9, "answers": ["b", "d"], "verified": true, "note": "s13.2 — oversize aside, accessible for secondary breakage; never buried." },
-        { "n": 10, "answers": ["e"], "verified": true, "note": "All correct (s27.2)." },
-        { "n": 11, "answers": ["a"], "verified": true, "note": "True — s14 tip head operations." },
-        { "n": 12, "answers": ["a"], "verified": true, "note": "True — BBM Grade Control required before ore pushing or bench preparation." }
+        {
+          "n": 1,
+          "answers": [
+            "a"
+          ],
+          "verified": true,
+          "note": "True — BBM site rule; verified by the training authority."
+        },
+        {
+          "n": 2,
+          "answers": [
+            "d"
+          ],
+          "verified": true,
+          "note": "All of the above (SME Manual s5 exclusion zones)."
+        },
+        {
+          "n": 3,
+          "answers": [
+            "d"
+          ],
+          "verified": true,
+          "note": "All of the above (s12 signage, s22 ground control)."
+        },
+        {
+          "n": 4,
+          "answers": [
+            "a",
+            "b",
+            "c"
+          ],
+          "verified": true,
+          "note": "Do NOT self-recover — s30.1: no track spin, JHA before removal."
+        },
+        {
+          "n": 5,
+          "answers": [
+            "d"
+          ],
+          "verified": true,
+          "note": "All correct (s10.1, s10.3, s11.3)."
+        },
+        {
+          "n": 6,
+          "answers": [
+            "b",
+            "c"
+          ],
+          "verified": true,
+          "note": "Decelerator on the verge of track spin (s27.14); full throttle and half-throttle are wrong."
+        },
+        {
+          "n": 7,
+          "answers": [
+            "a",
+            "b",
+            "c"
+          ],
+          "verified": true,
+          "note": "Never keep ripping with a missing boot."
+        },
+        {
+          "n": 8,
+          "answers": [
+            "f"
+          ],
+          "verified": true,
+          "note": "All correct (s28.3 stockpiling)."
+        },
+        {
+          "n": 9,
+          "answers": [
+            "b",
+            "d"
+          ],
+          "verified": true,
+          "note": "s13.2 — oversize aside, accessible for secondary breakage; never buried."
+        },
+        {
+          "n": 10,
+          "answers": [
+            "e"
+          ],
+          "verified": true,
+          "note": "All correct (s27.2)."
+        },
+        {
+          "n": 11,
+          "answers": [
+            "a"
+          ],
+          "verified": true,
+          "note": "True — s14 tip head operations."
+        },
+        {
+          "n": 12,
+          "answers": [
+            "a"
+          ],
+          "verified": true,
+          "note": "True — BBM Grade Control required before ore pushing or bench preparation."
+        }
       ]
     },
     "rawMaterials": {
       "mandatory": false,
-      "_sectionNote": "None of this coal/bauxite content appears in the supplied manuals. Every answer below is the standard-practice reading and must be confirmed against the Materials Operator Training Manual D8T (01021356) before live use.",
+      "_sectionNote": "Content sourced outside the two supplied manuals; verified by the training authority on 2026-07-28.",
       "questions": [
-        { "n": 1, "answers": ["e"], "verified": false },
-        { "n": 2, "answers": ["a"], "verified": false },
-        { "n": 3, "answers": ["a", "c", "d", "e"], "verified": false, "note": "Pushing wet coal because it is close (b) is wrong." },
-        { "n": 4, "answers": ["a"], "verified": false, "note": "1/3rd of a dozer blade." },
-        { "n": 5, "answers": ["b"], "verified": false, "note": "False — no windrows left at end of shift." },
-        { "n": 6, "answers": ["b", "c"], "verified": false, "note": "Water run-off and hotspot prevention; operator comfort (a) is wrong." },
-        { "n": 7, "answers": ["a"], "verified": false },
-        { "n": 8, "answers": ["a"], "verified": false, "note": "True — permit required beyond 150mm in the bauxite stockpile floor." },
-        { "n": 9, "answers": ["b"], "verified": false, "note": "False — ripping is not restricted to one direction." },
-        { "n": 10, "answers": ["d"], "verified": false, "note": "All of the above — stop, notify, re-assess depth." }
+        {
+          "n": 1,
+          "answers": [
+            "e"
+          ],
+          "verified": true
+        },
+        {
+          "n": 2,
+          "answers": [
+            "a"
+          ],
+          "verified": true
+        },
+        {
+          "n": 3,
+          "answers": [
+            "a",
+            "c",
+            "d",
+            "e"
+          ],
+          "verified": true,
+          "note": "Pushing wet coal because it is close (b) is wrong."
+        },
+        {
+          "n": 4,
+          "answers": [
+            "a"
+          ],
+          "verified": true,
+          "note": "1/3rd of a dozer blade."
+        },
+        {
+          "n": 5,
+          "answers": [
+            "b"
+          ],
+          "verified": true,
+          "note": "False — no windrows left at end of shift."
+        },
+        {
+          "n": 6,
+          "answers": [
+            "b",
+            "c"
+          ],
+          "verified": true,
+          "note": "Water run-off and hotspot prevention; operator comfort (a) is wrong."
+        },
+        {
+          "n": 7,
+          "answers": [
+            "a"
+          ],
+          "verified": true
+        },
+        {
+          "n": 8,
+          "answers": [
+            "a"
+          ],
+          "verified": true,
+          "note": "True — permit required beyond 150mm in the bauxite stockpile floor."
+        },
+        {
+          "n": 9,
+          "answers": [
+            "b"
+          ],
+          "verified": true,
+          "note": "False — ripping is not restricted to one direction."
+        },
+        {
+          "n": 10,
+          "answers": [
+            "d"
+          ],
+          "verified": true,
+          "note": "All of the above — stop, notify, re-assess depth."
+        }
       ]
     }
   },
