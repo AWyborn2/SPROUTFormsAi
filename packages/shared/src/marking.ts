@@ -123,6 +123,27 @@ function applyMarks(
   return out;
 }
 
+/**
+ * Fields with the marking secrets removed — what a FILL surface may be served.
+ *
+ * `answerKey` is the complete answer key to the assessment; serving it to the
+ * browser that renders the questions hands every candidate the answers in
+ * devtools. Marking never runs client-side (the outcome route computes it from
+ * the stored attempt), so no fill surface has any use for these properties —
+ * only the builder, where keys are authored, may see them.
+ *
+ * Returns the same array when nothing carried a key, so callers can cheaply
+ * skip no-op copies.
+ */
+export function stripMarkingSecrets(fields: readonly FormField[]): FormField[] {
+  if (!fields.some((f) => f.answerKey || f.outcomeTarget)) return fields as FormField[];
+  return fields.map((f) => {
+    if (!f.answerKey && !f.outcomeTarget) return f;
+    const { answerKey: _key, outcomeTarget: _target, ...rest } = f;
+    return rest;
+  });
+}
+
 export interface MarkTheoryInput {
   /** The full field set of the template version. */
   fields: readonly FormField[];

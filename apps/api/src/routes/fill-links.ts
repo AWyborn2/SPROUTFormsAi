@@ -15,6 +15,7 @@ import {
   missingRequiredFields,
   resolveTheme,
   stripHiddenValues,
+  stripMarkingSecrets,
 } from '@formai/shared';
 // The authed POST /submissions validates with the same runtime schema —
 // single SubmissionValue contract, two doors.
@@ -340,7 +341,10 @@ publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
     orgName: org?.name ?? '',
     orgBranding,
     versionId: version.id,
-    fields: version.fields,
+    // Marking secrets never reach a fill surface: `answerKey` is the complete
+    // answer key to an assessment, and this route's only credential is a link
+    // token. Stripped at the door rather than trusted to the client.
+    fields: stripMarkingSecrets(Array.isArray(version.fields) ? version.fields : []),
     container: version.container,
     smartFillEnabled: orgSmartFillEnabled(org?.planTier),
   });
