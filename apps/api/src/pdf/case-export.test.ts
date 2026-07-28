@@ -28,12 +28,33 @@ const MANIFEST: AssessmentToolManifest = {
   parts: [
     { key: 'p1', ordinal: 1, label: 'Theory', kind: 'theory', pathways: ['experienced', 'new'], startFieldId: 'h1' },
     { key: 'p2', ordinal: 2, label: 'Prac 1', kind: 'practical', pathways: ['experienced', 'new'], startFieldId: 'h2' },
-    { key: 'p3', ordinal: 3, label: 'Log', kind: 'logbook', pathways: ['new'], startFieldId: 'h3', minimumHours: 20 },
+    {
+      key: 'p3',
+      ordinal: 3,
+      label: 'Log',
+      kind: 'logbook',
+      pathways: ['new'],
+      startFieldId: 'h3',
+      minimumHours: 20,
+      durationColumnKey: 'duration',
+    },
     { key: 'p4', ordinal: 4, label: 'Prac 2', kind: 'practical', pathways: ['new'], startFieldId: 'h4' },
   ],
 };
 
-const FIELDS: FormField[] = [header('h1'), header('h2'), header('h3'), header('h4')];
+const logTable: FormField = {
+  id: 'log-table',
+  type: 'repeating_group',
+  label: 'Log',
+  required: false,
+  source: 'imported',
+  columns: [
+    { key: 'task', label: 'Task', type: 'text' },
+    { key: 'duration', label: 'Duration', type: 'number' },
+  ],
+};
+
+const FIELDS: FormField[] = [header('h1'), header('h2'), header('h3'), logTable, header('h4')];
 
 const attempt = (
   partKey: string,
@@ -169,6 +190,7 @@ describe('exportCasePdf', () => {
     header('h2'),
     { id: 'b', type: 'text', label: 'B', required: false, source: 'imported', geometry: { segments: [box(1)] } },
     header('h3'),
+    logTable,
     header('h4'),
   ];
 

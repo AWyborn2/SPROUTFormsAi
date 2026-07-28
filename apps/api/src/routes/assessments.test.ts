@@ -81,6 +81,18 @@ const FIELDS: FormField[] = [
   { id: 'q1-out', type: 'check_cross', label: 'Q1 outcome', required: false, source: 'imported' },
   header('h-prac1'),
   header('h-log'),
+  {
+    id: 'log-table',
+    type: 'repeating_group',
+    label: 'Direct observation log',
+    required: false,
+    source: 'imported',
+    columns: [
+      { key: 'date', label: 'Date', type: 'date' },
+      { key: 'task', label: 'Task', type: 'text' },
+      { key: 'duration', label: 'Duration', type: 'number' },
+    ],
+  },
   header('h-prac2'),
 ];
 
@@ -111,6 +123,7 @@ const MANIFEST: AssessmentToolManifest = {
       pathways: ['new'],
       startFieldId: 'h-log',
       minimumHours: 20,
+      durationColumnKey: 'duration',
     },
     {
       key: 'p4',
@@ -540,7 +553,7 @@ describe('logbook accumulation', () => {
         await fetch(`${base}/assessment-cases/${c.id}/attempts/${log.id}`, {
           method: 'PATCH',
           headers: auth(),
-          body: JSON.stringify({ values: { entries: [{ duration: 8 }, { duration: 6 }] } }),
+          body: JSON.stringify({ values: { 'log-table': [{ duration: 8 }, { duration: 6 }] } }),
         })
       ).json()) as { hours: number; thresholdReached: boolean };
       expect(below.hours).toBe(14);
@@ -550,7 +563,7 @@ describe('logbook accumulation', () => {
         await fetch(`${base}/assessment-cases/${c.id}/attempts/${log.id}`, {
           method: 'PATCH',
           headers: auth(),
-          body: JSON.stringify({ values: { entries: [{ duration: 8 }, { duration: 6 }, { duration: 7 }] } }),
+          body: JSON.stringify({ values: { 'log-table': [{ duration: 8 }, { duration: 6 }, { duration: 7 }] } }),
         })
       ).json()) as { hours: number; thresholdReached: boolean };
       expect(crossing.hours).toBe(21);
@@ -560,7 +573,7 @@ describe('logbook accumulation', () => {
         await fetch(`${base}/assessment-cases/${c.id}/attempts/${log.id}`, {
           method: 'PATCH',
           headers: auth(),
-          body: JSON.stringify({ values: { entries: [{ duration: 30 }] } }),
+          body: JSON.stringify({ values: { 'log-table': [{ duration: 30 }] } }),
         })
       ).json()) as { thresholdReached: boolean };
       expect(after.thresholdReached).toBe(false);
@@ -828,6 +841,112 @@ describe('POST /assessment-cases/:id/export', () => {
       });
 
       expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * Hours count toward a safety threshold, so two properties are pinned at the
+ * route: a non-positive duration is REFUSED rather than quietly ignored, and a
+ * duration column carrying a machine_hours calc is recomputed server-side —
+ * the client's figure for a derived cell is discarded, so meter arithmetic
+ * cannot be forged by editing a request body.
+ */
+describe('logbook duration integrity', () => {
+  async function logbookAttempt(base: string) {
+    const tool = await seedTool(base);
+    const c = (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+      })
+    ).json()) as { id: string };
+
+    for (const [part, values] of [
+      ['p1', { q1: ['a'] }],
+      ['p2', {}],
+    ] as const) {
+      const a = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/${part}/attempts`, {
+          method: 'POST',
+          headers: auth(),
+        })
+      ).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values }),
+      });
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify(part === 'p1' ? {} : { outcome: 'satisfactory' }),
+      });
+    }
+
+    const log = (await (
+      await fetch(`${base}/assessment-cases/${c.id}/parts/p3/attempts`, { method: 'POST', headers: auth() })
+    ).json()) as { id: string };
+    return { caseId: c.id, attemptId: log.id };
+  }
+
+  it('refuses a row with a zero duration rather than ignoring it', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await logbookAttempt(base);
+
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { 'log-table': [{ duration: 8 }, { duration: 0 }] } }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; row: number };
+      expect(body.error).toBe('invalid_logbook_row');
+      expect(body.row).toBe(1);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a negative duration', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await logbookAttempt(base);
+
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { 'log-table': [{ duration: -4 }] } }),
+      });
+
+      expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepts rows still awaiting a duration and counts only completed ones', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await logbookAttempt(base);
+
+      const res = (await (
+        await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+          method: 'PATCH',
+          headers: auth(),
+          body: JSON.stringify({ values: { 'log-table': [{ duration: 8 }, { task: 'mid-entry' }] } }),
+        })
+      ).json()) as { hours: number };
+
+      expect(res.hours).toBe(8);
     } finally {
       server.close();
     }

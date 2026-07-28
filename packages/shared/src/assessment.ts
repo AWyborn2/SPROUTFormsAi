@@ -83,6 +83,19 @@ export interface AssessmentPart {
   startFieldId: string;
   /** Logbook parts only — hours before the next demonstration is prompted. */
   minimumHours?: number;
+  /**
+   * Logbook parts only — the column of the part's table that carries each
+   * entry's hours. Declared rather than assumed: an imported PDF may extract
+   * that column under any key, and totalling a column that does not exist
+   * silently reports zero hours against a safety threshold. Validation
+   * verifies the column really exists in the part's table at authoring time.
+   *
+   * When the template gives this column a `machine_hours` calc, the cell is
+   * derived from start/finish meter readings and the filler cannot type an
+   * arbitrary total; a tool without meter readings simply omits the calc and
+   * the column is entered directly. That is the declared-per-tool flexibility.
+   */
+  durationColumnKey?: string;
   /** Field id of the page-one method checklist entry this part ticks. */
   checklistFieldId?: string;
   /**
@@ -201,8 +214,31 @@ export function validateManifest(
       );
     }
 
-    if (part.kind === 'logbook' && !(part.minimumHours && part.minimumHours > 0)) {
-      problems.push(`Logbook part "${part.key}" has no positive minimumHours.`);
+    if (part.kind === 'logbook') {
+      if (!(part.minimumHours && part.minimumHours > 0)) {
+        problems.push(`Logbook part "${part.key}" has no positive minimumHours.`);
+      }
+      if (!part.durationColumnKey) {
+        problems.push(`Logbook part "${part.key}" declares no durationColumnKey.`);
+      } else {
+        // The declared column must exist in the part's own table. Totalling a
+        // column that is not there silently reports zero hours against a
+        // safety threshold, so the mismatch is an authoring error — caught
+        // here, where an author can fix it.
+        const table = fieldsInSection(fields, part.startFieldId).find(
+          (f) => f.type === 'repeating_group',
+        );
+        if (!table) {
+          problems.push(`Logbook part "${part.key}" has no repeating table in its section.`);
+        } else if (
+          table.columns &&
+          !table.columns.some((c) => c.key === part.durationColumnKey)
+        ) {
+          problems.push(
+            `Logbook part "${part.key}" names duration column "${part.durationColumnKey}", which is not a column of its table.`,
+          );
+        }
+      }
     }
   }
 

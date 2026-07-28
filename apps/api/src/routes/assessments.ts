@@ -3,9 +3,11 @@ import { z } from 'zod';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import {
+  applyCalcs,
   ASSESSMENT_PATHWAYS,
   NS_DISPOSITIONS,
   caseProgress,
+  fieldsInSection,
   isCaseCompetent,
   markTheory,
   orderedParts,
@@ -54,9 +56,6 @@ export const assessmentToolsRouter: Router = Router();
 export const assessmentCasesRouter: Router = Router();
 
 const GATE = [requireTenant, requirePlanFeature('assessments')] as const;
-
-/** The column a logbook part's duration lives in. */
-const DURATION_COLUMN = 'duration';
 
 // ── shared helpers ──────────────────────────────────────────────────────────
 
@@ -136,6 +135,7 @@ const partSchema = z.object({
   pathways: z.array(z.enum(ASSESSMENT_PATHWAYS)).min(1),
   startFieldId: z.string().min(1),
   minimumHours: z.number().positive().optional(),
+  durationColumnKey: z.string().optional(),
   checklistFieldId: z.string().optional(),
   mandatorySectionFieldId: z.string().optional(),
 });
@@ -655,15 +655,56 @@ assessmentCasesRouter.patch(
       return;
     }
 
-    const values = parsed.data.values as Record<string, SubmissionValue>;
+    let values = parsed.data.values as Record<string, SubmissionValue>;
     const tool = await loadTool(db, row.toolId, tenant.orgId);
     const part = tool ? orderedParts(tool.manifest).find((p) => p.key === attempt.partKey) : undefined;
 
     let hours: number | null = null;
     let thresholdReached = false;
-    if (part?.kind === 'logbook') {
-      const rows = Object.values(values).find(Array.isArray) as RepeatingRowValue[] | undefined;
-      hours = totalLoggedHours(rows ?? [], DURATION_COLUMN);
+    if (part?.kind === 'logbook' && part.durationColumnKey) {
+      // The duration column is recomputed SERVER-SIDE when it carries a calc.
+      // Whatever the client sent for a derived cell is discarded: hours count
+      // toward a safety threshold, so the meter arithmetic must not be
+      // forgeable by editing a request body.
+      const fields = await fieldsForVersion(db, attempt.templateVersionId);
+      const table = fieldsInSection(fields, part.startFieldId).find(
+        (f) => f.type === 'repeating_group',
+      );
+
+      const durationKey = part.durationColumnKey;
+      values = Object.fromEntries(
+        Object.entries(values).map(([k, v]) => {
+          if (!Array.isArray(v) || (table && k !== table.id)) return [k, v];
+          const rows = applyCalcs(table?.columns, v as RepeatingRowValue[]);
+          return [k, rows];
+        }),
+      );
+
+      const rows = (table ? values[table.id] : Object.values(values).find(Array.isArray)) as
+        | RepeatingRowValue[]
+        | undefined;
+
+      // A row whose duration is present but not a positive number is a
+      // mis-entry (zero, negative, or meter readings that go backwards — a
+      // calc writes '' for those). Refusing it keeps "hours that count" and
+      // "rows on the record" the same set, so the exported logbook cannot
+      // show entries the threshold quietly ignored.
+      const bad = (rows ?? []).findIndex((r) => {
+        const raw = r?.[durationKey];
+        if (raw === undefined || raw === null) return false;
+        const n = typeof raw === 'number' ? raw : Number.parseFloat(String(raw));
+        return !(Number.isFinite(n) && n > 0);
+      });
+      if (bad >= 0) {
+        res.status(400).json({
+          error: 'invalid_logbook_row',
+          row: bad,
+          message: `Row ${bad + 1} has no positive ${durationKey} — check the start and finish readings.`,
+        });
+        return;
+      }
+
+      hours = totalLoggedHours(rows ?? [], durationKey);
       thresholdReached =
         part.minimumHours != null && hours >= part.minimumHours && attempt.thresholdNotifiedAt === null;
     }

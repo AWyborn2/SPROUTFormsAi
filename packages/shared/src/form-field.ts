@@ -180,21 +180,30 @@ export interface VisibilityCondition {
  * Auto-calculation config for a repeating column — the cell computes itself
  * from the row's other cells and renders read-only on fill surfaces.
  *
- * One kind only, deliberately: `total_hours` is the timesheet shape
- * (finish − start − lunch, in decimal hours). A general formula engine would
- * need its own parser, cycle rules and error surface; a named calculation is
- * one tested function. The semantics live in `time-calc.ts`.
+ * Named calculations only, deliberately: a general formula engine would need
+ * its own parser, cycle rules and error surface; a named calculation is one
+ * tested function. The semantics live in `time-calc.ts`.
+ *
+ * - `total_hours` — the timesheet shape: finish − start − lunch, times of day
+ *   in `HH:MM`, result in decimal hours.
+ * - `machine_hours` — the equipment-logbook shape: finish − start where both
+ *   are METER READINGS (plain decimals off the machine's hour meter), result
+ *   in decimal hours. Distinct from `total_hours` because meter readings are
+ *   not times of day: there is no midnight wrap, and a finish at or below the
+ *   start is a mis-entry rather than a night shift. Making the filler enter
+ *   both readings and deriving the duration is what stops a logbook hour
+ *   column being typed as whatever reaches a threshold.
  */
 export interface ColumnCalc {
-  kind: 'total_hours';
-  /** Key of the start-time column (`HH:MM`). */
+  kind: 'total_hours' | 'machine_hours';
+  /** Key of the start column — `HH:MM` time, or a meter reading. */
   startKey: string;
-  /** Key of the finish-time column (`HH:MM`). */
+  /** Key of the finish column — `HH:MM` time, or a meter reading. */
   finishKey: string;
   /**
-   * Key of the lunch column, subtracted as a DURATION — `HH:MM` or a plain
-   * decimal-hours number. Optional: absent, blank or zero subtracts nothing
-   * (a task finished before any break).
+   * `total_hours` only — key of the lunch column, subtracted as a DURATION
+   * (`HH:MM` or a plain decimal-hours number). Optional: absent, blank or zero
+   * subtracts nothing (a task finished before any break).
    */
   lunchKey?: string;
 }
