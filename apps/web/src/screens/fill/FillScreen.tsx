@@ -318,6 +318,7 @@ export function FillScreen() {
             header={identityBlock}
             dictation
             smartFill={smartFillOffered ? runSmartFill : undefined}
+            uploadPath={`/fill/${token}/uploads`}
           />
         ) : (
           <>
@@ -337,6 +338,7 @@ export function FillScreen() {
                     incompleteRowIndexes={incompleteRows[f.id]}
                     dictation
                     onChange={(v) => setValue(f.id, v)}
+                    uploadPath={`/fill/${token}/uploads`}
                   />
                 </div>
               ))}

@@ -3,7 +3,7 @@
  * preview and the external fill flow, so a field looks and behaves identically
  * wherever it appears. Values use the shared SubmissionValue union.
  */
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Checkbox,
   DateTimePicker,
@@ -19,15 +19,19 @@ import {
   currentTimeHHMM,
   type RepeatingRow,
 } from '@formai/ui';
-import type { FormField, SubmissionValue } from '@formai/shared';
+import type { FormField, SubmissionFileRef, SubmissionValue } from '@formai/shared';
 import {
+  ALLOWED_ATTACHMENT_TYPES,
+  MAX_ATTACHMENT_BYTES,
   applyCalcs,
   applySelection,
   incompleteFixedRowIndices,
+  isFileRef,
   resolveAnswerSets,
   selectedOption,
 } from '@formai/shared';
 import type { RepeatingRowValue } from '@formai/shared';
+import { ApiError, uploadAttachment } from '../../lib/data/api-client.js';
 import { resolveRepeatingRows } from '../../lib/fixed-rows.js';
 import { coerceSpokenValue, isDictatable, useDictation } from '../../lib/voice/index.js';
 
@@ -53,6 +57,21 @@ export interface FieldInputProps {
    * than no mic at all.
    */
   dictation?: boolean;
+  /**
+   * Where a `file_upload` field POSTs its bytes.
+   *
+   * - omitted → `/uploads`, the authenticated door. Correct for every
+   *   signed-in surface (mobile field app, internal fill).
+   * - a path → that endpoint; the public fill page passes
+   *   `/fill/:token/uploads`, where the link token is the credential.
+   * - `null` → do not persist. The builder's live preview renders a real
+   *   control against a throwaway value, so uploading there would litter the
+   *   bucket with objects no submission will ever reference.
+   *
+   * Note the parallel with `dictation` above: both default to the safe
+   * behaviour for a preview surface, for the same reason.
+   */
+  uploadPath?: string | null;
 }
 
 /**
@@ -69,7 +88,11 @@ export function canDictateField(field: FormField): boolean {
 }
 
 function asString(v: SubmissionValue): string {
-  return v === null || v === undefined || Array.isArray(v) ? '' : String(v);
+  if (v === null || v === undefined || Array.isArray(v)) return '';
+  // A file ref is an object; `String(...)` on one yields "[object Object]",
+  // which would render as the answer text of any field that received one.
+  if (isFileRef(v)) return v.fileName;
+  return String(v);
 }
 
 export function FieldInput({
@@ -80,6 +103,7 @@ export function FieldInput({
   disabled,
   incompleteRowIndexes,
   dictation = false,
+  uploadPath,
 }: FieldInputProps) {
   if (field.type === 'section_header') {
     return (
@@ -244,10 +268,12 @@ export function FieldInput({
         );
       case 'file_upload':
         return (
-          <FileDropzone
-            onFiles={(files) => onChange(files[0]?.name ?? '')}
-            selectedName={asString(value) || undefined}
-            hint="PDF, image or document"
+          <FileUploadField
+            field={field}
+            value={value}
+            onChange={onChange}
+            disabled={disabled}
+            uploadPath={uploadPath}
           />
         );
       case 'repeating_group': {
@@ -412,6 +438,171 @@ function DictationRow({ field, onChange, children }: DictationRowProps) {
       <p role="status" className={`text-xs text-warning-text ${announcement ? 'mt-1' : ''}`}>
         {announcement}
       </p>
+    </div>
+  );
+}
+
+/** `accept` attribute covering exactly what the upload routes will store. */
+const ATTACHMENT_ACCEPT = Object.keys(ALLOWED_ATTACHMENT_TYPES).join(',');
+
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * A `file_upload` field that actually stores bytes.
+ *
+ * This previously recorded `files[0].name` and nothing else — the value looked
+ * answered, validation passed, the submission saved, and the file never left
+ * the browser. A required "Driver's licence image" could be satisfied by
+ * picking a file and immediately closing the laptop. So the upload happens on
+ * pick, and the field's value only becomes a ref once storage has the bytes.
+ *
+ * Type and size are checked here too, before the read: rejecting a 40 MB video
+ * locally is instant and specific, where letting it through means base64-ing it
+ * and waiting for a 413.
+ */
+function FileUploadField({
+  field,
+  value,
+  onChange,
+  disabled,
+  uploadPath,
+}: {
+  field: FormField;
+  value: SubmissionValue;
+  onChange: (value: SubmissionValue) => void;
+  disabled?: boolean;
+  uploadPath?: string | null;
+}) {
+  const ref = isFileRef(value) ? value : null;
+  const [progress, setProgress] = useState<number | undefined>(undefined);
+  const [uploadError, setUploadError] = useState('');
+  /**
+   * Preview of the file the respondent just picked, from the local `File` —
+   * not from the server. The public fill page has no authenticated way to read
+   * an attachment back (deliberately: see uploads.ts), and even on an authed
+   * surface a local URL avoids a round trip for bytes the browser already has.
+   */
+  const [localPreview, setLocalPreview] = useState('');
+  const previewUrlRef = useRef('');
+
+  // Object URLs are held by the document until explicitly released.
+  useEffect(
+    () => () => {
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    },
+    [],
+  );
+
+  const uploading = progress !== undefined;
+
+  async function pick(file: File) {
+    setUploadError('');
+
+    if (!ALLOWED_ATTACHMENT_TYPES[file.type]) {
+      setUploadError('Choose a PNG, JPEG, WebP or PDF file.');
+      return;
+    }
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      setUploadError(
+        `That file is ${formatBytes(file.size)} — the limit is ${formatBytes(MAX_ATTACHMENT_BYTES)}.`,
+      );
+      return;
+    }
+
+    // Show the picked image immediately; the upload runs behind it.
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = file.type.startsWith('image/') ? URL.createObjectURL(file) : '';
+    setLocalPreview(previewUrlRef.current);
+
+    // Builder preview: render the interaction, persist nothing.
+    if (uploadPath === null) return;
+
+    setProgress(0);
+    try {
+      const stored = await uploadAttachment<SubmissionFileRef>(
+        uploadPath ?? '/uploads',
+        file,
+        setProgress,
+      );
+      onChange(stored);
+    } catch (err) {
+      // The value stays unset on failure — an upload that did not complete must
+      // never leave the field looking answered.
+      onChange(null);
+      setLocalPreview('');
+      setUploadError(
+        err instanceof ApiError && err.status === 413
+          ? 'That file is too large — the limit is 10 MB.'
+          : err instanceof ApiError && err.status === 400
+            ? "That file's contents don't match its type. Try re-saving or choosing another."
+            : err instanceof ApiError && err.status === 401
+              ? 'Your session expired. Sign in again, then re-attach the file.'
+              : 'Upload failed — check your connection and try again.',
+      );
+    } finally {
+      setProgress(undefined);
+    }
+  }
+
+  function clear() {
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = '';
+    setLocalPreview('');
+    setUploadError('');
+    onChange(null);
+  }
+
+  const isImage = ref ? ref.contentType.startsWith('image/') : !!localPreview;
+  // Falls back to the authed serving route for a ref loaded from a saved
+  // record, where no local File exists (e.g. resuming a draft).
+  const previewSrc =
+    localPreview || (ref && isImage && uploadPath !== null ? `/api/uploads/file/${ref.key}` : '');
+
+  return (
+    <div>
+      <FileDropzone
+        onFiles={(files) => {
+          const file = files[0];
+          if (file) void pick(file);
+        }}
+        accept={ATTACHMENT_ACCEPT}
+        progress={progress}
+        selectedName={ref?.fileName}
+        hint={field.help ?? 'PNG, JPEG, WebP or PDF · up to 10 MB'}
+        disabled={disabled || uploading}
+      />
+
+      {previewSrc && (
+        <img
+          src={previewSrc}
+          alt={ref ? `Preview of ${ref.fileName}` : 'Preview of the selected file'}
+          className="mt-2 h-20 w-20 rounded-md border border-border object-cover"
+        />
+      )}
+
+      {ref && !uploading && (
+        <div className="mt-2 flex items-center gap-2 text-xs text-text-tertiary">
+          <Icon name="check" size={13} className="text-success" />
+          <span className="truncate">
+            {ref.fileName} · {formatBytes(ref.size)}
+          </span>
+          {!disabled && (
+            <button
+              type="button"
+              onClick={clear}
+              className="ml-auto shrink-0 font-semibold text-text-accent hover:underline"
+            >
+              Remove
+            </button>
+          )}
+        </div>
+      )}
+
+      {uploadError && <p className="mt-1 text-xs text-danger-text">{uploadError}</p>}
     </div>
   );
 }

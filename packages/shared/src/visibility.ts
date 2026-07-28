@@ -29,6 +29,7 @@
  */
 
 import type { FormField, FormFieldType, VisibilityCondition } from './form-field.js';
+import { isFileRef } from './submission.js';
 import type { SubmissionValue } from './submission.js';
 
 /**
@@ -81,9 +82,21 @@ function scalarAnswer(
   return undefined;
 }
 
-/** True when the answer is an array/row-list rather than a scalar. */
+/**
+ * True when the answer is a composite — an array/row-list or a stored file —
+ * rather than a scalar a condition could compare against.
+ *
+ * A file ref is listed for the same reason a multi-select array is: "equals" has
+ * no honest meaning over it. Which of the key, the original filename, or the
+ * content type would the author's string be compared to? Rather than pick one
+ * silently, this reports unevaluatable, and rule 1 resolves that to VISIBLE.
+ * Leaving it out would be worse than ambiguous — an object falls through
+ * `scalarAnswer` to `undefined`, which reads as "unanswered" and would HIDE a
+ * dependent section on the strength of a file the respondent had already
+ * uploaded.
+ */
 function isNonScalarAnswer(value: SubmissionValue | undefined): boolean {
-  return Array.isArray(value);
+  return Array.isArray(value) || isFileRef(value);
 }
 
 /**

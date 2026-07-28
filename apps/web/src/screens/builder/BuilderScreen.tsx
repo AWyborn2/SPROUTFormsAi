@@ -22,6 +22,7 @@ import {
   useToast,
 } from '@formai/ui';
 import type { FormField, FormFieldType } from '@formai/shared';
+import { CHC_INTAKE_FORM_NAME, chcIntakeFields } from '@formai/shared';
 import { ApiError } from '../../lib/data/api-client.js';
 import { useForm, usePublishBuilder, usePublishVersion } from '../../lib/data/hooks.js';
 import { previewSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
@@ -65,6 +66,19 @@ const VALIDATION_OPTIONS = [
 ];
 
 /**
+ * Starting field sets a new form can be seeded from, by `?preset=<key>`.
+ *
+ * A preset produces an ordinary unsaved draft — nothing about the resulting
+ * form remembers where its fields came from, so every field can be renamed,
+ * reordered or deleted like any other. That is the point: the CHC intake form
+ * ships as a real editable template rather than as a screen an administrator
+ * would have to file a ticket to change.
+ */
+const PRESETS: Record<string, { name: string; fields: () => FormField[] }> = {
+  'chc-intake': { name: CHC_INTAKE_FORM_NAME, fields: chcIntakeFields },
+};
+
+/**
  * Builder entry point. With no `?form` param it starts a blank new-form
  * session; with `?form=<id>` it loads that template's current version and
  * seeds the editor from it (publishing then creates a new version of that
@@ -99,12 +113,20 @@ export function BuilderScreen() {
     );
   }
 
+  // `?preset=<key>` seeds a NEW form from a starting field set (see PRESETS).
+  // It is deliberately only consulted when there is no `?form=` — a preset is a
+  // way to begin, never something that overwrites a template being edited.
+  const presetKey = !formId ? searchParams.get('preset') : null;
+  const preset = presetKey ? PRESETS[presetKey] : undefined;
+
   const init: BuilderInit =
     formId && detail
       ? { formId, name: detail.name, fields: detail.fields, container: detail.container }
-      : { formId: null, name: 'Untitled form', fields: [] };
+      : preset
+        ? { formId: null, name: preset.name, fields: preset.fields() }
+        : { formId: null, name: 'Untitled form', fields: [] };
 
-  return <BuilderEditor key={formId ?? 'new'} init={init} />;
+  return <BuilderEditor key={formId ?? (presetKey ? `preset:${presetKey}` : 'new')} init={init} />;
 }
 
 /** The drag-and-drop form builder (canvas + palette + config + live preview). */
@@ -944,7 +966,9 @@ function PreviewMode({ state }: { state: BuilderState }) {
         <div className="grid grid-cols-12 gap-[18px]">
           {state.fields.map((f) => (
             <div key={f.id} className={previewSpanClass(resolveFillSpan(f, narrow))}>
-              <FieldInput field={f} value={null} onChange={() => {}} />
+              {/* `uploadPath={null}`: this preview throws its value away, so a
+                  file picked here must not reach the bucket. */}
+              <FieldInput field={f} value={null} onChange={() => {}} uploadPath={null} />
             </div>
           ))}
         </div>

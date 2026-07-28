@@ -153,6 +153,23 @@ export function useExportSubmissionPdf() {
   });
 }
 
+/** Record a submission from an authenticated surface. */
+export function useCreateSubmission() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      templateId: string;
+      versionId: string;
+      values: Record<string, SubmissionValue>;
+    }) => store.createSubmission(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.submissions });
+      qc.invalidateQueries({ queryKey: keys.dashboard });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
 /** Approve or reject a submission; the API records the audit entry server-side. */
 export function useSetSubmissionStatus() {
   const qc = useQueryClient();

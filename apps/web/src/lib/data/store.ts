@@ -333,6 +333,21 @@ export const store = {
   },
 
   /**
+   * Records a submission on the AUTHED path. `submitterName`/`submitterEmail`
+   * are deliberately not sent: the API stamps identity from the session and
+   * ignores any claim in the body (AE3), so passing one would only suggest it
+   * mattered. `versionId` is echoed from the version the screen actually
+   * rendered, pinning the submission to what the filler saw (AE2).
+   */
+  createSubmission(input: {
+    templateId: string;
+    versionId: string;
+    values: Record<string, SubmissionValue>;
+  }): Promise<SubmissionRow> {
+    return apiClient.post<SubmissionRowDto>('/submissions', input).then(toSubmissionRow);
+  },
+
+  /**
    * The export sends the submission id and nothing else: the API loads the
    * pinned version's fields and the stored values itself and applies the
    * visibility filter server-side (U11). Sending fields/values from here would

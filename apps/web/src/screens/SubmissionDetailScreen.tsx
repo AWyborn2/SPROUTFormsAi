@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Badge, Button, Icon, RepeatingGroup, useToast } from '@formai/ui';
-import type { FormField, SubmissionValue } from '@formai/shared';
+import type { FormField, SubmissionFileRef, SubmissionValue } from '@formai/shared';
+import { isFileRef } from '@formai/shared';
 import { resolveSubmitterIdentity, toDisplayRows } from '../lib/submission-display.js';
 import {
   useExportSubmissionPdf,
@@ -214,6 +215,10 @@ export function SubmissionDetailScreen() {
 function formatValue(value: SubmissionValue | undefined): string {
   if (value === null || value === undefined || value === '') return '—';
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  // Attachments render as a link elsewhere (`AttachmentValue`); this is the
+  // text fallback, so a reviewer scanning the data view still sees the file
+  // rather than "[object Object]".
+  if (isFileRef(value)) return value.fileName;
   if (Array.isArray(value)) {
     if (value.length === 0) return '—';
     if (typeof value[0] === 'object' && value[0] !== null) {
@@ -303,6 +308,49 @@ function LoadingPanel({ label }: { label: string }) {
   );
 }
 
+/**
+ * A stored attachment in the read-only data view — thumbnail for an image,
+ * icon for a PDF, both linking to the authenticated serving route.
+ *
+ * `target="_blank"` with `rel="noreferrer"` rather than an inline embed: the
+ * bytes are respondent-supplied, so they open in their own sandboxed context
+ * (the route sends `Content-Security-Policy: sandbox` alongside `nosniff`)
+ * instead of anywhere near this page's origin privileges.
+ */
+function AttachmentValue({ file }: { file: SubmissionFileRef }) {
+  const href = `/api/uploads/file/${file.key}`;
+  const isImage = file.contentType.startsWith('image/');
+  const size =
+    file.size < 1024 * 1024
+      ? `${Math.round(file.size / 1024)} KB`
+      : `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
+
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex items-center gap-2.5 hover:underline"
+    >
+      {isImage ? (
+        <img
+          src={href}
+          alt={file.fileName}
+          className="h-10 w-10 rounded-sm border border-border object-cover"
+        />
+      ) : (
+        <span className="grid h-10 w-10 place-items-center rounded-sm border border-border bg-surface-sunken text-text-tertiary">
+          <Icon name="file-text" size={16} />
+        </span>
+      )}
+      <span>
+        <span className="block text-text-accent">{file.fileName}</span>
+        <span className="block text-[11.5px] font-normal text-text-tertiary">{size}</span>
+      </span>
+    </a>
+  );
+}
+
 function CapturedData({ detail }: { detail: SubmissionDetail | null | undefined }) {
   if (detail === undefined) {
     return <LoadingPanel label="Loading captured data…" />;
@@ -365,7 +413,11 @@ function CapturedData({ detail }: { detail: SubmissionDetail | null | undefined 
                 {field.required && <span className="ml-0.5 text-danger">*</span>}
               </span>
               <span className="flex-1 whitespace-pre-wrap text-[13.5px] font-medium text-text-primary">
-                {formatValue(detail.values[field.id])}
+                {isFileRef(detail.values[field.id]) ? (
+                  <AttachmentValue file={detail.values[field.id] as SubmissionFileRef} />
+                ) : (
+                  formatValue(detail.values[field.id])
+                )}
               </span>
             </div>
           ),

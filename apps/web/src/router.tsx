@@ -23,6 +23,7 @@ import { BillingScreen } from './screens/enterprise/BillingScreen.js';
 import { WhiteLabelScreen } from './screens/enterprise/WhiteLabelScreen.js';
 import { CompetencyScreen } from './screens/enterprise/CompetencyScreen.js';
 import { MobileScreen } from './screens/mobile/MobileScreen.js';
+import { ChcIntakeScreen } from './screens/chc/ChcIntakeScreen.js';
 import { SCREENS, type ScreenDef } from './lib/screens.js';
 
 /** Screens implemented for real; everything else renders the Phase-0 placeholder. */
@@ -46,6 +47,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   billing: <BillingScreen />,
   whitelabel: <WhiteLabelScreen />,
   competency: <CompetencyScreen />,
+  'chc-intake': <ChcIntakeScreen />,
   mobile: <MobileScreen />,
 };
 

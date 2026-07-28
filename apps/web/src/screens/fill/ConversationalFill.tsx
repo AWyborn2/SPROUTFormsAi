@@ -50,6 +50,8 @@ interface ConversationalFillProps {
    * absence IS the plan gate on this screen, not a disabled button.
    */
   smartFill?: (transcript: string) => Promise<SmartFillResult | null>;
+  /** Attachment endpoint for `file_upload` fields — see `FieldInputProps`. */
+  uploadPath?: string | null;
 }
 
 /** What the last Smart Fill run touched, so the respondent can see it and check it. */
@@ -108,6 +110,7 @@ export function ConversationalFill({
   header,
   dictation = false,
   smartFill,
+  uploadPath,
 }: ConversationalFillProps) {
   const steps = buildSteps(fields);
   const [index, setIndex] = useState(0);
@@ -322,6 +325,7 @@ export function ConversationalFill({
                         (touched && blocking.includes(f.id) ? 'This question is required.' : undefined)
                       }
                       onChange={(v) => setValue(f.id, v)}
+                      uploadPath={uploadPath}
                     />
                   </div>
                 </div>
