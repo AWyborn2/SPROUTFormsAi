@@ -99,6 +99,13 @@
       "when": 1785219192108,
       "tag": "0013_easy_revanche",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1785219395653,
+      "tag": "0014_closed_firelord",
+      "breakpoints": true
     }
   ]
 }
