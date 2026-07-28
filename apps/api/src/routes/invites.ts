@@ -1,12 +1,13 @@
 import { Router } from 'express';
-import { and, count, eq, isNull, ne, sql } from 'drizzle-orm';
-import { PLAN_CONFIG, schema, type PlanTier } from '@formai/db';
+import { and, eq, isNull, sql } from 'drizzle-orm';
+import { schema } from '@formai/db';
 import { requireTenant, SESSION_COOKIE_NAME } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { isUniqueViolation } from '../lib/db-errors.js';
 import { recordAudit } from '../audit/record.js';
 import { sealSession } from '../auth/replit-auth.js';
 import { SESSION_COOKIE_OPTIONS } from './auth.js';
+import { checkSeatAvailability, seatLimitError } from '../lib/seats.js';
 import { db } from '../db.js';
 
 export const publicInvitesRouter: Router = Router();
@@ -73,38 +74,10 @@ invitesRouter.post(
       where: eq(schema.organizations.id, invite.orgId),
     });
     if (org) {
-      // Mirrors the invite-creation check in team.ts: candidates draw on their
-      // own allowance, everyone else on staff seats. Both ends must agree, or
-      // an invite that passed creation would be refused at acceptance.
-      const acceptingCandidate = invite.role === 'candidate';
-      const tierConfig = PLAN_CONFIG[org.planTier as PlanTier];
-      const seatLimit = acceptingCandidate
-        ? ((org.candidateSeatLimit as number | null) ?? tierConfig?.candidateSeatLimit)
-        : ((org.seatLimit as number | null) ?? tierConfig?.seatLimit);
-
-      if (seatLimit != null && Number.isFinite(seatLimit)) {
-        const [activeSeatResult] = await db
-          .select({ count: count() })
-          .from(schema.memberships)
-          .where(
-            and(
-              eq(schema.memberships.orgId, invite.orgId),
-              eq(schema.memberships.status, 'active'),
-              acceptingCandidate
-                ? eq(schema.memberships.role, 'candidate')
-                : ne(schema.memberships.role, 'candidate'),
-            ),
-          );
-        const activeSeats = activeSeatResult?.count ?? 0;
-        if (activeSeats >= seatLimit) {
-          res.status(403).json({
-            error: acceptingCandidate ? 'candidate_limit_reached' : 'seat_limit_reached',
-            message: `This organisation's ${org.planTier} plan is at its ${acceptingCandidate ? 'candidate' : 'seat'} limit (${seatLimit}). Ask an owner to upgrade the plan or free a seat.`,
-            seatLimit,
-            seatUsed: activeSeats,
-          });
-          return;
-        }
+      const check = await checkSeatAvailability(db, org, invite.role);
+      if (!check.ok) {
+        res.status(403).json(seatLimitError(check, org.planTier));
+        return;
       }
     }
 

@@ -44,6 +44,8 @@ function fakeDb(opts: {
   insertedRule?: unknown;
   competencyHoldersFindFirst?: unknown;
   competencyHoldersFindMany?: unknown[];
+  /** Result of the SQL aggregate syncHolderCount runs. */
+  holderCount?: number;
   membershipsFindFirst?: unknown;
   /** Every route is gated by requirePlanFeature('competencyGating'). */
   planTier?: string;
@@ -80,6 +82,11 @@ function fakeDb(opts: {
         findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst),
       },
     },
+    select: vi.fn(() => ({
+      from: () => ({
+        where: () => Promise.resolve([{ count: opts.holderCount ?? 0 }]),
+      }),
+    })),
     insert: vi.fn((table: unknown) => ({
       values: (v: unknown) => {
         insertValues(table, v);
@@ -347,7 +354,7 @@ describe('competency holders', () => {
       competenciesFindFirst: competency,
       membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
       competencyHoldersFindFirst: undefined,
-      competencyHoldersFindMany: [{ id: 'h1' }],
+      holderCount: 1,
     });
     mockDbValue = f.db;
     const { server, base } = startApp();
@@ -375,7 +382,7 @@ describe('competency holders', () => {
       competenciesFindFirst: competency,
       membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
       competencyHoldersFindFirst: { id: 'h1', competencyId: 'c1', userId: HOLDER_ID },
-      competencyHoldersFindMany: [{ id: 'h1' }],
+      holderCount: 1,
     });
     mockDbValue = f.db;
     const { server, base } = startApp();

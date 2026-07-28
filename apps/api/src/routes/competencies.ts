@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, count, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
@@ -9,8 +9,10 @@ import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
 
 /**
- * Competencies and the rules gating a form section behind one. All routes
- * are gated behind the `competencyGating` plan feature (business → enterprise).
+ * Competencies, who holds them, and the rules gating a form section behind one.
+ * All routes are gated behind the `competencyGating` plan feature (Business and
+ * Enterprise) — it moved down from Enterprise-only when multi-part assessments
+ * shipped, because assessor eligibility per tool reads these records.
  */
 export const competenciesRouter: Router = Router();
 export const competencyRulesRouter: Router = Router();
@@ -99,15 +101,19 @@ competenciesRouter.delete(
  * a cascade-deleted user would both make a +1/-1 counter wrong.
  */
 async function syncHolderCount(database: NonNullable<typeof db>, competencyId: string) {
-  const rows = await database.query.competencyHolders.findMany({
-    where: eq(schema.competencyHolders.competencyId, competencyId),
-    columns: { id: true },
-  });
+  // A SQL aggregate, not findMany().length — this table grows with people ×
+  // competencies, and loading every row to count it would scale with the
+  // workforce on a request that only needs one number.
+  const [result] = await database
+    .select({ count: count() })
+    .from(schema.competencyHolders)
+    .where(eq(schema.competencyHolders.competencyId, competencyId));
+  const holders = result?.count ?? 0;
   await database
     .update(schema.competencies)
-    .set({ holders: rows.length })
+    .set({ holders })
     .where(eq(schema.competencies.id, competencyId));
-  return rows.length;
+  return holders;
 }
 
 /** Load a competency within the caller's org, or null. */
