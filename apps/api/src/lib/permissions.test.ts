@@ -54,16 +54,68 @@ describe('hasPermission', () => {
     expect(await hasPermission(tenant, 'assessments', 'view')).toBe(true);
   });
 
-  it('denies when there is no matrix row', async () => {
-    mockDbValue = dbWithMatrix(undefined);
-
-    expect(await hasPermission(tenant, 'assessments', 'view')).toBe(false);
-  });
-
   it('denies when the database is unavailable', async () => {
     mockDbValue = null;
 
     expect(await hasPermission(tenant, 'assessments', 'view')).toBe(false);
+  });
+
+  it('denies an unknown role with no stored row', async () => {
+    mockDbValue = dbWithMatrix(undefined);
+
+    expect(await hasPermission({ orgId: 'org-1', role: 'wizard' }, 'assessments', 'view')).toBe(
+      false,
+    );
+  });
+});
+
+/**
+ * A known role with no stored row resolves to the product default.
+ *
+ * This is what seeds roles added after an org was created — PostgreSQL forbids
+ * using an enum value in the transaction that added it, and drizzle applies all
+ * pending migrations in one transaction, so new-role matrices cannot be
+ * backfilled in SQL beside the enum change. These pin that the fallback is
+ * narrow: known roles only, and never when the database is unreachable.
+ */
+describe('default-matrix fallback', () => {
+  it('resolves a known role with no stored row to its product default', async () => {
+    mockDbValue = dbWithMatrix(undefined);
+
+    // The candidate default is own-scoped, so it must read as own — not as
+    // denied (the pre-fallback behaviour) and not as org-wide.
+    expect(await permissionScope(tenant, 'assessments', 'view')).toBe('own');
+    expect(await hasPermission(tenant, 'assessments', 'view')).toBe(false);
+  });
+
+  it('gives an unseeded assessor org-wide assessment access', async () => {
+    mockDbValue = dbWithMatrix(undefined);
+
+    expect(await hasPermission({ orgId: 'org-1', role: 'assessor' }, 'assessments', 'create')).toBe(
+      true,
+    );
+  });
+
+  it('prefers a stored row over the default when one exists', async () => {
+    mockDbValue = dbWithMatrix(orgWide);
+
+    expect(await permissionScope(tenant, 'assessments', 'view')).toBe('all');
+  });
+
+  it('does not fall back for an unknown role', async () => {
+    mockDbValue = dbWithMatrix(undefined);
+
+    expect(await permissionScope({ orgId: 'org-1', role: 'wizard' }, 'assessments', 'view')).toBe(
+      'none',
+    );
+  });
+
+  it('does not fall back when the database is unavailable', async () => {
+    mockDbValue = null;
+
+    expect(await permissionScope({ orgId: 'org-1', role: 'assessor' }, 'assessments', 'create')).toBe(
+      'none',
+    );
   });
 });
 

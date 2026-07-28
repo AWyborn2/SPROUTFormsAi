@@ -1,8 +1,10 @@
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import {
+  DEFAULT_ROLE_PERMISSIONS,
   matrixAllows,
   resolveScope,
+  ROLES,
   type PermissionAction,
   type PermissionCategory,
   type PermissionScope,
@@ -10,7 +12,23 @@ import {
 } from '@formai/shared';
 import { db } from '../db.js';
 
-/** Fetch the tenant role's stored matrix, or undefined when unavailable. */
+/**
+ * The tenant role's effective matrix, or undefined when nothing can be
+ * resolved.
+ *
+ * A KNOWN role with no stored row falls back to the product default. This is
+ * what seeds the roles added after an org was created: PostgreSQL will not let
+ * a migration insert a row using an enum value added in the same transaction
+ * (55P04), and drizzle applies all pending migrations in one transaction — so
+ * new-role matrices cannot be backfilled in SQL alongside the enum change.
+ * Resolving the default here removes the ordering dependency entirely, and
+ * cannot be forgotten the way a follow-up migration can.
+ *
+ * The fallback is narrow on purpose. An UNKNOWN role resolves to undefined
+ * (denied), and so does an unavailable database — the fail-closed guarantees
+ * both still hold. It only answers "this org never customised a role the
+ * product ships", which is a default, not an escalation.
+ */
 async function matrixFor(tenant: { orgId: string; role: string }) {
   if (!db) return undefined;
   const row = await db.query.rolePermissions.findFirst({
@@ -19,7 +37,10 @@ async function matrixFor(tenant: { orgId: string; role: string }) {
       eq(schema.rolePermissions.role, tenant.role as Role),
     ),
   });
-  return row?.matrix;
+  if (row?.matrix) return row.matrix;
+  return (ROLES as readonly string[]).includes(tenant.role)
+    ? DEFAULT_ROLE_PERMISSIONS[tenant.role as Role]
+    : undefined;
 }
 
 /**
