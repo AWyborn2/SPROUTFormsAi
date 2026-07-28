@@ -85,6 +85,14 @@ export interface AssessmentPart {
   minimumHours?: number;
   /** Field id of the page-one method checklist entry this part ticks. */
   checklistFieldId?: string;
+  /**
+   * Theory parts only — the `section_header` whose questions must ALL be
+   * correct for the part to reach satisfactory. Named rather than hardcoded to
+   * "General" so the rule travels to any assessment tool with a
+   * must-pass-entirely section; questions outside it are still marked, they
+   * just don't gate the outcome.
+   */
+  mandatorySectionFieldId?: string;
 }
 
 /** The part structure of one assessment tool, against one template. */
@@ -107,6 +115,33 @@ export function requiredParts(
   pathway: AssessmentPathway,
 ): AssessmentPart[] {
   return orderedParts(manifest).filter((p) => p.pathways.includes(pathway));
+}
+
+/**
+ * The fields belonging to the section opened by `headerFieldId` — everything
+ * after that header up to the next `section_header`, header excluded.
+ *
+ * This is the same header-to-next-header rule `visibility.ts` applies to
+ * section scope. It lives here too because part membership and mandatory-section
+ * membership are structural questions asked outside visibility evaluation, and
+ * an unknown header returns nothing rather than the whole form: a manifest
+ * pointing at a field that no longer exists must yield an empty section, never
+ * silently claim every field in the document.
+ */
+export function fieldsInSection(
+  fields: readonly FormField[],
+  headerFieldId: string,
+): FormField[] {
+  const start = fields.findIndex((f) => f.id === headerFieldId);
+  if (start < 0) return [];
+
+  const out: FormField[] = [];
+  for (let i = start + 1; i < fields.length; i++) {
+    const field = fields[i]!;
+    if (field.type === 'section_header') break;
+    out.push(field);
+  }
+  return out;
 }
 
 /**
