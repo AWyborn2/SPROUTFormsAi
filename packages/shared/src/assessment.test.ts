@@ -10,8 +10,13 @@ import type { FormField } from './form-field.js';
 import {
   type AssessmentPart,
   type AssessmentToolManifest,
+  type AttemptFact,
+  type PartOutcome,
+  caseProgress,
+  isCaseCompetent,
   orderedParts,
   requiredParts,
+  totalLoggedHours,
   validateAnswerKeys,
   validateManifest,
 } from './assessment.js';
@@ -195,5 +200,126 @@ describe('validateAnswerKeys', () => {
     const q = question('q1', { answerKey: [], outcomeTarget: { fieldId: 'o1' } });
 
     expect(validateAnswerKeys([q, outcome]).some((p) => p.includes('empty answer key'))).toBe(true);
+  });
+});
+
+/**
+ * Progress is DERIVED, never stored. These pin the two rules that make it
+ * trustworthy: a part that has ever passed stays passed (the evidence document
+ * renders that attempt), and a part stays locked until every earlier required
+ * part has passed — which is what stops a final demonstration happening before
+ * the hours it depends on are logged (U6/U7, R19/R20).
+ */
+describe('caseProgress', () => {
+  const manifest: AssessmentToolManifest = {
+    parts: [
+      part({ key: 'p1', ordinal: 1, kind: 'theory' }),
+      part({ key: 'p2', ordinal: 2 }),
+      part({ key: 'p3', ordinal: 3, kind: 'logbook', minimumHours: 20, pathways: ['new'] }),
+      part({ key: 'p4', ordinal: 4, pathways: ['new'] }),
+    ],
+  };
+
+  const at = (partKey: string, attemptNumber: number, outcome: PartOutcome | null): AttemptFact => ({
+    partKey,
+    attemptNumber,
+    outcome,
+  });
+
+  it('opens the first part and locks the rest when nothing has happened', () => {
+    const p = caseProgress(manifest, 'new', []);
+
+    expect(p.map((x) => x.state)).toEqual(['open', 'locked', 'locked', 'locked']);
+  });
+
+  it('unlocks the next part only once the previous one passes', () => {
+    const p = caseProgress(manifest, 'new', [at('p1', 1, 'satisfactory')]);
+
+    expect(p.map((x) => x.state)).toEqual(['satisfactory', 'open', 'locked', 'locked']);
+  });
+
+  it('keeps a failed part actionable rather than locking it', () => {
+    const p = caseProgress(manifest, 'new', [at('p1', 1, 'not_satisfactory')]);
+
+    expect(p[0]?.state).toBe('not_satisfactory');
+    expect(p[1]?.state).toBe('locked');
+  });
+
+  it('treats a part as satisfactory once any attempt passed, and counts them all', () => {
+    const p = caseProgress(manifest, 'new', [
+      at('p1', 1, 'not_satisfactory'),
+      at('p1', 2, 'satisfactory'),
+    ]);
+
+    expect(p[0]?.state).toBe('satisfactory');
+    expect(p[0]?.attempts).toBe(2);
+    expect(p[0]?.latestOutcome).toBe('satisfactory');
+  });
+
+  it('does not lock a later part because an earlier one was retried', () => {
+    const p = caseProgress(manifest, 'new', [
+      at('p1', 1, 'not_satisfactory'),
+      at('p1', 2, 'satisfactory'),
+      at('p2', 1, 'satisfactory'),
+    ]);
+
+    expect(p[2]?.state).toBe('open');
+  });
+
+  it('reports an unresolved attempt as open, not satisfied', () => {
+    const p = caseProgress(manifest, 'new', [at('p1', 1, null)]);
+
+    expect(p[0]?.state).toBe('open');
+    expect(p[0]?.latestOutcome).toBeNull();
+    expect(p[1]?.state).toBe('locked');
+  });
+
+  it('only considers the parts the pathway requires', () => {
+    const p = caseProgress(manifest, 'experienced', [at('p1', 1, 'satisfactory')]);
+
+    expect(p.map((x) => x.part.key)).toEqual(['p1', 'p2']);
+  });
+});
+
+describe('isCaseCompetent', () => {
+  const manifest: AssessmentToolManifest = {
+    parts: [part({ key: 'p1', ordinal: 1 }), part({ key: 'p2', ordinal: 2 })],
+  };
+
+  it('is competent only when every required part has passed', () => {
+    const all = caseProgress(manifest, 'experienced', [
+      { partKey: 'p1', attemptNumber: 1, outcome: 'satisfactory' },
+      { partKey: 'p2', attemptNumber: 1, outcome: 'satisfactory' },
+    ]);
+    expect(isCaseCompetent(all)).toBe(true);
+  });
+
+  it('is not competent while any part is outstanding', () => {
+    const some = caseProgress(manifest, 'experienced', [
+      { partKey: 'p1', attemptNumber: 1, outcome: 'satisfactory' },
+    ]);
+    expect(isCaseCompetent(some)).toBe(false);
+  });
+
+  it('is not competent for an empty progress list', () => {
+    expect(isCaseCompetent([])).toBe(false);
+  });
+});
+
+describe('totalLoggedHours', () => {
+  it('sums the duration column', () => {
+    expect(totalLoggedHours([{ d: 4 }, { d: 3.5 }], 'd')).toBe(7.5);
+  });
+
+  it('parses numeric strings', () => {
+    expect(totalLoggedHours([{ d: '4' }, { d: '2.25' }], 'd')).toBe(6.25);
+  });
+
+  it('ignores blank, malformed and negative cells rather than throwing', () => {
+    expect(totalLoggedHours([{ d: 4 }, { d: '' }, { d: 'half a shift' }, { d: -2 }], 'd')).toBe(4);
+  });
+
+  it('returns 0 for no rows', () => {
+    expect(totalLoggedHours([], 'd')).toBe(0);
   });
 });

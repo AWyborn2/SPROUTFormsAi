@@ -83,6 +83,19 @@ export interface AssessmentPart {
   startFieldId: string;
   /** Logbook parts only — hours before the next demonstration is prompted. */
   minimumHours?: number;
+  /**
+   * Logbook parts only — the column of the part's table that carries each
+   * entry's hours. Declared rather than assumed: an imported PDF may extract
+   * that column under any key, and totalling a column that does not exist
+   * silently reports zero hours against a safety threshold. Validation
+   * verifies the column really exists in the part's table at authoring time.
+   *
+   * When the template gives this column a `machine_hours` calc, the cell is
+   * derived from start/finish meter readings and the filler cannot type an
+   * arbitrary total; a tool without meter readings simply omits the calc and
+   * the column is entered directly. That is the declared-per-tool flexibility.
+   */
+  durationColumnKey?: string;
   /** Field id of the page-one method checklist entry this part ticks. */
   checklistFieldId?: string;
   /**
@@ -98,6 +111,15 @@ export interface AssessmentPart {
 /** The part structure of one assessment tool, against one template. */
 export interface AssessmentToolManifest {
   parts: AssessmentPart[];
+  /**
+   * Field whose answer selects the location stream, e.g. Mining vs Raw
+   * Materials. Named here so the export can seed it from the case rather than
+   * trusting whatever a filler typed: the stream decided which sections
+   * applied during the assessment, so it must decide which sections render on
+   * the evidence document too. Absent on a tool with no location-specific
+   * content.
+   */
+  locationStreamFieldId?: string;
 }
 
 /**
@@ -192,12 +214,131 @@ export function validateManifest(
       );
     }
 
-    if (part.kind === 'logbook' && !(part.minimumHours && part.minimumHours > 0)) {
-      problems.push(`Logbook part "${part.key}" has no positive minimumHours.`);
+    if (part.kind === 'logbook') {
+      if (!(part.minimumHours && part.minimumHours > 0)) {
+        problems.push(`Logbook part "${part.key}" has no positive minimumHours.`);
+      }
+      if (!part.durationColumnKey) {
+        problems.push(`Logbook part "${part.key}" declares no durationColumnKey.`);
+      } else {
+        // The declared column must exist in the part's own table. Totalling a
+        // column that is not there silently reports zero hours against a
+        // safety threshold, so the mismatch is an authoring error — caught
+        // here, where an author can fix it.
+        const table = fieldsInSection(fields, part.startFieldId).find(
+          (f) => f.type === 'repeating_group',
+        );
+        if (!table) {
+          problems.push(`Logbook part "${part.key}" has no repeating table in its section.`);
+        } else if (
+          table.columns &&
+          !table.columns.some((c) => c.key === part.durationColumnKey)
+        ) {
+          problems.push(
+            `Logbook part "${part.key}" names duration column "${part.durationColumnKey}", which is not a column of its table.`,
+          );
+        }
+      }
     }
   }
 
   return problems;
+}
+
+/**
+ * Where a part stands. Derived from its attempts — never stored, because a
+ * stored copy is a second source of truth that can disagree with the rows it
+ * summarises.
+ */
+export type PartState = 'locked' | 'open' | 'satisfactory' | 'not_satisfactory';
+
+/** The attempt facts progress is computed from. */
+export interface AttemptFact {
+  partKey: string;
+  attemptNumber: number;
+  /** Null while the attempt is still open. */
+  outcome: PartOutcome | null;
+}
+
+export interface PartProgress {
+  part: AssessmentPart;
+  state: PartState;
+  /** How many attempts have been made at this part. */
+  attempts: number;
+  /** Outcome of the highest-numbered attempt, or null if none is resolved. */
+  latestOutcome: PartOutcome | null;
+}
+
+/** Attempts for one part, highest attempt number first. */
+function attemptsForPart(attempts: readonly AttemptFact[], partKey: string): AttemptFact[] {
+  return attempts
+    .filter((a) => a.partKey === partKey)
+    .sort((a, b) => b.attemptNumber - a.attemptNumber);
+}
+
+/**
+ * Every part the pathway requires, with its derived state, in document order.
+ *
+ * Parts unlock in sequence: a part is `open` only once every EARLIER required
+ * part has a satisfactory attempt. That is what stops a candidate sitting the
+ * final demonstration before logging the hours it depends on. A part that has
+ * ever passed stays `satisfactory` regardless of later attempts, because the
+ * evidence document renders the passing attempt and the audit trail keeps the
+ * rest.
+ */
+export function caseProgress(
+  manifest: AssessmentToolManifest,
+  pathway: AssessmentPathway,
+  attempts: readonly AttemptFact[],
+): PartProgress[] {
+  const required = requiredParts(manifest, pathway);
+  const out: PartProgress[] = [];
+  let earlierAllSatisfied = true;
+
+  for (const part of required) {
+    const mine = attemptsForPart(attempts, part.key);
+    const passed = mine.some((a) => a.outcome === 'satisfactory');
+    const latestOutcome = mine.find((a) => a.outcome !== null)?.outcome ?? null;
+
+    let state: PartState;
+    if (passed) {
+      state = 'satisfactory';
+    } else if (!earlierAllSatisfied) {
+      state = 'locked';
+    } else {
+      state = latestOutcome === 'not_satisfactory' ? 'not_satisfactory' : 'open';
+    }
+
+    out.push({ part, state, attempts: mine.length, latestOutcome });
+    if (!passed) earlierAllSatisfied = false;
+  }
+
+  return out;
+}
+
+/** A case is competent only when every required part has passed. */
+export function isCaseCompetent(progress: readonly PartProgress[]): boolean {
+  return progress.length > 0 && progress.every((p) => p.state === 'satisfactory');
+}
+
+/**
+ * Hours logged in a logbook part, summed from a duration column.
+ *
+ * Non-numeric cells contribute nothing rather than throwing: a logbook is
+ * filled over weeks by someone in a cab, and one malformed row must not make
+ * the whole total unreadable.
+ */
+export function totalLoggedHours(
+  rows: readonly Record<string, unknown>[],
+  durationKey: string,
+): number {
+  let total = 0;
+  for (const row of rows) {
+    const raw = row?.[durationKey];
+    const value = typeof raw === 'number' ? raw : Number.parseFloat(String(raw ?? ''));
+    if (Number.isFinite(value) && value > 0) total += value;
+  }
+  return Math.round(total * 100) / 100;
 }
 
 /**

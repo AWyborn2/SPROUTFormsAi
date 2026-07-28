@@ -10,4 +10,13 @@ export {
   type ExtractOptions,
 } from './extract.js';
 export { roundTripExport, type RoundTripInput } from './round-trip.js';
+export {
+  assembleCaseValues,
+  exportCasePdf,
+  CaseExportError,
+  type AssembledCase,
+  type AssembleCaseInput,
+  type CaseAttemptRecord,
+  type ExportCaseInput,
+} from './case-export.js';
 export { extractFormFieldsTool, EXTRACT_TOOL_NAME } from './tool-schema.js';

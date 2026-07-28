@@ -73,6 +73,32 @@ export function totalHoursFor(calc: ColumnCalc, row: RepeatingRowValue): number 
 }
 
 /**
+ * Machine hours for one row under a `machine_hours` calc — finish meter
+ * reading minus start meter reading, rounded to 2 places.
+ *
+ * Null when either reading is missing or malformed (a row mid-entry), and null
+ * when finish <= start: meter readings only go up, so a non-positive span is a
+ * mis-entry, and computing it to zero would let a row that says nothing count
+ * as a logged shift.
+ */
+export function machineHoursFor(calc: ColumnCalc, row: RepeatingRowValue): number | null {
+  const parse = (v: unknown): number | null => {
+    const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v.trim()) : NaN;
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  const start = parse(row[calc.startKey]);
+  const finish = parse(row[calc.finishKey]);
+  if (start === null || finish === null) return null;
+  if (finish <= start) return null;
+  return Math.round((finish - start) * 100) / 100;
+}
+
+/** The one computation for a calc kind — every consumer routes through this. */
+export function calcValueFor(calc: ColumnCalc, row: RepeatingRowValue): number | null {
+  return calc.kind === 'machine_hours' ? machineHoursFor(calc, row) : totalHoursFor(calc, row);
+}
+
+/**
  * Recompute every calc column of one row, returning a new row (or the same
  * object when nothing changed, so callers can cheaply skip no-op updates).
  * An uncomputable calc writes '' — the cell reads blank, and blank is
@@ -85,7 +111,7 @@ export function applyRowCalcs(
   let next = row;
   for (const column of columns ?? []) {
     if (!column.calc) continue;
-    const total = totalHoursFor(column.calc, next);
+    const total = calcValueFor(column.calc, next);
     const value = total === null ? '' : total;
     if (next[column.key] !== value) next = { ...next, [column.key]: value };
   }

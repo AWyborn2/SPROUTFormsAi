@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FormField } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
-import { markTheory } from './marking.js';
+import { markTheory, stripMarkingSecrets } from './marking.js';
 
 const header = (id: string, over: Partial<FormField> = {}): FormField => ({
   id,
@@ -244,5 +244,39 @@ describe('derived values', () => {
 
     expect(values).toEqual({ g1: ['a'], g2: ['b', 'c'] });
     expect('g1-out' in values).toBe(false);
+  });
+});
+
+/**
+ * `answerKey` is the complete answer key to a safety assessment. The property
+ * pinned here is that a fill surface can never be served it: stripping removes
+ * both marking properties, leaves everything else intact, and is a no-op copy
+ * only when something actually carried a secret.
+ */
+describe('stripMarkingSecrets', () => {
+  it('removes answerKey and outcomeTarget, keeping the rest of the field', () => {
+    const fields = [q('g1', ['a']), outcome('g1-out')];
+
+    const stripped = stripMarkingSecrets(fields);
+
+    const g1 = stripped.find((f) => f.id === 'g1');
+    expect(g1?.answerKey).toBeUndefined();
+    expect(g1?.outcomeTarget).toBeUndefined();
+    expect(g1?.options).toEqual(['a', 'b', 'c', 'd']);
+    expect(g1?.label).toBe('g1');
+  });
+
+  it('returns the same array when nothing carries a secret', () => {
+    const fields = [header('general'), outcome('o1')];
+
+    expect(stripMarkingSecrets(fields)).toBe(fields);
+  });
+
+  it('does not mutate the original fields', () => {
+    const fields = [q('g1', ['a', 'b'])];
+
+    stripMarkingSecrets(fields);
+
+    expect(fields[0]?.answerKey).toEqual(['a', 'b']);
   });
 });
