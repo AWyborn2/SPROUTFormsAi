@@ -42,7 +42,12 @@ function fakeDb(opts: {
   formTemplatesFindMany?: unknown[];
   insertedCompetency?: unknown;
   insertedRule?: unknown;
-  /** Every route is gated by requirePlanFeature('competencyGating') — enterprise-only. */
+  competencyHoldersFindFirst?: unknown;
+  competencyHoldersFindMany?: unknown[];
+  /** Result of the SQL aggregate syncHolderCount runs. */
+  holderCount?: number;
+  membershipsFindFirst?: unknown;
+  /** Every route is gated by requirePlanFeature('competencyGating'). */
   planTier?: string;
 }) {
   const deleteWhere = vi.fn();
@@ -69,7 +74,19 @@ function fakeDb(opts: {
       users: {
         findFirst: vi.fn().mockResolvedValue(undefined),
       },
+      competencyHolders: {
+        findFirst: vi.fn().mockResolvedValue(opts.competencyHoldersFindFirst),
+        findMany: vi.fn().mockResolvedValue(opts.competencyHoldersFindMany ?? []),
+      },
+      memberships: {
+        findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst),
+      },
     },
+    select: vi.fn(() => ({
+      from: () => ({
+        where: () => Promise.resolve([{ count: opts.holderCount ?? 0 }]),
+      }),
+    })),
     insert: vi.fn((table: unknown) => ({
       values: (v: unknown) => {
         insertValues(table, v);
@@ -101,7 +118,10 @@ afterEach(() => {
 
 describe('GET /competencies', () => {
   it('403s with feature_not_available when the org plan lacks competencyGating', async () => {
-    mockDbValue = fakeDb({ planTier: 'business' }).db;
+    // 'team', not 'business': competency gating moved down to Business when
+    // multi-part assessments shipped, because assessor eligibility depends on
+    // it and assessments start at Business.
+    mockDbValue = fakeDb({ planTier: 'team' }).db;
     const { server, base } = startApp();
     try {
       const res = await fetch(`${base}/competencies`, { headers: authHeader() });
@@ -310,6 +330,158 @@ describe('DELETE /competency-rules/:id', () => {
       const res = await fetch(`${base}/competency-rules/r1`, { method: 'DELETE', headers: authHeader() });
       expect(res.status).toBe(204);
       expect(deleteWhere).toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * `competencies.holders` is a denormalised count that predates the join table.
+ * These pin the invariant that makes it trustworthy: it is always RECOMPUTED
+ * from the join, never incremented, so an idempotent grant or a cascade-deleted
+ * user cannot drift it (U3, R26/R28).
+ */
+/** Real UUIDs — the grant route validates userId as one. */
+const HOLDER_ID = '00000000-0000-4000-8000-000000000002';
+const OUTSIDER_ID = '00000000-0000-4000-8000-0000000000ff';
+
+describe('competency holders', () => {
+  const competency = { id: 'c1', orgId: 'org-1', name: 'Track Dozer', code: 'Q34666893', holders: 0 };
+
+  it('grants a competency and recomputes the count from the join', async () => {
+    const f = fakeDb({
+      competenciesFindFirst: competency,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+      competencyHoldersFindFirst: undefined,
+      holderCount: 1,
+    });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ competencyId: 'c1', holders: 1 });
+      expect(f.insertValues).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ competencyId: 'c1', userId: HOLDER_ID, orgId: 'org-1' }),
+      );
+      expect(f.updateSet).toHaveBeenCalledWith(schema.competencies, { holders: 1 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('is idempotent — re-granting inserts nothing and still reports the count', async () => {
+    const f = fakeDb({
+      competenciesFindFirst: competency,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+      competencyHoldersFindFirst: { id: 'h1', competencyId: 'c1', userId: HOLDER_ID },
+      holderCount: 1,
+    });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ competencyId: 'c1', holders: 1 });
+      expect(f.insertValues).not.toHaveBeenCalledWith(schema.competencyHolders, expect.anything());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses to record a grant against someone outside the org', async () => {
+    mockDbValue = fakeDb({
+      competenciesFindFirst: competency,
+      membershipsFindFirst: undefined,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: OUTSIDER_ID }),
+      });
+
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error: string }).error).toBe('user_not_in_org');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for a competency belonging to another org', async () => {
+    mockDbValue = fakeDb({ competenciesFindFirst: undefined }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/other/holders`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('recomputes the count down to zero on revoke', async () => {
+    const f = fakeDb({
+      competenciesFindFirst: competency,
+      competencyHoldersFindMany: [],
+    });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders/${HOLDER_ID}`, {
+        method: 'DELETE',
+        headers: authHeader(),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ competencyId: 'c1', holders: 0 });
+      expect(f.deleteWhere).toHaveBeenCalledWith(schema.competencyHolders, expect.anything());
+      expect(f.updateSet).toHaveBeenCalledWith(schema.competencies, { holders: 0 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lists what a user holds, scoped to the caller org', async () => {
+    mockDbValue = fakeDb({
+      competencyHoldersFindMany: [{ competencyId: 'c1', evidenceRef: 'CERT-9' }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual([{ competencyId: 'c1', evidenceRef: 'CERT-9' }]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns nothing for a user with no grants in this org', async () => {
+    mockDbValue = fakeDb({ competencyHoldersFindMany: [] }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${OUTSIDER_ID}`, { headers: authHeader() });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual([]);
     } finally {
       server.close();
     }

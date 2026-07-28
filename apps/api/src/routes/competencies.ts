@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, count, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
@@ -9,8 +9,10 @@ import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
 
 /**
- * Competencies and the rules gating a form section behind one. All routes
- * are gated behind the `competencyGating` plan feature (business → enterprise).
+ * Competencies, who holds them, and the rules gating a form section behind one.
+ * All routes are gated behind the `competencyGating` plan feature (Business and
+ * Enterprise) — it moved down from Enterprise-only when multi-part assessments
+ * shipped, because assessor eligibility per tool reads these records.
  */
 export const competenciesRouter: Router = Router();
 export const competencyRulesRouter: Router = Router();
@@ -87,6 +89,175 @@ competenciesRouter.delete(
     }
     await db.delete(schema.competencies).where(eq(schema.competencies.id, row.id));
     res.status(204).end();
+  }),
+);
+
+/**
+ * Recount a competency's holders from the join and write it back.
+ *
+ * `competencies.holders` predates the join table and is still what every
+ * existing display reads, so it is recomputed rather than incremented: a
+ * derived count that drifts is worse than no count, and an idempotent grant or
+ * a cascade-deleted user would both make a +1/-1 counter wrong.
+ */
+async function syncHolderCount(database: NonNullable<typeof db>, competencyId: string) {
+  // A SQL aggregate, not findMany().length — this table grows with people ×
+  // competencies, and loading every row to count it would scale with the
+  // workforce on a request that only needs one number.
+  const [result] = await database
+    .select({ count: count() })
+    .from(schema.competencyHolders)
+    .where(eq(schema.competencyHolders.competencyId, competencyId));
+  const holders = result?.count ?? 0;
+  await database
+    .update(schema.competencies)
+    .set({ holders })
+    .where(eq(schema.competencies.id, competencyId));
+  return holders;
+}
+
+/** Load a competency within the caller's org, or null. */
+async function findOwnedCompetency(
+  database: NonNullable<typeof db>,
+  competencyId: string,
+  orgId: string,
+) {
+  return (
+    (await database.query.competencies.findFirst({
+      where: and(
+        eq(schema.competencies.id, competencyId),
+        eq(schema.competencies.orgId, orgId),
+      ),
+    })) ?? null
+  );
+}
+
+const grantBody = z.object({
+  userId: z.string().uuid(),
+  evidenceRef: z.string().max(200).optional(),
+});
+
+/** Grant a competency to a person. Idempotent — re-granting is a no-op. */
+competenciesRouter.post(
+  '/:id/holders',
+  requireTenant,
+  requirePlanFeature('competencyGating'),
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const parsed = grantBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tenant = req.tenant!;
+    const competency = await findOwnedCompetency(db, req.params.id!, tenant.orgId);
+    if (!competency) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    // The holder must be a member of this org. Without this check any org could
+    // record a grant against any user id and read it back as eligibility.
+    const membership = await db.query.memberships.findFirst({
+      where: and(
+        eq(schema.memberships.userId, parsed.data.userId),
+        eq(schema.memberships.orgId, tenant.orgId),
+      ),
+    });
+    if (!membership) {
+      res.status(404).json({ error: 'user_not_in_org' });
+      return;
+    }
+
+    const existing = await db.query.competencyHolders.findFirst({
+      where: and(
+        eq(schema.competencyHolders.competencyId, competency.id),
+        eq(schema.competencyHolders.userId, parsed.data.userId),
+      ),
+    });
+
+    if (!existing) {
+      await db.insert(schema.competencyHolders).values({
+        orgId: tenant.orgId,
+        competencyId: competency.id,
+        userId: parsed.data.userId,
+        evidenceRef: parsed.data.evidenceRef ?? null,
+        grantedByUserId: tenant.userId,
+      });
+      await recordAudit(db, tenant, {
+        action: 'Granted competency',
+        target: `${competency.code} → ${parsed.data.userId}`,
+        category: 'settings',
+        icon: 'award',
+      });
+    }
+
+    const holders = await syncHolderCount(db, competency.id);
+    res.status(existing ? 200 : 201).json({ competencyId: competency.id, holders });
+  }),
+);
+
+/** Revoke a competency from a person. */
+competenciesRouter.delete(
+  '/:id/holders/:userId',
+  requireTenant,
+  requirePlanFeature('competencyGating'),
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const competency = await findOwnedCompetency(db, req.params.id!, tenant.orgId);
+    if (!competency) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    await db
+      .delete(schema.competencyHolders)
+      .where(
+        and(
+          eq(schema.competencyHolders.competencyId, competency.id),
+          eq(schema.competencyHolders.userId, req.params.userId!),
+        ),
+      );
+    await recordAudit(db, tenant, {
+      action: 'Revoked competency',
+      target: `${competency.code} → ${req.params.userId}`,
+      category: 'settings',
+      icon: 'award',
+    });
+
+    const holders = await syncHolderCount(db, competency.id);
+    res.json({ competencyId: competency.id, holders });
+  }),
+);
+
+/**
+ * The competency ids a user holds in this org. This is the lookup prerequisite
+ * warnings and assessor eligibility both read.
+ */
+competenciesRouter.get(
+  '/held/:userId',
+  requireTenant,
+  requirePlanFeature('competencyGating'),
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const rows = await db.query.competencyHolders.findMany({
+      where: and(
+        eq(schema.competencyHolders.userId, req.params.userId!),
+        eq(schema.competencyHolders.orgId, tenant.orgId),
+      ),
+    });
+    res.json(rows.map((r) => ({ competencyId: r.competencyId, evidenceRef: r.evidenceRef })));
   }),
 );
 

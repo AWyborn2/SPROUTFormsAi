@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { PLAN_CONFIG, PLAN_TIERS, schema, type Db } from '@formai/db';
+import { ROLES } from '@formai/shared';
 import { provisionTenant } from './tenant-provisioning.js';
 
 class UniqueViolation extends Error {
@@ -90,8 +91,10 @@ describe('provisionTenant', () => {
     const membershipCall = insertValues.mock.calls.find(([table]) => table === schema.memberships);
     expect(membershipCall?.[1]).toMatchObject({ userId: 'u1', orgId: 'o1', role: 'owner' });
 
+    // One seeded matrix per role — bound to ROLES rather than a literal so
+    // adding a role doesn't silently leave its matrix unseeded.
     const permsCall = insertValues.mock.calls.find(([table]) => table === schema.rolePermissions);
-    expect(permsCall?.[1]).toHaveLength(5);
+    expect(permsCall?.[1]).toHaveLength(ROLES.length);
   });
 
   it('reuses the sole existing membership without creating a new org for a returning user', async () => {

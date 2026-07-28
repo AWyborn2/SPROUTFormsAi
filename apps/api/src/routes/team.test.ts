@@ -352,6 +352,96 @@ describe('POST /team/members', () => {
     }
   });
 
+  /**
+   * Candidates are metered on their own allowance. The property that matters is
+   * that the two pools are INDEPENDENT: a site whose trainers fill the staff
+   * seats must still be able to enrol operators, and vice versa (U5, R27).
+   */
+  it('lets a staff-full org still enrol a candidate', async () => {
+    const { db, insertValues } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Mine Co',
+        planTier: 'business',
+        seatLimit: 15,
+        candidateSeatLimit: 200,
+      },
+      // Counts the candidate pool, which is empty even though staff is full.
+      activeSeatCount: 0,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, {
+        method: 'POST',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'operator@x.io', role: 'candidate' }),
+      });
+      expect(res.status).toBe(201);
+      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeDefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s with candidate_limit_reached, distinct from the staff seat error', async () => {
+    const { db, insertValues } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Mine Co',
+        planTier: 'business',
+        seatLimit: 15,
+        candidateSeatLimit: 200,
+      },
+      activeSeatCount: 200,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, {
+        method: 'POST',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'operator@x.io', role: 'candidate' }),
+      });
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; seatLimit: number };
+      expect(body.error).toBe('candidate_limit_reached');
+      expect(body.seatLimit).toBe(200);
+      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not cap candidates on enterprise, where the allowance is unlimited', async () => {
+    const { db, insertValues } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Mine Co',
+        planTier: 'enterprise',
+        seatLimit: 100,
+        candidateSeatLimit: null,
+      },
+      activeSeatCount: 5000,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, {
+        method: 'POST',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'operator@x.io', role: 'candidate' }),
+      });
+      expect(res.status).toBe(201);
+      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeDefined();
+    } finally {
+      server.close();
+    }
+  });
+
   it('403s with seat_limit_reached via the plan-tier fallback when org.seatLimit is null', async () => {
     const { db, insertValues } = fakeDb({
       rolePermissionsFindFirst: ADMIN_PERMS,

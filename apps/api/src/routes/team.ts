@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
-import { and, count, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { PLAN_CONFIG, schema, type PlanConfig, type PlanTier } from '@formai/db';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { schema } from '@formai/db';
 import { PERMISSION_CATEGORIES, ROLES, type PermissionMatrix, type Role } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -11,6 +11,7 @@ import { isUniqueViolation } from '../lib/db-errors.js';
 import { recordAudit } from '../audit/record.js';
 import { sendInviteEmail } from '../email/resend.js';
 import { env } from '../env.js';
+import { checkSeatAvailability, seatLimitError } from '../lib/seats.js';
 import { db } from '../db.js';
 
 export const teamRouter: Router = Router();
@@ -98,43 +99,17 @@ teamRouter.post(
     const normalizedEmail = parsed.data.email.toLowerCase();
     const displayName = name ?? (nameFromEmail(normalizedEmail) || normalizedEmail);
 
-    // ── Seat limit check ──────────────────────────────────────────────────
-    // Count active memberships and compare against the org's effective seat
-    // limit. Resolution order:
-    //   1. org.seatLimit — the explicit per-org limit. Drizzle types it as
-    //      non-null (the column has a default), but legacy rows written before
-    //      the column existed read back as null, so treat it as nullable.
-    //   2. The org's plan tier config (PLAN_CONFIG[planTier].seatLimit).
-    //   3. Neither resolves to a finite number → unlimited: enforcement is
-    //      skipped ONLY when the tier genuinely configures no cap (a missing
-    //      or non-finite tier seatLimit). Every shipped tier defines a finite
-    //      limit, so this never silently disables enforcement for normal orgs.
+    // Seat limit check — staff and candidates draw on separate pools. The
+    // resolution rules live in lib/seats.ts alongside the acceptance-time
+    // check, so both ends of an invite cannot drift apart.
     const org = await db.query.organizations.findFirst({
       where: eq(schema.organizations.id, tenant.orgId),
     });
     if (org) {
-      const tierConfig: PlanConfig | undefined = PLAN_CONFIG[org.planTier as PlanTier];
-      const seatLimit = (org.seatLimit as number | null) ?? tierConfig?.seatLimit;
-      if (seatLimit != null && Number.isFinite(seatLimit)) {
-        const [activeSeatResult] = await db
-          .select({ count: count() })
-          .from(schema.memberships)
-          .where(
-            and(
-              eq(schema.memberships.orgId, tenant.orgId),
-              eq(schema.memberships.status, 'active'),
-            ),
-          );
-        const activeSeats = activeSeatResult?.count ?? 0;
-        if (activeSeats >= seatLimit) {
-          res.status(403).json({
-            error: 'seat_limit_reached',
-            message: `Your ${org.planTier} plan allows ${seatLimit} seat${seatLimit === 1 ? '' : 's'}. Remove a member or upgrade your plan to invite more people.`,
-            seatLimit,
-            seatUsed: activeSeats,
-          });
-          return;
-        }
+      const check = await checkSeatAvailability(db, org, role);
+      if (!check.ok) {
+        res.status(403).json(seatLimitError(check, org.planTier));
+        return;
       }
     }
 
@@ -392,6 +367,17 @@ teamRouter.patch(
         where: and(eq(schema.rolePermissions.orgId, tenant.orgId), eq(schema.rolePermissions.role, role)),
       });
       if (row) {
+        // A scoped ('own') grant cannot be represented by this two-state
+        // control, and the toggle below would read it as truthy and collapse it
+        // to `false` — silently destroying the scope that keeps a candidate
+        // confined to their own records. Refuse instead.
+        if (row.matrix[category]?.[action] === 'own') {
+          res.status(409).json({
+            error: 'scoped_permission',
+            message: `${role}: ${category}.${action} is scoped to own records and cannot be toggled here.`,
+          });
+          return;
+        }
         const nextAllowed = allowed ?? !(row.matrix[category]?.[action] ?? false);
         const nextMatrix: PermissionMatrix = {
           ...row.matrix,

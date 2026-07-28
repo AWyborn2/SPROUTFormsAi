@@ -20,17 +20,47 @@ export interface PlanFeatures {
   smartFill: boolean;
   sso: boolean;
   auditExport: boolean;
+  /**
+   * Competency records, gating rules, and the prerequisite / assessor-eligibility
+   * checks that read them. Business+ — it moved down a tier when multi-part
+   * assessments shipped, because assessor eligibility per machine depends on it
+   * and assessments start at Business. The revenue it used to reserve for
+   * Enterprise is recaptured by the candidate seat allowance instead.
+   */
   competencyGating: boolean;
+  /** Multi-part assessment cases. Business+. */
+  assessments: boolean;
+  /**
+   * Panel review of a disputed outcome. Enterprise only — the
+   * independent-assessor arm of an appeal is a linked re-assessment case and
+   * ships at Business; modelling a panel's membership and per-member verdicts
+   * does not.
+   */
+  panelAppeals: boolean;
 }
 
 export interface PlanConfig {
+  /**
+   * Staff seats — everyone except candidates. See `candidateSeatLimit` for why
+   * they are counted apart.
+   */
   seatLimit: number;
+  /**
+   * Candidates the org may enrol, or `null` for unlimited.
+   *
+   * Counted separately from staff because the two scale independently: a site
+   * with 15 trainers may assess several hundred operators, so charging
+   * candidates against the staff limit would exhaust every tier at one site.
+   * `0` means the tier cannot enrol candidates at all.
+   */
+  candidateSeatLimit: number | null;
   features: PlanFeatures;
 }
 
 export const PLAN_CONFIG: Record<PlanTier, PlanConfig> = {
   individual: {
     seatLimit: 1,
+    candidateSeatLimit: 0,
     features: {
       branding: true,
       whiteLabel: false,
@@ -38,10 +68,13 @@ export const PLAN_CONFIG: Record<PlanTier, PlanConfig> = {
       sso: false,
       auditExport: false,
       competencyGating: false,
+      assessments: false,
+      panelAppeals: false,
     },
   },
   team: {
     seatLimit: 5,
+    candidateSeatLimit: 0,
     features: {
       branding: true,
       whiteLabel: false,
@@ -49,21 +82,27 @@ export const PLAN_CONFIG: Record<PlanTier, PlanConfig> = {
       sso: false,
       auditExport: false,
       competencyGating: false,
+      assessments: false,
+      panelAppeals: false,
     },
   },
   business: {
     seatLimit: 15,
+    candidateSeatLimit: 200,
     features: {
       branding: true,
       whiteLabel: true,
       smartFill: true,
       sso: false,
       auditExport: true,
-      competencyGating: false,
+      competencyGating: true,
+      assessments: true,
+      panelAppeals: false,
     },
   },
   enterprise: {
     seatLimit: 100,
+    candidateSeatLimit: null,
     features: {
       branding: true,
       whiteLabel: true,
@@ -71,6 +110,8 @@ export const PLAN_CONFIG: Record<PlanTier, PlanConfig> = {
       sso: true,
       auditExport: true,
       competencyGating: true,
+      assessments: true,
+      panelAppeals: true,
     },
   },
 };

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { and, count, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import { requireTenant, SESSION_COOKIE_NAME } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -7,6 +7,7 @@ import { isUniqueViolation } from '../lib/db-errors.js';
 import { recordAudit } from '../audit/record.js';
 import { sealSession } from '../auth/replit-auth.js';
 import { SESSION_COOKIE_OPTIONS } from './auth.js';
+import { checkSeatAvailability, seatLimitError } from '../lib/seats.js';
 import { db } from '../db.js';
 
 export const publicInvitesRouter: Router = Router();
@@ -73,23 +74,9 @@ invitesRouter.post(
       where: eq(schema.organizations.id, invite.orgId),
     });
     if (org) {
-      const [activeSeatResult] = await db
-        .select({ count: count() })
-        .from(schema.memberships)
-        .where(
-          and(
-            eq(schema.memberships.orgId, invite.orgId),
-            eq(schema.memberships.status, 'active'),
-          ),
-        );
-      const activeSeats = activeSeatResult?.count ?? 0;
-      if (activeSeats >= org.seatLimit) {
-        res.status(403).json({
-          error: 'seat_limit_reached',
-          message: `This organisation's ${org.planTier} plan is at its seat limit (${org.seatLimit}). Ask an owner to upgrade the plan or free a seat.`,
-          seatLimit: org.seatLimit,
-          seatUsed: activeSeats,
-        });
+      const check = await checkSeatAvailability(db, org, invite.role);
+      if (!check.ok) {
+        res.status(403).json(seatLimitError(check, org.planTier));
         return;
       }
     }

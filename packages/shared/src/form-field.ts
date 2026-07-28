@@ -276,6 +276,41 @@ export interface FormField {
 
   /** Layout hint on a 12-col grid (builder). */
   colSpan?: number;
+
+  /**
+   * For an auto-marked choice question: the option values that TOGETHER make a
+   * correct answer. Marking is exact-set-match — a strict subset is wrong (the
+   * candidate missed a required option) and so is a superset (they picked a
+   * wrong one). That single rule covers both printed shapes: an ordinary
+   * single-answer question is a one-element key, and a "select correct answers"
+   * question is a multi-element one, with no separate partial-credit mode to
+   * configure or disagree about.
+   *
+   * Absent means the question is not auto-marked and contributes no mark.
+   */
+  answerKey?: string[];
+
+  /**
+   * Where this question's derived ✓/✗ is written. Required whenever
+   * `answerKey` is set — a key with nowhere to land would compute a mark that
+   * never reaches the page, which on an evidence document reads as an
+   * unanswered question rather than a marked one.
+   */
+  outcomeTarget?: OutcomeTarget;
+}
+
+/**
+ * Where a derived mark lands. Either a scalar field of its own (typically a
+ * `check_cross`), or one cell of a repeating group addressed by row and column
+ * — the shape printed assessment papers actually use, where each question's
+ * outcome box is a cell in the margin table rather than a standalone widget.
+ */
+export interface OutcomeTarget {
+  fieldId: string;
+  /** Repeating-group targets only: which row. */
+  rowKey?: string;
+  /** Repeating-group targets only: which column. */
+  columnKey?: string;
 }
 
 /** Container/layout config for a template (builder canvas). */

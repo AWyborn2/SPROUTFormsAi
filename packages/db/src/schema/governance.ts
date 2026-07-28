@@ -31,6 +31,47 @@ export const competencies = pgTable(
   (t) => [index('competencies_org_idx').on(t.orgId)],
 );
 
+/**
+ * Who holds which competency.
+ *
+ * `competencies.holders` is a denormalised COUNT and always was — it can say
+ * "12 people hold this" but not WHICH twelve, so no prerequisite or
+ * assessor-eligibility question was answerable before this table. The count
+ * column is kept because existing displays read it; it is maintained alongside
+ * these rows rather than replaced, so the two never disagree.
+ *
+ * `evidenceRef` is a free-text pointer at the external record (a certificate
+ * number, an LMS record id) for orgs recording competencies by hand. It is
+ * display and audit only — nothing resolves it, and until an LMS sync exists it
+ * is the only trace of where a grant came from.
+ */
+export const competencyHolders = pgTable(
+  'competency_holders',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    competencyId: uuid()
+      .notNull()
+      .references(() => competencies.id, { onDelete: 'cascade' }),
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    evidenceRef: text('evidence_ref'),
+    grantedByUserId: uuid('granted_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    /** A person holds a competency once; granting twice is idempotent. */
+    uniqueIndex('competency_holders_competency_user_uq').on(t.competencyId, t.userId),
+    index('competency_holders_user_idx').on(t.userId),
+    index('competency_holders_org_idx').on(t.orgId),
+  ],
+);
+
 /** Which competency unlocks which form section. */
 export const competencyRules = pgTable(
   'competency_rules',
@@ -95,6 +136,22 @@ export const competenciesRelations = relations(competencies, ({ one, many }) => 
     references: [organizations.id],
   }),
   rules: many(competencyRules),
+  holders: many(competencyHolders),
+}));
+
+export const competencyHoldersRelations = relations(competencyHolders, ({ one }) => ({
+  org: one(organizations, {
+    fields: [competencyHolders.orgId],
+    references: [organizations.id],
+  }),
+  competency: one(competencies, {
+    fields: [competencyHolders.competencyId],
+    references: [competencies.id],
+  }),
+  user: one(users, {
+    fields: [competencyHolders.userId],
+    references: [users.id],
+  }),
 }));
 
 export const competencyRulesRelations = relations(competencyRules, ({ one }) => ({

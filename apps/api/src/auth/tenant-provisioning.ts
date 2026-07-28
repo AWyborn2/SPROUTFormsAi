@@ -51,6 +51,7 @@ async function findOrCreateOrg(
       name: orgName,
       planTier,
       seatLimit: planConfig.seatLimit,
+      candidateSeatLimit: planConfig.candidateSeatLimit,
       accountKind,
       // Solo workspaces skip the team onboarding wizard entirely.
       ...(isIndividual ? { onboardingCompletedAt: new Date() } : {}),
