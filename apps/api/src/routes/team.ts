@@ -392,6 +392,17 @@ teamRouter.patch(
         where: and(eq(schema.rolePermissions.orgId, tenant.orgId), eq(schema.rolePermissions.role, role)),
       });
       if (row) {
+        // A scoped ('own') grant cannot be represented by this two-state
+        // control, and the toggle below would read it as truthy and collapse it
+        // to `false` — silently destroying the scope that keeps a candidate
+        // confined to their own records. Refuse instead.
+        if (row.matrix[category]?.[action] === 'own') {
+          res.status(409).json({
+            error: 'scoped_permission',
+            message: `${role}: ${category}.${action} is scoped to own records and cannot be toggled here.`,
+          });
+          return;
+        }
         const nextAllowed = allowed ?? !(row.matrix[category]?.[action] ?? false);
         const nextMatrix: PermissionMatrix = {
           ...row.matrix,
