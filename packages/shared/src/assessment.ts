@@ -201,6 +201,102 @@ export function validateManifest(
 }
 
 /**
+ * Where a part stands. Derived from its attempts — never stored, because a
+ * stored copy is a second source of truth that can disagree with the rows it
+ * summarises.
+ */
+export type PartState = 'locked' | 'open' | 'satisfactory' | 'not_satisfactory';
+
+/** The attempt facts progress is computed from. */
+export interface AttemptFact {
+  partKey: string;
+  attemptNumber: number;
+  /** Null while the attempt is still open. */
+  outcome: PartOutcome | null;
+}
+
+export interface PartProgress {
+  part: AssessmentPart;
+  state: PartState;
+  /** How many attempts have been made at this part. */
+  attempts: number;
+  /** Outcome of the highest-numbered attempt, or null if none is resolved. */
+  latestOutcome: PartOutcome | null;
+}
+
+/** Attempts for one part, highest attempt number first. */
+function attemptsForPart(attempts: readonly AttemptFact[], partKey: string): AttemptFact[] {
+  return attempts
+    .filter((a) => a.partKey === partKey)
+    .sort((a, b) => b.attemptNumber - a.attemptNumber);
+}
+
+/**
+ * Every part the pathway requires, with its derived state, in document order.
+ *
+ * Parts unlock in sequence: a part is `open` only once every EARLIER required
+ * part has a satisfactory attempt. That is what stops a candidate sitting the
+ * final demonstration before logging the hours it depends on. A part that has
+ * ever passed stays `satisfactory` regardless of later attempts, because the
+ * evidence document renders the passing attempt and the audit trail keeps the
+ * rest.
+ */
+export function caseProgress(
+  manifest: AssessmentToolManifest,
+  pathway: AssessmentPathway,
+  attempts: readonly AttemptFact[],
+): PartProgress[] {
+  const required = requiredParts(manifest, pathway);
+  const out: PartProgress[] = [];
+  let earlierAllSatisfied = true;
+
+  for (const part of required) {
+    const mine = attemptsForPart(attempts, part.key);
+    const passed = mine.some((a) => a.outcome === 'satisfactory');
+    const latestOutcome = mine.find((a) => a.outcome !== null)?.outcome ?? null;
+
+    let state: PartState;
+    if (passed) {
+      state = 'satisfactory';
+    } else if (!earlierAllSatisfied) {
+      state = 'locked';
+    } else {
+      state = latestOutcome === 'not_satisfactory' ? 'not_satisfactory' : 'open';
+    }
+
+    out.push({ part, state, attempts: mine.length, latestOutcome });
+    if (!passed) earlierAllSatisfied = false;
+  }
+
+  return out;
+}
+
+/** A case is competent only when every required part has passed. */
+export function isCaseCompetent(progress: readonly PartProgress[]): boolean {
+  return progress.length > 0 && progress.every((p) => p.state === 'satisfactory');
+}
+
+/**
+ * Hours logged in a logbook part, summed from a duration column.
+ *
+ * Non-numeric cells contribute nothing rather than throwing: a logbook is
+ * filled over weeks by someone in a cab, and one malformed row must not make
+ * the whole total unreadable.
+ */
+export function totalLoggedHours(
+  rows: readonly Record<string, unknown>[],
+  durationKey: string,
+): number {
+  let total = 0;
+  for (const row of rows) {
+    const raw = row?.[durationKey];
+    const value = typeof raw === 'number' ? raw : Number.parseFloat(String(raw ?? ''));
+    if (Number.isFinite(value) && value > 0) total += value;
+  }
+  return Math.round(total * 100) / 100;
+}
+
+/**
  * Problems with auto-marking configuration on a field set. Empty means valid.
  *
  * A field with neither an answer key nor an outcome target is ordinary and

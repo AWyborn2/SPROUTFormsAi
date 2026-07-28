@@ -4,6 +4,7 @@ import express, { type Express } from 'express';
 import { env } from './env.js';
 import { accountRouter } from './routes/account.js';
 import { orgLogoRouter, publicAssetsRouter } from './routes/assets.js';
+import { assessmentCasesRouter, assessmentToolsRouter } from './routes/assessments.js';
 import { auditRouter } from './routes/audit.js';
 import { authRouter } from './routes/auth.js';
 import { competenciesRouter, competencyRulesRouter } from './routes/competencies.js';
@@ -58,6 +59,8 @@ export function createApp(): Express {
   app.use('/account', accountRouter);
   app.use('/org', orgRouter);
   app.use('/forms', formsRouter);
+  app.use('/assessment-tools', assessmentToolsRouter);
+  app.use('/assessment-cases', assessmentCasesRouter);
   // Authed fill-link management (/forms/:id/fill-links…) — separate router
   // sharing the /forms prefix; unmatched paths fall through to it.
   app.use('/forms', formFillLinksRouter);
