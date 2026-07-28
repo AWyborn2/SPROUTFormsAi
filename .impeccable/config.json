@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "inter",
+        "createdAt": "2026-07-28T06:17:36.790Z",
+        "reason": "User confirmed Inter is intentional - CHC brand typeface from the approved prototype"
+      }
+    ]
+  }
+}
