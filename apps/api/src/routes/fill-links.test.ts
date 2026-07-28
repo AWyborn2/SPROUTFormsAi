@@ -532,6 +532,38 @@ describe('GET /fill/:token (public, no auth)', () => {
   });
 
   /**
+   * The org's voice off-switch wins over an entitled plan: `smartFillEnabled`
+   * goes false so the page never draws the Smart Fill entry point, and the
+   * branding payload carries `voiceInput: false` so the per-field mics are not
+   * drawn either — the flag rides in `orgBranding`, no new wire field.
+   */
+  it('reports smartFillEnabled false when the org disabled voice input', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Charles Hull',
+        planTier: 'business',
+        branding: { ...BRANDING, voiceInput: false },
+      },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as {
+        smartFillEnabled: boolean;
+        orgBranding: { voiceInput?: boolean };
+      };
+      expect(body.smartFillEnabled).toBe(false);
+      expect(body.orgBranding.voiceInput).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
    * An org that never opened the theme editor must keep the exact payload it
    * had before theming existed — this is the AE3 guarantee on the wire, and
    * this route is the most-hit anonymous endpoint in the product.

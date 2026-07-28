@@ -182,6 +182,13 @@ const brandingBody = z.object({
   formFont: z.string().refine(isValidFormFont, { message: 'Unknown font family' }),
   /** Optional theme layer. Absent leaves the org on the product defaults. */
   theme: themeBody.optional(),
+  /**
+   * Voice input on fill surfaces (dictation + Smart Fill). Optional and
+   * omittable: zod strips unknown keys, so WITHOUT this line every branding
+   * save from a client that carries the flag would silently drop it — the
+   * org's choice undone by the next unrelated logo change.
+   */
+  voiceInput: z.boolean().optional(),
 });
 
 const patchOrgBody = z

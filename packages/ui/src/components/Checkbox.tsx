@@ -48,7 +48,10 @@ export const Checkbox = forwardRef<HTMLInputElement, CheckboxProps>(function Che
           className="peer absolute inset-0 h-full w-full cursor-pointer appearance-none rounded-[5px] border border-border-strong bg-surface-card transition-colors duration-fast checked:border-accent checked:bg-accent indeterminate:border-accent indeterminate:bg-accent focus-visible:shadow-focus disabled:cursor-not-allowed"
           {...props}
         />
-        <span className="pointer-events-none text-[#12321f] opacity-0 peer-checked:opacity-100 peer-indeterminate:opacity-100">
+        {/* `relative` is load-bearing: the absolutely-positioned input paints
+            over later in-flow content, so without it the ✓ sits UNDER the
+            input's opaque checked background — a solid box with no mark. */}
+        <span className="pointer-events-none relative text-[#12321f] opacity-0 peer-checked:opacity-100 peer-indeterminate:opacity-100">
           <Icon name={indeterminate ? 'minus' : 'check'} size={13} className="stroke-[3]" />
         </span>
       </span>

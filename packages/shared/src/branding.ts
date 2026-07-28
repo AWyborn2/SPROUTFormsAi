@@ -55,6 +55,18 @@ export interface BrandingKit {
    * `DEFAULT_THEME`.
    */
   theme?: ThemeTokens;
+  /**
+   * Whether fill surfaces offer voice input — the per-field dictation mic AND
+   * AI Smart Fill. One switch for both because that is the question an org
+   * actually answers ("do we want people speaking into our forms?"), not two.
+   *
+   * ABSENT MEANS ENABLED: every branding kit written before this flag existed
+   * lacks it, and those orgs have voice today. Stored in the kit (same
+   * no-migration reasoning as `theme`, which already carries the behavioural
+   * `layout` choice) and enforced server-side on both Smart Fill doors — the
+   * client reading of this flag only decides whether controls are drawn.
+   */
+  voiceInput?: boolean;
 }
 
 /** FormAI's own defaults, mirroring the prototype's initial brand state. */

@@ -109,6 +109,19 @@ voiceRouter.post(
       return;
     }
 
+    // The org's own off-switch, checked AFTER the plan gate: `requirePlanFeature`
+    // answers "does the plan include it", this answers "did the org turn it
+    // off" (`branding.voiceInput`, absent = on). Enforced here as well as on
+    // the public door so a disabled org's members cannot keep spending model
+    // calls from the builder preview that respondents can no longer make.
+    const org = await db.query.organizations.findFirst({
+      where: eq(schema.organizations.id, tenant.orgId),
+    });
+    if (org?.branding?.voiceInput === false) {
+      res.status(403).json({ error: 'voice_disabled' });
+      return;
+    }
+
     // Draft versions are deliberately allowed: this door serves the builder's
     // own preview, where nothing is published yet.
     const fields: FormField[] = Array.isArray(version.fields) ? version.fields : [];
