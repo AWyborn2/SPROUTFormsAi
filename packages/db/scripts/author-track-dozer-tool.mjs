@@ -94,8 +94,14 @@ async function main() {
     console.error('No Track Dozer template found. Import the PDF first, or pass --template-id.');
     process.exit(1);
   }
-  if (templates.length > 1) {
-    warnings.push(`${templates.length} templates match "track dozer"; using the newest. Pass --template-id to pick.`);
+  if (templates.length > 1 && !TEMPLATE_ID) {
+    // Re-imports leave the earlier template in place, so this is expected
+    // rather than alarming — but authoring the wrong one would key a template
+    // nobody uses, so list them and name the choice explicitly.
+    warnings.push(
+      `${templates.length} templates match "track dozer". Using the newest (${templates[0].id}). ` +
+        `Others: ${templates.slice(1).map((t) => t.id).join(', ')}. Pass --template-id to pick a different one.`,
+    );
   }
   const template = templates[0];
   if (!template.current_version_id) {
@@ -170,9 +176,17 @@ async function main() {
   // Requirements") repeat across parts 2, 4 and 6, and the page-group boundary
   // duplicates some headers outright — so anchors take the FIRST match of each
   // part number and ignore the rest.
+  // String comparison rather than a regex: `norm` has already collapsed the
+  // label to "part 1 theory", so a prefix test is exact and carries no
+  // escaping to get wrong. The trailing space is what stops "part 1" matching
+  // "part 10".
   function partAnchor(n) {
-    const re = new RegExp(`^part\s*${n}\b`);
-    const hit = fields.find((f) => f.type === 'section_header' && re.test(norm(f.label)));
+    const wanted = `part ${n}`;
+    const hit = fields.find((f) => {
+      if (f.type !== 'section_header') return false;
+      const label = norm(f.label);
+      return label === wanted || label.startsWith(`${wanted} `);
+    });
     if (!hit) problems.push(`No "PART ${n}" heading found to anchor part ${n}.`);
     else console.log(`  Part ${n} anchor → ${hit.id}  "${hit.label}"`);
     return hit;
