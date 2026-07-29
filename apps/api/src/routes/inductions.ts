@@ -5,6 +5,7 @@ import { schema } from '@formai/db';
 import {
   assessInductionReadiness,
   buildInductionCohorts,
+  CHC_MIN_NOTICE_BUSINESS_DAYS,
   holidaysCoverThrough,
   isIsoDate,
   ISO_DATE_PATTERN,
@@ -128,6 +129,7 @@ async function bookedSubmissionIds(submissionIds: string[]): Promise<Set<string>
 async function loadAssessedStarters(
   orgId: string,
   today: Date,
+  allowLateNotice = false,
 ): Promise<{ starter: AssessedStarter; row: SubmissionRow }[]> {
   if (!db) return [];
   const rows = await db.query.submissions.findMany({
@@ -149,7 +151,11 @@ async function loadAssessedStarters(
       starter: {
         submissionId: row.id,
         profile,
-        ...assessInductionReadiness(profile, { today, alreadyBooked: booked.has(row.id) }),
+        ...assessInductionReadiness(profile, {
+          today,
+          alreadyBooked: booked.has(row.id),
+          allowLateNotice,
+        }),
       },
       row,
     });
@@ -162,10 +168,20 @@ async function canRead(tenant: { orgId: string; role: string }): Promise<boolean
   return hasPermission(tenant, 'submissions', 'view');
 }
 
+/**
+ * The operator's notice override, as a query flag.
+ *
+ * Express hands query values through as strings, so this matches the
+ * `includeSensitive` convention rather than inventing a second coercion.
+ */
+const allowLateNoticeFlag = z.enum(['true', 'false']).optional();
+const isOn = (flag?: string) => flag === 'true';
+
 const listQuery = z.object({
   from: z.string().regex(ISO_DATE).optional(),
   to: z.string().regex(ISO_DATE).optional(),
   readiness: z.enum(['ready', 'blocked']).optional(),
+  allowLateNotice: allowLateNoticeFlag,
 });
 
 inductionsRouter.get('/candidates', requireMachineOrTenant, withErrorHandling(async (req, res) => {
@@ -185,7 +201,11 @@ inductionsRouter.get('/candidates', requireMachineOrTenant, withErrorHandling(as
   }
   const { from, to, readiness } = parsed.data;
 
-  const assessed = await loadAssessedStarters(tenant.orgId, new Date());
+  const assessed = await loadAssessedStarters(
+    tenant.orgId,
+    new Date(),
+    isOn(parsed.data.allowLateNotice),
+  );
   const matching = assessed.filter(({ starter }) => {
     const date = starter.profile.inductionDate;
     if (from && (!isIsoDate(date) || date < from)) return false;
@@ -202,6 +222,7 @@ inductionsRouter.get('/candidates', requireMachineOrTenant, withErrorHandling(as
 
 const detailQuery = z.object({
   includeSensitive: z.enum(['true', 'false']).optional(),
+  allowLateNotice: allowLateNoticeFlag,
 });
 
 inductionsRouter.get('/candidates/:id', requireMachineOrTenant, withErrorHandling(async (req, res) => {
@@ -243,7 +264,11 @@ inductionsRouter.get('/candidates/:id', requireMachineOrTenant, withErrorHandlin
   const assessed: AssessedStarter = {
     submissionId: row.id,
     profile,
-    ...assessInductionReadiness(profile, { today: new Date(), alreadyBooked: booked.has(row.id) }),
+    ...assessInductionReadiness(profile, {
+      today: new Date(),
+      alreadyBooked: booked.has(row.id),
+      allowLateNotice: isOn(parsed.data.allowLateNotice),
+    }),
   };
   const body = candidateDto(assessed, row);
 
@@ -261,7 +286,10 @@ inductionsRouter.get('/candidates/:id', requireMachineOrTenant, withErrorHandlin
   res.json({ ...body, sensitive: profile.sensitive });
 }));
 
-const cohortQuery = z.object({ date: z.string().regex(ISO_DATE).optional() });
+const cohortQuery = z.object({
+  date: z.string().regex(ISO_DATE).optional(),
+  allowLateNotice: allowLateNoticeFlag,
+});
 
 inductionsRouter.get('/cohorts', requireMachineOrTenant, withErrorHandling(async (req, res) => {
   if (!db) {
@@ -279,7 +307,11 @@ inductionsRouter.get('/cohorts', requireMachineOrTenant, withErrorHandling(async
     return;
   }
 
-  const assessed = await loadAssessedStarters(tenant.orgId, new Date());
+  const assessed = await loadAssessedStarters(
+    tenant.orgId,
+    new Date(),
+    isOn(parsed.data.allowLateNotice),
+  );
   const byId = new Map(assessed.map(({ starter, row }) => [starter.submissionId, row]));
   const cohorts = buildInductionCohorts(assessed.map(({ starter }) => starter)).filter(
     (c) => !parsed.data.date || c.date === parsed.data.date,
@@ -357,6 +389,7 @@ function bookingDto(
     seats: booking.seats,
     externalReference: booking.externalReference,
     note: booking.note,
+    noticeOverrideReason: booking.noticeOverrideReason,
     bookedByUserId: booking.bookedByUserId,
     bookedByApiKeyId: booking.bookedByApiKeyId,
     createdAt: booking.createdAt.toISOString(),
@@ -369,6 +402,12 @@ const createBookingBody = z.object({
   submissionIds: z.array(z.string().min(1)).min(1).max(50),
   externalReference: z.string().max(200).optional(),
   note: z.string().max(500).optional(),
+  /**
+   * Required only when a starter on this booking is inside the notice window.
+   * Free text on purpose — the site's reasons for absorbing short notice are
+   * not an enum anybody could enumerate in advance.
+   */
+  noticeOverrideReason: z.string().min(1).max(500).optional(),
 });
 
 inductionsRouter.post('/bookings', requireMachineOrTenant, withErrorHandling(async (req, res) => {
@@ -386,7 +425,7 @@ inductionsRouter.post('/bookings', requireMachineOrTenant, withErrorHandling(asy
     res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
     return;
   }
-  const { date, submissionIds, externalReference, note } = parsed.data;
+  const { date, submissionIds, externalReference, note, noticeOverrideReason } = parsed.data;
   const wanted = [...new Set(submissionIds)];
 
   const rows = await db.query.submissions.findMany({
@@ -404,6 +443,7 @@ inductionsRouter.post('/bookings', requireMachineOrTenant, withErrorHandling(asy
   const fieldsByVersion = await pinnedFieldsFor(rows);
 
   const starters: { submissionId: string; starterName: string }[] = [];
+  const lateNotice: string[] = [];
   for (const row of rows) {
     const profile = readStarterProfile(fieldsByVersion.get(row.templateVersionId) ?? [], row.values);
     if (!profile) {
@@ -421,7 +461,25 @@ inductionsRouter.post('/bookings', requireMachineOrTenant, withErrorHandling(asy
       });
       return;
     }
+    // Assessed with the override ON so a short-notice starter surfaces as a
+    // `notice_overridden` warning rather than a blocker — that warning is
+    // exactly the signal that a recorded reason is owed below.
+    const verdict = assessInductionReadiness(profile, { allowLateNotice: true });
+    if (verdict.warnings.includes('notice_overridden')) lateNotice.push(row.id);
     starters.push({ submissionId: row.id, starterName: profile.fullName });
+  }
+
+  // A short-notice booking is allowed, but never silently. Refusing without a
+  // reason is what keeps the exception in the record instead of in somebody's
+  // memory — the same "record the decision, don't make it" rule the assessment
+  // workflow follows elsewhere.
+  if (lateNotice.length > 0 && !noticeOverrideReason) {
+    res.status(400).json({
+      error: 'notice_override_required',
+      submissionIds: lateNotice,
+      detail: `${lateNotice.length} starter${lateNotice.length === 1 ? ' is' : 's are'} inside the ${CHC_MIN_NOTICE_BUSINESS_DAYS}-business-day notice window. Pass noticeOverrideReason to record why the site accepted the booking anyway.`,
+    });
+    return;
   }
 
   const alreadyBooked = await bookedSubmissionIds(wanted);
@@ -439,6 +497,9 @@ inductionsRouter.post('/bookings', requireMachineOrTenant, withErrorHandling(asy
       seats: starters.length,
       externalReference: externalReference ?? '',
       note: note ?? '',
+      // Only stored when it was actually needed, so a non-empty value always
+      // means "this booking waived the notice rule".
+      noticeOverrideReason: lateNotice.length > 0 ? (noticeOverrideReason ?? '') : '',
       bookedByUserId: tenant.userId,
       bookedByApiKeyId: req.apiKeyId ?? null,
     })
@@ -450,8 +511,12 @@ inductionsRouter.post('/bookings', requireMachineOrTenant, withErrorHandling(asy
     .values(starters.map((s) => ({ bookingId: booking.id, ...s })));
 
   await recordAudit(db, tenant, {
-    action: req.apiKeyId ? 'Recorded induction booking via API key' : 'Recorded induction booking',
-    target: `${date} — ${starters.length} seat${starters.length === 1 ? '' : 's'}`,
+    action: lateNotice.length > 0
+      ? 'Recorded induction booking with notice override'
+      : req.apiKeyId
+        ? 'Recorded induction booking via API key'
+        : 'Recorded induction booking',
+    target: `${date} — ${starters.length} seat${starters.length === 1 ? '' : 's'}${lateNotice.length > 0 ? ` — notice waived: ${noticeOverrideReason}` : ''}`,
     category: 'submissions',
     icon: 'calendar-check',
   });

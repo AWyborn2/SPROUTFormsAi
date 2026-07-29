@@ -1,0 +1,1 @@
+ALTER TABLE "induction_bookings" ADD COLUMN "notice_override_reason" text DEFAULT '' NOT NULL;

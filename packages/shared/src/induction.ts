@@ -103,7 +103,7 @@ export type InductionBlocker =
   | 'already_booked';
 
 /** Something a human should know that does not stop the booking. */
-export type InductionWarning = 'holiday_list_expired';
+export type InductionWarning = 'holiday_list_expired' | 'notice_overridden';
 
 export interface InductionVerdict {
   readiness: 'ready' | 'blocked';
@@ -241,10 +241,19 @@ export function readStarterProfile(
  * — so demanding them here would block every transfer for a reason the form
  * cannot fix. An unanswered Beakon question is treated as "not in Beakon",
  * which errs toward asking for detail rather than assuming it exists elsewhere.
+ *
+ * `allowLateNotice` is the operator's override of the notice rule, and it is
+ * deliberately narrow. Short notice is a matter of lead time — the site can
+ * agree to absorb it, and sometimes does. A date that is not a Monday, or is a
+ * public holiday, is not short notice: it is a day on which no induction runs
+ * at all, and no amount of authority makes one appear. So the override moves
+ * `date_notice_lapsed` from blocker to `notice_overridden` warning and leaves
+ * `date_invalid` exactly where it is. The warning is never dropped: the whole
+ * point is that the exception stays visible to whoever reads the record later.
  */
 export function assessInductionReadiness(
   profile: StarterProfile,
-  options: { today?: Date; alreadyBooked?: boolean } = {},
+  options: { today?: Date; alreadyBooked?: boolean; allowLateNotice?: boolean } = {},
 ): InductionVerdict {
   const today = options.today ?? new Date();
   const blockers: InductionBlocker[] = [];
@@ -259,7 +268,8 @@ export function assessInductionReadiness(
   if (!isIsoDate(iso) || !isMonday(iso) || isPublicHoliday(iso)) {
     blockers.push('date_invalid');
   } else if (businessDaysUntil(iso, today) < CHC_MIN_NOTICE_BUSINESS_DAYS) {
-    blockers.push('date_notice_lapsed');
+    if (options.allowLateNotice) warnings.push('notice_overridden');
+    else blockers.push('date_notice_lapsed');
   }
 
   // Past the last listed holiday the notice count silently treats holidays as

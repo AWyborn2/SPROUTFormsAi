@@ -185,6 +185,47 @@ describe('assessInductionReadiness', () => {
     expect(verdict.readiness).toBe('blocked');
     expect(verdict.blockers).toContain('already_booked');
   });
+
+  it('lets an operator override short notice, keeping it visible as a warning', () => {
+    const blocked = assess(fullValues(), { today: THURSDAY });
+    expect(blocked.readiness).toBe('blocked');
+    expect(blocked.blockers).toContain('date_notice_lapsed');
+
+    const overridden = assess(fullValues(), { today: THURSDAY, allowLateNotice: true });
+    expect(overridden.readiness).toBe('ready');
+    expect(overridden.blockers).not.toContain('date_notice_lapsed');
+    // The exception stays legible to whoever reads the record later.
+    expect(overridden.warnings).toContain('notice_overridden');
+  });
+
+  it('does not let the override manufacture an induction day that does not exist', () => {
+    // Short notice is lead time the site can absorb. A Wednesday, or a Monday
+    // that is a public holiday, is a day no induction runs at all.
+    for (const date of [WEDNESDAY, HOLIDAY_MONDAY]) {
+      const verdict = assess(fullValues({ [CHC_FIELD_IDS.inductionDate]: date }), {
+        allowLateNotice: true,
+      });
+      expect(verdict.readiness).toBe('blocked');
+      expect(verdict.blockers).toContain('date_invalid');
+      expect(verdict.warnings).not.toContain('notice_overridden');
+    }
+  });
+
+  it('does not warn about an override that was never needed', () => {
+    const verdict = assess(fullValues(), { allowLateNotice: true });
+    expect(verdict.readiness).toBe('ready');
+    expect(verdict.warnings).not.toContain('notice_overridden');
+  });
+
+  it('leaves every other blocker standing when notice is overridden', () => {
+    const verdict = assess(fullValues({ [CHC_FIELD_IDS.mobile]: '' }), {
+      today: THURSDAY,
+      allowLateNotice: true,
+    });
+    expect(verdict.readiness).toBe('blocked');
+    expect(verdict.blockers).toContain('contact_missing');
+    expect(verdict.warnings).toContain('notice_overridden');
+  });
 });
 
 describe('buildInductionCohorts', () => {

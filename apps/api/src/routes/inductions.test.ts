@@ -652,6 +652,148 @@ describe('POST /inductions/bookings', () => {
   });
 });
 
+describe('notice override', () => {
+  /** Thursday — Monday 16 Mar is then two clear business days out, inside the window. */
+  const INSIDE_WINDOW = new Date('2026-03-12T09:00:00');
+
+  function overrideRequest(body: Record<string, unknown>) {
+    return {
+      method: 'POST',
+      headers: { ...authHeader(OWNER), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    };
+  }
+
+  it('reports a short-notice starter as blocked, and as ready once overridden', async () => {
+    vi.setSystemTime(INSIDE_WINDOW);
+    mockDbValue = fakeDb({ submissions: [submission('sub-1', starterValues())] });
+    const { server, base } = startApp();
+    try {
+      const plain = await jsonBody(
+        await fetch(`${base}/inductions/candidates`, { headers: authHeader(OWNER) }),
+      );
+      expect(plain.candidates[0].readiness).toBe('blocked');
+      expect(plain.candidates[0].blockers).toContain('date_notice_lapsed');
+
+      const overridden = await jsonBody(
+        await fetch(`${base}/inductions/candidates?allowLateNotice=true`, {
+          headers: authHeader(OWNER),
+        }),
+      );
+      expect(overridden.candidates[0].readiness).toBe('ready');
+      expect(overridden.candidates[0].warnings).toContain('notice_overridden');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('seats an overridden starter in the cohort', async () => {
+    vi.setSystemTime(INSIDE_WINDOW);
+    mockDbValue = fakeDb({ submissions: [submission('sub-1', starterValues())] });
+    const { server, base } = startApp();
+    try {
+      const plain = await jsonBody(
+        await fetch(`${base}/inductions/cohorts`, { headers: authHeader(OWNER) }),
+      );
+      expect(plain.cohorts[0].seats).toBe(0);
+
+      const overridden = await jsonBody(
+        await fetch(`${base}/inductions/cohorts?allowLateNotice=true`, { headers: authHeader(OWNER) }),
+      );
+      expect(overridden.cohorts[0].seats).toBe(1);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a short-notice booking with no recorded reason, and writes nothing', async () => {
+    vi.setSystemTime(INSIDE_WINDOW);
+    const db = fakeDb({ submissions: [submission('sub-1', starterValues())] });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(
+        `${base}/inductions/bookings`,
+        overrideRequest({ date: VALID_MONDAY, submissionIds: ['sub-1'] }),
+      );
+      expect(res.status).toBe(400);
+      const body = await jsonBody(res);
+      expect(body.error).toBe('notice_override_required');
+      expect(body.submissionIds).toEqual(['sub-1']);
+      expect(db.__insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records the reason on the booking and names the override in the audit trail', async () => {
+    vi.setSystemTime(INSIDE_WINDOW);
+    const db = fakeDb({ submissions: [submission('sub-1', starterValues())] });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(
+        `${base}/inductions/bookings`,
+        overrideRequest({
+          date: VALID_MONDAY,
+          submissionIds: ['sub-1'],
+          noticeOverrideReason: 'Site trainer confirmed a seat by phone',
+        }),
+      );
+      expect(res.status).toBe(201);
+      expect((await jsonBody(res)).noticeOverrideReason).toBe('Site trainer confirmed a seat by phone');
+
+      const audit = db.__insertValues.mock.calls
+        .map(([, v]) => v as Record<string, unknown>)
+        .find((v) => typeof v?.action === 'string');
+      expect(audit!.action).toBe('Recorded induction booking with notice override');
+      expect(String(audit!.target)).toContain('Site trainer confirmed a seat by phone');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('leaves the reason empty on a booking that never needed one', async () => {
+    const db = fakeDb({ submissions: [submission('sub-1', starterValues())] });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(
+        `${base}/inductions/bookings`,
+        overrideRequest({
+          date: VALID_MONDAY,
+          submissionIds: ['sub-1'],
+          noticeOverrideReason: 'not actually needed',
+        }),
+      );
+      expect(res.status).toBe(201);
+      // A non-empty value must always mean "this booking waived the rule".
+      expect((await jsonBody(res)).noticeOverrideReason).toBe('');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still refuses a date the site does not run inductions on', async () => {
+    vi.setSystemTime(INSIDE_WINDOW);
+    mockDbValue = fakeDb({
+      submissions: [submission('sub-wed', starterValues({ [CHC_FIELD_IDS.inductionDate]: '2026-03-18' }))],
+    });
+    const { server, base } = startApp();
+    try {
+      const body = await jsonBody(
+        await fetch(`${base}/inductions/candidates?allowLateNotice=true`, {
+          headers: authHeader(OWNER),
+        }),
+      );
+      expect(body.candidates[0].readiness).toBe('blocked');
+      expect(body.candidates[0].blockers).toContain('date_invalid');
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('booked starters', () => {
   it('are blocked and no longer counted toward a cohort seat', async () => {
     mockDbValue = fakeDb({

@@ -207,6 +207,15 @@ export const inductionBookings = pgTable(
     /** The external system's handle, e.g. a BISTrainer transaction reference. */
     externalReference: text('external_reference').notNull().default(''),
     note: text().notNull().default(''),
+    /**
+     * Why the four-business-day notice rule was waived, when it was.
+     *
+     * Empty on an ordinary booking. Non-empty is the trace of a deliberate
+     * exception: the API refuses to record a short-notice booking without one,
+     * so an auditor asking "who agreed to this, and why" finds the answer
+     * stored beside the booking rather than in somebody's inbox.
+     */
+    noticeOverrideReason: text('notice_override_reason').notNull().default(''),
     /** The acting user. For a machine call this is the API key's issuer. */
     bookedByUserId: uuid('booked_by_user_id').references(() => users.id, { onDelete: 'set null' }),
     /** Set when an agent booked it, so machine and human bookings stay distinguishable. */
