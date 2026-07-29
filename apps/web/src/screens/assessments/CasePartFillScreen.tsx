@@ -2,7 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { SubmissionValue } from '@formai/shared';
 import { Button, Icon, useToast } from '@formai/ui';
-import { useAssessmentAttempt, useSaveAttempt } from '../../lib/data/hooks.js';
+import {
+  useAssessmentAttempt,
+  useSaveAttempt,
+  useSetAttemptSubmitted,
+} from '../../lib/data/hooks.js';
 import { partVisibility } from '../../lib/assessment-fill.js';
 import { fillSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
@@ -31,6 +35,7 @@ export function CasePartFillScreen() {
   const { toast } = useToast();
   const { data: attempt, isLoading } = useAssessmentAttempt(caseId, attemptId);
   const save = useSaveAttempt(caseId ?? '');
+  const setSubmitted = useSetAttemptSubmitted(caseId ?? '');
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   const [dirty, setDirty] = useState(false);
@@ -87,8 +92,11 @@ export function CasePartFillScreen() {
 
   // A marked attempt is a historical record. Nothing here may edit it — a
   // resolved attempt is never mutated, which is what keeps the audit trail
-  // meaningful.
-  const readOnly = attempt.outcome !== null;
+  // meaningful. A handed-in one is frozen too, but reversibly: the candidate can
+  // take it back until it is marked.
+  const marked = attempt.outcome !== null;
+  const handedIn = attempt.submittedAt !== null;
+  const readOnly = marked || handedIn;
   const rendered = visibleFillFields(attempt.fields, answers, sources);
 
   function setValue(fieldId: string, v: SubmissionValue) {
@@ -130,11 +138,37 @@ export function CasePartFillScreen() {
         </p>
       </header>
 
-      {readOnly && (
+      {marked && (
         <p className="mb-4 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-[13px] text-text-secondary">
           This attempt has been marked, so it can no longer be changed. If you need another go, your
           assessor can open a new attempt.
         </p>
+      )}
+
+      {handedIn && !marked && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5">
+          <p className="text-[13px] text-text-secondary">
+            Handed in — your assessor will mark this. You can still take it back until they do.
+          </p>
+          <Button
+            variant="outline"
+            leadingIcon="undo-2"
+            disabled={setSubmitted.isPending}
+            onClick={() => {
+              if (!attemptId) return;
+              setSubmitted.mutate(
+                { attemptId, submitted: false },
+                {
+                  onSuccess: () => toast({ variant: 'info', message: 'Reopened — you can keep editing.' }),
+                  onError: () =>
+                    toast({ variant: 'warning', message: "Couldn't reopen — it may already be marked." }),
+                },
+              );
+            }}
+          >
+            Take it back
+          </Button>
+        </div>
       )}
 
       <div className="grid grid-cols-12 gap-[16px]">
@@ -163,8 +197,46 @@ export function CasePartFillScreen() {
           <span className="text-[12.5px] text-text-tertiary">
             {dirty ? 'Unsaved changes' : 'All changes saved'}
           </span>
-          <Button leadingIcon="save" onClick={onSave} disabled={save.isPending || !dirty}>
+          <Button
+            variant="outline"
+            leadingIcon="save"
+            onClick={onSave}
+            disabled={save.isPending || !dirty}
+          >
             {save.isPending ? 'Saving…' : 'Save answers'}
+          </Button>
+          {/* Handing in is the signal an assessor waits on. Saving first means a
+              candidate cannot submit a version of their answers that differs
+              from the one still sitting unsaved on screen. */}
+          <Button
+            leadingIcon="send"
+            disabled={save.isPending || setSubmitted.isPending}
+            onClick={() => {
+              if (!attemptId) return;
+              const handOff = () =>
+                setSubmitted.mutate(
+                  { attemptId, submitted: true },
+                  {
+                    onSuccess: () => {
+                      setDirty(false);
+                      toast({ variant: 'success', message: 'Handed in for marking.' });
+                    },
+                    onError: () =>
+                      toast({ variant: 'danger', message: "Couldn't hand in — try again." }),
+                  },
+                );
+              if (!dirty) return handOff();
+              save.mutate(
+                { attemptId, values },
+                {
+                  onSuccess: handOff,
+                  onError: () =>
+                    toast({ variant: 'danger', message: "Couldn't save your answers — nothing was handed in." }),
+                },
+              );
+            }}
+          >
+            {setSubmitted.isPending ? 'Handing in…' : 'Hand in for marking'}
           </Button>
         </div>
       )}

@@ -471,6 +471,8 @@ assessmentCasesRouter.get(
         partKey: a.partKey,
         attemptNumber: a.attemptNumber,
         outcome: a.outcome,
+        /** Null until the candidate hands it in — the "ready to mark" signal. */
+        submittedAt: a.submittedAt,
         disposition: a.disposition,
         dispositionReason: a.dispositionReason,
         templateVersionId: a.templateVersionId,
@@ -683,6 +685,7 @@ assessmentCasesRouter.get(
       partKind: part.kind,
       attemptNumber: attempt.attemptNumber,
       outcome: attempt.outcome,
+      submittedAt: attempt.submittedAt,
       templateVersionId: attempt.templateVersionId,
       /**
        * The case's stream and the field its answer belongs in, so the renderer
@@ -710,6 +713,97 @@ assessmentCasesRouter.get(
       values: attempt.values ?? {},
     });
   }),
+);
+
+/**
+ * Handing a part in, and taking it back.
+ *
+ * This is the signal that closes the tracking gap the paper process had: an
+ * attempt with answers and no outcome cannot distinguish a candidate halfway
+ * through from one who finished a week ago and is waiting. Submitting says
+ * which.
+ *
+ * It is the CANDIDATE'S act — `edit` at `own` scope reaches it — and it is not
+ * an outcome. Until an assessor marks the attempt nothing has been judged, so
+ * the candidate can reopen it themselves rather than needing anyone's help to
+ * undo a mis-tap. Marking is what makes an attempt permanent.
+ */
+async function setSubmitted(
+  req: Parameters<Parameters<typeof withErrorHandling>[0]>[0],
+  res: Parameters<Parameters<typeof withErrorHandling>[0]>[1],
+  submitting: boolean,
+) {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const tenant = req.tenant!;
+  const scope = await permissionScope(tenant, 'assessments', 'edit');
+  if (scope === 'none') {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+
+  const row = await loadCase(db, req.params.id!, tenant.orgId);
+  // Same rule as everywhere else: someone else's work is 404, not 403.
+  if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+
+  const attempt = await db.query.assessmentPartAttempts.findFirst({
+    where: and(
+      eq(schema.assessmentPartAttempts.id, req.params.attemptId!),
+      eq(schema.assessmentPartAttempts.caseId, row.id),
+    ),
+  });
+  if (!attempt) {
+    res.status(404).json({ error: 'attempt_not_found' });
+    return;
+  }
+  // Once marked, an attempt is evidence in both directions: handing it in again
+  // is meaningless, and reopening it would let a candidate rewrite what an
+  // assessor already judged.
+  if (attempt.outcome !== null) {
+    res.status(409).json({ error: 'attempt_resolved' });
+    return;
+  }
+
+  // Idempotent. A double-tap must not restamp a later hand-in time than the
+  // one the candidate actually made.
+  if (submitting && attempt.submittedAt) {
+    res.status(200).json({ id: attempt.id, submittedAt: attempt.submittedAt });
+    return;
+  }
+
+  const submittedAt = submitting ? new Date() : null;
+  await db
+    .update(schema.assessmentPartAttempts)
+    .set({ submittedAt })
+    .where(eq(schema.assessmentPartAttempts.id, attempt.id));
+
+  await recordAudit(db, tenant, {
+    action: submitting ? 'Submitted assessment part' : 'Reopened assessment part',
+    target: `${row.id} ${attempt.partKey} attempt ${attempt.attemptNumber}`,
+    // 'submissions' to match the rest of this router — assessment activity is
+    // filed there rather than under a category of its own.
+    category: 'submissions',
+    icon: submitting ? 'send' : 'undo-2',
+  });
+
+  res.status(200).json({ id: attempt.id, submittedAt });
+}
+
+assessmentCasesRouter.post(
+  '/:id/attempts/:attemptId/submit',
+  ...GATE,
+  withErrorHandling((req, res) => setSubmitted(req, res, true)),
+);
+
+assessmentCasesRouter.post(
+  '/:id/attempts/:attemptId/reopen',
+  ...GATE,
+  withErrorHandling((req, res) => setSubmitted(req, res, false)),
 );
 
 const saveValuesBody = z.object({ values: z.record(z.string(), z.unknown()) });
@@ -761,6 +855,13 @@ assessmentCasesRouter.patch(
     // signed; a correction is a new attempt.
     if (attempt.outcome !== null) {
       res.status(409).json({ error: 'attempt_resolved' });
+      return;
+    }
+    // Handed in, not yet marked. Refusing here is what makes "submitted" mean
+    // anything — otherwise the answers could keep moving while the assessor was
+    // reading them. The candidate can reopen it themselves; nothing is lost.
+    if (attempt.submittedAt) {
+      res.status(409).json({ error: 'attempt_submitted' });
       return;
     }
 

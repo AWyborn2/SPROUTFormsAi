@@ -54,6 +54,8 @@ export interface CaseAttemptView {
   partKey: string;
   attemptNumber: number;
   outcome: PartOutcome | null;
+  /** Null until the candidate hands it in — the "ready to mark" signal. */
+  submittedAt: string | null;
   disposition: NotSatisfactoryDisposition | null;
   dispositionReason: string | null;
   templateVersionId: string;
@@ -90,6 +92,8 @@ export interface AttemptFillView {
   partKind: PartKind;
   attemptNumber: number;
   outcome: PartOutcome | null;
+  /** Null until the candidate hands it in. */
+  submittedAt: string | null;
   templateVersionId: string;
   /**
    * The case's stream and the manifest question it answers. Either being null
@@ -146,6 +150,24 @@ export const assessmentsApi = {
   /** The fillable surface for one attempt: part-scoped fields and saved answers. */
   getAttempt: (caseId: string, attemptId: string) =>
     apiClient.get<AttemptFillView>(`/assessment-cases/${caseId}/attempts/${attemptId}`),
+
+  /**
+   * Hand a part in, or take it back.
+   *
+   * Reversible by the candidate right up until an assessor marks it — nothing
+   * has been judged yet, so a mis-tap costs nobody anything.
+   */
+  submitAttempt: (caseId: string, attemptId: string) =>
+    apiClient.post<{ id: string; submittedAt: string | null }>(
+      `/assessment-cases/${caseId}/attempts/${attemptId}/submit`,
+      {},
+    ),
+
+  reopenAttempt: (caseId: string, attemptId: string) =>
+    apiClient.post<{ id: string; submittedAt: string | null }>(
+      `/assessment-cases/${caseId}/attempts/${attemptId}/reopen`,
+      {},
+    ),
 
   /** Opens a new attempt, or returns the one already open for that part. */
   openAttempt: (caseId: string, partKey: string) =>

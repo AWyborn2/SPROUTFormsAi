@@ -134,6 +134,13 @@
       "when": 1785299107587,
       "tag": "0018_kind_zarda",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1785301177850,
+      "tag": "0019_green_arachne",
+      "breakpoints": true
     }
   ]
 }

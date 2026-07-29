@@ -151,7 +151,13 @@ function PartCard({
 }: {
   caseId: string;
   part: CasePartView;
-  attempts: { id: string; attemptNumber: number; outcome: string | null; dispositionReason: string | null }[];
+  attempts: {
+    id: string;
+    attemptNumber: number;
+    outcome: string | null;
+    submittedAt: string | null;
+    dispositionReason: string | null;
+  }[];
   readOnly: boolean;
   onOpen: () => void;
   opening: boolean;
@@ -213,6 +219,16 @@ function PartCard({
           {/* Answering is available to BOTH sides while an attempt is open —
               the candidate does the work, and the assessor needs to read it to
               mark it. Only the marking control below is assessor-only. */}
+          {/* The whole point of the hand-in signal: an assessor can see which
+              parts are waiting on them without opening each one. */}
+          {openAttempt?.submittedAt && !readOnly && (
+            <p className="inline-flex w-fit items-center gap-1.5 rounded-pill px-3 py-1.5 text-[12.5px] font-semibold"
+              style={{ background: 'var(--warning-soft)', color: 'var(--warning-text)' }}>
+              <Icon name="inbox" size={14} />
+              Handed in — ready to mark
+            </p>
+          )}
+
           {openAttempt && (
             <Link
               to={`/app/assessments/${caseId}/attempts/${openAttempt.id}`}
@@ -220,7 +236,7 @@ function PartCard({
               style={{ background: 'var(--accent)' }}
             >
               <Icon name="pen-line" size={15} />
-              {readOnly ? 'Answer questions' : 'Open answers'}
+              {readOnly ? (openAttempt.submittedAt ? 'Review my answers' : 'Answer questions') : 'Open answers'}
             </Link>
           )}
 

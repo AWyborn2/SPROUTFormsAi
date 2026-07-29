@@ -147,7 +147,12 @@ export interface MarkTheoryInput {
   /** The full field set of the template version. */
   fields: readonly FormField[];
   /** The candidate's answers, including whatever seeds visibility. */
-  values: Record<string, SubmissionValue>;
+  /**
+   * The candidate's answers. NULLABLE because an attempt that was opened and
+   * never typed into stores no value map at all, and that is a real state to
+   * mark: every question comes out unanswered, which is incorrect.
+   */
+  values: Record<string, SubmissionValue> | null | undefined;
   /** The theory part being marked — supplies the mandatory section. */
   part: Pick<AssessmentPart, 'mandatoryFieldIds'>;
 }
@@ -161,7 +166,11 @@ export interface MarkTheoryInput {
  * the gate and the location-specific sets are evidence.
  */
 export function markTheory({ fields, values, part }: MarkTheoryInput): TheoryMarkingResult {
-  const visible = visibleFields(fields, values as VisibilityAnswers);
+  // An untouched attempt has no map. Marking it is meaningful — every question
+  // is unanswered — so normalize rather than refusing, which would have made an
+  // assessor unable to fail a candidate who wrote nothing.
+  const answers = values ?? {};
+  const visible = visibleFields(fields, answers as VisibilityAnswers);
 
   const mandatoryIds = new Set(part.mandatoryFieldIds ?? []);
 
@@ -171,7 +180,7 @@ export function markTheory({ fields, values, part }: MarkTheoryInput): TheoryMar
     if (!field.answerKey || field.answerKey.length === 0) continue;
     if (!field.outcomeTarget) continue;
 
-    const selected = selectedOptions(values[field.id]);
+    const selected = selectedOptions(answers[field.id]);
     const unanswered = selected === undefined;
 
     marks.push({
@@ -189,7 +198,7 @@ export function markTheory({ fields, values, part }: MarkTheoryInput): TheoryMar
 
   return {
     marks,
-    derivedValues: applyMarks(marks, values),
+    derivedValues: applyMarks(marks, answers),
     correctCount,
     totalCount: marks.length,
     mandatoryAllCorrect,

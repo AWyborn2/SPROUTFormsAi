@@ -724,6 +724,21 @@ export function useSaveAttempt(caseId: string) {
   });
 }
 
+/** Hand a part in, or take it back while it is still unmarked. */
+export function useSetAttemptSubmitted(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { attemptId: string; submitted: boolean }) =>
+      input.submitted
+        ? assessmentsApi.submitAttempt(caseId, input.attemptId)
+        : assessmentsApi.reopenAttempt(caseId, input.attemptId),
+    onSuccess: (_r, input) => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+      void qc.invalidateQueries({ queryKey: keys.assessmentAttempt(caseId, input.attemptId) });
+    },
+  });
+}
+
 export function useRecordOutcome(caseId: string) {
   const qc = useQueryClient();
   return useMutation({

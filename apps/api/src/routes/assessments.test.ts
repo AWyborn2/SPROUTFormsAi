@@ -1286,3 +1286,185 @@ describe('GET /assessment-cases/:id/attempts/:attemptId', () => {
     }
   });
 });
+
+/**
+ * Handing a part in.
+ *
+ * The signal that closes the tracking gap: "has answers but no outcome" cannot
+ * tell someone halfway through from someone who finished last week and is
+ * waiting on an assessor. Submitting is the candidate's own act, and reversible
+ * by them right up until it is marked.
+ */
+describe('submitting an attempt', () => {
+  async function openAttemptFor(base: string, pathway = 'new') {
+    const tool = await seedTool(base);
+    const caseRes = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway }),
+    });
+    const kase = (await caseRes.json()) as { id: string };
+    const attemptRes = await fetch(`${base}/assessment-cases/${kase.id}/parts/p1/attempts`, {
+      method: 'POST',
+      headers: auth(),
+      body: '{}',
+    });
+    const attempt = (await attemptRes.json()) as { id: string };
+    return { caseId: kase.id, attemptId: attempt.id };
+  }
+
+  const submit = (base: string, caseId: string, attemptId: string, who = candidate) =>
+    fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/submit`, {
+      method: 'POST',
+      headers: auth(who),
+      body: '{}',
+    });
+
+  const reopen = (base: string, caseId: string, attemptId: string, who = candidate) =>
+    fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/reopen`, {
+      method: 'POST',
+      headers: auth(who),
+      body: '{}',
+    });
+
+  it('lets the candidate hand in their own attempt', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await openAttemptFor(base);
+      const res = await submit(base, caseId, attemptId);
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { submittedAt: string | null }).submittedAt).toBeTruthy();
+
+      // Visible to the assessor without opening the attempt — that IS the
+      // signal, so it has to reach the case view.
+      const detail = await fetch(`${base}/assessment-cases/${caseId}`, { headers: auth() });
+      const body = (await detail.json()) as { attempts: { id: string; submittedAt: string | null }[] };
+      expect(body.attempts.find((a) => a.id === attemptId)?.submittedAt).toBeTruthy();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses to save answers onto a handed-in attempt', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await openAttemptFor(base);
+      await submit(base, caseId, attemptId);
+
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      // Otherwise "handed in" would mean nothing — the answers could keep
+      // moving while the assessor was reading them.
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('attempt_submitted');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets the candidate take it back while it is still unmarked', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await openAttemptFor(base);
+      await submit(base, caseId, attemptId);
+
+      const res = await reopen(base, caseId, attemptId);
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { submittedAt: string | null }).submittedAt).toBeNull();
+
+      // ...and answering works again. Nothing was assessed, so nothing is lost.
+      const save = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      expect(save.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses to submit another candidate’s attempt, as not found', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await openAttemptFor(base);
+      const res = await submit(base, caseId, attemptId, {
+        userId: OTHER_CANDIDATE,
+        orgId: ORG,
+        role: 'candidate',
+      });
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  /** Answer the mandatory question correctly, so the derived outcome passes. */
+  async function markSatisfactory(base: string, caseId: string, attemptId: string) {
+    await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+      method: 'PATCH',
+      headers: auth(candidate),
+      body: JSON.stringify({ values: { q1: ['a'] } }),
+    });
+    const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/outcome`, {
+      method: 'POST',
+      headers: auth(),
+      body: '{}',
+    });
+    // Guard the set-up: a 400 here would leave the attempt unmarked and the
+    // assertions below would pass for the wrong reason.
+    expect(res.status).toBe(200);
+  }
+
+  it('refuses to submit an already-marked attempt', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await openAttemptFor(base);
+      await markSatisfactory(base, caseId, attemptId);
+
+      const res = await submit(base, caseId, attemptId);
+      // A marked attempt is evidence; handing it in again is meaningless.
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('attempt_resolved');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses to reopen an attempt once it has been marked', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await openAttemptFor(base);
+      await markSatisfactory(base, caseId, attemptId);
+      const res = await reopen(base, caseId, attemptId);
+      // Reopening after marking would let a candidate rewrite what was assessed.
+      expect(res.status).toBe(409);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('is idempotent — submitting twice keeps the first hand-in time', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await openAttemptFor(base);
+      const first = (await (await submit(base, caseId, attemptId)).json()) as { submittedAt: string };
+      const second = (await (await submit(base, caseId, attemptId)).json()) as { submittedAt: string };
+
+      // A double-tap must not look like a later hand-in than it was.
+      expect(second.submittedAt).toBe(first.submittedAt);
+    } finally {
+      server.close();
+    }
+  });
+});
