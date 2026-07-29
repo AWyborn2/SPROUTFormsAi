@@ -10,6 +10,55 @@ import type { AnswerSet, FormFieldType, RepeatingColumn, SourcePosition } from '
 export type ExtractionStatus = 'ok' | 'review' | 'low';
 
 /**
+ * What kind of document is being imported.
+ *
+ * Extraction reads very differently by document class, and a single generic
+ * prompt gets some classes badly wrong. The case that forced this: on a
+ * competency assessment paper, half the theory questions came back as
+ * answerable choice fields and half as rows inside a summary table — the same
+ * content, two incompatible treatments, leaving fifteen questions unanswerable.
+ * A per-type instruction set tells the model what the class's structures MEAN.
+ *
+ * `generic` keeps the original behaviour and stays the default, so an
+ * unclassified import behaves exactly as it did before types existed.
+ */
+export const DOCUMENT_TYPES = [
+  'generic',
+  'assessment',
+  'checklist',
+  'report',
+  'timesheet',
+  'order_form',
+  'record',
+  'plan',
+] as const;
+export type DocumentType = (typeof DOCUMENT_TYPES)[number];
+
+/** Human labels for the import-time picker. */
+export const DOCUMENT_TYPE_LABELS: Record<DocumentType, string> = {
+  generic: 'General form',
+  assessment: 'Competency assessment',
+  checklist: 'Inspection checklist',
+  report: 'Report',
+  timesheet: 'Timesheet',
+  order_form: 'Order form',
+  record: 'Record',
+  plan: 'Plan',
+};
+
+/** One-line hints shown beside each choice at import. */
+export const DOCUMENT_TYPE_HINTS: Record<DocumentType, string> = {
+  generic: 'No special handling — the default reading.',
+  assessment: 'Theory questions, practical checklists, logbooks, sign-off outcomes.',
+  checklist: 'Repeating item rows with tick or N/A columns.',
+  report: 'Narrative sections with supporting figures.',
+  timesheet: 'Dated rows with start, finish and hours.',
+  order_form: 'Line items with quantity, description and price.',
+  record: 'A register of entries kept over time.',
+  plan: 'Staged or scheduled work with owners and dates.',
+};
+
+/**
  * Which of the N printed groups a split-table field is, in left-to-right order.
  *
  * Review-only, produced by `splitTableGroups` when the reviewer breaks one

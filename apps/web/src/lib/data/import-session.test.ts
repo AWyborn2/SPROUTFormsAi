@@ -140,7 +140,7 @@ describe('startExtraction', () => {
     expect(postMock).toHaveBeenNthCalledWith(
       2,
       '/pdf/extract',
-      { assetId: 'asset-123', fileName: 'site-safety-audit.pdf' },
+      { assetId: 'asset-123', fileName: 'site-safety-audit.pdf', documentType: 'generic' },
       { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
     );
   });
@@ -232,7 +232,8 @@ describe('retryExtraction', () => {
     expect(session.fields).toHaveLength(2);
     expect(postMock).toHaveBeenLastCalledWith(
       '/pdf/extract',
-      { assetId: 'asset-456', fileName: 'site-safety-audit.pdf' },
+      // Retry replays the type the original run chose, not a fresh default.
+      { assetId: 'asset-456', fileName: 'site-safety-audit.pdf', documentType: 'generic' },
       { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
     );
   });
@@ -1274,5 +1275,56 @@ describe('a printSelectedValue choice field publishes a single value box, not pe
     confirmGeometry(optionSlotId('shift', 'Day'));
 
     expect(reviewedToFields([dropdown()])[0]?.geometry).toBeUndefined();
+  });
+});
+
+/**
+ * The document type selects which extraction profile the server applies, so it
+ * has to survive the whole pipeline — including a retry, which must re-run the
+ * same reading rather than silently falling back to generic.
+ */
+describe('document type', () => {
+  it('sends the chosen type to the extractor', async () => {
+    postMock.mockResolvedValueOnce({ assetId: 'asset-123' });
+    postMock.mockResolvedValueOnce({ fields: [], designNotes: [] });
+
+    await startExtraction(makeFile(), 'assessment');
+
+    expect(postMock).toHaveBeenNthCalledWith(
+      2,
+      '/pdf/extract',
+      expect.objectContaining({ documentType: 'assessment' }),
+      { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+    );
+  });
+
+  it('replays the same type on retry', async () => {
+    postMock.mockResolvedValueOnce({ assetId: 'asset-123' });
+    postMock.mockRejectedValueOnce(new Error('boom'));
+    await startExtraction(makeFile(), 'assessment');
+
+    postMock.mockResolvedValueOnce({ assetId: 'asset-456' });
+    postMock.mockResolvedValueOnce({ fields: [], designNotes: [] });
+    await retryExtraction();
+
+    expect(postMock).toHaveBeenLastCalledWith(
+      '/pdf/extract',
+      expect.objectContaining({ documentType: 'assessment' }),
+      { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+    );
+  });
+
+  it('defaults to generic when no type is chosen', async () => {
+    postMock.mockResolvedValueOnce({ assetId: 'asset-123' });
+    postMock.mockResolvedValueOnce({ fields: [], designNotes: [] });
+
+    await startExtraction(makeFile());
+
+    expect(postMock).toHaveBeenNthCalledWith(
+      2,
+      '/pdf/extract',
+      expect.objectContaining({ documentType: 'generic' }),
+      { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
+    );
   });
 });

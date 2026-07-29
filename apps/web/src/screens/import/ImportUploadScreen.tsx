@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Button, FileDropzone, Icon } from '@formai/ui';
+import { DOCUMENT_TYPE_HINTS, DOCUMENT_TYPE_LABELS, DOCUMENT_TYPES, type DocumentType } from '@formai/shared';
 import { useForm } from '../../lib/data/hooks.js';
 import { resetImportSession, setImportTarget, startExtraction } from '../../lib/data/import-session.js';
 import { formatFileSize, validateUploadFile } from './upload-validation.js';
@@ -17,6 +18,7 @@ export function ImportUploadScreen() {
   const { data: targetForm } = useForm(targetFormId ?? undefined);
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [documentType, setDocumentType] = useState<DocumentType>('generic');
 
   // Fresh session each time the wizard is entered from the top; the target
   // (if any) is set AFTER the reset so a plain "Import PDF" entry clears it.
@@ -41,7 +43,7 @@ export function ImportUploadScreen() {
   function handleExtract() {
     if (!file) return;
     // Fire-and-forget — the review screen renders upload/extract progress.
-    void startExtraction(file);
+    void startExtraction(file, documentType);
     navigate('/app/import/review');
   }
 
@@ -100,6 +102,33 @@ export function ImportUploadScreen() {
               </div>
             </div>
             <Icon name="check-circle-2" size={18} className="flex-none text-accent" />
+          </div>
+        )}
+
+        {file && (
+          <div className="mt-4">
+            <label
+              htmlFor="import-document-type"
+              className="block text-[13.5px] font-semibold"
+            >
+              What kind of document is this?
+            </label>
+            <p className="mt-0.5 text-xs text-text-tertiary">
+              Tunes how the fields are read. Leave it on General form if none fits.
+            </p>
+            <select
+              id="import-document-type"
+              value={documentType}
+              onChange={(e) => setDocumentType(e.target.value as DocumentType)}
+              className="mt-2 w-full rounded-md border border-border bg-surface-card p-[9px_11px] text-[13.5px]"
+            >
+              {DOCUMENT_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {DOCUMENT_TYPE_LABELS[t]}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1.5 text-xs text-text-tertiary">{DOCUMENT_TYPE_HINTS[documentType]}</p>
           </div>
         )}
 

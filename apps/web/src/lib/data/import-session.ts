@@ -13,6 +13,7 @@ import { useSyncExternalStore } from 'react';
 import type {
   AnswerSet,
   ColumnCalc,
+  DocumentType,
   ExtractedField,
   ExtractionResult,
   ExtractionStatus,
@@ -88,6 +89,11 @@ function emptySession(): ImportSession {
 let session: ImportSession = emptySession();
 /** Base64 of the last file handed to startExtraction — kept so retry works. */
 let heldBase64: string | null = null;
+/**
+ * The document type chosen at upload, replayed on retry so a re-extraction
+ * uses the same reading as the run it is retrying.
+ */
+let heldDocumentType: DocumentType = 'generic';
 /** Monotonic run token — a reset/new start invalidates in-flight async work. */
 let runId = 0;
 
@@ -276,9 +282,13 @@ export async function fileToBase64(file: File): Promise<string> {
  * session has landed in 'ready' or 'error' — state is read via the store,
  * not the return value.
  */
-export async function startExtraction(file: File): Promise<void> {
+export async function startExtraction(
+  file: File,
+  documentType: DocumentType = 'generic',
+): Promise<void> {
   const run = ++runId;
   heldBase64 = null;
+  heldDocumentType = documentType;
   // Starting over with a new file keeps the re-extract target — the target is
   // wizard-scoped (cleared by reset on step-1 entry), not file-scoped.
   update({
@@ -321,7 +331,7 @@ async function runPipeline(run: number, fileName: string, base64: string): Promi
 
     const result = await apiClient.post<ExtractionResult>(
       '/pdf/extract',
-      { assetId, fileName },
+      { assetId, fileName, documentType: heldDocumentType },
       { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
     );
     if (run !== runId) return;

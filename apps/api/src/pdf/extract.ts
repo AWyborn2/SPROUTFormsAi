@@ -29,6 +29,7 @@ import {
 } from 'pdf-lib';
 import type {
   AnswerSet,
+  DocumentType,
   ExtractedField,
   ExtractionResult,
   FormFieldType,
@@ -37,6 +38,7 @@ import type {
 } from '@formai/shared';
 import { resolveAnswerSets } from '@formai/shared';
 import { EXTRACT_TOOL_NAME, extractFormFieldsTool } from './tool-schema.js';
+import { profileFor } from './document-profiles.js';
 
 /** Minimum tokens for the forced tool call — undersizing makes it fail outright. */
 export const EXTRACTION_MAX_TOKENS = 16000;
@@ -88,6 +90,12 @@ export interface ExtractOptions {
    * extracted one call each. A value ≤ 0 or non-finite falls back to the default.
    */
   pageBatchSize?: number;
+  /**
+   * What kind of document this is. Selects an extra instruction set appended
+   * to the base prompt — see `document-profiles.ts`. Omitted or `generic`
+   * keeps the pre-existing behaviour exactly.
+   */
+  documentType?: DocumentType;
 }
 
 const EXTRACTION_PROMPT =
@@ -107,6 +115,20 @@ const EXTRACTION_PROMPT =
   'house shapes are OK / NA, ✓ / × / N-A, and Pass / Fail / NA. Group alternatives into an ' +
   'answerSets entry naming those column keys; leave independent checkboxes ungrouped. ' +
   'Give every field a confidence score.';
+
+/**
+ * The base prompt, plus any per-document-type instructions.
+ *
+ * Type guidance is APPENDED rather than substituted so a profile can lean on
+ * the general rules it does not contradict, and so an untuned type degrades to
+ * exactly the previous behaviour instead of to nothing.
+ */
+function promptFor(type: DocumentType | undefined): string {
+  const profile = profileFor(type);
+  return profile ? `${EXTRACTION_PROMPT}
+
+${profile}` : EXTRACTION_PROMPT;
+}
 
 /**
  * Which page a widget sits on, or -1 when it cannot be established.
@@ -427,7 +449,7 @@ async function extractBatch(
             type: 'document',
             source: { type: 'base64', media_type: 'application/pdf', data: base64 },
           },
-          { type: 'text', text: EXTRACTION_PROMPT },
+          { type: 'text', text: promptFor(opts.documentType) },
         ],
       },
     ],

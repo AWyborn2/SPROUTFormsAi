@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
+import { DOCUMENT_TYPES } from '@formai/shared';
 import type { FormField, SubmissionValue } from '@formai/shared';
 import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
@@ -82,6 +83,8 @@ const extractBody = z
     pdfBase64: z.string().min(1).optional(),
     /** An id returned by `POST /pdf/upload`. Mutually exclusive with `pdfBase64`. */
     assetId: z.string().min(1).optional(),
+    /** Selects the per-type extraction profile; defaults to generic. */
+    documentType: z.enum(DOCUMENT_TYPES).optional(),
   })
   .refine((v) => (v.pdfBase64 ? 1 : 0) + (v.assetId ? 1 : 0) === 1, {
     message: 'exactly one of pdfBase64 or assetId is required',
@@ -117,6 +120,7 @@ pdfRouter.post(
     try {
       const anthropic = getAnthropic() ?? undefined;
       const result = await extractForm(bytes, {
+        documentType: parsed.data.documentType,
         fileName: parsed.data.fileName,
         anthropic,
         model: env.ANTHROPIC_EXTRACTION_MODEL,
