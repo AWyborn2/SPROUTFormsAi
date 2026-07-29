@@ -137,7 +137,7 @@ const partSchema = z.object({
   minimumHours: z.number().positive().optional(),
   durationColumnKey: z.string().optional(),
   checklistFieldId: z.string().optional(),
-  mandatorySectionFieldId: z.string().optional(),
+  mandatoryFieldIds: z.array(z.string()).optional(),
 });
 
 const toolBody = z.object({
@@ -155,8 +155,8 @@ const toolBody = z.object({
  * Create an assessment tool over a published template.
  *
  * The manifest is validated against the template's ACTUAL fields, not accepted
- * on trust: a part whose start field is not a section header in that version
- * would contribute no values and export as a silently blank part.
+ * on trust: a part anchored to a field that version does not contain would
+ * contribute no values and export as a silently blank part.
  */
 assessmentToolsRouter.post(
   '/',

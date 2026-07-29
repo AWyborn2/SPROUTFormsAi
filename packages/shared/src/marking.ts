@@ -25,7 +25,6 @@
  */
 
 import type { AssessmentPart, PartOutcome } from './assessment.js';
-import { fieldsInSection } from './assessment.js';
 import type { FormField, OutcomeTarget } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 import { visibleFields, type VisibilityAnswers } from './visibility.js';
@@ -150,7 +149,7 @@ export interface MarkTheoryInput {
   /** The candidate's answers, including whatever seeds visibility. */
   values: Record<string, SubmissionValue>;
   /** The theory part being marked — supplies the mandatory section. */
-  part: Pick<AssessmentPart, 'mandatorySectionFieldId'>;
+  part: Pick<AssessmentPart, 'mandatoryFieldIds'>;
 }
 
 /**
@@ -164,11 +163,7 @@ export interface MarkTheoryInput {
 export function markTheory({ fields, values, part }: MarkTheoryInput): TheoryMarkingResult {
   const visible = visibleFields(fields, values as VisibilityAnswers);
 
-  const mandatoryIds = new Set(
-    part.mandatorySectionFieldId
-      ? fieldsInSection(fields, part.mandatorySectionFieldId).map((f) => f.id)
-      : [],
-  );
+  const mandatoryIds = new Set(part.mandatoryFieldIds ?? []);
 
   const marks: QuestionMark[] = [];
 

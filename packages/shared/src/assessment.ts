@@ -6,12 +6,14 @@
  * Two ideas carry this module.
  *
  * 1. PARTS ARE DECLARED, NOT INFERRED. A printed assessment paper is one
- *    template holding every part as a run of sections. Rather than tagging each
- *    field with a part, the tool declares where each part BEGINS — a
- *    `section_header` field id — and a part runs from there to the next part's
- *    start. That reuses the header-to-next-header convention `visibility.ts`
- *    already implements, so importing an 18-page paper needs one authoring pass
- *    instead of a field-level migration.
+ *    template holding every part in sequence. Rather than tagging each field
+ *    with a part, the tool declares the field each part BEGINS AT, and a part
+ *    runs from there to the next part's start. Importing an 18-page paper
+ *    needs one authoring pass instead of a field-level migration.
+ *
+ *    The anchor is any field, not a `section_header`. Extraction emits the
+ *    fields a person fills in; a printed heading is not one, so a
+ *    header-anchored model could not describe a real import at all.
  *
  * 2. PATHWAY MEMBERSHIP LIVES ON THE PART. Which parts a pathway requires is
  *    declared per part rather than computed from part numbers. Hardcoding
@@ -79,7 +81,15 @@ export interface AssessmentPart {
   kind: PartKind;
   /** Pathways that require this part. */
   pathways: AssessmentPathway[];
-  /** Field id of the `section_header` where this part begins. */
+  /**
+   * The field this part BEGINS AT, inclusive. Any field type.
+   *
+   * Deliberately not restricted to `section_header`. Extraction emits the
+   * fields a person fills in, and a printed heading is not one — requiring a
+   * header anchor made a real 18-page import unanchorable, with none of its
+   * nine part boundaries resolvable. A part now runs from this field to the
+   * next part's start field, which needs no furniture in the document.
+   */
   startFieldId: string;
   /** Logbook parts only — hours before the next demonstration is prompted. */
   minimumHours?: number;
@@ -99,13 +109,16 @@ export interface AssessmentPart {
   /** Field id of the page-one method checklist entry this part ticks. */
   checklistFieldId?: string;
   /**
-   * Theory parts only — the `section_header` whose questions must ALL be
-   * correct for the part to reach satisfactory. Named rather than hardcoded to
-   * "General" so the rule travels to any assessment tool with a
-   * must-pass-entirely section; questions outside it are still marked, they
-   * just don't gate the outcome.
+   * Theory parts only — the questions that must ALL be answered correctly for
+   * the part to reach satisfactory.
+   *
+   * Listed explicitly rather than derived from a section, for the same reason
+   * `startFieldId` was relaxed: a document may carry no section boundary to
+   * derive them from. Questions outside this list are still marked and
+   * reported; they simply do not gate the outcome. Absent or empty means the
+   * part has no must-pass-entirely set.
    */
-  mandatorySectionFieldId?: string;
+  mandatoryFieldIds?: string[];
 }
 
 /** The part structure of one assessment tool, against one template. */
@@ -120,6 +133,42 @@ export interface AssessmentToolManifest {
    * content.
    */
   locationStreamFieldId?: string;
+}
+
+/**
+ * The fields belonging to one part — from its start field, inclusive, up to
+ * the next part's start field.
+ *
+ * Ranges are computed from the manifest's own ordering rather than from
+ * document furniture, so a part is well defined even in a template with no
+ * section headers at all. A part whose start field is missing from the version
+ * yields nothing rather than the remainder of the document: a stale anchor
+ * must produce an empty part, never silently swallow every field after it.
+ */
+export function fieldsInPart(
+  fields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+  partKey: string,
+): FormField[] {
+  const ordered = orderedParts(manifest);
+  const index = ordered.findIndex((p) => p.key === partKey);
+  if (index < 0) return [];
+
+  const start = fields.findIndex((f) => f.id === ordered[index]!.startFieldId);
+  if (start < 0) return [];
+
+  // The next part whose anchor actually resolves bounds this one. Skipping
+  // unresolvable anchors stops one broken part from truncating its neighbour.
+  let end = fields.length;
+  for (let i = index + 1; i < ordered.length; i++) {
+    const at = fields.findIndex((f) => f.id === ordered[i]!.startFieldId);
+    if (at > start) {
+      end = at;
+      break;
+    }
+  }
+
+  return fields.slice(start, end);
 }
 
 /**
@@ -188,9 +237,7 @@ export function validateManifest(
 
   const seenKeys = new Set<string>();
   const seenOrdinals = new Set<number>();
-  const headerIds = new Set(
-    fields.filter((f) => f.type === 'section_header').map((f) => f.id),
-  );
+  const fieldIds = new Set(fields.map((f) => f.id));
 
   for (const part of parts) {
     if (seenKeys.has(part.key)) problems.push(`Duplicate part key "${part.key}".`);
@@ -207,11 +254,18 @@ export function validateManifest(
 
     // A start field that isn't in the version means the manifest was authored
     // against a different template version. Exporting that would silently drop
-    // the part's values, so it is a hard problem rather than a warning.
-    if (!headerIds.has(part.startFieldId)) {
+    // the part's values, so it is a hard problem rather than a warning. The
+    // field may be of ANY type — see `startFieldId`.
+    if (!fieldIds.has(part.startFieldId)) {
       problems.push(
-        `Part "${part.key}" starts at field "${part.startFieldId}", which is not a section header in this version.`,
+        `Part "${part.key}" starts at field "${part.startFieldId}", which is not in this version.`,
       );
+    }
+
+    for (const id of part.mandatoryFieldIds ?? []) {
+      if (!fieldIds.has(id)) {
+        problems.push(`Part "${part.key}" names mandatory field "${id}", which is not in this version.`);
+      }
     }
 
     if (part.kind === 'logbook') {

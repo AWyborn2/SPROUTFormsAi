@@ -105,7 +105,7 @@ const MANIFEST: AssessmentToolManifest = {
       kind: 'theory',
       pathways: ['experienced', 'new', 'rpl'],
       startFieldId: 'h-theory',
-      mandatorySectionFieldId: 'h-general',
+      mandatoryFieldIds: ['q1'],
     },
     {
       key: 'p2',

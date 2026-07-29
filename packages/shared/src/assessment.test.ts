@@ -13,6 +13,7 @@ import {
   type AttemptFact,
   type PartOutcome,
   caseProgress,
+  fieldsInPart,
   isCaseCompetent,
   orderedParts,
   requiredParts,
@@ -109,7 +110,7 @@ describe('validateManifest', () => {
     expect(validateManifest(manifest, fields)).toEqual([]);
   });
 
-  it('rejects a start field that is not a section header in this version', () => {
+  it('rejects a start field that is not in this version', () => {
     const manifest: AssessmentToolManifest = {
       parts: [part({ key: 'a', ordinal: 1, startFieldId: 'gone' })],
     };
@@ -120,12 +121,22 @@ describe('validateManifest', () => {
     expect(problems[0]).toContain('gone');
   });
 
-  it('rejects a start field that exists but is not a header', () => {
+  it('accepts a start field that is not a section header', () => {
+    // Extraction emits input fields, not printed headings — anchoring to a
+    // question or a table is the normal case, not a degraded one.
     const manifest: AssessmentToolManifest = {
       parts: [part({ key: 'a', ordinal: 1, startFieldId: 'q1' })],
     };
 
-    expect(validateManifest(manifest, [...fields, question('q1')])).toHaveLength(1);
+    expect(validateManifest(manifest, [...fields, question('q1')])).toEqual([]);
+  });
+
+  it('rejects a mandatory field id that is not in this version', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [part({ key: 'a', ordinal: 1, mandatoryFieldIds: ['ghost'] })],
+    };
+
+    expect(validateManifest(manifest, fields).some((p) => p.includes('ghost'))).toBe(true);
   });
 
   it('reports every problem rather than stopping at the first', () => {
@@ -321,5 +332,82 @@ describe('totalLoggedHours', () => {
 
   it('returns 0 for no rows', () => {
     expect(totalLoggedHours([], 'd')).toBe(0);
+  });
+});
+
+/**
+ * Part ranges are computed from the manifest's own ordering, not from document
+ * furniture — which is what lets a template with no section headers still have
+ * well-defined parts. The failure this pins is the dangerous one: a stale
+ * anchor must yield an EMPTY part, never the whole remainder of the document.
+ */
+describe('fieldsInPart', () => {
+  const docFields: FormField[] = [
+    question('q1'),
+    question('q2'),
+    header('h-mid'),
+    question('q3'),
+    question('q4'),
+    question('q5'),
+  ];
+
+  const manifest: AssessmentToolManifest = {
+    parts: [
+      part({ key: 'one', ordinal: 1, startFieldId: 'q1' }),
+      part({ key: 'two', ordinal: 2, startFieldId: 'q3' }),
+    ],
+  };
+
+  it('runs from the start field, inclusive, to the next part start', () => {
+    expect(fieldsInPart(docFields, manifest, 'one').map((f) => f.id)).toEqual(['q1', 'q2', 'h-mid']);
+  });
+
+  it('runs the last part to the end of the document', () => {
+    expect(fieldsInPart(docFields, manifest, 'two').map((f) => f.id)).toEqual(['q3', 'q4', 'q5']);
+  });
+
+  it('anchors on any field type, not just a header', () => {
+    expect(fieldsInPart(docFields, manifest, 'one')[0]?.type).toBe('checkbox_group');
+  });
+
+  it('returns nothing for an unknown part key', () => {
+    expect(fieldsInPart(docFields, manifest, 'nope')).toEqual([]);
+  });
+
+  it('returns nothing — not the rest of the document — when the anchor is stale', () => {
+    const stale: AssessmentToolManifest = {
+      parts: [part({ key: 'ghost', ordinal: 1, startFieldId: 'deleted' })],
+    };
+
+    expect(fieldsInPart(docFields, stale, 'ghost')).toEqual([]);
+  });
+
+  it('does not let a broken neighbour truncate a part', () => {
+    const mixed: AssessmentToolManifest = {
+      parts: [
+        part({ key: 'one', ordinal: 1, startFieldId: 'q1' }),
+        part({ key: 'broken', ordinal: 2, startFieldId: 'deleted' }),
+        part({ key: 'three', ordinal: 3, startFieldId: 'q4' }),
+      ],
+    };
+
+    // 'broken' cannot bound 'one', so 'one' runs to the next anchor that resolves.
+    expect(fieldsInPart(docFields, mixed, 'one').map((f) => f.id)).toEqual([
+      'q1',
+      'q2',
+      'h-mid',
+      'q3',
+    ]);
+  });
+
+  it('respects document order over authoring order', () => {
+    const reversed: AssessmentToolManifest = {
+      parts: [
+        part({ key: 'two', ordinal: 2, startFieldId: 'q3' }),
+        part({ key: 'one', ordinal: 1, startFieldId: 'q1' }),
+      ],
+    };
+
+    expect(fieldsInPart(docFields, reversed, 'one').map((f) => f.id)).toEqual(['q1', 'q2', 'h-mid']);
   });
 });

@@ -48,7 +48,8 @@ const generalFields: FormField[] = [
   outcome('g2-out'),
 ];
 
-const part = { mandatorySectionFieldId: 'general' };
+/** General is the must-pass set: both its questions, named explicitly. */
+const part = { mandatoryFieldIds: ['g1', 'g2'] };
 
 const run = (fields: FormField[], values: Record<string, SubmissionValue>) =>
   markTheory({ fields, values, part });
