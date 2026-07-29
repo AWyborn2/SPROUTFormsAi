@@ -27,7 +27,9 @@ server answers *who, when, how many* and remembers *what was booked*.
 - **Streamable HTTP** (`./express`) — the same tools mounted on the API itself
   at `POST /mcp`, for hosted clients that cannot spawn anything locally. No
   build, no second deployment; authenticate with the same API key as a bearer
-  token. See `docs/induction-mcp.md`.
+  token. For Claude's custom-connector dialog, which has no header field, the
+  same tools are also served at `POST /mcp/key/<api-key>` with the credential in
+  the URL. See `docs/induction-mcp.md`.
 
 ## Setup
 

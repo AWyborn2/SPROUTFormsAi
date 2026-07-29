@@ -2,7 +2,7 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express, { type Express } from 'express';
 import { env } from './env.js';
-import { requireMachineOrTenant } from './middleware/machine.js';
+import { requireMachineKeyFromPath, requireMachineOrTenant } from './middleware/machine.js';
 import { accountRouter } from './routes/account.js';
 import { apiKeysRouter } from './routes/api-keys.js';
 import { orgLogoRouter, publicAssetsRouter } from './routes/assets.js';
@@ -96,11 +96,18 @@ export function createApp(): Express {
   // several round trips later. The tools then call this same API back over
   // loopback with the caller's own key — see the router's docstring for why
   // that hop is deliberate.
+  const mcpApiUrl = `http://127.0.0.1:${env.API_PORT}`;
+  // URL-credentialed door, mounted BEFORE the header one so the more specific
+  // path wins (`app.use('/mcp', …)` would otherwise swallow it). It exists
+  // because Claude's custom-connector dialog takes a URL and OAuth fields with
+  // nowhere to put a bearer token; see requireMachineKeyFromPath for the
+  // tradeoff that buys.
   app.use(
-    '/mcp',
-    requireMachineOrTenant,
-    inductionMcpRouter({ apiUrl: `http://127.0.0.1:${env.API_PORT}` }),
+    '/mcp/key/:key',
+    requireMachineKeyFromPath('key'),
+    inductionMcpRouter({ apiUrl: mcpApiUrl, apiKeyFor: (req) => req.machineApiKey ?? null }),
   );
+  app.use('/mcp', requireMachineOrTenant, inductionMcpRouter({ apiUrl: mcpApiUrl }));
   app.use('/audit', auditRouter);
   app.use('/dashboard', dashboardRouter);
   app.use('/competencies', competenciesRouter);
