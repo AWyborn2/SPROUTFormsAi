@@ -90,16 +90,30 @@ function authHeader(tenant: { userId: string; orgId: string; role: string }) {
   return { cookie: `fai_session=${sealSession(tenant)}` };
 }
 
-function fakeDb(opts: {
-  submissions?: unknown[];
-  submissionFindFirst?: unknown;
-  versions?: unknown[];
-  apiKey?: unknown;
-} = {}) {
+function insertResult(rows: unknown[]) {
+  const awaitable = Promise.resolve(undefined) as Promise<undefined> & {
+    returning: () => Promise<unknown[]>;
+  };
+  awaitable.returning = vi.fn().mockResolvedValue(rows);
+  return awaitable;
+}
+
+function fakeDb(
+  opts: {
+    submissions?: unknown[];
+    submissionFindFirst?: unknown;
+    versions?: unknown[];
+    apiKey?: unknown;
+    bookings?: unknown[];
+    bookingStarters?: { bookingId: string; submissionId: string; starterName: string }[];
+  } = {},
+) {
   const versions = opts.versions ?? [
     { id: 'ver-intake', templateId: 'tpl-intake', fields: INTAKE_FIELDS },
   ];
-  return {
+  const insertValues = vi.fn();
+
+  const db = {
     query: {
       submissions: {
         findMany: vi.fn().mockResolvedValue(opts.submissions ?? []),
@@ -112,9 +126,28 @@ function fakeDb(opts: {
       rolePermissions: { findFirst: vi.fn().mockResolvedValue(undefined) },
       users: { findFirst: vi.fn().mockResolvedValue({ id: 'u-owner', name: 'Ash Wyborn' }) },
       apiKeys: { findFirst: vi.fn().mockResolvedValue(opts.apiKey) },
+      inductionBookings: { findMany: vi.fn().mockResolvedValue(opts.bookings ?? []) },
+      inductionBookingStarters: { findMany: vi.fn().mockResolvedValue(opts.bookingStarters ?? []) },
     },
+    insert: vi.fn((table: unknown) => ({
+      values: (v: unknown) => {
+        insertValues(table, v);
+        const rows = Array.isArray(v) ? v : [v];
+        return insertResult(
+          rows.map((row) => ({
+            id: 'booking-new',
+            createdAt: new Date('2026-03-10T09:00:00Z'),
+            ...(row as object),
+          })),
+        );
+      },
+    })),
     update: vi.fn(() => ({ set: () => ({ where: () => Promise.resolve() }) })),
   } as unknown as Db;
+
+  return Object.assign(db, { __insertValues: insertValues }) as Db & {
+    __insertValues: ReturnType<typeof vi.fn>;
+  };
 }
 
 beforeEach(() => {
@@ -430,6 +463,266 @@ describe('GET /inductions/dates', () => {
     try {
       expect((await fetch(`${base}/inductions/dates?count=0`, { headers: authHeader(OWNER) })).status).toBe(400);
       expect((await fetch(`${base}/inductions/dates?count=99`, { headers: authHeader(OWNER) })).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('POST /inductions/bookings', () => {
+  function bookingRequest(
+    body: Record<string, unknown>,
+    tenant: { userId: string; orgId: string; role: string } = OWNER,
+  ) {
+    return {
+      method: 'POST',
+      headers: { ...authHeader(tenant), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    };
+  }
+
+  it('records a booking whose seat count matches its starters', async () => {
+    const db = fakeDb({
+      submissions: [submission('sub-1', starterValues()), submission('sub-2', starterValues())],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(
+        `${base}/inductions/bookings`,
+        bookingRequest({
+          date: VALID_MONDAY,
+          submissionIds: ['sub-1', 'sub-2'],
+          externalReference: 'BIS-9931',
+        }),
+      );
+      expect(res.status).toBe(201);
+      const body = await jsonBody(res);
+      expect(body.seats).toBe(2);
+      expect(body.date).toBe(VALID_MONDAY);
+      expect(body.externalReference).toBe('BIS-9931');
+      expect(body.starters.map((s: { starterName: string }) => s.starterName)).toEqual([
+        'Marlee Okonkwo',
+        'Marlee Okonkwo',
+      ]);
+      // Names are captured at booking time so a later form edit cannot rewrite
+      // who was actually booked.
+      const [, starterRows] = db.__insertValues.mock.calls.find(
+        ([, v]) => Array.isArray(v) && (v as unknown[]).length === 2,
+      )!;
+      expect((starterRows as { starterName: string }[])[0]!.starterName).toBe('Marlee Okonkwo');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records the API key when an agent books, and leaves it null for a session', async () => {
+    const minted = mintApiKey();
+    const viaKeyDb = fakeDb({
+      submissions: [submission('sub-1', starterValues())],
+      apiKey: {
+        id: 'key-1',
+        orgId: 'org-1',
+        role: 'reviewer',
+        prefix: minted.prefix,
+        hash: minted.hash,
+        createdByUserId: 'u-owner',
+        revokedAt: null,
+      },
+    });
+    mockDbValue = viaKeyDb;
+    const { server, base } = startApp();
+    try {
+      const viaKey = await fetch(`${base}/inductions/bookings`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${minted.plaintext}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ date: VALID_MONDAY, submissionIds: ['sub-1'] }),
+      });
+      expect(viaKey.status).toBe(201);
+      expect((await jsonBody(viaKey)).bookedByApiKeyId).toBe('key-1');
+
+      const audits = viaKeyDb.__insertValues.mock.calls
+        .map(([, v]) => v as Record<string, unknown>)
+        .filter((v) => typeof v?.action === 'string');
+      expect(audits[0]!.action).toBe('Recorded induction booking via API key');
+    } finally {
+      server.close();
+    }
+
+    const viaSessionDb = fakeDb({ submissions: [submission('sub-1', starterValues())] });
+    mockDbValue = viaSessionDb;
+    const second = startApp();
+    try {
+      const res = await fetch(
+        `${second.base}/inductions/bookings`,
+        bookingRequest({ date: VALID_MONDAY, submissionIds: ['sub-1'] }),
+      );
+      const body = await jsonBody(res);
+      expect(body.bookedByApiKeyId).toBeNull();
+      expect(body.bookedByUserId).toBe(OWNER.userId);
+    } finally {
+      second.server.close();
+    }
+  });
+
+  it('404s when a submission is not in the caller org, and writes nothing', async () => {
+    // The org filter is in the WHERE clause, so a foreign id is simply absent.
+    const db = fakeDb({ submissions: [] });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(
+        `${base}/inductions/bookings`,
+        bookingRequest({ date: VALID_MONDAY, submissionIds: ['sub-elsewhere'] }),
+      );
+      expect(res.status).toBe(404);
+      expect((await jsonBody(res)).submissionIds).toEqual(['sub-elsewhere']);
+      expect(db.__insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s when a starter wants a different Monday', async () => {
+    const db = fakeDb({
+      submissions: [submission('sub-late', starterValues({ [CHC_FIELD_IDS.inductionDate]: LATER_MONDAY }))],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(
+        `${base}/inductions/bookings`,
+        bookingRequest({ date: VALID_MONDAY, submissionIds: ['sub-late'] }),
+      );
+      expect(res.status).toBe(400);
+      const body = await jsonBody(res);
+      expect(body.error).toBe('date_mismatch');
+      expect(body.inductionDate).toBe(LATER_MONDAY);
+      expect(db.__insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s rather than double-booking a starter', async () => {
+    const db = fakeDb({
+      submissions: [submission('sub-1', starterValues())],
+      bookingStarters: [{ bookingId: 'booking-old', submissionId: 'sub-1', starterName: 'Marlee Okonkwo' }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(
+        `${base}/inductions/bookings`,
+        bookingRequest({ date: VALID_MONDAY, submissionIds: ['sub-1'] }),
+      );
+      expect(res.status).toBe(409);
+      expect(await jsonBody(res)).toEqual({ error: 'already_booked', submissionIds: ['sub-1'] });
+      expect(db.__insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a caller without the export grant', async () => {
+    const db = fakeDb({ submissions: [submission('sub-1', starterValues())] });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(
+        `${base}/inductions/bookings`,
+        bookingRequest({ date: VALID_MONDAY, submissionIds: ['sub-1'] }, VIEWER),
+      );
+      expect(res.status).toBe(403);
+      expect(db.__insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s on a malformed body', async () => {
+    mockDbValue = fakeDb();
+    const { server, base } = startApp();
+    try {
+      expect((await fetch(`${base}/inductions/bookings`, bookingRequest({ date: 'soon', submissionIds: ['s'] }))).status).toBe(400);
+      expect((await fetch(`${base}/inductions/bookings`, bookingRequest({ date: VALID_MONDAY, submissionIds: [] }))).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('booked starters', () => {
+  it('are blocked and no longer counted toward a cohort seat', async () => {
+    mockDbValue = fakeDb({
+      submissions: [submission('sub-1', starterValues()), submission('sub-2', starterValues())],
+      bookingStarters: [{ bookingId: 'booking-old', submissionId: 'sub-1', starterName: 'Marlee Okonkwo' }],
+    });
+    const { server, base } = startApp();
+    try {
+      const candidates = await jsonBody(
+        await fetch(`${base}/inductions/candidates`, { headers: authHeader(OWNER) }),
+      );
+      const booked = candidates.candidates.find((c: { submissionId: string }) => c.submissionId === 'sub-1');
+      expect(booked.readiness).toBe('blocked');
+      expect(booked.blockers).toContain('already_booked');
+
+      const cohorts = await jsonBody(
+        await fetch(`${base}/inductions/cohorts`, { headers: authHeader(OWNER) }),
+      );
+      expect(cohorts.cohorts[0].seats).toBe(1);
+      expect(cohorts.cohorts[0].starters).toHaveLength(2);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('GET /inductions/bookings', () => {
+  const BOOKING = {
+    id: 'booking-1',
+    orgId: 'org-1',
+    inductionDate: VALID_MONDAY,
+    seats: 2,
+    externalReference: 'BIS-9931',
+    note: '',
+    bookedByUserId: 'u-owner',
+    bookedByApiKeyId: null,
+    createdAt: new Date('2026-03-11T02:00:00Z'),
+  };
+
+  it('returns bookings with their starters', async () => {
+    mockDbValue = fakeDb({
+      bookings: [BOOKING],
+      bookingStarters: [
+        { bookingId: 'booking-1', submissionId: 'sub-1', starterName: 'Marlee Okonkwo' },
+        { bookingId: 'booking-1', submissionId: 'sub-2', starterName: 'Rowan Fletcher' },
+      ],
+    });
+    const { server, base } = startApp();
+    try {
+      const body = await jsonBody(
+        await fetch(`${base}/inductions/bookings?date=${VALID_MONDAY}`, { headers: authHeader(OWNER) }),
+      );
+      expect(body.bookings).toHaveLength(1);
+      expect(body.bookings[0].seats).toBe(2);
+      expect(body.bookings[0].starters.map((s: { starterName: string }) => s.starterName)).toEqual([
+        'Marlee Okonkwo',
+        'Rowan Fletcher',
+      ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('answers an empty list without querying starters', async () => {
+    mockDbValue = fakeDb({ bookings: [] });
+    const { server, base } = startApp();
+    try {
+      const body = await jsonBody(
+        await fetch(`${base}/inductions/bookings`, { headers: authHeader(OWNER) }),
+      );
+      expect(body).toEqual({ bookings: [] });
     } finally {
       server.close();
     }

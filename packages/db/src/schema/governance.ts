@@ -14,6 +14,7 @@ import type { PermissionMatrix } from '@formai/shared';
 import { auditCategoryEnum, roleEnum } from './enums.ts';
 import { organizations, users } from './organizations.ts';
 import { formTemplates } from './forms.ts';
+import { submissions } from './submissions.ts';
 
 /** Competencies held by workers (Should-tier gating). */
 export const competencies = pgTable(
@@ -178,6 +179,90 @@ export const apiKeysRelations = relations(apiKeys, ({ one }) => ({
   createdBy: one(users, {
     fields: [apiKeys.createdByUserId],
     references: [users.id],
+  }),
+}));
+
+/**
+ * A booked induction: one date, N seats, the starters it covers.
+ *
+ * Deliberately its own record rather than a submission status. A status string
+ * cannot hold a seat count, an external reference, or the many-starters-to-one
+ * -booking shape the site actually books in — and conflating "this intake was
+ * approved" with "this cohort was booked" would leave neither answerable.
+ *
+ * `inductionDate` is text in the same ISO form the intake answer uses, so the
+ * two compare without a conversion in between.
+ */
+export const inductionBookings = pgTable(
+  'induction_bookings',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** ISO `YYYY-MM-DD`, matching the intake answer it was booked from. */
+    inductionDate: text('induction_date').notNull(),
+    /** Seats taken. Derived from the starters, stored so the booking reads on its own. */
+    seats: integer().notNull(),
+    /** The external system's handle, e.g. a BISTrainer transaction reference. */
+    externalReference: text('external_reference').notNull().default(''),
+    note: text().notNull().default(''),
+    /** The acting user. For a machine call this is the API key's issuer. */
+    bookedByUserId: uuid('booked_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** Set when an agent booked it, so machine and human bookings stay distinguishable. */
+    bookedByApiKeyId: uuid('booked_by_api_key_id').references(() => apiKeys.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('induction_bookings_org_idx').on(t.orgId),
+    index('induction_bookings_org_date_idx').on(t.orgId, t.inductionDate),
+  ],
+);
+
+/**
+ * One starter's seat in a booking.
+ *
+ * `starterName` is captured at booking time on purpose: the submission it came
+ * from stays editable, and the record of who was actually booked must not
+ * change underneath the booking. The unique index is what makes a retried tool
+ * call idempotent rather than double-booking a seat.
+ */
+export const inductionBookingStarters = pgTable(
+  'induction_booking_starters',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    bookingId: uuid('booking_id')
+      .notNull()
+      .references(() => inductionBookings.id, { onDelete: 'cascade' }),
+    submissionId: uuid('submission_id')
+      .notNull()
+      .references(() => submissions.id, { onDelete: 'restrict' }),
+    starterName: text('starter_name').notNull(),
+  },
+  (t) => [
+    uniqueIndex('induction_booking_starters_uq').on(t.bookingId, t.submissionId),
+    index('induction_booking_starters_submission_idx').on(t.submissionId),
+  ],
+);
+
+export const inductionBookingsRelations = relations(inductionBookings, ({ one, many }) => ({
+  org: one(organizations, {
+    fields: [inductionBookings.orgId],
+    references: [organizations.id],
+  }),
+  starters: many(inductionBookingStarters),
+}));
+
+export const inductionBookingStartersRelations = relations(inductionBookingStarters, ({ one }) => ({
+  booking: one(inductionBookings, {
+    fields: [inductionBookingStarters.bookingId],
+    references: [inductionBookings.id],
+  }),
+  submission: one(submissions, {
+    fields: [inductionBookingStarters.submissionId],
+    references: [submissions.id],
   }),
 }));
 

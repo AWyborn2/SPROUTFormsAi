@@ -15,6 +15,7 @@ import {
 import { requireMachineOrTenant } from '../middleware/machine.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
+import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
 
 /**
@@ -81,6 +82,21 @@ function candidateDto(
 type SubmissionRow = typeof schema.submissions.$inferSelect;
 
 /**
+ * The submissions already covered by a booking.
+ *
+ * Scoped by submission id rather than org because the ids handed in are always
+ * already org-filtered — every caller of this reached them through a query
+ * that filtered on `orgId` first.
+ */
+async function bookedSubmissionIds(submissionIds: string[]): Promise<Set<string>> {
+  if (!db || submissionIds.length === 0) return new Set();
+  const rows = await db.query.inductionBookingStarters.findMany({
+    where: inArray(schema.inductionBookingStarters.submissionId, submissionIds),
+  });
+  return new Set(rows.map((r) => r.submissionId));
+}
+
+/**
  * Every induction candidate in the org, assessed against `today`.
  *
  * Rows whose pinned version is not the intake form are skipped rather than
@@ -106,6 +122,8 @@ async function loadAssessedStarters(
     versions.map((v) => [v.id, Array.isArray(v.fields) ? (v.fields as FormField[]) : []]),
   );
 
+  const booked = await bookedSubmissionIds(rows.map((r) => r.id));
+
   const assessed: { starter: AssessedStarter; row: SubmissionRow }[] = [];
   for (const row of rows) {
     const fields = fieldsByVersion.get(row.templateVersionId);
@@ -116,7 +134,7 @@ async function loadAssessedStarters(
       starter: {
         submissionId: row.id,
         profile,
-        ...assessInductionReadiness(profile, { today }),
+        ...assessInductionReadiness(profile, { today, alreadyBooked: booked.has(row.id) }),
       },
       row,
     });
@@ -206,10 +224,11 @@ inductionsRouter.get('/candidates/:id', requireMachineOrTenant, withErrorHandlin
     return;
   }
 
+  const booked = await bookedSubmissionIds([row.id]);
   const assessed: AssessedStarter = {
     submissionId: row.id,
     profile,
-    ...assessInductionReadiness(profile, { today: new Date() }),
+    ...assessInductionReadiness(profile, { today: new Date(), alreadyBooked: booked.has(row.id) }),
   };
   const body = candidateDto(assessed, row);
 
@@ -296,4 +315,184 @@ inductionsRouter.get('/dates', requireMachineOrTenant, withErrorHandling(async (
   }
 
   res.json({ dates, holidaysCoverThrough: coverThrough });
+}));
+
+/* ── Bookings ────────────────────────────────────────────────────────────── */
+
+/**
+ * Recording a booking is acting on submission data, so it gates on the same
+ * grant exporting does. The permission matrix has no booking action, and
+ * inventing a category for one consumer would leave every org's stored matrix
+ * needing a migration; `submissions.export` is the existing action meaning "may
+ * take this data out of the system and do something with it", which is exactly
+ * what a booking is the record of. (Mirrors the reasoning behind
+ * `canApproveSubmissions` in submissions.ts.)
+ */
+async function canBook(tenant: { orgId: string; role: string }): Promise<boolean> {
+  return hasPermission(tenant, 'submissions', 'export');
+}
+
+function bookingDto(
+  booking: typeof schema.inductionBookings.$inferSelect,
+  starters: { submissionId: string; starterName: string }[],
+) {
+  return {
+    id: booking.id,
+    date: booking.inductionDate,
+    seats: booking.seats,
+    externalReference: booking.externalReference,
+    note: booking.note,
+    bookedByUserId: booking.bookedByUserId,
+    bookedByApiKeyId: booking.bookedByApiKeyId,
+    createdAt: booking.createdAt.toISOString(),
+    starters: starters.map((s) => ({ submissionId: s.submissionId, starterName: s.starterName })),
+  };
+}
+
+const createBookingBody = z.object({
+  date: z.string().regex(ISO_DATE),
+  submissionIds: z.array(z.string().min(1)).min(1).max(50),
+  externalReference: z.string().max(200).optional(),
+  note: z.string().max(500).optional(),
+});
+
+inductionsRouter.post('/bookings', requireMachineOrTenant, withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const tenant = req.tenant!;
+  if (!(await canBook(tenant))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  const parsed = createBookingBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return;
+  }
+  const { date, submissionIds, externalReference, note } = parsed.data;
+  const wanted = [...new Set(submissionIds)];
+
+  const rows = await db.query.submissions.findMany({
+    where: and(eq(schema.submissions.orgId, tenant.orgId), inArray(schema.submissions.id, wanted)),
+  });
+  // A submission in another org is simply absent from this result, so a
+  // cross-tenant booking attempt reads as "not found" rather than as a hint
+  // that the id exists somewhere.
+  if (rows.length !== wanted.length) {
+    const found = new Set(rows.map((r) => r.id));
+    res.status(404).json({ error: 'not_found', submissionIds: wanted.filter((id) => !found.has(id)) });
+    return;
+  }
+
+  const versions = await db.query.formTemplateVersions.findMany({
+    where: inArray(schema.formTemplateVersions.id, [...new Set(rows.map((r) => r.templateVersionId))]),
+  });
+  const fieldsByVersion = new Map<string, FormField[]>(
+    versions.map((v) => [v.id, Array.isArray(v.fields) ? (v.fields as FormField[]) : []]),
+  );
+
+  const starters: { submissionId: string; starterName: string }[] = [];
+  for (const row of rows) {
+    const profile = readStarterProfile(fieldsByVersion.get(row.templateVersionId) ?? [], row.values);
+    if (!profile) {
+      res.status(400).json({ error: 'not_an_induction_candidate', submissionId: row.id });
+      return;
+    }
+    // One booking covers one date — that is how the site books it, one
+    // transaction with N seats. A starter requesting a different Monday
+    // belongs to a different booking, not this one.
+    if (profile.inductionDate !== date) {
+      res.status(400).json({
+        error: 'date_mismatch',
+        submissionId: row.id,
+        inductionDate: profile.inductionDate,
+      });
+      return;
+    }
+    starters.push({ submissionId: row.id, starterName: profile.fullName });
+  }
+
+  const alreadyBooked = await bookedSubmissionIds(wanted);
+  if (alreadyBooked.size > 0) {
+    // A retried tool call must not consume a second seat for the same person.
+    res.status(409).json({ error: 'already_booked', submissionIds: [...alreadyBooked] });
+    return;
+  }
+
+  const [booking] = await db
+    .insert(schema.inductionBookings)
+    .values({
+      orgId: tenant.orgId,
+      inductionDate: date,
+      seats: starters.length,
+      externalReference: externalReference ?? '',
+      note: note ?? '',
+      bookedByUserId: tenant.userId,
+      bookedByApiKeyId: req.apiKeyId ?? null,
+    })
+    .returning();
+  if (!booking) throw new Error('induction_booking_create_failed: insert returned no row');
+
+  await db
+    .insert(schema.inductionBookingStarters)
+    .values(starters.map((s) => ({ bookingId: booking.id, ...s })));
+
+  await recordAudit(db, tenant, {
+    action: req.apiKeyId ? 'Recorded induction booking via API key' : 'Recorded induction booking',
+    target: `${date} — ${starters.length} seat${starters.length === 1 ? '' : 's'}`,
+    category: 'submissions',
+    icon: 'calendar-check',
+  });
+
+  res.status(201).json(bookingDto(booking, starters));
+}));
+
+const listBookingsQuery = z.object({ date: z.string().regex(ISO_DATE).optional() });
+
+inductionsRouter.get('/bookings', requireMachineOrTenant, withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const tenant = req.tenant!;
+  if (!(await canRead(tenant))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  const parsed = listBookingsQuery.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return;
+  }
+
+  const bookings = await db.query.inductionBookings.findMany({
+    where: parsed.data.date
+      ? and(
+          eq(schema.inductionBookings.orgId, tenant.orgId),
+          eq(schema.inductionBookings.inductionDate, parsed.data.date),
+        )
+      : eq(schema.inductionBookings.orgId, tenant.orgId),
+    orderBy: (b, { desc }) => [desc(b.createdAt)],
+  });
+  if (bookings.length === 0) {
+    res.json({ bookings: [] });
+    return;
+  }
+
+  const starterRows = await db.query.inductionBookingStarters.findMany({
+    where: inArray(
+      schema.inductionBookingStarters.bookingId,
+      bookings.map((b) => b.id),
+    ),
+  });
+  const startersByBooking = new Map<string, { submissionId: string; starterName: string }[]>();
+  for (const row of starterRows) {
+    const bucket = startersByBooking.get(row.bookingId);
+    if (bucket) bucket.push(row);
+    else startersByBooking.set(row.bookingId, [row]);
+  }
+
+  res.json({ bookings: bookings.map((b) => bookingDto(b, startersByBooking.get(b.id) ?? [])) });
 }));
