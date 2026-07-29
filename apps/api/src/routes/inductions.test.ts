@@ -653,8 +653,8 @@ describe('POST /inductions/bookings', () => {
 });
 
 describe('notice override', () => {
-  /** Thursday — Monday 16 Mar is then two clear business days out, inside the window. */
-  const INSIDE_WINDOW = new Date('2026-03-12T09:00:00');
+  /** Friday 13 Mar — one day past the Thursday cutoff for Monday 16 Mar. */
+  const INSIDE_WINDOW = new Date('2026-03-13T09:00:00');
 
   function overrideRequest(body: Record<string, unknown>) {
     return {

@@ -15,9 +15,9 @@
  *    reimplemented the rule would eventually book a starter with too little
  *    notice, which is the failure the rule exists to prevent.
  *
- * 2. ASSESSMENT HAPPENS NOW, NOT AT FILL TIME. A date that satisfied the
- *    four-business-day rule when the form was filled may not satisfy it today.
- *    So the notice check re-runs against the caller's clock and reports
+ * 2. ASSESSMENT HAPPENS NOW, NOT AT FILL TIME. A date inside the booking window
+ *    when the form was filled may be past the Thursday cutoff today. So the
+ *    window check re-runs against the caller's clock and reports
  *    `date_notice_lapsed` separately from `date_invalid` — the two need
  *    different human responses (rebook vs. correct the form).
  *
@@ -30,12 +30,11 @@
 
 import {
   CHC_FIELD_IDS,
-  CHC_MIN_NOTICE_BUSINESS_DAYS,
   CHC_ROLE_FIELD_BY_DEPARTMENT,
-  businessDaysUntil,
+  bookingCutoffFor,
   holidaysCoverThrough,
-  isMonday,
-  isPublicHoliday,
+  isInductionDay,
+  withinBookingWindow,
 } from './chc-intake.js';
 import type { FormField } from './form-field.js';
 import { isFileRef } from './submission.js';
@@ -242,14 +241,14 @@ export function readStarterProfile(
  * cannot fix. An unanswered Beakon question is treated as "not in Beakon",
  * which errs toward asking for detail rather than assuming it exists elsewhere.
  *
- * `allowLateNotice` is the operator's override of the notice rule, and it is
- * deliberately narrow. Short notice is a matter of lead time — the site can
- * agree to absorb it, and sometimes does. A date that is not a Monday, or is a
- * public holiday, is not short notice: it is a day on which no induction runs
- * at all, and no amount of authority makes one appear. So the override moves
- * `date_notice_lapsed` from blocker to `notice_overridden` warning and leaves
- * `date_invalid` exactly where it is. The warning is never dropped: the whole
- * point is that the exception stays visible to whoever reads the record later.
+ * `allowLateNotice` is the operator's override of the Thursday cutoff, and it
+ * is deliberately narrow. A booking made after the cutoff misses the Friday
+ * swipe-card run, which the site can agree to work around. A day the site does
+ * not run an induction on is a different thing entirely — no amount of
+ * authority makes one appear — so the override moves `date_notice_lapsed` from
+ * blocker to `notice_overridden` warning and leaves `date_invalid` exactly
+ * where it is. The warning is never dropped: the point is that the exception
+ * stays visible to whoever reads the record later.
  */
 export function assessInductionReadiness(
   profile: StarterProfile,
@@ -265,9 +264,9 @@ export function assessInductionReadiness(
   }
 
   const iso = profile.inductionDate;
-  if (!isIsoDate(iso) || !isMonday(iso) || isPublicHoliday(iso)) {
+  if (!isIsoDate(iso) || !isInductionDay(iso)) {
     blockers.push('date_invalid');
-  } else if (businessDaysUntil(iso, today) < CHC_MIN_NOTICE_BUSINESS_DAYS) {
+  } else if (!withinBookingWindow(iso, today)) {
     if (options.allowLateNotice) warnings.push('notice_overridden');
     else blockers.push('date_notice_lapsed');
   }

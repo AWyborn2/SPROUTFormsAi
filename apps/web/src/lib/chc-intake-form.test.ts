@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   CHC_FIELD_IDS,
-  CHC_MIN_NOTICE_BUSINESS_DAYS,
-  businessDaysUntil,
+  bookingCutoffFor,
   chcIntakeFields,
+  isInductionDay,
   isMonday,
+  isPublicHoliday,
+  withinBookingWindow,
   nextBookableInductionDate,
   validateInductionDate,
   visibleFields,
@@ -64,74 +66,88 @@ function beakonNoState(over: Partial<ChcIntakeState> = {}): ChcIntakeState {
 }
 
 describe('induction date rule', () => {
-  it('accepts a Monday with enough clear notice', () => {
+  it('accepts a Monday inside the booking window', () => {
     expect(validateInductionDate('2026-06-22', MONDAY_2026_06_08)).toBeNull();
   });
 
-  it('rejects any day that is not a Monday', () => {
-    // 2026-06-23 is the Tuesday after — far enough out that only the weekday fails.
-    expect(validateInductionDate('2026-06-23', MONDAY_2026_06_08)).toBe('Must be a Monday');
+  it('rejects a day the site does not run inductions on', () => {
+    expect(validateInductionDate('2026-06-23', MONDAY_2026_06_08)).toBe(
+      'Must be a Monday (or the Tuesday after a public-holiday Monday)',
+    );
     expect(isMonday('2026-06-22')).toBe(true);
     expect(isMonday('2026-06-23')).toBe(false);
   });
 
-  it('reports the weekday problem BEFORE the notice problem', () => {
-    // A Tuesday that is also too soon: being told "must be a Monday" first is
-    // what stops someone hunting for a date four days out that still fails.
-    expect(validateInductionDate('2026-06-09', MONDAY_2026_06_08)).toBe('Must be a Monday');
+  it('accepts the Tuesday when the Monday is a public holiday', () => {
+    // Reconciliation Day falls on Mon 1 Jun 2026, so that week's induction runs
+    // on the Tuesday. Refusing it would strand every starter in that week.
+    expect(isInductionDay('2026-06-02')).toBe(true);
+    expect(validateInductionDate('2026-06-02', new Date('2026-05-01T09:00:00'))).toBeNull();
   });
 
-  it('rejects a Monday inside the notice window', () => {
-    // 2026-06-15 is the very next Monday — 4 clear business days would be
-    // Thu 11th, so a Monday one week out is exactly on the boundary.
-    expect(businessDaysUntil('2026-06-15', MONDAY_2026_06_08)).toBe(5);
-    expect(validateInductionDate('2026-06-15', MONDAY_2026_06_08)).toBeNull();
-
-    // From Thursday, the following Monday is only 2 clear business days away.
-    const thursday = new Date('2026-06-11T09:00:00');
-    expect(businessDaysUntil('2026-06-15', thursday)).toBe(2);
-    expect(validateInductionDate('2026-06-15', thursday)).toBe(
-      `Must be at least ${CHC_MIN_NOTICE_BUSINESS_DAYS} business days from today`,
-    );
+  it('does not accept a Tuesday in an ordinary week', () => {
+    expect(isInductionDay('2026-06-23')).toBe(false);
   });
 
-  it('excludes weekends from the business-day count', () => {
-    // Mon 8th → Fri 12th is 4 working days; the weekend adds nothing.
-    expect(businessDaysUntil('2026-06-12', MONDAY_2026_06_08)).toBe(4);
-    expect(businessDaysUntil('2026-06-14', MONDAY_2026_06_08)).toBe(4);
-  });
-
-  it('excludes listed public holidays from the count', () => {
-    // WA Day is Mon 2026-06-01. Counting from Thu 2026-05-28, the Monday is a
-    // holiday, so the days to Wed 3rd are Fri, Tue, Wed — three, not four.
-    const thursday = new Date('2026-05-28T09:00:00');
-    expect(businessDaysUntil('2026-06-03', thursday)).toBe(3);
-  });
-
-  it('refuses a Monday that is itself a public holiday', () => {
+  it('points a holiday Monday at the Tuesday rather than just refusing it', () => {
     expect(validateInductionDate('2026-06-01', new Date('2026-05-01T09:00:00'))).toBe(
-      'That Monday is a public holiday — choose another',
+      'That Monday is a public holiday — book the Tuesday instead',
     );
   });
 
-  it('treats the request day itself as not counting', () => {
-    // Same-day is zero clear business days, however early in the morning it is.
-    expect(businessDaysUntil('2026-06-08', MONDAY_2026_06_08)).toBe(0);
+  it('books right up to the Thursday before, and no further', () => {
+    // The runbook is explicit that short notice is not a reason to refuse.
+    expect(bookingCutoffFor('2026-06-15')).toBe('2026-06-11');
+
+    const thursday = new Date('2026-06-11T09:00:00');
+    expect(validateInductionDate('2026-06-15', thursday)).toBeNull();
+
+    const friday = new Date('2026-06-12T09:00:00');
+    expect(validateInductionDate('2026-06-15', friday)).toBe(
+      'Bookings for that date closed on Thursday 11/06/2026',
+    );
   });
 
-  it('counts a past date as zero rather than going negative', () => {
-    expect(businessDaysUntil('2026-05-01', MONDAY_2026_06_08)).toBe(0);
+  it('measures the cutoff from the induction day, so a Tuesday uses the prior Thursday', () => {
+    // Tue 2 Jun 2026 (holiday-Monday week) — the Thursday before is 28 May.
+    expect(bookingCutoffFor('2026-06-02')).toBe('2026-05-28');
+    expect(withinBookingWindow('2026-06-02', new Date('2026-05-28T09:00:00'))).toBe(true);
+    expect(withinBookingWindow('2026-06-02', new Date('2026-05-29T09:00:00'))).toBe(false);
+  });
+
+  it('carries every holiday the runbook lists', () => {
+    // Two weekday holidays were previously missing, which quietly skewed the
+    // old business-day count. The list is now the runbook's table verbatim.
+    for (const iso of ['2026-01-01', '2026-01-26', '2026-03-02', '2026-04-06', '2026-04-27',
+                       '2026-06-01', '2026-09-28', '2026-12-25', '2026-12-28']) {
+      expect(isPublicHoliday(iso)).toBe(true);
+    }
   });
 
   it('rejects an empty or malformed date', () => {
     expect(validateInductionDate('', MONDAY_2026_06_08)).toBe('Required');
     expect(validateInductionDate('not-a-date', MONDAY_2026_06_08)).toBe('Enter a valid date');
+    expect(bookingCutoffFor('not-a-date')).toBeNull();
   });
 
   it('proposes a next bookable date that the rule itself accepts', () => {
     const next = nextBookableInductionDate(MONDAY_2026_06_08);
-    expect(isMonday(next)).toBe(true);
+    expect(isInductionDay(next)).toBe(true);
     expect(validateInductionDate(next, MONDAY_2026_06_08)).toBeNull();
+  });
+
+  it('offers the holiday-week Tuesday when walking forward past it', () => {
+    // Walking from mid-May, the run of dates must include Tue 2 Jun and never
+    // Mon 1 Jun — the week is not skipped.
+    const seen: string[] = [];
+    let cursor = new Date('2026-05-11T09:00:00');
+    for (let i = 0; i < 5; i++) {
+      const iso = nextBookableInductionDate(cursor);
+      seen.push(iso);
+      cursor = new Date(`${iso}T09:00:00`);
+    }
+    expect(seen).toContain('2026-06-02');
+    expect(seen).not.toContain('2026-06-01');
   });
 });
 
