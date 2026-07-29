@@ -33,6 +33,12 @@ export interface InductionMcpRouterOptions {
    * address, so the request never leaves the host.
    */
   apiUrl: string;
+  /**
+   * How to read the caller's API key off the request. Defaults to the
+   * `Authorization` header; a mount whose credential arrives another way (the
+   * URL-credentialed connector door) supplies its own reader.
+   */
+  apiKeyFor?: (req: Parameters<Parameters<Router['post']>[1]>[0]) => string | null;
 }
 
 export function inductionMcpRouter(options: InductionMcpRouterOptions): Router {
@@ -42,7 +48,9 @@ export function inductionMcpRouter(options: InductionMcpRouterOptions): Router {
     // The caller's own key is forwarded verbatim. This router mints no
     // authority of its own: whatever the key could reach directly, it reaches
     // here, and nothing more.
-    const apiKey = bearerToken(req.header('authorization'));
+    const apiKey = options.apiKeyFor
+      ? options.apiKeyFor(req)
+      : bearerToken(req.header('authorization'));
     if (!apiKey) {
       res.status(401).json({ error: 'unauthenticated' });
       return;

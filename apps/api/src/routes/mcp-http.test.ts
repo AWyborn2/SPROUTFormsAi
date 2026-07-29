@@ -193,4 +193,105 @@ describe('POST /mcp', () => {
       server.close();
     }
   });
+
+  it('does not leak the key path under the header mount', async () => {
+    // The URL door is mounted first; the header door must not also answer it.
+    const { minted, row } = liveKey();
+    mockDbValue = fakeDb(row);
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/mcp/key/${encodeURIComponent(minted.plaintext)}`, {
+        method: 'POST',
+        headers: MCP_HEADERS,
+        body: JSON.stringify(INITIALIZE),
+      });
+      // Authenticated purely by the path — no Authorization header sent.
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('POST /mcp/key/:key — the connector door', () => {
+  it('completes the handshake with the key in the URL and no header', async () => {
+    const { minted, row } = liveKey();
+    mockDbValue = fakeDb(row);
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/mcp/key/${encodeURIComponent(minted.plaintext)}`, {
+        method: 'POST',
+        headers: MCP_HEADERS,
+        body: JSON.stringify(INITIALIZE),
+      });
+      expect(res.status).toBe(200);
+      const body = await rpcResult(res);
+      expect((body.result as { serverInfo: { name: string } }).serverInfo.name).toBe(
+        'formai-inductions',
+      );
+      // Whatever else it does, the response must not echo the credential back.
+      expect(JSON.stringify(body)).not.toContain(minted.plaintext);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('serves the same toolset as the header door', async () => {
+    const { minted, row } = liveKey();
+    mockDbValue = fakeDb(row);
+    const { server, base } = startApp();
+    try {
+      const list = { jsonrpc: '2.0', id: 9, method: 'tools/list', params: {} };
+      const viaPath = await fetch(`${base}/mcp/key/${encodeURIComponent(minted.plaintext)}`, {
+        method: 'POST',
+        headers: MCP_HEADERS,
+        body: JSON.stringify(list),
+      });
+      const viaHeader = await fetch(`${base}/mcp`, {
+        method: 'POST',
+        headers: { ...MCP_HEADERS, authorization: `Bearer ${minted.plaintext}` },
+        body: JSON.stringify(list),
+      });
+      expect(await rpcResult(viaPath)).toEqual(await rpcResult(viaHeader));
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s on a revoked, forged, or malformed key in the path', async () => {
+    const { minted } = liveKey();
+    for (const [label, key, row] of [
+      ['revoked', minted.plaintext, undefined],
+      ['forged', 'fai_deadbeef_notarealsecret', undefined],
+      ['malformed', 'not-a-key', undefined],
+    ] as const) {
+      mockDbValue = fakeDb(row);
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/mcp/key/${encodeURIComponent(key)}`, {
+          method: 'POST',
+          headers: MCP_HEADERS,
+          body: JSON.stringify(INITIALIZE),
+        });
+        expect(res.status, label).toBe(401);
+      } finally {
+        server.close();
+      }
+    }
+  });
+
+  it('refuses an empty key segment rather than falling through unauthenticated', async () => {
+    mockDbValue = fakeDb(undefined);
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/mcp/key/`, {
+        method: 'POST',
+        headers: MCP_HEADERS,
+        body: JSON.stringify(INITIALIZE),
+      });
+      expect(res.status).toBe(401);
+    } finally {
+      server.close();
+    }
+  });
 });

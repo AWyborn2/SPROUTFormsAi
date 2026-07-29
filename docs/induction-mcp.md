@@ -91,6 +91,27 @@ There is nothing to install, build, or deploy for this path — if the API is
 running, the endpoint is live. Point the client at that URL, give it the key,
 and it gets the identical toolset.
 
+### Claude's custom-connector dialog — the key goes in the URL
+
+Claude's **Add custom connector** dialog takes a name, a URL, and optional OAuth
+credentials. There is nowhere to put a bearer token, so the header form above
+cannot be used there. For that dialog only, the same tools are served with the
+key as a path segment:
+
+```
+https://your-formai-host/api/mcp/key/fai_...
+```
+
+Paste that as the **Remote MCP server URL** and leave the OAuth fields empty.
+
+It is the **same credential**: same role, same audit trail, and revoking the key
+in the app kills the connector immediately. What differs is where the key
+travels. A URL is visible to proxies, access logs, and whatever stores the
+connector configuration, in a way an `Authorization` header is not — so prefer
+the header form for anything that can send one, and treat a connector URL as
+the secret it is. If one is ever exposed, revoke that key and issue another;
+that is the mitigation, and it takes one click.
+
 Two things worth knowing about how it behaves:
 
 - **It is stateless.** Every request stands alone and carries its own key, so
