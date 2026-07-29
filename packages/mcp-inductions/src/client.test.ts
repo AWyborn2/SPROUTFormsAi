@@ -117,9 +117,21 @@ describe('InductionsClient', () => {
 
   it('encodes a submission id into the path', async () => {
     const fetchImpl = vi.fn(async () => respond(200, {}));
-    await client(fetchImpl as unknown as typeof fetch).getCandidate('sub/1', true);
+    await client(fetchImpl as unknown as typeof fetch).getCandidate('sub/1', {
+      includeSensitive: true,
+    });
     const [url] = fetchImpl.mock.calls[0] as unknown as [string];
     expect(url).toContain('/inductions/candidates/sub%2F1');
     expect(url).toContain('includeSensitive=true');
+  });
+
+  it('sends the notice override only when it is asked for', async () => {
+    const off = vi.fn(async () => respond(200, { cohorts: [] }));
+    const on = vi.fn(async () => respond(200, { cohorts: [] }));
+    await client(off as unknown as typeof fetch).cohorts('2026-03-16');
+    await client(on as unknown as typeof fetch).cohorts('2026-03-16', true);
+
+    expect((off.mock.calls[0] as unknown as string[])[0]).not.toContain('allowLateNotice');
+    expect((on.mock.calls[0] as unknown as string[])[0]).toContain('allowLateNotice=true');
   });
 });

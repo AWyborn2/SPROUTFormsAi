@@ -25,9 +25,10 @@ their own role, and a key can never issue or revoke keys itself.
 
 ---
 
-## 2. Build the server
+## 2. Build the server (stdio only)
 
-From the repository root:
+Skip this if you are connecting a hosted client over HTTP — that path needs no
+local build. For a local Claude Code setup, from the repository root:
 
 ```bash
 pnpm install
@@ -39,7 +40,12 @@ pnpm --filter @formai/mcp-inductions build
 
 ---
 
-## 3. Point Claude Code at it
+## 3. Connect a client
+
+There are two transports, and which one you can use depends on where the client
+runs.
+
+### Local client (Claude Code on your machine) — stdio
 
 Add to your project's `.mcp.json`:
 
@@ -51,22 +57,58 @@ Add to your project's `.mcp.json`:
       "args": ["packages/mcp-inductions/dist/index.js"],
       "env": {
         "FORMAI_API_URL": "https://your-formai-host/api",
-        "FORMAI_API_KEY": "fai_…"
+        "FORMAI_API_KEY": "fai_..."
       }
     }
   }
 }
 ```
 
-The server runs on **your machine**, not on the deployment. It only needs to be
-able to reach the API over the network — the same URL your browser uses, plus
-`/api` if your deployment serves the API under a path.
+`FORMAI_API_URL` is the **API** base, not a page you can open in a browser. On a
+Replit deployment that is your app's host plus `/api` — the web server proxies
+`/api` through to the API process. Getting this wrong is quiet rather than
+loud: a page URL answers `200` with HTML, which is not an error.
 
----
+The server runs on **your machine**, not on the deployment. It only needs to be
+able to reach the API over the network.
+
+### Hosted client (Cowork, or anything not on your machine) — HTTP
+
+A hosted client cannot spawn a local process, so stdio is not an option. The
+same six tools are served over Streamable HTTP at `/mcp` on the API itself:
+
+```
+https://your-formai-host/api/mcp
+```
+
+Authenticate with the same API key as a bearer token:
+
+```
+Authorization: Bearer fai_...
+```
+
+There is nothing to install, build, or deploy for this path — if the API is
+running, the endpoint is live. Point the client at that URL, give it the key,
+and it gets the identical toolset.
+
+Two things worth knowing about how it behaves:
+
+- **It is stateless.** Every request stands alone and carries its own key, so
+  there are no sessions to expire and no server state shared between callers.
+  `GET /api/mcp` answers `405`; the endpoint takes `POST` only.
+- **A bad key fails immediately.** The key is checked before the MCP handshake,
+  so a revoked or wrong credential comes back as `401` rather than as a
+  confusing tool failure several round trips later.
 
 ## 4. Verify
 
 Ask the agent: *"What are the next induction dates?"*
+
+For the HTTP endpoint you can check it without a client at all:
+
+```bash
+curl -s -X POST https://your-formai-host/api/mcp   -H "Authorization: Bearer fai_..."   -H "content-type: application/json"   -H "accept: application/json, text/event-stream"   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
 
 You should get Mondays, four or more clear business days out, with public
 holidays skipped. If instead you see:
@@ -114,6 +156,24 @@ forgetting a permission check.
 4. `record_induction_booking` — record what was booked, with the BISTrainer
    reference. Those starters then show as `already_booked`, so a second run
    cannot book them again.
+
+## Overriding the notice rule
+
+A starter inside the four-business-day window shows as `date_notice_lapsed` and
+holds no seat. When the site agrees to take them anyway, pass `allowLateNotice`
+on the candidate or cohort read: they read as ready, carry a
+`notice_overridden` warning, and count toward the seat total.
+
+Recording that booking then **requires** `noticeOverrideReason`. The API
+refuses without one, stores it beside the booking, and writes an audit entry
+naming the waiver. So the exception lives in the record instead of somebody's
+memory — which is the whole reason the override is allowed to exist rather than
+being something people work around by editing the form.
+
+The override is narrow on purpose. It waives *lead time*, nothing else. A date
+that is not a Monday, or is a public holiday, stays blocked no matter what
+flag you pass: those are days on which no induction runs, and no authority
+makes one appear.
 
 ## Known limitation: the public-holiday list
 

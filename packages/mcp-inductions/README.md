@@ -18,6 +18,16 @@ server answers *who, when, how many* and remembers *what was booked*.
 | `record_induction_booking` | Records a completed booking; refuses to double-book |
 | `list_induction_bookings` | What has already been booked |
 
+## Two transports
+
+- **stdio** (`dist/index.js`) — for a client that can spawn a local process,
+  such as Claude Code on your own machine. Configured with `FORMAI_API_URL`
+  and `FORMAI_API_KEY`.
+- **Streamable HTTP** (`./express`) — the same tools mounted on the API itself
+  at `POST /mcp`, for hosted clients that cannot spawn anything locally. No
+  build, no second deployment; authenticate with the same API key as a bearer
+  token. See `docs/induction-mcp.md`.
+
 ## Setup
 
 1. **Issue a key.** In FormAI, go to **API keys** and create one. Choose
@@ -89,4 +99,5 @@ returned.
 | `unauthenticated (HTTP 401)` | The key is wrong, revoked, or from another workspace |
 | `forbidden (HTTP 403)` on booking | The key's role lacks submission export — reissue as Reviewer |
 | `already_booked (HTTP 409)` | That starter is already covered by a booking; re-read the candidates |
+| `notice_override_required (HTTP 400)` | A starter is inside the notice window; ask the human, then pass `noticeOverrideReason` |
 | Server exits at startup | `FORMAI_API_URL` or `FORMAI_API_KEY` is unset — the message names which |

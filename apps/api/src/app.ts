@@ -2,6 +2,7 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express, { type Express } from 'express';
 import { env } from './env.js';
+import { requireMachineOrTenant } from './middleware/machine.js';
 import { accountRouter } from './routes/account.js';
 import { apiKeysRouter } from './routes/api-keys.js';
 import { orgLogoRouter, publicAssetsRouter } from './routes/assets.js';
@@ -13,6 +14,7 @@ import { dashboardRouter } from './routes/dashboard.js';
 import { formFillLinksRouter, publicFillRouter } from './routes/fill-links.js';
 import { formsRouter } from './routes/forms.js';
 import { healthRouter } from './routes/health.js';
+import { inductionMcpRouter } from '@formai/mcp-inductions/express';
 import { inductionsRouter } from './routes/inductions.js';
 import { invitesRouter, publicInvitesRouter } from './routes/invites.js';
 import { orgRouter } from './routes/org.js';
@@ -87,6 +89,18 @@ export function createApp(): Express {
   // The one router an API key can reach. Everything above stays session-only,
   // so widening machine access is a deliberate mount rather than a side effect.
   app.use('/inductions', inductionsRouter);
+  // The same tools over Streamable HTTP, for MCP clients that cannot spawn a
+  // local process (a hosted agent, anything not on the operator's machine).
+  // `requireMachineOrTenant` runs first so a bad or revoked key is refused
+  // before the protocol handshake, rather than surfacing as a tool failure
+  // several round trips later. The tools then call this same API back over
+  // loopback with the caller's own key — see the router's docstring for why
+  // that hop is deliberate.
+  app.use(
+    '/mcp',
+    requireMachineOrTenant,
+    inductionMcpRouter({ apiUrl: `http://127.0.0.1:${env.API_PORT}` }),
+  );
   app.use('/audit', auditRouter);
   app.use('/dashboard', dashboardRouter);
   app.use('/competencies', competenciesRouter);

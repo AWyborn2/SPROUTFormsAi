@@ -8,6 +8,10 @@ export const cohortInput = z.object({
     .regex(ISO_DATE, 'Use YYYY-MM-DD')
     .optional()
     .describe('One induction Monday. Omit to see every upcoming cohort.'),
+  allowLateNotice: z.boolean().optional()
+    .describe(
+      'Count short-notice starters toward the seat total, as if the notice rule were waived. Set only when a human has decided the site will accept short notice. It does not change the calendar: a starter whose date is not a Monday, or is a public holiday, stays blocked either way.',
+    ),
 });
 
 export function registerCohortTools(host: ToolHost, client: InductionsClient): void {
@@ -23,6 +27,6 @@ export function registerCohortTools(host: ToolHost, client: InductionsClient): v
         'counting the roster yourself: the two differ whenever a starter is blocked.',
       inputSchema: cohortInput,
     },
-    async (args) => ok(await client.cohorts(args.date)),
+    async (args) => ok(await client.cohorts(args.date, args.allowLateNotice)),
   );
 }
