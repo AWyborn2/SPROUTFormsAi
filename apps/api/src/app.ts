@@ -3,6 +3,7 @@ import cors from 'cors';
 import express, { type Express } from 'express';
 import { env } from './env.js';
 import { accountRouter } from './routes/account.js';
+import { apiKeysRouter } from './routes/api-keys.js';
 import { orgLogoRouter, publicAssetsRouter } from './routes/assets.js';
 import { assessmentCasesRouter, assessmentToolsRouter } from './routes/assessments.js';
 import { auditRouter } from './routes/audit.js';
@@ -79,6 +80,9 @@ export function createApp(): Express {
   app.use('/invites', invitesRouter);
   app.use('/submissions', submissionsRouter);
   app.use('/team', teamRouter);
+  // Machine credentials. Session-only by design — a key must not be able to
+  // mint or revoke keys (see routes/api-keys.ts).
+  app.use('/api-keys', apiKeysRouter);
   app.use('/audit', auditRouter);
   app.use('/dashboard', dashboardRouter);
   app.use('/competencies', competenciesRouter);

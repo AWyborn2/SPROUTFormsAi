@@ -130,6 +130,57 @@ export const auditLogEntries = pgTable(
   ],
 );
 
+/**
+ * A machine credential: an org-scoped key an agent presents instead of a
+ * session cookie.
+ *
+ * Only the SHA-256 `hash` of the full key is stored, so a database dump does
+ * not yield working credentials and the plaintext exists exactly once, in the
+ * create response. `prefix` is the displayable leading segment AND the lookup
+ * handle — uniquely indexed so verification is one indexed read followed by a
+ * constant-time hash comparison, rather than a scan that hashes every row.
+ *
+ * `role` reuses the membership role enum, so a key's authority is described in
+ * exactly the same vocabulary as a person's and resolves through the same
+ * permission matrix. Revocation is a timestamp rather than a delete: a key that
+ * did something needs to remain visible to the audit conversation about it.
+ */
+export const apiKeys = pgTable(
+  'api_keys',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** Human label, e.g. "Induction booking agent". */
+    name: text().notNull(),
+    role: roleEnum().notNull().default('reviewer'),
+    prefix: text().notNull(),
+    hash: text().notNull(),
+    /**
+     * The administrator who issued it. Machine calls act as this user, because
+     * `TenantContext.userId` is non-nullable and audit rows must name a real
+     * actor — an agent's action is attributable to whoever authorised it.
+     */
+    createdByUserId: uuid().references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+    lastUsedAt: timestamp({ withTimezone: true }),
+    revokedAt: timestamp({ withTimezone: true }),
+  },
+  (t) => [uniqueIndex('api_keys_prefix_uq').on(t.prefix), index('api_keys_org_idx').on(t.orgId)],
+);
+
+export const apiKeysRelations = relations(apiKeys, ({ one }) => ({
+  org: one(organizations, {
+    fields: [apiKeys.orgId],
+    references: [organizations.id],
+  }),
+  createdBy: one(users, {
+    fields: [apiKeys.createdByUserId],
+    references: [users.id],
+  }),
+}));
+
 export const competenciesRelations = relations(competencies, ({ one, many }) => ({
   org: one(organizations, {
     fields: [competencies.orgId],
