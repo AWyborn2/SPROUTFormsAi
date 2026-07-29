@@ -52,6 +52,12 @@ export const SCREENS: ScreenDef[] = [
   { key: 'audit', path: '/app/audit', group: 'Enterprise & org', label: 'Audit log', icon: 'scroll-text', shell: 'app', inNav: true },
   { key: 'billing', path: '/app/billing', group: 'Enterprise & org', label: 'Billing', icon: 'credit-card', shell: 'app', inNav: true },
   { key: 'competency', path: '/app/competency', group: 'Competency gating', label: 'Competency gating', icon: 'graduation-cap', shell: 'app', inNav: true },
+
+  // Multi-part assessments. The case list is one screen for two audiences —
+  // an assessor sees the org's cases, a candidate sees their own — because the
+  // API scopes the read by permission rather than the screen filtering it.
+  { key: 'assessments', path: '/app/assessments', group: 'Assessments', label: 'Assessments', icon: 'clipboard-check', shell: 'app', inNav: true },
+  { key: 'assessment-case', path: '/app/assessments/:id', group: 'Assessments', label: 'Assessment case', icon: 'clipboard-list', shell: 'app' },
   { key: 'whitelabel', path: '/app/settings/branding', group: 'Enterprise & org', label: 'Branding', icon: 'sliders-horizontal', shell: 'app', inNav: true },
 
   // Mobile (responsive web)

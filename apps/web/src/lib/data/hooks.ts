@@ -13,6 +13,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import type {
+  AssessmentPathway,
   BrandingKit,
   FormContainer,
   FormField,
@@ -21,6 +22,11 @@ import type {
 } from '@formai/shared';
 import { ApiError, apiClient } from './api-client.js';
 import { store } from './store.js';
+import {
+  assessmentsApi,
+  type CreateCaseInput,
+  type RecordOutcomeInput,
+} from './assessments.js';
 import type {
   FormDetail,
   FormSummary,
@@ -70,6 +76,9 @@ const keys = {
   auditLog: ['auditLog'] as const,
   billing: ['billing'] as const,
   competencies: ['competencies'] as const,
+  assessmentTools: ['assessmentTools'] as const,
+  assessmentCases: ['assessmentCases'] as const,
+  assessmentCase: (id: string) => ['assessmentCases', id] as const,
   competencyRules: ['competencyRules'] as const,
   fillForm: (token: string) => ['fillForm', token] as const,
   fillLinks: (formId: string) => ['fillLinks', formId] as const,
@@ -610,3 +619,83 @@ export function useSubmitInspection() {
 }
 
 export type { FormSummary, FormDetail, SubmissionRow, SubmissionDetail };
+
+
+// ── assessments ─────────────────────────────────────────────────────────────
+//
+// Case reads are invalidated on every mutation rather than patched in place:
+// part state is DERIVED server-side from the attempt rows, so the server's view
+// is the only correct one. Optimistically editing a cached case would mean
+// re-implementing the unlock and outcome rules in the browser, and any drift
+// between the two would show a candidate a part the API would refuse.
+
+export function useAssessmentTools() {
+  return useQuery({ queryKey: keys.assessmentTools, queryFn: () => assessmentsApi.listTools() });
+}
+
+export function useAssessmentCases() {
+  return useQuery({ queryKey: keys.assessmentCases, queryFn: () => assessmentsApi.listCases() });
+}
+
+export function useAssessmentCase(id: string | undefined) {
+  return useQuery({
+    queryKey: keys.assessmentCase(id ?? ''),
+    queryFn: () => assessmentsApi.getCase(id!),
+    enabled: !!id,
+  });
+}
+
+export function useCreateAssessmentCase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateCaseInput) => assessmentsApi.createCase(input),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    },
+  });
+}
+
+export function useOpenAttempt(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (partKey: string) => assessmentsApi.openAttempt(caseId, partKey),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+    },
+  });
+}
+
+export function useSaveAttempt(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { attemptId: string; values: Record<string, SubmissionValue> }) =>
+      assessmentsApi.saveAttempt(caseId, input.attemptId, input.values),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+    },
+  });
+}
+
+export function useRecordOutcome(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: Omit<RecordOutcomeInput, 'caseId'>) =>
+      assessmentsApi.recordOutcome({ caseId, ...input }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    },
+  });
+}
+
+export function useChangePathway(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { pathway: AssessmentPathway; reason: string; rplJustification?: string }) =>
+      assessmentsApi.changePathway(caseId, input.pathway, input.reason, input.rplJustification),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    },
+  });
+}
