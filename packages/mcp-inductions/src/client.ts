@@ -53,6 +53,7 @@ export interface Booking {
   seats: number;
   externalReference: string;
   note: string;
+  noticeOverrideReason: string;
   bookedByUserId: string | null;
   bookedByApiKeyId: string | null;
   createdAt: string;
@@ -98,16 +99,25 @@ export class InductionsClient {
     return body as T;
   }
 
-  listCandidates(params: { from?: string; to?: string; readiness?: 'ready' | 'blocked' }) {
+  listCandidates(params: {
+    from?: string;
+    to?: string;
+    readiness?: 'ready' | 'blocked';
+    allowLateNotice?: boolean;
+  }) {
     return this.request<{ candidates: Candidate[]; holidaysCoverThrough: string }>(
       '/inductions/candidates',
-      params,
+      { ...params, allowLateNotice: params.allowLateNotice ? 'true' : undefined },
     );
   }
 
-  getCandidate(submissionId: string, includeSensitive?: boolean) {
+  getCandidate(
+    submissionId: string,
+    options: { includeSensitive?: boolean; allowLateNotice?: boolean } = {},
+  ) {
     return this.request<Candidate>(`/inductions/candidates/${encodeURIComponent(submissionId)}`, {
-      includeSensitive: includeSensitive ? 'true' : undefined,
+      includeSensitive: options.includeSensitive ? 'true' : undefined,
+      allowLateNotice: options.allowLateNotice ? 'true' : undefined,
     });
   }
 
@@ -118,9 +128,10 @@ export class InductionsClient {
     }>('/inductions/dates', { count });
   }
 
-  cohorts(date?: string) {
+  cohorts(date?: string, allowLateNotice?: boolean) {
     return this.request<{ cohorts: Cohort[]; holidaysCoverThrough: string }>('/inductions/cohorts', {
       date,
+      allowLateNotice: allowLateNotice ? 'true' : undefined,
     });
   }
 
@@ -129,6 +140,7 @@ export class InductionsClient {
     submissionIds: string[];
     externalReference?: string;
     note?: string;
+    noticeOverrideReason?: string;
   }) {
     return this.request<Booking>('/inductions/bookings', {}, {
       method: 'POST',

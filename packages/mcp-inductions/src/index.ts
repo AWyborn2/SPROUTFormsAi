@@ -1,32 +1,21 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
-import { McpServer } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { ConfigError, loadConfig } from './config.js';
 import { InductionsClient } from './client.js';
-import type { ToolHost } from './tools/host.js';
-import { registerCandidateTools } from './tools/candidates.js';
-import { registerCohortTools } from './tools/cohorts.js';
-import { registerDateTools } from './tools/dates.js';
-import { registerBookingTools } from './tools/bookings.js';
+import { buildServer } from './server.js';
 
 /**
- * FormAI induction MCP server.
+ * FormAI induction MCP server — stdio entry point.
  *
- * Speaks stdio, so stdout belongs to the protocol — every diagnostic goes to
- * stderr. A stray console.log here corrupts the message stream and the client
- * disconnects with something far less informative than the message that caused
- * it.
+ * stdout belongs to the protocol here, so every diagnostic goes to stderr. A
+ * stray console.log corrupts the message stream and the client disconnects
+ * with something far less informative than the message that caused it.
+ *
+ * For a hosted deployment reachable by a cloud client, see `./express.js`,
+ * which serves the same tools over Streamable HTTP.
  */
-export function buildServer(client: InductionsClient): McpServer {
-  const server = new McpServer({ name: 'formai-inductions', version: '0.1.0' });
-  const host = server as unknown as ToolHost;
-  registerCandidateTools(host, client);
-  registerCohortTools(host, client);
-  registerDateTools(host, client);
-  registerBookingTools(host, client);
-  return server;
-}
+export { buildServer } from './server.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();

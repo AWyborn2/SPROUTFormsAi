@@ -15,6 +15,16 @@ export const recordBookingInput = z.object({
     .optional()
     .describe('The booking handle in the external system, e.g. a BISTrainer transaction reference.'),
   note: z.string().max(500).optional(),
+  noticeOverrideReason: z
+    .string()
+    .min(1)
+    .max(500)
+    .optional()
+    .describe(
+      'Why the site accepted a booking inside the four-business-day notice window. Required ' +
+      'when any starter is short-notice — the API refuses without it. Record what the human ' +
+      'actually decided (who agreed, and on what basis); never invent a justification.',
+    ),
 });
 
 export const listBookingsInput = z.object({
@@ -32,7 +42,10 @@ export function registerBookingTools(host: ToolHost, client: InductionsClient): 
         'in the external system, never before — it is the record of a booking, not a request ' +
         'for one. Every starter must share the booking date. An already_booked error means a ' +
         'starter is covered by an existing booking; re-read the candidates rather than ' +
-        'retrying, because a repeat call will never succeed for that person.',
+        'retrying, because a repeat call will never succeed for that person. A ' +
+        'notice_override_required error means a starter is inside the notice window: stop and ' +
+        'ask the human whether the site has agreed to it, then pass their answer as ' +
+        'noticeOverrideReason.',
       inputSchema: recordBookingInput,
     },
     async (args) => ok(await client.recordBooking(args)),
