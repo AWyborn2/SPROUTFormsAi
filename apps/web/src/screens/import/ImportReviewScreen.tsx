@@ -81,6 +81,7 @@ export function ImportReviewScreen() {
   // Held here — the one owner of "current field" — and threaded to the PDF
   // overlay (which rubber-bands) and the geometry panel (which toggles it). A
   // drawn box lands as an UNCONFIRMED proposal under that slot; then confirmed.
+  const [reviewOnly, setReviewOnly] = useState(false);
   const [drawSlot, setDrawSlot] = useState<string | null>(null);
 
   // The overlay follows the armed slot while drawing (so a checkbox option's box
@@ -144,6 +145,18 @@ export function ImportReviewScreen() {
   if (session.status === 'idle') return null;
 
   // Weakest still-unconfirmed extraction (hidden once everything is resolved).
+  /**
+   * The rows actually rendered. Filtering here rather than hiding rows in CSS
+   * keeps the index/count each row shows consistent with what is on screen —
+   * "3 of 8" while filtered, not "47 of 185".
+   */
+  const needsReviewFields = session.fields.filter((f) => reviewStatus(f) !== 'ok');
+  // Confirming the last flagged field while filtered would otherwise strand the
+  // reviewer on an empty list with a disabled toggle. The filter releases
+  // itself when it has nothing left to show.
+  const showingReviewOnly = reviewOnly && needsReviewFields.length > 0;
+  const visibleFields = showingReviewOnly ? needsReviewFields : session.fields;
+
   const lowest = lowestUnresolvedField(session.fields);
 
   // Build highlight data for the PDF viewer
@@ -316,9 +329,28 @@ export function ImportReviewScreen() {
                     </button>
                   )}
                 </div>
-                <div
-                  className="flex items-center gap-[7px] rounded-pill px-[11px] py-1.5"
-                  style={{ background: session.needReview ? 'var(--warning-soft)' : 'var(--success-soft)' }}
+                {/* The badge doubles as the filter: with 185 fields, finding
+                    the 8 unconfirmed ones by scrolling is the slow part of
+                    review. Stays a plain button when there is nothing to
+                    filter, so it never offers an empty list. */}
+                <button
+                  type="button"
+                  onClick={() => session.needReview && setReviewOnly((v) => !v)}
+                  disabled={!session.needReview}
+                  aria-pressed={showingReviewOnly}
+                  title={
+                    session.needReview
+                      ? showingReviewOnly
+                        ? 'Show all fields'
+                        : 'Show only the fields needing review'
+                      : undefined
+                  }
+                  className="flex items-center gap-[7px] rounded-pill px-[11px] py-1.5 enabled:hover:brightness-95 disabled:cursor-default"
+                  style={{
+                    background: session.needReview ? 'var(--warning-soft)' : 'var(--success-soft)',
+                    outline: showingReviewOnly ? '2px solid var(--warning-text)' : 'none',
+                    outlineOffset: '1px',
+                  }}
                 >
                   <Icon
                     name={session.needReview ? 'alert-triangle' : 'check-circle-2'}
@@ -329,9 +361,13 @@ export function ImportReviewScreen() {
                     className="text-[12.5px] font-semibold"
                     style={{ color: session.needReview ? 'var(--warning-text)' : 'var(--success-text)' }}
                   >
-                    {session.needReview ? `${session.needReview} need review` : 'All confirmed'}
+                    {session.needReview
+                      ? showingReviewOnly
+                        ? `Showing ${session.needReview} · show all`
+                        : `${session.needReview} need review`
+                      : 'All confirmed'}
                   </span>
-                </div>
+                </button>
                 </div>
                 <div className="mt-2.5 flex items-center justify-end gap-1.5 border-t border-border-subtle pt-2.5">
                   <button
@@ -356,13 +392,13 @@ export function ImportReviewScreen() {
               </div>
 
               <div ref={fieldListRef} className="flex flex-col gap-2.5">
-                {session.fields.map((f, i) => (
+                {visibleFields.map((f, i) => (
                   <ReviewRow
                     key={f.id}
                     id={`review-row-${f.id}`}
                     field={f}
                     index={i}
-                    count={session.fields.length}
+                    count={visibleFields.length}
                     expanded={f.id === selectedFieldId}
                     onToggle={() => handleSelectField(f.id)}
                     onSelect={setSelectedFieldId}

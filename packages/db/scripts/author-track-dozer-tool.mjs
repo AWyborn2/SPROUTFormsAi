@@ -19,17 +19,19 @@
  *
  * What it does:
  *  1. Locates the template and its current published version.
- *  2. Finds each part's starting section header by label.
+ *  2. Anchors each part to its PART heading (first match only — sub-headings
+ *     repeat across parts, and page-group boundaries duplicate some headers).
  *  3. Maps answer-key letters onto each theory question's real options and
  *     writes answerKey + outcomeTarget onto the version's fields.
  *  4. Builds the six-part manifest (pathways, hours minima, duration columns).
  *  5. Attaches prerequisite/assessor competencies found by code.
  *  6. Upserts the assessment_tools row.
  *
- * Known limitation, reported not hidden: a theory question with no adjacent
- * check_cross outcome field cannot be auto-marked (validateAnswerKeys requires
- * a target). Such questions are listed and skipped — add outcome fields in the
- * builder, then re-run.
+ * Questions are paired with the check_cross that FOLLOWS them, and the pairs
+ * are consumed in document order against the key's three sections. If the pair
+ * count does not equal the key's answer count EXACTLY, nothing is written —
+ * an off-by-one would silently shift every subsequent answer onto the wrong
+ * question, which on a safety assessment is worse than not running at all.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -60,38 +62,9 @@ const norm = (s) =>
     .replace(/\s+/g, ' ')
     .trim();
 
-/** First section_header whose normalised label contains every term set. */
-function findHeader(fields, ...termSets) {
-  for (const terms of termSets) {
-    const hit = fields.find(
-      (f) => f.type === 'section_header' && terms.every((t) => norm(f.label).includes(t)),
-    );
-    if (hit) return hit;
-  }
-  return null;
-}
 
-/** Fields strictly between a header and the next section_header. */
-function sectionOf(fields, headerId) {
-  const start = fields.findIndex((f) => f.id === headerId);
-  if (start < 0) return [];
-  const out = [];
-  for (let i = start + 1; i < fields.length; i++) {
-    if (fields[i].type === 'section_header') break;
-    out.push(fields[i]);
-  }
-  return out;
-}
 
-/** Fields from one header up to (not including) another header, spanning sections. */
-function between(fields, fromId, toId) {
-  const a = fields.findIndex((f) => f.id === fromId);
-  const b = toId ? fields.findIndex((f) => f.id === toId) : fields.length;
-  if (a < 0) return [];
-  return fields.slice(a + 1, b < 0 ? fields.length : b);
-}
 
-const QUESTION_TYPES = new Set(['checkbox_group', 'radio', 'dropdown', 'boolean_yes_no']);
 
 /**
  * Map an answer letter onto a question's actual option values.
@@ -111,16 +84,6 @@ function mapLetter(letter, field) {
   return idx >= 0 && idx < options.length ? options[idx] : null;
 }
 
-/** The check_cross field that follows `field` before the next question/header. */
-function outcomeAfter(fields, field) {
-  const i = fields.findIndex((f) => f.id === field.id);
-  for (let j = i + 1; j < fields.length; j++) {
-    const f = fields[j];
-    if (f.type === 'section_header' || QUESTION_TYPES.has(f.type)) return null;
-    if (f.type === 'check_cross') return f;
-  }
-  return null;
-}
 
 async function main() {
   // ── locate template and version ─────────────────────────────────────────
@@ -144,99 +107,137 @@ async function main() {
   console.log(`Template: ${template.name} (${template.id})`);
   console.log(`Version:  ${version.id} — ${fields.length} fields\n`);
 
-  // ── part headers ────────────────────────────────────────────────────────
-  const headers = {
-    p1: findHeader(fields, ['part 1'], ['theory']),
-    general: findHeader(fields, ['general']),
-    mining: findHeader(fields, ['bbm mining'], ['mining only']),
-    raw: findHeader(fields, ['raw materials']),
-    p2: findHeader(fields, ['part 2']),
-    p3: findHeader(fields, ['part 3'], ['direct observation log']),
-    p4: findHeader(fields, ['part 4']),
-    p5: findHeader(fields, ['part 5'], ['minimal supervision log'], ['minimimal supervision log']),
-    p6: findHeader(fields, ['part 6']),
-  };
-  for (const [k, h] of Object.entries(headers)) {
-    if (h) console.log(`  header ${k.padEnd(7)} → ${h.id}  "${h.label}"`);
-    else problems.push(`No section header found for "${k}".`);
+  // ── theory questions, in document order ─────────────────────────────────
+  //
+  // Questions are paired with the check_cross that FOLLOWS them: the assessment
+  // profile emits each outcome box immediately after its question, so adjacency
+  // is the pairing rule rather than a label match (labels vary — "Q1 Outcome",
+  // "BBM Q1 Outcome", "7b. Outcome").
+  const CHOICE = new Set(['checkbox_group', 'radio', 'dropdown', 'boolean_yes_no']);
+  const paired = [];
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i];
+    if (!CHOICE.has(f.type)) continue;
+    const next = fields[i + 1];
+    if (next?.type === 'check_cross') paired.push({ question: f, outcome: next });
+  }
+  console.log(`Question/outcome pairs found: ${paired.length}`);
+
+  // The key's three sections in printed order. Pairs are consumed in document
+  // order, which is why the run-length check below is the safety net: if the
+  // counts do not line up exactly, the mapping is not trustworthy and nothing
+  // is written.
+  const sectionOrder = [
+    ['general', KEY.sections.general],
+    ['bbmMining', KEY.sections.bbmMining],
+    ['rawMaterials', KEY.sections.rawMaterials],
+  ];
+  const expected = sectionOrder.reduce((n, [, sec]) => n + sec.questions.length, 0);
+  if (paired.length !== expected) {
+    problems.push(
+      `Found ${paired.length} question/outcome pairs but the key has ${expected} answers. ` +
+        `Nothing written — confirm the import produced one outcome box per question.`,
+    );
   }
 
-  // ── theory answer keys ──────────────────────────────────────────────────
   const keyed = [];
   const skipped = [];
-  const sectionSpans = {
-    general: [headers.general, headers.mining],
-    bbmMining: [headers.mining, headers.raw],
-    rawMaterials: [headers.raw, headers.p2],
-  };
-  for (const [name, [from, to]] of Object.entries(sectionSpans)) {
-    if (!from) {
-      problems.push(`Theory section "${name}" has no header; its keys were not applied.`);
-      continue;
-    }
-    const qs = between(fields, from.id, to?.id).filter((f) => QUESTION_TYPES.has(f.type));
-    const keySection = KEY.sections[name];
-    if (qs.length !== keySection.questions.length) {
-      problems.push(
-        `Section "${name}": template has ${qs.length} question fields but the key has ${keySection.questions.length}. Keys NOT applied — fix the import or the mapping first.`,
-      );
-      continue;
-    }
-    qs.forEach((field, i) => {
-      const entry = keySection.questions[i];
-      const mapped = entry.answers.map((l) => ({ letter: l, value: mapLetter(l, field) }));
-      const unmappable = mapped.filter((m) => m.value === null);
-      if (unmappable.length > 0) {
-        skipped.push(`${name} Q${entry.n} ("${field.label}"): cannot map letter(s) ${unmappable.map((m) => m.letter).join(', ')} onto options ${JSON.stringify(field.options ?? [])}`);
-        return;
+  const mandatoryFieldIds = [];
+  if (paired.length === expected) {
+    let cursor = 0;
+    for (const [name, section] of sectionOrder) {
+      for (const entry of section.questions) {
+        const { question, outcome } = paired[cursor++];
+        const mapped = entry.answers.map((l) => ({ letter: l, value: mapLetter(l, question) }));
+        const bad = mapped.filter((m) => m.value === null);
+        if (bad.length) {
+          skipped.push(
+            `${name} Q${entry.n} ("${question.label.slice(0, 50)}"): cannot map ${bad.map((m) => m.letter).join(', ')} onto ${JSON.stringify(question.options ?? [])}`,
+          );
+          continue;
+        }
+        question.answerKey = mapped.map((m) => m.value);
+        question.outcomeTarget = { fieldId: outcome.id };
+        if (section.mandatory) mandatoryFieldIds.push(question.id);
+        keyed.push(`${name.padEnd(13)} Q${String(entry.n).padStart(2)} → ${question.id} [${entry.answers.join(',')}] ✓→ ${outcome.id}`);
       }
-      const outcome = outcomeAfter(fields, field);
-      if (!outcome) {
-        skipped.push(`${name} Q${entry.n} ("${field.label}"): no check_cross outcome field follows it — add one in the builder.`);
-        return;
-      }
-      field.answerKey = mapped.map((m) => m.value);
-      field.outcomeTarget = { fieldId: outcome.id };
-      keyed.push(`${name} Q${entry.n}: [${entry.answers.join(',')}] → ${JSON.stringify(field.answerKey)} ✓→ ${outcome.id}`);
-    });
+    }
   }
 
-  // ── logbook duration columns ────────────────────────────────────────────
-  function durationColumn(headerId, partLabel) {
-    if (!headerId) return undefined;
-    const table = sectionOf(fields, headerId).find((f) => f.type === 'repeating_group');
+  // ── part anchors ────────────────────────────────────────────────────────
+  //
+  // Matched on the PART heading only. Sub-headings ("4.1 Operational
+  // Requirements") repeat across parts 2, 4 and 6, and the page-group boundary
+  // duplicates some headers outright — so anchors take the FIRST match of each
+  // part number and ignore the rest.
+  function partAnchor(n) {
+    const re = new RegExp(`^part\s*${n}\b`);
+    const hit = fields.find((f) => f.type === 'section_header' && re.test(norm(f.label)));
+    if (!hit) problems.push(`No "PART ${n}" heading found to anchor part ${n}.`);
+    else console.log(`  Part ${n} anchor → ${hit.id}  "${hit.label}"`);
+    return hit;
+  }
+  const anchors = [1, 2, 3, 4, 5, 6].map(partAnchor);
+
+  // ── logbook tables ──────────────────────────────────────────────────────
+  //
+  // The open-row table AFTER a logbook part's anchor and before the next.
+  function logbookColumn(anchorIndex, label) {
+    const from = anchors[anchorIndex];
+    const to = anchors[anchorIndex + 1];
+    if (!from) return undefined;
+    const a = fields.indexOf(from);
+    const b = to ? fields.indexOf(to) : fields.length;
+    const table = fields.slice(a, b).find((f) => f.type === 'repeating_group' && !f.fixedRows?.length);
     if (!table) {
-      problems.push(`${partLabel}: no repeating table in its section.`);
+      problems.push(`${label}: no open-row table between its anchor and the next part.`);
       return undefined;
     }
     const col = (table.columns ?? []).find((c) => /duration|hours/.test(norm(c.label)));
     if (!col) {
-      problems.push(`${partLabel}: table "${table.label}" has no duration/hours column. Columns: ${(table.columns ?? []).map((c) => `${c.key} ("${c.label}")`).join(', ')}`);
+      problems.push(`${label}: table "${table.label}" has no duration column. Columns: ${(table.columns ?? []).map((c) => c.key).join(', ')}`);
       return undefined;
     }
-    console.log(`  ${partLabel}: duration column "${col.key}" ("${col.label}") in table ${table.id}`);
+    console.log(`  ${label}: duration column "${col.key}" in ${table.id} ("${table.label}")`);
     return col.key;
   }
-  const p3Duration = durationColumn(headers.p3?.id, 'Part 3 logbook');
-  const p5Duration = durationColumn(headers.p5?.id, 'Part 5 logbook');
+  const p3Duration = logbookColumn(2, 'Part 3 logbook');
+  const p5Duration = logbookColumn(4, 'Part 5 logbook');
 
   // ── location stream ─────────────────────────────────────────────────────
   const streamField = fields.find(
-    (f) => ['dropdown', 'radio'].includes(f.type) && /department|stream|mining.*raw|location/.test(norm(f.label)),
+    (f) => ['dropdown', 'radio'].includes(f.type) && /department|stream|location/.test(norm(f.label)),
   );
-  if (streamField) console.log(`  location stream field: ${streamField.id} ("${streamField.label}")`);
-  else warnings.push('No location-stream question found. Add a "Which department?" dropdown in the builder (options: Mining, Raw Materials) with visibleWhen conditions on the Mining/Raw sections, then re-run.');
+  if (streamField) console.log(`  location stream → ${streamField.id} ("${streamField.label}")`);
+  else warnings.push(
+    'No location-stream question exists on this document. Mining and Raw Materials content will ' +
+      'NOT be gated per candidate until one is added in the builder (a dropdown "Department" with ' +
+      'options Mining / Raw Materials) and visibleWhen conditions are set on those section headers.',
+  );
 
   // ── manifest ────────────────────────────────────────────────────────────
   const all = ['experienced', 'new', 'rpl'];
+  const spec = [
+    { key: 'p1-theory', label: 'Part 1 — Theory', kind: 'theory', pathways: all },
+    { key: 'p2-practical', label: 'Part 2 — Practical Demonstration', kind: 'practical', pathways: all },
+    { key: 'p3-logbook', label: 'Part 3 — Direct Observation Log', kind: 'logbook', pathways: ['new'], minimumHours: 20, durationColumnKey: p3Duration },
+    { key: 'p4-practical', label: 'Part 4 — Minimal Supervision Practical', kind: 'practical', pathways: ['new'] },
+    { key: 'p5-logbook', label: 'Part 5 — Minimal Supervision Log', kind: 'logbook', pathways: ['new'], minimumHours: 50, durationColumnKey: p5Duration },
+    { key: 'p6-practical', label: 'Part 6 — Final Practical Assessment', kind: 'practical', pathways: ['new'] },
+  ];
   const parts = [];
-  if (headers.p1) parts.push({ key: 'p1-theory', ordinal: 1, label: 'Part 1 — Theory', kind: 'theory', pathways: all, startFieldId: headers.p1.id, ...(headers.general ? { mandatorySectionFieldId: headers.general.id } : {}) });
-  if (headers.p2) parts.push({ key: 'p2-practical', ordinal: 2, label: 'Part 2 — Practical Demonstration', kind: 'practical', pathways: all, startFieldId: headers.p2.id });
-  if (headers.p3) parts.push({ key: 'p3-logbook', ordinal: 3, label: 'Part 3 — Direct Observation Log', kind: 'logbook', pathways: ['new'], startFieldId: headers.p3.id, minimumHours: 20, ...(p3Duration ? { durationColumnKey: p3Duration } : {}) });
-  if (headers.p4) parts.push({ key: 'p4-practical', ordinal: 4, label: 'Part 4 — Minimal Supervision Practical', kind: 'practical', pathways: ['new'], startFieldId: headers.p4.id });
-  if (headers.p5) parts.push({ key: 'p5-logbook', ordinal: 5, label: 'Part 5 — Minimal Supervision Log', kind: 'logbook', pathways: ['new'], startFieldId: headers.p5.id, minimumHours: 50, ...(p5Duration ? { durationColumnKey: p5Duration } : {}) });
-  if (headers.p6) parts.push({ key: 'p6-practical', ordinal: 6, label: 'Part 6 — Final Practical Assessment', kind: 'practical', pathways: ['new'], startFieldId: headers.p6.id });
+  spec.forEach((sp, i) => {
+    const anchor = anchors[i];
+    if (!anchor) return;
+    const part = { key: sp.key, ordinal: i + 1, label: sp.label, kind: sp.kind, pathways: sp.pathways, startFieldId: anchor.id };
+    if (sp.minimumHours) part.minimumHours = sp.minimumHours;
+    if (sp.durationColumnKey) part.durationColumnKey = sp.durationColumnKey;
+    if (i === 0 && mandatoryFieldIds.length) part.mandatoryFieldIds = mandatoryFieldIds;
+    parts.push(part);
+  });
   const manifest = { parts, ...(streamField ? { locationStreamFieldId: streamField.id } : {}) };
+  console.log(`
+Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryFieldIds.join(', ') || 'none'}`);
 
   // ── competencies by code ────────────────────────────────────────────────
   const codes = { candidate: ['Q34666893', 'Q50001782'], assessor: ['Q34666893', 'Q50071833', 'Q50073293'] };
