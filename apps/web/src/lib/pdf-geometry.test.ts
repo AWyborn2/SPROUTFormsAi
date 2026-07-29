@@ -1108,3 +1108,146 @@ describe('proposeFieldOptionCells — options as columns vs options printed inli
     expect(res).not.toBeNull();
   });
 });
+
+/**
+ * Theory questions — answers printed inline.
+ *
+ * The other population of choice fields on the Track Dozer, taken from the real
+ * template: ai_29 prints `True` / `False` beside the question, ai_33 stacks four
+ * answers beneath it. These have no option columns at all, so their marks are
+ * anchored on the answer's OWN printed text.
+ */
+import { proposeInlineOptionCells } from './pdf-geometry.js';
+
+function proposeInline(items: PositionedText[], label: string, options: string[]) {
+  return proposeInlineOptionCells({ page: 2, ...A4, items, label, options });
+}
+
+const Q1 = 'Q1. The track dozer must be isolated with a lock and hasp before maintenance';
+
+/** ai_29's shape: question, then a checkbox and word for each answer. */
+function inlineTrueFalse(): PositionedText[] {
+  return [
+    { text: Q1, x: 37.5, y: 630.8, width: 380 },
+    { text: '\u2610', x: 430, y: 630.8, width: 9 },
+    { text: 'True', x: 443, y: 630.8, width: 18 },
+    { text: '\u2610', x: 480, y: 630.8, width: 9 },
+    { text: 'False', x: 493, y: 630.8, width: 20 },
+  ];
+}
+
+/** ai_33's shape: four answers stacked beneath, no checkbox in the text layer. */
+function stackedChoices(): PositionedText[] {
+  return [
+    { text: 'Q3. What is the purpose of performing a walk around pre-start inspection?', x: 37.5, y: 630.8, width: 400 },
+    { text: 'Inspect for damage', x: 60, y: 614, width: 90 },
+    { text: 'Identify faults with the machine', x: 60, y: 597.1, width: 140 },
+    { text: 'Ensure equipment is safe to operate', x: 60, y: 580.3, width: 160 },
+    { text: 'All the above', x: 60, y: 563.5, width: 62 },
+  ];
+}
+
+describe('proposeInlineOptionCells', () => {
+  it('uses the printed checkbox when it reaches the text layer', () => {
+    const res = proposeInline(inlineTrueFalse(), Q1, ['True', 'False'])!;
+
+    expect(res).not.toBeNull();
+    expect(res.segments.map((s) => s.optionKey)).toEqual(['True', 'False']);
+    // The ☐ glyphs sit at 430 and 480 — the boxes are those, not the words.
+    expect(res.segments[0]!.x).toBe(430);
+    expect(res.segments[1]!.x).toBe(480);
+    expect(res.confidence).toBe(1);
+  });
+
+  it('keeps each box on its own answer, never straddling the next', () => {
+    const res = proposeInline(inlineTrueFalse(), Q1, ['True', 'False'])!;
+    const [t, f] = res.segments;
+
+    // "True" runs 443-461; the False marker starts at 480. A box that reached
+    // across would let one tick read as either answer.
+    expect(t!.x + t!.width).toBeLessThan(f!.x);
+  });
+
+  it('estimates a box beside the answer when no checkbox is in the text layer', () => {
+    const res = proposeInline(stackedChoices(), 'Q3. What is the purpose of performing a walk around pre-start inspection?', [
+      'Inspect for damage',
+      'Identify faults with the machine',
+      'Ensure equipment is safe to operate',
+      'All the above',
+    ])!;
+
+    expect(res).not.toBeNull();
+    expect(res.segments).toHaveLength(4);
+    // Left of the answer text, and on that answer's own baseline.
+    for (const segment of res.segments) expect(segment.x).toBeLessThan(60);
+    expect(res.segments[0]!.y).toBeGreaterThan(res.segments[3]!.y);
+  });
+
+  it('says an estimated box needs checking, and does not read as certain', () => {
+    const res = proposeInline(stackedChoices(), 'Q3. What is the purpose of performing a walk around pre-start inspection?', [
+      'Inspect for damage',
+      'Identify faults with the machine',
+      'Ensure equipment is safe to operate',
+      'All the above',
+    ])!;
+
+    expect(res.confidence).toBe(0.5);
+    expect(res.notes.join(' ')).toMatch(/estimated/i);
+  });
+
+  it('produces segments the shared validator accepts', () => {
+    const res = proposeInline(inlineTrueFalse(), Q1, ['True', 'False'])!;
+
+    for (const segment of res.segments) {
+      expect(resolveGeometry({ geometry: { segments: [segment] } }, 3).segments).toHaveLength(1);
+    }
+  });
+});
+
+describe('proposeInlineOptionCells — refusals', () => {
+  it('refuses when one option is not printed anywhere', () => {
+    // Partial placement is worse than none: the options a reviewer can see
+    // placed are the ones they stop checking.
+    expect(proposeInline(inlineTrueFalse(), Q1, ['True', 'False', 'N/A'])).toBeNull();
+  });
+
+  it('refuses when an option word appears twice in the window', () => {
+    const page = [...inlineTrueFalse(), { text: 'True', x: 60, y: 597.1, width: 18 }];
+
+    expect(proposeInline(page, Q1, ['True', 'False'])).toBeNull();
+  });
+
+  it('refuses when the question itself is printed twice', () => {
+    const page = [...inlineTrueFalse(), ...inlineTrueFalse().map((i) => ({ ...i, y: i.y - 300 }))];
+
+    expect(proposeInline(page, Q1, ['True', 'False'])).toBeNull();
+  });
+
+  it('refuses a question label too short to identify', () => {
+    expect(proposeInline(inlineTrueFalse(), 'Q1', ['True', 'False'])).toBeNull();
+  });
+
+  it('refuses when the question is not on this page', () => {
+    expect(
+      proposeInline(inlineTrueFalse(), 'Q7. It is acceptable to leave a vertical face', ['True', 'False']),
+    ).toBeNull();
+  });
+
+  it('does not search past the question that follows', () => {
+    // "False" belongs to a question far below; taking it would place this
+    // question's mark on another question's answer.
+    const page = [
+      { text: Q1, x: 37.5, y: 630.8, width: 380 },
+      { text: 'True', x: 443, y: 630.8, width: 18 },
+      ...Array.from({ length: 20 }, (_, i) => ({
+        text: `filler line ${i}`,
+        x: 37.5,
+        y: 614 - i * 16.8,
+        width: 100,
+      })),
+      { text: 'False', x: 443, y: 250, width: 20 },
+    ];
+
+    expect(proposeInline(page, Q1, ['True', 'False'])).toBeNull();
+  });
+});

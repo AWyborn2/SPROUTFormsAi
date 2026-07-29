@@ -933,3 +933,161 @@ export function proposeFieldOptionCells(input: FieldProposeInput): FieldProposal
 
   return { segments, confidence: Math.max(0, Math.min(1, confidence)), notes };
 }
+
+/**
+ * How far left of an option's text a marker glyph may sit and still be its own.
+ *
+ * A checkbox printed in the text layer sits immediately before the words it
+ * labels. Beyond about a dozen points the nearest run is the previous option's
+ * text or the question stem, not a marker.
+ */
+const MARKER_GAP = 12;
+
+/** A marker glyph is a box or bullet, never a word. */
+const MARKER_MAX_WIDTH = 15;
+
+/** Fallback marker side length, and the gap it leaves before the text. */
+const SYNTHETIC_MARKER_SIZE = 10;
+const SYNTHETIC_MARKER_GAP = 3;
+
+/**
+ * How many printed rows below the question its answers may occupy.
+ *
+ * Six options is the largest on the measured library ("All of these answers are
+ * correct" questions run to six), and a wrapped option takes two lines. Beyond
+ * that the search has left the question and is reading the next one.
+ */
+const INLINE_SEARCH_ROWS = 14;
+
+/**
+ * Propose one box per option for a question whose answers are PRINTED INLINE.
+ *
+ * The counterpart to `proposeFieldOptionCells`, for the other population of
+ * choice fields on these forms. A theory question — "Q1. The track dozer must
+ * be isolated…" with `True` and `False` — prints its answers beside or beneath
+ * itself, and its marks belong next to those printed words. It has no option
+ * columns at all, so the column derivation must never be applied to it (see
+ * `optionsPrintedInRow`, which is the guard on the other side of this line).
+ *
+ * Anchoring on the option's OWN text is what makes this safe. The column rule
+ * could put a tick for "True" in the tick column of an unrelated outcome cell —
+ * a mark against the wrong answer. Here the worst case is a box a few points
+ * off the printed checkbox but unambiguously against the option it names, which
+ * is a cosmetic error rather than a false record.
+ *
+ * Refuses unless EVERY option is found exactly once. A partial placement is
+ * worse than none: the options a reviewer can see placed are the ones they stop
+ * checking.
+ */
+export function proposeInlineOptionCells(input: FieldProposeInput): FieldProposal | null {
+  if (input.options.length < 2 || input.items.length === 0) return null;
+
+  const wanted = stripEnumeration(normalizeForMatch(input.label));
+  if (wanted.length < 12) return null;
+
+  const rows = toRows(input.items);
+  if (rows.length === 0) return null;
+
+  // Where the question is printed. Ambiguity refuses, exactly as it does for
+  // the column rule — the dozer asks "True / False" of many questions, and the
+  // label is the only thing telling them apart.
+  const starts = rows.filter((r) => {
+    const text = normalizeForMatch(r.items.map((i) => i.text).join(' '));
+    return text.length > 0 && (text.includes(wanted) || wanted.includes(text));
+  });
+  if (starts.length !== 1) return null;
+
+  const startIndex = rows.indexOf(starts[0]!);
+  const window = rows.slice(startIndex, startIndex + INLINE_SEARCH_ROWS);
+
+  const pitch = rowPitch(window.slice(1).map((r, i) => window[i]!.y - r.y));
+  const size = Math.min(SYNTHETIC_MARKER_SIZE, pitch > 0 ? pitch * 0.7 : SYNTHETIC_MARKER_SIZE);
+
+  const segments: PageBox[] = [];
+  let synthesized = 0;
+
+  for (const option of input.options) {
+    const needle = normalizeForMatch(option);
+    if (needle.length < 2) return null;
+
+    // Every run whose own text carries this option, anywhere in the window.
+    const hits: { row: Row; item: PositionedText }[] = [];
+    for (const row of window) {
+      for (const item of row.items) {
+        if (containsTokens(normalizeForMatch(item.text), needle)) hits.push({ row, item });
+      }
+    }
+    // Found nowhere, or in several places — either way there is no single box
+    // this option names, and guessing between them records an answer nobody
+    // gave.
+    if (hits.length !== 1) return null;
+
+    const { row, item } = hits[0]!;
+
+    // The printed checkbox, when it reaches the text layer: a short narrow run
+    // immediately before the option's words on the same baseline.
+    const marker = row.items.find(
+      (candidate) =>
+        candidate !== item &&
+        candidate.width > 0 &&
+        candidate.width <= MARKER_MAX_WIDTH &&
+        candidate.x < item.x &&
+        item.x - (candidate.x + candidate.width) <= MARKER_GAP,
+    );
+
+    if (marker) {
+      segments.push({
+        page: input.page,
+        x: marker.x,
+        y: row.y - size * 0.2,
+        width: marker.width,
+        height: size,
+        pageWidth: input.pageWidth,
+        pageHeight: input.pageHeight,
+        optionKey: option,
+      });
+      continue;
+    }
+
+    // No marker in the text layer — it is drawn as vector strokes, which this
+    // module never reads. Place a box in the gap the marker occupies, which is
+    // approximate but cannot stray onto another option.
+    const x = item.x - SYNTHETIC_MARKER_GAP - size;
+    if (x < 0) return null;
+    synthesized++;
+    segments.push({
+      page: input.page,
+      x,
+      y: row.y - size * 0.2,
+      width: size,
+      height: size,
+      pageWidth: input.pageWidth,
+      pageHeight: input.pageHeight,
+      optionKey: option,
+    });
+  }
+
+  if (segments.length !== input.options.length) return null;
+
+  // The same validator the reviewer's hand-drawn boxes pass.
+  if (
+    segments.some(
+      (s) => resolveGeometry({ geometry: { segments: [s] } }, input.page + 1).segments.length === 0,
+    )
+  ) {
+    return null;
+  }
+
+  const notes: string[] = [];
+  let confidence = 1;
+  if (synthesized > 0) {
+    // Halved rather than nudged: an estimated box is the case a reviewer most
+    // needs to look at, and it should not read as nearly-certain.
+    confidence = 0.5;
+    notes.push(
+      `${synthesized} of ${segments.length} checkbox(es) are not in the PDF's text layer — those boxes are estimated from the answer's position and should be checked against the page.`,
+    );
+  }
+
+  return { segments, confidence, notes };
+}

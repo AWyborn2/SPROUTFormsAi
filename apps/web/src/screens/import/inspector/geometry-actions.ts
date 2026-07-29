@@ -15,7 +15,11 @@ import type {
   TableProposal,
   TextPage,
 } from '../../../lib/pdf-geometry.js';
-import { proposeFieldOptionCells, proposeTableSegments } from '../../../lib/pdf-geometry.js';
+import {
+  proposeFieldOptionCells,
+  proposeInlineOptionCells,
+  proposeTableSegments,
+} from '../../../lib/pdf-geometry.js';
 
 /**
  * The part of a field grid derivation reads: its shape, its row count, and —
@@ -1033,14 +1037,21 @@ export function deriveOptionCellsAcrossPages(
 
   const hits: FieldProposal[] = [];
   for (const [i, page] of pages.entries()) {
-    const p = proposeFieldOptionCells({
+    const input = {
       page: i,
       pageWidth: page.width,
       pageHeight: page.height,
       items: page.items,
       label: field.label,
       options: field.options,
-    });
+    };
+
+    // Two shapes, tried in order and mutually exclusive by construction. The
+    // column rule refuses a field whose options are printed in its row; the
+    // inline rule refuses one whose options are column glyphs, because those
+    // are not printed beside the question at all. Neither can claim the other's
+    // field, so the order is for clarity rather than precedence.
+    const p = proposeFieldOptionCells(input) ?? proposeInlineOptionCells(input);
     if (p) hits.push(p);
     // Two pages both claiming this question is the ambiguous case that matters;
     // stop as soon as it is established rather than scanning on.

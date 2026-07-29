@@ -1127,3 +1127,80 @@ describe('deriveOptionCellsAcrossPages', () => {
     ).toBeNull();
   });
 });
+
+/**
+ * The two option shapes must not claim each other's fields.
+ *
+ * This is the invariant the whole pair rests on. Both populations arrive as "a
+ * choice field with N options" and `deriveOptionCellsAcrossPages` tries both
+ * rules, so if either accepted the other's field the marks would land in the
+ * wrong place with full confidence — a tick for "True" in an outcome column, or
+ * an outcome tick beside a printed word.
+ */
+describe('deriveOptionCellsAcrossPages — routing between the two shapes', () => {
+  const A4_PAGE = { width: 595, height: 842 };
+
+  /** Practical criteria: labels left, ✓ / × and N/A columns right. */
+  const criteriaPage: TextPage = {
+    ...A4_PAGE,
+    items: [
+      { text: 'N/A', x: 539.9, y: 648.6, width: 13.3 },
+      { text: 'During the demonstration, did the candidate:', x: 37.5, y: 647.7, width: 192 },
+      { text: '\uf0fc', x: 502.6, y: 647.7, width: 7.1 },
+      { text: '/ \u00d7', x: 512.1, y: 647.7, width: 10.3 },
+      { text: 'Correct & controlled steering techniques', x: 37.5, y: 630.8, width: 258.1 },
+      { text: 'Manoeuvres dozer safely', x: 37.5, y: 614, width: 143.6 },
+    ],
+  };
+
+  /** A theory question printing its own answers. */
+  const theoryPage: TextPage = {
+    ...A4_PAGE,
+    items: [
+      { text: 'Q1. The track dozer must be isolated with a lock and hasp', x: 37.5, y: 630.8, width: 300 },
+      { text: '\u2610', x: 430, y: 630.8, width: 9 },
+      { text: 'True', x: 443, y: 630.8, width: 18 },
+      { text: '\u2610', x: 480, y: 630.8, width: 9 },
+      { text: 'False', x: 493, y: 630.8, width: 20 },
+    ],
+  };
+
+  it('maps a practical criterion onto the option columns', () => {
+    const res = deriveOptionCellsAcrossPages(
+      { label: 'Correct & controlled steering techniques', options: ['\u2713 / \u00d7', 'N/A'] },
+      [criteriaPage],
+    );
+
+    expect(res).not.toBeNull();
+    // Right of the label header — the glyph columns, not the row.
+    for (const segment of res!.segments) expect(segment.x).toBeGreaterThan(450);
+  });
+
+  it('anchors a theory question on its own printed answers', () => {
+    const res = deriveOptionCellsAcrossPages(
+      { label: 'Q1. The track dozer must be isolated with a lock and hasp', options: ['True', 'False'] },
+      [theoryPage],
+    );
+
+    expect(res).not.toBeNull();
+    // The printed ☐ glyphs, nowhere near where an outcome column would be.
+    expect(res!.segments.map((s) => s.x)).toEqual([430, 480]);
+  });
+
+  it('does not place a theory question in the outcome columns of its own page', () => {
+    // The page carries BOTH: a criteria header and a question with inline
+    // answers. This is the real Track Dozer layout, and the trap.
+    const mixed: TextPage = { ...A4_PAGE, items: [...criteriaPage.items, ...theoryPage.items] };
+    const res = deriveOptionCellsAcrossPages(
+      { label: 'Q1. The track dozer must be isolated with a lock and hasp', options: ['True', 'False'] },
+      [mixed],
+    );
+
+    // Either it anchors on the printed ☐ glyphs at 430 and 480, or it refuses.
+    // What it must never do is map True/False onto the ✓ / × and N/A columns,
+    // whose anchors sit at 502.6, 512.1 and 539.9.
+    if (res) {
+      expect(res.segments.map((s) => s.x)).toEqual([430, 480]);
+    }
+  });
+});
