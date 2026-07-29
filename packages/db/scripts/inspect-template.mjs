@@ -28,6 +28,53 @@ const clip = (s, n = 78) => {
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
 
+/**
+ * Size the geometry job, and say how much of it a machine can offer to do.
+ *
+ * Evidence export draws nothing for a field with no placement, so until this
+ * reaches full coverage the exported PDF is blank wherever it is short. The
+ * split that matters is AUTO-PROPOSABLE vs HAND-PLACE-ONLY: `deriveForField`
+ * (apps/web) only proposes for a repeating table with at least two columns and
+ * a known row count. Everything else has to be drawn by a reviewer, one box at
+ * a time, so that count is the real cost of the remaining work.
+ *
+ * Boxes, not fields, is the unit — a choice field ticks per option, so it needs
+ * one box for each.
+ */
+function reportPlacementWork(fields) {
+  const CHOICE = new Set(['checkbox_group', 'radio', 'dropdown']);
+  // A section header is printed furniture with no answer to place.
+  const placeable = fields.filter((f) => f.type !== 'section_header');
+  const missing = placeable.filter((f) => !f.geometry && !f.sourcePosition);
+
+  const autoProposable = (f) =>
+    f.type === 'repeating_group' && (f.columns?.length ?? 0) >= 2 && (f.fixedRows?.length ?? 0) > 0;
+
+  // printSelectedValue prints the chosen value as text in ONE box, so it is
+  // placed like a scalar rather than per option.
+  const boxesFor = (f) =>
+    CHOICE.has(f.type) && !f.printSelectedValue && (f.options?.length ?? 0) > 0 ? f.options.length : 1;
+
+  const auto = missing.filter(autoProposable);
+  const hand = missing.filter((f) => !autoProposable(f));
+  const handBoxes = hand.reduce((n, f) => n + boxesFor(f), 0);
+
+  console.log('');
+  console.log('PLACEMENT WORK REMAINING');
+  console.log(`  ${placeable.length - missing.length}/${placeable.length} answerable fields placed`);
+  console.log(`  ${auto.length} field(s) a machine can propose for (repeating tables)`);
+  console.log(`  ${hand.length} field(s) must be hand-drawn — ${handBoxes} box(es) in total`);
+
+  if (hand.length) {
+    const byType = {};
+    for (const f of hand) byType[f.type] = (byType[f.type] ?? 0) + boxesFor(f);
+    console.log('  hand-drawn boxes by field type:');
+    for (const [k, n] of Object.entries(byType).sort((a, b) => b[1] - a[1])) {
+      console.log(`    ${String(n).padStart(4)}  ${k}`);
+    }
+  }
+}
+
 async function main() {
   const templates = TEMPLATE_ID
     ? await sql`select * from form_templates where id = ${TEMPLATE_ID}`
@@ -52,6 +99,7 @@ async function main() {
 
   const withGeometry = fields.filter((f) => f.geometry || f.sourcePosition).length;
   console.log(`\nPLACEMENT: ${withGeometry}/${fields.length} fields carry geometry or a source position.`);
+  reportPlacementWork(fields);
 
   const headers = fields.filter((f) => f.type === 'section_header');
   console.log(`\nSECTION HEADERS (${headers.length})`);
