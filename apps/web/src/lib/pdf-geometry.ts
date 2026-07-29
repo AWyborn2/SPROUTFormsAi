@@ -684,3 +684,186 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
 
   return proposals;
 }
+
+/* ── Non-table fields ─────────────────────────────────────────────────────── */
+
+/**
+ * A field whose answer is printed as a row of option cells, but which was NOT
+ * extracted as a repeating table.
+ *
+ * This is the shape the assessment tools actually take. The dozer's theory
+ * pages LOOK like a table — a question per row, tick / cross / N-A columns down
+ * the right — but the extraction profile deliberately emits one FIELD per
+ * question rather than one table with 31 rows, because a question needs its own
+ * answer key and its own outcome cell. `proposeTableSegments` therefore never
+ * fires on them, and every one of those cells has to be drawn by hand.
+ *
+ * The page is still geometrically a table, so the column derivation above
+ * applies unchanged. What is new is only the row: instead of taking every row
+ * beneath the header, one field is matched to ONE row by its label text.
+ */
+export interface FieldProposeInput {
+  page: number;
+  pageWidth: number;
+  pageHeight: number;
+  items: PositionedText[];
+  /** The field's label, as extracted. Matched against the printed row. */
+  label: string;
+  /** Option keys in PRINTED left-to-right order — one cell each. */
+  options: readonly string[];
+}
+
+export interface FieldProposal {
+  /** One box per option, each carrying its `optionKey`. */
+  segments: PageBox[];
+  /** 0..1. Reduced for every anchor inferred rather than found. */
+  confidence: number;
+  /** Why confidence was reduced, or why the match was close. For the reviewer. */
+  notes: string[];
+}
+
+/**
+ * Normalize text for label matching.
+ *
+ * Aggressive on purpose. The extracted label came from a vision model reading
+ * the same page, so it agrees on WORDS but not on punctuation, spacing, or the
+ * question number — and the text layer splits a line into runs at arbitrary
+ * points. Comparing anything finer than a word sequence compares artefacts of
+ * two different extractors rather than the sentence both of them read.
+ */
+function normalizeForMatch(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/**
+ * Leading enumeration — "12.", "Q3", "(a)" — which the model often drops from
+ * the label and the page always prints.
+ */
+function stripEnumeration(text: string): string {
+  return text.replace(/^(?:q(?:uestion)?\s*)?\d+\s*/, '').trim();
+}
+
+/** Every row inside a band, top-down, as one normalized string. */
+function bandText(rows: Row[], band: GeometryBand): string {
+  return normalizeForMatch(
+    rows
+      .filter((r) => r.y > band.start && r.y <= band.end)
+      .sort((a, b) => b.y - a.y)
+      .flatMap((r) => [...r.items].sort((a, b) => a.x - b.x).map((i) => i.text))
+      .join(' '),
+  );
+}
+
+/**
+ * Does this row band carry the field's label?
+ *
+ * Containment in EITHER direction: the model's label can be a shortened form of
+ * the printed question, or can carry a heading the print splits across the
+ * band. Requiring equality matched almost nothing.
+ *
+ * Deciding which band wins — and refusing when several do — is the caller's
+ * job, because ambiguity is a property of the whole page rather than of any one
+ * band. See `proposeFieldOptionCells`.
+ */
+function bandMatches(rows: Row[], band: GeometryBand, label: string): boolean {
+  const wanted = stripEnumeration(normalizeForMatch(label));
+  // A handful of characters is not enough to identify a row: "yes", "date",
+  // "name" match half the page. Below this the only safe answer is to let a
+  // reviewer draw it, which is the visible failure rather than the silent one.
+  if (wanted.length < 12) return false;
+
+  const text = bandText(rows, band);
+  if (text.length === 0) return false;
+  return text.includes(wanted) || wanted.includes(text);
+}
+
+/**
+ * Propose one option cell per option for a non-table field.
+ *
+ * Returns null rather than a guess whenever the page does not settle it — no
+ * option header, a label that matches no row or several, anchors that cannot be
+ * reconciled against the option count. Every refusal leaves the field exporting
+ * as data, which is a visibly incomplete PDF someone notices; a confident box in
+ * the wrong cell stamps a competency mark against something nobody checked.
+ */
+export function proposeFieldOptionCells(input: FieldProposeInput): FieldProposal | null {
+  if (input.options.length < 2 || input.items.length === 0) return null;
+
+  const rows = toRows(input.items);
+  // Top-down, so a page carrying several tables uses the header that actually
+  // governs the matched row rather than whichever was found first.
+  const headers = findHeaderRows(rows).sort((a, b) => b.row.y - a.row.y);
+  if (headers.length === 0) return null;
+
+  // Every match on the WHOLE page is collected before any is used. Judging
+  // ambiguity per header would miss the case that matters most: a page carrying
+  // the same question under two tables offers one match beneath each, and each
+  // header on its own looks unambiguous.
+  const matches: { header: HeaderRow; band: GeometryBand }[] = [];
+  for (let h = 0; h < headers.length; h++) {
+    const header = headers[h]!;
+    const bands = rowBands(rows, header, headers[h + 1]?.row.y ?? 0);
+    for (const band of bands) {
+      if (bandMatches(rows, band, input.label)) matches.push({ header, band });
+    }
+  }
+
+  // Absence and ambiguity are the same answer: let a reviewer draw it. Placing
+  // the cell on the wrong occurrence records an assessment against something
+  // nobody asked.
+  if (matches.length !== 1) return null;
+  const { header, band } = matches[0]!;
+
+  const rightmostText = Math.max(...header.row.items.map((i) => i.x + i.width));
+  const reconciled = reconcile(header.anchors, input.options.length, rightmostText);
+  if (!reconciled) return null;
+
+  const columns = centresToBands(
+    reconciled.centres,
+    [...input.options],
+    header.labelRight,
+    input.pageWidth,
+  );
+  const height = band.end - band.start;
+  if (!(height > 0)) return null;
+
+  const segments: PageBox[] = columns.map((column) => ({
+    page: input.page,
+    x: column.start,
+    y: band.start,
+    width: column.end - column.start,
+    height,
+    pageWidth: input.pageWidth,
+    pageHeight: input.pageHeight,
+    optionKey: column.key,
+  }));
+
+  // The same validator the reviewer's hand-drawn boxes pass. A proposal that
+  // cannot survive it would be dropped silently at export.
+  if (
+    segments.some(
+      (s) => resolveGeometry({ geometry: { segments: [s] } }, input.page + 1).segments.length === 0,
+    )
+  ) {
+    return null;
+  }
+
+  const notes: string[] = [];
+  let confidence = 1;
+  if (reconciled.inferred > 0) {
+    confidence -= 0.25 * reconciled.inferred;
+    notes.push(`${reconciled.inferred} option column(s) inferred from pitch, not found in the text.`);
+  }
+  if (reconciled.merged > 0) {
+    notes.push(`${reconciled.merged} header run(s) merged to match the option count.`);
+  }
+  if (!header.corroborated) {
+    confidence -= 0.15;
+    notes.push('Only one option header on the page — nothing corroborates the column positions.');
+  }
+
+  return { segments, confidence: Math.max(0, Math.min(1, confidence)), notes };
+}

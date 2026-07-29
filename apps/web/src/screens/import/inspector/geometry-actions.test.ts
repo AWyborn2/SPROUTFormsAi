@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FormField, GroupOrdinal, PageBox } from '@formai/shared';
 import { markPlacement, resolveGeometry } from '@formai/shared';
-import type { PositionedText } from '../../../lib/pdf-geometry.js';
+import type { PositionedText, TextPage } from '../../../lib/pdf-geometry.js';
 import {
   NEAR_EQUAL_CONFIDENCE,
   NUDGE_POINTS,
@@ -22,6 +22,7 @@ import {
   type DerivableField,
   deriveAcrossPages,
   deriveForField,
+  deriveOptionCellsAcrossPages,
   evenGrid,
   handleAdjustment,
   itemsInBox,
@@ -1037,3 +1038,92 @@ describe('rule-line extraction from a page path (draw-jump: snap to the grid)', 
     expect(applyMatrix(ctm, 5, 5)).toEqual([50, 710]);
   });
 })
+
+/**
+ * Document-wide option-cell derivation for non-table fields.
+ *
+ * The page-level rule is proved in `pdf-geometry.test.ts` against measured
+ * fixtures. What is added here is the DOCUMENT rule: the dozer repeats the same
+ * criterion under several parts, and a mark placed under the wrong one records
+ * an assessment against a criterion nobody checked.
+ */
+describe('deriveOptionCellsAcrossPages', () => {
+  const A4_PAGE = { width: 595, height: 842 };
+
+  /** A minimal page carrying the dozer's measured tick / cross / N-A header. */
+  function questionPage(question: string): TextPage {
+    return {
+      ...A4_PAGE,
+      items: [
+        { text: 'N/A', x: 539.9, y: 648.6, width: 13.3 },
+        { text: 'During the demonstration, did the candidate:', x: 37.5, y: 647.7, width: 192 },
+        { text: '\uf0fc', x: 502.6, y: 647.7, width: 7.1 },
+        { text: '/ \u00d7', x: 512.1, y: 647.7, width: 10.3 },
+        { text: question, x: 37.5, y: 630.8, width: 258.1 },
+        { text: 'Wearing correct PPE', x: 37.5, y: 614, width: 84 },
+      ],
+    };
+  }
+
+  const OPTIONS = ['tick', 'cross', 'na'];
+
+  it('finds the question on whichever page prints it', () => {
+    const pages = [questionPage('Receive and clarify the work instructions'), questionPage('Something else entirely')];
+    const res = deriveOptionCellsAcrossPages(
+      { label: 'Receive and clarify the work instructions', options: OPTIONS },
+      pages,
+    );
+
+    expect(res).not.toBeNull();
+    expect(res!.segments).toHaveLength(3);
+    expect(res!.segments[0]!.page).toBe(0);
+  });
+
+  it('records the page it matched, not page zero', () => {
+    const pages = [questionPage('Something else entirely'), questionPage('Receive and clarify the work instructions')];
+    const res = deriveOptionCellsAcrossPages(
+      { label: 'Receive and clarify the work instructions', options: OPTIONS },
+      pages,
+    );
+
+    expect(res!.segments.every((s) => s.page === 1)).toBe(true);
+  });
+
+  it('refuses when two pages both print the same criterion', () => {
+    // The real hazard: "Wearing correct PPE" appears under several parts of the
+    // dozer. Nothing distinguishes the occurrences, so neither may be chosen.
+    const pages = [questionPage('Receive and clarify the work instructions'), questionPage('Receive and clarify the work instructions')];
+
+    expect(
+      deriveOptionCellsAcrossPages(
+        { label: 'Receive and clarify the work instructions', options: OPTIONS },
+        pages,
+      ),
+    ).toBeNull();
+  });
+
+  it('refuses a field with fewer than two options', () => {
+    const pages = [questionPage('Receive and clarify the work instructions')];
+
+    expect(
+      deriveOptionCellsAcrossPages(
+        { label: 'Receive and clarify the work instructions', options: ['tick'] },
+        pages,
+      ),
+    ).toBeNull();
+    expect(
+      deriveOptionCellsAcrossPages({ label: 'Receive and clarify the work instructions' }, pages),
+    ).toBeNull();
+  });
+
+  it('refuses when no page prints the question', () => {
+    const pages = [questionPage('Receive and clarify the work instructions')];
+
+    expect(
+      deriveOptionCellsAcrossPages(
+        { label: 'Conducts a pre-start inspection of the ROPS', options: OPTIONS },
+        pages,
+      ),
+    ).toBeNull();
+  });
+});

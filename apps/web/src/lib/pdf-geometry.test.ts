@@ -844,3 +844,162 @@ describe('the standalone header shape does not admit page furniture (U8 review)'
     expect(got[0]!.segment.rowBands!).toHaveLength(3);
   });
 });
+
+/**
+ * Non-table fields — one FIELD per printed question.
+ *
+ * This is the shape the assessment tools actually take. The extraction profile
+ * emits one field per question (each needs its own answer key and outcome
+ * cell), so `proposeTableSegments` never fires on these pages even though they
+ * are geometrically tables. Same measured fixtures, matched a row at a time.
+ */
+import { proposeFieldOptionCells } from './pdf-geometry.js';
+
+const TICK_CROSS_NA = ['tick', 'cross', 'na'] as const;
+
+function proposeField(items: PositionedText[], label: string, options = TICK_CROSS_NA) {
+  return proposeFieldOptionCells({ page: 6, ...A4, items, label, options: [...options] });
+}
+
+describe('proposeFieldOptionCells — matching one question to its row', () => {
+  it('proposes one cell per option for a measured question row', () => {
+    const res = proposeField(dozerPage7Table1(), 'Identify and report potential hazards');
+
+    expect(res).not.toBeNull();
+    expect(res!.segments).toHaveLength(3);
+    expect(res!.segments.map((s) => s.optionKey)).toEqual(['tick', 'cross', 'na']);
+  });
+
+  it('puts each cell over its own printed column, left to right, without overlap', () => {
+    const res = proposeField(dozerPage7Table1(), 'Identify and report potential hazards')!;
+    const [tick, cross, na] = res.segments;
+
+    // The measured anchors sit at 502.6, 512.1 and 539.9.
+    expect(tick!.x).toBeLessThan(cross!.x);
+    expect(cross!.x).toBeLessThan(na!.x);
+    expect(tick!.x + tick!.width).toBeLessThanOrEqual(cross!.x + 0.001);
+    expect(cross!.x + cross!.width).toBeLessThanOrEqual(na!.x + 0.001);
+  });
+
+  it('places the band over the row it matched, not a neighbour', () => {
+    const res = proposeField(dozerPage7Table1(), 'Identify and report potential hazards')!;
+    const box = res.segments[0]!;
+
+    // That row's baseline is 614; its neighbours are 630.8 and 597.1. The band
+    // must contain its own baseline and neither of theirs — one row out stamps
+    // a competency mark against a different criterion.
+    expect(box.y).toBeLessThan(614);
+    expect(box.y + box.height).toBeGreaterThan(614);
+    expect(box.y).toBeGreaterThan(597.1);
+    expect(box.y + box.height).toBeLessThan(630.8);
+  });
+
+  it('treats a wrapped question as one row', () => {
+    // Measured: this label wraps, leaving a 10.4pt gap against a ~16.8pt pitch.
+    const res = proposeField(
+      dozerPage7Table2Header(),
+      'Isolates machine correctly using personnel safety locks',
+    )!;
+
+    expect(res).not.toBeNull();
+    const box = res.segments[0]!;
+    // One band spanning BOTH printed lines (528.6 and 518.2). Counting the wrap
+    // as its own row offsets every answer below it.
+    expect(box.y).toBeLessThan(518.2);
+    expect(box.y + box.height).toBeGreaterThan(528.6);
+  });
+
+  it('matches when the model dropped the printed question number', () => {
+    const res = proposeField(dozerPage7Table1(), '4. Wearing correct PPE');
+
+    expect(res).not.toBeNull();
+  });
+
+  it('produces segments the shared validator accepts', () => {
+    const res = proposeField(dozerPage7Table1(), 'Identify and report potential hazards')!;
+
+    for (const segment of res.segments) {
+      expect(resolveGeometry({ geometry: { segments: [segment] } }, 7).segments).toHaveLength(1);
+    }
+  });
+});
+
+describe('proposeFieldOptionCells — refusals', () => {
+  it('refuses a label that matches no printed row', () => {
+    expect(proposeField(dozerPage7Table1(), 'Conducts a pre-start inspection of the ROPS')).toBeNull();
+  });
+
+  it('refuses a label too short to identify a row', () => {
+    // "Date", "Name", "Yes" match half a page. Below the floor the only safe
+    // answer is to let a reviewer draw it.
+    expect(proposeField(dozerPage7Table1(), 'Date')).toBeNull();
+  });
+
+  it('refuses when the same question is printed twice on the page', () => {
+    // Two equally good matches, and no honest way to pick — placing the cell on
+    // the wrong one records an assessment against something nobody asked.
+    const page = [
+      ...dozerPage7Table1(),
+      ...dozerPage7Table1().map((i) => ({ ...i, y: i.y - 200 })),
+    ];
+
+    expect(proposeField(page, 'Identify and report potential hazards')).toBeNull();
+  });
+
+  it('refuses a page with no option header at all', () => {
+    const prose: PositionedText[] = [
+      { text: 'Identify and report potential hazards', x: 37.5, y: 614, width: 143.6 },
+      { text: 'Wearing correct PPE', x: 37.5, y: 580.3, width: 84 },
+    ];
+
+    expect(proposeField(prose, 'Identify and report potential hazards')).toBeNull();
+  });
+
+  it('refuses a single-option field — one column is not a row of cells', () => {
+    expect(
+      proposeField(dozerPage7Table1(), 'Identify and report potential hazards', ['tick'] as never),
+    ).toBeNull();
+  });
+});
+
+describe('proposeFieldOptionCells — confidence', () => {
+  it('reports full confidence on a corroborated header with every anchor found', () => {
+    // The real page 7: two tables, whose headers repeat the same anchor
+    // positions and so corroborate each other, over DISTINCT criteria.
+    const page7 = [...dozerPage7Table1(), ...dozerPage7Table2Header()];
+    const res = proposeField(page7, 'Maintain three (3) point contact when manoeuvring over')!;
+
+    expect(res).not.toBeNull();
+    expect(res.confidence).toBe(1);
+    expect(res.notes).toEqual([]);
+  });
+
+  it('uses the header governing the matched row, not the first on the page', () => {
+    const page7 = [...dozerPage7Table1(), ...dozerPage7Table2Header()];
+    const res = proposeField(page7, 'Maintain three (3) point contact when manoeuvring over')!;
+    const box = res.segments[0]!;
+
+    // That criterion sits under the SECOND header, at baseline 501.4. Taking
+    // the first header's rows would place the cell ~100pt up the page.
+    expect(box.y).toBeLessThan(501.4);
+    expect(box.y + box.height).toBeGreaterThan(501.4);
+  });
+
+  it('says so when nothing corroborates the column positions', () => {
+    const res = proposeField(dozerPage7Table1(), 'Identify and report potential hazards')!;
+
+    expect(res.confidence).toBeLessThan(1);
+    expect(res.notes.join(' ')).toMatch(/corroborat/i);
+  });
+
+  it('reduces confidence and says why when an anchor had to be inferred', () => {
+    // The Small Loader shape: no Private-Use tick reaches the text layer, so the
+    // tick column is extended from pitch rather than found.
+    const res = proposeField(withoutTick(), 'Identify and report potential hazards');
+
+    if (res) {
+      expect(res.confidence).toBeLessThan(1);
+      expect(res.notes.join(' ')).toMatch(/inferred/i);
+    }
+  });
+});
