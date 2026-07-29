@@ -2,6 +2,14 @@ import type { StandardSchemaV1 } from '@modelcontextprotocol/server';
 import { ApiError } from '../client.js';
 
 /**
+ * The date shape every induction tool accepts, defined once so three schemas
+ * cannot drift into accepting different things. The package deliberately does
+ * not import it from @formai/shared: it must stay installable on its own, and
+ * it pins a different Zod major.
+ */
+export const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
  * The slice of `McpServer` the tool modules actually use.
  *
  * Structural rather than the concrete class so a test can register tools

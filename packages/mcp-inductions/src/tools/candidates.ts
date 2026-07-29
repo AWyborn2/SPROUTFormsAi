@@ -1,8 +1,6 @@
 import { z } from 'zod';
 import type { InductionsClient } from '../client.js';
-import { defineTool, ok, type ToolHost } from './host.js';
-
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+import { defineTool, ISO_DATE, ok, type ToolHost } from './host.js';
 
 export const listCandidatesInput = z.object({
   from: z.string().regex(ISO_DATE, 'Use YYYY-MM-DD').optional()

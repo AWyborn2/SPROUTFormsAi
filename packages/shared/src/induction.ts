@@ -136,7 +136,18 @@ const REQUIRED_SHAPE = [
   CHC_FIELD_IDS.inBeakon,
 ] as const;
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * The ISO `YYYY-MM-DD` shape every induction date is stored and compared in.
+ *
+ * Exported because the API route validates query parameters against the same
+ * shape: two copies of this pattern is two chances to accept a date this
+ * module will silently treat as unusable.
+ */
+export const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+export function isIsoDate(value: string): boolean {
+  return ISO_DATE_PATTERN.test(value);
+}
 
 function text(values: Record<string, SubmissionValue>, id: string): string {
   const value = values[id];
@@ -245,7 +256,7 @@ export function assessInductionReadiness(
   }
 
   const iso = profile.inductionDate;
-  if (!ISO_DATE.test(iso) || !isMonday(iso) || isPublicHoliday(iso)) {
+  if (!isIsoDate(iso) || !isMonday(iso) || isPublicHoliday(iso)) {
     blockers.push('date_invalid');
   } else if (businessDaysUntil(iso, today) < CHC_MIN_NOTICE_BUSINESS_DAYS) {
     blockers.push('date_notice_lapsed');
@@ -253,7 +264,7 @@ export function assessInductionReadiness(
 
   // Past the last listed holiday the notice count silently treats holidays as
   // working days, so the date can only be reported as provisional.
-  if (ISO_DATE.test(iso) && iso > holidaysCoverThrough()) warnings.push('holiday_list_expired');
+  if (isIsoDate(iso) && iso > holidaysCoverThrough()) warnings.push('holiday_list_expired');
 
   if (options.alreadyBooked) blockers.push('already_booked');
 
@@ -272,7 +283,7 @@ export function buildInductionCohorts(starters: AssessedStarter[]): InductionCoh
   const byDate = new Map<string, AssessedStarter[]>();
   for (const starter of starters) {
     const date = starter.profile.inductionDate;
-    if (!ISO_DATE.test(date)) continue;
+    if (!isIsoDate(date)) continue;
     const bucket = byDate.get(date);
     if (bucket) bucket.push(starter);
     else byDate.set(date, [starter]);

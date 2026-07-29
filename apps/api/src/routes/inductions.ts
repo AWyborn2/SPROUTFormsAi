@@ -6,6 +6,8 @@ import {
   assessInductionReadiness,
   buildInductionCohorts,
   holidaysCoverThrough,
+  isIsoDate,
+  ISO_DATE_PATTERN,
   nextBookableInductionDate,
   readStarterProfile,
   type AssessedStarter,
@@ -37,7 +39,8 @@ import { db } from '../db.js';
  */
 export const inductionsRouter: Router = Router();
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+/** The date shape @formai/shared stores and compares — never a second copy. */
+const ISO_DATE = ISO_DATE_PATTERN;
 
 /** How many upcoming Mondays `GET /dates` returns when the caller doesn't say. */
 const DEFAULT_DATE_COUNT = 4;
@@ -82,6 +85,25 @@ function candidateDto(
 type SubmissionRow = typeof schema.submissions.$inferSelect;
 
 /**
+ * The pinned field list for each submission's version.
+ *
+ * Both the listing path and the booking path need it, and both need it as one
+ * batched read rather than a query per row.
+ */
+async function pinnedFieldsFor(rows: SubmissionRow[]): Promise<Map<string, FormField[]>> {
+  if (!db || rows.length === 0) return new Map();
+  const versions = await db.query.formTemplateVersions.findMany({
+    where: inArray(
+      schema.formTemplateVersions.id,
+      [...new Set(rows.map((r) => r.templateVersionId))],
+    ),
+  });
+  return new Map(
+    versions.map((v) => [v.id, Array.isArray(v.fields) ? (v.fields as FormField[]) : []]),
+  );
+}
+
+/**
  * The submissions already covered by a booking.
  *
  * Scoped by submission id rather than org because the ids handed in are always
@@ -114,14 +136,7 @@ async function loadAssessedStarters(
   });
   if (rows.length === 0) return [];
 
-  const versionIds = [...new Set(rows.map((r) => r.templateVersionId))];
-  const versions = await db.query.formTemplateVersions.findMany({
-    where: inArray(schema.formTemplateVersions.id, versionIds),
-  });
-  const fieldsByVersion = new Map<string, FormField[]>(
-    versions.map((v) => [v.id, Array.isArray(v.fields) ? (v.fields as FormField[]) : []]),
-  );
-
+  const fieldsByVersion = await pinnedFieldsFor(rows);
   const booked = await bookedSubmissionIds(rows.map((r) => r.id));
 
   const assessed: { starter: AssessedStarter; row: SubmissionRow }[] = [];
@@ -173,8 +188,8 @@ inductionsRouter.get('/candidates', requireMachineOrTenant, withErrorHandling(as
   const assessed = await loadAssessedStarters(tenant.orgId, new Date());
   const matching = assessed.filter(({ starter }) => {
     const date = starter.profile.inductionDate;
-    if (from && (!ISO_DATE.test(date) || date < from)) return false;
-    if (to && (!ISO_DATE.test(date) || date > to)) return false;
+    if (from && (!isIsoDate(date) || date < from)) return false;
+    if (to && (!isIsoDate(date) || date > to)) return false;
     if (readiness && starter.readiness !== readiness) return false;
     return true;
   });
@@ -386,12 +401,7 @@ inductionsRouter.post('/bookings', requireMachineOrTenant, withErrorHandling(asy
     return;
   }
 
-  const versions = await db.query.formTemplateVersions.findMany({
-    where: inArray(schema.formTemplateVersions.id, [...new Set(rows.map((r) => r.templateVersionId))]),
-  });
-  const fieldsByVersion = new Map<string, FormField[]>(
-    versions.map((v) => [v.id, Array.isArray(v.fields) ? (v.fields as FormField[]) : []]),
-  );
+  const fieldsByVersion = await pinnedFieldsFor(rows);
 
   const starters: { submissionId: string; starterName: string }[] = [];
   for (const row of rows) {

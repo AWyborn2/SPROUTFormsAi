@@ -1,11 +1,11 @@
 import { z } from 'zod';
 import type { InductionsClient } from '../client.js';
-import { defineTool, ok, type ToolHost } from './host.js';
+import { defineTool, ISO_DATE, ok, type ToolHost } from './host.js';
 
 export const cohortInput = z.object({
   date: z
     .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD')
+    .regex(ISO_DATE, 'Use YYYY-MM-DD')
     .optional()
     .describe('One induction Monday. Omit to see every upcoming cohort.'),
 });
