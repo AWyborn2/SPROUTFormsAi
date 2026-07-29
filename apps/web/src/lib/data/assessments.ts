@@ -13,6 +13,7 @@
  */
 import type {
   AssessmentPathway,
+  FormField,
   NotSatisfactoryDisposition,
   PartKind,
   PartOutcome,
@@ -75,6 +76,35 @@ export interface AssessmentCaseDetail {
   attempts: CaseAttemptView[];
 }
 
+/**
+ * One attempt's fillable surface.
+ *
+ * `fields` arrive with answer keys and outcome targets ALREADY REMOVED by the
+ * server — see the route. Nothing here re-strips them, because a client-side
+ * strip would imply the browser had been sent them in the first place.
+ */
+export interface AttemptFillView {
+  id: string;
+  partKey: string;
+  partLabel: string;
+  partKind: PartKind;
+  attemptNumber: number;
+  outcome: PartOutcome | null;
+  templateVersionId: string;
+  /**
+   * The case's stream and the manifest question it answers. Either being null
+   * fails OPEN: every location set renders rather than none.
+   */
+  locationStream: string | null;
+  locationStreamFieldId: string | null;
+  /** The stream question, for condition lookup — often outside this part. */
+  streamField: FormField | null;
+  minimumHours: number | null;
+  durationColumnKey: string | null;
+  fields: FormField[];
+  values: Record<string, SubmissionValue>;
+}
+
 export interface CreateCaseInput {
   toolId: string;
   candidateUserId: string;
@@ -112,6 +142,10 @@ export const assessmentsApi = {
       `/assessment-cases/${caseId}/pathway`,
       { pathway, reason, ...(rplJustification ? { rplJustification } : {}) },
     ),
+
+  /** The fillable surface for one attempt: part-scoped fields and saved answers. */
+  getAttempt: (caseId: string, attemptId: string) =>
+    apiClient.get<AttemptFillView>(`/assessment-cases/${caseId}/attempts/${attemptId}`),
 
   /** Opens a new attempt, or returns the one already open for that part. */
   openAttempt: (caseId: string, partKey: string) =>

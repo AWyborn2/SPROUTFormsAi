@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Button, Icon } from '@formai/ui';
 import { NS_DISPOSITIONS, type NotSatisfactoryDisposition, type PartState } from '@formai/shared';
 import {
@@ -191,7 +191,16 @@ function PartCard({
                 className={a.outcome === 'satisfactory' ? 'mt-0.5 flex-none text-success-text' : 'mt-0.5 flex-none text-danger'}
               />
               <span className="text-text-secondary">
-                Attempt {a.attemptNumber} — {a.outcome === 'satisfactory' ? 'satisfactory' : 'not satisfactory'}
+                {/* Readable after the fact, never editable — the fill screen
+                    locks a marked attempt. A candidate who failed should be
+                    able to see what they actually answered. */}
+                <Link
+                  to={`/app/assessments/${caseId}/attempts/${a.id}`}
+                  className="underline decoration-dotted underline-offset-2"
+                >
+                  Attempt {a.attemptNumber}
+                </Link>{' '}
+                — {a.outcome === 'satisfactory' ? 'satisfactory' : 'not satisfactory'}
                 {a.dispositionReason ? `: ${a.dispositionReason}` : ''}
               </span>
             </li>
@@ -199,14 +208,41 @@ function PartCard({
         </ul>
       )}
 
-      {!readOnly && part.state !== 'locked' && part.state !== 'satisfactory' && (
-        <div className="mt-3 border-t border-border-subtle pt-3">
-          {openAttempt ? (
+      {part.state !== 'locked' && part.state !== 'satisfactory' && (
+        <div className="mt-3 flex flex-col gap-3 border-t border-border-subtle pt-3">
+          {/* Answering is available to BOTH sides while an attempt is open —
+              the candidate does the work, and the assessor needs to read it to
+              mark it. Only the marking control below is assessor-only. */}
+          {openAttempt && (
+            <Link
+              to={`/app/assessments/${caseId}/attempts/${openAttempt.id}`}
+              className="inline-flex w-fit items-center gap-1.5 rounded-[10px] px-3.5 py-2 text-[13px] font-semibold text-white"
+              style={{ background: 'var(--accent)' }}
+            >
+              <Icon name="pen-line" size={15} />
+              {readOnly ? 'Answer questions' : 'Open answers'}
+            </Link>
+          )}
+
+          {!readOnly && openAttempt && (
             <OutcomeForm caseId={caseId} attemptId={openAttempt.id} kind={part.kind} />
-          ) : (
+          )}
+
+          {!readOnly && !openAttempt && (
             <Button onClick={onOpen} disabled={opening} leadingIcon="play">
               {opening ? 'Opening…' : attempts.length > 0 ? 'Start another attempt' : 'Start this part'}
             </Button>
+          )}
+
+          {/* A candidate cannot release a part to themselves — starting one is
+              the assessor's call, so say who they are waiting on rather than
+              showing a control that would 403. */}
+          {readOnly && !openAttempt && (
+            <p className="text-[12.5px] text-text-tertiary">
+              {attempts.length > 0
+                ? 'Your assessor will open another attempt if one is needed.'
+                : 'Your assessor will start this part when you’re ready.'}
+            </p>
           )}
         </div>
       )}

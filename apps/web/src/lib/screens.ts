@@ -62,6 +62,10 @@ export const SCREENS: ScreenDef[] = [
   // API scopes the read by permission rather than the screen filtering it.
   { key: 'assessments', path: '/app/assessments', group: 'Assessments', label: 'Assessments', icon: 'clipboard-check', shell: 'app', inNav: true },
   { key: 'assessment-case', path: '/app/assessments/:id', group: 'Assessments', label: 'Assessment case', icon: 'clipboard-list', shell: 'app' },
+  // Filling one part of a case. Addressed by ATTEMPT id, not part key: a retry
+  // is a distinct attempt row, and the URL has to say which one is being
+  // answered or a resumed link would reopen the wrong one.
+  { key: 'assessment-part-fill', path: '/app/assessments/:id/attempts/:attemptId', group: 'Assessments', label: 'Complete assessment part', icon: 'pen-line', shell: 'app' },
   { key: 'whitelabel', path: '/app/settings/branding', group: 'Enterprise & org', label: 'Branding', icon: 'sliders-horizontal', shell: 'app', inNav: true },
 
   // Mobile (responsive web)

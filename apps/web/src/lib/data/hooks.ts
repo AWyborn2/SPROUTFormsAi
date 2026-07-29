@@ -79,6 +79,8 @@ const keys = {
   assessmentTools: ['assessmentTools'] as const,
   assessmentCases: ['assessmentCases'] as const,
   assessmentCase: (id: string) => ['assessmentCases', id] as const,
+  assessmentAttempt: (caseId: string, attemptId: string) =>
+    ['assessmentCases', caseId, 'attempts', attemptId] as const,
   competencyRules: ['competencyRules'] as const,
   fillForm: (token: string) => ['fillForm', token] as const,
   fillLinks: (formId: string) => ['fillLinks', formId] as const,
@@ -679,6 +681,15 @@ export function useAssessmentCase(id: string | undefined) {
     queryKey: keys.assessmentCase(id ?? ''),
     queryFn: () => assessmentsApi.getCase(id!),
     enabled: !!id,
+  });
+}
+
+/** One attempt's fillable surface — part-scoped fields plus saved answers. */
+export function useAssessmentAttempt(caseId: string | undefined, attemptId: string | undefined) {
+  return useQuery({
+    queryKey: keys.assessmentAttempt(caseId ?? '', attemptId ?? ''),
+    queryFn: () => assessmentsApi.getAttempt(caseId!, attemptId!),
+    enabled: Boolean(caseId && attemptId),
   });
 }
 

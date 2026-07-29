@@ -65,8 +65,28 @@ const header = (id: string): FormField => ({
   source: 'imported',
 });
 
+/** A section header gated on the case's location stream. */
+const streamSection = (id: string, stream: string): FormField => ({
+  id,
+  type: 'section_header',
+  label: id,
+  required: false,
+  source: 'imported',
+  visibleWhen: { fieldId: 'stream-q', op: 'equals', value: stream },
+});
+
 const FIELDS: FormField[] = [
   header('h-theory'),
+  // The stream question itself. Its answer is seeded from the case rather than
+  // asked again, which is what gates the two location sets below.
+  {
+    id: 'stream-q',
+    type: 'dropdown',
+    label: 'Location',
+    required: false,
+    source: 'imported',
+    options: ['Mining', 'Raw Materials'],
+  },
   header('h-general'),
   {
     id: 'q1',
@@ -79,6 +99,10 @@ const FIELDS: FormField[] = [
     outcomeTarget: { fieldId: 'q1-out' },
   },
   { id: 'q1-out', type: 'check_cross', label: 'Q1 outcome', required: false, source: 'imported' },
+  streamSection('h-mining', 'Mining'),
+  { id: 'q-mining', type: 'text', label: 'Mining only', required: false, source: 'imported' },
+  streamSection('h-raw', 'Raw Materials'),
+  { id: 'q-raw', type: 'text', label: 'Raw Materials only', required: false, source: 'imported' },
   header('h-prac1'),
   header('h-log'),
   {
@@ -97,6 +121,7 @@ const FIELDS: FormField[] = [
 ];
 
 const MANIFEST: AssessmentToolManifest = {
+  locationStreamFieldId: 'stream-q',
   parts: [
     {
       key: 'p1',
@@ -1090,6 +1115,172 @@ describe('POST /assessment-cases/:id/appeal', () => {
       });
 
       expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * The fillable surface for one attempt — what the candidate portal renders.
+ *
+ * The headline behaviour is what is ABSENT. These fields carry the answer key
+ * to the assessment the candidate is about to sit, and this route serves them
+ * to that candidate. Stripping happens at the door: nothing downstream is
+ * trusted to hide them.
+ */
+describe('GET /assessment-cases/:id/attempts/:attemptId', () => {
+  async function caseWithOpenAttempt(base: string, pathway = 'new') {
+    const tool = await seedTool(base);
+    const caseRes = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway }),
+    });
+    const kase = (await caseRes.json()) as { id: string };
+    const attemptRes = await fetch(`${base}/assessment-cases/${kase.id}/parts/p1/attempts`, {
+      method: 'POST',
+      headers: auth(),
+      body: '{}',
+    });
+    const attempt = (await attemptRes.json()) as { id: string };
+    return { caseId: kase.id, attemptId: attempt.id };
+  }
+
+  it('never serves answer keys or outcome targets to the candidate sitting the part', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseWithOpenAttempt(base);
+
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(candidate),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { fields: FormField[] };
+
+      // The question itself must still be there — this is a fill surface.
+      expect(body.fields.some((f) => f.id === 'q1')).toBe(true);
+      // But nothing that gives the answer away, on ANY field.
+      expect(body.fields.some((f) => f.answerKey !== undefined)).toBe(false);
+      expect(body.fields.some((f) => f.outcomeTarget !== undefined)).toBe(false);
+      // Belt and braces: the option that IS the answer must not appear as a key
+      // anywhere in the serialized payload.
+      expect(JSON.stringify(body)).not.toContain('answerKey');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('serves only the fields belonging to that part', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseWithOpenAttempt(base);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(candidate),
+      });
+      const body = (await res.json()) as { partKey: string; fields: FormField[] };
+
+      expect(body.partKey).toBe('p1');
+      const ids = body.fields.map((f) => f.id);
+      // Part 1 runs from its own anchor to the next part's.
+      expect(ids).toContain('q1');
+      // A later part's content is not the candidate's business here, and
+      // rendering it would let them fill a part out of sequence.
+      expect(ids).not.toContain('log-table');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns another candidate\u2019s attempt as not found, not forbidden', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseWithOpenAttempt(base);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth({ userId: OTHER_CANDIDATE, orgId: ORG, role: 'candidate' }),
+      });
+      // 403 would confirm the case exists, which is itself a disclosure.
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets the assessor read the same attempt', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseWithOpenAttempt(base);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns saved answers so a part can be resumed', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseWithOpenAttempt(base);
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { q1: ['b'] } }),
+      });
+
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(candidate),
+      });
+      const body = (await res.json()) as { values: Record<string, unknown>; outcome: string | null };
+      expect(body.values).toEqual({ q1: ['b'] });
+      // Still open — an unmarked attempt has no outcome.
+      expect(body.outcome).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports the case stream and part kind so the portal can render correctly', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseWithOpenAttempt(base);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(candidate),
+      });
+      const body = (await res.json()) as {
+        partLabel: string;
+        partKind: string;
+        attemptNumber: number;
+        locationStream: string | null;
+      };
+      expect(body.partKind).toBe('theory');
+      expect(body.partLabel).toBe('Part 1 Theory');
+      expect(body.attemptNumber).toBe(1);
+      // Unset stream is reported as null; the renderer fails OPEN on it and
+      // shows every location set rather than none.
+      expect(body.locationStream).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for an attempt id that belongs to a different case', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const first = await caseWithOpenAttempt(base);
+      const second = await caseWithOpenAttempt(base);
+      const res = await fetch(`${base}/assessment-cases/${first.caseId}/attempts/${second.attemptId}`, {
+        headers: auth(),
+      });
+      expect(res.status).toBe(404);
     } finally {
       server.close();
     }

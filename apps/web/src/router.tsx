@@ -25,6 +25,7 @@ import { WhiteLabelScreen } from './screens/enterprise/WhiteLabelScreen.js';
 import { CompetencyScreen } from './screens/enterprise/CompetencyScreen.js';
 import { AssessmentCasesScreen } from './screens/assessments/AssessmentCasesScreen.js';
 import { AssessmentCaseScreen } from './screens/assessments/AssessmentCaseScreen.js';
+import { CasePartFillScreen } from './screens/assessments/CasePartFillScreen.js';
 import { MobileScreen } from './screens/mobile/MobileScreen.js';
 import { ChcIntakeScreen } from './screens/chc/ChcIntakeScreen.js';
 import { SCREENS, type ScreenDef } from './lib/screens.js';
@@ -53,6 +54,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   competency: <CompetencyScreen />,
   assessments: <AssessmentCasesScreen />,
   'assessment-case': <AssessmentCaseScreen />,
+  'assessment-part-fill': <CasePartFillScreen />,
   'chc-intake': <ChcIntakeScreen />,
   mobile: <MobileScreen />,
 };

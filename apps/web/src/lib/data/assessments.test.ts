@@ -46,6 +46,15 @@ describe('reads', () => {
     expect(get).toHaveBeenCalledWith(`/assessment-cases/${CASE}`);
   });
 
+  it('fetches one attempt by id, addressed under its case', async () => {
+    get.mockResolvedValue({ fields: [], values: {} });
+    await assessmentsApi.getAttempt(CASE, ATTEMPT);
+
+    // Nested under the case on purpose: the route scopes the attempt to a case
+    // the caller may read, so a bare /attempts/:id would have nothing to check.
+    expect(get).toHaveBeenCalledWith(`/assessment-cases/${CASE}/attempts/${ATTEMPT}`);
+  });
+
   it('lists tools', async () => {
     get.mockResolvedValue([]);
     await assessmentsApi.listTools();
