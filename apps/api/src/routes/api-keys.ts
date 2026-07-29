@@ -98,9 +98,13 @@ apiKeysRouter.post('/', requireTenant, withErrorHandling(async (req, res) => {
   // export them, which is what recording an induction booking is gated on,
   // without carrying any administrative grant.
   const role = parsed.data.role ?? 'reviewer';
-  if (ROLE_RANK[role] > ROLE_RANK[tenant.role as Role]) {
-    // An admin cannot mint an owner key. Issuing a credential stronger than
-    // yourself is privilege escalation with an extra step.
+  // An admin cannot mint an owner key — issuing a credential stronger than
+  // yourself is privilege escalation with an extra step. An issuer role the
+  // rank table doesn't know resolves to -1, below every issuable role, so the
+  // guard fails CLOSED on an unknown role rather than comparing against
+  // undefined (which reads as allowed).
+  const issuerRank = ROLE_RANK[tenant.role as Role] ?? -1;
+  if (ROLE_RANK[role] > issuerRank) {
     res.status(403).json({ error: 'role_exceeds_issuer' });
     return;
   }

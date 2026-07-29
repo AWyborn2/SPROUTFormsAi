@@ -200,6 +200,28 @@ describe('requireMachineOrTenant — acceptance', () => {
     expect(req.apiKeyId).toBeUndefined();
   });
 
+  it('lets a downstream throw propagate rather than answering 401 for it', async () => {
+    // next() sits outside the auth try/catch on purpose: an error thrown by a
+    // later handler is that handler's problem, and reporting it as
+    // `unauthenticated` would send a second response over a half-written one.
+    const { minted, row } = liveKey();
+    const { db } = fakeDb({ apiKey: row });
+    mockDbValue = db;
+    const res = fakeRes();
+    const boom = new Error('downstream exploded');
+    const next = vi.fn(() => {
+      throw boom;
+    });
+    await expect(
+      requireMachineOrTenant(
+        fakeReq({ authorization: `Bearer ${minted.plaintext}` }),
+        res,
+        next as unknown as NextFunction,
+      ),
+    ).rejects.toThrow(boom);
+    expect(res.statusCode).toBe(0);
+  });
+
   it('prefers the bearer key when both credentials are present', async () => {
     const { minted, row } = liveKey();
     const { db } = fakeDb({ apiKey: row });

@@ -46,6 +46,9 @@ export async function requireMachineOrTenant(
       unauthenticated();
       return;
     }
+    // The try covers ONLY credential resolution. `next()` runs after it —
+    // inside, a synchronous throw from downstream middleware would be caught
+    // here and misreported as a 401 (or double-send once headers are out).
     try {
       const key = await db.query.apiKeys.findFirst({
         where: and(eq(schema.apiKeys.prefix, parsed.prefix), isNull(schema.apiKeys.revokedAt)),
@@ -73,12 +76,12 @@ export async function requireMachineOrTenant(
         .set({ lastUsedAt: new Date() })
         .where(eq(schema.apiKeys.id, key.id))
         .catch(() => {});
-      next();
-      return;
     } catch {
       unauthenticated();
       return;
     }
+    next();
+    return;
   }
 
   const token = req.cookies?.[SESSION_COOKIE_NAME];
