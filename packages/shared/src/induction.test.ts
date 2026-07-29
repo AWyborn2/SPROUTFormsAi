@@ -74,7 +74,7 @@ function fullValues(overrides: Record<string, SubmissionValue> = {}) {
 
 function assess(
   values: Record<string, SubmissionValue>,
-  options: { today?: Date; alreadyBooked?: boolean } = {},
+  options: { today?: Date; alreadyBooked?: boolean; allowLateNotice?: boolean } = {},
 ) {
   const profile = readStarterProfile(fields, values);
   if (!profile) throw new Error('expected a CHC-shaped submission');
