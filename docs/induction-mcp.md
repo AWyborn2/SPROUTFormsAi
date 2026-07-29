@@ -136,6 +136,28 @@ This default is deliberate: these responses land in a model's context window,
 which may be logged outside this system, and a booking demonstrably does not
 need those fields.
 
+## Photos and licence images
+
+Candidate payloads report a document as presence plus metadata —
+`{ present: true, fileName: "marlee.jpg", contentType: "image/jpeg" }` — never
+the bytes and never the storage key. The agent can tell you a photo exists; it
+cannot see it.
+
+When a task genuinely needs the file, such as building a BISTrainer profile,
+`get_induction_document_link` mints a **download link that expires in five
+minutes**. The agent fetches that URL and transfers the file. The image never
+passes through the model's context, so it never lands in a transcript.
+
+Three things about those links:
+
+- **The link is the credential.** Anyone holding it can fetch the file until it
+  expires, so it should be used and discarded, not pasted into a chat log or a
+  ticket.
+- **Minting one needs the export grant.** A Viewer key can see that a photo
+  exists and go no further; a Reviewer key can mint the link.
+- **Every issue is audited** under the `security` category, naming the file.
+  A document leaving the system is a security event, and the log says so.
+
 ## What the agent cannot do
 
 The key reaches induction endpoints only. Team management, billing, form

@@ -17,6 +17,7 @@ server answers *who, when, how many* and remembers *what was booked*.
 | `plan_induction_cohort` | Seat count and roster for one induction date |
 | `record_induction_booking` | Records a completed booking; refuses to double-book |
 | `list_induction_bookings` | What has already been booked |
+| `get_induction_document_link` | A five-minute download link for a photo or licence image |
 
 ## Two transports
 
@@ -90,7 +91,9 @@ Candidate payloads exclude date of birth, home address, licence number and
 emergency contact by default. A caller can request them explicitly, and the
 API returns them only if the key's role grants submission export. Identity
 documents are reported as present/absent with a filename; the bytes are never
-returned.
+returned inline. `get_induction_document_link` mints a short-lived URL for the
+cases that genuinely need the file, so the image is transferred rather than
+carried through a model's context.
 
 ## Troubleshooting
 

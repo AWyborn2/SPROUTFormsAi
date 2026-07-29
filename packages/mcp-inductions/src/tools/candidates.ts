@@ -25,6 +25,11 @@ export const getCandidateInput = z.object({
     .describe('Treat the notice rule as waived for this starter. Set only when a human has decided the site will accept short notice. It does not change the calendar: a starter whose date is not a Monday, or is a public holiday, stays blocked either way.'),
 });
 
+export const documentLinkInput = z.object({
+  submissionId: z.string().min(1),
+  kind: z.enum(['photo', 'driversLicence']).describe('Which stored document to link to.'),
+});
+
 export function registerCandidateTools(host: ToolHost, client: InductionsClient): void {
   defineTool(
     host,
@@ -64,5 +69,23 @@ export function registerCandidateTools(host: ToolHost, client: InductionsClient)
           allowLateNotice: args.allowLateNotice,
         }),
       ),
+  );
+
+  defineTool(
+    host,
+    'get_induction_document_link',
+    {
+      title: 'Link to a starter document',
+      description:
+        'A temporary download link for the profile photo or licence image a starter uploaded — ' +
+        'use it to ' +
+        'transfer the file into another system, such as a BISTrainer profile. The link expires ' +
+        'in a few minutes and needs no credential, so treat it as the secret it is: fetch it, ' +
+        'use it, and do not paste it into anything that keeps a record. These are identity ' +
+        'documents; request one only when a task actually needs the file, not to inspect or ' +
+        'describe the person.',
+      inputSchema: documentLinkInput,
+    },
+    async (args) => ok(await client.documentLink(args.submissionId, args.kind)),
   );
 }

@@ -4,9 +4,6 @@
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
-  "bin": {
-    "formai-mcp-inductions": "./dist/index.js"
-  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",

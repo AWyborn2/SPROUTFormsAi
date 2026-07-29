@@ -5,11 +5,13 @@ import { schema } from '@formai/db';
 import {
   assessInductionReadiness,
   buildInductionCohorts,
+  CHC_FIELD_IDS,
   CHC_MIN_NOTICE_BUSINESS_DAYS,
   holidaysCoverThrough,
   isIsoDate,
   ISO_DATE_PATTERN,
   nextBookableInductionDate,
+  isFileRef,
   readStarterProfile,
   type AssessedStarter,
   type FormField,
@@ -19,6 +21,9 @@ import { requireMachineOrTenant } from '../middleware/machine.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
+import { sealSession, unsealSession } from '../auth/replit-auth.js';
+import { getStorageClient } from '../storage/index.js';
+import { ATTACHMENT_KEY_RE, EXT_CONTENT_TYPE } from './uploads.js';
 import { db } from '../db.js';
 
 /**
@@ -571,3 +576,139 @@ inductionsRouter.get('/bookings', requireMachineOrTenant, withErrorHandling(asyn
 
   res.json({ bookings: bookings.map((b) => bookingDto(b, startersByBooking.get(b.id) ?? [])) });
 }));
+
+/* ── Identity documents ──────────────────────────────────────────────────── */
+
+/**
+ * A capability to read exactly one stored document, for a few minutes.
+ *
+ * Sealed with the same AES-256-GCM helper the session cookie uses, so the token
+ * is tamper-evident and carries its own expiry. It names the object directly
+ * rather than the submission, so a link cannot be replayed against a different
+ * starter after the answer changes.
+ */
+interface DocumentGrant {
+  orgId: string;
+  key: string;
+}
+
+/**
+ * How long a minted link stays usable.
+ *
+ * Long enough for an agent to hand the URL to a browser and upload the file
+ * somewhere; short enough that a link copied into a chat transcript is dead
+ * before anyone reads the transcript back.
+ */
+const DOCUMENT_LINK_TTL_MS = 5 * 60 * 1000;
+
+const DOCUMENT_FIELDS = {
+  photo: CHC_FIELD_IDS.photo,
+  driversLicence: CHC_FIELD_IDS.driversLicence,
+} as const;
+
+const documentParams = z.object({ kind: z.enum(['photo', 'driversLicence']) });
+
+inductionsRouter.get(
+  '/candidates/:id/documents/:kind',
+  requireMachineOrTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    // An identity document is the most sensitive thing this router can reach,
+    // so minting a link needs the same grant as exporting a submission — a
+    // read-only viewer key can see that a photo exists and nothing more.
+    if (!(await hasPermission(tenant, 'submissions', 'export'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = documentParams.safeParse(req.params);
+    if (!parsed.success) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const row = await db.query.submissions.findFirst({
+      where: and(eq(schema.submissions.id, req.params.id!), eq(schema.submissions.orgId, tenant.orgId)),
+    });
+    if (!row) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    // Read the raw answer rather than the profile: `readStarterProfile`
+    // deliberately drops the storage key, which is exactly what this route
+    // needs and nothing else is allowed to see.
+    const answer = row.values[DOCUMENT_FIELDS[parsed.data.kind]];
+    if (!isFileRef(answer) || !answer.key.startsWith(`${tenant.orgId}/`)) {
+      res.status(404).json({ error: 'document_not_found' });
+      return;
+    }
+
+    const grant: DocumentGrant = { orgId: tenant.orgId, key: answer.key };
+    const token = sealSession(grant, DOCUMENT_LINK_TTL_MS);
+
+    await recordAudit(db, tenant, {
+      action: req.apiKeyId
+        ? 'Issued induction document link via API key'
+        : 'Issued induction document link',
+      target: `${parsed.data.kind}: ${answer.fileName}`,
+      category: 'security',
+      icon: 'link',
+    });
+
+    // A PATH, not a URL. The API is reached through a proxy that adds a prefix
+    // it knows nothing about, so guessing an absolute URL here would produce a
+    // link that 404s. The caller knows the base it used to get here.
+    res.json({
+      path: `/inductions/documents/${encodeURIComponent(token)}`,
+      expiresAt: new Date(Date.now() + DOCUMENT_LINK_TTL_MS).toISOString(),
+      fileName: answer.fileName,
+      contentType: answer.contentType,
+      size: answer.size,
+    });
+  }),
+);
+
+/**
+ * Serves the bytes a minted link points at.
+ *
+ * Deliberately unauthenticated: the token IS the credential, which is what
+ * makes the link usable by a plain browser or downloader that has no API key.
+ * Every rejection is an identical 404 — an expired token, a forged one, and a
+ * key that no longer exists must be indistinguishable, or the endpoint becomes
+ * a way to probe what the storage holds.
+ */
+inductionsRouter.get(
+  '/documents/:token',
+  withErrorHandling(async (req, res) => {
+    const grant = unsealSession<DocumentGrant>(req.params.token!);
+    if (!grant || !ATTACHMENT_KEY_RE.test(grant.key) || !grant.key.startsWith(`${grant.orgId}/`)) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const client = getStorageClient();
+    if (!client) {
+      res.status(503).json({ error: 'storage_unavailable' });
+      return;
+    }
+    const bytes = await client.download(grant.orgId, grant.key);
+    if (!bytes) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const ext = grant.key.slice(grant.key.lastIndexOf('.') + 1).toLowerCase();
+    res.setHeader('Content-Type', EXT_CONTENT_TYPE[ext] ?? 'application/octet-stream');
+    // Same hardening as the authenticated door: respondent-supplied bytes must
+    // never be sniffed into a scriptable type or opened as an active document.
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    // The URL is a short-lived secret; a shared cache must not keep a copy of
+    // what it returned.
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(bytes);
+  }),
+);
