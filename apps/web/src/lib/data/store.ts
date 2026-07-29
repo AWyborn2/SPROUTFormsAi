@@ -219,6 +219,8 @@ interface MemberDto {
   role: Role;
   status: 'active' | 'invited' | 'suspended';
   emailSent?: boolean;
+  /** Present on a freshly created invite — the link to hand over or print. */
+  acceptPath?: string;
 }
 
 interface AuditEntryDto {
@@ -516,6 +518,33 @@ export const store = {
     return apiClient.post(`/invites/${encodeURIComponent(token)}/accept`, {});
   },
 
+  /**
+   * Ask the server for a one-time link that lets a member set their OWN
+   * password. Returns a link, never a password — see the route for why.
+   */
+  issuePasswordReset(memberId: string): Promise<{ resetUrl: string; expiresAt: string; name: string }> {
+    return apiClient
+      .post<{ resetPath: string; expiresAt: string; name: string }>(
+        `/team/members/${memberId}/password-reset`,
+        {},
+      )
+      .then((dto) => ({
+        ...dto,
+        resetUrl: new URL(dto.resetPath, window.location.origin).toString(),
+      }));
+  },
+
+  /** Confirms a reset link is live before showing the form. Name only. */
+  getPasswordReset(token: string): Promise<{ name: string } | undefined> {
+    return getOrUndefined(apiClient.get<{ name: string }>(`/reset-password/${encodeURIComponent(token)}`));
+  },
+
+  completePasswordReset(input: { token: string; password: string }): Promise<{ ok: boolean }> {
+    return apiClient.post(`/reset-password/${encodeURIComponent(input.token)}`, {
+      password: input.password,
+    });
+  },
+
   createFillLink(formId: string): Promise<FillLink> {
     return apiClient.post<FillLink>(`/forms/${formId}/fill-links`, {});
   },
@@ -555,17 +584,54 @@ export const store = {
     return apiClient.post('/org/plan', { planTier });
   },
 
-  inviteMember(input: { email: string; role: RoleName }): Promise<(Member & { emailSent: boolean }) | null> {
+  /**
+   * Invite someone — the concierge flow.
+   *
+   * `email` is optional: leaving it out produces a QR/link invite for a
+   * candidate with no work address, in which case `name` is what identifies the
+   * pending row. Either way the caller gets `acceptUrl` back so it can show a
+   * QR code, because an emailed invite can still fail to arrive.
+   */
+  inviteMember(input: {
+    email?: string;
+    name?: string;
+    role: RoleName;
+  }): Promise<(Member & { emailSent: boolean; acceptUrl: string }) | null> {
+    const email = input.email?.trim();
+    const name = input.name?.trim();
     return apiClient
       .post<MemberDto>('/team/members', {
-        email: input.email.trim(),
+        ...(email ? { email } : {}),
+        ...(name ? { name } : {}),
         role: input.role.toLowerCase(),
       })
-      .then((dto) => ({ ...toMember(dto), emailSent: dto.emailSent === true }))
+      .then((dto) => ({
+        ...toMember(dto),
+        emailSent: dto.emailSent === true,
+        // Absolute, because the point of it is to be pasted or scanned on
+        // another device.
+        acceptUrl: dto.acceptPath ? new URL(dto.acceptPath, window.location.origin).toString() : '',
+      }))
       .catch((err) => {
         if (err instanceof ApiError && err.status === 409) return null;
         throw err;
       });
+  },
+
+  /**
+   * Create an account from an invite and sign in as it.
+   *
+   * Separate from `acceptInvite`, which attaches an EXISTING session to an org.
+   * This is the path for someone who has no account at all.
+   */
+  signupFromInvite(input: {
+    token: string;
+    name: string;
+    email: string;
+    password: string;
+  }): Promise<{ orgId: string; role: string }> {
+    const { token, ...body } = input;
+    return apiClient.post(`/invites/${encodeURIComponent(token)}/signup`, body);
   },
 
   setMemberRole(input: { id: string; role: RoleName }): Promise<Member | undefined> {

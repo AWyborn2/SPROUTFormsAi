@@ -48,8 +48,10 @@ teamRouter.get(
       }),
       ...pendingInvites.map((i) => ({
         id: i.id,
-        name: nameFromEmail(i.email) || i.email,
-        email: i.email,
+        // A QR-delivered invite has no email at all, so the recorded name is
+        // the only way to tell pending rows apart.
+        name: i.inviteeName || nameFromEmail(i.email ?? '') || i.email || 'Pending invite',
+        email: i.email ?? '',
         role: i.role,
         status: 'invited' as const,
       })),
@@ -71,11 +73,22 @@ function generateInviteToken(): string {
   return randomBytes(24).toString('base64url');
 }
 
-const postMemberBody = z.object({
-  email: z.string().trim().email(),
-  role: z.enum(ROLES),
-  name: z.string().trim().min(1).optional(),
-});
+/**
+ * Inviting someone.
+ *
+ * `email` is OPTIONAL because many candidates have no work address — their
+ * invite is delivered as a printed QR code instead. When it is omitted a name
+ * is required, so a pending invite is still identifiable in the member list.
+ */
+const postMemberBody = z
+  .object({
+    email: z.string().trim().email().optional(),
+    role: z.enum(ROLES),
+    name: z.string().trim().min(1).optional(),
+  })
+  .refine((v) => Boolean(v.email || v.name), {
+    message: 'an invite needs an email address or a name',
+  });
 
 teamRouter.post(
   '/members',
@@ -96,8 +109,9 @@ teamRouter.post(
       return;
     }
     const { role, name } = parsed.data;
-    const normalizedEmail = parsed.data.email.toLowerCase();
-    const displayName = name ?? (nameFromEmail(normalizedEmail) || normalizedEmail);
+    const normalizedEmail = parsed.data.email?.toLowerCase() ?? null;
+    const displayName =
+      name ?? (normalizedEmail ? nameFromEmail(normalizedEmail) || normalizedEmail : 'Invited');
 
     // Seat limit check — staff and candidates draw on separate pools. The
     // resolution rules live in lib/seats.ts alongside the acceptance-time
@@ -113,10 +127,13 @@ teamRouter.post(
       }
     }
 
-    // Duplicate check: already a member of this org.
-    const candidates = await db.query.users.findMany({
-      where: sql`lower(${schema.users.email}) = ${normalizedEmail}`,
-    });
+    // Duplicate check: already a member of this org. Only possible when an
+    // address was given — a QR invite has nobody to match against yet.
+    const candidates = normalizedEmail
+      ? await db.query.users.findMany({
+          where: sql`lower(${schema.users.email}) = ${normalizedEmail}`,
+        })
+      : [];
     if (candidates.length) {
       const existingMembership = await db.query.memberships.findFirst({
         where: and(
@@ -137,7 +154,13 @@ teamRouter.post(
     try {
       [invite] = await db
         .insert(schema.invites)
-        .values({ orgId: tenant.orgId, email: normalizedEmail, role, token: generateInviteToken() })
+        .values({
+          orgId: tenant.orgId,
+          email: normalizedEmail,
+          inviteeName: name ?? '',
+          role,
+          token: generateInviteToken(),
+        })
         .returning();
     } catch (err) {
       if (isUniqueViolation(err)) {
@@ -150,19 +173,22 @@ teamRouter.post(
 
     await recordAudit(db, tenant, {
       action: 'Invited member',
-      target: normalizedEmail,
+      target: normalizedEmail ?? displayName,
       category: 'team',
       icon: 'user-plus',
     });
 
+    // Only attempt delivery when there is somewhere to deliver to. A QR invite
+    // reports emailSent:false, which the UI already reads as "share the link".
     let emailSent = false;
     try {
+      if (!invite.email) throw new Error('no_email_delivery');
       const [org, inviter] = await Promise.all([
         db.query.organizations.findFirst({ where: eq(schema.organizations.id, tenant.orgId) }),
         db.query.users.findFirst({ where: eq(schema.users.id, tenant.userId) }),
       ]);
       emailSent = await sendInviteEmail({
-        to: invite.email,
+        to: invite.email!,
         orgName: org?.name ?? 'your team',
         inviterName: inviter?.name ?? 'A teammate',
         acceptUrl: `${env.WEB_ORIGIN}/invite/${invite.token}`,
@@ -174,13 +200,86 @@ teamRouter.post(
     res.status(201).json({
       id: invite.id,
       name: displayName,
-      email: invite.email,
+      email: invite.email ?? '',
       role: invite.role,
       status: 'invited',
       emailSent,
+      /**
+       * The acceptance link, returned so the admin can print it as a QR or
+       * hand it over directly. This is the invite's whole credential, which is
+       * why only a team manager reaches this route at all.
+       */
+      acceptPath: `/invite/${invite.token}`,
     });
   }),
 );
+
+/**
+ * Issue a one-time link that lets a member set their OWN password.
+ *
+ * Deliberately does NOT set a password. An admin who could choose a candidate's
+ * password could sign in as them, and the same admins mark the assessments
+ * those candidates sit — so a signed "satisfactory" would no longer prove the
+ * candidate was ever there. The admin gets a link to hand over; the candidate
+ * chooses the secret.
+ */
+teamRouter.post(
+  '/members/:id/password-reset',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await canManageTeam(tenant))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+
+    // Scoped to a membership in the CALLER's org — the id is a membership id,
+    // so an admin cannot raise a reset against a user in someone else's tenant.
+    const membership = await db.query.memberships.findFirst({
+      where: and(eq(schema.memberships.id, req.params.id!), eq(schema.memberships.orgId, tenant.orgId)),
+    });
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const [reset] = await db
+      .insert(schema.passwordResets)
+      .values({
+        userId: membership.userId,
+        orgId: tenant.orgId,
+        token: generateInviteToken(),
+        issuedByUserId: tenant.userId,
+        expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
+      })
+      .returning();
+    if (!reset) throw new Error('password_reset_failed: insert returned no row');
+
+    const user = await db.query.users.findFirst({
+      where: eq(schema.users.id, membership.userId),
+    });
+
+    await recordAudit(db, tenant, {
+      action: 'Issued password reset',
+      target: user?.email ?? user?.name ?? membership.userId,
+      category: 'team',
+      icon: 'key-round',
+    });
+
+    res.status(201).json({
+      resetPath: `/reset-password/${reset.token}`,
+      expiresAt: reset.expiresAt.toISOString(),
+      name: user?.name ?? '',
+    });
+  }),
+);
+
+/** Long enough to hand a printed code over on site, short enough to expire. */
+const PASSWORD_RESET_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const patchMemberBody = z.object({ role: z.enum(ROLES) });
 
@@ -229,8 +328,8 @@ teamRouter.patch(
       }
       res.json({
         id: invite.id,
-        name: nameFromEmail(invite.email) || invite.email,
-        email: invite.email,
+        name: invite.inviteeName || nameFromEmail(invite.email ?? '') || invite.email || 'Pending invite',
+        email: invite.email ?? '',
         role: nextInviteRole,
         status: 'invited',
       });
@@ -286,7 +385,7 @@ teamRouter.delete(
       await db.delete(schema.invites).where(eq(schema.invites.id, invite.id));
       await recordAudit(db, tenant, {
         action: 'Revoked invite',
-        target: invite.email,
+        target: invite.email ?? (invite.inviteeName || invite.id),
         category: 'team',
         icon: 'user-minus',
       });

@@ -39,6 +39,10 @@ export const SCREENS: ScreenDef[] = [
   // Invite landing — the invite email's destination. Outside RequireAuth: the
   // invitee must be able to read what they're joining before signing in.
   { key: 'invite', path: '/invite/:token', group: 'Onboarding & account', label: 'Accept invite', icon: 'user-plus', shell: 'external' },
+  // Password reset — also outside RequireAuth, because someone who has lost
+  // their password by definition cannot sign in to reach it. The token is the
+  // credential and it is single-use.
+  { key: 'reset-password', path: '/reset-password/:token', group: 'Onboarding & account', label: 'Set a new password', icon: 'key-round', shell: 'external' },
 
   // CHC @ BBM — the purpose-built intake form. `shell: 'app'` (authenticated):
   // it records real submissions and uploads identity documents, so it is never
@@ -56,9 +60,6 @@ export const SCREENS: ScreenDef[] = [
   // Multi-part assessments. The case list is one screen for two audiences —
   // an assessor sees the org's cases, a candidate sees their own — because the
   // API scopes the read by permission rather than the screen filtering it.
-  // Public: the page a scanned candidate QR code lands on. Outside the app
-  // shell and outside RequireAuth, because the scanner has no account yet.
-  { key: 'join', path: '/join/:token', group: 'Assessments', label: 'Join as candidate', icon: 'qr-code', shell: 'none' },
   { key: 'assessments', path: '/app/assessments', group: 'Assessments', label: 'Assessments', icon: 'clipboard-check', shell: 'app', inNav: true },
   { key: 'assessment-case', path: '/app/assessments/:id', group: 'Assessments', label: 'Assessment case', icon: 'clipboard-list', shell: 'app' },
   { key: 'whitelabel', path: '/app/settings/branding', group: 'Enterprise & org', label: 'Branding', icon: 'sliders-horizontal', shell: 'app', inNav: true },

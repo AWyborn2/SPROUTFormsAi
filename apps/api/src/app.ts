@@ -13,7 +13,7 @@ import { formFillLinksRouter, publicFillRouter } from './routes/fill-links.js';
 import { formsRouter } from './routes/forms.js';
 import { healthRouter } from './routes/health.js';
 import { invitesRouter, publicInvitesRouter } from './routes/invites.js';
-import { joinLinksRouter, publicJoinRouter } from './routes/join-links.js';
+import { passwordResetRouter } from './routes/password-reset.js';
 import { orgRouter } from './routes/org.js';
 import { pdfRouter } from './routes/pdf.js';
 import { submissionsRouter } from './routes/submissions.js';
@@ -73,6 +73,8 @@ export function createApp(): Express {
   // name the org before asking anyone to sign in; accepting is authenticated
   // and mounts after it, so the more specific POST path wins regardless.
   app.use('/invites', publicInvitesRouter);
+  // Public: whoever holds the link has no session — that is the point.
+  app.use('/reset-password', passwordResetRouter);
   // Org logo serving — public for the same reason /fill is: logged-out
   // respondents must be able to load the branding on a public fill page.
   // The route restricts itself to the logo key namespace (see assets.ts).
@@ -80,8 +82,6 @@ export function createApp(): Express {
   app.use('/invites', invitesRouter);
   app.use('/submissions', submissionsRouter);
   app.use('/team', teamRouter);
-  app.use('/team', joinLinksRouter);
-  app.use('/join', publicJoinRouter);
   app.use('/audit', auditRouter);
   app.use('/dashboard', dashboardRouter);
   app.use('/competencies', competenciesRouter);

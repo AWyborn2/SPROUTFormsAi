@@ -16,6 +16,7 @@ import { ImportReviewScreen } from './screens/import/ImportReviewScreen.js';
 import { ImportPublishScreen } from './screens/import/ImportPublishScreen.js';
 import { FillScreen } from './screens/fill/FillScreen.js';
 import { InviteScreen } from './screens/invite/InviteScreen.js';
+import { ResetPasswordScreen } from './screens/invite/ResetPasswordScreen.js';
 import { TeamScreen } from './screens/enterprise/TeamScreen.js';
 import { RolesScreen } from './screens/enterprise/RolesScreen.js';
 import { AuditScreen } from './screens/enterprise/AuditScreen.js';
@@ -23,7 +24,6 @@ import { BillingScreen } from './screens/enterprise/BillingScreen.js';
 import { WhiteLabelScreen } from './screens/enterprise/WhiteLabelScreen.js';
 import { CompetencyScreen } from './screens/enterprise/CompetencyScreen.js';
 import { AssessmentCasesScreen } from './screens/assessments/AssessmentCasesScreen.js';
-import { JoinScreen } from './screens/join/JoinScreen.js';
 import { AssessmentCaseScreen } from './screens/assessments/AssessmentCaseScreen.js';
 import { MobileScreen } from './screens/mobile/MobileScreen.js';
 import { ChcIntakeScreen } from './screens/chc/ChcIntakeScreen.js';
@@ -44,6 +44,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   'submission-detail': <SubmissionDetailScreen />,
   fill: <FillScreen />,
   invite: <InviteScreen />,
+  'reset-password': <ResetPasswordScreen />,
   team: <TeamScreen />,
   roles: <RolesScreen />,
   audit: <AuditScreen />,
@@ -51,7 +52,6 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   whitelabel: <WhiteLabelScreen />,
   competency: <CompetencyScreen />,
   assessments: <AssessmentCasesScreen />,
-  join: <JoinScreen />,
   'assessment-case': <AssessmentCaseScreen />,
   'chc-intake': <ChcIntakeScreen />,
   mobile: <MobileScreen />,

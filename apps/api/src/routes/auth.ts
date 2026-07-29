@@ -19,7 +19,9 @@ export const SESSION_COOKIE_OPTIONS = {
 };
 
 /** Cost factor for every bcrypt hash the app mints (signup and the dummy hash below). */
-const BCRYPT_COST = 12;
+/** Cost factor for every bcrypt hash the app mints. Exported so the
+ * invite-signup path cannot drift to a weaker cost than signup. */
+export const BCRYPT_COST = 12;
 
 /**
  * Structurally valid, full-cost bcrypt hash of a random string, minted once at

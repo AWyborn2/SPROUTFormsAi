@@ -24,7 +24,6 @@ import { ApiError, apiClient } from './api-client.js';
 import { store } from './store.js';
 import {
   assessmentsApi,
-  joinLinksApi,
   type CreateCaseInput,
   type RecordOutcomeInput,
 } from './assessments.js';
@@ -80,7 +79,6 @@ const keys = {
   assessmentTools: ['assessmentTools'] as const,
   assessmentCases: ['assessmentCases'] as const,
   assessmentCase: (id: string) => ['assessmentCases', id] as const,
-  joinLinks: ['joinLinks'] as const,
   competencyRules: ['competencyRules'] as const,
   fillForm: (token: string) => ['fillForm', token] as const,
   fillLinks: (formId: string) => ['fillLinks', formId] as const,
@@ -386,6 +384,42 @@ export function useAcceptInvite() {
   });
 }
 
+/**
+ * Create an account FROM an invite and land signed in.
+ *
+ * Clears the cache like `useAcceptInvite` does: the session changes identity
+ * mid-flight, so anything already fetched belongs to nobody.
+ */
+export function useSignupFromInvite() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { token: string; name: string; email: string; password: string }) =>
+      store.signupFromInvite(input),
+    onSuccess: () => qc.clear(),
+  });
+}
+
+/** Admin-side: mint a set-your-own-password link to hand over. */
+export function useIssuePasswordReset() {
+  return useMutation({ mutationFn: (memberId: string) => store.issuePasswordReset(memberId) });
+}
+
+/** Public: is this reset link still live, and whose is it? */
+export function usePasswordReset(token: string | undefined) {
+  return useQuery({
+    queryKey: ['password-reset', token ?? ''],
+    queryFn: () => store.getPasswordReset(token!),
+    enabled: Boolean(token),
+    retry: false,
+  });
+}
+
+export function useCompletePasswordReset() {
+  return useMutation({
+    mutationFn: (input: { token: string; password: string }) => store.completePasswordReset(input),
+  });
+}
+
 /* ── Fill-link management (authed) ───────────────────────────────────────── */
 
 export function useFillLinks(formId: string | undefined) {
@@ -457,7 +491,8 @@ export function useUpdatePlan() {
 export function useInviteMember() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { email: string; role: RoleName }) => store.inviteMember(input),
+    mutationFn: async (input: { email?: string; name?: string; role: RoleName }) =>
+      store.inviteMember(input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: keys.members });
       qc.invalidateQueries({ queryKey: keys.auditLog });
@@ -698,34 +733,6 @@ export function useChangePathway(caseId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
-    },
-  });
-}
-
-
-// ── candidate join links ────────────────────────────────────────────────────
-
-export function useJoinLinks() {
-  return useQuery({ queryKey: keys.joinLinks, queryFn: () => joinLinksApi.list() });
-}
-
-export function useCreateJoinLink() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { label?: string; expiresAt?: string | null; maxUses?: number | null }) =>
-      joinLinksApi.create(input),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: keys.joinLinks });
-    },
-  });
-}
-
-export function useRevokeJoinLink() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => joinLinksApi.revoke(id),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: keys.joinLinks });
     },
   });
 }
