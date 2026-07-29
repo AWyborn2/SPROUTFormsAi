@@ -3,6 +3,7 @@ import { Avatar, Badge, Button, Dialog, Icon, Input, Select, useToast } from '@f
 import { useBilling, useInviteMember, useMembers, useRemoveMember, useSession, useSetMemberRole } from '../../lib/data/hooks.js';
 import { INVITABLE_ROLES, ROLE_NAMES, type Member, type RoleName } from '../../lib/data/types.js';
 import { EMAIL_RE } from '../../lib/validation.js';
+import { JoinLinkPanel } from './JoinLinkPanel.js';
 
 /** Team management — member list, seat header, and the invite dialog. */
 export function TeamScreen() {
@@ -169,6 +170,8 @@ export function TeamScreen() {
           </div>
         </div>
       </Dialog>
+
+      <JoinLinkPanel />
     </div>
   );
 }

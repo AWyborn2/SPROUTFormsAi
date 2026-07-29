@@ -1,5 +1,5 @@
 import { relations, sql } from 'drizzle-orm';
-import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import type { BrandingKit } from '@formai/shared';
 import { membershipStatusEnum, roleEnum } from './enums.ts';
 
@@ -85,6 +85,58 @@ export const invites = pgTable(
       .on(t.orgId, t.email)
       .where(sql`${t.acceptedAt} IS NULL`),
     index('invites_org_idx').on(t.orgId),
+  ],
+);
+
+/**
+ * A REUSABLE self-serve join link — the QR code on a toolbox-talk sheet.
+ *
+ * Deliberately not an `invites` row. An invite binds to one email address, is
+ * single-use, and is created per person; this is one durable token many people
+ * present, which is a different security object and needs its own controls:
+ * expiry, revocation, and a use cap.
+ *
+ * `role` is stored but the API pins it to `candidate` on redemption regardless
+ * of what the row says. A join link is handed out on paper and photographed —
+ * treating a stored role as authoritative would make a database edit (or a
+ * future bug in the create route) enough to mint administrators from a poster
+ * on a wall.
+ */
+export const orgJoinLinks = pgTable(
+  'org_join_links',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** Crypto-random URL-safe token. The only credential the link carries. */
+    token: text().notNull(),
+    /**
+     * Stored for the record, but NOT relied on: redemption pins the role in
+     * code. Deliberately has NO column default — a default would bake the
+     * 'candidate' enum value into this migration, and on a fresh database
+     * every migration applies in one transaction, where PostgreSQL refuses to
+     * use an enum value added by an earlier migration in that same
+     * transaction (55P04). The API always supplies it explicitly.
+     */
+    role: roleEnum().notNull(),
+    /** What this link is for, e.g. "Dozer intake — Feb". Display only. */
+    label: text().notNull().default(''),
+    /** Null = never expires, though the UI always suggests one. */
+    expiresAt: timestamp({ withTimezone: true }),
+    /** Null = unlimited redemptions. */
+    maxUses: integer('max_uses'),
+    useCount: integer('use_count').notNull().default(0),
+    /** Revoked links flip to false; the row is kept so joins stay attributable. */
+    active: boolean().notNull().default(true),
+    createdByUserId: uuid('created_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('org_join_links_token_uq').on(t.token),
+    index('org_join_links_org_idx').on(t.orgId),
   ],
 );
 

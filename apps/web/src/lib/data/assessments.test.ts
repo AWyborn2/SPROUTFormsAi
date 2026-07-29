@@ -12,17 +12,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const get = vi.fn();
 const post = vi.fn();
 const patch = vi.fn();
+const del = vi.fn();
 
 vi.mock('./api-client.js', () => ({
   apiClient: {
     get: (...a: unknown[]) => get(...a),
     post: (...a: unknown[]) => post(...a),
     patch: (...a: unknown[]) => patch(...a),
+    delete: (...a: unknown[]) => del(...a),
   },
   ApiError: class extends Error {},
 }));
 
-const { assessmentsApi } = await import('./assessments.js');
+const { assessmentsApi, joinLinksApi } = await import('./assessments.js');
 
 const CASE = '00000000-0000-4000-8000-00000000000c';
 const ATTEMPT = '00000000-0000-4000-8000-00000000000a';
@@ -159,5 +161,45 @@ describe('changing pathway', () => {
       pathway: 'new',
       reason: 'Failed Part 2; moving to full programme',
     });
+  });
+});
+
+/**
+ * Join links are bearer credentials printed on paper. The client must never
+ * imply it has any say over the role — the API pins that — and the public
+ * describe/accept pair must address the token, not the org.
+ */
+describe('join links', () => {
+  it('creates a link without ever sending a role', async () => {
+    post.mockResolvedValue({});
+    await joinLinksApi.create({ label: 'Dozer intake', expiresAt: null, maxUses: 25 });
+
+    const [path, body] = post.mock.calls[0] as [string, Record<string, unknown>];
+    expect(path).toBe('/team/join-links');
+    expect(body).not.toHaveProperty('role');
+    expect(body).toMatchObject({ label: 'Dozer intake', maxUses: 25 });
+  });
+
+  it('describes a link by token on the public path', async () => {
+    get.mockResolvedValue({ orgName: 'X', usable: true });
+    await joinLinksApi.describe('tok');
+
+    expect(get).toHaveBeenCalledWith('/join/tok');
+  });
+
+  it('accepts against the token, never an org id', async () => {
+    post.mockResolvedValue({ orgId: 'o', role: 'candidate', alreadyMember: false });
+    await joinLinksApi.accept('tok');
+
+    const [path, body] = post.mock.calls[0] as [string, Record<string, unknown>];
+    expect(path).toBe('/join/tok/accept');
+    expect(body).toEqual({});
+  });
+
+  it('revokes by id', async () => {
+    del.mockResolvedValue(undefined);
+    await joinLinksApi.revoke('link-1');
+
+    expect(del).toHaveBeenCalledWith('/team/join-links/link-1');
   });
 });

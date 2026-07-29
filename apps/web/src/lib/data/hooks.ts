@@ -24,6 +24,7 @@ import { ApiError, apiClient } from './api-client.js';
 import { store } from './store.js';
 import {
   assessmentsApi,
+  joinLinksApi,
   type CreateCaseInput,
   type RecordOutcomeInput,
 } from './assessments.js';
@@ -79,6 +80,7 @@ const keys = {
   assessmentTools: ['assessmentTools'] as const,
   assessmentCases: ['assessmentCases'] as const,
   assessmentCase: (id: string) => ['assessmentCases', id] as const,
+  joinLinks: ['joinLinks'] as const,
   competencyRules: ['competencyRules'] as const,
   fillForm: (token: string) => ['fillForm', token] as const,
   fillLinks: (formId: string) => ['fillLinks', formId] as const,
@@ -696,6 +698,34 @@ export function useChangePathway(caseId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    },
+  });
+}
+
+
+// ── candidate join links ────────────────────────────────────────────────────
+
+export function useJoinLinks() {
+  return useQuery({ queryKey: keys.joinLinks, queryFn: () => joinLinksApi.list() });
+}
+
+export function useCreateJoinLink() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { label?: string; expiresAt?: string | null; maxUses?: number | null }) =>
+      joinLinksApi.create(input),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.joinLinks });
+    },
+  });
+}
+
+export function useRevokeJoinLink() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => joinLinksApi.revoke(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.joinLinks });
     },
   });
 }

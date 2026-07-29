@@ -13,6 +13,7 @@ import { formFillLinksRouter, publicFillRouter } from './routes/fill-links.js';
 import { formsRouter } from './routes/forms.js';
 import { healthRouter } from './routes/health.js';
 import { invitesRouter, publicInvitesRouter } from './routes/invites.js';
+import { joinLinksRouter, publicJoinRouter } from './routes/join-links.js';
 import { orgRouter } from './routes/org.js';
 import { pdfRouter } from './routes/pdf.js';
 import { submissionsRouter } from './routes/submissions.js';
@@ -79,6 +80,8 @@ export function createApp(): Express {
   app.use('/invites', invitesRouter);
   app.use('/submissions', submissionsRouter);
   app.use('/team', teamRouter);
+  app.use('/team', joinLinksRouter);
+  app.use('/join', publicJoinRouter);
   app.use('/audit', auditRouter);
   app.use('/dashboard', dashboardRouter);
   app.use('/competencies', competenciesRouter);
