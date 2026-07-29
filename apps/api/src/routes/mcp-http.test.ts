@@ -98,7 +98,7 @@ describe('POST /mcp', () => {
     }
   });
 
-  it('advertises the six induction tools', async () => {
+  it('advertises the induction toolset', async () => {
     const { minted, row } = liveKey();
     mockDbValue = fakeDb(row);
     const { server, base } = startApp();
@@ -115,6 +115,7 @@ describe('POST /mcp', () => {
       const names = (body.result as { tools: { name: string }[] }).tools.map((t) => t.name).sort();
       expect(names).toEqual([
         'get_induction_candidate',
+        'get_induction_document_link',
         'list_induction_bookings',
         'list_induction_candidates',
         'next_induction_dates',

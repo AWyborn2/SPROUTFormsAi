@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError, InductionsClient } from './client.js';
 import type { ToolResult } from './tools/host.js';
-import { listCandidatesInput, registerCandidateTools } from './tools/candidates.js';
+import { documentLinkInput, listCandidatesInput, registerCandidateTools } from './tools/candidates.js';
 import { cohortInput, registerCohortTools } from './tools/cohorts.js';
 import { datesInput, registerDateTools } from './tools/dates.js';
 import { recordBookingInput, registerBookingTools } from './tools/bookings.js';
@@ -42,6 +42,7 @@ describe('tool registration', () => {
     const tools = setup({});
     expect([...tools.keys()].sort()).toEqual([
       'get_induction_candidate',
+      'get_induction_document_link',
       'list_induction_bookings',
       'list_induction_candidates',
       'next_induction_dates',
@@ -131,6 +132,39 @@ describe('tool handlers', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain('request_failed');
     expect(result.content[0]!.text).toContain('fetch failed');
+  });
+});
+
+describe('document links', () => {
+  it('composes an absolute URL from the configured base', async () => {
+    const documentLink = vi.fn(async () => ({
+      url: 'https://forms.example.com/api/inductions/documents/tok',
+      path: '/inductions/documents/tok',
+      expiresAt: '2026-03-10T09:05:00.000Z',
+      fileName: 'marlee.jpg',
+      contentType: 'image/jpeg',
+      size: 2048,
+    }));
+    const tools = setup({ documentLink } as unknown as Partial<InductionsClient>);
+
+    const result = await tools.get('get_induction_document_link')!.call({
+      submissionId: 'sub-1',
+      kind: 'photo',
+    });
+    expect(documentLink).toHaveBeenCalledWith('sub-1', 'photo');
+    expect((payload(result) as { url: string }).url).toContain('/inductions/documents/tok');
+  });
+
+  it('warns the agent that the link is a secret and the file is an identity document', () => {
+    const tools = setup({});
+    const description = tools.get('get_induction_document_link')!.config.description;
+    expect(description).toContain('expires');
+    expect(description).toContain('identity');
+  });
+
+  it('rejects a document kind the form does not collect', () => {
+    expect(documentLinkInput.safeParse({ submissionId: 's1', kind: 'passport' }).success).toBe(false);
+    expect(documentLinkInput.safeParse({ submissionId: 's1', kind: 'photo' }).success).toBe(true);
   });
 });
 

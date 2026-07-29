@@ -121,6 +121,24 @@ export class InductionsClient {
     });
   }
 
+  /**
+   * A short-lived link to one stored identity document.
+   *
+   * The API answers with a PATH, because it sits behind a proxy that adds a
+   * prefix it knows nothing about. The absolute URL is composed here, from the
+   * base this client was configured with — the one address known to work.
+   */
+  async documentLink(submissionId: string, kind: 'photo' | 'driversLicence') {
+    const body = await this.request<{
+      path: string;
+      expiresAt: string;
+      fileName: string;
+      contentType: string;
+      size: number;
+    }>(`/inductions/candidates/${encodeURIComponent(submissionId)}/documents/${kind}`);
+    return { ...body, url: `${this.config.apiUrl}${body.path}` };
+  }
+
   nextDates(count?: number) {
     return this.request<{
       dates: { date: string; holidayListExpired: boolean }[];
