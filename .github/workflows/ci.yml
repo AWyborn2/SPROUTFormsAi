@@ -38,8 +38,18 @@ jobs:
       - name: Build all packages
         run: pnpm -r build
 
+      - name: Test shared (domain rules)
+        # packages/shared holds the rules several surfaces must agree on —
+        # visibility, marking, and the induction date/readiness assessment.
+        # Its suite ran only locally before, which meant a change to a rule
+        # two apps depend on could merge unverified.
+        run: pnpm --filter @formai/shared test
+
       - name: Test api (PDF pipeline golden files)
         run: pnpm --filter @formai/api test
+
+      - name: Test MCP induction server
+        run: pnpm --filter @formai/mcp-inductions test
 
       - name: Test web (unit)
         # The web suite (vitest/jsdom) covers the import-review geometry logic —

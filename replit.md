@@ -8,6 +8,9 @@ Multi-tenant B2B forms platform (PDF-to-form conversion + drag-and-drop builder)
   - `apps/api` — Express + tsx backend
   - `packages/db` — Drizzle ORM + postgres-js, migrations in `packages/db/drizzle`
   - `packages/shared`, `packages/ui` — shared code / design tokens
+  - `packages/mcp-inductions` — MCP server exposing induction data to Claude Code. Runs on an
+    operator's machine, **not** on this deployment; it only needs network access to the API.
+    See `docs/induction-mcp.md`.
 - Frontend dev server: port 5000, host 0.0.0.0, `allowedHosts: true` (required for Replit preview proxy). Vite proxies `/api` → `http://localhost:8000`.
 - Backend: Express on localhost port 8000 (repo default was 8787; overridden via `API_PORT=8000` in the workflow because 8787 isn't an allowed Replit port).
 - Database: Replit built-in PostgreSQL (`DATABASE_URL` env var). Migrations applied via `pnpm db:migrate`. Repo originally targeted Supabase Postgres; the same drizzle setup works with the Replit DB.

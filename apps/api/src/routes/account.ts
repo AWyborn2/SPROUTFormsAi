@@ -68,6 +68,11 @@ accountRouter.delete(
 
     await db.transaction(async (tx) => {
       if (orgDeleted) {
+        // Induction bookings hold RESTRICT references to submissions (a booked
+        // starter must not be silently unbookable), so they go first — their
+        // starter rows cascade — or the submissions delete below would abort
+        // the whole transaction for any org that ever recorded a booking.
+        await tx.delete(schema.inductionBookings).where(eq(schema.inductionBookings.orgId, tenant.orgId));
         await tx.delete(schema.submissions).where(eq(schema.submissions.orgId, tenant.orgId));
         await tx.delete(schema.competencyRules).where(eq(schema.competencyRules.orgId, tenant.orgId));
         await tx.delete(schema.competencies).where(eq(schema.competencies.orgId, tenant.orgId));
