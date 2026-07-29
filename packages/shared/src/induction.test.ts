@@ -11,8 +11,10 @@ import {
 
 /** Tuesday. Chosen so the next Monday (16 Mar) is exactly on the notice line. */
 const TUESDAY = new Date('2026-03-10T09:00:00');
-/** Thursday — two clear business days from Monday 16 Mar, i.e. inside the window. */
-const THURSDAY = new Date('2026-03-12T09:00:00');
+/** Thursday 12 Mar — the cutoff day itself for Monday 16 Mar, so still bookable. */
+const CUTOFF_DAY = new Date('2026-03-12T09:00:00');
+/** Friday 13 Mar — one day past that cutoff. */
+const PAST_CUTOFF = new Date('2026-03-13T09:00:00');
 
 const VALID_MONDAY = '2026-03-16';
 const LATER_MONDAY = '2026-03-23';
@@ -168,8 +170,16 @@ describe('assessInductionReadiness', () => {
     expect(verdict.blockers).toContain('date_invalid');
   });
 
+  it('still accepts a booking made on the Thursday cutoff itself', () => {
+    // The runbook is explicit that short notice is not a reason to refuse —
+    // Thursday for the following Monday is an ordinary, in-window booking.
+    const verdict = assess(fullValues(), { today: CUTOFF_DAY });
+    expect(verdict.readiness).toBe('ready');
+    expect(verdict.blockers).toEqual([]);
+  });
+
   it('distinguishes a lapsed notice window from an invalid date', () => {
-    const verdict = assess(fullValues(), { today: THURSDAY });
+    const verdict = assess(fullValues(), { today: PAST_CUTOFF });
     expect(verdict.blockers).toContain('date_notice_lapsed');
     expect(verdict.blockers).not.toContain('date_invalid');
   });
@@ -187,11 +197,11 @@ describe('assessInductionReadiness', () => {
   });
 
   it('lets an operator override short notice, keeping it visible as a warning', () => {
-    const blocked = assess(fullValues(), { today: THURSDAY });
+    const blocked = assess(fullValues(), { today: PAST_CUTOFF });
     expect(blocked.readiness).toBe('blocked');
     expect(blocked.blockers).toContain('date_notice_lapsed');
 
-    const overridden = assess(fullValues(), { today: THURSDAY, allowLateNotice: true });
+    const overridden = assess(fullValues(), { today: PAST_CUTOFF, allowLateNotice: true });
     expect(overridden.readiness).toBe('ready');
     expect(overridden.blockers).not.toContain('date_notice_lapsed');
     // The exception stays legible to whoever reads the record later.
@@ -219,7 +229,7 @@ describe('assessInductionReadiness', () => {
 
   it('leaves every other blocker standing when notice is overridden', () => {
     const verdict = assess(fullValues({ [CHC_FIELD_IDS.mobile]: '' }), {
-      today: THURSDAY,
+      today: PAST_CUTOFF,
       allowLateNotice: true,
     });
     expect(verdict.readiness).toBe('blocked');

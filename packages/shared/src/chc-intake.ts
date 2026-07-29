@@ -105,26 +105,28 @@ export const CHC_GENDERS = ['Male', 'Female', 'Undisclosed'] as const;
 export const CHC_STARTER_TYPES = ['New starter', 'Transfer'] as const;
 
 /**
- * Public holidays excluded from the business-day count, as ISO `YYYY-MM-DD`.
+ * WA public holidays, as ISO `YYYY-MM-DD`.
  *
- * WA dates for 2026, carried over from the approved prototype. This list is
- * finite and WILL expire: past its last entry the notice rule silently gets
- * more lenient, counting a holiday as a working day. `holidaysCoverThrough`
- * exists so a caller can detect that rather than discover it from a booking
- * made with too little notice.
+ * Mirrors the table in the mobilisation runbook
+ * (`01-new-starter-intake/references/induction-rules.md`), which is the
+ * authority — when the runbook is updated for a new year, this list follows it.
+ *
+ * A holiday does two things: no induction runs that day, and when it falls on a
+ * Monday the induction moves to the Tuesday. The list is finite and WILL
+ * expire; `holidaysCoverThrough` exists so a caller can say so out loud rather
+ * than let a date past the end quietly look ordinary.
  */
 export const CHC_PUBLIC_HOLIDAYS: readonly string[] = [
+  '2026-01-01', // New Year's Day
   '2026-01-26', // Australia Day
-  '2026-03-02', // Labour Day
+  '2026-03-02', // WA Day
   '2026-04-06', // Easter Monday
-  '2026-04-27', // Anzac Day (observed)
-  '2026-06-01', // Western Australia Day
-  '2026-09-28', // King's Birthday
-  '2026-12-28', // Christmas (observed)
+  '2026-04-27', // ANZAC Day (observed)
+  '2026-06-01', // Reconciliation Day
+  '2026-09-28', // Queen's Birthday
+  '2026-12-25', // Christmas Day
+  '2026-12-28', // Boxing Day (observed)
 ];
-
-/** Minimum clear business days between today and an induction date. */
-export const CHC_MIN_NOTICE_BUSINESS_DAYS = 4;
 
 /** The last date the holiday list actually covers. */
 export function holidaysCoverThrough(): string {
@@ -145,7 +147,6 @@ export function toIsoDate(date: Date): string {
   return `${date.getFullYear()}-${month}-${day}`;
 }
 
-/** Inductions run Mondays only. */
 export function isMonday(iso: string): boolean {
   const date = parseIsoDate(iso);
   return date ? date.getDay() === 1 : false;
@@ -156,54 +157,78 @@ export function isPublicHoliday(iso: string): boolean {
 }
 
 /**
- * Clear business days strictly AFTER `from` up to and including `iso`.
+ * Whether the site actually runs an induction on this date.
  *
- * "Clear" is what makes the notice rule mean what the site means by it: the day
- * the request is raised does not count, because the paperwork it triggers
- * cannot start until the next working day. Weekends and the listed public
- * holidays are skipped. Returns 0 for a date in the past.
+ * Mondays — except when the Monday is a public holiday, in which case the
+ * induction moves to the Tuesday. That Tuesday is a real induction day and must
+ * be bookable; treating it as an invalid date loses every starter in a holiday
+ * week, since there is no other day that week to move them to.
  */
-export function businessDaysUntil(iso: string, from: Date = new Date()): number {
-  const target = parseIsoDate(iso);
-  if (!target) return 0;
+export function isInductionDay(iso: string): boolean {
+  const date = parseIsoDate(iso);
+  if (!date || isPublicHoliday(iso)) return false;
 
-  const cursor = new Date(from);
-  cursor.setHours(0, 0, 0, 0);
-  target.setHours(0, 0, 0, 0);
-  cursor.setDate(cursor.getDate() + 1);
+  const day = date.getDay();
+  if (day === 1) return true;
+  if (day !== 2) return false;
 
-  let count = 0;
-  while (cursor <= target) {
-    const day = cursor.getDay();
-    if (day !== 0 && day !== 6 && !isPublicHoliday(toIsoDate(cursor))) count++;
-    cursor.setDate(cursor.getDate() + 1);
-  }
-  return count;
+  // A Tuesday qualifies only as the stand-in for a holiday Monday.
+  const monday = new Date(date);
+  monday.setDate(monday.getDate() - 1);
+  return isPublicHoliday(toIsoDate(monday));
+}
+
+/**
+ * The Thursday a booking for `iso` must be made on or before.
+ *
+ * The site's rule is a CUTOFF, not a lead time: book any time you like, right
+ * up to the Thursday before. Swipe cards print on the Friday afternoon, which
+ * is what that Thursday is really about — a booking after it misses the card
+ * run, not some notional paperwork window.
+ */
+export function bookingCutoffFor(iso: string): string | null {
+  const date = parseIsoDate(iso);
+  if (!date) return null;
+  const cursor = new Date(date);
+  do {
+    cursor.setDate(cursor.getDate() - 1);
+  } while (cursor.getDay() !== 4);
+  return toIsoDate(cursor);
+}
+
+/** Whether a booking for `iso` can still be made as at `from`. */
+export function withinBookingWindow(iso: string, from: Date = new Date()): boolean {
+  const cutoff = bookingCutoffFor(iso);
+  return cutoff !== null && toIsoDate(from) <= cutoff;
 }
 
 /**
  * The induction-date rule, as one answer.
  *
- * Returns null when the date is bookable, or the message to show. Order is
- * deliberate — "must be a Monday" before the notice check — so someone who
- * picks a Wednesday is told the thing they got wrong first rather than being
- * sent to find a date four days out that is still not a Monday.
+ * Returns null when the date is bookable, or the message to show. There is
+ * deliberately NO minimum-notice test: short notice is not a reason to refuse a
+ * booking, and the runbook says so in as many words. The only time question is
+ * whether the Thursday cutoff has passed.
  */
 export function validateInductionDate(iso: string, from: Date = new Date()): string | null {
   if (!iso) return 'Required';
   if (!parseIsoDate(iso)) return 'Enter a valid date';
-  if (!isMonday(iso)) return 'Must be a Monday';
-  if (isPublicHoliday(iso)) return 'That Monday is a public holiday — choose another';
-  if (businessDaysUntil(iso, from) < CHC_MIN_NOTICE_BUSINESS_DAYS) {
-    return `Must be at least ${CHC_MIN_NOTICE_BUSINESS_DAYS} business days from today`;
+  if (isPublicHoliday(iso)) {
+    return isMonday(iso)
+      ? 'That Monday is a public holiday — book the Tuesday instead'
+      : 'That day is a public holiday — choose another';
+  }
+  if (!isInductionDay(iso)) return 'Must be a Monday (or the Tuesday after a public-holiday Monday)';
+  if (!withinBookingWindow(iso, from)) {
+    return `Bookings for that date closed on Thursday ${formatAuDate(bookingCutoffFor(iso)!)}`;
   }
   return null;
 }
 
 /**
- * The next bookable induction Monday — used to seed the date picker's `min`.
- * Bounded so a malformed holiday list can never spin: a year of candidate
- * Mondays is far more than the rule can ever need.
+ * The next bookable induction date — used to seed the date picker's `min`.
+ * Bounded so a malformed holiday list can never spin: a year of candidates is
+ * far more than the rule can ever need.
  */
 export function nextBookableInductionDate(from: Date = new Date()): string {
   const cursor = new Date(from);
@@ -340,7 +365,7 @@ export function chcIntakeFields(): FormField[] {
       type: 'date',
       label: 'Preferred induction date',
       required: true,
-      help: `Mondays only · minimum ${CHC_MIN_NOTICE_BUSINESS_DAYS} business days notice.`,
+      help: 'Mondays only (Tuesday after a public holiday) · book by the Thursday before.',
       colSpan: 12,
       ...built,
     },

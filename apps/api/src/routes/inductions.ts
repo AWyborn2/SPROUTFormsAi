@@ -6,7 +6,6 @@ import {
   assessInductionReadiness,
   buildInductionCohorts,
   CHC_FIELD_IDS,
-  CHC_MIN_NOTICE_BUSINESS_DAYS,
   holidaysCoverThrough,
   isIsoDate,
   ISO_DATE_PATTERN,
@@ -482,7 +481,7 @@ inductionsRouter.post('/bookings', requireMachineOrTenant, withErrorHandling(asy
     res.status(400).json({
       error: 'notice_override_required',
       submissionIds: lateNotice,
-      detail: `${lateNotice.length} starter${lateNotice.length === 1 ? ' is' : 's are'} inside the ${CHC_MIN_NOTICE_BUSINESS_DAYS}-business-day notice window. Pass noticeOverrideReason to record why the site accepted the booking anyway.`,
+      detail: `${lateNotice.length} starter${lateNotice.length === 1 ? ' is' : 's are'} past the Thursday booking cutoff for that date. Pass noticeOverrideReason to record why the site accepted the booking anyway.`,
     });
     return;
   }
