@@ -163,6 +163,33 @@ export interface Member {
   status: MemberStatus;
 }
 
+/* ── API keys ─────────────────────────────────────────────────────────────── */
+
+/**
+ * A machine credential, as the settings screen sees it.
+ *
+ * There is no `key` field: the plaintext exists once, in the create response
+ * (`CreatedApiKey`), and is never retrievable afterwards. `prefix` is what
+ * identifies a key in the list.
+ */
+export interface ApiKey {
+  id: string;
+  name: string;
+  role: RoleName;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+/** The create response — the only place the plaintext ever appears. */
+export interface CreatedApiKey extends ApiKey {
+  key: string;
+}
+
+/** Roles a key may carry. Candidate is scoped to its own records, so it is not offered. */
+export const API_KEY_ROLES: RoleName[] = ['Admin', 'Builder', 'Reviewer', 'Viewer'];
+
 /** Category keys used to colour/icon and filter audit entries. */
 export type AuditCategory = 'forms' | 'submissions' | 'team' | 'settings' | 'security' | 'general';
 

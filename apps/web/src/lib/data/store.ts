@@ -32,8 +32,10 @@ import { geometrySegments, ROLE_LABELS } from '@formai/shared';
 import { ApiError, apiClient } from './api-client.js';
 import { ROLE_NAMES } from './types.js';
 import type {
+  ApiKey,
   AuditCategory,
   AuditEntry,
+  CreatedApiKey,
   BrandScanProposal,
   Competency,
   CompetencyRule,
@@ -254,6 +256,29 @@ interface CompetencyRuleDto {
   competencyId: string;
   competency: string;
   enabled: boolean;
+}
+
+/** Raw shape from `apps/api`'s /api-keys routes. */
+interface ApiKeyDto {
+  id: string;
+  name: string;
+  role: Role;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+function toApiKey(dto: ApiKeyDto): ApiKey {
+  return {
+    id: dto.id,
+    name: dto.name,
+    role: ROLE_LABELS[dto.role] as RoleName,
+    prefix: dto.prefix,
+    createdAt: dto.createdAt,
+    lastUsedAt: dto.lastUsedAt,
+    revokedAt: dto.revokedAt,
+  };
 }
 
 function toMember(dto: MemberDto): Member {
@@ -540,6 +565,27 @@ export const store = {
 
   auditLog(): Promise<AuditEntry[]> {
     return apiClient.get<AuditEntryDto[]>('/audit').then((rows) => rows.map(toAuditEntry));
+  },
+
+  listApiKeys(): Promise<ApiKey[]> {
+    return apiClient.get<ApiKeyDto[]>('/api-keys').then((rows) => rows.map(toApiKey));
+  },
+
+  /**
+   * Creates a key. The response carries the plaintext, and that is the only
+   * moment it exists outside the caller — nothing here persists it.
+   */
+  createApiKey(input: { name: string; role: RoleName }): Promise<CreatedApiKey> {
+    return apiClient
+      .post<ApiKeyDto & { key: string }>('/api-keys', {
+        name: input.name.trim(),
+        role: input.role.toLowerCase(),
+      })
+      .then((dto) => ({ ...toApiKey(dto), key: dto.key }));
+  },
+
+  revokeApiKey(id: string): Promise<ApiKey> {
+    return apiClient.delete<ApiKeyDto>(`/api-keys/${encodeURIComponent(id)}`).then(toApiKey);
   },
 
   /** Real plan/seat/feature data from `GET /org/billing`. */
