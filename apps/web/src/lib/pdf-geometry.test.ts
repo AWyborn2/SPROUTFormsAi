@@ -1003,3 +1003,108 @@ describe('proposeFieldOptionCells — confidence', () => {
     }
   });
 });
+
+/**
+ * The two shapes a choice field takes on these forms.
+ *
+ * Both arrive as "a choice field with two options" and both sit on a page
+ * carrying a `✓ / × N/A` header, so nothing in the field's TYPE separates them.
+ * Taken from the real Track Dozer template:
+ *
+ *   - ai_137 "Correct & controlled steering techniques", options ✓ / × and N/A
+ *     — a practical criterion whose options name the printed COLUMNS.
+ *   - ai_29 "Q1. The track dozer must be isolated with a lock and hasp…",
+ *     options True and False — a theory question whose answers print INLINE.
+ *
+ * Mapping the second onto the columns puts a tick for "True" in the tick column
+ * of an outcome cell.
+ */
+describe('proposeFieldOptionCells — options as columns vs options printed inline', () => {
+  /** A page in the practical-criteria shape: labels left, glyph columns right. */
+  function criteriaPage(): PositionedText[] {
+    return [
+      { text: 'N/A', x: 539.9, y: 648.6, width: 13.3 },
+      { text: 'During the demonstration, did the candidate:', x: 37.5, y: 647.7, width: 192 },
+      { text: '\uf0fc', x: 502.6, y: 647.7, width: 7.1 },
+      { text: '/ \u00d7', x: 512.1, y: 647.7, width: 10.3 },
+      { text: 'Correct & controlled steering techniques', x: 37.5, y: 630.8, width: 258.1 },
+      { text: 'Manoeuvres dozer safely', x: 37.5, y: 614, width: 143.6 },
+      { text: 'Uses correct two-way protocols', x: 37.5, y: 597.1, width: 150 },
+    ];
+  }
+
+  /**
+   * The same page furniture, but the row is a theory question that prints its
+   * own answers. The outcome column header is still there — that is the trap.
+   */
+  function theoryPage(): PositionedText[] {
+    return [
+      { text: 'N/A', x: 539.9, y: 648.6, width: 13.3 },
+      { text: 'During the demonstration, did the candidate:', x: 37.5, y: 647.7, width: 192 },
+      { text: '\uf0fc', x: 502.6, y: 647.7, width: 7.1 },
+      { text: '/ \u00d7', x: 512.1, y: 647.7, width: 10.3 },
+      {
+        text: 'Q1. The track dozer must be isolated with a lock and hasp before maintenance',
+        x: 37.5,
+        y: 630.8,
+        width: 258.1,
+      },
+      { text: 'True', x: 300, y: 630.8, width: 18 },
+      { text: 'False', x: 340, y: 630.8, width: 20 },
+      { text: 'Manoeuvres dozer safely', x: 37.5, y: 614, width: 143.6 },
+    ];
+  }
+
+  it('maps a practical criterion onto the printed columns', () => {
+    const res = proposeField(criteriaPage(), 'Correct & controlled steering techniques', [
+      '\u2713 / \u00d7',
+      'N/A',
+    ] as never);
+
+    expect(res).not.toBeNull();
+    expect(res!.segments).toHaveLength(2);
+    // Both cells belong over the glyph columns, right of the label header.
+    for (const segment of res!.segments) expect(segment.x).toBeGreaterThan(450);
+  });
+
+  it('refuses a theory question whose answers are printed in the row', () => {
+    const res = proposeField(
+      theoryPage(),
+      'Q1. The track dozer must be isolated with a lock and hasp before maintenance',
+      ['True', 'False'] as never,
+    );
+
+    // The page has a perfectly good ✓ / × N/A header and the label matches a
+    // row, so everything else about this succeeds — only the printed options
+    // reveal that those columns are not this field's answer cells.
+    expect(res).toBeNull();
+  });
+
+  it('is not fooled by an option word that merely occurs inside a criterion', () => {
+    // `N/A` normalizes to `n a`, which is a SUBSTRING of "in a" and so of half
+    // the criteria on the form. Token-wise it is not, and the criterion must
+    // still be proposed for.
+    const page = criteriaPage().map((i) =>
+      i.text === 'Manoeuvres dozer safely'
+        ? { ...i, text: 'Operates in a safe and controlled manner at all times' }
+        : i,
+    );
+    const res = proposeField(page, 'Operates in a safe and controlled manner at all times', [
+      '\u2713 / \u00d7',
+      'N/A',
+    ] as never);
+
+    expect(res).not.toBeNull();
+  });
+
+  it('ignores symbol-only options, which carry no evidence either way', () => {
+    // `✓ / ×` normalizes to nothing. Treating that as "absent from the row"
+    // would be reading meaning into an empty string.
+    const res = proposeField(criteriaPage(), 'Uses correct two-way protocols', [
+      '\u2713 / \u00d7',
+      'N/A',
+    ] as never);
+
+    expect(res).not.toBeNull();
+  });
+});

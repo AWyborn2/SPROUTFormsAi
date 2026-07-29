@@ -746,15 +746,76 @@ function stripEnumeration(text: string): string {
   return text.replace(/^(?:q(?:uestion)?\s*)?\d+\s*/, '').trim();
 }
 
-/** Every row inside a band, top-down, as one normalized string. */
-function bandText(rows: Row[], band: GeometryBand): string {
+/**
+ * Every row inside a band, top-down, as one normalized string.
+ *
+ * The HEADER row is excluded. The first band's top edge IS the header baseline,
+ * so the header falls inside it — and its text is the column names (`N/A`, and
+ * the question stem "During the demonstration, did the candidate:"). Counting
+ * that as part of the first row both invents label text and makes the column
+ * names look like options printed in the row, which refused every first
+ * criterion on the page.
+ */
+function bandText(rows: Row[], band: GeometryBand, headerY: number): string {
   return normalizeForMatch(
     rows
-      .filter((r) => r.y > band.start && r.y <= band.end)
+      .filter((r) => r.y > band.start && r.y <= band.end && r.y !== headerY)
       .sort((a, b) => b.y - a.y)
       .flatMap((r) => [...r.items].sort((a, b) => a.x - b.x).map((i) => i.text))
       .join(' '),
   );
+}
+
+/**
+ * Is `needle` present in `haystack` as a run of WHOLE words?
+ *
+ * Token-wise rather than substring, because the normalizer collapses
+ * punctuation to spaces: `N/A` becomes `n a`, which occurs as a substring of
+ * "operates in a safe manner" and of half the criteria on the form. As tokens
+ * it does not.
+ */
+function containsTokens(haystack: string, needle: string): boolean {
+  if (needle.length === 0) return false;
+  const hay = haystack.split(' ').filter(Boolean);
+  const want = needle.split(' ').filter(Boolean);
+  if (want.length === 0 || want.length > hay.length) return false;
+
+  for (let i = 0; i + want.length <= hay.length; i++) {
+    if (want.every((w, j) => hay[i + j] === w)) return true;
+  }
+  return false;
+}
+
+/**
+ * Are this field's options printed INSIDE the row, rather than as columns?
+ *
+ * The discriminator between the two shapes a choice field takes on these forms,
+ * and the guard that stops the column mapping being applied to the wrong one:
+ *
+ *   - A practical criterion — "Manoeuvres dozer safely" with options `✓ / ×`
+ *     and `N/A` — names the COLUMNS down the right of the page. Its options are
+ *     column headers and appear nowhere in the row itself.
+ *   - A theory question — "Q1. The track dozer must be isolated…" with options
+ *     `True` and `False` — prints its answers inline, beside the question. Its
+ *     boxes sit next to those printed words, nowhere near the outcome columns.
+ *
+ * Both reach this module as "a choice field with two options", and both sit on
+ * a page carrying a `✓ / × N/A` header. Mapping the second onto the columns
+ * would put a tick for "True" in the tick column of an outcome cell — a
+ * confident mark in a cell nobody measured, which is the failure this whole
+ * module is arranged to prevent. So: if an option is printed in the row, the
+ * options are not the columns, and this refuses.
+ *
+ * Symbol-only options (`✓ / ×` normalizes to nothing) carry no evidence either
+ * way and are skipped rather than counted as absent.
+ */
+function optionsPrintedInRow(text: string, options: readonly string[]): boolean {
+  return options.some((option) => {
+    const needle = normalizeForMatch(option);
+    // Two characters is not enough to be evidence of anything.
+    if (needle.length < 2) return false;
+    return containsTokens(text, needle);
+  });
 }
 
 /**
@@ -768,14 +829,14 @@ function bandText(rows: Row[], band: GeometryBand): string {
  * job, because ambiguity is a property of the whole page rather than of any one
  * band. See `proposeFieldOptionCells`.
  */
-function bandMatches(rows: Row[], band: GeometryBand, label: string): boolean {
+function bandMatches(rows: Row[], band: GeometryBand, label: string, headerY: number): boolean {
   const wanted = stripEnumeration(normalizeForMatch(label));
   // A handful of characters is not enough to identify a row: "yes", "date",
   // "name" match half the page. Below this the only safe answer is to let a
   // reviewer draw it, which is the visible failure rather than the silent one.
   if (wanted.length < 12) return false;
 
-  const text = bandText(rows, band);
+  const text = bandText(rows, band, headerY);
   if (text.length === 0) return false;
   return text.includes(wanted) || wanted.includes(text);
 }
@@ -807,7 +868,7 @@ export function proposeFieldOptionCells(input: FieldProposeInput): FieldProposal
     const header = headers[h]!;
     const bands = rowBands(rows, header, headers[h + 1]?.row.y ?? 0);
     for (const band of bands) {
-      if (bandMatches(rows, band, input.label)) matches.push({ header, band });
+      if (bandMatches(rows, band, input.label, header.row.y)) matches.push({ header, band });
     }
   }
 
@@ -816,6 +877,11 @@ export function proposeFieldOptionCells(input: FieldProposeInput): FieldProposal
   // nobody asked.
   if (matches.length !== 1) return null;
   const { header, band } = matches[0]!;
+
+  // The options must BE the page's columns. When they are printed in the row
+  // instead, this is a question with inline answers and its boxes are beside
+  // those words — see `optionsPrintedInRow`.
+  if (optionsPrintedInRow(bandText(rows, band, header.row.y), input.options)) return null;
 
   const rightmostText = Math.max(...header.row.items.map((i) => i.x + i.width));
   const reconciled = reconcile(header.anchors, input.options.length, rightmostText);
