@@ -966,6 +966,53 @@ const SYNTHETIC_MARKER_GAP = 3;
 const INLINE_SEARCH_ROWS = 14;
 
 /**
+ * Which runs of consecutive rows carry this label.
+ *
+ * Returns RUNS rather than row indexes because a question printed over two lines
+ * matches on both — each line's words are a subset of the label — and treating
+ * that as two matches refused every question long enough to wrap while short ones
+ * placed correctly. One run is one occurrence; several runs is genuine ambiguity,
+ * which every caller here refuses.
+ *
+ * Enumeration is stripped from the PRINTED row as well as from the label: the
+ * page prints "1. The track dozer must be isolated…" while the extracted label
+ * reads "Q1. …", and leaving the row's number in place broke containment in both
+ * directions on exactly the wrapping questions this exists to find.
+ */
+function labelRuns(rows: Row[], wanted: string): number[][] {
+  const matched: { index: number; whole: boolean }[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const text = stripEnumeration(normalizeForMatch(rows[i]!.items.map((x) => x.text).join(' ')));
+    // A short row is not evidence. Without this floor a bare "true" or a page
+    // number could satisfy `wanted.includes(text)` for any question at all.
+    if (text.length < 12) continue;
+    if (text.includes(wanted)) matched.push({ index: i, whole: true });
+    else if (wanted.includes(text)) matched.push({ index: i, whole: false });
+  }
+
+  // A row carrying the WHOLE label is a complete occurrence; a row the label
+  // merely contains is one line of a wrapped one. Two complete occurrences are
+  // two questions, however close together they are printed.
+  //
+  // Index adjacency alone cannot tell those apart, which is the trap: two
+  // occurrences 180pt apart with nothing but white space between them are
+  // adjacent BY INDEX, because no other row lies between them. Grouping on
+  // adjacency alone therefore read a duplicated question as one wrapped one and
+  // placed a cell against whichever copy came first. Vertical distance is no
+  // better a discriminator — on a two-line fixture the wrap gap IS the row pitch.
+  const whole = matched.filter((m) => m.whole);
+  if (whole.length > 1) return whole.map((m) => [m.index]);
+
+  const runs: number[][] = [];
+  for (const { index } of matched) {
+    const last = runs[runs.length - 1];
+    if (last && index === last[last.length - 1]! + 1) last.push(index);
+    else runs.push([index]);
+  }
+  return runs;
+}
+
+/**
  * Propose one box per option for a question whose answers are PRINTED INLINE.
  *
  * The counterpart to `proposeFieldOptionCells`, for the other population of
@@ -997,30 +1044,7 @@ export function proposeInlineOptionCells(input: FieldProposeInput): FieldProposa
   // Where the question is printed. Ambiguity refuses, exactly as it does for
   // the column rule — the dozer asks "True / False" of many questions, and the
   // label is the only thing telling them apart.
-  const matchingRows: number[] = [];
-  for (let i = 0; i < rows.length; i++) {
-    // Enumeration stripped from the PRINTED row as well as the label. The page
-    // prints "1. The track dozer must be isolated…" while the extracted label
-    // reads "Q1. …", and leaving the row's number in place broke containment in
-    // both directions for any question long enough to wrap.
-    const text = stripEnumeration(normalizeForMatch(rows[i]!.items.map((x) => x.text).join(' ')));
-    // A short row is not evidence. Without this floor a bare "true" or a page
-    // number could satisfy `wanted.includes(text)` for any question at all.
-    if (text.length < 12) continue;
-    if (text.includes(wanted) || wanted.includes(text)) matchingRows.push(i);
-  }
-
-  // ADJACENT matches are one wrapped question, not two questions. A question
-  // printed over two lines matches on both of them — each line's words are a
-  // subset of the label — and counting that as ambiguity refused every long
-  // question while short ones placed correctly. Genuine ambiguity is matches in
-  // SEPARATED places, which is what this still refuses.
-  const runs: number[][] = [];
-  for (const i of matchingRows) {
-    const last = runs[runs.length - 1];
-    if (last && i === last[last.length - 1]! + 1) last.push(i);
-    else runs.push([i]);
-  }
+  const runs = labelRuns(rows, wanted);
   if (runs.length !== 1) return null;
 
   const startIndex = runs[0]![0]!;
@@ -1170,6 +1194,114 @@ function nearestMarker(
     if (gap < bestGap) {
       bestGap = gap;
       best = candidate;
+    }
+  }
+  return best;
+}
+
+/* ── Outcome cells, by example ────────────────────────────────────────────── */
+
+/**
+ * Propose a cell in the SAME COLUMN as one a reviewer already placed, on a
+ * different row.
+ *
+ * This exists for the outcome cells, which neither other rule can reach. Their
+ * labels are names the extractor invented — "Q1 Outcome", "7. Outcome" — and
+ * appear nowhere on the page, so nothing can be matched by label. And a page
+ * whose only right-hand column is a single tick box yields ONE anchor, while
+ * `findHeaderRows` needs two before it will call something a column header, so
+ * the column derivation cannot see it either. Thirty-one cells, no rule.
+ *
+ * So the geometry comes from a human instead. The reviewer places the first
+ * outcome cell by hand; every remaining one is the same box on its own question's
+ * row. Nothing about the column is inferred — it is copied from an exemplar
+ * somebody looked at — and only the ROW is derived, by the same label matching
+ * the other rules use.
+ *
+ * The vertical offset is learned rather than assumed. Where a box sits relative
+ * to its row's baseline is a property of how that form is drawn, so the exemplar's
+ * own offset is measured and reapplied, which keeps a cell whose box sits high or
+ * low in the row consistent down the page.
+ */
+export interface ExemplarProposeInput {
+  /** Every page's text, so the target row can be on a different page. */
+  pages: readonly TextPage[];
+  /** A box a human placed for a sibling cell. Its column and size are reused. */
+  exemplar: PageBox;
+  /**
+   * The label of the QUESTION whose row this cell belongs to — not the cell's
+   * own label, which is synthetic and matches nothing on the page.
+   */
+  questionLabel: string;
+}
+
+export function proposeFromExemplar(input: ExemplarProposeInput): FieldProposal | null {
+  const wanted = stripEnumeration(normalizeForMatch(input.questionLabel));
+  if (wanted.length < 12) return null;
+
+  // The exemplar's own row, so its baseline-to-box offset can be measured. An
+  // exemplar whose page carries no matching row leaves the offset unknown, and
+  // guessing it would drift every proposed cell by the same wrong amount.
+  const exemplarPage = input.pages[input.exemplar.page];
+  if (!exemplarPage) return null;
+  const exemplarRows = toRows(exemplarPage.items);
+  const exemplarBaseline = nearestBaseline(exemplarRows, input.exemplar);
+  if (exemplarBaseline === undefined) return null;
+  const offset = input.exemplar.y - exemplarBaseline;
+
+  // The target row, found across every page. Absence and ambiguity are one
+  // answer, as everywhere else here: a cell placed on the wrong question records
+  // a verdict against something nobody asked.
+  const hits: { page: number; rows: Row[]; run: number[] }[] = [];
+  for (const [page, text] of input.pages.entries()) {
+    const rows = toRows(text.items);
+    for (const run of labelRuns(rows, wanted)) hits.push({ page, rows, run });
+    if (hits.length > 1) return null;
+  }
+  if (hits.length !== 1) return null;
+
+  const { page, rows, run } = hits[0]!;
+  const target = input.pages[page]!;
+  // The FIRST line of a wrapped question. The printed cell sits against the
+  // question's opening line, not the middle of its wrap.
+  const baseline = rows[run[0]!]!.y;
+
+  const box: PageBox = {
+    page,
+    x: input.exemplar.x,
+    y: baseline + offset,
+    width: input.exemplar.width,
+    height: input.exemplar.height,
+    pageWidth: target.width,
+    pageHeight: target.height,
+  };
+
+  if (resolveGeometry({ geometry: { segments: [box] } }, page + 1).segments.length === 0) return null;
+
+  return {
+    segments: [box],
+    // Not full confidence, ever. The column is a human's, but the row is derived
+    // and the offset is copied from one sample — a reviewer should still look.
+    confidence: 0.75,
+    notes: [
+      `Column and size copied from the cell you placed on page ${input.exemplar.page + 1}; row matched from the question text.`,
+    ],
+  };
+}
+
+/** The baseline of the row a box sits on, by nearest to its vertical centre. */
+function nearestBaseline(rows: Row[], box: PageBox): number | undefined {
+  const centre = box.y + box.height / 2;
+  let best: number | undefined;
+  let bestGap = Infinity;
+  for (const row of rows) {
+    const gap = Math.abs(row.y - centre);
+    // Beyond a row's own height the nearest baseline is a different row, and an
+    // offset measured against it would be meaningless.
+    if (gap > box.height) continue;
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = row.y;
     }
   }
   return best;

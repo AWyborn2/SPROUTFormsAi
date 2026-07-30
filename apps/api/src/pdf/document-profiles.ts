@@ -41,10 +41,14 @@ const ASSESSMENT_PROFILE =
   'repeating_group whose rows are the question text — that makes every one of them unanswerable, ' +
   'and it is the single most damaging mistake on this document class.\n' +
   '2. TRUE/FALSE questions are `radio` fields with options exactly ["True", "False"].\n' +
-  '3. OUTCOME BOXES ARE SEPARATE FIELDS. A ✓/× (tick/cross) box printed beside or after a ' +
-  'question records whether the answer was CORRECT — it is not one of the answer choices. Emit it ' +
-  'as its own `check_cross` field immediately after the question it belongs to, labelled with that ' +
-  'question\'s number. Every question with a printed outcome box gets one.\n' +
+  '3. OUTCOME BOXES ARE SEPARATE FIELDS, LINKED BY QUESTION REFERENCE. A tick/cross box printed ' +
+  'beside or after a question records whether the answer was CORRECT - it is not one of the answer ' +
+  'choices. Emit it as its own `check_cross` field immediately after the question it belongs to. ' +
+  'Set `questionRef` on BOTH the question and its outcome box to the reference exactly as printed ' +
+  '("Q1", "BBM Q3", "7") - that string is what pairs them, so the two must match character for ' +
+  'character. Numbering restarts in each section, so repeat a reference only where the page does. ' +
+  'Every question with a printed outcome box gets one; a question with no printed box gets no ' +
+  'outcome field, and omitting one is far better than inventing it.\n' +
   '4. EMIT SECTION HEADERS for structural headings, as `section_header` fields carrying no answer: ' +
   'each PART heading ("PART 1 - THEORY", "PART 3 - DIRECT OBSERVATION LOG"), and each named ' +
   'question group inside a part ("Written or Verbal Questions (General)", "BBM Mining Only", ' +

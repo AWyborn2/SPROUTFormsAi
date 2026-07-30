@@ -1219,3 +1219,113 @@ describe('roundTripExport — verdict rings on auto-marked questions', () => {
     expect(tickXs(output)).toHaveLength(1);
   });
 });
+
+/**
+ * A standalone check_cross outcome cell.
+ *
+ * This is where an auto-marked question's verdict lands: `applyMarks` writes a
+ * BOOLEAN into the field named by the question's `outcomeTarget` — true for
+ * correct, false for incorrect.
+ *
+ * It used to fall through to the scalar TEXT path, which rendered that boolean
+ * via `scalarText`: `true` drew the letter "X", and `false` drew nothing at all.
+ * So a correct answer was stamped with a glyph that reads as a cross, and an
+ * incorrect one was blank — indistinguishable, on a competency record, from a
+ * question nobody ever assessed. Both directions of that are load-bearing here.
+ */
+describe('roundTripExport — a standalone check_cross outcome cell', () => {
+  const CELL: PageBox = {
+    page: 0,
+    x: 520,
+    y: 600,
+    width: 16,
+    height: 14,
+    pageWidth: 600,
+    pageHeight: 800,
+  };
+
+  const outcomeField = (): FormField => ({
+    id: 'ai_30',
+    type: 'check_cross',
+    label: 'Q1 Outcome',
+    required: false,
+    source: 'imported',
+    geometry: { segments: [CELL] },
+  });
+
+  it('draws a tick when the answer was correct', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [outcomeField()],
+      values: { ai_30: true },
+    });
+
+    const marks = drawnMarks(output);
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.kind).toBe('tick');
+  });
+
+  it('draws a CROSS when the answer was incorrect, rather than nothing', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [outcomeField()],
+      values: { ai_30: false },
+    });
+
+    // A blank cell on a competency record reads as never-assessed. "I checked
+    // this and it failed" is a recorded finding and has to appear as one.
+    const marks = drawnMarks(output);
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.kind).toBe('cross');
+  });
+
+  it('draws nothing when the question was never marked', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [outcomeField()],
+      values: {},
+    });
+
+    // Unmarked is the one state that SHOULD be blank — inventing a glyph here
+    // would assert an assessment that never happened.
+    expect(drawnMarks(output)).toHaveLength(0);
+  });
+
+  it('never stamps the letter X for a correct answer', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [outcomeField()],
+      values: { ai_30: true },
+    });
+
+    // The old behaviour. An "X" in an outcome column is read by an auditor as a
+    // cross, so it said the exact opposite of what was recorded.
+    expect(glyphXs(output, 'X')).toEqual([]);
+  });
+
+  it('centres the mark in the recorded cell', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [outcomeField()],
+      values: { ai_30: true },
+    });
+
+    const mark = drawnMarks(output)[0]!;
+    // Inside the cell on both axes — a mark hanging outside it would land on a
+    // neighbouring question's row.
+    expect(mark.x).toBeGreaterThanOrEqual(CELL.x);
+    expect(mark.x).toBeLessThan(CELL.x + CELL.width);
+    expect(mark.y).toBeGreaterThanOrEqual(CELL.y);
+    expect(mark.y).toBeLessThan(CELL.y + CELL.height);
+  });
+
+  it('applies the same rule to boolean_yes_no, which is also self-answering', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [{ ...outcomeField(), id: 'ai_20', type: 'boolean_yes_no', label: 'More coaching?' }],
+      values: { ai_20: false },
+    });
+
+    expect(drawnMarks(output)[0]!.kind).toBe('cross');
+  });
+});

@@ -117,6 +117,19 @@ export interface ExtractedField {
    * column of items; never `< 2`.
    */
   columnGroups?: number;
+  /**
+   * The question reference as PRINTED on the page — "Q1", "BBM Q3", "7".
+   *
+   * Carried by a question AND by its outcome box, which is what links the two.
+   * A printed reference rather than adjacency because adjacency shifts: a single
+   * question whose outcome box the model missed re-pairs every question after
+   * it, silently, and the result reads as a complete mapping. A reference has to
+   * MATCH, so a gap stays a gap.
+   *
+   * Not unique document-wide — this paper restarts its numbering in each
+   * section — so it is resolved locally. See `linkOutcomeTargets`.
+   */
+  questionRef?: string;
   sourcePosition?: SourcePosition;
   /** Reviewer-facing note, e.g. "detected as text — likely a signature field". */
   note?: string;

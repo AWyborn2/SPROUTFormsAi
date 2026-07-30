@@ -42,7 +42,8 @@ const RING_PAD = 1.6;
 const RING_MIN_RADIUS = 4;
 
 /**
- * Column types whose `false` is a RECORDED answer rather than an empty cell.
+ * Field and column types whose `false` is a RECORDED answer rather than an empty
+ * cell — read by both the repeating-column path and the scalar one.
  *
  * A plain `checkbox` that is false is simply unticked, and drawing anything
  * would invent an answer. A `check_cross` that is false is an assessor saying
@@ -80,6 +81,21 @@ function drawMark(
   }
   line(x, y + size * 0.08, x + size * 0.9, y + size * 0.92);
   line(x, y + size * 0.92, x + size * 0.9, y + size * 0.08);
+}
+
+/**
+ * Read a self-answering field's recorded verdict.
+ *
+ * `applyMarks` writes a real boolean into the field a question's `outcomeTarget`
+ * names, but a hand-filled cell can arrive as the string a form control posted,
+ * so both are accepted. Anything else — a number, a stray value — returns
+ * undefined and is drawn as ordinary text rather than silently becoming a tick.
+ */
+function verdictOf(value: SubmissionValue | undefined): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return undefined;
 }
 
 /** Render a scalar value to the string drawn on the page. */
@@ -158,6 +174,29 @@ export async function roundTripExport({
     const pos = segments[0]!;
     const page = pages[pos.page];
     if (!page) continue;
+
+    /*
+      A SELF-ANSWERING cell carries a verdict, not a value, and both of its
+      states are recorded findings.
+
+      This used to fall through to the text path below, which rendered the
+      boolean through `scalarText`: `true` stamped the letter "X" and `false`
+      stamped nothing. So a CORRECT answer was marked with a glyph an auditor
+      reads as a cross — the precise opposite of what was recorded — and an
+      INCORRECT one was left blank, which on a competency record is
+      indistinguishable from a question nobody ever assessed.
+
+      Absent stays blank, and only absent: never-marked is the one state that
+      must not draw, because a glyph there asserts an assessment that never
+      happened.
+    */
+    if (SELF_ANSWERING.has(field.type)) {
+      const verdict = verdictOf(value);
+      if (verdict === undefined) continue;
+      const { x, y, size } = boxMarkPlacement(pos);
+      drawMark(page, verdict ? 'tick' : 'cross', x, y, size);
+      continue;
+    }
 
     const text = scalarText(value);
     if (!text) continue;

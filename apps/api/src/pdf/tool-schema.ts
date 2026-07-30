@@ -97,6 +97,11 @@ export const extractFormFieldsTool = {
               description:
                 'For a fixed-item checklist printed as N side-by-side column groups sharing one header — the number of those groups. Omit for a single column of items. When set, fixedRows must be listed column-major (see fixedRows).',
             },
+            questionRef: {
+              type: 'string',
+              description:
+                'The question reference exactly as printed ("Q1", "BBM Q3", "7"). Set it on a question AND on that question’s tick/cross outcome box; the matching string is what links the two. Omit on anything that is neither.',
+            },
             note: {
               type: 'string',
               description: 'Reviewer-facing caveat, e.g. "detected as text — most likely a signature field".',
