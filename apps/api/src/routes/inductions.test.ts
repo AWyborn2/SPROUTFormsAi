@@ -57,15 +57,20 @@ function starterValues(overrides: Record<string, SubmissionValue> = {}) {
   };
 }
 
-function submission(id: string, values: Record<string, SubmissionValue>, versionId = 'ver-intake') {
+function submission(
+  id: string,
+  values: Record<string, SubmissionValue>,
+  versionId = 'ver-intake',
+  submitter: { userId?: string; name?: string; email?: string } = {},
+) {
   return {
     id,
     orgId: 'org-1',
     templateId: 'tpl-intake',
     templateVersionId: versionId,
-    submittedByUserId: null,
-    submitterName: '',
-    submitterEmail: '',
+    submittedByUserId: submitter.userId ?? null,
+    submitterName: submitter.name ?? '',
+    submitterEmail: submitter.email ?? '',
     values,
     status: 'submitted',
     flag: '',
@@ -193,6 +198,63 @@ describe('GET /inductions/candidates', () => {
       // KTD6 — documents are presence and metadata, never a fetchable handle.
       expect(text).toContain('marlee.jpg');
       expect(text).not.toContain('upload-secret-key');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('names who lodged the intake, separately from who it is about', async () => {
+    // The requester and the starter are different people, and the booking
+    // confirmation is owed to both. Before this field the payload carried only
+    // the starter's address, so an agent drafting the reply had nowhere to
+    // learn that HR was waiting on it too.
+    mockDbValue = fakeDb({
+      submissions: [
+        submission('sub-1', starterValues(), 'ver-intake', {
+          userId: 'user-hr',
+          name: 'Priya Raman',
+          email: 'priya@charleshull.com.au',
+        }),
+      ],
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/inductions/candidates`, { headers: authHeader(OWNER) });
+      const candidate = (await jsonBody(res)).candidates[0];
+      expect(candidate.submittedBy).toEqual({
+        name: 'Priya Raman',
+        email: 'priya@charleshull.com.au',
+        verified: true,
+      });
+      // The starter's own address is untouched — these are two recipients, not
+      // one overwriting the other.
+      expect(candidate.starter.email).toBe('marlee@example.com');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('marks a public fill-link submitter unverified', async () => {
+    // No session means the API stamped nothing: the name and address are what
+    // the filler typed. An agent about to email that address should be able to
+    // see the difference rather than treating a self-asserted claim as the
+    // org's own record.
+    mockDbValue = fakeDb({
+      submissions: [
+        submission('sub-1', starterValues(), 'ver-intake', {
+          name: 'Someone Claiming',
+          email: 'typed@example.com',
+        }),
+      ],
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/inductions/candidates`, { headers: authHeader(OWNER) });
+      expect((await jsonBody(res)).candidates[0].submittedBy).toEqual({
+        name: 'Someone Claiming',
+        email: 'typed@example.com',
+        verified: false,
+      });
     } finally {
       server.close();
     }

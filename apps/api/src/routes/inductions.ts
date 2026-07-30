@@ -51,10 +51,34 @@ const ISO_DATE = ISO_DATE_PATTERN;
 const DEFAULT_DATE_COUNT = 4;
 const MAX_DATE_COUNT = 26;
 
+/**
+ * Who lodged the intake, as distinct from who it is about.
+ *
+ * The two are routinely different people — HR, a supervisor or a coordinator
+ * fills the form for a starter — and both of them need the booking
+ * confirmation. Without this, the only address on the payload is the starter's,
+ * and the requester finds out what was booked by being told separately or not
+ * at all.
+ *
+ * `verified` is the load-bearing field. On an authenticated submit the API
+ * stamps identity from the session and ignores any claim in the body, so the
+ * address is the org's own record of that user. A public fill link has no
+ * session: the name and address are whatever the filler typed. An agent about
+ * to put a confirmation in front of a human should be able to tell those apart,
+ * because "email the person who submitted this" is a very different act when
+ * the address is self-asserted.
+ */
+interface SubmittedBy {
+  name: string;
+  email: string;
+  verified: boolean;
+}
+
 interface CandidateRow {
   submissionId: string;
   submittedAt: string;
   status: string;
+  submittedBy: SubmittedBy;
   starter: Omit<StarterProfile, 'sensitive'>;
   readiness: AssessedStarter['readiness'];
   blockers: AssessedStarter['blockers'];
@@ -74,12 +98,24 @@ function redact(profile: StarterProfile): Omit<StarterProfile, 'sensitive'> {
 
 function candidateDto(
   starter: AssessedStarter,
-  row: { id: string; createdAt: Date; status: string },
+  row: {
+    id: string;
+    createdAt: Date;
+    status: string;
+    submitterName: string;
+    submitterEmail: string;
+    submittedByUserId: string | null;
+  },
 ): CandidateRow {
   return {
     submissionId: row.id,
     submittedAt: row.createdAt.toISOString(),
     status: row.status,
+    submittedBy: {
+      name: row.submitterName,
+      email: row.submitterEmail,
+      verified: row.submittedByUserId !== null,
+    },
     starter: redact(starter.profile),
     readiness: starter.readiness,
     blockers: starter.blockers,

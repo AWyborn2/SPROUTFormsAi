@@ -47,7 +47,11 @@ export function registerCandidateTools(host: ToolHost, client: InductionsClient)
         'Inductions run on Mondays, moving to the Tuesday when that Monday is a public ' +
         'holiday. There is no minimum notice: a booking is fine right up to the Thursday ' +
         'before. date_notice_lapsed is the one blocker an operator may waive — see ' +
-        'allowLateNotice — and doing so is a human decision, not one to take on their behalf.',
+        'allowLateNotice — and doing so is a human decision, not one to take on their behalf. ' +
+        'submittedBy is who lodged the form, which is usually not the starter: it is the ' +
+        'address a booking confirmation is owed to alongside the starter\'s own. Its ' +
+        'verified flag is false when the intake arrived through a public fill link, where ' +
+        'the address was typed by the filler rather than stamped from a signed-in session.',
       inputSchema: listCandidatesInput,
     },
     async (args) => ok(await client.listCandidates(args)),
@@ -61,7 +65,9 @@ export function registerCandidateTools(host: ToolHost, client: InductionsClient)
       description:
         'Full detail for a single starter. Sensitive personal fields are withheld unless ' +
         'includeSensitive is set and the API key carries the export grant; when they are ' +
-        'withheld the response says why in sensitiveOmitted.',
+        'withheld the response says why in sensitiveOmitted. submittedBy carries who lodged ' +
+        'the form — usually not the starter — so a confirmation can reach the requester as ' +
+        'well as the person being inducted.',
       inputSchema: getCandidateInput,
     },
     async (args) =>
