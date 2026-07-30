@@ -743,6 +743,8 @@ function normalizeForMatch(text: string): string {
  * the label and the page always prints.
  */
 function stripEnumeration(text: string): string {
+  // Also handles a bare leading letter enumeration ("a b) True" normalizes to
+  // "a true"), which the stacked multiple-choice rows carry.
   return text.replace(/^(?:q(?:uestion)?\s*)?\d+\s*/, '').trim();
 }
 
@@ -836,7 +838,11 @@ function bandMatches(rows: Row[], band: GeometryBand, label: string, headerY: nu
   // reviewer draw it, which is the visible failure rather than the silent one.
   if (wanted.length < 12) return false;
 
-  const text = bandText(rows, band, headerY);
+  // The printed side is stripped too. The page numbers its rows ("1. Plan and
+  // Prepare") while the extracted label often does not, and an unstripped number
+  // sits at the front of the haystack where it breaks containment in both
+  // directions.
+  const text = stripEnumeration(bandText(rows, band, headerY));
   if (text.length === 0) return false;
   return text.includes(wanted) || wanted.includes(text);
 }
@@ -991,13 +997,33 @@ export function proposeInlineOptionCells(input: FieldProposeInput): FieldProposa
   // Where the question is printed. Ambiguity refuses, exactly as it does for
   // the column rule — the dozer asks "True / False" of many questions, and the
   // label is the only thing telling them apart.
-  const starts = rows.filter((r) => {
-    const text = normalizeForMatch(r.items.map((i) => i.text).join(' '));
-    return text.length > 0 && (text.includes(wanted) || wanted.includes(text));
-  });
-  if (starts.length !== 1) return null;
+  const matchingRows: number[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    // Enumeration stripped from the PRINTED row as well as the label. The page
+    // prints "1. The track dozer must be isolated…" while the extracted label
+    // reads "Q1. …", and leaving the row's number in place broke containment in
+    // both directions for any question long enough to wrap.
+    const text = stripEnumeration(normalizeForMatch(rows[i]!.items.map((x) => x.text).join(' ')));
+    // A short row is not evidence. Without this floor a bare "true" or a page
+    // number could satisfy `wanted.includes(text)` for any question at all.
+    if (text.length < 12) continue;
+    if (text.includes(wanted) || wanted.includes(text)) matchingRows.push(i);
+  }
 
-  const startIndex = rows.indexOf(starts[0]!);
+  // ADJACENT matches are one wrapped question, not two questions. A question
+  // printed over two lines matches on both of them — each line's words are a
+  // subset of the label — and counting that as ambiguity refused every long
+  // question while short ones placed correctly. Genuine ambiguity is matches in
+  // SEPARATED places, which is what this still refuses.
+  const runs: number[][] = [];
+  for (const i of matchingRows) {
+    const last = runs[runs.length - 1];
+    if (last && i === last[last.length - 1]! + 1) last.push(i);
+    else runs.push([i]);
+  }
+  if (runs.length !== 1) return null;
+
+  const startIndex = runs[0]![0]!;
   const window = rows.slice(startIndex, startIndex + INLINE_SEARCH_ROWS);
 
   // Locate every option's printed text first. Nothing can be placed until all

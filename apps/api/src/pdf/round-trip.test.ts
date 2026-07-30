@@ -130,9 +130,28 @@ interface Stroke {
  * repeated), which this regex reads back.
  */
 function strokes(bytes: Uint8Array): Stroke[] {
+  const out: Stroke[] = [];
+  for (const content of contentStreams(bytes)) {
+    const re = /(-?[\d.]+) (-?[\d.]+) m\s+(-?[\d.]+) (-?[\d.]+) m\s+(-?[\d.]+) (-?[\d.]+) l\s+S/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(content)) !== null) {
+      out.push({ x1: Number(m[1]), y1: Number(m[2]), x2: Number(m[5]), y2: Number(m[6]) });
+    }
+  }
+  return out;
+}
+
+/**
+ * Every decoded content stream in the document.
+ *
+ * Split out from `strokes` so colour and curve assertions read the same bytes
+ * rather than each re-implementing the inflate loop — a second copy would drift
+ * from this one the first time a fixture changed.
+ */
+function contentStreams(bytes: Uint8Array): string[] {
   const buf = Buffer.from(bytes);
   const hay = buf.toString('latin1');
-  const out: Stroke[] = [];
+  const out: string[] = [];
   let pos = 0;
   while ((pos = hay.indexOf('stream', pos)) !== -1) {
     if (hay.slice(pos - 3, pos + 6) === 'endstream') {
@@ -144,21 +163,39 @@ function strokes(bytes: Uint8Array): Stroke[] {
     if (hay[dataStart] === '\n') dataStart++;
     const end = hay.indexOf('endstream', dataStart);
     if (end === -1) break;
-    let content: string;
     try {
-      content = zlib.inflateSync(buf.subarray(dataStart, end)).toString('latin1');
+      out.push(zlib.inflateSync(buf.subarray(dataStart, end)).toString('latin1'));
     } catch {
-      pos = end + 9;
-      continue;
-    }
-    const re = /(-?[\d.]+) (-?[\d.]+) m\s+(-?[\d.]+) (-?[\d.]+) m\s+(-?[\d.]+) (-?[\d.]+) l\s+S/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(content)) !== null) {
-      out.push({ x1: Number(m[1]), y1: Number(m[2]), x2: Number(m[5]), y2: Number(m[6]) });
+      // Not a deflate stream (an embedded font, an image) — nothing to read.
     }
     pos = end + 9;
   }
   return out;
+}
+
+/**
+ * Every STROKE colour set on the page, in order, as `r g b`.
+ *
+ * pdf-lib emits a stroking colour as `<r> <g> <b> RG`. The verdict rings are the
+ * only thing in these fixtures that sets one to anything but the default ink, so
+ * reading them back is how a green ring is told from a red one.
+ */
+function strokeColors(bytes: Uint8Array): string[] {
+  const out: string[] = [];
+  for (const content of contentStreams(bytes)) {
+    const re = /(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) RG/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(content)) !== null) out.push(`${m[1]} ${m[2]} ${m[3]}`);
+  }
+  return out;
+}
+
+/** How many bezier curve segments were stroked — an ellipse is drawn from them. */
+function curveCount(bytes: Uint8Array): number {
+  return contentStreams(bytes).reduce(
+    (n, content) => n + (content.match(/ c\s/g)?.length ?? 0),
+    0,
+  );
 }
 
 interface Mark {
@@ -1044,3 +1081,141 @@ describe('roundTripExport — a printSelectedValue dropdown writes its value as 
     expect(bytesInclude(output, 'Night')).toBe(false); // not the letter/word
   });
 })
+
+/**
+ * Verdict rings on a marked assessment question.
+ *
+ * The printed form numbers its answers "a)" / "b)" and an assessor marking it by
+ * hand circles the letter. The exported evidence has to be legible to an auditor
+ * reading a photocopy beside those hand-marked originals, so a question that
+ * carries an answer key gets a RING around the answer given — green when it is
+ * in the key, red when it is not — rather than a tick beside it.
+ *
+ * A field with no key keeps the tick: there is no verdict to report, and a
+ * colour would assert one.
+ */
+describe('roundTripExport — verdict rings on auto-marked questions', () => {
+  const GREEN = '0.05 0.42 0.16';
+  const RED = '0.7 0.1 0.1';
+
+  const optionBox = (x: number, optionKey: string): PageBox => ({
+    page: 0,
+    x,
+    y: 500,
+    width: 10,
+    height: 10,
+    pageWidth: 600,
+    pageHeight: 800,
+    optionKey,
+  });
+
+  /** Q2 on the dozer: "a) True" / "b) False", key is True. */
+  const question = (answerKey?: string[]): FormField => ({
+    id: 'ai_31',
+    type: 'radio',
+    label: 'Q2. 3 points of contact is always required',
+    required: false,
+    source: 'imported',
+    options: ['True', 'False'],
+    ...(answerKey ? { answerKey } : {}),
+    geometry: { segments: [optionBox(200, 'True'), optionBox(240, 'False')] },
+  });
+
+  it('rings a correct answer in green', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [question(['True'])],
+      values: { ai_31: 'True' },
+    });
+
+    expect(strokeColors(output)).toContain(GREEN);
+    expect(strokeColors(output)).not.toContain(RED);
+    // An ellipse is stroked from bezier segments; a tick is straight lines.
+    expect(curveCount(output)).toBeGreaterThan(0);
+  });
+
+  it('rings a wrong answer in red', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [question(['True'])],
+      values: { ai_31: 'False' },
+    });
+
+    expect(strokeColors(output)).toContain(RED);
+    expect(strokeColors(output)).not.toContain(GREEN);
+  });
+
+  it('rings only the answer that was given, never the one that was right', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [question(['True'])],
+      values: { ai_31: 'False' },
+    });
+
+    // Exactly one ring. Circling the correct answer too would annotate the
+    // record with something the candidate never wrote, which is a different
+    // document from the one they sat.
+    expect(strokeColors(output).filter((c) => c === RED || c === GREEN)).toHaveLength(1);
+  });
+
+  it('draws no ring at all when nothing was answered', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [question(['True'])],
+      values: {},
+    });
+
+    expect(strokeColors(output).filter((c) => c === RED || c === GREEN)).toHaveLength(0);
+    expect(curveCount(output)).toBe(0);
+  });
+
+  it('colours each answer on a multi-select by its own verdict', async () => {
+    const multi: FormField = {
+      ...question(['Report and do not operate', 'Ensure equipment is repaired']),
+      type: 'checkbox_group',
+      selectionType: 'multiple',
+      options: ['Remove tag and operate', 'Report and do not operate', 'Ensure equipment is repaired'],
+      geometry: {
+        segments: [
+          optionBox(200, 'Remove tag and operate'),
+          optionBox(240, 'Report and do not operate'),
+          optionBox(280, 'Ensure equipment is repaired'),
+        ],
+      },
+    };
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [multi],
+      // One right, one wrong — exact-set-match makes the question incorrect, but
+      // the PAGE still has to show which of the two ticks was the mistake.
+      values: { ai_31: ['Report and do not operate', 'Remove tag and operate'] },
+    });
+
+    const verdicts = strokeColors(output).filter((c) => c === RED || c === GREEN);
+    expect(verdicts).toHaveLength(2);
+    expect(verdicts).toContain(GREEN);
+    expect(verdicts).toContain(RED);
+  });
+
+  it('keeps the plain tick on a field with no answer key', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [question()],
+      values: { ai_31: 'True' },
+    });
+
+    // No key means no verdict; inventing a colour would assert one.
+    expect(strokeColors(output).filter((c) => c === RED || c === GREEN)).toHaveLength(0);
+    expect(tickXs(output)).toHaveLength(1);
+  });
+
+  it('keeps the plain tick when the key is present but empty', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [question([])],
+      values: { ai_31: 'True' },
+    });
+
+    expect(tickXs(output)).toHaveLength(1);
+  });
+});

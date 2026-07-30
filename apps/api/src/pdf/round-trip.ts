@@ -27,6 +27,21 @@ import type { FormField, PageBox, RepeatingRowValue, SubmissionValue } from '@fo
 const INK = rgb(0.094, 0.106, 0.098); // #181b19
 
 /**
+ * Verdict colours for a marked answer.
+ *
+ * Dark enough to survive a photocopier and a fax, which is how these records
+ * actually travel — a pale highlighter green reproduces as "no mark at all", and
+ * an unmarked answer on a competency record reads as never-assessed.
+ */
+const CORRECT_INK = rgb(0.05, 0.42, 0.16);
+const INCORRECT_INK = rgb(0.70, 0.10, 0.10);
+
+/** How far a ring is drawn OUTSIDE the box it encircles, in points. */
+const RING_PAD = 1.6;
+/** A ring below this radius reads as a blob rather than a circle. */
+const RING_MIN_RADIUS = 4;
+
+/**
  * Column types whose `false` is a RECORDED answer rather than an empty cell.
  *
  * A plain `checkbox` that is false is simply unticked, and drawing anything
@@ -51,10 +66,11 @@ function drawMark(
   x: number,
   y: number,
   size: number,
+  color = INK,
 ): void {
   const t = Math.max(0.8, size / 9);
   const line = (x1: number, y1: number, x2: number, y2: number) =>
-    page.drawLine({ start: { x: x1, y: y1 }, end: { x: x2, y: y2 }, thickness: t, color: INK });
+    page.drawLine({ start: { x: x1, y: y1 }, end: { x: x2, y: y2 }, thickness: t, color });
 
   if (kind === 'tick') {
     // Down-stroke into the elbow, then the long up-stroke.
@@ -132,7 +148,7 @@ export async function roundTripExport({
     if (isChoiceField(field.type) && !field.printSelectedValue) {
       const optionSegments = segments.filter((s) => s.optionKey !== undefined);
       if (optionSegments.length > 0) {
-        drawCheckboxOptions(pages, value, optionSegments);
+        drawCheckboxOptions(pages, value, optionSegments, field.answerKey);
         continue;
       }
     }
@@ -184,10 +200,55 @@ function boxMarkPlacement(box: PageBox): { x: number; y: number; size: number } 
  * the set of chosen option keys. An option with no matching selection is left
  * blank — an unticked box, which is a recorded "not this one", not a guess.
  */
+/**
+ * Ring the answer the candidate chose, in its verdict colour.
+ *
+ * A ring rather than a tick because of what these documents are FOR. The
+ * printed form numbers its answers "a)" / "b)", an assessor marking it by hand
+ * circles the letter, and the exported evidence has to be legible to an auditor
+ * reading a photocopy beside hand-marked originals. A tick sitting next to a
+ * letter says "something was marked here"; a ring around the letter says which
+ * answer was given, in the same visual language as the paper it replaces.
+ *
+ * Drawn OUTSIDE the recorded box, not inside it. The box sits on the printed
+ * letter, so an inset mark would strike through the very glyph the ring is meant
+ * to identify.
+ */
+function drawRing(
+  page: ReturnType<PDFDocument['getPages']>[number],
+  box: PageBox,
+  color: ReturnType<typeof rgb>,
+): void {
+  const xScale = Math.max(RING_MIN_RADIUS, box.width / 2 + RING_PAD);
+  const yScale = Math.max(RING_MIN_RADIUS, box.height / 2 + RING_PAD);
+  page.drawEllipse({
+    x: box.x + box.width / 2,
+    y: box.y + box.height / 2,
+    xScale,
+    yScale,
+    borderColor: color,
+    borderWidth: Math.max(0.9, Math.min(xScale, yScale) / 6),
+  });
+}
+
+/**
+ * Mark each selected option in its own recorded box.
+ *
+ * TWO PRESENTATIONS, decided by whether the field is auto-marked:
+ *
+ *  - An assessment question (it carries an `answerKey`) gets a RING around the
+ *    answer it chose, green when that answer is in the key and red when it is
+ *    not. The verdict belongs on the page because the exported PDF is the
+ *    artefact an auditor reads — reconstructing right from wrong by
+ *    cross-referencing a key held elsewhere is exactly the work this removes.
+ *  - Any other checkbox group keeps the tick it has always drawn. A form with no
+ *    key has no verdict to report, and inventing a colour would assert one.
+ */
 function drawCheckboxOptions(
   pages: import('pdf-lib').PDFPage[],
   value: SubmissionValue | undefined,
   segments: PageBox[],
+  answerKey?: readonly string[],
 ): void {
   const selected = new Set(
     Array.isArray(value)
@@ -197,10 +258,17 @@ function drawCheckboxOptions(
         : [String(value)],
   );
 
+  const marked = answerKey !== undefined && answerKey.length > 0;
+
   for (const seg of segments) {
     if (seg.optionKey === undefined || !selected.has(seg.optionKey)) continue;
     const page = pages[seg.page];
     if (!page) continue;
+
+    if (marked) {
+      drawRing(page, seg, answerKey.includes(seg.optionKey) ? CORRECT_INK : INCORRECT_INK);
+      continue;
+    }
     const { x, y, size } = boxMarkPlacement(seg);
     drawMark(page, 'tick', x, y, size);
   }

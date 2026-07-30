@@ -1313,3 +1313,65 @@ describe('proposeInlineOptionCells — a checkbox printed AFTER its answer', () 
     expect(no!.width).toBeLessThanOrEqual(9);
   });
 });
+
+/**
+ * A numbered question whose text WRAPS.
+ *
+ * Reported from a mapping session: Q2 matched and placed correctly while Q1 —
+ * the longer question directly above it — found nothing. The page numbers its
+ * rows ("1. The track dozer…") and the extracted label carries its own ("Q1.
+ * …"), and only the label's number was being stripped. On a question short
+ * enough to fit one line that made no difference; on one that wrapped, the row
+ * held just the first line, whose leading "1 " then broke containment in both
+ * directions.
+ */
+describe('proposeInlineOptionCells — a numbered question that wraps', () => {
+  const LABEL =
+    'Q1. The track dozer must be isolated with a lock and hasp before you can carry out any maintenance activity';
+
+  /** The question over two printed lines, each answer lettered beneath it. */
+  function wrappedQuestion(): PositionedText[] {
+    return [
+      { text: '1.', x: 40, y: 630.8, width: 8 },
+      { text: 'The track dozer must be isolated with a lock and hasp before you', x: 58, y: 630.8, width: 300 },
+      { text: 'can carry out any maintenance activity', x: 58, y: 620.4, width: 170 },
+      { text: 'a)', x: 70, y: 604, width: 9 },
+      { text: 'True', x: 88, y: 604, width: 18 },
+      { text: 'b)', x: 70, y: 587.2, width: 9 },
+      { text: 'False', x: 88, y: 587.2, width: 20 },
+    ];
+  }
+
+  it('matches the question and rings both answers', () => {
+    const res = proposeInline(wrappedQuestion(), LABEL, ['True', 'False']);
+
+    expect(res).not.toBeNull();
+    expect(res!.segments).toHaveLength(2);
+  });
+
+  it('places each box on its own printed letter', () => {
+    const res = proposeInline(wrappedQuestion(), LABEL, ['True', 'False'])!;
+
+    // The "a)" and "b)" runs at x=70 are the markers an assessor circles.
+    expect(res.segments.map((s) => s.x)).toEqual([70, 70]);
+    // ...on their own rows, so the two boxes are not the same cell.
+    expect(res.segments[0]!.y).toBeGreaterThan(res.segments[1]!.y);
+  });
+
+  it('reports the boxes as found rather than estimated', () => {
+    const res = proposeInline(wrappedQuestion(), LABEL, ['True', 'False'])!;
+
+    expect(res.confidence).toBe(1);
+    expect(res.notes.join(' ')).toMatch(/BEFORE/);
+  });
+
+  it('still refuses a label whose words are not on the page', () => {
+    // The looser matching must not make everything match something.
+    expect(
+      proposeInline(wrappedQuestion(), 'Q9. When ripping you must only rip in one direction', [
+        'True',
+        'False',
+      ]),
+    ).toBeNull();
+  });
+});
