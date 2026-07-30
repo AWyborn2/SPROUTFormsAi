@@ -13,11 +13,14 @@ const get = vi.fn();
 const post = vi.fn();
 const patch = vi.fn();
 
+const postForBlob = vi.fn();
+
 vi.mock('./api-client.js', () => ({
   apiClient: {
     get: (...a: unknown[]) => get(...a),
     post: (...a: unknown[]) => post(...a),
     patch: (...a: unknown[]) => patch(...a),
+    postForBlob: (...a: unknown[]) => postForBlob(...a),
   },
   ApiError: class extends Error {},
 }));
@@ -178,5 +181,24 @@ describe('changing pathway', () => {
       pathway: 'new',
       reason: 'Failed Part 2; moving to full programme',
     });
+  });
+});
+
+describe('evidence export', () => {
+  it('asks the server to build the PDF and sends nothing else', async () => {
+    postForBlob.mockResolvedValue(new Blob());
+    await assessmentsApi.exportCasePdf(CASE);
+
+    // The server loads the case's pinned version and its attempts itself. Sending
+    // values from the browser would let the evidence document be edited in
+    // transit — the one artefact an investigation reads.
+    expect(postForBlob).toHaveBeenCalledWith(`/assessment-cases/${CASE}/export`);
+  });
+
+  it('returns the bytes rather than parsing them', async () => {
+    const blob = new Blob(['%PDF-1.7'], { type: 'application/pdf' });
+    postForBlob.mockResolvedValue(blob);
+
+    expect(await assessmentsApi.exportCasePdf(CASE)).toBe(blob);
   });
 });

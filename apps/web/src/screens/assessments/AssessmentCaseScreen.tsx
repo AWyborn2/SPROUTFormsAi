@@ -1,14 +1,16 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { CaseStateBadge } from '../statusBadges.js';
-import { Button, Icon } from '@formai/ui';
+import { Button, Icon, useToast } from '@formai/ui';
 import { NS_DISPOSITIONS, type NotSatisfactoryDisposition, type PartState } from '@formai/shared';
 import {
   useAssessmentCase,
+  useExportCasePdf,
   useOpenAttempt,
   useRecordOutcome,
   useSession,
 } from '../../lib/data/hooks.js';
+import { caseExportFilename, caseExportProblem } from '../../lib/case-export-problem.js';
 import type { CasePartView } from '../../lib/data/assessments.js';
 
 /**
@@ -47,8 +49,47 @@ export function AssessmentCaseScreen() {
   const { data: session } = useSession();
   const { data: c, isLoading, error } = useAssessmentCase(id);
   const openAttempt = useOpenAttempt(id ?? '');
+  const exportPdf = useExportCasePdf();
+  const { toast } = useToast();
 
   const isCandidate = session?.role === 'candidate';
+
+  /**
+   * Download the case as a filled copy of the original assessment.
+   *
+   * Offered whatever state the case is in, not only once competent. A part that
+   * has not passed prints blank, which is exactly what the paper form looks like
+   * mid-programme — and an auditor asking "where is this candidate up to" is a
+   * real question that wants a document, not a screenshot.
+   */
+  function onExport() {
+    if (!id || !c) return;
+    exportPdf.mutate(id, {
+      onSuccess: (blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = caseExportFilename(c.toolName, c.candidateName || c.candidateUserId);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        toast({ variant: 'success', message: 'Evidence PDF exported.' });
+      },
+      onError: (err) => {
+        // Six distinct failures, each with its own next step — see
+        // `caseExportProblem`. Collapsing them into one message would leave a
+        // training officer stuck on the document they need for an audit.
+        const problem = caseExportProblem(err);
+        toast({
+          variant: 'danger',
+          message: [problem.message, problem.remedy, ...problem.problems]
+            .filter(Boolean)
+            .join(' '),
+        });
+      },
+    });
+  }
 
   if (isLoading) return <div className="p-[30px_28px]"><p className="text-[13.5px] text-text-tertiary">Loading case…</p></div>;
   if (error || !c) {
@@ -84,7 +125,21 @@ export function AssessmentCaseScreen() {
             {c.locationStream ? ` · ${c.locationStream}` : ''}
           </p>
         </div>
-        <CaseStateBadge state={c.state} size="md" />
+        <div className="flex items-center gap-2.5">
+          {/* Candidates have no export permission — the route refuses them, so
+              showing the control would only produce a 403 they cannot act on. */}
+          {!isCandidate && (
+            <Button
+              variant="outline"
+              leadingIcon="file-down"
+              onClick={onExport}
+              disabled={exportPdf.isPending}
+            >
+              {exportPdf.isPending ? 'Building…' : 'Export evidence PDF'}
+            </Button>
+          )}
+          <CaseStateBadge state={c.state} size="md" />
+        </div>
       </div>
 
       {c.prerequisiteWarnings.length > 0 && (

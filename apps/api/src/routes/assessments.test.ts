@@ -1740,3 +1740,62 @@ describe('submitting an attempt', () => {
     }
   });
 });
+
+/**
+ * The candidate's name on the case detail.
+ *
+ * Added for the evidence export's filename. Those PDFs get emailed and filed, so
+ * a UUID in the name makes a document nobody can identify later — and the one
+ * place it matters is an audit, months after the fact.
+ */
+describe('GET /assessment-cases/:id — candidate name', () => {
+  it('resolves the name for display and for the exported filename', async () => {
+    const { db, store } = makeDb();
+    store.users!.push({ id: CANDIDATE, name: 'Dale Ferguson', email: 'dale@example.com' });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const created = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+        })
+      ).json()) as { id: string };
+
+      const detail = (await (
+        await fetch(`${base}/assessment-cases/${created.id}`, { headers: auth() })
+      ).json()) as { candidateName: string; candidateUserId: string };
+
+      expect(detail.candidateName).toBe('Dale Ferguson');
+      expect(detail.candidateUserId).toBe(CANDIDATE);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('answers with an empty name rather than failing when the user row is gone', async () => {
+    // A deleted account must not make an existing case unreadable — the case is
+    // the record, and it has to stay openable to be exported.
+    const { db } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const created = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+        })
+      ).json()) as { id: string };
+
+      const res = await fetch(`${base}/assessment-cases/${created.id}`, { headers: auth() });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { candidateName: string }).candidateName).toBe('');
+    } finally {
+      server.close();
+    }
+  });
+});
