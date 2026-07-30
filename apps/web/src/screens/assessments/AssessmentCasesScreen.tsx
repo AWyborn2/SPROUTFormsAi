@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button, Icon } from '@formai/ui';
 import { ASSESSMENT_PATHWAYS, type AssessmentPathway } from '@formai/shared';
+import { CaseStateBadge } from '../statusBadges.js';
 import {
   useAssessmentCases,
   useAssessmentTools,
@@ -23,12 +24,6 @@ const PATHWAY_LABELS: Record<AssessmentPathway, string> = {
   experienced: 'Experienced',
   new: 'New / inexperienced',
   rpl: 'Recognition of prior learning',
-};
-
-const STATE_STYLE: Record<string, { bg: string; fg: string; icon: string; label: string }> = {
-  open: { bg: 'var(--warning-soft)', fg: 'var(--warning-text)', icon: 'clock', label: 'In progress' },
-  competent: { bg: 'var(--success-soft)', fg: 'var(--success-text)', icon: 'circle-check', label: 'Competent' },
-  closed: { bg: 'var(--danger-soft)', fg: 'var(--danger)', icon: 'circle-x', label: 'Not yet competent' },
 };
 
 export function AssessmentCasesScreen() {
@@ -112,7 +107,6 @@ export function AssessmentCasesScreen() {
             </thead>
             <tbody>
               {cases.map((c) => {
-                const style = STATE_STYLE[c.state] ?? STATE_STYLE.open!;
                 return (
                   <tr
                     key={c.id}
@@ -127,13 +121,7 @@ export function AssessmentCasesScreen() {
                     )}
                     <td className="p-[11px_14px] text-text-secondary">{PATHWAY_LABELS[c.pathway]}</td>
                     <td className="p-[11px_14px]">
-                      <span
-                        className="inline-flex items-center gap-1.5 rounded-pill px-2.5 py-1 text-[12px] font-semibold"
-                        style={{ background: style.bg, color: style.fg }}
-                      >
-                        <Icon name={style.icon} size={13} />
-                        {style.label}
-                      </span>
+                      <CaseStateBadge state={c.state} />
                     </td>
                     <td className="p-[11px_14px] text-text-tertiary">
                       {new Date(c.createdAt).toLocaleDateString()}
