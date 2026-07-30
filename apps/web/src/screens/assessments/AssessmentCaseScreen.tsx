@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { CaseStateBadge } from '../statusBadges.js';
 import { Button, Icon } from '@formai/ui';
 import { NS_DISPOSITIONS, type NotSatisfactoryDisposition, type PartState } from '@formai/shared';
 import {
@@ -83,7 +84,7 @@ export function AssessmentCaseScreen() {
             {c.locationStream ? ` · ${c.locationStream}` : ''}
           </p>
         </div>
-        <CaseStateBadge state={c.state} />
+        <CaseStateBadge state={c.state} size="md" />
       </div>
 
       {c.prerequisiteWarnings.length > 0 && (
@@ -120,24 +121,6 @@ export function AssessmentCaseScreen() {
         ))}
       </div>
     </div>
-  );
-}
-
-function CaseStateBadge({ state }: { state: string }) {
-  const map: Record<string, { bg: string; fg: string; icon: string; label: string }> = {
-    open: { bg: 'var(--warning-soft)', fg: 'var(--warning-text)', icon: 'clock', label: 'In progress' },
-    competent: { bg: 'var(--success-soft)', fg: 'var(--success-text)', icon: 'circle-check', label: 'Competent' },
-    closed: { bg: 'var(--danger-soft)', fg: 'var(--danger)', icon: 'circle-x', label: 'Not yet competent' },
-  };
-  const s = map[state] ?? map.open!;
-  return (
-    <span
-      className="inline-flex items-center gap-1.5 rounded-pill px-3 py-1.5 text-[13px] font-semibold"
-      style={{ background: s.bg, color: s.fg }}
-    >
-      <Icon name={s.icon} size={15} />
-      {s.label}
-    </span>
   );
 }
 
