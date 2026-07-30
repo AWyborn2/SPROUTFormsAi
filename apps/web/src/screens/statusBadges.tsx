@@ -50,6 +50,11 @@ export function partStateLabel(state: PartState): string {
 
 const CASE_STATE: Record<AssessmentCaseState, { variant: BadgeVariant; label: string }> = {
   open: { variant: 'warning', label: 'In progress' },
+  // Every required part has passed; the assessor has not yet approved. It must
+  // NOT read as "in progress" — the candidate has finished and the case is
+  // waiting on a person, which is the one thing an assessor opens this list to
+  // find. This is also why the state is stored rather than derived.
+  awaiting_sign_off: { variant: 'info', label: 'Awaiting assessor sign-off' },
   competent: { variant: 'success', label: 'Competent' },
   // Terminal but not a pass. "Closed" is the state name; "not yet competent" is
   // what it means to the person reading the row.

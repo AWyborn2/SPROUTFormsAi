@@ -15,6 +15,7 @@ import {
   caseProgress,
   fieldsInPart,
   isCaseCompetent,
+  moreCoachingRequired,
   orderedParts,
   requiredParts,
   totalLoggedHours,
@@ -314,6 +315,76 @@ describe('isCaseCompetent', () => {
 
   it('is not competent for an empty progress list', () => {
     expect(isCaseCompetent([])).toBe(false);
+  });
+});
+
+/**
+ * The front page prints TWO boxes — "more coaching required: Yes" and "No" —
+ * and exactly one is ticked. Both are positive statements, so neither can be
+ * expressed as the absence of the other: a blank pair has to go on meaning
+ * "nobody finished this form".
+ *
+ * The rule reads each part's FINAL state, by explicit decision of the training
+ * authority. A part failed once and passed on the retry counts as satisfactory,
+ * because coaching happened and worked; the attempt history keeps the failure
+ * for anyone who needs the journey.
+ */
+describe('moreCoachingRequired', () => {
+  const manifest: AssessmentToolManifest = {
+    parts: [part({ key: 'p1', ordinal: 1 }), part({ key: 'p2', ordinal: 2 })],
+  };
+
+  it('answers No when every part ended satisfactory', () => {
+    const p = caseProgress(manifest, 'experienced', [
+      { partKey: 'p1', attemptNumber: 1, outcome: 'satisfactory' },
+      { partKey: 'p2', attemptNumber: 1, outcome: 'satisfactory' },
+    ]);
+    expect(moreCoachingRequired(p)).toBe(false);
+  });
+
+  it('answers No when a part failed and then passed on retry', () => {
+    // The decision separating "final state" from "any failure ever". If this
+    // flips, every candidate who ever needed a second go is marked as needing
+    // more coaching on a record that simultaneously says they are competent.
+    const p = caseProgress(manifest, 'experienced', [
+      { partKey: 'p1', attemptNumber: 1, outcome: 'not_satisfactory' },
+      { partKey: 'p1', attemptNumber: 2, outcome: 'satisfactory' },
+      { partKey: 'p2', attemptNumber: 1, outcome: 'satisfactory' },
+    ]);
+    expect(moreCoachingRequired(p)).toBe(false);
+  });
+
+  it('answers Yes while a part stands unsatisfactory', () => {
+    const p = caseProgress(manifest, 'experienced', [
+      { partKey: 'p1', attemptNumber: 1, outcome: 'satisfactory' },
+      { partKey: 'p2', attemptNumber: 1, outcome: 'not_satisfactory' },
+    ]);
+    expect(moreCoachingRequired(p)).toBe(true);
+  });
+
+  it('ticks NEITHER box while a part is simply unattempted', () => {
+    // An unfinished form is not a coaching finding. Ticking either box here
+    // would print a conclusion nobody reached.
+    const p = caseProgress(manifest, 'experienced', [
+      { partKey: 'p1', attemptNumber: 1, outcome: 'satisfactory' },
+    ]);
+    expect(moreCoachingRequired(p)).toBeNull();
+  });
+
+  it('ticks neither box on a case with no progress at all', () => {
+    expect(moreCoachingRequired([])).toBeNull();
+  });
+
+  it('never disagrees with isCaseCompetent about a competent case', () => {
+    // A signed-off case is competent by definition, so its answer is always No.
+    // If these two diverge the front page contradicts its own verdict.
+    const p = caseProgress(manifest, 'experienced', [
+      { partKey: 'p1', attemptNumber: 1, outcome: 'not_satisfactory' },
+      { partKey: 'p1', attemptNumber: 2, outcome: 'satisfactory' },
+      { partKey: 'p2', attemptNumber: 1, outcome: 'satisfactory' },
+    ]);
+    expect(isCaseCompetent(p)).toBe(true);
+    expect(moreCoachingRequired(p)).toBe(false);
   });
 });
 
