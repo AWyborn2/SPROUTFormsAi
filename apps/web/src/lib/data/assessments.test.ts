@@ -39,6 +39,16 @@ describe('reads', () => {
     expect(get).toHaveBeenCalledWith('/assessment-cases');
   });
 
+  it('reads all progress from one aggregate path, not per case', async () => {
+    get.mockResolvedValue([]);
+    await assessmentsApi.listProgress();
+
+    // A fixed segment, and the API declares it ahead of `/:id` — fetching this
+    // as a case id is exactly the collision both sides are ordered to avoid.
+    expect(get).toHaveBeenCalledWith('/assessment-cases/progress');
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
   it('fetches one case by id', async () => {
     get.mockResolvedValue({});
     await assessmentsApi.getCase(CASE);

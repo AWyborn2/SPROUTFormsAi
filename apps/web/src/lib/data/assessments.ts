@@ -78,6 +78,44 @@ export interface AssessmentCaseDetail {
   attempts: CaseAttemptView[];
 }
 
+/** One part of a case as the progress dashboard sees it. */
+export interface CaseProgressPart {
+  key: string;
+  label: string;
+  kind: PartKind;
+  ordinal: number;
+  state: PartState;
+  latestOutcome: PartOutcome | null;
+  attempts: number;
+  minimumHours: number | null;
+  /** Null for anything but a logbook — there is no threshold to meet. */
+  loggedHours: number | null;
+}
+
+/**
+ * One case on the progress dashboard.
+ *
+ * Every field here is DERIVED server-side from the attempt rows on each read —
+ * the current part, each part's state, the hours logged. The screen renders what
+ * it is given; recomputing any of it in the browser would be a second
+ * implementation of the unlock and threshold rules, free to disagree with the
+ * one that actually governs the case.
+ */
+export interface CaseProgressRow {
+  id: string;
+  toolName: string;
+  candidateUserId: string;
+  /** Empty when the user record cannot be resolved; the id is always present. */
+  candidateName: string;
+  pathway: AssessmentPathway;
+  state: 'open' | 'competent' | 'closed';
+  /** First part not yet satisfactory. Null once the case is competent. */
+  currentPartKey: string | null;
+  currentPartLabel: string | null;
+  parts: CaseProgressPart[];
+  createdAt: string;
+}
+
 /**
  * One attempt's fillable surface.
  *
@@ -132,6 +170,14 @@ export const assessmentsApi = {
   listTools: () => apiClient.get<AssessmentToolSummary[]>('/assessment-tools'),
 
   listCases: () => apiClient.get<AssessmentCaseRow[]>('/assessment-cases'),
+
+  /**
+   * Progress across every case the caller may see, in one request.
+   *
+   * A fixed path, so it must not be reachable as `getCase('progress')` — the
+   * API declares this route before `/:id` for the same reason.
+   */
+  listProgress: () => apiClient.get<CaseProgressRow[]>('/assessment-cases/progress'),
 
   getCase: (id: string) => apiClient.get<AssessmentCaseDetail>(`/assessment-cases/${id}`),
 

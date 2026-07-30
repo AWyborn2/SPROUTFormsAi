@@ -61,6 +61,10 @@ export const SCREENS: ScreenDef[] = [
   // an assessor sees the org's cases, a candidate sees their own — because the
   // API scopes the read by permission rather than the screen filtering it.
   { key: 'assessments', path: '/app/assessments', group: 'Assessments', label: 'Assessments', icon: 'clipboard-check', shell: 'app', inNav: true },
+  // Progress across every case in one table. Declared BEFORE the case route so
+  // the literal segment is listed ahead of the parameter it would otherwise be
+  // read as; the API declares its matching endpoint in the same order.
+  { key: 'assessment-progress', path: '/app/assessments/progress', group: 'Assessments', label: 'Assessment progress', icon: 'gauge', shell: 'app' },
   { key: 'assessment-case', path: '/app/assessments/:id', group: 'Assessments', label: 'Assessment case', icon: 'clipboard-list', shell: 'app' },
   // Filling one part of a case. Addressed by ATTEMPT id, not part key: a retry
   // is a distinct attempt row, and the URL has to say which one is being

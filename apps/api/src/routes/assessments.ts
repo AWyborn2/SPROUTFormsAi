@@ -17,6 +17,7 @@ import {
   stripMarkingSecrets,
   validateAnswerKeys,
   validateManifest,
+  type AssessmentPart,
   type AssessmentPathway,
   type AssessmentToolManifest,
   type AttemptFact,
@@ -394,6 +395,172 @@ assessmentCasesRouter.get(
         state: c.state,
         createdAt: c.createdAt,
       })),
+    );
+  }),
+);
+
+/**
+ * Hours logged against one logbook part, from its attempt rows.
+ *
+ * Read from the HIGHEST-NUMBERED attempt rather than summed across all of them.
+ * A retried logbook re-enters its entries on the new attempt, so summing would
+ * count the same weeks twice and report more experience than the candidate has
+ * — the one error direction that matters when the figure is measured against a
+ * safety threshold. It is also the attempt the threshold notification fired on
+ * and the one the evidence document renders, so the dashboard agrees with both.
+ *
+ * Every array in the attempt's values is totalled rather than the one table the
+ * manifest names, because naming it needs the pinned version's field list — a
+ * read per attempt version that this endpoint otherwise never makes. A part's
+ * values hold only that part's fields and only its logbook table carries the
+ * duration column, so the wider sum reaches the same number.
+ */
+function loggedHoursFor(
+  part: AssessmentPart,
+  attempts: readonly { attemptNumber: number; values: Record<string, SubmissionValue> }[],
+): number | null {
+  if (part.kind !== 'logbook' || !part.durationColumnKey) return null;
+  // Picked by attempt number rather than by position, so the answer does not
+  // depend on the order the caller happened to hand them over in.
+  const latest = attempts.reduce<(typeof attempts)[number] | undefined>(
+    (best, a) => (!best || a.attemptNumber > best.attemptNumber ? a : best),
+    undefined,
+  );
+  if (!latest) return 0;
+
+  // An array in a value map is not necessarily a table — a checkbox group's
+  // selections are an array of strings — so rows are narrowed to objects rather
+  // than asserted to be table rows.
+  const rows = Object.values(latest.values ?? {}).flatMap((value) =>
+    Array.isArray(value)
+      ? value.filter((row): row is RepeatingRowValue => typeof row === 'object' && row !== null)
+      : [],
+  );
+  return totalLoggedHours(rows, part.durationColumnKey);
+}
+
+/**
+ * Where every candidate stands, without opening a single case (R21).
+ *
+ * DERIVED ON EVERY READ, like the rest of this router. Part state, the current
+ * part and the logged hours all come from the attempt rows. A stored progress
+ * summary would be a second source of truth that goes stale the moment an
+ * attempt is marked by a path that forgot to update it — and this is the screen
+ * a supervisor trusts to tell them who is waiting.
+ *
+ * REGISTERED BEFORE `/:id`. Express matches in declaration order, so with the
+ * id route first the whole dashboard would resolve as "the case whose id is
+ * progress" and answer 404.
+ */
+assessmentCasesRouter.get(
+  '/progress',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'view');
+    if (scope === 'none') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+
+    // Same server-side scope filter as the case list. A candidate reaching the
+    // dashboard sees their own rows; filtering after the fact would mean the
+    // aggregate had been computed over everyone's attempts and then trimmed.
+    const cases = await db.query.assessmentCases.findMany({
+      where:
+        scope === 'own'
+          ? and(
+              eq(schema.assessmentCases.orgId, tenant.orgId),
+              eq(schema.assessmentCases.candidateUserId, tenant.userId),
+            )
+          : eq(schema.assessmentCases.orgId, tenant.orgId),
+      orderBy: (c) => [desc(c.createdAt)],
+    });
+    if (cases.length === 0) {
+      res.json([]);
+      return;
+    }
+
+    const toolIds = [...new Set(cases.map((c) => c.toolId))];
+    const tools = await db.query.assessmentTools.findMany({
+      where: inArray(schema.assessmentTools.id, toolIds),
+    });
+    const toolById = new Map(tools.map((t) => [t.id, t]));
+
+    // Candidates by name, because a dashboard listing user ids is unreadable to
+    // the supervisor who has to act on it.
+    const candidateIds = [...new Set(cases.map((c) => c.candidateUserId))];
+    const candidates = await db.query.users.findMany({
+      where: inArray(schema.users.id, candidateIds),
+    });
+    const nameById = new Map(candidates.map((u) => [u.id, u.name]));
+
+    // Every attempt in the org in ONE query, grouped by case in code. A query
+    // per case is the N+1 this endpoint exists to replace: a site with three
+    // hundred candidates would issue three hundred round trips to draw one
+    // table. Rows for a case outside `visible` are DROPPED rather than grouped,
+    // so an `own` caller cannot be shown another candidate's attempts even
+    // though the org-scoped read touched them.
+    const visible = new Set(cases.map((c) => c.id));
+    const attemptRows = await db.query.assessmentPartAttempts.findMany({
+      where: eq(schema.assessmentPartAttempts.orgId, tenant.orgId),
+      orderBy: (a, { asc }) => [asc(a.partKey), asc(a.attemptNumber)],
+    });
+    const byCase = new Map<string, typeof attemptRows>();
+    for (const row of attemptRows) {
+      if (!visible.has(row.caseId)) continue;
+      const bucket = byCase.get(row.caseId);
+      if (bucket) bucket.push(row);
+      else byCase.set(row.caseId, [row]);
+    }
+
+    res.json(
+      cases.map((c) => {
+        const tool = toolById.get(c.toolId);
+        const attempts = byCase.get(c.id) ?? [];
+        // A tool row cannot actually vanish — the case's FK is `restrict` — but
+        // if one ever did, the candidate stays on the dashboard with no parts
+        // rather than disappearing from it or failing the whole request.
+        const progress = tool
+          ? caseProgress(tool.manifest, c.pathway as AssessmentPathway, toAttemptFacts(attempts))
+          : [];
+
+        // The first required part that has not passed, in document order. Null
+        // once every part has, which is what makes a competent case legible at a
+        // glance beside a closed one: closed still names the part it stopped at.
+        const current = progress.find((p) => p.state !== 'satisfactory');
+
+        return {
+          id: c.id,
+          toolName: tool?.name ?? '',
+          candidateUserId: c.candidateUserId,
+          candidateName: nameById.get(c.candidateUserId) ?? '',
+          pathway: c.pathway,
+          state: c.state,
+          currentPartKey: current?.part.key ?? null,
+          currentPartLabel: current?.part.label ?? null,
+          parts: progress.map((p) => ({
+            key: p.part.key,
+            label: p.part.label,
+            kind: p.part.kind,
+            ordinal: p.part.ordinal,
+            state: p.state,
+            latestOutcome: p.latestOutcome,
+            attempts: p.attempts,
+            minimumHours: p.part.minimumHours ?? null,
+            /** Null for anything but a logbook — there is no threshold to meet. */
+            loggedHours: loggedHoursFor(
+              p.part,
+              attempts.filter((a) => a.partKey === p.part.key),
+            ),
+          })),
+          createdAt: c.createdAt,
+        };
+      }),
     );
   }),
 );

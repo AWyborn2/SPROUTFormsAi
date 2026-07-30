@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Button, Icon } from '@formai/ui';
 import { ASSESSMENT_PATHWAYS, type AssessmentPathway } from '@formai/shared';
 import {
@@ -53,11 +53,23 @@ export function AssessmentCasesScreen() {
               : 'Every candidate’s progress through a multi-part competency assessment.'}
           </p>
         </div>
-        {!isCandidate && (
-          <Button leadingIcon="plus" onClick={() => setCreating(true)} disabled={!tools?.length}>
-            New case
-          </Button>
-        )}
+        <div className="flex flex-none items-center gap-2">
+          {/* The answer to "who is waiting on what" lives one click away rather
+              than in this table: it needs a column per part and a meter per
+              logbook, which would crowd out the case list's own job. */}
+          <Link
+            to="/app/assessments/progress"
+            className="inline-flex items-center gap-1.5 rounded-[10px] border border-border px-3 py-2 text-[13px] font-semibold text-text-secondary hover:bg-surface-hover"
+          >
+            <Icon name="gauge" size={15} />
+            {isCandidate ? 'My progress' : 'Progress'}
+          </Link>
+          {!isCandidate && (
+            <Button leadingIcon="plus" onClick={() => setCreating(true)} disabled={!tools?.length}>
+              New case
+            </Button>
+          )}
+        </div>
       </div>
 
       {creating && tools && (
