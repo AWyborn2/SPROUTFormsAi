@@ -117,7 +117,13 @@ let editor: BuilderState | null = null;
 /** Extraction metadata by field id — the part of a ReviewField that isn't a FormField. */
 const reviewMeta = new Map<
   string,
-  { note?: string; resolved?: boolean; columnGroups?: number; groupOrdinal?: GroupOrdinal }
+  {
+    note?: string;
+    resolved?: boolean;
+    columnGroups?: number;
+    groupOrdinal?: GroupOrdinal;
+    questionRef?: string;
+  }
 >();
 
 /** Editor fields + their extraction metadata, as the review UI consumes them. */
@@ -132,6 +138,7 @@ function derivedReviewFields(): ReviewField[] {
       ...(meta?.resolved !== undefined ? { resolved: meta.resolved } : {}),
       ...(meta?.columnGroups !== undefined ? { columnGroups: meta.columnGroups } : {}),
       ...(meta?.groupOrdinal !== undefined ? { groupOrdinal: meta.groupOrdinal } : {}),
+      ...(meta?.questionRef !== undefined ? { questionRef: meta.questionRef } : {}),
     } as ReviewField;
   });
 }
@@ -149,9 +156,20 @@ function seedEditor(fields: ExtractedField[]): ReviewField[] {
     // Extraction-only metadata that must not publish but the review UI needs:
     // the `note`, and the side-by-side `columnGroups` hint the split control
     // pre-fills (U1). Both live here, keyed by id, exactly like `resolved`.
-    const meta: { note?: string; columnGroups?: number } = {};
+    //
+    // `questionRef` rides here too, and has to: it is the printed reference that
+    // pairs a question with its outcome cell, `FormField` has no such property,
+    // and the editor holds `FormField`s — so without this the reference was
+    // dropped the moment the extraction was seeded. Everything downstream still
+    // read it off the review field, so both the review list and
+    // `reviewedToFields` were resolving pairs over a list where no field had a
+    // reference at all: no links, silently, on every real import. Publishing it
+    // is not the point and would be wrong — the resolved `outcomeTarget` is
+    // what crosses the boundary, and this stays review-side like its neighbours.
+    const meta: { note?: string; columnGroups?: number; questionRef?: string } = {};
     if (f.note !== undefined) meta.note = f.note;
     if (f.columnGroups !== undefined) meta.columnGroups = f.columnGroups;
+    if (f.questionRef !== undefined) meta.questionRef = f.questionRef;
     if (Object.keys(meta).length > 0) reviewMeta.set(f.id, meta);
     return {
       id: f.id,

@@ -1457,4 +1457,35 @@ describe('reviewedToFields — outcome targets', () => {
 
     expect(out[0]!.outcomeTarget).toBeUndefined();
   });
+
+  it('keeps the printed reference on a reviewed field, so there is something to pair', async () => {
+    // The reference is not a `FormField` property and the editor holds
+    // `FormField`s, so it has to travel as review metadata or it is gone the
+    // moment an extraction is seeded. It was gone: every real import resolved
+    // zero links while the hand-built fixtures above stayed green, because they
+    // never went through the store.
+    await seedSession([
+      {
+        id: 'ai_29',
+        label: 'Q1 Ripping is a method of loosening rock',
+        type: 'radio',
+        confidence: 1,
+        options: ['True', 'False'],
+        questionRef: 'Q1',
+      },
+      { id: 'ai_30', label: 'Q1 Outcome', type: 'check_cross', confidence: 1, questionRef: 'Q1' },
+    ]);
+
+    const { fields } = getImportSession();
+    expect(fields.map((f) => f.questionRef)).toEqual(['Q1', 'Q1']);
+    expect(reviewedToFields(fields)[0]!.outcomeTarget).toEqual({ fieldId: 'ai_30' });
+  });
+
+  it('never publishes the printed reference itself, only the resolved target', () => {
+    // The reference describes the source page, not the published field — the
+    // link it resolved into is what downstream consumers act on.
+    const out = reviewedToFields([q('ai_29', 'Q1'), cell('ai_30', 'Q1')]);
+
+    expect(out.every((f) => !('questionRef' in f))).toBe(true);
+  });
 });
