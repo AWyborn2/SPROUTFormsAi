@@ -20,6 +20,7 @@ import {
   type ReviewField,
 } from '../../lib/data/import-session.js';
 import { FIELD_META, typeOptionsFor } from '../../lib/field-editor/reducer.js';
+import { outcomeUnits, type OutcomeLinkStatus } from '../../lib/outcome-units.js';
 import type { TextPage } from '../../lib/pdf-geometry.js';
 import {
   adjustGeometryBand,
@@ -159,16 +160,42 @@ export function ImportReviewScreen() {
 
   // Weakest still-unconfirmed extraction (hidden once everything is resolved).
   /**
-   * The rows actually rendered. Filtering here rather than hiding rows in CSS
-   * keeps the index/count each row shows consistent with what is on screen —
-   * "3 of 8" while filtered, not "47 of 185".
+   * What the review-only filter is about, counted per FIELD — a nested outcome
+   * cell is a field the reviewer still has to judge, so it counts here even
+   * though it is not a top-level row. Filtering in JS rather than hiding rows in
+   * CSS keeps the index/count each row is given consistent with what is on
+   * screen — "3 of 8" while filtered, not "47 of 185".
    */
   const needsReviewFields = session.fields.filter((f) => reviewStatus(f) !== 'ok');
   // Confirming the last flagged field while filtered would otherwise strand the
   // reviewer on an empty list with a disabled toggle. The filter releases
   // itself when it has nothing left to show.
   const showingReviewOnly = reviewOnly && needsReviewFields.length > 0;
-  const visibleFields = showingReviewOnly ? needsReviewFields : session.fields;
+
+  /*
+    Questions and their outcome cells, grouped into units.
+
+    Pairing runs over the WHOLE reviewed list and BEFORE the filter, never over
+    the rows on screen. Resolution is positional — forward from each question,
+    stopping at the next question carrying a reference — so a list with questions
+    filtered out moves that window and can hand a cell to a question that never
+    owned it. A pairing that changed when the reviewer toggled a view filter
+    would be worse than none.
+  */
+  const units = outcomeUnits(session.fields);
+  /*
+    The filter hides UNITS, not fields: a paired cell is shown with its question
+    or not at all. Otherwise confirming a question would strand its cell on its
+    own as a top-level row with no question above it — indistinguishable from the
+    orphan the flag below exists to report.
+  */
+  const visibleUnits = showingReviewOnly
+    ? units.filter(
+        (u) =>
+          reviewStatus(u.field) !== 'ok' ||
+          (u.outcome !== undefined && reviewStatus(u.outcome) !== 'ok'),
+      )
+    : units;
 
   const lowest = lowestUnresolvedField(session.fields);
 
@@ -191,6 +218,30 @@ export function ImportReviewScreen() {
   const handleSelectField = (id: string) => {
     setSelectedFieldId((cur) => (cur === id ? null : id));
   };
+
+  /*
+    Everything a row needs that does not depend on where it sits. A question and
+    its nested outcome cell are the same kind of row and must stay so — the cell
+    gets the same accordion, the same draw arming and the same corrections as any
+    other field. Spelling that out twice at the call site is how the two would
+    quietly drift apart.
+  */
+  const rowProps = (f: ReviewField, index: number, count: number) => ({
+    id: `review-row-${f.id}`,
+    field: f,
+    index,
+    count,
+    expanded: f.id === selectedFieldId,
+    onToggle: () => handleSelectField(f.id),
+    onSelect: setSelectedFieldId,
+    textPages,
+    activeDrawSlot: drawSlot,
+    onToggleDrawSlot: (slot: string) => setDrawSlot((s) => (s === slot ? null : slot)),
+    onRemapSignature: () => session.remapSignature(f.id),
+    onSetType: (type: ExtractedField['type']) => session.setType(f.id, type),
+    onConfirm: () => confirmField(f.id),
+    onConfirmTable: () => session.confirmTable(f.id),
+  });
 
   if (session.status === 'error') {
     return (
@@ -406,24 +457,47 @@ export function ImportReviewScreen() {
               </div>
 
               <div ref={fieldListRef} className="flex flex-col gap-2.5">
-                {visibleFields.map((f, i) => (
-                  <ReviewRow
-                    key={f.id}
-                    id={`review-row-${f.id}`}
-                    field={f}
-                    index={i}
-                    count={visibleFields.length}
-                    expanded={f.id === selectedFieldId}
-                    onToggle={() => handleSelectField(f.id)}
-                    onSelect={setSelectedFieldId}
-                    textPages={textPages}
-                    activeDrawSlot={drawSlot}
-                    onToggleDrawSlot={(slot) => setDrawSlot((s) => (s === slot ? null : slot))}
-                    onRemapSignature={() => session.remapSignature(f.id)}
-                    onSetType={(type) => session.setType(f.id, type)}
-                    onConfirm={() => confirmField(f.id)}
-                    onConfirmTable={() => session.confirmTable(f.id)}
-                  />
+                {visibleUnits.map((unit, i) => (
+                  <div key={unit.field.id} className="flex flex-col">
+                    <ReviewRow
+                      {...rowProps(unit.field, i, visibleUnits.length)}
+                      linkStatus={unit.linkStatus}
+                    />
+                    {unit.outcome && (
+                      /*
+                        The outcome cell is nested UNDER its question rather than
+                        listed beside it. That is the whole unit: the reviewer
+                        reads the question, then the box its verdict is drawn in,
+                        and places the two together — instead of meeting them as
+                        two unrelated rows thirty fields apart, with no way to
+                        tell which question a lone tick box grades.
+
+                        Still a full row, not a summary line. The cell has its own
+                        placement box to draw and its own confidence to judge, and
+                        collapsing it would take both away.
+                      */
+                      <div className="ml-[22px] mt-1.5 border-l-2 border-border-strong pl-3">
+                        <div className="mb-1.5 flex items-center gap-1 text-[11px] text-text-tertiary">
+                          <Icon name="corner-down-right" size={12} className="flex-none" />
+                          <span className="truncate">
+                            Outcome cell for {unit.field.questionRef} — this question’s verdict is
+                            drawn here
+                          </span>
+                        </div>
+                        {/* The cell is not part of the top-level sequence, so a
+                            top-level ordinal would mean nothing to its move
+                            controls; its real position in the field list is what
+                            bounds them. */}
+                        <ReviewRow
+                          {...rowProps(
+                            unit.outcome,
+                            session.fields.findIndex((f) => f.id === unit.outcome!.id),
+                            session.fields.length,
+                          )}
+                        />
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             </>
@@ -487,6 +561,7 @@ function ReviewRow({
   onSetType,
   onConfirm,
   onConfirmTable,
+  linkStatus,
 }: {
   id: string;
   field: ReviewField;
@@ -508,6 +583,12 @@ function ReviewRow({
   /** Affirm a flagged field as-is (metadata-only resolve, type unchanged). */
   onConfirm: () => void;
   onConfirmTable: () => void;
+  /**
+   * Where this row stands on the question ↔ outcome-cell pairing. Absent when
+   * the pairing has nothing to say — the row is then a plain field, and a
+   * `linked` row already says so by carrying its cell nested beneath it.
+   */
+  linkStatus?: OutcomeLinkStatus;
 }) {
   const st = reviewStatus(field);
   const c = CONF[st];
@@ -592,6 +673,14 @@ function ReviewRow({
           </span>
         )}
       </button>
+
+      {/* Above the confidence cards deliberately: a high-confidence extraction
+          can still be an unpaired one, and this gap is not something a
+          confidence score would ever raise. Anything other than `linked` is a
+          break worth showing — a linked row needs no banner, it carries its cell. */}
+      {linkStatus !== undefined && linkStatus !== 'linked' && (
+        <LinkGapNotice status={linkStatus} questionRef={field.questionRef} />
+      )}
 
       {isLow && (
         <div className="mt-[11px] rounded-md bg-danger-soft p-[11px_12px]">
@@ -758,6 +847,50 @@ function ReviewRow({
             onToggleDrawSlot={onToggleDrawSlot}
           />
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A break in the question ↔ outcome-cell pairing, said out loud.
+ *
+ * This is what grouping the two into a unit is for. `linkOutcomeTargets` names
+ * both gaps precisely, and until the reviewer could SEE one the reporting bought
+ * nothing: an unpaired question publishes with no `outcomeTarget`, so its verdict
+ * is never drawn on the exported PDF — and that PDF is the evidence the
+ * assessment is audited on. A record that grades nothing looks exactly like a
+ * record that grades correctly.
+ *
+ * Warning, not danger: the import still publishes and the answers still export
+ * as data, so this is "you are about to ship an incomplete record", not a
+ * blocked step. Neither status can reach here without a printed reference — the
+ * resolver reports only fields carrying one — so the reference is named plainly
+ * rather than hedged around.
+ */
+function LinkGapNotice({
+  status,
+  questionRef,
+}: {
+  /** Derived from the status union rather than restated, so the two cannot drift. */
+  status: Exclude<OutcomeLinkStatus, 'linked'>;
+  questionRef?: string;
+}) {
+  return (
+    <div className="mt-[11px] flex gap-2 rounded-md bg-warning-soft p-[11px_12px] text-[12.5px] leading-snug text-warning-text">
+      <Icon name="unlink" size={15} className="mt-px flex-none" />
+      {status === 'question-has-no-outcome' ? (
+        <span>
+          No outcome cell on this form carries <b>{questionRef}</b>. This question’s mark will not be
+          drawn on the exported PDF — find the printed tick/cross box extraction missed, or accept
+          that it exports as data only.
+        </span>
+      ) : (
+        <span>
+          This outcome cell is printed <b>{questionRef}</b>, but no question above it carries that
+          reference. Nothing will write a verdict into it — either the question it grades is
+          numbered differently, or extraction missed that question entirely.
+        </span>
       )}
     </div>
   );
