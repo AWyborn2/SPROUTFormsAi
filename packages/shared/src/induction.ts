@@ -31,6 +31,7 @@
 import {
   CHC_FIELD_IDS,
   CHC_ROLE_FIELD_BY_DEPARTMENT,
+  isIndigenousEthnicity,
   bookingCutoffFor,
   holidaysCoverThrough,
   isInductionDay,
@@ -73,6 +74,14 @@ export interface StarterProfile {
   /** First and last, the form BISTrainer's registration rows expect. */
   fullName: string;
   gender: string;
+  /** As answered, in BISTrainer's own vocabulary — what its profile field wants. */
+  ethnicity: string;
+  /**
+   * Derived from `ethnicity`, or read from the retired yes/no question on
+   * submissions that predate it. Null when neither says — an unanswered
+   * question and 'Unknown' are both genuinely "not stated", and reporting
+   * either as `false` would invent a fact about a person.
+   */
   indigenous: boolean | null;
   starterType: string;
   /** ISO `YYYY-MM-DD` as answered. Not validated here — see `assessInductionReadiness`. */
@@ -127,12 +136,22 @@ export interface InductionCohort {
   starters: AssessedStarter[];
 }
 
-/** Field ids that must all be present for a template to be an intake form. */
+/**
+ * Field ids that must all be present for a template to be an intake form.
+ *
+ * `in_beakon` used to be in this set and had to come out: the form dropped that
+ * question when every detail became mandatory, and a required id the template
+ * no longer carries makes `readStarterProfile` return null for every new
+ * submission — which the routes skip SILENTLY, so the whole intake would have
+ * disappeared from the MCP with nothing logged anywhere. `department` replaces
+ * it: mandatory on the form, and specific enough alongside an induction date
+ * that no unrelated template matches by accident.
+ */
 const REQUIRED_SHAPE = [
   CHC_FIELD_IDS.firstName,
   CHC_FIELD_IDS.lastName,
   CHC_FIELD_IDS.inductionDate,
-  CHC_FIELD_IDS.inBeakon,
+  CHC_FIELD_IDS.department,
 ] as const;
 
 /**
@@ -200,6 +219,7 @@ export function readStarterProfile(
 
   const firstName = text(values, CHC_FIELD_IDS.firstName);
   const lastName = text(values, CHC_FIELD_IDS.lastName);
+  const ethnicity = text(values, CHC_FIELD_IDS.ethnicity);
 
   return {
     firstName,
@@ -207,7 +227,8 @@ export function readStarterProfile(
     lastName,
     fullName: [firstName, lastName].filter(Boolean).join(' '),
     gender: text(values, CHC_FIELD_IDS.gender),
-    indigenous: tribool(values, CHC_FIELD_IDS.indigenous),
+    ethnicity,
+    indigenous: ethnicity ? isIndigenousEthnicity(ethnicity) : tribool(values, CHC_FIELD_IDS.indigenous),
     starterType: text(values, CHC_FIELD_IDS.starterType),
     inductionDate: text(values, CHC_FIELD_IDS.inductionDate),
     department,
@@ -234,12 +255,12 @@ export function readStarterProfile(
 /**
  * Whether this starter can be registered as they stand, and if not, why.
  *
- * Contact and document checks apply only when the starter is NOT already in
- * Beakon. For an in-Beakon starter the form never showed those fields — their
- * details come from the BISTrainer account the registration typeahead resolves
- * — so demanding them here would block every transfer for a reason the form
- * cannot fix. An unanswered Beakon question is treated as "not in Beakon",
- * which errs toward asking for detail rather than assuming it exists elsewhere.
+ * Contact and document checks apply to every starter the current form produces,
+ * because it now collects those details unconditionally. The `inBeakon` test
+ * survives for one reason: submissions raised before that question was retired
+ * legitimately have no contact or document answers, because the form hid those
+ * fields from anyone already in Beakon. Demanding them retrospectively would
+ * block old transfers for a reason nobody can now fix.
  *
  * `allowLateNotice` is the operator's override of the Thursday cutoff, and it
  * is deliberately narrow. A booking made after the cutoff misses the Friday

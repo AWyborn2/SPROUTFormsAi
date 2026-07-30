@@ -51,7 +51,7 @@ function fullValues(overrides: Record<string, SubmissionValue> = {}) {
     [CHC_FIELD_IDS.middleName]: 'Jean',
     [CHC_FIELD_IDS.lastName]: 'Okonkwo',
     [CHC_FIELD_IDS.gender]: 'Female',
-    [CHC_FIELD_IDS.indigenous]: true,
+    [CHC_FIELD_IDS.ethnicity]: 'Caucasian',
     [CHC_FIELD_IDS.starterType]: 'New starter',
     [CHC_FIELD_IDS.inductionDate]: VALID_MONDAY,
     [CHC_FIELD_IDS.department]: 'Operations',
@@ -120,6 +120,41 @@ describe('readStarterProfile', () => {
     expect(serialized).not.toContain('0498 765 432');
     expect(profile.sensitive.dob).toBe('1994-02-11');
     expect(profile.sensitive.licenceNumber).toBe('WA-1234567');
+  });
+
+  it('still recognises an intake that no longer asks the Beakon question', () => {
+    // The regression this guards: `in_beakon` was once in REQUIRED_SHAPE, so a
+    // template without it made readStarterProfile return null — and the routes
+    // skip nulls SILENTLY, so the whole intake would vanish from the MCP with
+    // nothing logged. The current form does not ask it.
+    const fieldsNow = chcIntakeFields();
+    expect(fieldsNow.some((f) => f.id === CHC_FIELD_IDS.inBeakon)).toBe(false);
+
+    const profile = readStarterProfile(fieldsNow, fullValues());
+    expect(profile).not.toBeNull();
+    expect(profile!.fullName).toBe('Marlee Okonkwo');
+  });
+
+  it('derives Indigenous status from the ethnicity answer', () => {
+    const read = (ethnicity: string) =>
+      readStarterProfile(fields, fullValues({ [CHC_FIELD_IDS.ethnicity]: ethnicity }))!;
+
+    expect(read('Aboriginal').indigenous).toBe(true);
+    expect(read('Torres Strait Islander').indigenous).toBe(true);
+    expect(read('Caucasian').indigenous).toBe(false);
+    // 'Unknown' and unanswered both mean the form does not say — reporting
+    // either as false would invent a fact about a person.
+    expect(read('Unknown').indigenous).toBeNull();
+    expect(read('Aboriginal').ethnicity).toBe('Aboriginal');
+  });
+
+  it('falls back to the retired yes/no on submissions that predate ethnicity', () => {
+    const legacy = readStarterProfile(
+      fields,
+      fullValues({ [CHC_FIELD_IDS.ethnicity]: '', [CHC_FIELD_IDS.indigenous]: true }),
+    )!;
+    expect(legacy.ethnicity).toBe('');
+    expect(legacy.indigenous).toBe(true);
   });
 
   it('returns null for a submission that is not CHC-shaped', () => {

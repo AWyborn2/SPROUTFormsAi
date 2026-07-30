@@ -21,13 +21,12 @@ export interface ChcIntakeState {
   last_name: string;
   gender: string;
   /** '' until answered — distinct from an answered 'No'. */
-  indigenous: '' | 'Yes' | 'No';
+  ethnicity: string;
   starter_type: string;
   induction_date: string;
   department: string;
   /** Selected roles. Single-role departments hold at most one entry. */
   role: string[];
-  in_beakon: '' | 'Yes' | 'No';
   mobile: string;
   email: string;
   dob: string;
@@ -50,12 +49,11 @@ export function emptyChcIntakeState(): ChcIntakeState {
     middle_name: '',
     last_name: '',
     gender: '',
-    indigenous: '',
+    ethnicity: '',
     starter_type: '',
     induction_date: '',
     department: '',
     role: [],
-    in_beakon: '',
     mobile: '',
     email: '',
     dob: '',
@@ -105,7 +103,7 @@ export function validateChcIntake(state: ChcIntakeState, now: Date = new Date())
   if (!state.first_name.trim()) errors.first_name = 'Required';
   if (!state.last_name.trim()) errors.last_name = 'Required';
   if (!state.gender) errors.gender = 'Please select';
-  if (!state.indigenous) errors.indigenous = 'Please select';
+  if (!state.ethnicity) errors.ethnicity = 'Please select';
   if (!state.starter_type) errors.starter_type = 'Please select';
   if (!state.department) errors.department = 'Please select';
 
@@ -123,12 +121,10 @@ export function validateChcIntake(state: ChcIntakeState, now: Date = new Date())
     }
   }
 
-  if (!state.in_beakon) errors.in_beakon = 'Please select';
-
   const dateError = validateInductionDate(state.induction_date, now);
   if (dateError) errors.induction_date = dateError;
 
-  if (state.in_beakon === 'No') {
+  {
     if (!state.mobile.trim()) errors.mobile = 'Required';
     else if (!PHONE_RE.test(state.mobile.trim())) errors.mobile = 'Enter a valid phone number';
 
@@ -191,11 +187,10 @@ export function chcSubmissionValues(state: ChcIntakeState): Record<string, Submi
     [CHC_FIELD_IDS.middleName]: state.middle_name.trim(),
     [CHC_FIELD_IDS.lastName]: state.last_name.trim(),
     [CHC_FIELD_IDS.gender]: state.gender,
-    [CHC_FIELD_IDS.indigenous]: state.indigenous === 'Yes',
+    [CHC_FIELD_IDS.ethnicity]: state.ethnicity,
     [CHC_FIELD_IDS.starterType]: state.starter_type,
     [CHC_FIELD_IDS.inductionDate]: state.induction_date,
     [CHC_FIELD_IDS.department]: state.department,
-    [CHC_FIELD_IDS.inBeakon]: state.in_beakon === 'Yes',
   };
 
   // Only the CHOSEN department's role field carries an answer; the other three
@@ -207,7 +202,7 @@ export function chcSubmissionValues(state: ChcIntakeState): Record<string, Submi
       : (state.role[0] ?? '');
   }
 
-  if (state.in_beakon === 'No') {
+  {
     values[CHC_FIELD_IDS.mobile] = state.mobile.trim();
     values[CHC_FIELD_IDS.email] = state.email.trim();
     values[CHC_FIELD_IDS.dob] = state.dob;
