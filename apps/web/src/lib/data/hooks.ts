@@ -13,6 +13,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import type {
+  AssessmentPathway,
   BrandingKit,
   FormContainer,
   FormField,
@@ -21,6 +22,11 @@ import type {
 } from '@formai/shared';
 import { ApiError, apiClient } from './api-client.js';
 import { store } from './store.js';
+import {
+  assessmentsApi,
+  type CreateCaseInput,
+  type RecordOutcomeInput,
+} from './assessments.js';
 import type {
   FormDetail,
   FormSummary,
@@ -70,6 +76,11 @@ const keys = {
   auditLog: ['auditLog'] as const,
   billing: ['billing'] as const,
   competencies: ['competencies'] as const,
+  assessmentTools: ['assessmentTools'] as const,
+  assessmentCases: ['assessmentCases'] as const,
+  assessmentCase: (id: string) => ['assessmentCases', id] as const,
+  assessmentAttempt: (caseId: string, attemptId: string) =>
+    ['assessmentCases', caseId, 'attempts', attemptId] as const,
   competencyRules: ['competencyRules'] as const,
   fillForm: (token: string) => ['fillForm', token] as const,
   fillLinks: (formId: string) => ['fillLinks', formId] as const,
@@ -376,6 +387,42 @@ export function useAcceptInvite() {
   });
 }
 
+/**
+ * Create an account FROM an invite and land signed in.
+ *
+ * Clears the cache like `useAcceptInvite` does: the session changes identity
+ * mid-flight, so anything already fetched belongs to nobody.
+ */
+export function useSignupFromInvite() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { token: string; name: string; email: string; password: string }) =>
+      store.signupFromInvite(input),
+    onSuccess: () => qc.clear(),
+  });
+}
+
+/** Admin-side: mint a set-your-own-password link to hand over. */
+export function useIssuePasswordReset() {
+  return useMutation({ mutationFn: (memberId: string) => store.issuePasswordReset(memberId) });
+}
+
+/** Public: is this reset link still live, and whose is it? */
+export function usePasswordReset(token: string | undefined) {
+  return useQuery({
+    queryKey: ['password-reset', token ?? ''],
+    queryFn: () => store.getPasswordReset(token!),
+    enabled: Boolean(token),
+    retry: false,
+  });
+}
+
+export function useCompletePasswordReset() {
+  return useMutation({
+    mutationFn: (input: { token: string; password: string }) => store.completePasswordReset(input),
+  });
+}
+
 /* ── Fill-link management (authed) ───────────────────────────────────────── */
 
 export function useFillLinks(formId: string | undefined) {
@@ -475,7 +522,8 @@ export function useUpdatePlan() {
 export function useInviteMember() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { email: string; role: RoleName }) => store.inviteMember(input),
+    mutationFn: async (input: { email?: string; name?: string; role: RoleName }) =>
+      store.inviteMember(input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: keys.members });
       qc.invalidateQueries({ queryKey: keys.auditLog });
@@ -639,3 +687,107 @@ export function useSubmitInspection() {
 }
 
 export type { FormSummary, FormDetail, SubmissionRow, SubmissionDetail };
+
+
+// ── assessments ─────────────────────────────────────────────────────────────
+//
+// Case reads are invalidated on every mutation rather than patched in place:
+// part state is DERIVED server-side from the attempt rows, so the server's view
+// is the only correct one. Optimistically editing a cached case would mean
+// re-implementing the unlock and outcome rules in the browser, and any drift
+// between the two would show a candidate a part the API would refuse.
+
+export function useAssessmentTools() {
+  return useQuery({ queryKey: keys.assessmentTools, queryFn: () => assessmentsApi.listTools() });
+}
+
+export function useAssessmentCases() {
+  return useQuery({ queryKey: keys.assessmentCases, queryFn: () => assessmentsApi.listCases() });
+}
+
+export function useAssessmentCase(id: string | undefined) {
+  return useQuery({
+    queryKey: keys.assessmentCase(id ?? ''),
+    queryFn: () => assessmentsApi.getCase(id!),
+    enabled: !!id,
+  });
+}
+
+/** One attempt's fillable surface — part-scoped fields plus saved answers. */
+export function useAssessmentAttempt(caseId: string | undefined, attemptId: string | undefined) {
+  return useQuery({
+    queryKey: keys.assessmentAttempt(caseId ?? '', attemptId ?? ''),
+    queryFn: () => assessmentsApi.getAttempt(caseId!, attemptId!),
+    enabled: Boolean(caseId && attemptId),
+  });
+}
+
+export function useCreateAssessmentCase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: CreateCaseInput) => assessmentsApi.createCase(input),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    },
+  });
+}
+
+export function useOpenAttempt(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (partKey: string) => assessmentsApi.openAttempt(caseId, partKey),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+    },
+  });
+}
+
+export function useSaveAttempt(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { attemptId: string; values: Record<string, SubmissionValue> }) =>
+      assessmentsApi.saveAttempt(caseId, input.attemptId, input.values),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+    },
+  });
+}
+
+/** Hand a part in, or take it back while it is still unmarked. */
+export function useSetAttemptSubmitted(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { attemptId: string; submitted: boolean }) =>
+      input.submitted
+        ? assessmentsApi.submitAttempt(caseId, input.attemptId)
+        : assessmentsApi.reopenAttempt(caseId, input.attemptId),
+    onSuccess: (_r, input) => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+      void qc.invalidateQueries({ queryKey: keys.assessmentAttempt(caseId, input.attemptId) });
+    },
+  });
+}
+
+export function useRecordOutcome(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: Omit<RecordOutcomeInput, 'caseId'>) =>
+      assessmentsApi.recordOutcome({ caseId, ...input }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    },
+  });
+}
+
+export function useChangePathway(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { pathway: AssessmentPathway; reason: string; rplJustification?: string }) =>
+      assessmentsApi.changePathway(caseId, input.pathway, input.reason, input.rplJustification),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    },
+  });
+}

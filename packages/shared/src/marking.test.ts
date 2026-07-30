@@ -112,6 +112,20 @@ describe('unanswered questions', () => {
   it('cannot reach a satisfactory outcome by answering nothing', () => {
     expect(run(generalFields, {}).outcome).toBe('not_satisfactory');
   });
+
+  it('marks an attempt that was opened and never typed into', () => {
+    // No value map at all, which is what an untouched attempt actually stores.
+    // Refusing here would have left an assessor unable to fail a candidate who
+    // wrote nothing — the one case where failing is least in doubt.
+    for (const values of [null, undefined]) {
+      const res = run(generalFields, values as never);
+
+      expect(res.outcome).toBe('not_satisfactory');
+      expect(res.correctCount).toBe(0);
+      expect(res.totalCount).toBe(2);
+      expect(res.marks.every((m) => m.unanswered)).toBe(true);
+    }
+  });
 });
 
 describe('mandatory section gate', () => {

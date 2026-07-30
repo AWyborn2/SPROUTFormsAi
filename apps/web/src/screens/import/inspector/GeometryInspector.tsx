@@ -31,6 +31,7 @@ import {
   appendRowBelow,
   deleteRowBand,
   deriveAcrossPages,
+  deriveOptionCellsAcrossPages,
   evenGrid,
   panelState,
   splitRowBand,
@@ -95,6 +96,7 @@ export function GeometryInspector({ field, textPages, activeDrawSlot = null, onT
     return (
       <OptionBoxesGeometry
         field={field}
+        textPages={textPages}
         activeDrawSlot={activeDrawSlot}
         onToggleDrawSlot={onToggleDrawSlot}
         showValueToggle={singleSelectChoice}
@@ -452,17 +454,45 @@ function RowBandRow({
  */
 function OptionBoxesGeometry({
   field,
+  textPages,
   activeDrawSlot,
   onToggleDrawSlot,
   showValueToggle = false,
 }: {
   field: ReviewField;
+  textPages: readonly TextPage[];
   activeDrawSlot: string | null;
   onToggleDrawSlot?: (slot: string) => void;
   /** Offer the "print value as text" switch (single-select dropdown / radio). */
   showValueToggle?: boolean;
 }) {
   const options = field.options ?? [];
+
+  // Derived only while EVERY option is still empty. A reviewer who has drawn or
+  // adjusted even one box is mid-placement, and replacing their work with a
+  // fresh derivation on the next render is the one thing this must never do.
+  const anyPlaced = options.some((o) => geometryProposal(optionSlotId(field.id, o)) !== undefined);
+  const optionSig = options.join(' ');
+  const derived = useMemo(
+    () => (anyPlaced ? null : deriveOptionCellsAcrossPages(field, textPages)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [field.id, field.label, optionSig, textPages, anyPlaced],
+  );
+
+  /**
+   * Fill every option's slot from the derivation, UNCONFIRMED.
+   *
+   * Confirmation stays per option and stays manual: a proposal is a starting
+   * point a reviewer checks against the page, and auto-confirming would publish
+   * marks onto a competency record against boxes no human ever looked at.
+   */
+  const applyDerived = () => {
+    if (!derived) return;
+    for (const segment of derived.segments) {
+      if (segment.optionKey === undefined) continue;
+      proposeGeometry(optionSlotId(field.id, segment.optionKey), segment);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
@@ -475,6 +505,31 @@ function OptionBoxesGeometry({
         Draw a box over each option on the PDF. Every option the filler selects then prints a ✓ in its box.
         Until an option is confirmed, this form still publishes and exports the answer as data.
       </p>
+
+      {derived && (
+        <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+          <p className="text-[11.5px] leading-snug text-text-secondary">
+            Found this question's row on page {(derived.segments[0]?.page ?? 0) + 1}, with{' '}
+            {derived.segments.length} option cells.
+            {derived.confidence < 1 && ' Check it against the page before confirming.'}
+          </p>
+          {derived.notes.length > 0 && (
+            <ul className="mt-1 list-disc pl-4 text-[11px] leading-snug text-text-tertiary">
+              {derived.notes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          )}
+          <Button
+            leadingIcon="wand-sparkles"
+            variant="outline"
+            onClick={applyDerived}
+            className="mt-1.5 w-full justify-center"
+          >
+            Place all {derived.segments.length} boxes
+          </Button>
+        </div>
+      )}
       <div className="flex flex-col gap-1.5">
         {options.map((option) => (
           <OptionBoxRow

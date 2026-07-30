@@ -39,6 +39,10 @@ export const SCREENS: ScreenDef[] = [
   // Invite landing — the invite email's destination. Outside RequireAuth: the
   // invitee must be able to read what they're joining before signing in.
   { key: 'invite', path: '/invite/:token', group: 'Onboarding & account', label: 'Accept invite', icon: 'user-plus', shell: 'external' },
+  // Password reset — also outside RequireAuth, because someone who has lost
+  // their password by definition cannot sign in to reach it. The token is the
+  // credential and it is single-use.
+  { key: 'reset-password', path: '/reset-password/:token', group: 'Onboarding & account', label: 'Set a new password', icon: 'key-round', shell: 'external' },
 
   // CHC @ BBM — the purpose-built intake form. `shell: 'app'` (authenticated):
   // it records real submissions and uploads identity documents, so it is never
@@ -52,6 +56,16 @@ export const SCREENS: ScreenDef[] = [
   { key: 'audit', path: '/app/audit', group: 'Enterprise & org', label: 'Audit log', icon: 'scroll-text', shell: 'app', inNav: true },
   { key: 'billing', path: '/app/billing', group: 'Enterprise & org', label: 'Billing', icon: 'credit-card', shell: 'app', inNav: true },
   { key: 'competency', path: '/app/competency', group: 'Competency gating', label: 'Competency gating', icon: 'graduation-cap', shell: 'app', inNav: true },
+
+  // Multi-part assessments. The case list is one screen for two audiences —
+  // an assessor sees the org's cases, a candidate sees their own — because the
+  // API scopes the read by permission rather than the screen filtering it.
+  { key: 'assessments', path: '/app/assessments', group: 'Assessments', label: 'Assessments', icon: 'clipboard-check', shell: 'app', inNav: true },
+  { key: 'assessment-case', path: '/app/assessments/:id', group: 'Assessments', label: 'Assessment case', icon: 'clipboard-list', shell: 'app' },
+  // Filling one part of a case. Addressed by ATTEMPT id, not part key: a retry
+  // is a distinct attempt row, and the URL has to say which one is being
+  // answered or a resumed link would reopen the wrong one.
+  { key: 'assessment-part-fill', path: '/app/assessments/:id/attempts/:attemptId', group: 'Assessments', label: 'Complete assessment part', icon: 'pen-line', shell: 'app' },
   { key: 'api-keys', path: '/app/settings/api-keys', group: 'Enterprise & org', label: 'API keys', icon: 'key', shell: 'app', inNav: true },
   { key: 'whitelabel', path: '/app/settings/branding', group: 'Enterprise & org', label: 'Branding', icon: 'sliders-horizontal', shell: 'app', inNav: true },
 

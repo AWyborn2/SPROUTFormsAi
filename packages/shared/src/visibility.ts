@@ -223,14 +223,29 @@ function isSectionHidden(
 export function visibleFields(
   fields: readonly FormField[],
   answers: VisibilityAnswers,
+  extraSources: readonly FormField[] = [],
 ): FormField[] {
+  // Condition sources are looked up here but never rendered. `extraSources`
+  // exists for the case where a list is a SLICE of a larger form — filling one
+  // part of an assessment, say — and a section's condition points at a question
+  // outside the slice. Without the source, `evaluate` sees a dangling reference
+  // and falls open, so every gated section would render and the gating would
+  // silently never apply. Callers holding a whole form pass nothing.
+  // PREPENDED, not appended. A source's own visibility is judged partly by its
+  // enclosing section, and a field placed at the end of the list inherits
+  // whatever section happens to be last — so an out-of-part source would be
+  // "hidden" by a section it has nothing to do with, and the fail-open rule
+  // would then treat every dependent as visible. Ahead of the first header it
+  // belongs to no section, which is the truth: it is not part of this slice.
+  const sources = extraSources.length ? [...extraSources, ...fields] : fields;
+
   const out: FormField[] = [];
   let sectionHidden = false;
 
   for (const field of fields) {
     if (field.type === 'section_header') {
       // A header always opens a fresh scope, closing whatever preceded it.
-      sectionHidden = !isFieldVisible(field, fields, answers);
+      sectionHidden = !isFieldVisible(field, sources, answers);
       if (!sectionHidden) out.push(field);
       continue;
     }
@@ -238,7 +253,7 @@ export function visibleFields(
     // Section scope wins over the field's own condition: content the author
     // scoped away is gone regardless of what its individual rule says.
     if (sectionHidden) continue;
-    if (isFieldVisible(field, fields, answers)) out.push(field);
+    if (isFieldVisible(field, sources, answers)) out.push(field);
   }
 
   return out;

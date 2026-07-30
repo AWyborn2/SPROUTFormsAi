@@ -684,3 +684,410 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
 
   return proposals;
 }
+
+/* ── Non-table fields ─────────────────────────────────────────────────────── */
+
+/**
+ * A field whose answer is printed as a row of option cells, but which was NOT
+ * extracted as a repeating table.
+ *
+ * This is the shape the assessment tools actually take. The dozer's theory
+ * pages LOOK like a table — a question per row, tick / cross / N-A columns down
+ * the right — but the extraction profile deliberately emits one FIELD per
+ * question rather than one table with 31 rows, because a question needs its own
+ * answer key and its own outcome cell. `proposeTableSegments` therefore never
+ * fires on them, and every one of those cells has to be drawn by hand.
+ *
+ * The page is still geometrically a table, so the column derivation above
+ * applies unchanged. What is new is only the row: instead of taking every row
+ * beneath the header, one field is matched to ONE row by its label text.
+ */
+export interface FieldProposeInput {
+  page: number;
+  pageWidth: number;
+  pageHeight: number;
+  items: PositionedText[];
+  /** The field's label, as extracted. Matched against the printed row. */
+  label: string;
+  /** Option keys in PRINTED left-to-right order — one cell each. */
+  options: readonly string[];
+}
+
+export interface FieldProposal {
+  /** One box per option, each carrying its `optionKey`. */
+  segments: PageBox[];
+  /** 0..1. Reduced for every anchor inferred rather than found. */
+  confidence: number;
+  /** Why confidence was reduced, or why the match was close. For the reviewer. */
+  notes: string[];
+}
+
+/**
+ * Normalize text for label matching.
+ *
+ * Aggressive on purpose. The extracted label came from a vision model reading
+ * the same page, so it agrees on WORDS but not on punctuation, spacing, or the
+ * question number — and the text layer splits a line into runs at arbitrary
+ * points. Comparing anything finer than a word sequence compares artefacts of
+ * two different extractors rather than the sentence both of them read.
+ */
+function normalizeForMatch(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/**
+ * Leading enumeration — "12.", "Q3", "(a)" — which the model often drops from
+ * the label and the page always prints.
+ */
+function stripEnumeration(text: string): string {
+  return text.replace(/^(?:q(?:uestion)?\s*)?\d+\s*/, '').trim();
+}
+
+/**
+ * Every row inside a band, top-down, as one normalized string.
+ *
+ * The HEADER row is excluded. The first band's top edge IS the header baseline,
+ * so the header falls inside it — and its text is the column names (`N/A`, and
+ * the question stem "During the demonstration, did the candidate:"). Counting
+ * that as part of the first row both invents label text and makes the column
+ * names look like options printed in the row, which refused every first
+ * criterion on the page.
+ */
+function bandText(rows: Row[], band: GeometryBand, headerY: number): string {
+  return normalizeForMatch(
+    rows
+      .filter((r) => r.y > band.start && r.y <= band.end && r.y !== headerY)
+      .sort((a, b) => b.y - a.y)
+      .flatMap((r) => [...r.items].sort((a, b) => a.x - b.x).map((i) => i.text))
+      .join(' '),
+  );
+}
+
+/**
+ * Is `needle` present in `haystack` as a run of WHOLE words?
+ *
+ * Token-wise rather than substring, because the normalizer collapses
+ * punctuation to spaces: `N/A` becomes `n a`, which occurs as a substring of
+ * "operates in a safe manner" and of half the criteria on the form. As tokens
+ * it does not.
+ */
+function containsTokens(haystack: string, needle: string): boolean {
+  if (needle.length === 0) return false;
+  const hay = haystack.split(' ').filter(Boolean);
+  const want = needle.split(' ').filter(Boolean);
+  if (want.length === 0 || want.length > hay.length) return false;
+
+  for (let i = 0; i + want.length <= hay.length; i++) {
+    if (want.every((w, j) => hay[i + j] === w)) return true;
+  }
+  return false;
+}
+
+/**
+ * Are this field's options printed INSIDE the row, rather than as columns?
+ *
+ * The discriminator between the two shapes a choice field takes on these forms,
+ * and the guard that stops the column mapping being applied to the wrong one:
+ *
+ *   - A practical criterion — "Manoeuvres dozer safely" with options `✓ / ×`
+ *     and `N/A` — names the COLUMNS down the right of the page. Its options are
+ *     column headers and appear nowhere in the row itself.
+ *   - A theory question — "Q1. The track dozer must be isolated…" with options
+ *     `True` and `False` — prints its answers inline, beside the question. Its
+ *     boxes sit next to those printed words, nowhere near the outcome columns.
+ *
+ * Both reach this module as "a choice field with two options", and both sit on
+ * a page carrying a `✓ / × N/A` header. Mapping the second onto the columns
+ * would put a tick for "True" in the tick column of an outcome cell — a
+ * confident mark in a cell nobody measured, which is the failure this whole
+ * module is arranged to prevent. So: if an option is printed in the row, the
+ * options are not the columns, and this refuses.
+ *
+ * Symbol-only options (`✓ / ×` normalizes to nothing) carry no evidence either
+ * way and are skipped rather than counted as absent.
+ */
+function optionsPrintedInRow(text: string, options: readonly string[]): boolean {
+  return options.some((option) => {
+    const needle = normalizeForMatch(option);
+    // Two characters is not enough to be evidence of anything.
+    if (needle.length < 2) return false;
+    return containsTokens(text, needle);
+  });
+}
+
+/**
+ * Does this row band carry the field's label?
+ *
+ * Containment in EITHER direction: the model's label can be a shortened form of
+ * the printed question, or can carry a heading the print splits across the
+ * band. Requiring equality matched almost nothing.
+ *
+ * Deciding which band wins — and refusing when several do — is the caller's
+ * job, because ambiguity is a property of the whole page rather than of any one
+ * band. See `proposeFieldOptionCells`.
+ */
+function bandMatches(rows: Row[], band: GeometryBand, label: string, headerY: number): boolean {
+  const wanted = stripEnumeration(normalizeForMatch(label));
+  // A handful of characters is not enough to identify a row: "yes", "date",
+  // "name" match half the page. Below this the only safe answer is to let a
+  // reviewer draw it, which is the visible failure rather than the silent one.
+  if (wanted.length < 12) return false;
+
+  const text = bandText(rows, band, headerY);
+  if (text.length === 0) return false;
+  return text.includes(wanted) || wanted.includes(text);
+}
+
+/**
+ * Propose one option cell per option for a non-table field.
+ *
+ * Returns null rather than a guess whenever the page does not settle it — no
+ * option header, a label that matches no row or several, anchors that cannot be
+ * reconciled against the option count. Every refusal leaves the field exporting
+ * as data, which is a visibly incomplete PDF someone notices; a confident box in
+ * the wrong cell stamps a competency mark against something nobody checked.
+ */
+export function proposeFieldOptionCells(input: FieldProposeInput): FieldProposal | null {
+  if (input.options.length < 2 || input.items.length === 0) return null;
+
+  const rows = toRows(input.items);
+  // Top-down, so a page carrying several tables uses the header that actually
+  // governs the matched row rather than whichever was found first.
+  const headers = findHeaderRows(rows).sort((a, b) => b.row.y - a.row.y);
+  if (headers.length === 0) return null;
+
+  // Every match on the WHOLE page is collected before any is used. Judging
+  // ambiguity per header would miss the case that matters most: a page carrying
+  // the same question under two tables offers one match beneath each, and each
+  // header on its own looks unambiguous.
+  const matches: { header: HeaderRow; band: GeometryBand }[] = [];
+  for (let h = 0; h < headers.length; h++) {
+    const header = headers[h]!;
+    const bands = rowBands(rows, header, headers[h + 1]?.row.y ?? 0);
+    for (const band of bands) {
+      if (bandMatches(rows, band, input.label, header.row.y)) matches.push({ header, band });
+    }
+  }
+
+  // Absence and ambiguity are the same answer: let a reviewer draw it. Placing
+  // the cell on the wrong occurrence records an assessment against something
+  // nobody asked.
+  if (matches.length !== 1) return null;
+  const { header, band } = matches[0]!;
+
+  // The options must BE the page's columns. When they are printed in the row
+  // instead, this is a question with inline answers and its boxes are beside
+  // those words — see `optionsPrintedInRow`.
+  if (optionsPrintedInRow(bandText(rows, band, header.row.y), input.options)) return null;
+
+  const rightmostText = Math.max(...header.row.items.map((i) => i.x + i.width));
+  const reconciled = reconcile(header.anchors, input.options.length, rightmostText);
+  if (!reconciled) return null;
+
+  const columns = centresToBands(
+    reconciled.centres,
+    [...input.options],
+    header.labelRight,
+    input.pageWidth,
+  );
+  const height = band.end - band.start;
+  if (!(height > 0)) return null;
+
+  const segments: PageBox[] = columns.map((column) => ({
+    page: input.page,
+    x: column.start,
+    y: band.start,
+    width: column.end - column.start,
+    height,
+    pageWidth: input.pageWidth,
+    pageHeight: input.pageHeight,
+    optionKey: column.key,
+  }));
+
+  // The same validator the reviewer's hand-drawn boxes pass. A proposal that
+  // cannot survive it would be dropped silently at export.
+  if (
+    segments.some(
+      (s) => resolveGeometry({ geometry: { segments: [s] } }, input.page + 1).segments.length === 0,
+    )
+  ) {
+    return null;
+  }
+
+  const notes: string[] = [];
+  let confidence = 1;
+  if (reconciled.inferred > 0) {
+    confidence -= 0.25 * reconciled.inferred;
+    notes.push(`${reconciled.inferred} option column(s) inferred from pitch, not found in the text.`);
+  }
+  if (reconciled.merged > 0) {
+    notes.push(`${reconciled.merged} header run(s) merged to match the option count.`);
+  }
+  if (!header.corroborated) {
+    confidence -= 0.15;
+    notes.push('Only one option header on the page — nothing corroborates the column positions.');
+  }
+
+  return { segments, confidence: Math.max(0, Math.min(1, confidence)), notes };
+}
+
+/**
+ * How far left of an option's text a marker glyph may sit and still be its own.
+ *
+ * A checkbox printed in the text layer sits immediately before the words it
+ * labels. Beyond about a dozen points the nearest run is the previous option's
+ * text or the question stem, not a marker.
+ */
+const MARKER_GAP = 12;
+
+/** A marker glyph is a box or bullet, never a word. */
+const MARKER_MAX_WIDTH = 15;
+
+/** Fallback marker side length, and the gap it leaves before the text. */
+const SYNTHETIC_MARKER_SIZE = 10;
+const SYNTHETIC_MARKER_GAP = 3;
+
+/**
+ * How many printed rows below the question its answers may occupy.
+ *
+ * Six options is the largest on the measured library ("All of these answers are
+ * correct" questions run to six), and a wrapped option takes two lines. Beyond
+ * that the search has left the question and is reading the next one.
+ */
+const INLINE_SEARCH_ROWS = 14;
+
+/**
+ * Propose one box per option for a question whose answers are PRINTED INLINE.
+ *
+ * The counterpart to `proposeFieldOptionCells`, for the other population of
+ * choice fields on these forms. A theory question — "Q1. The track dozer must
+ * be isolated…" with `True` and `False` — prints its answers beside or beneath
+ * itself, and its marks belong next to those printed words. It has no option
+ * columns at all, so the column derivation must never be applied to it (see
+ * `optionsPrintedInRow`, which is the guard on the other side of this line).
+ *
+ * Anchoring on the option's OWN text is what makes this safe. The column rule
+ * could put a tick for "True" in the tick column of an unrelated outcome cell —
+ * a mark against the wrong answer. Here the worst case is a box a few points
+ * off the printed checkbox but unambiguously against the option it names, which
+ * is a cosmetic error rather than a false record.
+ *
+ * Refuses unless EVERY option is found exactly once. A partial placement is
+ * worse than none: the options a reviewer can see placed are the ones they stop
+ * checking.
+ */
+export function proposeInlineOptionCells(input: FieldProposeInput): FieldProposal | null {
+  if (input.options.length < 2 || input.items.length === 0) return null;
+
+  const wanted = stripEnumeration(normalizeForMatch(input.label));
+  if (wanted.length < 12) return null;
+
+  const rows = toRows(input.items);
+  if (rows.length === 0) return null;
+
+  // Where the question is printed. Ambiguity refuses, exactly as it does for
+  // the column rule — the dozer asks "True / False" of many questions, and the
+  // label is the only thing telling them apart.
+  const starts = rows.filter((r) => {
+    const text = normalizeForMatch(r.items.map((i) => i.text).join(' '));
+    return text.length > 0 && (text.includes(wanted) || wanted.includes(text));
+  });
+  if (starts.length !== 1) return null;
+
+  const startIndex = rows.indexOf(starts[0]!);
+  const window = rows.slice(startIndex, startIndex + INLINE_SEARCH_ROWS);
+
+  const pitch = rowPitch(window.slice(1).map((r, i) => window[i]!.y - r.y));
+  const size = Math.min(SYNTHETIC_MARKER_SIZE, pitch > 0 ? pitch * 0.7 : SYNTHETIC_MARKER_SIZE);
+
+  const segments: PageBox[] = [];
+  let synthesized = 0;
+
+  for (const option of input.options) {
+    const needle = normalizeForMatch(option);
+    if (needle.length < 2) return null;
+
+    // Every run whose own text carries this option, anywhere in the window.
+    const hits: { row: Row; item: PositionedText }[] = [];
+    for (const row of window) {
+      for (const item of row.items) {
+        if (containsTokens(normalizeForMatch(item.text), needle)) hits.push({ row, item });
+      }
+    }
+    // Found nowhere, or in several places — either way there is no single box
+    // this option names, and guessing between them records an answer nobody
+    // gave.
+    if (hits.length !== 1) return null;
+
+    const { row, item } = hits[0]!;
+
+    // The printed checkbox, when it reaches the text layer: a short narrow run
+    // immediately before the option's words on the same baseline.
+    const marker = row.items.find(
+      (candidate) =>
+        candidate !== item &&
+        candidate.width > 0 &&
+        candidate.width <= MARKER_MAX_WIDTH &&
+        candidate.x < item.x &&
+        item.x - (candidate.x + candidate.width) <= MARKER_GAP,
+    );
+
+    if (marker) {
+      segments.push({
+        page: input.page,
+        x: marker.x,
+        y: row.y - size * 0.2,
+        width: marker.width,
+        height: size,
+        pageWidth: input.pageWidth,
+        pageHeight: input.pageHeight,
+        optionKey: option,
+      });
+      continue;
+    }
+
+    // No marker in the text layer — it is drawn as vector strokes, which this
+    // module never reads. Place a box in the gap the marker occupies, which is
+    // approximate but cannot stray onto another option.
+    const x = item.x - SYNTHETIC_MARKER_GAP - size;
+    if (x < 0) return null;
+    synthesized++;
+    segments.push({
+      page: input.page,
+      x,
+      y: row.y - size * 0.2,
+      width: size,
+      height: size,
+      pageWidth: input.pageWidth,
+      pageHeight: input.pageHeight,
+      optionKey: option,
+    });
+  }
+
+  if (segments.length !== input.options.length) return null;
+
+  // The same validator the reviewer's hand-drawn boxes pass.
+  if (
+    segments.some(
+      (s) => resolveGeometry({ geometry: { segments: [s] } }, input.page + 1).segments.length === 0,
+    )
+  ) {
+    return null;
+  }
+
+  const notes: string[] = [];
+  let confidence = 1;
+  if (synthesized > 0) {
+    // Halved rather than nudged: an estimated box is the case a reviewer most
+    // needs to look at, and it should not read as nearly-certain.
+    confidence = 0.5;
+    notes.push(
+      `${synthesized} of ${segments.length} checkbox(es) are not in the PDF's text layer — those boxes are estimated from the answer's position and should be checked against the page.`,
+    );
+  }
+
+  return { segments, confidence, notes };
+}

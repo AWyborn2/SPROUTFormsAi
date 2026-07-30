@@ -217,7 +217,19 @@ describe('POST /team/members', () => {
         body: JSON.stringify({ email: 'Sam.Lee@x.io', role: 'builder' }),
       });
       expect(res.status).toBe(201);
-      expect(await res.json()).toEqual({ id: 'inv-new', name: 'Sam Lee', email: 'sam.lee@x.io', role: 'builder', status: 'invited', emailSent: true });
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body).toMatchObject({
+        id: 'inv-new',
+        name: 'Sam Lee',
+        email: 'sam.lee@x.io',
+        role: 'builder',
+        status: 'invited',
+        emailSent: true,
+      });
+      // The acceptance link comes back so an admin can hand it over directly or
+      // print it as a QR — the invite's whole credential, which is why only a
+      // team manager reaches this route.
+      expect(body.acceptPath).toMatch(/^\/invite\/.+/);
 
       const inviteInsert = insertValues.mock.calls.find(([table]) => table === schema.invites);
       expect(inviteInsert?.[1]).toMatchObject({ orgId: 'org-1', email: 'sam.lee@x.io', role: 'builder' });

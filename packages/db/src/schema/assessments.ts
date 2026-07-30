@@ -155,6 +155,18 @@ export const assessmentPartAttempts = pgTable(
     belowThresholdReason: text('below_threshold_reason'),
     /** Set once, when a logbook part first reaches its minimum hours. */
     thresholdNotifiedAt: timestamp('threshold_notified_at', { withTimezone: true }),
+    /**
+     * When the candidate handed this attempt in.
+     *
+     * Exists because "has answers but no outcome" cannot distinguish someone
+     * halfway through from someone who finished a week ago and is waiting — the
+     * exact gap that made the paper process untrackable after the theory stage.
+     *
+     * Not an outcome and not a lock: the candidate can reopen it themselves
+     * while it is still unmarked, because nothing has been assessed yet. Only
+     * marking makes an attempt permanent.
+     */
+    submittedAt: timestamp('submitted_at', { withTimezone: true }),
     assessorUserId: uuid('assessor_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),

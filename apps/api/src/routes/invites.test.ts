@@ -61,7 +61,13 @@ function fakeDb(opts: {
       invites: { findFirst: vi.fn().mockResolvedValue(opts.invitesFindFirst) },
       memberships: { findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst) },
       organizations: { findFirst: vi.fn().mockResolvedValue(opts.organizationsFindFirst) },
-      users: { findFirst: vi.fn().mockResolvedValue(opts.usersFindFirst ?? { id: 'u1', name: 'Sam Lee' }) },
+      users: {
+        // `in` rather than `??` so a test can say "no such user" with an
+        // explicit undefined — the signup path turns entirely on that answer.
+        findFirst: vi
+          .fn()
+          .mockResolvedValue('usersFindFirst' in opts ? opts.usersFindFirst : { id: 'u1', name: 'Sam Lee' }),
+      },
     },
     insert: vi.fn((table: unknown) => ({
       values: (v: unknown) => {
@@ -236,6 +242,149 @@ describe('POST /invites/:token/accept', () => {
         action: 'Accepted invite',
         target: 'sam@x.io',
       });
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * The concierge signup path: an invited person creating their account.
+ *
+ * This is a PUBLIC route that mints a session, so what matters here is what it
+ * refuses — a wrong address on an emailed invite, an address that already has
+ * an account, and a second redemption of the same token.
+ */
+describe('POST /invites/:token/signup', () => {
+  const QR_INVITE = { ...PENDING_INVITE, id: 'inv-qr', email: null, inviteeName: 'Dale Rivers' };
+  const GOOD = { name: 'Sam Lee', email: 'Sam@x.io', password: 'correct horse battery' };
+
+  async function signup(base: string, token: string, body: Record<string, unknown>) {
+    return fetch(`${base}/invites/${token}/signup`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('creates the account, claims the invite, grants the role and seals a session', async () => {
+    const { db, insertValues, updateSet } = fakeDb({
+      invitesFindFirst: PENDING_INVITE,
+      usersFindFirst: undefined, // no existing account for this address
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await signup(base, 'tok-abc', GOOD);
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ orgId: 'org-invited', role: 'builder' });
+
+      // Address is stored lowercased, and the password is never stored raw.
+      const userInsert = insertValues.mock.calls.find(([t]) => t === schema.users);
+      const user = userInsert?.[1] as { email: string; passwordHash: string };
+      expect(user.email).toBe('sam@x.io');
+      expect(user.passwordHash).not.toContain('correct horse battery');
+
+      // The TOKEN decides the role — nothing in the body could influence it.
+      const membership = insertValues.mock.calls.find(([t]) => t === schema.memberships);
+      expect(membership?.[1]).toMatchObject({ orgId: 'org-invited', role: 'builder', status: 'active' });
+
+      expect(updateSet.mock.calls.find(([t]) => t === schema.invites)?.[1]).toMatchObject({
+        acceptedByUserId: expect.any(String),
+      });
+      expect(res.headers.get('set-cookie')).toContain('fai_session=');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepts any address on a QR invite, which names nobody', async () => {
+    const { db } = fakeDb({ invitesFindFirst: QR_INVITE, usersFindFirst: undefined });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await signup(base, 'tok-abc', { ...GOOD, email: 'dale.rivers@personal.example' });
+      expect(res.status).toBe(201);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a different address on an emailed invite, so a forwarded email is not redeemable', async () => {
+    const { db, insertValues } = fakeDb({ invitesFindFirst: PENDING_INVITE, usersFindFirst: undefined });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await signup(base, 'tok-abc', { ...GOOD, email: 'someone.else@x.io' });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'email_mismatch' });
+      expect(insertValues.mock.calls.find(([t]) => t === schema.users)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('never overwrites an existing account — an invite is not a password reset', async () => {
+    const { db, insertValues, updateSet } = fakeDb({
+      invitesFindFirst: PENDING_INVITE,
+      usersFindFirst: { id: 'u-existing', email: 'sam@x.io', passwordHash: 'their-own-hash' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await signup(base, 'tok-abc', GOOD);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'account_exists' });
+      // Above all: no write touched the existing identity, and no session was
+      // issued for it. Otherwise any invite naming an address takes it over.
+      expect(insertValues.mock.calls.find(([t]) => t === schema.users)).toBeUndefined();
+      expect(updateSet.mock.calls.find(([t]) => t === schema.users)).toBeUndefined();
+      expect(res.headers.get('set-cookie')).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s on an already-redeemed token rather than minting a second membership', async () => {
+    // The invite reads as pending but the claiming UPDATE matches no row —
+    // someone redeemed it in between.
+    const { db, insertValues } = fakeDb({
+      invitesFindFirst: PENDING_INVITE,
+      usersFindFirst: undefined,
+      claimResult: [],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await signup(base, 'tok-abc', GOOD);
+      expect(res.status).toBe(404);
+      expect(insertValues.mock.calls.find(([t]) => t === schema.memberships)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects a short password before touching the database', async () => {
+    const { db, insertValues } = fakeDb({ invitesFindFirst: PENDING_INVITE, usersFindFirst: undefined });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await signup(base, 'tok-abc', { ...GOOD, password: 'short' });
+      expect(res.status).toBe(400);
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s on an unknown token without disclosing anything', async () => {
+    const { db } = fakeDb({ invitesFindFirst: undefined });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await signup(base, 'nope', GOOD);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: 'invite_not_found' });
     } finally {
       server.close();
     }

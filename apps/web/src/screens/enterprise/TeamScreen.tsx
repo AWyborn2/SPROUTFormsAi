@@ -1,6 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Avatar, Badge, Button, Dialog, Icon, Input, Select, useToast } from '@formai/ui';
-import { useBilling, useInviteMember, useMembers, useRemoveMember, useSession, useSetMemberRole } from '../../lib/data/hooks.js';
+import {
+  useBilling,
+  useInviteMember,
+  useIssuePasswordReset,
+  useMembers,
+  useRemoveMember,
+  useSession,
+  useSetMemberRole,
+} from '../../lib/data/hooks.js';
 import { INVITABLE_ROLES, ROLE_NAMES, type Member, type RoleName } from '../../lib/data/types.js';
 import { EMAIL_RE } from '../../lib/validation.js';
 
@@ -13,10 +21,22 @@ export function TeamScreen() {
   const invite = useInviteMember();
   const setRole = useSetMemberRole();
   const remove = useRemoveMember();
+  const issueReset = useIssuePasswordReset();
 
   const [inviteOpen, setInviteOpen] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteName, setInviteName] = useState('');
   const [inviteRole, setInviteRole] = useState<RoleName>('Builder');
+  /**
+   * How the invite reaches the person. Many candidates have no work email, so
+   * their invite is printed or shown as a QR code and handed over in person —
+   * which is also what makes it safe to skip the address check on acceptance.
+   */
+  const [delivery, setDelivery] = useState<'email' | 'link'>('email');
+  /** Set once an invite exists, so the link can be shown, copied, or scanned. */
+  const [created, setCreated] = useState<{ name: string; url: string; emailSent: boolean } | null>(null);
+  /** A freshly issued password-reset link, awaiting handover. */
+  const [resetLink, setResetLink] = useState<{ name: string; url: string } | null>(null);
 
   const active = members.filter((m) => m.status === 'active').length;
   const invited = members.filter((m) => m.status === 'invited').length;
@@ -27,31 +47,44 @@ export function TeamScreen() {
   function closeInvite() {
     setInviteOpen(false);
     setInviteEmail('');
+    setInviteName('');
+    setCreated(null);
+    setDelivery('email');
   }
 
   function sendInvite() {
     const email = inviteEmail.trim();
-    if (!EMAIL_RE.test(email)) {
+    const name = inviteName.trim();
+
+    if (delivery === 'email' && !EMAIL_RE.test(email)) {
       toast({ variant: 'warning', message: 'Enter a valid email address to invite.' });
       return;
     }
+    // A link invite carries no address, so the name is the only thing that will
+    // identify the pending row in this list until it's accepted.
+    if (delivery === 'link' && !name) {
+      toast({ variant: 'warning', message: "Enter the person's name so you can tell invites apart." });
+      return;
+    }
+
     invite.mutate(
-      { email, role: inviteRole },
+      {
+        ...(delivery === 'email' ? { email } : {}),
+        ...(name ? { name } : {}),
+        role: inviteRole,
+      },
       {
         onSuccess: (member) => {
           if (!member) {
             toast({ variant: 'warning', message: `${email} is already on the team.` });
             return;
           }
-          if (member.emailSent === false) {
-            toast({
-              variant: 'warning',
-              message: "Invite created — the email couldn't be sent, ask them to sign in with this address directly.",
-            });
-          } else {
+          // Stay open on the created invite: the link is shown ONCE, and for a
+          // link invite it is the only way the person can ever get in.
+          setCreated({ name: member.name, url: member.acceptUrl, emailSent: member.emailSent });
+          if (delivery === 'email' && member.emailSent) {
             toast({ variant: 'success', message: `${email} invited as ${inviteRole}.` });
           }
-          closeInvite();
         },
         onError: (err: unknown) => {
           const errObj = err as { status?: number; body?: { message?: string } };
@@ -129,6 +162,18 @@ export function TeamScreen() {
               )
             }
             onRemove={() => remove.mutate(m.id)}
+            onResetPassword={
+              // Only for accepted members: someone still holding an unaccepted
+              // invite has no account yet, so there is nothing to reset.
+              m.status === 'active'
+                ? () =>
+                    issueReset.mutate(m.id, {
+                      onSuccess: (r) => setResetLink({ name: r.name || m.name, url: r.resetUrl }),
+                      onError: () =>
+                        toast({ variant: 'danger', message: 'Could not create a reset link.' }),
+                    })
+                : undefined
+            }
           />
         ))}
       </div>
@@ -137,37 +182,130 @@ export function TeamScreen() {
       <Dialog
         open={inviteOpen}
         onClose={closeInvite}
-        title="Invite a teammate"
-        description={`They'll get an email invite to join ${session?.orgName ?? 'your organization'}.`}
+        title={created ? 'Invite created' : 'Invite someone'}
+        description={
+          created
+            ? undefined
+            : `They'll join ${session?.orgName ?? 'your organization'} with the role you choose.`
+        }
         size="sm"
       >
-        <div className="flex flex-col gap-[15px] pt-1.5">
-          <Input
-            label="Email address"
-            type="email"
-            leadingIcon="mail"
-            placeholder="name@company.com"
-            value={inviteEmail}
-            onChange={(e) => setInviteEmail(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') sendInvite();
-            }}
+        {created ? (
+          <LinkHandover
+            url={created.url}
+            qrLabel={`Invite QR code for ${created.name}`}
+            onDone={closeInvite}
+            blurb={
+              created.emailSent ? (
+                <>
+                  Emailed to <strong className="text-text-primary">{created.name}</strong>. They can also
+                  scan this.
+                </>
+              ) : (
+                <>
+                  Show or print this for <strong className="text-text-primary">{created.name}</strong>.
+                  They'll create their account and set their own password.
+                </>
+              )
+            }
           />
-          <Select
-            label="Role"
-            value={inviteRole}
-            onChange={(e) => setInviteRole(e.target.value as RoleName)}
-            options={INVITABLE_ROLES}
-          />
-          <div className="mt-1 flex justify-end gap-2.5">
-            <Button variant="outline" onClick={closeInvite}>
-              Cancel
-            </Button>
-            <Button leadingIcon="send" onClick={sendInvite}>
-              Send invite
-            </Button>
+        ) : (
+          <div className="flex flex-col gap-[15px] pt-1.5">
+            {/* Delivery choice first: it decides which field below is required. */}
+            <div className="flex gap-2">
+              {(
+                [
+                  { key: 'email', label: 'Email invite', icon: 'mail' },
+                  { key: 'link', label: 'QR code or link', icon: 'qr-code' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  onClick={() => setDelivery(opt.key)}
+                  aria-pressed={delivery === opt.key}
+                  className={`flex flex-1 items-center justify-center gap-1.5 rounded-[10px] border px-3 py-2 text-[13px] font-medium transition-colors ${
+                    delivery === opt.key
+                      ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                      : 'border-[var(--border)] text-text-secondary'
+                  }`}
+                >
+                  <Icon name={opt.icon} size={15} />
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            {delivery === 'email' ? (
+              <Input
+                label="Email address"
+                type="email"
+                leadingIcon="mail"
+                placeholder="name@company.com"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') sendInvite();
+                }}
+              />
+            ) : (
+              <Input
+                label="Their name"
+                leadingIcon="user"
+                placeholder="Dale Rivers"
+                value={inviteName}
+                onChange={(e) => setInviteName(e.target.value)}
+                help="No email needed — hand them the QR code or link. They'll set their own password."
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') sendInvite();
+                }}
+              />
+            )}
+
+            <Select
+              label="Role"
+              value={inviteRole}
+              onChange={(e) => setInviteRole(e.target.value as RoleName)}
+              options={INVITABLE_ROLES}
+            />
+            <div className="mt-1 flex justify-end gap-2.5">
+              <Button variant="outline" onClick={closeInvite}>
+                Cancel
+              </Button>
+              <Button
+                leadingIcon={delivery === 'email' ? 'send' : 'qr-code'}
+                onClick={sendInvite}
+                disabled={invite.isPending}
+              >
+                {delivery === 'email' ? 'Send invite' : 'Create invite'}
+              </Button>
+            </div>
           </div>
-        </div>
+        )}
+      </Dialog>
+
+      {/* Password-reset handover. Note there is no field here for an admin to
+          type a password into: they hand over a link and the person sets their
+          own, which is what stops an assessor signing in as a candidate. */}
+      <Dialog
+        open={resetLink !== null}
+        onClose={() => setResetLink(null)}
+        title="Password reset link"
+        size="sm"
+      >
+        {resetLink && (
+          <LinkHandover
+            url={resetLink.url}
+            qrLabel={`Password reset QR code for ${resetLink.name}`}
+            onDone={() => setResetLink(null)}
+            blurb={
+              <>
+                Show or print this for <strong className="text-text-primary">{resetLink.name}</strong>.
+                They'll choose a new password themselves — you won't see it.
+              </>
+            }
+          />
+        )}
       </Dialog>
     </div>
   );
@@ -177,10 +315,13 @@ function MemberRow({
   member,
   onRole,
   onRemove,
+  onResetPassword,
 }: {
   member: Member;
   onRole: (role: RoleName) => void;
   onRemove: () => void;
+  /** Absent for a member with no account yet — nothing to reset. */
+  onResetPassword?: () => void;
 }) {
   const isOwner = member.role === 'Owner';
   return (
@@ -218,7 +359,17 @@ function MemberRow({
           </Badge>
         )}
       </span>
-      <span className="flex w-[34px] justify-end">
+      <span className="flex w-[68px] justify-end gap-0.5">
+        {onResetPassword && (
+          <button
+            onClick={onResetPassword}
+            aria-label={`Reset password for ${member.name}`}
+            title="Issue a password reset link"
+            className="fai-chip-btn grid h-[30px] w-[30px] place-items-center rounded-sm text-text-tertiary hover:bg-surface-hover"
+          >
+            <Icon name="key-round" size={15} />
+          </button>
+        )}
         {!isOwner && (
           <button
             onClick={onRemove}
@@ -229,6 +380,76 @@ function MemberRow({
           </button>
         )}
       </span>
+    </div>
+  );
+}
+
+/**
+ * What an admin hands over: a scannable code and a copyable link.
+ *
+ * Used for both invites and password resets, because both are the same shape of
+ * secret — a URL that is the entire credential, shown once to the person who
+ * just created it, to be handed over in person or printed.
+ *
+ * Note what is NOT here, in either case: any way to set someone else's
+ * password. They choose it themselves at the far end of the link, so nobody who
+ * administers or marks their assessments can sign in as them.
+ */
+function LinkHandover({
+  url,
+  blurb,
+  qrLabel,
+  onDone,
+}: {
+  url: string;
+  blurb: React.ReactNode;
+  qrLabel: string;
+  onDone: () => void;
+}) {
+  const { toast } = useToast();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (!url) return;
+    let cancelled = false;
+    // Imported lazily: the QR encoder is only needed once an invite exists,
+    // and it should not sit in the bundle every admin loads.
+    void import('qrcode').then((qr) => {
+      if (cancelled || !canvasRef.current) return;
+      void qr.toCanvas(canvasRef.current, url, { width: 190, margin: 1 });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+
+  return (
+    <div className="flex flex-col items-center gap-3 pt-1.5">
+      <p className="text-center text-[13px] text-text-secondary">{blurb}</p>
+
+      <div className="rounded-[12px] border border-[var(--border)] bg-white p-3">
+        <canvas ref={canvasRef} aria-label={qrLabel} />
+      </div>
+
+      <code className="w-full break-all rounded-[8px] bg-[var(--surface-2)] px-2.5 py-2 text-center text-[11px] text-text-secondary">
+        {url}
+      </code>
+
+      <div className="mt-1 flex w-full justify-end gap-2.5">
+        <Button
+          variant="outline"
+          leadingIcon="copy"
+          onClick={() => {
+            void navigator.clipboard
+              .writeText(url)
+              .then(() => toast({ variant: 'success', message: 'Link copied.' }))
+              .catch(() => toast({ variant: 'warning', message: 'Copy failed — select the link above.' }));
+          }}
+        >
+          Copy link
+        </Button>
+        <Button onClick={onDone}>Done</Button>
+      </div>
     </div>
   );
 }

@@ -68,8 +68,20 @@ export const invites = pgTable(
     orgId: uuid()
       .notNull()
       .references(() => organizations.id, { onDelete: 'cascade' }),
-    /** Where the invite link was sent. Delivery only — never an identity claim. */
-    email: text().notNull(),
+    /**
+     * Where the invite was sent, when it was sent anywhere.
+     *
+     * NULLABLE because many candidates have no work email — their invite is
+     * handed over as a printed QR code instead. Delivery only; never an
+     * identity claim, and the acceptor supplies their own address at signup.
+     *
+     * The pending-uniqueness index below still works: PostgreSQL treats NULLs
+     * as distinct, so any number of QR-only invites can be outstanding while
+     * emailed ones stay one-per-address.
+     */
+    email: text(),
+    /** Who this invite is for, so a pending QR invite is identifiable. */
+    inviteeName: text('invitee_name').notNull().default(''),
     role: roleEnum().notNull().default('viewer'),
     /** Unguessable; the sole authorization for accepting. */
     token: text().notNull(),
@@ -85,6 +97,44 @@ export const invites = pgTable(
       .on(t.orgId, t.email)
       .where(sql`${t.acceptedAt} IS NULL`),
     index('invites_org_idx').on(t.orgId),
+  ],
+);
+
+/**
+ * A one-time link that lets someone set their OWN password.
+ *
+ * This exists so an administrator can help a candidate who is locked out
+ * WITHOUT ever choosing or seeing their password. If an admin could set it,
+ * they could sign in as that candidate — and since the same admins mark the
+ * assessments those candidates sit, that would quietly destroy the evidentiary
+ * value of every signed record. The admin issues a token; the candidate picks
+ * the password.
+ *
+ * `orgId` is recorded so the issuing org is auditable and so a reset can only
+ * be raised by an org the user actually belongs to.
+ */
+export const passwordResets = pgTable(
+  'password_resets',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** Unguessable; the sole authorization for setting a new password. */
+    token: text().notNull(),
+    /** Who raised it, for the audit trail. Null once that admin is deleted. */
+    issuedByUserId: uuid().references(() => users.id, { onDelete: 'set null' }),
+    expiresAt: timestamp({ withTimezone: true }).notNull(),
+    /** Stamped on use, which is what makes the link single-use. */
+    usedAt: timestamp({ withTimezone: true }),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('password_resets_token_uq').on(t.token),
+    index('password_resets_user_idx').on(t.userId),
   ],
 );
 

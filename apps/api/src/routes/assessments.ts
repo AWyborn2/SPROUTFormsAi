@@ -7,12 +7,14 @@ import {
   ASSESSMENT_PATHWAYS,
   NS_DISPOSITIONS,
   caseProgress,
+  fieldsInPart,
   fieldsInSection,
   isCaseCompetent,
   markTheory,
   orderedParts,
   requiredParts,
   totalLoggedHours,
+  stripMarkingSecrets,
   validateAnswerKeys,
   validateManifest,
   type AssessmentPathway,
@@ -469,6 +471,8 @@ assessmentCasesRouter.get(
         partKey: a.partKey,
         attemptNumber: a.attemptNumber,
         outcome: a.outcome,
+        /** Null until the candidate hands it in — the "ready to mark" signal. */
+        submittedAt: a.submittedAt,
         disposition: a.disposition,
         dispositionReason: a.dispositionReason,
         templateVersionId: a.templateVersionId,
@@ -617,6 +621,191 @@ assessmentCasesRouter.post(
   }),
 );
 
+/**
+ * The fillable surface for one attempt — what the candidate portal renders.
+ *
+ * MARKING SECRETS ARE STRIPPED AT THE DOOR. These fields carry the complete
+ * answer key to the assessment the candidate is about to sit, and this route
+ * serves them to that candidate. Nothing downstream is trusted to hide them:
+ * they do not leave the process.
+ *
+ * Fields come from the version the ATTEMPT is pinned to, not the case's current
+ * one. A candidate resuming an attempt started against an older version must
+ * see the questions they were asked, not the ones the template has since grown.
+ */
+assessmentCasesRouter.get(
+  '/:id/attempts/:attemptId',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'view');
+    if (scope === 'none') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    // Same rule as case detail: a candidate asking for someone else's work gets
+    // 404, because 403 would confirm it exists.
+    if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const attempt = (await attemptsFor(db, row.id)).find((a) => a.id === req.params.attemptId);
+    // An attempt id from another case is a miss, not a cross-case read.
+    if (!attempt) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const tool = await loadTool(db, row.toolId, tenant.orgId);
+    if (!tool) {
+      res.status(409).json({ error: 'tool_missing' });
+      return;
+    }
+
+    const manifest = tool.manifest as AssessmentToolManifest;
+    const part = orderedParts(manifest).find((p) => p.key === attempt.partKey);
+    if (!part) {
+      res.status(409).json({ error: 'part_missing_from_manifest' });
+      return;
+    }
+
+    const allFields = await fieldsForVersion(db, attempt.templateVersionId);
+
+    res.json({
+      id: attempt.id,
+      partKey: attempt.partKey,
+      partLabel: part.label,
+      partKind: part.kind,
+      attemptNumber: attempt.attemptNumber,
+      outcome: attempt.outcome,
+      submittedAt: attempt.submittedAt,
+      templateVersionId: attempt.templateVersionId,
+      /**
+       * The case's stream and the field its answer belongs in, so the renderer
+       * can seed visibility exactly the way the exporter does — by answering the
+       * manifest's stream question, not by filtering fields itself.
+       *
+       * Either being null is fail-open: every location set renders rather than
+       * none, because hiding content nobody chose to hide would silently shorten
+       * the assessment.
+       */
+      locationStream: row.locationStream,
+      locationStreamFieldId: manifest.locationStreamFieldId ?? null,
+      /**
+       * The stream question itself, sent as a lookup source because it often
+       * lives OUTSIDE this part — on the cover checklist, typically. Without it
+       * the renderer sees a dangling condition, falls open, and every location
+       * set shows: the gating would silently never apply.
+       */
+      streamField: manifest.locationStreamFieldId
+        ? (allFields.find((f) => f.id === manifest.locationStreamFieldId) ?? null)
+        : null,
+      minimumHours: part.minimumHours ?? null,
+      durationColumnKey: part.durationColumnKey ?? null,
+      fields: stripMarkingSecrets(fieldsInPart(allFields, manifest, attempt.partKey)),
+      values: attempt.values ?? {},
+    });
+  }),
+);
+
+/**
+ * Handing a part in, and taking it back.
+ *
+ * This is the signal that closes the tracking gap the paper process had: an
+ * attempt with answers and no outcome cannot distinguish a candidate halfway
+ * through from one who finished a week ago and is waiting. Submitting says
+ * which.
+ *
+ * It is the CANDIDATE'S act — `edit` at `own` scope reaches it — and it is not
+ * an outcome. Until an assessor marks the attempt nothing has been judged, so
+ * the candidate can reopen it themselves rather than needing anyone's help to
+ * undo a mis-tap. Marking is what makes an attempt permanent.
+ */
+async function setSubmitted(
+  req: Parameters<Parameters<typeof withErrorHandling>[0]>[0],
+  res: Parameters<Parameters<typeof withErrorHandling>[0]>[1],
+  submitting: boolean,
+) {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const tenant = req.tenant!;
+  const scope = await permissionScope(tenant, 'assessments', 'edit');
+  if (scope === 'none') {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+
+  const row = await loadCase(db, req.params.id!, tenant.orgId);
+  // Same rule as everywhere else: someone else's work is 404, not 403.
+  if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+
+  const attempt = await db.query.assessmentPartAttempts.findFirst({
+    where: and(
+      eq(schema.assessmentPartAttempts.id, req.params.attemptId!),
+      eq(schema.assessmentPartAttempts.caseId, row.id),
+    ),
+  });
+  if (!attempt) {
+    res.status(404).json({ error: 'attempt_not_found' });
+    return;
+  }
+  // Once marked, an attempt is evidence in both directions: handing it in again
+  // is meaningless, and reopening it would let a candidate rewrite what an
+  // assessor already judged.
+  if (attempt.outcome !== null) {
+    res.status(409).json({ error: 'attempt_resolved' });
+    return;
+  }
+
+  // Idempotent. A double-tap must not restamp a later hand-in time than the
+  // one the candidate actually made.
+  if (submitting && attempt.submittedAt) {
+    res.status(200).json({ id: attempt.id, submittedAt: attempt.submittedAt });
+    return;
+  }
+
+  const submittedAt = submitting ? new Date() : null;
+  await db
+    .update(schema.assessmentPartAttempts)
+    .set({ submittedAt })
+    .where(eq(schema.assessmentPartAttempts.id, attempt.id));
+
+  await recordAudit(db, tenant, {
+    action: submitting ? 'Submitted assessment part' : 'Reopened assessment part',
+    target: `${row.id} ${attempt.partKey} attempt ${attempt.attemptNumber}`,
+    // 'submissions' to match the rest of this router — assessment activity is
+    // filed there rather than under a category of its own.
+    category: 'submissions',
+    icon: submitting ? 'send' : 'undo-2',
+  });
+
+  res.status(200).json({ id: attempt.id, submittedAt });
+}
+
+assessmentCasesRouter.post(
+  '/:id/attempts/:attemptId/submit',
+  ...GATE,
+  withErrorHandling((req, res) => setSubmitted(req, res, true)),
+);
+
+assessmentCasesRouter.post(
+  '/:id/attempts/:attemptId/reopen',
+  ...GATE,
+  withErrorHandling((req, res) => setSubmitted(req, res, false)),
+);
+
 const saveValuesBody = z.object({ values: z.record(z.string(), z.unknown()) });
 
 /**
@@ -666,6 +855,13 @@ assessmentCasesRouter.patch(
     // signed; a correction is a new attempt.
     if (attempt.outcome !== null) {
       res.status(409).json({ error: 'attempt_resolved' });
+      return;
+    }
+    // Handed in, not yet marked. Refusing here is what makes "submitted" mean
+    // anything — otherwise the answers could keep moving while the assessor was
+    // reading them. The candidate can reopen it themselves; nothing is lost.
+    if (attempt.submittedAt) {
+      res.status(409).json({ error: 'attempt_submitted' });
       return;
     }
 

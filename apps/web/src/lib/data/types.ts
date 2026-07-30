@@ -290,8 +290,14 @@ export interface FillLink {
 export interface PublicInvite {
   orgName: string;
   role: string;
-  /** The address the invite was sent to — shown for recognition, never used to authorize. */
-  email: string;
+  /**
+   * The address the invite was sent to — shown for recognition, never used to
+   * authorize. NULL on a QR/link invite handed over in person, which has no
+   * address at all.
+   */
+  email: string | null;
+  /** Who the invite was raised for, so a QR invite still identifies itself. */
+  inviteeName: string;
 }
 
 /**

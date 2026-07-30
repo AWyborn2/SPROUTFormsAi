@@ -9,8 +9,17 @@
  */
 import type { FormField, GeometryBand, GroupOrdinal, PageBox, RepeatingColumn } from '@formai/shared';
 import { markPlacement } from '@formai/shared';
-import type { PositionedText, TableProposal, TextPage } from '../../../lib/pdf-geometry.js';
-import { proposeTableSegments } from '../../../lib/pdf-geometry.js';
+import type {
+  FieldProposal,
+  PositionedText,
+  TableProposal,
+  TextPage,
+} from '../../../lib/pdf-geometry.js';
+import {
+  proposeFieldOptionCells,
+  proposeInlineOptionCells,
+  proposeTableSegments,
+} from '../../../lib/pdf-geometry.js';
 
 /**
  * The part of a field grid derivation reads: its shape, its row count, and —
@@ -1004,4 +1013,50 @@ export function panelState(
     reason:
       'The page did not give enough signal to place this table confidently, so nothing could be placed automatically. That is fine to leave — the form still publishes and exports its answers as data. To place it yourself, draw the table’s box on the PDF and lay out its grid inside it.',
   };
+}
+
+/**
+ * Propose one checkmark box per option for a NON-TABLE choice field, across the
+ * whole document.
+ *
+ * The counterpart to `deriveAcrossPages`, for the shape the assessment tools
+ * actually take: the extraction profile emits one field per printed question,
+ * so a page of theory questions is geometrically a table that no table
+ * derivation ever sees. Each field is matched to its own printed row by label.
+ *
+ * Scans every page and refuses on AMBIGUITY across the document, not merely
+ * within a page — the dozer repeats "Wearing correct PPE" under several parts,
+ * and placing the mark under the wrong one records an assessment against a
+ * criterion nobody checked. One confident hit, or nothing.
+ */
+export function deriveOptionCellsAcrossPages(
+  field: { label: string; options?: string[] },
+  pages: readonly TextPage[],
+): FieldProposal | null {
+  if (!field.options || field.options.length < 2) return null;
+
+  const hits: FieldProposal[] = [];
+  for (const [i, page] of pages.entries()) {
+    const input = {
+      page: i,
+      pageWidth: page.width,
+      pageHeight: page.height,
+      items: page.items,
+      label: field.label,
+      options: field.options,
+    };
+
+    // Two shapes, tried in order and mutually exclusive by construction. The
+    // column rule refuses a field whose options are printed in its row; the
+    // inline rule refuses one whose options are column glyphs, because those
+    // are not printed beside the question at all. Neither can claim the other's
+    // field, so the order is for clarity rather than precedence.
+    const p = proposeFieldOptionCells(input) ?? proposeInlineOptionCells(input);
+    if (p) hits.push(p);
+    // Two pages both claiming this question is the ambiguous case that matters;
+    // stop as soon as it is established rather than scanning on.
+    if (hits.length > 1) return null;
+  }
+
+  return hits[0] ?? null;
 }

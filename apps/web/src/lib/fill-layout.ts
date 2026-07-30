@@ -35,8 +35,9 @@ import type { FormContainer, FormField, SubmissionValue } from '@formai/shared';
 export function visibleFillFields(
   fields: FormField[],
   values: Record<string, SubmissionValue>,
+  extraSources: readonly FormField[] = [],
 ): FormField[] {
-  return visibleFields(fields, values);
+  return visibleFields(fields, values, extraSources);
 }
 
 /** Layouts the fill surface can actually render. */

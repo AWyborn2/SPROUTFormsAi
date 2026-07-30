@@ -844,3 +844,410 @@ describe('the standalone header shape does not admit page furniture (U8 review)'
     expect(got[0]!.segment.rowBands!).toHaveLength(3);
   });
 });
+
+/**
+ * Non-table fields — one FIELD per printed question.
+ *
+ * This is the shape the assessment tools actually take. The extraction profile
+ * emits one field per question (each needs its own answer key and outcome
+ * cell), so `proposeTableSegments` never fires on these pages even though they
+ * are geometrically tables. Same measured fixtures, matched a row at a time.
+ */
+import { proposeFieldOptionCells } from './pdf-geometry.js';
+
+const TICK_CROSS_NA = ['tick', 'cross', 'na'] as const;
+
+function proposeField(items: PositionedText[], label: string, options = TICK_CROSS_NA) {
+  return proposeFieldOptionCells({ page: 6, ...A4, items, label, options: [...options] });
+}
+
+describe('proposeFieldOptionCells — matching one question to its row', () => {
+  it('proposes one cell per option for a measured question row', () => {
+    const res = proposeField(dozerPage7Table1(), 'Identify and report potential hazards');
+
+    expect(res).not.toBeNull();
+    expect(res!.segments).toHaveLength(3);
+    expect(res!.segments.map((s) => s.optionKey)).toEqual(['tick', 'cross', 'na']);
+  });
+
+  it('puts each cell over its own printed column, left to right, without overlap', () => {
+    const res = proposeField(dozerPage7Table1(), 'Identify and report potential hazards')!;
+    const [tick, cross, na] = res.segments;
+
+    // The measured anchors sit at 502.6, 512.1 and 539.9.
+    expect(tick!.x).toBeLessThan(cross!.x);
+    expect(cross!.x).toBeLessThan(na!.x);
+    expect(tick!.x + tick!.width).toBeLessThanOrEqual(cross!.x + 0.001);
+    expect(cross!.x + cross!.width).toBeLessThanOrEqual(na!.x + 0.001);
+  });
+
+  it('places the band over the row it matched, not a neighbour', () => {
+    const res = proposeField(dozerPage7Table1(), 'Identify and report potential hazards')!;
+    const box = res.segments[0]!;
+
+    // That row's baseline is 614; its neighbours are 630.8 and 597.1. The band
+    // must contain its own baseline and neither of theirs — one row out stamps
+    // a competency mark against a different criterion.
+    expect(box.y).toBeLessThan(614);
+    expect(box.y + box.height).toBeGreaterThan(614);
+    expect(box.y).toBeGreaterThan(597.1);
+    expect(box.y + box.height).toBeLessThan(630.8);
+  });
+
+  it('treats a wrapped question as one row', () => {
+    // Measured: this label wraps, leaving a 10.4pt gap against a ~16.8pt pitch.
+    const res = proposeField(
+      dozerPage7Table2Header(),
+      'Isolates machine correctly using personnel safety locks',
+    )!;
+
+    expect(res).not.toBeNull();
+    const box = res.segments[0]!;
+    // One band spanning BOTH printed lines (528.6 and 518.2). Counting the wrap
+    // as its own row offsets every answer below it.
+    expect(box.y).toBeLessThan(518.2);
+    expect(box.y + box.height).toBeGreaterThan(528.6);
+  });
+
+  it('matches when the model dropped the printed question number', () => {
+    const res = proposeField(dozerPage7Table1(), '4. Wearing correct PPE');
+
+    expect(res).not.toBeNull();
+  });
+
+  it('produces segments the shared validator accepts', () => {
+    const res = proposeField(dozerPage7Table1(), 'Identify and report potential hazards')!;
+
+    for (const segment of res.segments) {
+      expect(resolveGeometry({ geometry: { segments: [segment] } }, 7).segments).toHaveLength(1);
+    }
+  });
+});
+
+describe('proposeFieldOptionCells — refusals', () => {
+  it('refuses a label that matches no printed row', () => {
+    expect(proposeField(dozerPage7Table1(), 'Conducts a pre-start inspection of the ROPS')).toBeNull();
+  });
+
+  it('refuses a label too short to identify a row', () => {
+    // "Date", "Name", "Yes" match half a page. Below the floor the only safe
+    // answer is to let a reviewer draw it.
+    expect(proposeField(dozerPage7Table1(), 'Date')).toBeNull();
+  });
+
+  it('refuses when the same question is printed twice on the page', () => {
+    // Two equally good matches, and no honest way to pick — placing the cell on
+    // the wrong one records an assessment against something nobody asked.
+    const page = [
+      ...dozerPage7Table1(),
+      ...dozerPage7Table1().map((i) => ({ ...i, y: i.y - 200 })),
+    ];
+
+    expect(proposeField(page, 'Identify and report potential hazards')).toBeNull();
+  });
+
+  it('refuses a page with no option header at all', () => {
+    const prose: PositionedText[] = [
+      { text: 'Identify and report potential hazards', x: 37.5, y: 614, width: 143.6 },
+      { text: 'Wearing correct PPE', x: 37.5, y: 580.3, width: 84 },
+    ];
+
+    expect(proposeField(prose, 'Identify and report potential hazards')).toBeNull();
+  });
+
+  it('refuses a single-option field — one column is not a row of cells', () => {
+    expect(
+      proposeField(dozerPage7Table1(), 'Identify and report potential hazards', ['tick'] as never),
+    ).toBeNull();
+  });
+});
+
+describe('proposeFieldOptionCells — confidence', () => {
+  it('reports full confidence on a corroborated header with every anchor found', () => {
+    // The real page 7: two tables, whose headers repeat the same anchor
+    // positions and so corroborate each other, over DISTINCT criteria.
+    const page7 = [...dozerPage7Table1(), ...dozerPage7Table2Header()];
+    const res = proposeField(page7, 'Maintain three (3) point contact when manoeuvring over')!;
+
+    expect(res).not.toBeNull();
+    expect(res.confidence).toBe(1);
+    expect(res.notes).toEqual([]);
+  });
+
+  it('uses the header governing the matched row, not the first on the page', () => {
+    const page7 = [...dozerPage7Table1(), ...dozerPage7Table2Header()];
+    const res = proposeField(page7, 'Maintain three (3) point contact when manoeuvring over')!;
+    const box = res.segments[0]!;
+
+    // That criterion sits under the SECOND header, at baseline 501.4. Taking
+    // the first header's rows would place the cell ~100pt up the page.
+    expect(box.y).toBeLessThan(501.4);
+    expect(box.y + box.height).toBeGreaterThan(501.4);
+  });
+
+  it('says so when nothing corroborates the column positions', () => {
+    const res = proposeField(dozerPage7Table1(), 'Identify and report potential hazards')!;
+
+    expect(res.confidence).toBeLessThan(1);
+    expect(res.notes.join(' ')).toMatch(/corroborat/i);
+  });
+
+  it('reduces confidence and says why when an anchor had to be inferred', () => {
+    // The Small Loader shape: no Private-Use tick reaches the text layer, so the
+    // tick column is extended from pitch rather than found.
+    const res = proposeField(withoutTick(), 'Identify and report potential hazards');
+
+    if (res) {
+      expect(res.confidence).toBeLessThan(1);
+      expect(res.notes.join(' ')).toMatch(/inferred/i);
+    }
+  });
+});
+
+/**
+ * The two shapes a choice field takes on these forms.
+ *
+ * Both arrive as "a choice field with two options" and both sit on a page
+ * carrying a `✓ / × N/A` header, so nothing in the field's TYPE separates them.
+ * Taken from the real Track Dozer template:
+ *
+ *   - ai_137 "Correct & controlled steering techniques", options ✓ / × and N/A
+ *     — a practical criterion whose options name the printed COLUMNS.
+ *   - ai_29 "Q1. The track dozer must be isolated with a lock and hasp…",
+ *     options True and False — a theory question whose answers print INLINE.
+ *
+ * Mapping the second onto the columns puts a tick for "True" in the tick column
+ * of an outcome cell.
+ */
+describe('proposeFieldOptionCells — options as columns vs options printed inline', () => {
+  /** A page in the practical-criteria shape: labels left, glyph columns right. */
+  function criteriaPage(): PositionedText[] {
+    return [
+      { text: 'N/A', x: 539.9, y: 648.6, width: 13.3 },
+      { text: 'During the demonstration, did the candidate:', x: 37.5, y: 647.7, width: 192 },
+      { text: '\uf0fc', x: 502.6, y: 647.7, width: 7.1 },
+      { text: '/ \u00d7', x: 512.1, y: 647.7, width: 10.3 },
+      { text: 'Correct & controlled steering techniques', x: 37.5, y: 630.8, width: 258.1 },
+      { text: 'Manoeuvres dozer safely', x: 37.5, y: 614, width: 143.6 },
+      { text: 'Uses correct two-way protocols', x: 37.5, y: 597.1, width: 150 },
+    ];
+  }
+
+  /**
+   * The same page furniture, but the row is a theory question that prints its
+   * own answers. The outcome column header is still there — that is the trap.
+   */
+  function theoryPage(): PositionedText[] {
+    return [
+      { text: 'N/A', x: 539.9, y: 648.6, width: 13.3 },
+      { text: 'During the demonstration, did the candidate:', x: 37.5, y: 647.7, width: 192 },
+      { text: '\uf0fc', x: 502.6, y: 647.7, width: 7.1 },
+      { text: '/ \u00d7', x: 512.1, y: 647.7, width: 10.3 },
+      {
+        text: 'Q1. The track dozer must be isolated with a lock and hasp before maintenance',
+        x: 37.5,
+        y: 630.8,
+        width: 258.1,
+      },
+      { text: 'True', x: 300, y: 630.8, width: 18 },
+      { text: 'False', x: 340, y: 630.8, width: 20 },
+      { text: 'Manoeuvres dozer safely', x: 37.5, y: 614, width: 143.6 },
+    ];
+  }
+
+  it('maps a practical criterion onto the printed columns', () => {
+    const res = proposeField(criteriaPage(), 'Correct & controlled steering techniques', [
+      '\u2713 / \u00d7',
+      'N/A',
+    ] as never);
+
+    expect(res).not.toBeNull();
+    expect(res!.segments).toHaveLength(2);
+    // Both cells belong over the glyph columns, right of the label header.
+    for (const segment of res!.segments) expect(segment.x).toBeGreaterThan(450);
+  });
+
+  it('refuses a theory question whose answers are printed in the row', () => {
+    const res = proposeField(
+      theoryPage(),
+      'Q1. The track dozer must be isolated with a lock and hasp before maintenance',
+      ['True', 'False'] as never,
+    );
+
+    // The page has a perfectly good ✓ / × N/A header and the label matches a
+    // row, so everything else about this succeeds — only the printed options
+    // reveal that those columns are not this field's answer cells.
+    expect(res).toBeNull();
+  });
+
+  it('is not fooled by an option word that merely occurs inside a criterion', () => {
+    // `N/A` normalizes to `n a`, which is a SUBSTRING of "in a" and so of half
+    // the criteria on the form. Token-wise it is not, and the criterion must
+    // still be proposed for.
+    const page = criteriaPage().map((i) =>
+      i.text === 'Manoeuvres dozer safely'
+        ? { ...i, text: 'Operates in a safe and controlled manner at all times' }
+        : i,
+    );
+    const res = proposeField(page, 'Operates in a safe and controlled manner at all times', [
+      '\u2713 / \u00d7',
+      'N/A',
+    ] as never);
+
+    expect(res).not.toBeNull();
+  });
+
+  it('ignores symbol-only options, which carry no evidence either way', () => {
+    // `✓ / ×` normalizes to nothing. Treating that as "absent from the row"
+    // would be reading meaning into an empty string.
+    const res = proposeField(criteriaPage(), 'Uses correct two-way protocols', [
+      '\u2713 / \u00d7',
+      'N/A',
+    ] as never);
+
+    expect(res).not.toBeNull();
+  });
+});
+
+/**
+ * Theory questions — answers printed inline.
+ *
+ * The other population of choice fields on the Track Dozer, taken from the real
+ * template: ai_29 prints `True` / `False` beside the question, ai_33 stacks four
+ * answers beneath it. These have no option columns at all, so their marks are
+ * anchored on the answer's OWN printed text.
+ */
+import { proposeInlineOptionCells } from './pdf-geometry.js';
+
+function proposeInline(items: PositionedText[], label: string, options: string[]) {
+  return proposeInlineOptionCells({ page: 2, ...A4, items, label, options });
+}
+
+const Q1 = 'Q1. The track dozer must be isolated with a lock and hasp before maintenance';
+
+/** ai_29's shape: question, then a checkbox and word for each answer. */
+function inlineTrueFalse(): PositionedText[] {
+  return [
+    { text: Q1, x: 37.5, y: 630.8, width: 380 },
+    { text: '\u2610', x: 430, y: 630.8, width: 9 },
+    { text: 'True', x: 443, y: 630.8, width: 18 },
+    { text: '\u2610', x: 480, y: 630.8, width: 9 },
+    { text: 'False', x: 493, y: 630.8, width: 20 },
+  ];
+}
+
+/** ai_33's shape: four answers stacked beneath, no checkbox in the text layer. */
+function stackedChoices(): PositionedText[] {
+  return [
+    { text: 'Q3. What is the purpose of performing a walk around pre-start inspection?', x: 37.5, y: 630.8, width: 400 },
+    { text: 'Inspect for damage', x: 60, y: 614, width: 90 },
+    { text: 'Identify faults with the machine', x: 60, y: 597.1, width: 140 },
+    { text: 'Ensure equipment is safe to operate', x: 60, y: 580.3, width: 160 },
+    { text: 'All the above', x: 60, y: 563.5, width: 62 },
+  ];
+}
+
+describe('proposeInlineOptionCells', () => {
+  it('uses the printed checkbox when it reaches the text layer', () => {
+    const res = proposeInline(inlineTrueFalse(), Q1, ['True', 'False'])!;
+
+    expect(res).not.toBeNull();
+    expect(res.segments.map((s) => s.optionKey)).toEqual(['True', 'False']);
+    // The ☐ glyphs sit at 430 and 480 — the boxes are those, not the words.
+    expect(res.segments[0]!.x).toBe(430);
+    expect(res.segments[1]!.x).toBe(480);
+    expect(res.confidence).toBe(1);
+  });
+
+  it('keeps each box on its own answer, never straddling the next', () => {
+    const res = proposeInline(inlineTrueFalse(), Q1, ['True', 'False'])!;
+    const [t, f] = res.segments;
+
+    // "True" runs 443-461; the False marker starts at 480. A box that reached
+    // across would let one tick read as either answer.
+    expect(t!.x + t!.width).toBeLessThan(f!.x);
+  });
+
+  it('estimates a box beside the answer when no checkbox is in the text layer', () => {
+    const res = proposeInline(stackedChoices(), 'Q3. What is the purpose of performing a walk around pre-start inspection?', [
+      'Inspect for damage',
+      'Identify faults with the machine',
+      'Ensure equipment is safe to operate',
+      'All the above',
+    ])!;
+
+    expect(res).not.toBeNull();
+    expect(res.segments).toHaveLength(4);
+    // Left of the answer text, and on that answer's own baseline.
+    for (const segment of res.segments) expect(segment.x).toBeLessThan(60);
+    expect(res.segments[0]!.y).toBeGreaterThan(res.segments[3]!.y);
+  });
+
+  it('says an estimated box needs checking, and does not read as certain', () => {
+    const res = proposeInline(stackedChoices(), 'Q3. What is the purpose of performing a walk around pre-start inspection?', [
+      'Inspect for damage',
+      'Identify faults with the machine',
+      'Ensure equipment is safe to operate',
+      'All the above',
+    ])!;
+
+    expect(res.confidence).toBe(0.5);
+    expect(res.notes.join(' ')).toMatch(/estimated/i);
+  });
+
+  it('produces segments the shared validator accepts', () => {
+    const res = proposeInline(inlineTrueFalse(), Q1, ['True', 'False'])!;
+
+    for (const segment of res.segments) {
+      expect(resolveGeometry({ geometry: { segments: [segment] } }, 3).segments).toHaveLength(1);
+    }
+  });
+});
+
+describe('proposeInlineOptionCells — refusals', () => {
+  it('refuses when one option is not printed anywhere', () => {
+    // Partial placement is worse than none: the options a reviewer can see
+    // placed are the ones they stop checking.
+    expect(proposeInline(inlineTrueFalse(), Q1, ['True', 'False', 'N/A'])).toBeNull();
+  });
+
+  it('refuses when an option word appears twice in the window', () => {
+    const page = [...inlineTrueFalse(), { text: 'True', x: 60, y: 597.1, width: 18 }];
+
+    expect(proposeInline(page, Q1, ['True', 'False'])).toBeNull();
+  });
+
+  it('refuses when the question itself is printed twice', () => {
+    const page = [...inlineTrueFalse(), ...inlineTrueFalse().map((i) => ({ ...i, y: i.y - 300 }))];
+
+    expect(proposeInline(page, Q1, ['True', 'False'])).toBeNull();
+  });
+
+  it('refuses a question label too short to identify', () => {
+    expect(proposeInline(inlineTrueFalse(), 'Q1', ['True', 'False'])).toBeNull();
+  });
+
+  it('refuses when the question is not on this page', () => {
+    expect(
+      proposeInline(inlineTrueFalse(), 'Q7. It is acceptable to leave a vertical face', ['True', 'False']),
+    ).toBeNull();
+  });
+
+  it('does not search past the question that follows', () => {
+    // "False" belongs to a question far below; taking it would place this
+    // question's mark on another question's answer.
+    const page = [
+      { text: Q1, x: 37.5, y: 630.8, width: 380 },
+      { text: 'True', x: 443, y: 630.8, width: 18 },
+      ...Array.from({ length: 20 }, (_, i) => ({
+        text: `filler line ${i}`,
+        x: 37.5,
+        y: 614 - i * 16.8,
+        width: 100,
+      })),
+      { text: 'False', x: 443, y: 250, width: 20 },
+    ];
+
+    expect(proposeInline(page, Q1, ['True', 'False'])).toBeNull();
+  });
+});
