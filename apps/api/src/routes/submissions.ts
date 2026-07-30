@@ -8,6 +8,7 @@ import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
+import { notifyInductionIntake } from '../webhooks/notify-intake.js';
 import { db } from '../db.js';
 
 /**
@@ -292,6 +293,12 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     })
     .returning();
   if (!row) throw new Error('submission_create_failed: insert returned no row');
+
+  // Fire-and-forget: the row is committed, and the filler must not wait on
+  // someone else's endpoint to learn their form saved. `.catch` is
+  // belt-and-braces — `notifyInductionIntake` already swallows delivery
+  // failures — against an unhandled rejection taking the process down.
+  void notifyInductionIntake(db, tenant, row, versionFields).catch(() => {});
 
   res.status(201).json(rowDto(row, template.name, sessionUser));
 }));

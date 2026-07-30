@@ -1,0 +1,1 @@
+ALTER TABLE "organizations" ADD COLUMN "induction_webhook_url" text DEFAULT '' NOT NULL;

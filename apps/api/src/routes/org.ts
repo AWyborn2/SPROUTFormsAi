@@ -11,6 +11,7 @@ import { recordAudit } from '../audit/record.js';
 import { deleteSupersededLogo, logoKeyFromPublicUrl } from './assets.js';
 import { runBrandScan } from '../brand-scan/scan.js';
 import { SafeFetchError } from '../brand-scan/safe-fetch.js';
+import { maskWebhookUrl } from '../webhooks/induction.js';
 import { db } from '../db.js';
 
 /**
@@ -199,14 +200,43 @@ const patchOrgBody = z
     teamSize: z.string().trim().min(1).max(32).optional(),
     /** Marks the onboarding wizard finished. Stamps once; repeats are no-ops. */
     onboardingComplete: z.literal(true).optional(),
+    /**
+     * Where to POST when an induction intake arrives; `''` turns it off.
+     *
+     * https only, and no credentials in the userinfo position. The address
+     * validation proper happens at send time in `safeFetch` — checking here as
+     * well would be a check-then-use gap, since DNS can change between the two.
+     * What this rejects is the class of value that could never be right.
+     */
+    inductionWebhookUrl: z
+      .union([
+        z.literal(''),
+        z
+          .string()
+          .trim()
+          .max(2048)
+          .refine((raw) => {
+            try {
+              const url = new URL(raw);
+              return url.protocol === 'https:' && !url.username && !url.password;
+            } catch {
+              return false;
+            }
+          }, 'Must be an https:// URL with no embedded credentials'),
+      ])
+      .optional(),
   })
   .refine(
     (b) =>
       b.name !== undefined ||
       b.branding !== undefined ||
       b.teamSize !== undefined ||
-      b.onboardingComplete !== undefined,
-    { message: 'At least one of name, branding, teamSize or onboardingComplete is required' },
+      b.onboardingComplete !== undefined ||
+      b.inductionWebhookUrl !== undefined,
+    {
+      message:
+        'At least one of name, branding, teamSize, onboardingComplete or inductionWebhookUrl is required',
+    },
   );
 
 orgRouter.patch(
@@ -235,7 +265,7 @@ orgRouter.patch(
       res.status(404).json({ error: 'not_found' });
       return;
     }
-    const { name, branding, teamSize, onboardingComplete } = parsed.data;
+    const { name, branding, teamSize, onboardingComplete, inductionWebhookUrl } = parsed.data;
 
     // The Zod refine proved the URL is one we minted; this proves it is *ours*.
     // Without it an admin could assign another tenant's logo key to their org.
@@ -254,6 +284,7 @@ orgRouter.patch(
       ...(name !== undefined ? { name } : {}),
       ...(branding !== undefined ? { branding } : {}),
       ...(teamSize !== undefined ? { teamSize } : {}),
+      ...(inductionWebhookUrl !== undefined ? { inductionWebhookUrl } : {}),
     };
     if (Object.keys(updates).length > 0) {
       await db
@@ -303,19 +334,32 @@ orgRouter.patch(
     // Audit what actually changed. A teamSize-only or onboarding-only PATCH is
     // not a branding edit, and a PATCH that changed nothing isn't an event.
     const renamed = name !== undefined && name !== org.name;
-    const changed = renamed || branding !== undefined || teamSize !== undefined || stamped;
+    const webhookChanged = inductionWebhookUrl !== undefined;
+    const changed =
+      renamed || branding !== undefined || teamSize !== undefined || stamped || webhookChanged;
     if (changed) {
       await recordAudit(db, tenant, {
-        action: renamed ? 'Renamed organisation' : 'Updated organisation settings',
+        action: renamed
+          ? 'Renamed organisation'
+          : webhookChanged
+            ? inductionWebhookUrl
+              ? 'Set induction intake webhook'
+              : 'Cleared induction intake webhook'
+            : 'Updated organisation settings',
         target: renamed
           ? `${org.name} → ${name}`
-          : branding !== undefined
-            ? 'Branding kit'
-            : stamped
-              ? 'Onboarding completed'
-              : 'Organisation details',
+          : // Masked: the query string carries the endpoint's authorisation, and
+            // an audit row is exactly the kind of durable record it must not
+            // reach.
+            webhookChanged
+            ? maskWebhookUrl(inductionWebhookUrl) || '(disabled)'
+            : branding !== undefined
+              ? 'Branding kit'
+              : stamped
+                ? 'Onboarding completed'
+                : 'Organisation details',
         category: 'settings',
-        icon: 'settings',
+        icon: webhookChanged && !renamed ? 'webhook' : 'settings',
       });
     }
 
@@ -325,6 +369,10 @@ orgRouter.patch(
       branding: branding ?? org.branding,
       teamSize: teamSize ?? org.teamSize ?? null,
       onboardingCompletedAt: onboardingCompletedAt?.toISOString() ?? null,
+      // Masked, never the stored value. An admin needs to see WHICH endpoint is
+      // configured; nobody needs the API to hand the credential back, and a
+      // response body travels further than the database row does.
+      inductionWebhookUrl: maskWebhookUrl(inductionWebhookUrl ?? org.inductionWebhookUrl),
     });
   }),
 );

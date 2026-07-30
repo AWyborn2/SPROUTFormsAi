@@ -148,6 +148,13 @@
       "when": 1785373750817,
       "tag": "0020_tricky_trish_tilby",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1785395711805,
+      "tag": "0021_flawless_stone_men",
+      "breakpoints": true
     }
   ]
 }

@@ -44,6 +44,15 @@ export const organizations = pgTable('organizations', {
   teamSize: text('team_size'),
   /** When the onboarding wizard was completed. Null = wizard still pending. */
   onboardingCompletedAt: timestamp('onboarding_completed_at', { withTimezone: true }),
+  /**
+   * Where to POST a summary when an induction intake is submitted. Empty = off.
+   *
+   * TREAT THE VALUE AS A SECRET. The intended target is a Power Automate HTTP
+   * trigger, and that URL carries its own authorisation in the query string —
+   * whoever holds it can fire the flow. So it is never returned in full by the
+   * API (see `maskWebhookUrl`) and never written to a log line.
+   */
+  inductionWebhookUrl: text('induction_webhook_url').notNull().default(''),
 });
 
 export const users = pgTable('users', {
