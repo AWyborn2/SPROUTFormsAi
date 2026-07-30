@@ -31,6 +31,13 @@ export interface Candidate {
   submissionId: string;
   submittedAt: string;
   status: string;
+  /**
+   * Who lodged the intake — usually not the person it is about. `verified` is
+   * false when the form arrived through a public fill link, where the name and
+   * address are whatever the filler typed rather than an identity the API
+   * stamped from a session.
+   */
+  submittedBy: { name: string; email: string; verified: boolean };
   starter: Record<string, unknown>;
   readiness: 'ready' | 'blocked';
   blockers: string[];
