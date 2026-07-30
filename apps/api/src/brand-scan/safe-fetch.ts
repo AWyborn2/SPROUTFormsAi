@@ -58,10 +58,26 @@ export interface SafeFetchOptions {
   timeoutMs?: number;
   /** Hard ceiling on the decoded body. */
   maxBytes?: number;
+  /**
+   * Redirect hops to follow. Pass 0 to refuse them outright — the right choice
+   * for a POST, where following a hop would re-send the body to a host the
+   * caller never nominated, and where a redirecting endpoint is a
+   * misconfiguration worth failing loudly on rather than papering over.
+   */
   maxRedirects?: number;
+  method?: 'GET' | 'POST';
+  /** Request body. POST only; ignored on GET. */
+  body?: string;
+  /** Merged over the defaults, so a caller can set its own content-type. */
+  headers?: Record<string, string>;
 }
 
-const DEFAULTS = { timeoutMs: 8000, maxBytes: 2 * 1024 * 1024, maxRedirects: 3 };
+const DEFAULTS = {
+  timeoutMs: 8000,
+  maxBytes: 2 * 1024 * 1024,
+  maxRedirects: 3,
+  method: 'GET' as const,
+};
 
 /**
  * True when an address is safe to connect to: public unicast only.
@@ -160,17 +176,25 @@ export interface SafeFetchResult {
   body: string;
 }
 
-function once(url: URL, timeoutMs: number, maxBytes: number): Promise<{
+function once(
+  url: URL,
+  timeoutMs: number,
+  maxBytes: number,
+  method: 'GET' | 'POST' = 'GET',
+  body?: string,
+  extraHeaders?: Record<string, string>,
+): Promise<{
   status: number;
   headers: IncomingMessage['headers'];
   body: string;
 }> {
   const send = url.protocol === 'https:' ? httpsRequest : httpRequest;
+  const payload = method === 'POST' && body !== undefined ? Buffer.from(body, 'utf8') : null;
   return new Promise((resolve, reject) => {
     const req = send(
       url,
       {
-        method: 'GET',
+        method,
         lookup: validatingLookup,
         headers: {
           // Identify honestly; some sites serve a different shell to unknown
@@ -178,6 +202,11 @@ function once(url: URL, timeoutMs: number, maxBytes: number): Promise<{
           'user-agent': 'FormAI-BrandScan/1.0 (+https://formai.app)',
           accept: 'text/html,text/css,*/*;q=0.5',
           'accept-encoding': 'identity',
+          // Length from the encoded buffer, not the string: a multi-byte
+          // character would make `body.length` shorter than the bytes actually
+          // written and the request would hang waiting for the rest.
+          ...(payload ? { 'content-length': String(payload.byteLength) } : {}),
+          ...extraHeaders,
         },
       },
       (res) => {
@@ -214,6 +243,7 @@ function once(url: URL, timeoutMs: number, maxBytes: number): Promise<{
           : new SafeFetchError((err as Error).message, 'request_failed'),
       ),
     );
+    if (payload) req.write(payload);
     req.end();
   });
 }
@@ -226,7 +256,7 @@ export async function safeFetch(
   rawUrl: string,
   options: SafeFetchOptions = {},
 ): Promise<SafeFetchResult> {
-  const { timeoutMs, maxBytes, maxRedirects } = { ...DEFAULTS, ...options };
+  const { timeoutMs, maxBytes, maxRedirects, method } = { ...DEFAULTS, ...options };
   const deadline = Date.now() + timeoutMs;
 
   let url = assertFetchableUrl(rawUrl);
@@ -235,7 +265,13 @@ export async function safeFetch(
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new SafeFetchError('Request timed out', 'timeout');
 
-    const res = await once(url, remaining, maxBytes);
+    // Body and headers go on the FIRST hop only. Re-POSTing to a redirect
+    // target would send the payload somewhere the caller never nominated —
+    // callers that care pass maxRedirects: 0 and never reach a second hop.
+    const res =
+      hop === 0
+        ? await once(url, remaining, maxBytes, method, options.body, options.headers)
+        : await once(url, remaining, maxBytes);
 
     const isRedirect = res.status >= 300 && res.status < 400 && res.headers.location;
     if (!isRedirect) {

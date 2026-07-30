@@ -670,6 +670,73 @@ describe('PATCH /org', () => {
     }
   });
 
+  it('stores the induction webhook in full but never returns or audits it in full', async () => {
+    // The query string is the endpoint's authorisation. It has to reach the
+    // row, and it must not reach the response body or the audit target — both
+    // of which travel further and live longer than the column does.
+    const SECRET_URL =
+      'https://prod-42.australiasoutheast.logic.azure.com/workflows/abc/triggers/manual/paths/invoke?api-version=2016-06-01&sig=SECRETSIGNATURE';
+    const { db, updateSet, insertValues } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { inductionWebhookUrl: SECRET_URL });
+      expect(res.status).toBe(200);
+
+      const text = await res.text();
+      expect(text).not.toContain('SECRETSIGNATURE');
+      expect(JSON.parse(text).inductionWebhookUrl).toBe(
+        'https://prod-42.australiasoutheast.logic.azure.com/workflows/abc/triggers/manual/paths/invoke?…',
+      );
+
+      // The row does get the real value — masking is a disclosure boundary, not
+      // storage. Without this the feature would be masked into uselessness.
+      expect(updateSet.mock.calls[0]?.[1]).toEqual({ inductionWebhookUrl: SECRET_URL });
+
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      // Serialise the VALUES only — element 0 is the drizzle table object, which
+      // is circular.
+      expect(JSON.stringify(auditInsert?.[1])).not.toContain('SECRETSIGNATURE');
+      expect(auditInsert?.[1]).toMatchObject({ action: 'Set induction intake webhook' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects a webhook URL that is not https or carries embedded credentials', async () => {
+    for (const bad of [
+      'http://example.com/hook',
+      'https://user:pass@example.com/hook',
+      'ftp://example.com/hook',
+      'not a url',
+    ]) {
+      const { db } = fakeDb();
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await patchOrg(base, ownerTenant, { inductionWebhookUrl: bad });
+        expect(res.status, `expected ${bad} to be rejected`).toBe(400);
+      } finally {
+        server.close();
+      }
+    }
+  });
+
+  it('lets an empty string clear the webhook', async () => {
+    const { db, updateSet, insertValues } = fakeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchOrg(base, ownerTenant, { inductionWebhookUrl: '' });
+      expect(res.status).toBe(200);
+      expect(updateSet.mock.calls[0]?.[1]).toEqual({ inductionWebhookUrl: '' });
+      const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(auditInsert?.[1]).toMatchObject({ action: 'Cleared induction intake webhook' });
+    } finally {
+      server.close();
+    }
+  });
+
   it('lets an owner update name and branding together, persists the row, and audits the rename', async () => {
     const { db, updateSet, insertValues } = fakeDb();
     mockDbValue = db;
@@ -684,6 +751,9 @@ describe('PATCH /org', () => {
         branding: NEW_KIT,
         teamSize: null,
         onboardingCompletedAt: null,
+        // Always present, always masked. Empty here because this org has no
+        // webhook set — unset reads as '' rather than the key being absent.
+        inductionWebhookUrl: '',
       });
 
       // The row update carried both fields (name trimmed).
