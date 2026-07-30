@@ -10,6 +10,7 @@ import {
   fieldsInPart,
   fieldsInSection,
   isCaseCompetent,
+  logbookRows,
   markTheory,
   orderedParts,
   requiredParts,
@@ -97,6 +98,16 @@ async function logbookTableId(
   return fieldsInSection(fields, startFieldId).find((f) => f.type === 'repeating_group')?.id;
 }
 
+/** The rows to carry into a retry, read by the one shared rule. */
+async function logbookRowsOf(
+  database: Database,
+  attempt: { values: Record<string, SubmissionValue>; templateVersionId: string },
+  part: AssessmentPart,
+): Promise<RepeatingRowValue[]> {
+  const fields = await fieldsForVersion(database, attempt.templateVersionId);
+  return logbookRows(fields, part, attempt.values);
+}
+
 /**
  * The rows and threshold stamp a new logbook attempt inherits from the last one.
  *
@@ -128,14 +139,14 @@ async function carryForwardLogbook(
   const last = [...input.previous].sort((a, b) => b.attemptNumber - a.attemptNumber)[0];
   if (!last) return undefined;
 
-  const [fromId, toId] = await Promise.all([
-    logbookTableId(database, last.templateVersionId, input.part.startFieldId),
+  // Read by the SHARED rule so the rows carried forward are exactly the rows the
+  // threshold counted and the dashboard reports. Written under the NEW version's
+  // table id, which is why only the destination needs resolving here.
+  const [rows, toId] = await Promise.all([
+    logbookRowsOf(database, last, input.part),
     logbookTableId(database, input.toVersionId, input.part.startFieldId),
   ]);
-  if (!fromId || !toId) return undefined;
-
-  const rows = last.values?.[fromId];
-  if (!Array.isArray(rows) || rows.length === 0) return undefined;
+  if (!toId || rows.length === 0) return undefined;
 
   return { values: { [toId]: rows }, thresholdNotifiedAt: last.thresholdNotifiedAt ?? null };
 }
@@ -470,25 +481,27 @@ assessmentCasesRouter.get(
  */
 function loggedHoursFor(
   part: AssessmentPart,
-  attempts: readonly { attemptNumber: number; values: Record<string, SubmissionValue> }[],
+  attempts: readonly {
+    attemptNumber: number;
+    values: Record<string, SubmissionValue>;
+    templateVersionId: string;
+  }[],
+  fieldsByVersion: ReadonlyMap<string, FormField[]>,
 ): number | null {
   if (part.kind !== 'logbook' || !part.durationColumnKey) return null;
   // Picked by attempt number rather than by position, so the answer does not
-  // depend on the order the caller happened to hand them over in.
+  // depend on the order the caller happened to hand them over in. The latest
+  // attempt is authoritative because a logbook retry CARRIES its rows forward,
+  // so the newest row already holds every hour logged.
   const latest = attempts.reduce<(typeof attempts)[number] | undefined>(
     (best, a) => (!best || a.attemptNumber > best.attemptNumber ? a : best),
     undefined,
   );
   if (!latest) return 0;
 
-  // An array in a value map is not necessarily a table — a checkbox group's
-  // selections are an array of strings — so rows are narrowed to objects rather
-  // than asserted to be table rows.
-  const rows = Object.values(latest.values ?? {}).flatMap((value) =>
-    Array.isArray(value)
-      ? value.filter((row): row is RepeatingRowValue => typeof row === 'object' && row !== null)
-      : [],
-  );
+  // The same rule the threshold notification and the retry carry-forward use.
+  // Three copies of "which rows are the logbook" disagreed; this is the one.
+  const rows = logbookRows(fieldsByVersion.get(latest.templateVersionId) ?? [], part, latest.values);
   return totalLoggedHours(rows, part.durationColumnKey);
 }
 
@@ -571,6 +584,32 @@ assessmentCasesRouter.get(
       else byCase.set(row.caseId, [row]);
     }
 
+    /*
+      The fields of every version the visible attempts are pinned to, loaded ONCE
+      for the whole page.
+
+      Needed because hours come from the part's DECLARED table, and finding that
+      table means reading the version an attempt was taken against. Counting
+      every array on the attempt instead — which this endpoint used to do — made
+      it disagree with the threshold notification about the same candidate, with
+      no retry involved. See `logbookRows`.
+
+      Deduplicated by version rather than fetched per attempt: a cohort shares a
+      handful of versions, and a read per attempt is the N+1 this endpoint exists
+      to replace.
+    */
+    const versionIds = [
+      ...new Set([...byCase.values()].flat().map((a) => a.templateVersionId)),
+    ];
+    const versions = versionIds.length
+      ? await db.query.formTemplateVersions.findMany({
+          where: inArray(schema.formTemplateVersions.id, versionIds),
+        })
+      : [];
+    const fieldsByVersion = new Map<string, FormField[]>(
+      versions.map((v) => [v.id, (v.fields ?? []) as FormField[]]),
+    );
+
     res.json(
       cases.map((c) => {
         const tool = toolById.get(c.toolId);
@@ -609,6 +648,7 @@ assessmentCasesRouter.get(
             loggedHours: loggedHoursFor(
               p.part,
               attempts.filter((a) => a.partKey === p.part.key),
+              fieldsByVersion,
             ),
           })),
           createdAt: c.createdAt,
@@ -1140,9 +1180,10 @@ assessmentCasesRouter.patch(
         }),
       );
 
-      const rows = (table ? values[table.id] : Object.values(values).find(Array.isArray)) as
-        | RepeatingRowValue[]
-        | undefined;
+      // Shared with the progress dashboard and the retry carry-forward. The old
+      // fallback here took the first array of ANY kind, which would have counted
+      // a checkbox group's answers as logbook rows.
+      const rows: RepeatingRowValue[] = logbookRows(fields, part, values);
 
       // A row whose duration is present but not a positive number is a
       // mis-entry (zero, negative, or meter readings that go backwards — a
