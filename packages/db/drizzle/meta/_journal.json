@@ -120,27 +120,6 @@
       "when": 1785278767815,
       "tag": "0016_messy_blur",
       "breakpoints": true
-    },
-    {
-      "idx": 17,
-      "version": "7",
-      "when": 1785298784026,
-      "tag": "0017_acoustic_cassandra_nova",
-      "breakpoints": true
-    },
-    {
-      "idx": 18,
-      "version": "7",
-      "when": 1785299107587,
-      "tag": "0018_kind_zarda",
-      "breakpoints": true
-    },
-    {
-      "idx": 19,
-      "version": "7",
-      "when": 1785301177850,
-      "tag": "0019_green_arachne",
-      "breakpoints": true
     }
   ]
 }

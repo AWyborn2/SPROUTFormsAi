@@ -1,1 +1,0 @@
-ALTER TABLE "assessment_part_attempts" ADD COLUMN "submitted_at" timestamp with time zone;
