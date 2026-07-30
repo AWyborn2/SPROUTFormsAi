@@ -17,6 +17,7 @@ import { ImportPublishScreen } from './screens/import/ImportPublishScreen.js';
 import { FillScreen } from './screens/fill/FillScreen.js';
 import { InviteScreen } from './screens/invite/InviteScreen.js';
 import { ResetPasswordScreen } from './screens/invite/ResetPasswordScreen.js';
+import { ApiKeysScreen } from './screens/enterprise/ApiKeysScreen.js';
 import { TeamScreen } from './screens/enterprise/TeamScreen.js';
 import { RolesScreen } from './screens/enterprise/RolesScreen.js';
 import { AuditScreen } from './screens/enterprise/AuditScreen.js';
@@ -47,6 +48,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   invite: <InviteScreen />,
   'reset-password': <ResetPasswordScreen />,
   team: <TeamScreen />,
+  'api-keys': <ApiKeysScreen />,
   roles: <RolesScreen />,
   audit: <AuditScreen />,
   billing: <BillingScreen />,

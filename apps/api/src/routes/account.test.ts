@@ -161,6 +161,9 @@ describe('DELETE /account', () => {
 
       const deletedTables = deleteWhere.mock.calls.map(([table]) => table);
       expect(deletedTables).toEqual([
+        // Bookings first: induction_booking_starters RESTRICTs its submission
+        // reference, so deleting submissions before bookings aborts the cascade.
+        schema.inductionBookings,
         schema.submissions,
         schema.competencyRules,
         schema.competencies,

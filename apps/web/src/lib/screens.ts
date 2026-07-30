@@ -66,6 +66,7 @@ export const SCREENS: ScreenDef[] = [
   // is a distinct attempt row, and the URL has to say which one is being
   // answered or a resumed link would reopen the wrong one.
   { key: 'assessment-part-fill', path: '/app/assessments/:id/attempts/:attemptId', group: 'Assessments', label: 'Complete assessment part', icon: 'pen-line', shell: 'app' },
+  { key: 'api-keys', path: '/app/settings/api-keys', group: 'Enterprise & org', label: 'API keys', icon: 'key', shell: 'app', inNav: true },
   { key: 'whitelabel', path: '/app/settings/branding', group: 'Enterprise & org', label: 'Branding', icon: 'sliders-horizontal', shell: 'app', inNav: true },
 
   // Mobile (responsive web)

@@ -2,7 +2,9 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express, { type Express } from 'express';
 import { env } from './env.js';
+import { requireMachineKeyFromPath, requireMachineOrTenant } from './middleware/machine.js';
 import { accountRouter } from './routes/account.js';
+import { apiKeysRouter } from './routes/api-keys.js';
 import { orgLogoRouter, publicAssetsRouter } from './routes/assets.js';
 import { assessmentCasesRouter, assessmentToolsRouter } from './routes/assessments.js';
 import { auditRouter } from './routes/audit.js';
@@ -12,6 +14,8 @@ import { dashboardRouter } from './routes/dashboard.js';
 import { formFillLinksRouter, publicFillRouter } from './routes/fill-links.js';
 import { formsRouter } from './routes/forms.js';
 import { healthRouter } from './routes/health.js';
+import { inductionMcpRouter } from '@formai/mcp-inductions/express';
+import { inductionsRouter } from './routes/inductions.js';
 import { invitesRouter, publicInvitesRouter } from './routes/invites.js';
 import { passwordResetRouter } from './routes/password-reset.js';
 import { orgRouter } from './routes/org.js';
@@ -82,6 +86,31 @@ export function createApp(): Express {
   app.use('/invites', invitesRouter);
   app.use('/submissions', submissionsRouter);
   app.use('/team', teamRouter);
+  // Machine credentials. Session-only by design — a key must not be able to
+  // mint or revoke keys (see routes/api-keys.ts).
+  app.use('/api-keys', apiKeysRouter);
+  // The one router an API key can reach. Everything above stays session-only,
+  // so widening machine access is a deliberate mount rather than a side effect.
+  app.use('/inductions', inductionsRouter);
+  // The same tools over Streamable HTTP, for MCP clients that cannot spawn a
+  // local process (a hosted agent, anything not on the operator's machine).
+  // `requireMachineOrTenant` runs first so a bad or revoked key is refused
+  // before the protocol handshake, rather than surfacing as a tool failure
+  // several round trips later. The tools then call this same API back over
+  // loopback with the caller's own key — see the router's docstring for why
+  // that hop is deliberate.
+  const mcpApiUrl = `http://127.0.0.1:${env.API_PORT}`;
+  // URL-credentialed door, mounted BEFORE the header one so the more specific
+  // path wins (`app.use('/mcp', …)` would otherwise swallow it). It exists
+  // because Claude's custom-connector dialog takes a URL and OAuth fields with
+  // nowhere to put a bearer token; see requireMachineKeyFromPath for the
+  // tradeoff that buys.
+  app.use(
+    '/mcp/key/:key',
+    requireMachineKeyFromPath('key'),
+    inductionMcpRouter({ apiUrl: mcpApiUrl, apiKeyFor: (req) => req.machineApiKey ?? null }),
+  );
+  app.use('/mcp', requireMachineOrTenant, inductionMcpRouter({ apiUrl: mcpApiUrl }));
   app.use('/audit', auditRouter);
   app.use('/dashboard', dashboardRouter);
   app.use('/competencies', competenciesRouter);

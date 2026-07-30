@@ -7,7 +7,6 @@ import {
   CHC_INTAKE_FORM_NAME,
   CHC_INTAKE_RECIPIENT,
   CHC_LICENCE_CLASSES,
-  CHC_MIN_NOTICE_BUSINESS_DAYS,
   CHC_ORG_NAME,
   CHC_SITE_SUBTITLE,
   CHC_STARTER_TYPES,
@@ -356,7 +355,7 @@ export function ChcIntakeScreen() {
               label="Preferred induction date"
               required
               error={errors.induction_date}
-              hint={`Mondays only · minimum ${CHC_MIN_NOTICE_BUSINESS_DAYS} business days notice.`}
+              hint="Mondays only (Tuesday after a public holiday) · book by the Thursday before."
             >
               <input
                 type="date"

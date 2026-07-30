@@ -14,6 +14,7 @@ import type { PermissionMatrix } from '@formai/shared';
 import { auditCategoryEnum, roleEnum } from './enums.ts';
 import { organizations, users } from './organizations.ts';
 import { formTemplates } from './forms.ts';
+import { submissions } from './submissions.ts';
 
 /** Competencies held by workers (Should-tier gating). */
 export const competencies = pgTable(
@@ -129,6 +130,150 @@ export const auditLogEntries = pgTable(
     index('audit_org_created_idx').on(t.orgId, t.createdAt),
   ],
 );
+
+/**
+ * A machine credential: an org-scoped key an agent presents instead of a
+ * session cookie.
+ *
+ * Only the SHA-256 `hash` of the full key is stored, so a database dump does
+ * not yield working credentials and the plaintext exists exactly once, in the
+ * create response. `prefix` is the displayable leading segment AND the lookup
+ * handle — uniquely indexed so verification is one indexed read followed by a
+ * constant-time hash comparison, rather than a scan that hashes every row.
+ *
+ * `role` reuses the membership role enum, so a key's authority is described in
+ * exactly the same vocabulary as a person's and resolves through the same
+ * permission matrix. Revocation is a timestamp rather than a delete: a key that
+ * did something needs to remain visible to the audit conversation about it.
+ */
+export const apiKeys = pgTable(
+  'api_keys',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** Human label, e.g. "Induction booking agent". */
+    name: text().notNull(),
+    role: roleEnum().notNull().default('reviewer'),
+    prefix: text().notNull(),
+    hash: text().notNull(),
+    /**
+     * The administrator who issued it. Machine calls act as this user, because
+     * `TenantContext.userId` is non-nullable and audit rows must name a real
+     * actor — an agent's action is attributable to whoever authorised it.
+     */
+    createdByUserId: uuid().references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+    lastUsedAt: timestamp({ withTimezone: true }),
+    revokedAt: timestamp({ withTimezone: true }),
+  },
+  (t) => [uniqueIndex('api_keys_prefix_uq').on(t.prefix), index('api_keys_org_idx').on(t.orgId)],
+);
+
+export const apiKeysRelations = relations(apiKeys, ({ one }) => ({
+  org: one(organizations, {
+    fields: [apiKeys.orgId],
+    references: [organizations.id],
+  }),
+  createdBy: one(users, {
+    fields: [apiKeys.createdByUserId],
+    references: [users.id],
+  }),
+}));
+
+/**
+ * A booked induction: one date, N seats, the starters it covers.
+ *
+ * Deliberately its own record rather than a submission status. A status string
+ * cannot hold a seat count, an external reference, or the many-starters-to-one
+ * -booking shape the site actually books in — and conflating "this intake was
+ * approved" with "this cohort was booked" would leave neither answerable.
+ *
+ * `inductionDate` is text in the same ISO form the intake answer uses, so the
+ * two compare without a conversion in between.
+ */
+export const inductionBookings = pgTable(
+  'induction_bookings',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** ISO `YYYY-MM-DD`, matching the intake answer it was booked from. */
+    inductionDate: text('induction_date').notNull(),
+    /** Seats taken. Derived from the starters, stored so the booking reads on its own. */
+    seats: integer().notNull(),
+    /** The external system's handle, e.g. a BISTrainer transaction reference. */
+    externalReference: text('external_reference').notNull().default(''),
+    note: text().notNull().default(''),
+    /**
+     * Why the four-business-day notice rule was waived, when it was.
+     *
+     * Empty on an ordinary booking. Non-empty is the trace of a deliberate
+     * exception: the API refuses to record a short-notice booking without one,
+     * so an auditor asking "who agreed to this, and why" finds the answer
+     * stored beside the booking rather than in somebody's inbox.
+     */
+    noticeOverrideReason: text('notice_override_reason').notNull().default(''),
+    /** The acting user. For a machine call this is the API key's issuer. */
+    bookedByUserId: uuid('booked_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** Set when an agent booked it, so machine and human bookings stay distinguishable. */
+    bookedByApiKeyId: uuid('booked_by_api_key_id').references(() => apiKeys.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('induction_bookings_org_idx').on(t.orgId),
+    index('induction_bookings_org_date_idx').on(t.orgId, t.inductionDate),
+  ],
+);
+
+/**
+ * One starter's seat in a booking.
+ *
+ * `starterName` is captured at booking time on purpose: the submission it came
+ * from stays editable, and the record of who was actually booked must not
+ * change underneath the booking. The unique index is what makes a retried tool
+ * call idempotent rather than double-booking a seat.
+ */
+export const inductionBookingStarters = pgTable(
+  'induction_booking_starters',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    bookingId: uuid('booking_id')
+      .notNull()
+      .references(() => inductionBookings.id, { onDelete: 'cascade' }),
+    submissionId: uuid('submission_id')
+      .notNull()
+      .references(() => submissions.id, { onDelete: 'restrict' }),
+    starterName: text('starter_name').notNull(),
+  },
+  (t) => [
+    uniqueIndex('induction_booking_starters_uq').on(t.bookingId, t.submissionId),
+    index('induction_booking_starters_submission_idx').on(t.submissionId),
+  ],
+);
+
+export const inductionBookingsRelations = relations(inductionBookings, ({ one, many }) => ({
+  org: one(organizations, {
+    fields: [inductionBookings.orgId],
+    references: [organizations.id],
+  }),
+  starters: many(inductionBookingStarters),
+}));
+
+export const inductionBookingStartersRelations = relations(inductionBookingStarters, ({ one }) => ({
+  booking: one(inductionBookings, {
+    fields: [inductionBookingStarters.bookingId],
+    references: [inductionBookings.id],
+  }),
+  submission: one(submissions, {
+    fields: [inductionBookingStarters.submissionId],
+    references: [submissions.id],
+  }),
+}));
 
 export const competenciesRelations = relations(competencies, ({ one, many }) => ({
   org: one(organizations, {

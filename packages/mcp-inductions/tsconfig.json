@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true,
+    /* The SDK's published .d.mts references Buffer, and TypeScript >= 6 no
+       longer auto-includes @types/*. */
+    "types": ["node"]
+  },
+  "include": ["src/**/*"]
+}

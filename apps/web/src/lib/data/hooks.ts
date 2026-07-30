@@ -85,6 +85,7 @@ const keys = {
   fillForm: (token: string) => ['fillForm', token] as const,
   fillLinks: (formId: string) => ['fillLinks', formId] as const,
   invite: (token: string) => ['invite', token] as const,
+  apiKeys: ['apiKeys'] as const,
 };
 
 /**
@@ -467,6 +468,34 @@ export function useRoles() {
 
 export function useAuditLog() {
   return useQuery({ queryKey: keys.auditLog, queryFn: () => store.auditLog() });
+}
+
+/* ── API keys ─────────────────────────────────────────────────────────────── */
+
+export function useApiKeys() {
+  return useQuery({ queryKey: keys.apiKeys, queryFn: () => store.listApiKeys() });
+}
+
+export function useCreateApiKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { name: string; role: RoleName }) => store.createApiKey(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.apiKeys });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+export function useRevokeApiKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => store.revokeApiKey(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.apiKeys });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
 }
 
 /** Real plan/seat/feature data from `GET /org/billing`. */

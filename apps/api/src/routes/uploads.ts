@@ -38,10 +38,15 @@ export const uploadsRouter: Router = Router();
  * from being interchangeable: a logo key fails this test, and an attachment key
  * fails the public logo route's test.
  */
-const ATTACHMENT_KEY_RE = /^[^/]+\/upload-[^/]+\.(png|jpe?g|webp|pdf)$/;
+/**
+ * The attachment key namespace. Exported so the induction document-link route
+ * checks the same shape rather than writing a second regex that could drift
+ * into accepting a PDF asset id or a logo key.
+ */
+export const ATTACHMENT_KEY_RE = /^[^/]+\/upload-[^/]+\.(png|jpe?g|webp|pdf)$/;
 
 /** Key extension → response `Content-Type`. The adapters store bare bytes. */
-const EXT_CONTENT_TYPE: Record<string, string> = {
+export const EXT_CONTENT_TYPE: Record<string, string> = {
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
