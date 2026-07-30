@@ -27,6 +27,7 @@
  */
 
 import type { FormField } from './form-field.js';
+import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 
 /**
  * The routes through an assessment tool.
@@ -373,6 +374,52 @@ export function caseProgress(
 /** A case is competent only when every required part has passed. */
 export function isCaseCompetent(progress: readonly PartProgress[]): boolean {
   return progress.length > 0 && progress.every((p) => p.state === 'satisfactory');
+}
+
+/**
+ * WHICH rows a logbook part's hours are counted from — the one rule, shared.
+ *
+ * There were three, and they disagreed. The threshold notification counted the
+ * rows under the part's declared table; the progress dashboard counted every
+ * array on the attempt; the retry carry-forward had its own copy of the lookup.
+ * Two readers of the same attempt could therefore report different totals with
+ * no retry involved at all — and an auditor comparing the dashboard against the
+ * audit trail would find a contradiction with nothing to explain it.
+ *
+ * The rule is the part's DECLARED table: the repeating group inside the part's
+ * own section. That is what the manifest says the hours come from, so it is what
+ * counts.
+ *
+ * The fallback exists because saved values are not validated against the part —
+ * the save route stores whatever keys the client sends, and real data already
+ * carries logbook rows under keys the manifest never named. Ignoring those would
+ * silently zero a candidate's hours, which is worse than reading them from an
+ * unexpected key. It is narrowed to arrays OF OBJECTS: a checkbox group's
+ * answers are an array of strings, and the threshold's old fallback would have
+ * happily counted one as a logbook.
+ */
+export function logbookRows(
+  fields: readonly FormField[],
+  part: Pick<AssessmentPart, 'startFieldId' | 'durationColumnKey'>,
+  values: Record<string, SubmissionValue> | null | undefined,
+): RepeatingRowValue[] {
+  const all = values ?? {};
+  const isRowList = (v: unknown): v is RepeatingRowValue[] =>
+    Array.isArray(v) && v.length > 0 && v.every((r) => typeof r === 'object' && r !== null);
+
+  const table = fieldsInSection(fields, part.startFieldId).find((f) => f.type === 'repeating_group');
+  const declared = table ? all[table.id] : undefined;
+  if (isRowList(declared)) return declared;
+
+  // The fallback also requires the DURATION COLUMN. A row list that does not
+  // carry the column this part totals is not this part's log — most obviously
+  // another part's table, which an attempt should never hold but nothing
+  // enforces. Without this the fallback would count someone else's hours.
+  const key = part.durationColumnKey;
+  if (!key) return [];
+  return Object.values(all).find((v) => isRowList(v) && key in (v[0] ?? {})) as
+    | RepeatingRowValue[]
+    | undefined ?? [];
 }
 
 /**
