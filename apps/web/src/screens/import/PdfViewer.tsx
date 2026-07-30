@@ -137,6 +137,24 @@ interface FieldHighlight {
   status: ExtractionStatus;
 }
 
+/**
+ * One placed box, drawn persistently on its page.
+ *
+ * Every placement stays visible regardless of which field is selected: with
+ * only the selected field's box drawn, each one vanished as soon as the reviewer
+ * moved on, and there was no way to see which of a hundred-odd boxes were
+ * already done short of clicking every field in turn.
+ */
+export interface PlacementMark {
+  /** Field id, or a field-and-option slot. Only needs to be unique. */
+  slot: string;
+  box: PageBox;
+  /** Confirmed placements read as done; unconfirmed ones still need a look. */
+  confirmed: boolean;
+  /** Drawn stronger — this is the field the panel is currently editing. */
+  active?: boolean;
+}
+
 interface PdfViewerProps {
   pdfBase64?: string;
   assetId?: string | null;
@@ -147,6 +165,8 @@ interface PdfViewerProps {
   onTextLayer?: (pages: TextPage[]) => void;
   /** A proposed grid to draw over the page, for the selected field. */
   bandOverlay?: PageBox | null;
+  /** Every box placed so far, on any field — drawn on whichever page it sits. */
+  placements?: readonly PlacementMark[];
   /**
    * Printed edges on the overlay's page that a dragged band edge may snap to
    * (U10). Supplied by the screen, which already holds the text layer.
@@ -535,6 +555,7 @@ export function PdfViewer({
   onSelectField,
   onTextLayer,
   bandOverlay,
+  placements,
   bandSnapTargets,
   bandSnapTargetsY,
   onBandEdge,
@@ -873,6 +894,35 @@ export function PdfViewer({
                           onSelectField?.(h.id);
                         }}
                         title={`${h.id}`}
+                      />
+                    );
+                  })}
+                {/*
+                  Placed boxes, drawn under the band grid and the draw surface
+                  so neither is obscured. Unconfirmed ones are dashed: the
+                  distinction between "placed" and "checked by a human" is the
+                  one this whole flow turns on, so it has to be visible at a
+                  glance rather than only in the side panel.
+                */}
+                {(placements ?? [])
+                  .filter((m) => m.box.page === pageIndex)
+                  .map((m) => {
+                    const scaleX = pageWidth / m.box.pageWidth;
+                    const scaleY = pageHeight / m.box.pageHeight;
+                    const colour = m.confirmed ? 'var(--success)' : 'var(--warning)';
+                    return (
+                      <div
+                        key={m.slot}
+                        className="pointer-events-none absolute rounded-[2px]"
+                        style={{
+                          left: m.box.x * scaleX,
+                          top: Math.max(0, pageHeight - (m.box.y + m.box.height) * scaleY),
+                          width: Math.max(3, m.box.width * scaleX),
+                          height: Math.max(3, m.box.height * scaleY),
+                          border: `${m.active ? 2 : 1.5}px ${m.confirmed ? 'solid' : 'dashed'} ${colour}`,
+                          background: m.active ? 'color-mix(in srgb, var(--accent) 18%, transparent)' : 'transparent',
+                          boxShadow: m.active ? `0 0 0 2px ${colour}` : undefined,
+                        }}
                       />
                     );
                   })}

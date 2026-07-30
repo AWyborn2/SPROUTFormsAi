@@ -39,6 +39,7 @@ import {
   adjustGeometryBoundary,
   confirmField,
   distributeGroups,
+  allGeometryPlacements,
   confirmGeometry,
   fileToBase64,
   reviewStatus,
@@ -1326,5 +1327,64 @@ describe('document type', () => {
       expect.objectContaining({ documentType: 'generic' }),
       { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
     );
+  });
+});
+
+/**
+ * `allGeometryPlacements` — what the page overlay draws.
+ *
+ * Reported from a real mapping session: with only the selected field's box on
+ * the page, every placement vanished as soon as the reviewer moved to the next
+ * field, so there was no way to see which of a hundred-odd boxes were done
+ * short of clicking every field in turn.
+ */
+describe('allGeometryPlacements', () => {
+  const box = (page = 0): PageBox => ({
+    page,
+    x: 100,
+    y: 200,
+    width: 12,
+    height: 12,
+    pageWidth: 595,
+    pageHeight: 842,
+  });
+
+  beforeEach(() => resetImportSession());
+
+  it('is empty before anything is placed', () => {
+    expect(allGeometryPlacements()).toEqual([]);
+  });
+
+  it('reports every slot, not just the last one touched', () => {
+    proposeGeometry('ai_1', box());
+    proposeGeometry('ai_2', box(3));
+
+    expect(allGeometryPlacements().map((p) => p.slot).sort()).toEqual(['ai_1', 'ai_2']);
+  });
+
+  it('distinguishes confirmed placements from unconfirmed ones', () => {
+    proposeGeometry('ai_1', box());
+    proposeGeometry('ai_2', box());
+    confirmGeometry('ai_1');
+
+    const byslot = new Map(allGeometryPlacements().map((p) => [p.slot, p.confirmed]));
+    // "Placed" and "checked by a human" are different states, and the overlay
+    // draws them differently — so the distinction has to survive this call.
+    expect(byslot.get('ai_1')).toBe(true);
+    expect(byslot.get('ai_2')).toBe(false);
+  });
+
+  it('carries each box’s own page, so a placement draws where it belongs', () => {
+    proposeGeometry('ai_1', box(7));
+
+    expect(allGeometryPlacements()[0]!.box.page).toBe(7);
+  });
+
+  it('drops a placement that was discarded', () => {
+    proposeGeometry('ai_1', box());
+    confirmGeometry('ai_1');
+    rejectGeometry('ai_1');
+
+    expect(allGeometryPlacements()).toEqual([]);
   });
 });

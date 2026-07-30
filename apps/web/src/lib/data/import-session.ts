@@ -625,6 +625,28 @@ export function proposeGeometry(fieldId: string, segment: PageBox): void {
   emit();
 }
 
+/**
+ * Every box placed so far, across ALL fields — what the page overlay draws.
+ *
+ * The reviewer needs to see their own progress: with only the selected field's
+ * box drawn, each placement vanished the moment they moved on, leaving no way to
+ * tell which of 160-odd boxes were already done except by clicking through every
+ * field one at a time.
+ *
+ * Keyed by SLOT, so a choice field contributes one entry per option.
+ */
+export function allGeometryPlacements(): {
+  slot: string;
+  box: PageBox;
+  confirmed: boolean;
+}[] {
+  return [...geometryProposals.entries()].map(([slot, box]) => ({
+    slot,
+    box,
+    confirmed: confirmedGeometry.has(slot),
+  }));
+}
+
 /** The proposal on offer for a field, confirmed or not. */
 export function geometryProposal(fieldId: string): PageBox | undefined {
   return geometryProposals.get(fieldId);

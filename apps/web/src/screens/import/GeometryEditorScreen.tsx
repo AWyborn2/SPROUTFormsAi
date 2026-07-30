@@ -118,6 +118,22 @@ export function GeometryEditorScreen() {
     );
   }
 
+  /**
+   * Every box on every field, so a reviewer can see what they have already
+   * placed instead of only the field they happen to have selected.
+   *
+   * Saved geometry is shown as confirmed: it is already persisted, or staged for
+   * the next Save, and either way a human put it there.
+   */
+  const placements = fields.flatMap((f) =>
+    geometrySegments(f).map((box, i) => ({
+      slot: `${f.id}#${box.optionKey ?? i}`,
+      box,
+      confirmed: true,
+      active: f.id === selectedId,
+    })),
+  );
+
   const placedCount = fields.filter((f) => geometrySegments(f).length > 0).length;
   const placeable = fields.filter((f) => f.type !== 'section_header');
 
@@ -192,6 +208,7 @@ export function GeometryEditorScreen() {
             selectedFieldId={selectedId}
             onSelectField={setSelectedId}
             onTextLayer={onTextLayer}
+            placements={placements}
             drawArmed={drawTarget !== null}
             onDrawBox={(box) => {
               if (!drawTarget) return;
