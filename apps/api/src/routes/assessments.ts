@@ -17,6 +17,7 @@ import {
   stripMarkingSecrets,
   validateAnswerKeys,
   validateManifest,
+  type AssessmentPart,
   type AssessmentPathway,
   type AssessmentToolManifest,
   type AttemptFact,
@@ -84,6 +85,59 @@ async function attemptsFor(database: Database, caseId: string) {
     where: eq(schema.assessmentPartAttempts.caseId, caseId),
     orderBy: (a, { asc }) => [asc(a.partKey), asc(a.attemptNumber)],
   });
+}
+
+/** The repeating table a logbook part totals its hours from, on one version. */
+async function logbookTableId(
+  database: Database,
+  versionId: string,
+  startFieldId: string,
+): Promise<string | undefined> {
+  const fields = await fieldsForVersion(database, versionId);
+  return fieldsInSection(fields, startFieldId).find((f) => f.type === 'repeating_group')?.id;
+}
+
+/**
+ * The rows and threshold stamp a new logbook attempt inherits from the last one.
+ *
+ * Returns nothing at all — not an empty map — for any part that is not a
+ * logbook, for a first attempt, and whenever the table cannot be resolved on
+ * BOTH versions. Carrying nothing leaves a visibly empty logbook a candidate
+ * can refill; carrying rows under a key the new version does not declare would
+ * strand them where no surface reads them, which looks like the same empty
+ * logbook while quietly making the data unreachable.
+ *
+ * The table id is resolved per VERSION because a retry pins to the case's
+ * current version, which can differ from the one the previous attempt was taken
+ * against. The rows move from the old id to the new one.
+ *
+ * `thresholdNotifiedAt` travels with them. The carried attempt is born above the
+ * minimum, and without the stamp its first save would announce "logbook minimum
+ * reached" a second time for a threshold crossed weeks earlier.
+ */
+async function carryForwardLogbook(
+  database: Database,
+  input: {
+    part: AssessmentPart;
+    previous: readonly { attemptNumber: number; values: Record<string, SubmissionValue>; templateVersionId: string; thresholdNotifiedAt: Date | null }[];
+    toVersionId: string;
+  },
+): Promise<{ values: Record<string, SubmissionValue>; thresholdNotifiedAt: Date | null } | undefined> {
+  if (input.part.kind !== 'logbook') return undefined;
+
+  const last = [...input.previous].sort((a, b) => b.attemptNumber - a.attemptNumber)[0];
+  if (!last) return undefined;
+
+  const [fromId, toId] = await Promise.all([
+    logbookTableId(database, last.templateVersionId, input.part.startFieldId),
+    logbookTableId(database, input.toVersionId, input.part.startFieldId),
+  ]);
+  if (!fromId || !toId) return undefined;
+
+  const rows = last.values?.[fromId];
+  if (!Array.isArray(rows) || rows.length === 0) return undefined;
+
+  return { values: { [toId]: rows }, thresholdNotifiedAt: last.thresholdNotifiedAt ?? null };
 }
 
 /** The fields of the version this attempt is pinned to. */
@@ -605,6 +659,35 @@ assessmentCasesRouter.post(
       return;
     }
 
+    /*
+      A LOGBOOK CARRIES ITS HOURS FORWARD. Every other kind of part starts a
+      retry empty.
+
+      A logbook is not really failed. The practice is that a candidate keeps
+      logging and simply does not progress until an assessor judges them
+      competent to — so `not_satisfactory` here means "not yet", and the hours
+      already logged still count toward the minimum. Starting the new attempt
+      empty told a candidate with 47 of 50 hours that they had none: a blank
+      table asking for 50, zero on every surface, and nothing anywhere saying
+      their recorded experience had just gone backwards.
+
+      Copied at WRITE time rather than summed at read time. The exported evidence
+      prints exactly ONE attempt per part (`authoritativeAttempt` in
+      pdf/case-export.ts), so a summed figure would sit on the dashboard beside a
+      printed logbook page totalling less, with nothing on the page to explain
+      the difference. One authoritative attempt keeps the dashboard, the
+      threshold and the PDF telling the same story.
+
+      A practical retry is deliberately NOT carried: it is a fresh
+      demonstration, and pre-filling it would show an assessor marks they never
+      made.
+    */
+    const carried = await carryForwardLogbook(db, {
+      part: target.part,
+      previous: mine,
+      toVersionId: row.currentVersionId,
+    });
+
     const [created] = await db
       .insert(schema.assessmentPartAttempts)
       .values({
@@ -613,6 +696,7 @@ assessmentCasesRouter.post(
         partKey,
         attemptNumber: mine.length + 1,
         templateVersionId: row.currentVersionId,
+        ...carried,
       })
       .returning();
     if (!created) throw new Error('attempt_create_failed: insert returned no row');
