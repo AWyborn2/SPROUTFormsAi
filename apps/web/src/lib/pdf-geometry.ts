@@ -966,6 +966,43 @@ const SYNTHETIC_MARKER_GAP = 3;
 const INLINE_SEARCH_ROWS = 14;
 
 /**
+ * Leading enumeration that marks a row as the START of another question.
+ *
+ * Digits only. Answers are lettered — "a)", "b)" — so a digit at the head of a
+ * row is the next question, never one of this question's own options. That
+ * asymmetry is what makes the boundary readable at all.
+ */
+const QUESTION_START = /^(?:q(?:uestion)?\s*)?\d+\s*[.)]/i;
+
+/**
+ * Where to stop looking for this question's answers.
+ *
+ * Bounded by the NEXT QUESTION, not by a fixed row count. A fixed count is what
+ * made Q1 on the dozer propose nothing while Q2 proposed correctly: both are
+ * True/False questions, Q1 sits 60pt above Q2, so Q1's window reached into Q2
+ * and found "True" twice — and finding an option twice is ambiguity, which
+ * refuses. Q2 only worked because the question below IT has prose answers.
+ * Nothing was wrong with Q1; it was the one with a like-for-like neighbour, and
+ * every consecutive pair of True/False questions had the same fault.
+ *
+ * The fixed count remains as a BACKSTOP for a page whose next question carries no
+ * readable number, so a missing boundary cannot run the search to the end of the
+ * page and make every option ambiguous.
+ */
+function answerWindowEnd(rows: Row[], startIndex: number, runLength: number): number {
+  // Skip the question's own rows: a wrapped question spans several, and its own
+  // number would otherwise end the window immediately.
+  const from = startIndex + runLength;
+  const cap = startIndex + INLINE_SEARCH_ROWS;
+
+  for (let i = from; i < Math.min(rows.length, cap); i++) {
+    const first = rows[i]!.items.reduce((a, b) => (b.x < a.x ? b : a), rows[i]!.items[0]!);
+    if (first && QUESTION_START.test(first.text.trim())) return i;
+  }
+  return cap;
+}
+
+/**
  * Which runs of consecutive rows carry this label.
  *
  * Returns RUNS rather than row indexes because a question printed over two lines
@@ -1048,7 +1085,7 @@ export function proposeInlineOptionCells(input: FieldProposeInput): FieldProposa
   if (runs.length !== 1) return null;
 
   const startIndex = runs[0]![0]!;
-  const window = rows.slice(startIndex, startIndex + INLINE_SEARCH_ROWS);
+  const window = rows.slice(startIndex, answerWindowEnd(rows, startIndex, runs[0]!.length));
 
   // Locate every option's printed text first. Nothing can be placed until all
   // of them are found: a partial placement is worse than none, because the
