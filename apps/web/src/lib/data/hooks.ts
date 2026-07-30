@@ -78,6 +78,12 @@ const keys = {
   competencies: ['competencies'] as const,
   assessmentTools: ['assessmentTools'] as const,
   assessmentCases: ['assessmentCases'] as const,
+  /**
+   * Deliberately NOT `['assessmentCases', 'progress']`: that shape is
+   * `assessmentCase('progress')`, so invalidating one case would sweep the
+   * dashboard and vice versa. A sibling key keeps the two independent.
+   */
+  assessmentProgress: ['assessmentProgress'] as const,
   assessmentCase: (id: string) => ['assessmentCases', id] as const,
   formVersion: (formId: string, versionId: string) => ['forms', formId, 'versions', versionId] as const,
   assessmentAttempt: (caseId: string, attemptId: string) =>
@@ -739,6 +745,11 @@ export function useAssessmentCases() {
   return useQuery({ queryKey: keys.assessmentCases, queryFn: () => assessmentsApi.listCases() });
 }
 
+/** Every case's progress in one read — the dashboard's only query. */
+export function useAssessmentProgress() {
+  return useQuery({ queryKey: keys.assessmentProgress, queryFn: () => assessmentsApi.listProgress() });
+}
+
 export function useAssessmentCase(id: string | undefined) {
   return useQuery({
     queryKey: keys.assessmentCase(id ?? ''),
@@ -762,6 +773,7 @@ export function useCreateAssessmentCase() {
     mutationFn: (input: CreateCaseInput) => assessmentsApi.createCase(input),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
 }
@@ -772,6 +784,7 @@ export function useOpenAttempt(caseId: string) {
     mutationFn: (partKey: string) => assessmentsApi.openAttempt(caseId, partKey),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
 }
@@ -783,6 +796,8 @@ export function useSaveAttempt(caseId: string) {
       assessmentsApi.saveAttempt(caseId, input.attemptId, input.values),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+      // Saving a logbook moves its hours, which is a column of the dashboard.
+      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
 }
@@ -810,6 +825,7 @@ export function useRecordOutcome(caseId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
 }
@@ -822,6 +838,7 @@ export function useChangePathway(caseId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
 }

@@ -1288,6 +1288,278 @@ describe('GET /assessment-cases/:id/attempts/:attemptId', () => {
 });
 
 /**
+ * The progress dashboard.
+ *
+ * What these pin is that the aggregate is a VIEW OF THE ATTEMPT ROWS and not a
+ * parallel record of its own. So they never assert a hand-written fixture: the
+ * cases are driven through the real routes first, and the dashboard is then
+ * checked against the rows those routes wrote and against what
+ * `GET /assessment-cases/:id` says about the same case. If the two ever
+ * disagree, one of them is summarising something it no longer reflects — which
+ * is the failure mode a stored progress column would have made permanent.
+ *
+ * Scope is the other half: a candidate's aggregate is filtered server-side, and
+ * a caller whose role grants no assessments view is refused outright rather than
+ * handed an empty list, which would read as "no candidates" instead of "not
+ * yours to see".
+ */
+describe('GET /assessment-cases/progress', () => {
+  type ProgressPart = {
+    key: string;
+    state: string;
+    latestOutcome: string | null;
+    attempts: number;
+    minimumHours: number | null;
+    loggedHours: number | null;
+  };
+  type ProgressRow = {
+    id: string;
+    toolName: string;
+    candidateUserId: string;
+    candidateName: string;
+    state: string;
+    currentPartKey: string | null;
+    currentPartLabel: string | null;
+    parts: ProgressPart[];
+  };
+
+  const dashboard = async (base: string, who: Session = admin) =>
+    (await (await fetch(`${base}/assessment-cases/progress`, { headers: auth(who) })).json()) as ProgressRow[];
+
+  /**
+   * A case against an EXISTING tool. The tool is seeded once per test rather
+   * than per case, because `assessment_tools_template_uq` allows exactly one
+   * tool per template — a second one would be a fixture that cannot exist.
+   */
+  const openCase = async (base: string, toolId: string, candidateUserId = CANDIDATE, pathway = 'new') =>
+    (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId, candidateUserId, pathway }),
+      })
+    ).json()) as { id: string };
+
+  const openPart = async (base: string, caseId: string, part: string) =>
+    (await (
+      await fetch(`${base}/assessment-cases/${caseId}/parts/${part}/attempts`, {
+        method: 'POST',
+        headers: auth(),
+      })
+    ).json()) as { id: string };
+
+  const save = (base: string, caseId: string, attemptId: string, values: unknown) =>
+    fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ values }),
+    });
+
+  const resolve = (base: string, caseId: string, attemptId: string, body: unknown) =>
+    fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/outcome`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify(body),
+    });
+
+  /** Pass theory and the first practical, so the logbook part unlocks. */
+  async function passFirstTwoParts(base: string, caseId: string) {
+    const theory = await openPart(base, caseId, 'p1');
+    await save(base, caseId, theory.id, { q1: ['a'] });
+    await resolve(base, caseId, theory.id, {});
+    const prac = await openPart(base, caseId, 'p2');
+    await resolve(base, caseId, prac.id, { outcome: 'satisfactory', assessorName: 'A. Assessor' });
+  }
+
+  it('reports the hours logged and the part the candidate is on', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const c = await openCase(base, tool.id);
+      await passFirstTwoParts(base, c.id);
+      const log = await openPart(base, c.id, 'p3');
+      await save(base, c.id, log.id, { 'log-table': [{ duration: 8 }, { duration: 6.5 }] });
+
+      const [row] = await dashboard(base);
+
+      // The logbook is where the case has got to, and its hours are the ones
+      // the save route just totalled — not a separately tracked figure.
+      expect(row?.currentPartKey).toBe('p3');
+      expect(row?.currentPartLabel).toBe('Part 3 Logbook');
+      const p3 = row?.parts.find((p) => p.key === 'p3');
+      expect(p3?.loggedHours).toBe(14.5);
+      expect(p3?.minimumHours).toBe(20);
+      // The two parts already passed report as such, and a part with no hours
+      // threshold reports no hours rather than a misleading zero.
+      expect(row?.parts.find((p) => p.key === 'p1')?.state).toBe('satisfactory');
+      expect(row?.parts.find((p) => p.key === 'p2')?.loggedHours).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('names the candidate rather than only their id', async () => {
+    const { db, store } = makeDb();
+    // One candidate, so the display name has somewhere to resolve from. The
+    // fake's where-matching is a conjunction over bound values, so a
+    // multi-candidate lookup finds nothing — see the note at the top of this
+    // file. Scoping and hours are proven elsewhere; this pins the join.
+    store.users!.push({ id: CANDIDATE, name: 'Dale Ferguson', email: 'dale@example.com' });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      await openCase(base, (await seedTool(base)).id);
+
+      const [row] = await dashboard(base);
+
+      expect(row?.candidateName).toBe('Dale Ferguson');
+      expect(row?.candidateUserId).toBe(CANDIDATE);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('gives a candidate only their own cases', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      for (const who of [CANDIDATE, OTHER_CANDIDATE]) {
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: who, pathway: 'experienced' }),
+        });
+      }
+
+      const mine = await dashboard(base, candidate);
+      const all = await dashboard(base);
+
+      // Filtered in the query, not trimmed afterwards — the aggregate a
+      // candidate receives was never computed over anyone else's attempts.
+      expect(mine).toHaveLength(1);
+      expect(mine[0]?.candidateUserId).toBe(CANDIDATE);
+      expect(all).toHaveLength(2);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('tells a competent case apart from one closed as not yet competent', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const passing = await openCase(base, tool.id, CANDIDATE, 'experienced');
+      await passFirstTwoParts(base, passing.id);
+
+      const closing = await openCase(base, tool.id, OTHER_CANDIDATE, 'experienced');
+      const attempt = await openPart(base, closing.id, 'p1');
+      await save(base, closing.id, attempt.id, { q1: ['b'] });
+      await resolve(base, closing.id, attempt.id, {
+        disposition: 'not_yet_competent',
+        reason: 'Withdrew from programme',
+      });
+
+      const rows = await dashboard(base);
+      const competent = rows.find((r) => r.id === passing.id);
+      const closed = rows.find((r) => r.id === closing.id);
+
+      // Both are finished; only one of them is a pass. The closed case still
+      // names the part it stopped at, which is what an auditor reads it for.
+      expect(competent?.state).toBe('competent');
+      expect(competent?.currentPartKey).toBeNull();
+      expect(closed?.state).toBe('closed');
+      expect(closed?.currentPartKey).toBe('p1');
+      expect(closed?.parts.find((p) => p.key === 'p1')?.latestOutcome).toBe('not_satisfactory');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('agrees with the case detail it summarises, failed attempts included', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const c = await openCase(base, tool.id);
+      await passFirstTwoParts(base, c.id);
+      const log = await openPart(base, c.id, 'p3');
+      await save(base, c.id, log.id, { 'log-table': [{ duration: 21 }] });
+      const failed = await resolve(base, c.id, log.id, {
+        outcome: 'not_satisfactory',
+        disposition: 'coaching_then_retry',
+        reason: 'Entries unsigned',
+      });
+      expect(failed.status).toBe(200);
+
+      const [row] = await dashboard(base);
+      const detail = (await (
+        await fetch(`${base}/assessment-cases/${c.id}`, { headers: auth() })
+      ).json()) as {
+        state: string;
+        parts: { key: string; state: string; latestOutcome: string | null; attempts: number }[];
+      };
+
+      expect(row?.state).toBe(detail.state);
+      expect(row?.parts.map((p) => [p.key, p.state, p.latestOutcome, p.attempts])).toEqual(
+        detail.parts.map((p) => [p.key, p.state, p.latestOutcome, p.attempts]),
+      );
+      // And the part the dashboard calls current is the first the detail does
+      // not call satisfactory — the same rule, computed once.
+      expect(row?.currentPartKey).toBe(detail.parts.find((p) => p.state !== 'satisfactory')?.key);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a caller whose role grants no assessments view', async () => {
+    const { db, store } = makeDb();
+    // Every shipped role may view assessments, so the denial has to come from a
+    // customised matrix — which is the real-world shape of it too: an org that
+    // has turned the category off for a role.
+    store.rolePermissions!.push({
+      id: nextId(),
+      orgId: ORG,
+      role: 'viewer',
+      matrix: {
+        ...DEFAULT_ROLE_PERMISSIONS.viewer,
+        assessments: { view: false, create: false, edit: false, delete: false, export: false },
+      },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-cases/progress`, {
+        headers: auth({ userId: ADMIN, orgId: ORG, role: 'viewer' }),
+      });
+
+      // 403, not an empty array: "not yours to see" must not read as "no
+      // candidates are being assessed".
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('is not mistaken for a case id', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-cases/progress`, { headers: auth() });
+
+      // The route is declared before `/:id`. With that order reversed Express
+      // would look for the case called "progress" and 404 the whole dashboard.
+      expect(res.status).toBe(200);
+      expect(Array.isArray(await res.json())).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
  * Handing a part in.
  *
  * The signal that closes the tracking gap: "has answers but no outcome" cannot

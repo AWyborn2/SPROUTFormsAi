@@ -7,10 +7,10 @@ export const cohortInput = z.object({
     .string()
     .regex(ISO_DATE, 'Use YYYY-MM-DD')
     .optional()
-    .describe('One induction Monday. Omit to see every upcoming cohort.'),
+    .describe('One induction date. Omit to see every upcoming cohort.'),
   allowLateNotice: z.boolean().optional()
     .describe(
-      'Count short-notice starters toward the seat total, as if the notice rule were waived. Set only when a human has decided the site will accept short notice. It does not change the calendar: a starter whose date is not a Monday, or is a public holiday, stays blocked either way.',
+      'Count starters booked after the Thursday cutoff toward the seat total, as if it were waived. Set only when a human has decided the site will accept the late booking. It does not move the calendar: a date the site runs no induction on — anything but the Monday, or the Tuesday when that Monday is a public holiday — stays blocked either way.',
     ),
 });
 

@@ -3,6 +3,7 @@ import {
   CHC_ABN,
   CHC_DEPARTMENT_NAMES,
   CHC_DOCUMENT_REF,
+  CHC_ETHNICITIES,
   CHC_GENDERS,
   CHC_INTAKE_FORM_NAME,
   CHC_INTAKE_RECIPIENT,
@@ -165,7 +166,6 @@ export function ChcIntakeScreen() {
     }
   }
 
-  const showBeakonFields = state.in_beakon === 'No';
   const hasErrors = Object.keys(errors).length > 0 && submitAttempted;
   // Identity comes from the session, never a typed-in claim: the API stamps the
   // submitter server-side anyway, so an editable "submitted by" box on the form
@@ -180,14 +180,13 @@ export function ChcIntakeScreen() {
       '',
       `Name: ${chcFullName(state)}`,
       `Gender: ${state.gender}`,
-      `Indigenous (ATSI): ${state.indigenous}`,
+      `Ethnicity: ${state.ethnicity}`,
       `Type: ${state.starter_type}`,
       `Induction date: ${formatAuDate(state.induction_date)}`,
       `Department: ${state.department}`,
       `Role(s): ${state.role.join(', ')}`,
-      `In Beakon: ${state.in_beakon}`,
     ];
-    if (showBeakonFields) {
+    {
       lines.push(
         '',
         '--- Additional Details ---',
@@ -320,19 +319,20 @@ export function ChcIntakeScreen() {
               />
             </Field>
 
-            <Field
-              label="Indigenous (Aboriginal or Torres Strait Islander)?"
-              required
-              error={errors.indigenous}
-              group="radiogroup"
-              last
-            >
-              <ChoiceRow
-                name="indigenous"
-                options={['Yes', 'No']}
-                value={state.indigenous}
-                onChange={(v) => set('indigenous', v as 'Yes' | 'No')}
-              />
+            <Field label="Ethnicity" required error={errors.ethnicity} last>
+              <select
+                className="chc-select"
+                style={{ ...inputStyle, background: '#fff', cursor: 'pointer' }}
+                value={state.ethnicity}
+                onChange={(e) => set('ethnicity', e.target.value)}
+              >
+                <option value="">Select an option…</option>
+                {CHC_ETHNICITIES.map((eth) => (
+                  <option key={eth} value={eth}>
+                    {eth}
+                  </option>
+                ))}
+              </select>
             </Field>
           </Card>
 
@@ -392,25 +392,8 @@ export function ChcIntakeScreen() {
             />
           </Card>
 
-          <Card title="Beakon Status">
-            <Field
-              label="Details already in Beakon (with photo & licence)?"
-              required
-              error={errors.in_beakon}
-              group="radiogroup"
-              last
-            >
-              <ChoiceRow
-                name="in_beakon"
-                options={['Yes', 'No']}
-                value={state.in_beakon}
-                onChange={(v) => set('in_beakon', v as 'Yes' | 'No')}
-              />
-            </Field>
-          </Card>
-
-          {showBeakonFields && (
-            <Card title="Additional Details" subtitle="Not in Beakon — provide details below.">
+          {(
+            <Card title="Additional Details">
               <Row>
                 <Field label="Mobile" required error={errors.mobile}>
                   <input
@@ -1041,7 +1024,8 @@ function ChcDocument({
   submitterEmail: string;
   onEmail: () => void;
 }) {
-  const showAdditional = state.in_beakon === 'No';
+  // Every intake now carries these — the Beakon exemption is gone.
+  const showAdditional = true;
   const today = new Date();
   const printedOn = formatAuDate(
     `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`,
@@ -1147,7 +1131,7 @@ function ChcDocument({
           <DocCell label="Middle name" value={state.middle_name.trim()} />
           <DocCell label="Last name" value={state.last_name.trim()} />
           <DocCell label="Gender" value={state.gender} />
-          <DocCell label="Indigenous (ATSI)" value={state.indigenous} span={2} />
+          <DocCell label="Ethnicity" value={state.ethnicity} span={2} />
         </DocGrid>
 
         <DocSection title="Employment Details" />
@@ -1155,7 +1139,6 @@ function ChcDocument({
           <DocCell label="Starter type" value={state.starter_type} />
           <DocCell label="Induction date" value={formatAuDate(state.induction_date)} />
           <DocCell label="Department" value={state.department} />
-          <DocCell label="In Beakon" value={state.in_beakon} />
           <DocCell label="Role(s)" value={state.role.join(', ')} span={2} />
         </DocGrid>
 

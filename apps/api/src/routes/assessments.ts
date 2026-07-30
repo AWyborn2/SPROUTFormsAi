@@ -10,6 +10,7 @@ import {
   fieldsInPart,
   fieldsInSection,
   isCaseCompetent,
+  logbookRows,
   markTheory,
   orderedParts,
   requiredParts,
@@ -17,6 +18,7 @@ import {
   stripMarkingSecrets,
   validateAnswerKeys,
   validateManifest,
+  type AssessmentPart,
   type AssessmentPathway,
   type AssessmentToolManifest,
   type AttemptFact,
@@ -84,6 +86,69 @@ async function attemptsFor(database: Database, caseId: string) {
     where: eq(schema.assessmentPartAttempts.caseId, caseId),
     orderBy: (a, { asc }) => [asc(a.partKey), asc(a.attemptNumber)],
   });
+}
+
+/** The repeating table a logbook part totals its hours from, on one version. */
+async function logbookTableId(
+  database: Database,
+  versionId: string,
+  startFieldId: string,
+): Promise<string | undefined> {
+  const fields = await fieldsForVersion(database, versionId);
+  return fieldsInSection(fields, startFieldId).find((f) => f.type === 'repeating_group')?.id;
+}
+
+/** The rows to carry into a retry, read by the one shared rule. */
+async function logbookRowsOf(
+  database: Database,
+  attempt: { values: Record<string, SubmissionValue>; templateVersionId: string },
+  part: AssessmentPart,
+): Promise<RepeatingRowValue[]> {
+  const fields = await fieldsForVersion(database, attempt.templateVersionId);
+  return logbookRows(fields, part, attempt.values);
+}
+
+/**
+ * The rows and threshold stamp a new logbook attempt inherits from the last one.
+ *
+ * Returns nothing at all — not an empty map — for any part that is not a
+ * logbook, for a first attempt, and whenever the table cannot be resolved on
+ * BOTH versions. Carrying nothing leaves a visibly empty logbook a candidate
+ * can refill; carrying rows under a key the new version does not declare would
+ * strand them where no surface reads them, which looks like the same empty
+ * logbook while quietly making the data unreachable.
+ *
+ * The table id is resolved per VERSION because a retry pins to the case's
+ * current version, which can differ from the one the previous attempt was taken
+ * against. The rows move from the old id to the new one.
+ *
+ * `thresholdNotifiedAt` travels with them. The carried attempt is born above the
+ * minimum, and without the stamp its first save would announce "logbook minimum
+ * reached" a second time for a threshold crossed weeks earlier.
+ */
+async function carryForwardLogbook(
+  database: Database,
+  input: {
+    part: AssessmentPart;
+    previous: readonly { attemptNumber: number; values: Record<string, SubmissionValue>; templateVersionId: string; thresholdNotifiedAt: Date | null }[];
+    toVersionId: string;
+  },
+): Promise<{ values: Record<string, SubmissionValue>; thresholdNotifiedAt: Date | null } | undefined> {
+  if (input.part.kind !== 'logbook') return undefined;
+
+  const last = [...input.previous].sort((a, b) => b.attemptNumber - a.attemptNumber)[0];
+  if (!last) return undefined;
+
+  // Read by the SHARED rule so the rows carried forward are exactly the rows the
+  // threshold counted and the dashboard reports. Written under the NEW version's
+  // table id, which is why only the destination needs resolving here.
+  const [rows, toId] = await Promise.all([
+    logbookRowsOf(database, last, input.part),
+    logbookTableId(database, input.toVersionId, input.part.startFieldId),
+  ]);
+  if (!toId || rows.length === 0) return undefined;
+
+  return { values: { [toId]: rows }, thresholdNotifiedAt: last.thresholdNotifiedAt ?? null };
 }
 
 /** The fields of the version this attempt is pinned to. */
@@ -398,6 +463,201 @@ assessmentCasesRouter.get(
   }),
 );
 
+/**
+ * Hours logged against one logbook part, from its attempt rows.
+ *
+ * Read from the HIGHEST-NUMBERED attempt rather than summed across all of them.
+ * A retried logbook re-enters its entries on the new attempt, so summing would
+ * count the same weeks twice and report more experience than the candidate has
+ * — the one error direction that matters when the figure is measured against a
+ * safety threshold. It is also the attempt the threshold notification fired on
+ * and the one the evidence document renders, so the dashboard agrees with both.
+ *
+ * Every array in the attempt's values is totalled rather than the one table the
+ * manifest names, because naming it needs the pinned version's field list — a
+ * read per attempt version that this endpoint otherwise never makes. A part's
+ * values hold only that part's fields and only its logbook table carries the
+ * duration column, so the wider sum reaches the same number.
+ */
+function loggedHoursFor(
+  part: AssessmentPart,
+  attempts: readonly {
+    attemptNumber: number;
+    values: Record<string, SubmissionValue>;
+    templateVersionId: string;
+  }[],
+  fieldsByVersion: ReadonlyMap<string, FormField[]>,
+): number | null {
+  if (part.kind !== 'logbook' || !part.durationColumnKey) return null;
+  // Picked by attempt number rather than by position, so the answer does not
+  // depend on the order the caller happened to hand them over in. The latest
+  // attempt is authoritative because a logbook retry CARRIES its rows forward,
+  // so the newest row already holds every hour logged.
+  const latest = attempts.reduce<(typeof attempts)[number] | undefined>(
+    (best, a) => (!best || a.attemptNumber > best.attemptNumber ? a : best),
+    undefined,
+  );
+  if (!latest) return 0;
+
+  // The same rule the threshold notification and the retry carry-forward use.
+  // Three copies of "which rows are the logbook" disagreed; this is the one.
+  const rows = logbookRows(fieldsByVersion.get(latest.templateVersionId) ?? [], part, latest.values);
+  return totalLoggedHours(rows, part.durationColumnKey);
+}
+
+/**
+ * Where every candidate stands, without opening a single case (R21).
+ *
+ * DERIVED ON EVERY READ, like the rest of this router. Part state, the current
+ * part and the logged hours all come from the attempt rows. A stored progress
+ * summary would be a second source of truth that goes stale the moment an
+ * attempt is marked by a path that forgot to update it — and this is the screen
+ * a supervisor trusts to tell them who is waiting.
+ *
+ * REGISTERED BEFORE `/:id`. Express matches in declaration order, so with the
+ * id route first the whole dashboard would resolve as "the case whose id is
+ * progress" and answer 404.
+ */
+assessmentCasesRouter.get(
+  '/progress',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'view');
+    if (scope === 'none') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+
+    // Same server-side scope filter as the case list. A candidate reaching the
+    // dashboard sees their own rows; filtering after the fact would mean the
+    // aggregate had been computed over everyone's attempts and then trimmed.
+    const cases = await db.query.assessmentCases.findMany({
+      where:
+        scope === 'own'
+          ? and(
+              eq(schema.assessmentCases.orgId, tenant.orgId),
+              eq(schema.assessmentCases.candidateUserId, tenant.userId),
+            )
+          : eq(schema.assessmentCases.orgId, tenant.orgId),
+      orderBy: (c) => [desc(c.createdAt)],
+    });
+    if (cases.length === 0) {
+      res.json([]);
+      return;
+    }
+
+    const toolIds = [...new Set(cases.map((c) => c.toolId))];
+    const tools = await db.query.assessmentTools.findMany({
+      where: inArray(schema.assessmentTools.id, toolIds),
+    });
+    const toolById = new Map(tools.map((t) => [t.id, t]));
+
+    // Candidates by name, because a dashboard listing user ids is unreadable to
+    // the supervisor who has to act on it.
+    const candidateIds = [...new Set(cases.map((c) => c.candidateUserId))];
+    const candidates = await db.query.users.findMany({
+      where: inArray(schema.users.id, candidateIds),
+    });
+    const nameById = new Map(candidates.map((u) => [u.id, u.name]));
+
+    // Every attempt in the org in ONE query, grouped by case in code. A query
+    // per case is the N+1 this endpoint exists to replace: a site with three
+    // hundred candidates would issue three hundred round trips to draw one
+    // table. Rows for a case outside `visible` are DROPPED rather than grouped,
+    // so an `own` caller cannot be shown another candidate's attempts even
+    // though the org-scoped read touched them.
+    const visible = new Set(cases.map((c) => c.id));
+    const attemptRows = await db.query.assessmentPartAttempts.findMany({
+      where: eq(schema.assessmentPartAttempts.orgId, tenant.orgId),
+      orderBy: (a, { asc }) => [asc(a.partKey), asc(a.attemptNumber)],
+    });
+    const byCase = new Map<string, typeof attemptRows>();
+    for (const row of attemptRows) {
+      if (!visible.has(row.caseId)) continue;
+      const bucket = byCase.get(row.caseId);
+      if (bucket) bucket.push(row);
+      else byCase.set(row.caseId, [row]);
+    }
+
+    /*
+      The fields of every version the visible attempts are pinned to, loaded ONCE
+      for the whole page.
+
+      Needed because hours come from the part's DECLARED table, and finding that
+      table means reading the version an attempt was taken against. Counting
+      every array on the attempt instead — which this endpoint used to do — made
+      it disagree with the threshold notification about the same candidate, with
+      no retry involved. See `logbookRows`.
+
+      Deduplicated by version rather than fetched per attempt: a cohort shares a
+      handful of versions, and a read per attempt is the N+1 this endpoint exists
+      to replace.
+    */
+    const versionIds = [
+      ...new Set([...byCase.values()].flat().map((a) => a.templateVersionId)),
+    ];
+    const versions = versionIds.length
+      ? await db.query.formTemplateVersions.findMany({
+          where: inArray(schema.formTemplateVersions.id, versionIds),
+        })
+      : [];
+    const fieldsByVersion = new Map<string, FormField[]>(
+      versions.map((v) => [v.id, (v.fields ?? []) as FormField[]]),
+    );
+
+    res.json(
+      cases.map((c) => {
+        const tool = toolById.get(c.toolId);
+        const attempts = byCase.get(c.id) ?? [];
+        // A tool row cannot actually vanish — the case's FK is `restrict` — but
+        // if one ever did, the candidate stays on the dashboard with no parts
+        // rather than disappearing from it or failing the whole request.
+        const progress = tool
+          ? caseProgress(tool.manifest, c.pathway as AssessmentPathway, toAttemptFacts(attempts))
+          : [];
+
+        // The first required part that has not passed, in document order. Null
+        // once every part has, which is what makes a competent case legible at a
+        // glance beside a closed one: closed still names the part it stopped at.
+        const current = progress.find((p) => p.state !== 'satisfactory');
+
+        return {
+          id: c.id,
+          toolName: tool?.name ?? '',
+          candidateUserId: c.candidateUserId,
+          candidateName: nameById.get(c.candidateUserId) ?? '',
+          pathway: c.pathway,
+          state: c.state,
+          currentPartKey: current?.part.key ?? null,
+          currentPartLabel: current?.part.label ?? null,
+          parts: progress.map((p) => ({
+            key: p.part.key,
+            label: p.part.label,
+            kind: p.part.kind,
+            ordinal: p.part.ordinal,
+            state: p.state,
+            latestOutcome: p.latestOutcome,
+            attempts: p.attempts,
+            minimumHours: p.part.minimumHours ?? null,
+            /** Null for anything but a logbook — there is no threshold to meet. */
+            loggedHours: loggedHoursFor(
+              p.part,
+              attempts.filter((a) => a.partKey === p.part.key),
+              fieldsByVersion,
+            ),
+          })),
+          createdAt: c.createdAt,
+        };
+      }),
+    );
+  }),
+);
+
 assessmentCasesRouter.get(
   '/:id',
   ...GATE,
@@ -605,6 +865,35 @@ assessmentCasesRouter.post(
       return;
     }
 
+    /*
+      A LOGBOOK CARRIES ITS HOURS FORWARD. Every other kind of part starts a
+      retry empty.
+
+      A logbook is not really failed. The practice is that a candidate keeps
+      logging and simply does not progress until an assessor judges them
+      competent to — so `not_satisfactory` here means "not yet", and the hours
+      already logged still count toward the minimum. Starting the new attempt
+      empty told a candidate with 47 of 50 hours that they had none: a blank
+      table asking for 50, zero on every surface, and nothing anywhere saying
+      their recorded experience had just gone backwards.
+
+      Copied at WRITE time rather than summed at read time. The exported evidence
+      prints exactly ONE attempt per part (`authoritativeAttempt` in
+      pdf/case-export.ts), so a summed figure would sit on the dashboard beside a
+      printed logbook page totalling less, with nothing on the page to explain
+      the difference. One authoritative attempt keeps the dashboard, the
+      threshold and the PDF telling the same story.
+
+      A practical retry is deliberately NOT carried: it is a fresh
+      demonstration, and pre-filling it would show an assessor marks they never
+      made.
+    */
+    const carried = await carryForwardLogbook(db, {
+      part: target.part,
+      previous: mine,
+      toVersionId: row.currentVersionId,
+    });
+
     const [created] = await db
       .insert(schema.assessmentPartAttempts)
       .values({
@@ -613,6 +902,7 @@ assessmentCasesRouter.post(
         partKey,
         attemptNumber: mine.length + 1,
         templateVersionId: row.currentVersionId,
+        ...carried,
       })
       .returning();
     if (!created) throw new Error('attempt_create_failed: insert returned no row');
@@ -890,9 +1180,10 @@ assessmentCasesRouter.patch(
         }),
       );
 
-      const rows = (table ? values[table.id] : Object.values(values).find(Array.isArray)) as
-        | RepeatingRowValue[]
-        | undefined;
+      // Shared with the progress dashboard and the retry carry-forward. The old
+      // fallback here took the first array of ANY kind, which would have counted
+      // a checkbox group's answers as logbook rows.
+      const rows: RepeatingRowValue[] = logbookRows(fields, part, values);
 
       // A row whose duration is present but not a positive number is a
       // mis-entry (zero, negative, or meter readings that go backwards — a

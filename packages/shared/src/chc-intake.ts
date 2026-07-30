@@ -102,6 +102,41 @@ export const CHC_DEPARTMENT_NAMES = Object.keys(CHC_DEPARTMENTS);
 export const CHC_LICENCE_CLASSES = ['C', 'LR', 'MR', 'HR', 'HC', 'MC'] as const;
 
 export const CHC_GENDERS = ['Male', 'Female', 'Undisclosed'] as const;
+
+/**
+ * Ethnicity options, in BISTrainer's own order and wording.
+ *
+ * This replaced a yes/no "Indigenous (ATSI)?" question. Collecting the actual
+ * value means the BISTrainer profile can be filled from the form instead of
+ * defaulting to Unknown, and Indigenous status is still answerable — it is
+ * whichever of these two options was chosen (see `isIndigenousEthnicity`)
+ * rather than a separate question that could contradict them.
+ */
+export const CHC_ETHNICITIES = [
+  'Aboriginal',
+  'African',
+  'Asian',
+  'Caucasian',
+  'Chinese',
+  'Eurasian',
+  'Indian',
+  'Malay',
+  'Others',
+  'Torres Strait Islander',
+  'Unknown',
+] as const;
+
+/** The two ethnicity values that mean Aboriginal or Torres Strait Islander. */
+export const CHC_INDIGENOUS_ETHNICITIES: readonly string[] = ['Aboriginal', 'Torres Strait Islander'];
+
+/**
+ * Indigenous status derived from an ethnicity answer, or null when the answer
+ * is absent or 'Unknown' — the two cases where the form genuinely does not say.
+ */
+export function isIndigenousEthnicity(ethnicity: string): boolean | null {
+  if (!ethnicity || ethnicity === 'Unknown') return null;
+  return CHC_INDIGENOUS_ETHNICITIES.includes(ethnicity);
+}
 export const CHC_STARTER_TYPES = ['New starter', 'Transfer'] as const;
 
 /**
@@ -261,6 +296,8 @@ export const CHC_FIELD_IDS = {
   middleName: 'middle_name',
   lastName: 'last_name',
   gender: 'gender',
+  ethnicity: 'ethnicity',
+  /** LEGACY. Retired in favour of `ethnicity`; kept so older submissions still read. */
   indigenous: 'indigenous',
 
   employmentSection: 'chc-sec-employment',
@@ -272,7 +309,9 @@ export const CHC_FIELD_IDS = {
   roleAdmin: 'role_admin',
   roleOffSiteSupport: 'role_off_site_support',
 
+  /** LEGACY. The Beakon branch is gone — every detail is now collected on the form. */
   beakonSection: 'chc-sec-beakon',
+  /** LEGACY. See `beakonSection`; kept so older submissions still read. */
   inBeakon: 'in_beakon',
 
   additionalSection: 'chc-sec-additional',
@@ -342,10 +381,11 @@ export function chcIntakeFields(): FormField[] {
       ...built,
     },
     {
-      id: CHC_FIELD_IDS.indigenous,
-      type: 'boolean_yes_no',
-      label: 'Indigenous (Aboriginal or Torres Strait Islander)?',
+      id: CHC_FIELD_IDS.ethnicity,
+      type: 'dropdown',
+      label: 'Ethnicity',
       required: true,
+      options: [...CHC_ETHNICITIES],
       colSpan: 12,
       ...built,
     },
@@ -403,25 +443,17 @@ export function chcIntakeFields(): FormField[] {
       }),
     ),
 
-    { id: CHC_FIELD_IDS.beakonSection, type: 'section_header', label: 'Beakon Status', required: false, ...built },
-    {
-      id: CHC_FIELD_IDS.inBeakon,
-      type: 'boolean_yes_no',
-      label: 'Details already in Beakon (with photo & licence)?',
-      required: true,
-      colSpan: 12,
-      ...built,
-    },
-
     {
       id: CHC_FIELD_IDS.additionalSection,
       type: 'section_header',
       label: 'Additional Details',
       required: false,
-      help: 'Not in Beakon — provide details below.',
-      // Governs every field below it. 'false' is how `boolean_yes_no` reads as
-      // a condition value (see `scalarAnswer` in visibility.ts).
-      visibleWhen: { fieldId: CHC_FIELD_IDS.inBeakon, op: 'equals', value: 'false' },
+      // Unconditional. This section used to be gated on "already in Beakon?",
+      // which meant a transfer's details had to be pulled out of Beakon by
+      // browser automation before a profile could be built. Collecting them
+      // here every time removes that round-trip entirely — the intake is now
+      // self-sufficient, and Beakon is only consulted when the request arrives
+      // as a free-text email instead of through this form.
       ...built,
     },
     { id: CHC_FIELD_IDS.mobile, type: 'text', label: 'Mobile', required: true, placeholder: 'Enter mobile', colSpan: 6, ...built },
