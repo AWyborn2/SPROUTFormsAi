@@ -4,6 +4,7 @@ import { Button, Icon, useToast } from '@formai/ui';
 import { geometrySegments, isChoiceField, type FormField, type PageBox } from '@formai/shared';
 import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../../lib/data/hooks.js';
 import type { TextPage } from '../../lib/pdf-geometry.js';
+import { markSentence } from '../../lib/mark-description.js';
 import { PdfViewer } from './PdfViewer.js';
 import {
   deriveAcrossPages,
@@ -425,6 +426,8 @@ function PlacementPanel({
           onClear={() => onSetScalarBox(null)}
         />
       )}
+
+      <p className="text-[11px] leading-snug text-text-tertiary">{markSentence(field)}</p>
 
       <p className="text-[11px] leading-snug text-text-tertiary">
         A field with no box exports as recorded data instead of a mark on the page — visibly

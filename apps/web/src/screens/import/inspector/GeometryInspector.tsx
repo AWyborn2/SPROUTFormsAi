@@ -15,6 +15,7 @@ import { Button, Icon, Switch } from '@formai/ui';
 import { isChoiceField } from '@formai/shared';
 import type { GeometryBand, PageBox } from '@formai/shared';
 import type { TextPage } from '../../../lib/pdf-geometry.js';
+import { markSentence } from '../../../lib/mark-description.js';
 import {
   adjustGeometryBand,
   confirmGeometry,
@@ -178,6 +179,11 @@ export function GeometryInspector({ field, textPages, activeDrawSlot = null, onT
       {/* A single-select choice printing its value as text reaches this scalar
           body; the toggle lets the reviewer switch back to per-option marks. */}
       {singleSelectChoice && <ChoiceRenderToggle field={field} />}
+
+      {/* What the box will actually draw. Stated per field type because the
+          exporter branches on the type, and the panel previously promised a tick
+          for everything — including the fields that get a ring or a cross. */}
+      <p className="text-[11.5px] leading-snug text-text-tertiary">{markSentence(field)}</p>
 
       {state.kind === 'draw-only' ? (
         <>
@@ -502,8 +508,8 @@ function OptionBoxesGeometry({
       </div>
       {showValueToggle && <ChoiceRenderToggle field={field} />}
       <p className="text-[11.5px] leading-snug text-text-tertiary">
-        Draw a box over each option on the PDF. Every option the filler selects then prints a ✓ in its box.
-        Until an option is confirmed, this form still publishes and exports the answer as data.
+        Draw a box over each option on the PDF. {markSentence(field)} Until an option is confirmed,
+        this form still publishes and exports the answer as data.
       </p>
 
       {derived && (
@@ -618,7 +624,7 @@ function ChoiceRenderToggle({ field }: { field: ReviewField }) {
     <label className="flex items-center gap-2 rounded-sm border border-border-subtle bg-surface-sunken p-[7px_9px]">
       <Switch checked={on} onChange={(e) => setFieldPrintSelectedValue(field.id, e.currentTarget.checked)} />
       <span className="flex-1 text-[11.5px] leading-snug text-text-secondary">
-        Print the selected value as text (instead of a ✓ in each option’s box)
+        Print the selected value as text (instead of marking each option’s own box)
       </span>
     </label>
   );
