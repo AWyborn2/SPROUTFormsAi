@@ -38,6 +38,16 @@ const VIEWER_PERMS = {
   role: 'viewer',
   matrix: { forms: { view: true, create: false, edit: false, delete: false }, submissions: {}, team: {}, billing: {}, audit: {} },
 };
+/**
+ * A candidate's forms matrix is entirely false. They are org members, so
+ * `requireTenant` admits them — the permission check is the only thing between
+ * them and the answer key riding on a theory question's field.
+ */
+const CANDIDATE_PERMS = {
+  orgId: 'org-1',
+  role: 'candidate',
+  matrix: { forms: { view: false, create: false, edit: false, delete: false }, submissions: {}, team: {}, billing: {}, audit: {} },
+};
 
 /** `.values(...)` result that is awaitable and exposes `.returning()`. */
 function insertResult(rows: unknown[]) {
@@ -349,6 +359,86 @@ describe('GET /forms/:id', () => {
       expect(body.submissionsCount).toBe(7);
       expect(body.versions).toHaveLength(2);
       expect(body.versions[0]).toMatchObject({ id: 'v2', publishedByName: 'Ash Wyborn' });
+    } finally {
+      server.close();
+    }
+  });
+
+  /*
+    This route hands back the version's fields verbatim, and a theory question
+    carries its `answerKey` on the field. It used to run on `requireTenant`
+    alone, so any org member — including the candidate sitting the assessment —
+    could read every correct answer by fetching the template.
+  */
+  it('403s a candidate rather than handing over the answer key', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: { id: 't1', status: 'published', currentVersionId: 'v1' },
+      formTemplateVersionsFindMany: [
+        { id: 'v1', versionLabel: 'v1', state: 'published', fields: [{ id: 'q1', answerKey: ['a'] }], createdAt: new Date() },
+      ],
+      rolePermissionsFindFirst: CANDIDATE_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1`, { headers: authHeader() });
+      expect(res.status).toBe(403);
+      // Read the body ONCE — it is a stream — then assert on both counts.
+      const body = await res.text();
+      expect(JSON.parse(body)).toEqual({ error: 'forbidden' });
+      expect(body).not.toContain('answerKey');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/*
+  The three routes below carried no permission check at all until the answer-key
+  audit. Grouped together because they are one class of defect, not three: every
+  OTHER route in forms.ts gates, so these read as omissions rather than intent.
+*/
+describe('forms routes fail closed', () => {
+  it('403s a candidate listing templates', async () => {
+    mockDbValue = fakeDb({ rolePermissionsFindFirst: CANDIDATE_PERMS }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms`, { headers: authHeader() });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a viewer creating a template — view does not imply create', async () => {
+    mockDbValue = fakeDb({ rolePermissionsFindFirst: VIEWER_PERMS }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Snuck in', sourceType: 'built_from_scratch', fields: [] }),
+      });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: 'forbidden' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a candidate publishing a template outright', async () => {
+    // The create body accepts `publish: true`, so an ungated POST was not just
+    // a draft — it put a live form in the org under someone else's name.
+    const { db, insertValues } = fakeDb({ rolePermissionsFindFirst: CANDIDATE_PERMS });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Live', sourceType: 'built_from_scratch', fields: [], publish: true }),
+      });
+      expect(res.status).toBe(403);
+      expect(insertValues).not.toHaveBeenCalled();
     } finally {
       server.close();
     }

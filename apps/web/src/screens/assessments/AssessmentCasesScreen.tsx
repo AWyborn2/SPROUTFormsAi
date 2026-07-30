@@ -7,6 +7,7 @@ import {
   useAssessmentCases,
   useAssessmentTools,
   useCreateAssessmentCase,
+  useMembers,
   useSession,
 } from '../../lib/data/hooks.js';
 
@@ -155,6 +156,15 @@ function NewCaseForm({
   onCreated: (id: string) => void;
 }) {
   const create = useCreateAssessmentCase();
+  const { data: members } = useMembers();
+  /*
+    Only accepted members can be a candidate: a pending invite has no user row
+    yet, and its `userId` is null. Filtering them out here is what stops the
+    picker offering a name the API would then reject as not-in-org.
+  */
+  const candidates = (members ?? []).filter(
+    (m): m is typeof m & { userId: string } => !!m.userId && m.status === 'active',
+  );
   const [toolId, setToolId] = useState(tools[0]?.id ?? '');
   const [candidateUserId, setCandidateUserId] = useState('');
   const [pathway, setPathway] = useState<AssessmentPathway>('new');
@@ -204,14 +214,26 @@ function NewCaseForm({
         </div>
 
         <div>
-          <label htmlFor="nc-candidate" className={label}>Candidate user id</label>
-          <input
+          <label htmlFor="nc-candidate" className={label}>Candidate</label>
+          <select
             id="nc-candidate"
             value={candidateUserId}
             onChange={(e) => setCandidateUserId(e.target.value)}
-            placeholder="00000000-0000-0000-0000-000000000000"
-            className={`${field} mt-1 font-mono text-[12px]`}
-          />
+            className={`${field} mt-1`}
+          >
+            <option value="">Choose a candidate…</option>
+            {candidates.map((m) => (
+              <option key={m.userId} value={m.userId}>
+                {m.name || m.email} · {m.role}
+              </option>
+            ))}
+          </select>
+          {candidates.length === 0 && (
+            <p className="mt-1 text-xs text-text-tertiary">
+              Nobody has accepted an invitation yet. Invite the candidate from Team first — a pending
+              invite has no user to record an assessment against.
+            </p>
+          )}
         </div>
 
         <div>

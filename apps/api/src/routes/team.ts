@@ -44,10 +44,28 @@ teamRouter.get(
     res.json([
       ...memberships.map((m) => {
         const u = userById.get(m.userId);
-        return { id: m.id, name: u?.name ?? '', email: u?.email ?? '', role: m.role, status: m.status };
+        return {
+          id: m.id,
+          /*
+            The USER id, distinct from the membership id above. Anything that
+            records something against a person — an assessment case, a
+            competency grant — keys on this, and it used to be resolved here
+            and thrown away, so opening the first case meant querying the
+            database by hand. A pending invite has no user yet, hence null.
+          */
+          userId: m.userId,
+          name: u?.name ?? '',
+          email: u?.email ?? '',
+          role: m.role,
+          status: m.status,
+        };
       }),
       ...pendingInvites.map((i) => ({
         id: i.id,
+        // Nobody has accepted yet, so there is no user to key anything to. A
+        // caller that needs a person must skip these rather than fall back to
+        // the invite id, which belongs to a different table.
+        userId: null,
         // A QR-delivered invite has no email at all, so the recorded name is
         // the only way to tell pending rows apart.
         name: i.inviteeName || nameFromEmail(i.email ?? '') || i.email || 'Pending invite',

@@ -140,7 +140,52 @@ describe('GET /team/members', () => {
       const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body).toEqual([{ id: 'm1', name: 'Ash Wyborn', email: 'ash@x.io', role: 'admin', status: 'active' }]);
+      expect(body).toEqual([
+        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', email: 'ash@x.io', role: 'admin', status: 'active' },
+      ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  /*
+    `id` is the MEMBERSHIP id. Everything that records something against a
+    person — an assessment case, a competency grant — keys on the USER id, and
+    this response resolved it internally and then dropped it. The result was
+    that opening the first assessment case required querying the database by
+    hand: the product asked for an id it never showed anyone.
+  */
+  it('exposes the user id, distinct from the membership id', async () => {
+    mockDbValue = fakeDb({
+      membershipsFindMany: [{ id: 'm1', userId: 'u1', role: 'candidate', status: 'active' }],
+      usersFindMany: [{ id: 'u1', name: 'Ash Wyborn', email: 'ash@x.io' }],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
+      const [row] = (await res.json()) as { id: string; userId: string | null }[];
+      expect(row!.userId).toBe('u1');
+      expect(row!.userId).not.toBe(row!.id);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('gives a pending invite a null user id rather than its invite id', async () => {
+    // Falling back to `id` here would hand a caller an id from a different
+    // table that still parses as a UUID — the exact confusion this splits.
+    mockDbValue = fakeDb({
+      membershipsFindMany: [],
+      usersFindMany: [],
+      invitesFindMany: [{ id: 'inv-1', email: 'sam.lee@x.io', role: 'builder', acceptedAt: null }],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
+      const [row] = (await res.json()) as { id: string; userId: string | null }[];
+      expect(row!.userId).toBeNull();
     } finally {
       server.close();
     }
@@ -160,8 +205,8 @@ describe('GET /team/members', () => {
       // The invitee has no user row yet — the name is derived from the address
       // the inviter typed, and `status` is what marks them as not-yet-joined.
       expect(await res.json()).toEqual([
-        { id: 'm1', name: 'Ash Wyborn', email: 'ash@x.io', role: 'admin', status: 'active' },
-        { id: 'inv-1', name: 'Sam Lee', email: 'sam.lee@x.io', role: 'builder', status: 'invited' },
+        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', email: 'ash@x.io', role: 'admin', status: 'active' },
+        { id: 'inv-1', userId: null, name: 'Sam Lee', email: 'sam.lee@x.io', role: 'builder', status: 'invited' },
       ]);
     } finally {
       server.close();

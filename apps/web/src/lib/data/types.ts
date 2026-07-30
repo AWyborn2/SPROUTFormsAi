@@ -156,7 +156,15 @@ export type MemberStatus = 'active' | 'invited';
 
 /** A team member (membership projection). */
 export interface Member {
+  /** The MEMBERSHIP id — what team management routes address. */
   id: string;
+  /**
+   * The USER id — what anything recording something against a person keys on
+   * (an assessment case, a competency grant). Null for a pending invite, which
+   * has no user yet. Distinct from `id`: passing a membership id where a user
+   * id is wanted validates as a UUID and then matches nothing.
+   */
+  userId: string | null;
   name: string;
   email: string;
   role: RoleName;

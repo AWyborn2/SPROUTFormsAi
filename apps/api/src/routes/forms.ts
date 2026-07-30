@@ -58,6 +58,10 @@ formsRouter.get('/', requireTenant, withErrorHandling(async (req, res) => {
     return;
   }
   const tenant = req.tenant!;
+  if (!(await hasPermission(tenant, 'forms', 'view'))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
   const templates = await db.query.formTemplates.findMany({
     where: eq(schema.formTemplates.orgId, tenant.orgId),
     orderBy: (t, { desc: descOrder }) => [descOrder(t.updatedAt)],
@@ -122,6 +126,10 @@ formsRouter.post('/', requireTenant, withErrorHandling(async (req, res) => {
     return;
   }
   const tenant = req.tenant!;
+  if (!(await hasPermission(tenant, 'forms', 'create'))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
   const { name, dept, sourceType, fields, container, sourcePdfAssetId, publish } = parsed.data;
   const now = new Date();
 
@@ -170,12 +178,27 @@ formsRouter.post('/', requireTenant, withErrorHandling(async (req, res) => {
   });
 }));
 
+/*
+  THIS RESPONSE CARRIES ANSWER KEYS. `fields` below is the published version's
+  field list verbatim, and a theory question's `answerKey` lives on the field.
+  The two surfaces a candidate legitimately reads — the part-fill payload and a
+  public fill link — both launder it through `stripMarkingSecrets`; this one
+  cannot, because the builder and the placement editor need the whole field.
+
+  So the gate IS the protection. A candidate's forms matrix is entirely false,
+  which is what excludes them. Do not relax this to `requireTenant` alone: org
+  membership is not the boundary here, the answers to a safety assessment are.
+*/
 formsRouter.get('/:id', requireTenant, withErrorHandling(async (req, res) => {
   if (!db) {
     res.status(503).json({ error: 'db_unavailable' });
     return;
   }
   const tenant = req.tenant!;
+  if (!(await hasPermission(tenant, 'forms', 'view'))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
   const template = await db.query.formTemplates.findFirst({
     where: and(eq(schema.formTemplates.id, req.params.id!), eq(schema.formTemplates.orgId, tenant.orgId)),
   });

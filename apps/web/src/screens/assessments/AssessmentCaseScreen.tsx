@@ -317,6 +317,13 @@ function PartCard({
  * the answer key and the assessor reviews the result. Offering a satisfactory /
  * not-satisfactory choice here would imply a judgement the assessor does not
  * actually make, and the API would ignore it.
+ *
+ * That reasoning is right, but it used to deadlock: the API demanded a
+ * disposition and reason for the not-satisfactory case, and this form — having
+ * no outcome control — never sent either, so a failed theory part 400'd and its
+ * attempt stayed unresolved forever. The API now defaults a computed failure to
+ * "more coaching required", so sending neither is correct. Do not add an
+ * outcome control here to "fix" a failure being recorded without one.
  */
 function OutcomeForm({ caseId, attemptId, kind }: { caseId: string; attemptId: string; kind: string }) {
   const record = useRecordOutcome(caseId);
@@ -358,7 +365,8 @@ function OutcomeForm({ caseId, attemptId, kind }: { caseId: string; attemptId: s
       {isTheory ? (
         <p className="text-[12.5px] text-text-tertiary">
           Marking is computed from the answer key once the candidate’s answers are saved. Recording the
-          outcome marks every question and decides the part.
+          outcome marks every question and decides the part. Anything under 100% is recorded as more
+          coaching required, and the candidate sits it again — it does not close the case.
         </p>
       ) : (
         <div className="flex flex-wrap gap-2">

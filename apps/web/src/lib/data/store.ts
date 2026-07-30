@@ -217,6 +217,9 @@ async function getOrUndefined<T>(promise: Promise<T>): Promise<T | undefined> {
 /** Raw shapes returned by `apps/api`'s team/audit/competency routes. */
 interface MemberDto {
   id: string;
+  /** The user behind the membership; null on a pending invite, absent on the
+   *  create/patch responses, which project a single membership. */
+  userId?: string | null;
   name: string;
   email: string;
   role: Role;
@@ -287,6 +290,7 @@ function toApiKey(dto: ApiKeyDto): ApiKey {
 function toMember(dto: MemberDto): Member {
   return {
     id: dto.id,
+    userId: dto.userId ?? null,
     name: dto.name,
     email: dto.email,
     role: ROLE_LABELS[dto.role] as RoleName,

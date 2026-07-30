@@ -203,6 +203,17 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
     competencyHolders: [],
     auditLogEntries: [],
     users: [],
+    /*
+      Case creation requires the candidate to be a member of THIS org — without
+      it, any org could open a case against any user id in the system. The fake
+      db had no memberships table at all, which is the shape of harness that
+      lets such a gap survive: the missing check had nothing to fail against.
+    */
+    memberships: [
+      { id: nextId(), orgId: ORG, userId: ADMIN, role: 'admin', status: 'active' },
+      { id: nextId(), orgId: ORG, userId: CANDIDATE, role: 'candidate', status: 'active' },
+      { id: nextId(), orgId: ORG, userId: OTHER_CANDIDATE, role: 'candidate', status: 'active' },
+    ],
   };
 
   const nameOf = (table: unknown) =>
@@ -252,6 +263,15 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
   } as unknown as Db;
 
   return { db, store };
+}
+
+/**
+ * Rows of one fake-db table. `store` carries an index signature, so reading a
+ * table directly is possibly-undefined; every table above is seeded, so an
+ * empty array is the honest answer rather than a non-null assertion.
+ */
+function rows(store: Record<string, Record<string, unknown>[]>, table: string) {
+  return store[table] ?? [];
 }
 
 async function seedTool(base: string, manifest = MANIFEST) {
@@ -373,6 +393,33 @@ describe('POST /assessment-cases', () => {
     }
   });
 
+  it('refuses a candidate who is not a member of this org, and opens nothing', async () => {
+    // candidateUserId was only checked for UUID shape, so a well-formed id
+    // belonging to another org's user opened a real case — building a
+    // competency record against a stranger, on this org's candidate seat.
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const res = await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          toolId: tool.id,
+          candidateUserId: '00000000-0000-4000-8000-0000000000ff',
+          pathway: 'new',
+        }),
+      });
+
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error: string }).error).toBe('candidate_not_in_org');
+      expect(rows(store, 'assessmentCases')).toHaveLength(0);
+    } finally {
+      server.close();
+    }
+  });
+
   it('records unmet prerequisites as warnings and still opens the case', async () => {
     const { db } = makeDb();
     mockDbValue = db;
@@ -470,8 +517,20 @@ describe('attempt sequencing', () => {
     }
   });
 
-  it('refuses a not-satisfactory outcome with no disposition and reason', async () => {
-    mockDbValue = makeDb().db;
+  /*
+    THIS TEST USED TO ASSERT THE OPPOSITE.
+
+    It required a disposition and a reason for a COMPUTED theory failure, and
+    400'd without them. Nothing could supply them — the assessor makes no
+    judgement on a theory part, so the UI offers no outcome control — which left
+    `outcome` null, and an unresolved attempt is handed back by the open route
+    as `reused: true` forever. A failed theory part was unrecordable and the
+    part wedged. The rule below replaces it deliberately, so the change is
+    visible in the diff rather than arriving as a silently deleted test.
+  */
+  it('records a computed theory failure as more-coaching-required, unprompted', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
     const { server, base } = startApp();
     try {
       const c = await openCase(base);
@@ -491,8 +550,138 @@ describe('attempt sequencing', () => {
         body: JSON.stringify({}),
       });
 
+      expect(res.status).toBe(200);
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === a.id);
+      expect(row?.outcome).toBe('not_satisfactory');
+      expect(row?.disposition).toBe('coaching_then_retry');
+      // No judgement was made, so nothing is invented to justify one.
+      expect(row?.dispositionReason).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('leaves the case open after a computed failure, so the candidate can sit it again', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await openCase(base);
+      const a = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, { method: 'POST', headers: auth() })
+      ).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['b'] } }),
+      });
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({}),
+      });
+
+      // Assert the failure was RECORDED as well as that the case stayed open —
+      // otherwise a route that refuses outright passes this vacuously.
+      expect(rows(store, 'assessmentPartAttempts').find((r) => r.id === a.id)?.outcome).toBe('not_satisfactory');
+      expect(rows(store, 'assessmentCases').find((r) => r.id === c.id)?.state).toBe('open');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('opens a fresh attempt after a computed failure rather than handing back the wedged one', async () => {
+    // The wedge itself: while the outcome stayed null, this returned reused:true
+    // every time and there was no verb to clear it.
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const c = await openCase(base);
+      const first = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, { method: 'POST', headers: auth() })
+      ).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${first.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['b'] } }),
+      });
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${first.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({}),
+      });
+
+      const retry = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, { method: 'POST', headers: auth() })
+      ).json()) as { id: string; reused?: boolean };
+      expect(retry.reused).toBeFalsy();
+      expect(retry.id).not.toBe(first.id);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still demands a disposition and reason where the assessor really did judge', async () => {
+    // R18 is unchanged for a JUDGED outcome. Only the computed branch moved.
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const c = await openCase(base);
+      // p2 will not open until its predecessor has passed, so pass p1 first.
+      const theory = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, { method: 'POST', headers: auth() })
+      ).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({}),
+      });
+
+      const a = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/p2/attempts`, { method: 'POST', headers: auth() })
+      ).json()) as { id: string };
+      const res = await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'not_satisfactory' }),
+      });
+
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toBe('disposition_and_reason_required');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets an assessor still close a theory part as not yet competent, explicitly', async () => {
+    // Defaulting to coaching is a DEFAULT, not a ceiling — the deliberate act
+    // of closing the case stays available.
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await openCase(base);
+      const a = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, { method: 'POST', headers: auth() })
+      ).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['b'] } }),
+      });
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ disposition: 'not_yet_competent', reason: 'Third sitting, no progress' }),
+      });
+
+      expect(rows(store, 'assessmentPartAttempts').find((r) => r.id === a.id)?.disposition).toBe('not_yet_competent');
+      expect(rows(store, 'assessmentCases').find((r) => r.id === c.id)?.state).toBe('closed');
     } finally {
       server.close();
     }

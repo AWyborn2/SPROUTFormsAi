@@ -367,6 +367,24 @@ assessmentCasesRouter.post(
       return;
     }
 
+    /*
+      The candidate must be a member of this org. `candidateUserId` was only
+      validated as a UUID, so any org could open a case against any user id in
+      the system and accumulate a competency record against a stranger — while
+      consuming one of its own candidate seats doing it. Same check, and the
+      same reason, as the competency grant in competencies.ts.
+    */
+    const candidateMembership = await db.query.memberships.findFirst({
+      where: and(
+        eq(schema.memberships.userId, candidateUserId),
+        eq(schema.memberships.orgId, tenant.orgId),
+      ),
+    });
+    if (!candidateMembership) {
+      res.status(404).json({ error: 'candidate_not_in_org' });
+      return;
+    }
+
     const [candidateGaps, assessorGaps] = await Promise.all([
       unmetPrerequisites(db, tenant.orgId, candidateUserId, tool.candidatePrerequisiteIds),
       unmetPrerequisites(db, tenant.orgId, assessorUserId, tool.assessorCompetencyIds),
@@ -1450,10 +1468,12 @@ const outcomeBody = z.object({
 /**
  * Resolve an attempt.
  *
- * A theory attempt's outcome is COMPUTED from the answer key and the assessor
- * reviews it; every other part's is recorded by the assessor. A
- * not-satisfactory outcome demands a disposition and a reason, which is the
- * "further action" the paper form asks for.
+ * A theory attempt's outcome is COMPUTED from the answer key; every other
+ * part's is JUDGED by the assessor. That split decides what a not-satisfactory
+ * result has to supply: a judged one demands a disposition and a reason — the
+ * "further action" the paper form asks for — while a computed one defaults to
+ * "more coaching required" and records itself, because arithmetic on an answer
+ * key is not a decision anyone has to justify.
  */
 assessmentCasesRouter.post(
   '/:id/attempts/:attemptId/outcome',
@@ -1505,8 +1525,13 @@ assessmentCasesRouter.post(
 
     let outcome = parsed.data.outcome ?? null;
     let derivedValues = attempt.values;
+    /**
+     * Was this verdict COMPUTED from the answer key, or JUDGED by the assessor?
+     * The distinction decides what the record has to demand below.
+     */
+    const computed = part.kind === 'theory';
 
-    if (part.kind === 'theory') {
+    if (computed) {
       const fields = await fieldsForVersion(db, attempt.templateVersionId);
       const marked = markTheory({ fields, values: attempt.values, part });
       outcome = marked.outcome;
@@ -1516,9 +1541,39 @@ assessmentCasesRouter.post(
       return;
     }
 
-    if (outcome === 'not_satisfactory' && !(parsed.data.disposition && parsed.data.reason)) {
-      res.status(400).json({ error: 'disposition_and_reason_required' });
-      return;
+    let disposition = parsed.data.disposition ?? null;
+    const reason = parsed.data.reason ?? null;
+
+    /*
+      UNDER 100% IS "NOT YET", NOT A FAILURE.
+
+      A theory verdict is arithmetic on the answer key — the assessor makes no
+      judgement, so there is no judgement to justify, and demanding a written
+      reason for one is demanding a reason for a sum. Practice is that the
+      candidate is coached and sits it again; the hours and the attempt are
+      retained either way.
+
+      So a computed not-satisfactory defaults to "more coaching required" and
+      records itself. It used to 400 for a missing disposition and reason the
+      UI had no way to collect, which left `outcome` null — and an unresolved
+      attempt is handed straight back by the open route as `reused: true`, so
+      the part wedged permanently with no verb to clear it. A failed theory
+      part was unrecordable.
+
+      An assessor may still pass `not_yet_competent` explicitly, which closes
+      the case. That is a deliberate act and stays available; it is only the
+      DEFAULT that changed, from "refuse" to "coach and retry".
+
+      A JUDGED outcome is unchanged: R18's disposition and reason still stand,
+      because there the assessor really did decide something.
+    */
+    if (outcome === 'not_satisfactory') {
+      if (computed) {
+        disposition = disposition ?? 'coaching_then_retry';
+      } else if (!(disposition && reason)) {
+        res.status(400).json({ error: 'disposition_and_reason_required' });
+        return;
+      }
     }
 
     await db
@@ -1526,8 +1581,8 @@ assessmentCasesRouter.post(
       .set({
         outcome,
         values: derivedValues,
-        disposition: outcome === 'not_satisfactory' ? (parsed.data.disposition ?? null) : null,
-        dispositionReason: outcome === 'not_satisfactory' ? (parsed.data.reason ?? null) : null,
+        disposition: outcome === 'not_satisfactory' ? disposition : null,
+        dispositionReason: outcome === 'not_satisfactory' ? reason : null,
         belowThresholdReason: parsed.data.belowThresholdReason ?? null,
         assessorUserId: tenant.userId,
         assessorName: parsed.data.assessorName ?? '',
@@ -1539,7 +1594,9 @@ assessmentCasesRouter.post(
     const attempts = await attemptsFor(db, row.id);
     const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
     const competent = isCaseCompetent(progress);
-    const closing = outcome === 'not_satisfactory' && parsed.data.disposition === 'not_yet_competent';
+    // The RESOLVED disposition, not the requested one — a computed fail that
+    // defaulted to coaching keeps the case open, which is the whole point.
+    const closing = outcome === 'not_satisfactory' && disposition === 'not_yet_competent';
 
     const nextState = competent ? 'competent' : closing ? 'closed' : 'open';
     if (nextState !== row.state) {
