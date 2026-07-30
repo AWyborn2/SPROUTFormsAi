@@ -54,6 +54,21 @@ describe('tool registration', () => {
     }
   });
 
+  it('describes the date rules the server actually enforces', () => {
+    // These strings are the only account of the rules an agent ever reads, so
+    // they drift silently when the rules change — this pins them to the two
+    // that actually apply. The four-business-day notice rule was replaced by
+    // the Thursday cutoff and must not survive in any description.
+    const tools = setup({});
+    const descriptions = [...tools.values()].map((t) => t.config.description).join(' ');
+    expect(descriptions).not.toMatch(/business[ -]day/i);
+    // Saying there is NO minimum notice is the point — an agent that assumes
+    // one will refuse a booking the site would happily take.
+    expect(descriptions).toMatch(/no minimum notice/i);
+    expect(tools.get('next_induction_dates')!.config.description).toContain('Thursday');
+    expect(tools.get('next_induction_dates')!.config.description).toContain('Tuesday');
+  });
+
   it('tells the agent that seats come from the server, not from counting the roster', () => {
     const tools = setup({});
     expect(tools.get('plan_induction_cohort')!.config.description).toContain('READY starters only');

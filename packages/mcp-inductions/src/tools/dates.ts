@@ -13,10 +13,12 @@ export function registerDateTools(host: ToolHost, client: InductionsClient): voi
     {
       title: 'Next bookable induction dates',
       description:
-        'Upcoming induction Mondays that satisfy the site rule: a Monday, not a public ' +
-        'holiday, at least four clear business days away. holidayListExpired marks a date ' +
-        'beyond the end of the stored public-holiday list, where the notice count may be ' +
-        'treating a holiday as a working day — check it with a human before booking.',
+        'Upcoming dates the site runs an induction on and can still be booked: Mondays, ' +
+        'moving to the Tuesday when that Monday is a public holiday, and only while the ' +
+        'Thursday-before cutoff has not passed. There is no minimum notice — a date a few ' +
+        'days out is perfectly bookable. holidayListExpired marks a date beyond the end of ' +
+        'the stored public-holiday list, where the day may in fact be a holiday nobody has ' +
+        'recorded yet — check it with a human before booking.',
       inputSchema: datesInput,
     },
     async (args) => ok(await client.nextDates(args.count)),

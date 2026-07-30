@@ -3,7 +3,7 @@ import type { InductionsClient } from '../client.js';
 import { defineTool, ISO_DATE, ok, type ToolHost } from './host.js';
 
 export const recordBookingInput = z.object({
-  date: z.string().regex(ISO_DATE, 'Use YYYY-MM-DD').describe('The induction Monday that was booked.'),
+  date: z.string().regex(ISO_DATE, 'Use YYYY-MM-DD').describe('The induction date that was booked.'),
   submissionIds: z
     .array(z.string().min(1))
     .min(1)
@@ -21,7 +21,7 @@ export const recordBookingInput = z.object({
     .max(500)
     .optional()
     .describe(
-      'Why the site accepted a booking inside the four-business-day notice window. Required ' +
+      'Why the site accepted a booking made after the Thursday cutoff for that date. Required ' +
       'when any starter is short-notice — the API refuses without it. Record what the human ' +
       'actually decided (who agreed, and on what basis); never invent a justification.',
     ),
@@ -43,9 +43,9 @@ export function registerBookingTools(host: ToolHost, client: InductionsClient): 
         'for one. Every starter must share the booking date. An already_booked error means a ' +
         'starter is covered by an existing booking; re-read the candidates rather than ' +
         'retrying, because a repeat call will never succeed for that person. A ' +
-        'notice_override_required error means a starter is inside the notice window: stop and ' +
-        'ask the human whether the site has agreed to it, then pass their answer as ' +
-        'noticeOverrideReason.',
+        'notice_override_required error means the Thursday cutoff for that date has passed: ' +
+        'stop and ask the human whether the site has agreed to it anyway, then pass their ' +
+        'answer as noticeOverrideReason.',
       inputSchema: recordBookingInput,
     },
     async (args) => ok(await client.recordBooking(args)),
