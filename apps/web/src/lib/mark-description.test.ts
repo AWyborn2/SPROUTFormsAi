@@ -75,8 +75,27 @@ describe('markDescription', () => {
     expect(d.mark).toMatch(/answered column/);
   });
 
-  it('describes a signature as itself, not as text', () => {
-    expect(markDescription({ type: 'signature' }).mark).toMatch(/signature/);
+  /*
+    THIS TEST USED TO ASSERT THE OPPOSITE — that a signature box "draws the
+    signature". It does not, and cannot: round-trip.ts has no signature branch,
+    apps/api/src/pdf contains no image-embedding call at all, and the value is a
+    base64 PNG data URL. The renderer falls through to String(value) and stamps
+    the raw data URL across the page as one unbreakable line.
+
+    A module whose whole purpose is to stop the panel promising marks the
+    exporter does not draw cannot itself promise the one it cannot keep.
+  */
+  it('refuses to promise a signature the exporter cannot draw', () => {
+    const d = markDescription({ type: 'signature' });
+
+    expect(d.mark).not.toBe('the signature');
+    expect(d.detail).toMatch(/cannot be drawn|raw image data/i);
+  });
+
+  it('warns a reviewer off placing a signature box at all', () => {
+    // The actionable half. Without it a reviewer places 5 boxes that each
+    // deface a page of the record.
+    expect(markSentence({ type: 'signature' })).toMatch(/leave it unplaced/i);
   });
 
   it('falls back to text for an ordinary field', () => {

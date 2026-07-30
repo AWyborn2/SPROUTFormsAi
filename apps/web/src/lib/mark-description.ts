@@ -64,7 +64,26 @@ export function markDescription(field: Pick<FormField, 'type' | 'options' | 'pri
   }
 
   if (field.type === 'signature') {
-    return { mark: 'the signature', detail: '' };
+    /*
+      NOT "the signature". The exporter cannot draw one.
+
+      A signature value is a base64 PNG data URL (SignaturePad's toDataURL), and
+      there is no image-embedding call anywhere in apps/api/src/pdf — no
+      embedPng, no drawImage. `round-trip.ts` has no signature branch at all, so
+      the value falls through to the scalar text path and is drawn with
+      String(value): thousands of characters of base64 on one unbreakable line,
+      because pdf-lib wraps only on spaces and base64 has none.
+
+      This module exists to stop the panel promising a mark the exporter does
+      not draw, so it must not make that promise about the one case it cannot
+      keep. When image embedding lands, this becomes "the signature" and the
+      warning goes.
+    */
+    return {
+      mark: 'nothing usable yet',
+      detail:
+        'Signature images cannot be drawn onto the exported PDF — placing a box here will print the raw image data across the page. Leave it unplaced until that is supported.',
+    };
   }
 
   return { mark: 'the value, as text', detail: '' };

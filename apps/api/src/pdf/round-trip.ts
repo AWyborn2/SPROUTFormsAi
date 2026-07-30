@@ -112,6 +112,27 @@ function scalarText(value: SubmissionValue | undefined): string {
     if (value.every((v) => typeof v === 'string')) return (value as string[]).join(', ');
     return '';
   }
+  /*
+    A DATA URL IS NEVER TEXT.
+
+    A drawn signature is `canvas.toDataURL('image/png')` — tens of kilobytes of
+    base64. There is no image-embedding path in this module yet, so without this
+    guard the value reaches `String(...)` below and is drawn as a caption:
+    pdf-lib breaks lines only on ' ', and base64 contains none, so it emits ONE
+    unbreakable line thousands of points wide straight across the record. It is
+    fully WinAnsi-encodable, so nothing throws — the page is simply ruined.
+
+    Deliberately type-agnostic rather than a `signature` branch. Extraction
+    folds signature boxes into text inputs, so the same blob arrives under type
+    `text`; and this renderer is shared with the submission export
+    (routes/pdf.ts), which has its own ways of acquiring one.
+
+    Blank is the correct failure. A competency record that is missing a mark is
+    a visible gap someone fixes; one defaced by a wall of base64 is neither
+    readable nor trustworthy. When image embedding lands, this becomes the
+    branch that draws the image.
+  */
+  if (typeof value === 'string' && value.startsWith('data:')) return '';
   return String(value);
 }
 
