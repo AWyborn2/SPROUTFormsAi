@@ -54,7 +54,29 @@ const logTable: FormField = {
   ],
 };
 
-const FIELDS: FormField[] = [header('h1'), header('h2'), header('h3'), logTable, header('h4')];
+/*
+  `stream` is here because MANIFEST names it as locationStreamFieldId and the
+  field did not exist. The fixture had always been invalid; nothing checked.
+  validateManifest now validates that pointer like every other one, which is
+  what surfaced it — exactly the latent break the retrofit was for.
+*/
+const streamField: FormField = {
+  id: 'stream',
+  type: 'radio',
+  label: 'Location stream',
+  required: false,
+  source: 'imported',
+  options: ['mining', 'raw-materials'],
+};
+
+const FIELDS: FormField[] = [
+  header('h1'),
+  header('h2'),
+  header('h3'),
+  logTable,
+  header('h4'),
+  streamField,
+];
 
 const attempt = (
   partKey: string,
@@ -192,6 +214,9 @@ describe('exportCasePdf', () => {
     header('h3'),
     logTable,
     header('h4'),
+    // Named by MANIFEST.locationStreamFieldId, which is now validated like
+    // every other pointer. See the note on `streamField` above.
+    streamField,
   ];
 
   it('preserves the source document’s page count', async () => {

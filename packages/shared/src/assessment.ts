@@ -385,6 +385,113 @@ export function validateManifest(
         }
       }
     }
+
+    /*
+      EVERY POINTER GETS A RULE, IN THE SAME COMMIT THAT ADDS IT.
+
+      `checklistFieldId` shipped as a type and a zod line with no reader, no
+      writer and no validator, and nobody noticed for weeks — because an
+      unvalidated pointer that resolves to nothing simply draws nothing. On a
+      competency record that silence is indistinguishable from a part nobody
+      assessed, so a pointer has to be checked at authoring time, where an
+      author can still fix it, rather than discovered at export.
+    */
+    for (const [what, id] of [
+      ['assessorNameFieldId', part.assessorNameFieldId],
+      ['signedDateFieldId', part.signedDateFieldId],
+      ['checklistMark', part.checklistMark?.fieldId],
+    ] as const) {
+      if (id && !fieldIds.has(id)) {
+        problems.push(`Part "${part.key}" names ${what} "${id}", which is not in this version.`);
+      }
+    }
+  }
+
+  /*
+    No two parts may claim the same printed box. `assembleCaseValues` merges
+    parts in order with Object.assign, so on a collision the last part silently
+    wins and one part's assessor or date is overwritten by another's, with
+    nothing to notice it.
+  */
+  const claimed = new Map<string, string>();
+  const claim = (id: string | undefined, by: string) => {
+    if (!id) return;
+    const prior = claimed.get(id);
+    if (prior) problems.push(`Field "${id}" is claimed by both ${prior} and ${by}.`);
+    else claimed.set(id, by);
+  };
+  for (const part of parts) {
+    claim(part.assessorNameFieldId, `part "${part.key}" assessorNameFieldId`);
+    claim(part.signedDateFieldId, `part "${part.key}" signedDateFieldId`);
+    claim(part.checklistMark?.fieldId, `part "${part.key}" checklistMark`);
+  }
+
+  /*
+    A mark addressing a table CELL must carry a primitive. The exporter refuses
+    a non-primitive rather than writing "[object Object]" into a competency
+    record, so without this the mark would silently never appear.
+  */
+  const marksNamingCells: [string, DeclaredMark | undefined][] = [
+    ...parts.map((p) => [`part "${p.key}" checklistMark`, p.checklistMark] as [string, DeclaredMark | undefined]),
+    ['signOff.overallSatisfactory', manifest.signOff?.overallSatisfactory],
+    ['signOff.moreCoachingRequiredYes', manifest.signOff?.moreCoachingRequiredYes],
+    ['signOff.moreCoachingRequiredNo', manifest.signOff?.moreCoachingRequiredNo],
+  ];
+  for (const [what, mark] of marksNamingCells) {
+    if (!mark?.rowKey || !mark.columnKey) continue;
+    if (mark.value !== null && typeof mark.value === 'object') {
+      problems.push(`${what} addresses a table cell but its value is not a primitive.`);
+    }
+  }
+
+  const signOff = manifest.signOff;
+  if (signOff) {
+    claim(signOff.assessorNameFieldId, 'signOff.assessorNameFieldId');
+    claim(signOff.signedDateFieldId, 'signOff.signedDateFieldId');
+    claim(signOff.assessorSignatureFieldId, 'signOff.assessorSignatureFieldId');
+
+    for (const [what, id] of [
+      ['signOff.assessorNameFieldId', signOff.assessorNameFieldId],
+      ['signOff.signedDateFieldId', signOff.signedDateFieldId],
+      ['signOff.assessorSignatureFieldId', signOff.assessorSignatureFieldId],
+      ['signOff.overallSatisfactory', signOff.overallSatisfactory?.fieldId],
+      ['signOff.moreCoachingRequiredYes', signOff.moreCoachingRequiredYes?.fieldId],
+      ['signOff.moreCoachingRequiredNo', signOff.moreCoachingRequiredNo?.fieldId],
+    ] as const) {
+      if (id && !fieldIds.has(id)) {
+        problems.push(`Manifest names ${what} "${id}", which is not in this version.`);
+      }
+    }
+
+    // The signature box must really be a signature field. Naming a text field
+    // would route a PNG data URL down the scalar path, where the renderer
+    // refuses it — a certified record with an empty signature box.
+    const sig = fields.find((f) => f.id === signOff.assessorSignatureFieldId);
+    if (sig && sig.type !== 'signature') {
+      problems.push(
+        `signOff.assessorSignatureFieldId "${sig.id}" is a ${sig.type}, not a signature field.`,
+      );
+    }
+
+    // Both coaching boxes or neither. One alone cannot express the answer it is
+    // missing, so half a pair prints an unanswerable front page.
+    if (!!signOff.moreCoachingRequiredYes !== !!signOff.moreCoachingRequiredNo) {
+      problems.push(
+        'signOff declares only one of moreCoachingRequiredYes / moreCoachingRequiredNo — the front page prints both boxes.',
+      );
+    }
+  }
+
+  /*
+    Retrofit: `locationStreamFieldId` had no check at all. Same class of
+    pointer, and this whole exercise exists because an unvalidated one draws
+    nothing and reports nothing. This may surface a latent break on an existing
+    tool, which is the point.
+  */
+  if (manifest.locationStreamFieldId && !fieldIds.has(manifest.locationStreamFieldId)) {
+    problems.push(
+      `Manifest names locationStreamFieldId "${manifest.locationStreamFieldId}", which is not in this version.`,
+    );
   }
 
   return problems;

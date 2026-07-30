@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { CaseStateBadge } from '../statusBadges.js';
-import { Button, Icon, useToast } from '@formai/ui';
+import { Button, Icon, SignaturePad, useToast } from '@formai/ui';
 import { NS_DISPOSITIONS, type NotSatisfactoryDisposition, type PartState } from '@formai/shared';
 import {
   useAssessmentCase,
@@ -9,6 +9,7 @@ import {
   useOpenAttempt,
   useRecordOutcome,
   useSession,
+  useSignOffCase,
 } from '../../lib/data/hooks.js';
 import { caseExportFilename, caseExportProblem } from '../../lib/case-export-problem.js';
 import type { CasePartView } from '../../lib/data/assessments.js';
@@ -51,6 +52,7 @@ export function AssessmentCaseScreen() {
   const openAttempt = useOpenAttempt(id ?? '');
   const exportPdf = useExportCasePdf();
   const { toast } = useToast();
+  const [signingOff, setSigningOff] = useState(false);
 
   const isCandidate = session?.role === 'candidate';
 
@@ -126,6 +128,14 @@ export function AssessmentCaseScreen() {
           </p>
         </div>
         <div className="flex items-center gap-2.5">
+          {/* Shown only once every part has passed and nobody has signed. The
+              route recomputes that itself and refuses otherwise, so this is a
+              convenience rather than the guard. */}
+          {!isCandidate && c.state === 'awaiting_sign_off' && (
+            <Button leadingIcon="circle-check" onClick={() => setSigningOff(true)}>
+              Sign off and certify
+            </Button>
+          )}
           {/* Candidates have no export permission — the route refuses them, so
               showing the control would only produce a 403 they cannot act on. */}
           {!isCandidate && (
@@ -174,6 +184,113 @@ export function AssessmentCaseScreen() {
             opening={openAttempt.isPending}
           />
         ))}
+      </div>
+
+      {signingOff && (
+        <SignOffDialog caseId={c.id} toolName={c.toolName} onClose={() => setSigningOff(false)} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The assessor's final approval.
+ *
+ * Deliberately more ceremony than a confirm button. What this writes is a
+ * person's name and signature on a document stating that a candidate is safe to
+ * operate a machine — so the assessor types their own name and draws their own
+ * signature rather than having either inferred from the session. The date is
+ * server-stamped and never sent: it is a claim about when a judgement was made,
+ * and the only moment we can vouch for is when the request arrived.
+ */
+function SignOffDialog({
+  caseId,
+  toolName,
+  onClose,
+}: {
+  caseId: string;
+  toolName: string;
+  onClose: () => void;
+}) {
+  const signOff = useSignOffCase(caseId);
+  const { toast } = useToast();
+  const [name, setName] = useState('');
+  const [signature, setSignature] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    setError(null);
+    if (!name.trim()) {
+      setError('Type your name as it should appear on the certificate.');
+      return;
+    }
+    if (!signature) {
+      setError('Draw or type your signature — it prints on the record.');
+      return;
+    }
+    try {
+      const res = await signOff.mutateAsync({ assessorName: name.trim(), signature });
+      const granted = res.granted?.length
+        ? ` Competency recorded: ${res.granted.join(', ')}.`
+        : '';
+      toast({ variant: 'success', message: `${toolName} is now competent.${granted}` });
+      // Anything that did not stop the sign-off still has to be seen — an
+      // assessor missing a competency of their own, or a grant that failed.
+      for (const w of res.warnings ?? []) {
+        toast({ variant: 'warning', message: w });
+      }
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not sign this case off.');
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgb(0 0 0 / 0.45)' }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Sign off and certify"
+    >
+      <div className="w-full max-w-[460px] rounded-lg border border-border bg-surface-card p-[20px_22px]">
+        <h2 className="font-heading text-[17px] font-bold">Sign off and certify</h2>
+        <p className="mt-1.5 text-[13px] text-text-tertiary">
+          Every part of {toolName} is satisfactory. Your name, signature and today’s date print on
+          the assessment record, and this is what makes the case competent.
+        </p>
+
+        <label htmlFor="so-name" className="mt-4 block text-[12.5px] font-semibold text-text-secondary">
+          Your name, as it should print
+        </label>
+        <input
+          id="so-name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="mt-1 w-full rounded-md border border-border bg-surface-card p-[9px_11px] text-[13.5px]"
+        />
+
+        <span className="mt-3.5 block text-[12.5px] font-semibold text-text-secondary">
+          Your signature
+        </span>
+        <div className="mt-1">
+          <SignaturePad value={signature} onChange={setSignature} aria-label="Assessor signature" />
+        </div>
+
+        {error && (
+          <p className="mt-3 text-[12.5px]" style={{ color: 'var(--danger)' }}>
+            {error}
+          </p>
+        )}
+
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose} disabled={signOff.isPending}>
+            Cancel
+          </Button>
+          <Button leadingIcon="circle-check" onClick={submit} disabled={signOff.isPending}>
+            {signOff.isPending ? 'Signing…' : 'Sign off'}
+          </Button>
+        </div>
       </div>
     </div>
   );

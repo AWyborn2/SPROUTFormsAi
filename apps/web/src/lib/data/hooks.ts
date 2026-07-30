@@ -841,6 +841,20 @@ export function useRecordOutcome(caseId: string) {
   });
 }
 
+/** The assessor's final approval. Invalidates the same three views an outcome does. */
+export function useSignOffCase(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { assessorName: string; signature: string }) =>
+      assessmentsApi.signOffCase({ caseId, ...input }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
+    },
+  });
+}
+
 export function useChangePathway(caseId: string) {
   const qc = useQueryClient();
   return useMutation({

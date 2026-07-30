@@ -23,6 +23,7 @@ const ORG = 'org-1';
 const ADMIN = '00000000-0000-4000-8000-00000000000a';
 const CANDIDATE = '00000000-0000-4000-8000-00000000000c';
 const OTHER_CANDIDATE = '00000000-0000-4000-8000-00000000000d';
+const COMPETENCY = '00000000-0000-4000-8000-0000000000f1';
 const TEMPLATE = '00000000-0000-4000-8000-000000000001';
 const VERSION = '00000000-0000-4000-8000-000000000002';
 
@@ -200,6 +201,7 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
     assessmentTools: [],
     assessmentCases: [],
     assessmentPartAttempts: [],
+    competencies: [{ id: COMPETENCY, orgId: ORG, name: 'Track Dozer Operator', code: 'TD-OP', holders: 0 }],
     competencyHolders: [],
     auditLogEntries: [],
     users: [],
@@ -274,11 +276,16 @@ function rows(store: Record<string, Record<string, unknown>[]>, table: string) {
   return store[table] ?? [];
 }
 
-async function seedTool(base: string, manifest = MANIFEST) {
+async function seedTool(base: string, manifest = MANIFEST, awardedCompetencyIds?: string[]) {
   const res = await fetch(`${base}/assessment-tools`, {
     method: 'POST',
     headers: auth(),
-    body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest }),
+    body: JSON.stringify({
+      templateId: TEMPLATE,
+      name: 'Track Dozer',
+      manifest,
+      ...(awardedCompetencyIds ? { awardedCompetencyIds } : {}),
+    }),
   });
   return (await res.json()) as { id: string };
 }
@@ -1966,6 +1973,89 @@ describe('POST /assessment-cases/:id/sign-off', () => {
       }
 
       expect(rows(store, 'assessmentCases').find((r) => r.id === c.id)?.state).toBe('competent');
+    } finally {
+      server.close();
+    }
+  });
+
+  /*
+    Passing puts the candidate on the register the product exists to maintain.
+
+    `assessment_tools` declared what a candidate must BRING and what an assessor
+    must HOLD, but nothing naming what passing AWARDS — so a competent case
+    updated its own state and stopped. `competency_holders` could only ever be
+    written by hand, and a prerequisite chain could never be built out of the
+    product's own assessments.
+  */
+  it('grants the competency the tool awards, linked to the case that earned it', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base, MANIFEST, [COMPETENCY]);
+      const c = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
+        })
+      ).json()) as { id: string };
+
+      const theory = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, { method: 'POST', headers: auth() })
+      ).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({}),
+      });
+      const prac = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/p2/attempts`, { method: 'POST', headers: auth() })
+      ).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${prac.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'A. Assessor' }),
+      });
+
+      const res = await fetch(`${base}/assessment-cases/${c.id}/sign-off`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          assessorName: 'A. Assessor',
+          signature: 'data:image/png;base64,iVBORw0KGgo=',
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { granted: string[] }).granted).toEqual(['TD-OP']);
+
+      const holder = rows(store, 'competencyHolders').find((h) => h.userId === CANDIDATE);
+      expect(holder).toBeDefined();
+      // FOLLOWABLE evidence. `evidenceRef` is documented as resolving to
+      // nothing, so the case id is what makes this a link rather than a label.
+      expect(holder!.sourceCaseId).toBe(c.id);
+      expect(holder!.revokedAt ?? null).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('grants nothing when the tool awards nothing', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // readyCase seeds a tool with no awardedCompetencyIds — the default, and
+      // the state every existing tool is in.
+      const c = await readyCase(base);
+      await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
+
+      expect(rows(store, 'competencyHolders')).toHaveLength(0);
     } finally {
       server.close();
     }

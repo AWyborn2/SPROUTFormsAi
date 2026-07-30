@@ -1,10 +1,14 @@
 import {
+  caseProgress,
+  moreCoachingRequired,
   requiredParts,
   validateManifest,
   type AssessmentPathway,
   type AssessmentToolManifest,
+  type DeclaredMark,
   type FormField,
   type PartOutcome,
+  type RepeatingRowValue,
   type SubmissionValue,
 } from '@formai/shared';
 import { roundTripExport } from './round-trip.js';
@@ -45,6 +49,18 @@ export interface CaseAttemptRecord {
   attemptNumber: number;
   outcome: PartOutcome | null;
   values: Record<string, SubmissionValue>;
+  /** Who marked this part. Stored as a COLUMN, so it is not in `values`. */
+  assessorName?: string;
+  /** When this part was marked. Also a column. */
+  signedAt?: Date | null;
+}
+
+/** The assessor's approval of the whole case, once they have given it. */
+export interface CaseSignOff {
+  at: Date;
+  name: string;
+  /** PNG data URL. */
+  signature: string;
 }
 
 export interface AssembleCaseInput {
@@ -53,6 +69,19 @@ export interface AssembleCaseInput {
   /** The case's declared stream, seeded so visibility matches the assessment. */
   locationStream?: string | null;
   attempts: readonly CaseAttemptRecord[];
+  /**
+   * Null until the assessor signs. The whole certification block is gated on
+   * this, so a mid-programme export prints the front page exactly as it does
+   * today: blank.
+   */
+  signOff?: CaseSignOff | null;
+  /**
+   * Whether the case is RESOLVED — competent, or closed as not yet competent.
+   * The coaching pair is written only on a resolved case: an unfinished form is
+   * not a coaching finding, and ticking either box early prints a conclusion
+   * nobody reached.
+   */
+  resolved?: boolean;
 }
 
 export interface AssembledCase {
@@ -87,11 +116,60 @@ function authoritativeAttempt(
  * which mirrors the printed tool, where an experienced candidate's booklet
  * still contains Parts 3 to 6 with nothing written in them.
  */
+/**
+ * Write a declared mark into the value map.
+ *
+ * The value is written VERBATIM — never derived, never negated. A `check_cross`
+ * renders `false` as a cross meaning "checked and failed", so a scheme that
+ * inferred marks from booleans would put a failure on the page wherever the
+ * answer happened to be "no".
+ *
+ * A repeating-group target addresses one cell, leaving the rest of the row and
+ * every other row alone.
+ */
+function writeMark(values: Record<string, SubmissionValue>, mark: DeclaredMark | undefined): void {
+  if (!mark) return;
+  if (!mark.rowKey || !mark.columnKey) {
+    values[mark.fieldId] = mark.value;
+    return;
+  }
+  /*
+    A table CELL holds a primitive. A manifest naming a row and column but
+    carrying an array or a file reference is an authoring error — caught by
+    validateManifest — and writing it anyway would put "[object Object]" in a
+    cell of a competency record. Refusing leaves the cell blank, which is the
+    safe failure everywhere else in this module.
+  */
+  const cell = mark.value;
+  if (cell !== null && typeof cell === 'object') return;
+
+  const existing = values[mark.fieldId];
+  const rows: RepeatingRowValue[] = Array.isArray(existing)
+    ? (existing as RepeatingRowValue[]).map((r) => ({ ...r }))
+    : [];
+  const row = rows.find((r) => r._key === mark.rowKey);
+  if (row) {
+    row[mark.columnKey] = cell;
+  } else {
+    rows.push({ _key: mark.rowKey, [mark.columnKey]: cell });
+  }
+  values[mark.fieldId] = rows;
+}
+
+/** Written as `dd/mm/yyyy`, matching how the printed forms date everything. */
+function formatSignedDate(at: Date): string {
+  const dd = String(at.getDate()).padStart(2, '0');
+  const mm = String(at.getMonth() + 1).padStart(2, '0');
+  return `${dd}/${mm}/${at.getFullYear()}`;
+}
+
 export function assembleCaseValues({
   manifest,
   pathway,
   locationStream,
   attempts,
+  signOff,
+  resolved,
 }: AssembleCaseInput): AssembledCase {
   const known = new Set(manifest.parts.map((p) => p.key));
   const unknown = [...new Set(attempts.map((a) => a.partKey))].filter((k) => !known.has(k));
@@ -106,7 +184,8 @@ export function assembleCaseValues({
   const rendered: string[] = [];
   const blank: string[] = [];
 
-  for (const part of requiredParts(manifest, pathway)) {
+  const passing = requiredParts(manifest, pathway);
+  for (const part of passing) {
     const attempt = authoritativeAttempt(attempts, part.key);
     if (!attempt) {
       blank.push(part.key);
@@ -114,6 +193,20 @@ export function assembleCaseValues({
     }
     Object.assign(values, attempt.values);
     rendered.push(part.key);
+
+    /*
+      Per-part name and date live as COLUMNS on the attempt row, so they never
+      arrive in `attempt.values` and the printed boxes stayed empty on every
+      export. An empty name writes nothing rather than an empty string: a blank
+      box says "nobody recorded this", and drawing '' against a real date would
+      say a nameless person marked it.
+    */
+    if (part.assessorNameFieldId && attempt.assessorName) {
+      values[part.assessorNameFieldId] = attempt.assessorName;
+    }
+    if (part.signedDateFieldId && attempt.signedAt) {
+      values[part.signedDateFieldId] = formatSignedDate(attempt.signedAt);
+    }
   }
 
   // Seeded LAST so the case wins. The stream recorded on the case is what
@@ -122,6 +215,52 @@ export function assembleCaseValues({
   // different set of questions than the candidate was actually assessed on.
   if (manifest.locationStreamFieldId && locationStream) {
     values[manifest.locationStreamFieldId] = locationStream;
+  }
+
+  /*
+    THE FRONT PAGE. Written after the per-part merge so no part's Object.assign
+    can clobber a cover-page key, and every entry gated on the manifest actually
+    naming it — a field the manifest does not name is written nothing at all and
+    exports blank. On a competency record, silence is the safe failure; a
+    confident mark in the wrong box asserts a finding nobody made.
+  */
+  for (const part of passing) {
+    if (rendered.includes(part.key)) writeMark(values, part.checklistMark);
+  }
+
+  const marks = manifest.signOff;
+  if (marks) {
+    /*
+      The coaching pair. Exactly one box is ticked, and only once the case is
+      RESOLVED — while it is still open, neither is written, because an
+      unfinished form is not a finding of "no coaching required".
+
+      Read from the parts' FINAL outcomes, so a part failed once and passed on
+      retry counts as satisfactory.
+    */
+    if (resolved) {
+      const coaching = moreCoachingRequired(
+        caseProgress(manifest, pathway, attempts.map((a) => ({
+          partKey: a.partKey,
+          attemptNumber: a.attemptNumber,
+          outcome: a.outcome,
+        }))),
+      );
+      if (coaching === true) writeMark(values, marks.moreCoachingRequiredYes);
+      if (coaching === false) writeMark(values, marks.moreCoachingRequiredNo);
+    }
+
+    /*
+      The certification itself renders ONLY once an assessor has signed. This is
+      the gate that keeps a mid-programme export honest: it prints the document
+      with the front page empty, exactly as it does today.
+    */
+    if (signOff) {
+      if (marks.assessorNameFieldId) values[marks.assessorNameFieldId] = signOff.name;
+      if (marks.signedDateFieldId) values[marks.signedDateFieldId] = formatSignedDate(signOff.at);
+      if (marks.assessorSignatureFieldId) values[marks.assessorSignatureFieldId] = signOff.signature;
+      writeMark(values, marks.overallSatisfactory);
+    }
   }
 
   return { values, rendered, blank };
@@ -148,13 +287,43 @@ export async function exportCasePdf({
   pathway,
   locationStream,
   attempts,
+  signOff,
+  resolved,
 }: ExportCaseInput): Promise<Uint8Array> {
   const problems = validateManifest(manifest, fields);
   if (problems.length > 0) {
     throw new CaseExportError('case_export_invalid_manifest', problems);
   }
 
-  const { values } = assembleCaseValues({ manifest, pathway, locationStream, attempts });
+  const { values, blank } = assembleCaseValues({
+    manifest,
+    pathway,
+    locationStream,
+    attempts,
+    signOff,
+    resolved,
+  });
+
+  /*
+    A SIGNED CASE WITH A BLANK REQUIRED PART IS A CONTRADICTION.
+
+    Sign-off refuses unless every required part has passed, so reaching here
+    means the manifest or the pathway moved underneath the case after it was
+    certified. The alternative to refusing is a front page carrying an
+    assessor's signature over a document whose required parts print empty —
+    precisely the misrepresentation this module exists to prevent.
+
+    `blank` was previously destructured away and never consulted.
+  */
+  if (signOff && blank.length > 0) {
+    throw new CaseExportError(
+      'case_export_competent_with_blank_parts',
+      blank.map(
+        (k) =>
+          `Part "${k}" is required by this pathway but has no passing attempt, yet the case is signed off.`,
+      ),
+    );
+  }
 
   // `roundTripExport` applies the visibility filter itself, so a section the
   // candidate's stream excluded cannot appear carrying an answer.

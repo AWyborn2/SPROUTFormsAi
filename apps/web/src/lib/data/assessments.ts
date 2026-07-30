@@ -253,4 +253,20 @@ export const assessmentsApi = {
       caseState: string;
       parts: { key: string; state: PartState }[];
     }>(`/assessment-cases/${caseId}/attempts/${attemptId}/outcome`, body),
+
+  /**
+   * The assessor's final approval. `granted` names the competencies this put on
+   * the register; `warnings` carries anything that did not stop the sign-off —
+   * an assessor missing a competency of their own, or a grant that could not be
+   * made. The date is server-stamped and is not sent.
+   */
+  signOffCase: ({ caseId, ...body }: { caseId: string; assessorName: string; signature: string }) =>
+    apiClient.post<{
+      state: AssessmentCaseState;
+      signedOffAt: string;
+      signedOffName: string;
+      granted?: string[];
+      warnings?: string[];
+      alreadySignedOff?: boolean;
+    }>(`/assessment-cases/${caseId}/sign-off`, body),
 };
