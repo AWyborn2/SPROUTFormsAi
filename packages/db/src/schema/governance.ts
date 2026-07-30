@@ -15,6 +15,8 @@ import { auditCategoryEnum, roleEnum } from './enums.ts';
 import { organizations, users } from './organizations.ts';
 import { formTemplates } from './forms.ts';
 import { submissions } from './submissions.ts';
+// One-way: assessments.ts imports nothing from here, so this is not a cycle.
+import { assessmentCases } from './assessments.ts';
 
 /** Competencies held by workers (Should-tier gating). */
 export const competencies = pgTable(
@@ -63,6 +65,31 @@ export const competencyHolders = pgTable(
     grantedByUserId: uuid('granted_by_user_id').references(() => users.id, {
       onDelete: 'set null',
     }),
+    /*
+      The assessment case that earned this, when the product itself granted it.
+      `evidenceRef` above is documented as display-only — a string nothing
+      resolves — and "linked to the case as evidence" has to be FOLLOWABLE or it
+      is not a link. Null on a hand-recorded grant, which is the existing case.
+
+      `set null` because deleting a case must neither strip someone's competency
+      nor be blocked by one.
+    */
+    sourceCaseId: uuid('source_case_id').references(() => assessmentCases.id, {
+      onDelete: 'set null',
+    }),
+    /*
+      Revocation without erasure. An overturned appeal has to be able to strip a
+      grant while leaving the fact it was once held on the record — the same
+      conclusion this file already reached for API keys, for the same reason:
+      something that WAS true needs to stay visible to the audit conversation
+      about it. A hard delete would leave the register silently disagreeing with
+      the audit log.
+
+      Every eligibility read must filter `revokedAt IS NULL`, or a revoked grant
+      goes on counting as a prerequisite.
+    */
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedReason: text('revoked_reason'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [

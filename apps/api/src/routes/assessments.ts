@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import {
   applyCalcs,
@@ -10,6 +10,9 @@ import {
   fieldsInPart,
   fieldsInSection,
   isCaseCompetent,
+  isTerminalCaseState,
+  moreCoachingRequired,
+  type AssessmentCaseState,
   logbookRows,
   markTheory,
   orderedParts,
@@ -178,6 +181,11 @@ async function unmetPrerequisites(
     where: and(
       eq(schema.competencyHolders.userId, userId),
       eq(schema.competencyHolders.orgId, orgId),
+      // A revoked grant is kept for the audit trail but confers nothing. Without
+      // this, a competency stripped by an overturned appeal goes on satisfying
+      // prerequisites — the row is still there, and eligibility is the one
+      // question it must stop answering.
+      isNull(schema.competencyHolders.revokedAt),
     ),
   });
   const heldIds = new Set(held.map((h) => h.competencyId));
@@ -1593,16 +1601,46 @@ assessmentCasesRouter.post(
     // Recompute case state from the rows rather than incrementing a counter.
     const attempts = await attemptsFor(db, row.id);
     const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
-    const competent = isCaseCompetent(progress);
+    const allPartsPassed = isCaseCompetent(progress);
     // The RESOLVED disposition, not the requested one — a computed fail that
     // defaulted to coaching keeps the case open, which is the whole point.
     const closing = outcome === 'not_satisfactory' && disposition === 'not_yet_competent';
 
-    const nextState = competent ? 'competent' : closing ? 'closed' : 'open';
+    /*
+      MARKING THE LAST PART DOES NOT CERTIFY ANYONE.
+
+      Passing every part moves the case to `awaiting_sign_off`. Only the
+      assessor's manual approval reaches `competent`, because that is what the
+      printed record's name, signature and date attest to — and none of them
+      exist until a person supplies them.
+
+      `row.signedOffAt` is the conjunct that keeps this recompute honest. It runs
+      on every outcome POST and derives state purely from the attempt rows, so
+      without it, resolving any later attempt — an out-of-pathway part, an
+      appeal — would recompute a signed case back down and silently un-certify
+      someone who has already been certified.
+    */
+    const nextState: AssessmentCaseState = row.signedOffAt
+      ? 'competent'
+      : allPartsPassed
+        ? 'awaiting_sign_off'
+        : closing
+          ? 'closed'
+          : 'open';
+
     if (nextState !== row.state) {
       await db
         .update(schema.assessmentCases)
-        .set({ state: nextState, ...(nextState === 'open' ? {} : { closedAt: new Date() }) })
+        .set({
+          state: nextState,
+          /*
+            Ask whether the state is TERMINAL, never whether it differs from
+            'open'. The old test dated everything that was not open, which
+            stamps a close time on a case merely waiting for a signature — a
+            finished date on an unfinished assessment.
+          */
+          ...(isTerminalCaseState(nextState) ? { closedAt: new Date() } : {}),
+        })
         .where(eq(schema.assessmentCases.id, row.id));
     }
 
@@ -1618,6 +1656,149 @@ assessmentCasesRouter.post(
       outcome,
       caseState: nextState,
       parts: progress.map((p) => ({ key: p.part.key, state: p.state })),
+    });
+  }),
+);
+
+const signOffBody = z.object({
+  assessorName: z.string().min(1),
+  /*
+    A PNG data URL, as SignaturePad emits. Shape-checked here because the
+    exporter refuses to draw anything it cannot recognise, and a signature
+    rejected silently at render time would leave a certified record with an
+    empty signature box and nothing to explain it.
+  */
+  signature: z.string().regex(/^data:image\/png;base64,/),
+});
+
+/**
+ * Sign off a case — the assessor's manual approval, and the last act of an
+ * assessment.
+ *
+ * Marking the final part does not certify anybody; it moves the case to
+ * `awaiting_sign_off`. Only this route reaches `competent`, because that is the
+ * state the printed record's name, signature and date attest to, and a person
+ * has to supply them.
+ *
+ * THE DATE IS SERVER-STAMPED. It is never accepted from the client: a
+ * certification date is a claim about when a judgement was made, and the one
+ * moment we can actually vouch for is the moment the request arrived.
+ */
+assessmentCasesRouter.post(
+  '/:id/sign-off',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    /*
+      `hasPermission` asks for an ORG-WIDE grant, so a candidate's own-scoped
+      `edit` resolves to false and they cannot reach this route at all. That is
+      the intent: a candidate must never be able to certify themselves.
+    */
+    if (!(await hasPermission(tenant, 'assessments', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = signOffBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    /*
+      IDEMPOTENT. A double-tap returns the existing record rather than
+      re-stamping: the second press would otherwise record a later approval time
+      than the one actually made, and write a second audit entry for one
+      decision.
+    */
+    if (row.signedOffAt) {
+      res.json({
+        state: row.state,
+        signedOffAt: row.signedOffAt.toISOString(),
+        signedOffName: row.signedOffName,
+        alreadySignedOff: true,
+      });
+      return;
+    }
+
+    if (row.state === 'closed') {
+      res.status(409).json({ error: 'case_closed' });
+      return;
+    }
+    // Nobody certifies themselves, even holding an assessor role.
+    if (tenant.userId === row.candidateUserId) {
+      res.status(409).json({ error: 'candidate_cannot_sign_off' });
+      return;
+    }
+
+    const tool = await loadTool(db, row.toolId, tenant.orgId);
+    if (!tool) {
+      res.status(409).json({ error: 'tool_missing' });
+      return;
+    }
+
+    /*
+      WHAT STOPS IT BEING APPROVED EARLY.
+
+      Computed from the attempt rows on this request, by the same predicate the
+      case screen renders from — so it cannot disagree with what the assessor is
+      looking at. There is no override parameter and no force flag: nothing in
+      the request can substitute for every required part having a passing
+      attempt.
+    */
+    const attempts = await attemptsFor(db, row.id);
+    const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+    if (!isCaseCompetent(progress)) {
+      res.status(409).json({
+        error: 'parts_incomplete',
+        outstanding: progress.filter((p) => p.state !== 'satisfactory').map((p) => p.part.key),
+      });
+      return;
+    }
+
+    // Warned on, never blocking — the same doctrine as case creation. An
+    // out-of-date competency record is far more common than an unqualified
+    // assessor, and refusing here would stop a real assessment over data entry.
+    const assessorGaps = await unmetPrerequisites(
+      db,
+      tenant.orgId,
+      tenant.userId,
+      tool.assessorCompetencyIds,
+    );
+
+    const signedOffAt = new Date();
+    await db
+      .update(schema.assessmentCases)
+      .set({
+        signedOffAt,
+        signedOffByUserId: tenant.userId,
+        signedOffName: parsed.data.assessorName,
+        signedOffSignature: parsed.data.signature,
+        state: 'competent',
+        closedAt: signedOffAt,
+      })
+      .where(eq(schema.assessmentCases.id, row.id));
+
+    await recordAudit(db, tenant, {
+      action: 'Signed off assessment case',
+      target: `${row.id} → ${parsed.data.assessorName}${assessorGaps.length ? ` (assessor missing ${assessorGaps.join(', ')})` : ''}`,
+      category: 'submissions',
+      icon: 'circle-check',
+    });
+
+    res.json({
+      state: 'competent',
+      signedOffAt: signedOffAt.toISOString(),
+      signedOffName: parsed.data.assessorName,
+      warnings: assessorGaps.map((id) => `assessor missing competency ${id}`),
     });
   }),
 );

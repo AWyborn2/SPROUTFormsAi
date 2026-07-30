@@ -15,6 +15,7 @@ import type {
   AssessmentPathway,
   FormField,
   NotSatisfactoryDisposition,
+  AssessmentCaseState,
   PartKind,
   PartOutcome,
   PartState,
@@ -34,7 +35,7 @@ export interface AssessmentCaseRow {
   toolName: string;
   candidateUserId: string;
   pathway: AssessmentPathway;
-  state: 'open' | 'competent' | 'closed';
+  state: AssessmentCaseState;
   createdAt: string;
 }
 
@@ -72,7 +73,7 @@ export interface AssessmentCaseDetail {
   assessorUserId: string | null;
   pathway: AssessmentPathway;
   locationStream: string | null;
-  state: 'open' | 'competent' | 'closed';
+  state: AssessmentCaseState;
   currentVersionId: string;
   prerequisiteWarnings: string[];
   appealOfCaseId: string | null;
@@ -110,7 +111,7 @@ export interface CaseProgressRow {
   /** Empty when the user record cannot be resolved; the id is always present. */
   candidateName: string;
   pathway: AssessmentPathway;
-  state: 'open' | 'competent' | 'closed';
+  state: AssessmentCaseState;
   /** First part not yet satisfactory. Null once the case is competent. */
   currentPartKey: string | null;
   currentPartLabel: string | null;

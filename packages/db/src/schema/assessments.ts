@@ -51,6 +51,23 @@ export const assessmentTools = pgTable(
       .$type<string[]>()
       .notNull()
       .default([]),
+    /*
+      Competency ids this tool AWARDS on sign-off. The tool declared what a
+      candidate must bring and what an assessor must hold, but never what
+      passing it confers — so a competent case updated its own state and the
+      register it exists to maintain stayed empty, and prerequisite chains could
+      never be built out of the product's own assessments.
+
+      jsonb of ids with no FK, matching the two above. Not laziness: competency
+      delete has no dependency check, so `restrict` turns a routine tidy-up into
+      an unhandled 500, `cascade` would delete the assessment tool, and
+      `set null` would silently disarm the award with nothing to notice it.
+      This degrades exactly the way prerequisites already do.
+    */
+    awardedCompetencyIds: jsonb('awarded_competency_ids')
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
@@ -107,6 +124,26 @@ export const assessmentCases = pgTable(
       .default([]),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
     closedAt: timestamp({ withTimezone: true }),
+
+    /*
+      THE CERTIFICATION. Written once, by the assessor, at the manual sign-off
+      step — the last thing that happens on an assessment.
+
+      Held on the CASE and not derived from the attempts, because the attempt
+      columns cannot carry it honestly: `assessorName` there defaults to '' and
+      is optional on the outcome body, while `signedAt` is stamped on EVERY
+      attempt resolution. Sourcing a certificate from those would print a blank
+      name against a real timestamp on the document that certifies a person is
+      safe to operate a machine.
+    */
+    signedOffAt: timestamp('signed_off_at', { withTimezone: true }),
+    signedOffByUserId: uuid('signed_off_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    /** The assessor's printed name, as they signed it. */
+    signedOffName: text('signed_off_name').notNull().default(''),
+    /** PNG data URL, as SignaturePad emits. One per case; 5-40KB. */
+    signedOffSignature: text('signed_off_signature').notNull().default(''),
   },
   (t) => [
     index('assessment_cases_org_idx').on(t.orgId),

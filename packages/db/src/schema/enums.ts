@@ -53,6 +53,19 @@ export const nsDispositionEnum = pgEnum('ns_disposition', [
 
 export const assessmentCaseStateEnum = pgEnum('assessment_case_state', [
   'open',
+  /*
+    Every required part has passed; the assessor has not yet approved. NOT
+    terminal — `closedAt` stays null here, and `isTerminalCaseState` is what
+    decides that, rather than a comparison against 'open'.
+
+    Added by migration 0022 alongside the sign-off columns. That is safe because
+    no migration WRITES this value: PostgreSQL's restriction (55P04) is on using
+    a new enum value in the transaction that added it, not on adding it beside
+    other DDL. If a future migration ever needs to backfill rows TO this value,
+    that backfill must be its own migration — drizzle runs all pending ones in a
+    single transaction.
+  */
+  'awaiting_sign_off',
   'competent',
   'closed',
 ]);

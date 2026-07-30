@@ -925,7 +925,29 @@ describe('full case lifecycle', () => {
       expect(retry.attemptNumber).toBe(2);
       const passed = await resolve(retry.id, { outcome: 'satisfactory', assessorName: 'A. Assessor' });
 
-      expect(passed.caseState).toBe('competent');
+      /*
+        THIS USED TO EXPECT 'competent'. Marking the last part no longer
+        certifies anyone: passing everything reaches `awaiting_sign_off`, and
+        only the assessor's manual approval reaches `competent`. That is the
+        state the printed record's name, signature and date attest to, and none
+        of them exist yet at this point.
+      */
+      expect(passed.caseState).toBe('awaiting_sign_off');
+
+      // Not terminal — a case waiting on a signature is not a finished one.
+      expect((store.assessmentCases ?? []).find((r) => r.id === c.id)?.closedAt ?? null).toBeNull();
+
+      const signed = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/sign-off`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({
+            assessorName: 'A. Assessor',
+            signature: 'data:image/png;base64,iVBORw0KGgo=',
+          }),
+        })
+      ).json()) as { state: string };
+      expect(signed.state).toBe('competent');
 
       // Both Part 4 attempts survive, and the failure keeps its reason.
       const p4Attempts = (store.assessmentPartAttempts ?? []).filter((a) => a.partKey === 'p4');
@@ -1642,6 +1664,17 @@ describe('GET /assessment-cases/progress', () => {
       const tool = await seedTool(base);
       const passing = await openCase(base, tool.id, CANDIDATE, 'experienced');
       await passFirstTwoParts(base, passing.id);
+      // Passing every part now reaches `awaiting_sign_off`; the assessor's
+      // manual approval is what makes it competent, so the dashboard cannot
+      // show a competent case until someone signs.
+      await fetch(`${base}/assessment-cases/${passing.id}/sign-off`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          assessorName: 'A. Assessor',
+          signature: 'data:image/png;base64,iVBORw0KGgo=',
+        }),
+      });
 
       const closing = await openCase(base, tool.id, OTHER_CANDIDATE, 'experienced');
       const attempt = await openPart(base, closing.id, 'p1');
@@ -1742,6 +1775,197 @@ describe('GET /assessment-cases/progress', () => {
       // would look for the case called "progress" and 404 the whole dashboard.
       expect(res.status).toBe(200);
       expect(Array.isArray(await res.json())).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * Signing a case off — the assessor's manual approval, and the last act of an
+ * assessment.
+ *
+ * Marking the final part reaches `awaiting_sign_off`, never `competent`. The
+ * gap matters because the printed record carries a name, a signature and a
+ * date: certifying on the last mark would produce a document asserting that a
+ * person judged someone safe to operate a dozer, with nobody's name on it.
+ */
+describe('POST /assessment-cases/:id/sign-off', () => {
+  const SIG = 'data:image/png;base64,iVBORw0KGgo=';
+
+  async function readyCase(base: string) {
+    const tool = await seedTool(base);
+    const c = (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
+      })
+    ).json()) as { id: string };
+
+    const theory = (await (
+      await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, { method: 'POST', headers: auth() })
+    ).json()) as { id: string };
+    await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ values: { q1: ['a'] } }),
+    });
+    await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}/outcome`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({}),
+    });
+    const prac = (await (
+      await fetch(`${base}/assessment-cases/${c.id}/parts/p2/attempts`, { method: 'POST', headers: auth() })
+    ).json()) as { id: string };
+    await fetch(`${base}/assessment-cases/${c.id}/attempts/${prac.id}/outcome`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'A. Assessor' }),
+    });
+    return c;
+  }
+
+  const signOff = (base: string, id: string, body: unknown) =>
+    fetch(`${base}/assessment-cases/${id}/sign-off`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify(body),
+    });
+
+  it('certifies the case, stamping the name, signature and its own date', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyCase(base);
+      const res = await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
+
+      expect(res.status).toBe(200);
+      const row = rows(store, 'assessmentCases').find((r) => r.id === c.id);
+      expect(row?.state).toBe('competent');
+      expect(row?.signedOffName).toBe('A. Assessor');
+      expect(row?.signedOffSignature).toBe(SIG);
+      expect(row?.signedOffAt).toBeInstanceOf(Date);
+      // Terminal at last, so the close date means something.
+      expect(row?.closedAt).toBeInstanceOf(Date);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses while any part is outstanding, and names which', async () => {
+    // The whole guard against approving early. There is no force flag.
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const c = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
+        })
+      ).json()) as { id: string };
+
+      const res = await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
+
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; outstanding: string[] };
+      expect(body.error).toBe('parts_incomplete');
+      expect(body.outstanding).toContain('p1');
+      expect(rows(store, 'assessmentCases').find((r) => r.id === c.id)?.signedOffAt ?? null).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses to let the candidate certify themselves', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyCase(base);
+      // An assessor-role user who happens to BE the candidate on this case.
+      const res = await fetch(`${base}/assessment-cases/${c.id}/sign-off`, {
+        method: 'POST',
+        headers: auth({ userId: CANDIDATE, orgId: ORG, role: 'admin' }),
+        body: JSON.stringify({ assessorName: 'Self', signature: SIG }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('candidate_cannot_sign_off');
+      expect(rows(store, 'assessmentCases').find((r) => r.id === c.id)?.signedOffAt ?? null).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a signature that is not a PNG data URL', async () => {
+    // The exporter draws nothing it cannot recognise, so a bad signature
+    // accepted here would certify a record with an empty signature box.
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyCase(base);
+      const res = await signOff(base, c.id, { assessorName: 'A. Assessor', signature: 'scribble' });
+
+      expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('is idempotent — a double tap does not restamp the approval time', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyCase(base);
+      await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
+      const first = rows(store, 'assessmentCases').find((r) => r.id === c.id)?.signedOffAt;
+
+      const again = await signOff(base, c.id, { assessorName: 'Someone Else', signature: SIG });
+
+      expect(again.status).toBe(200);
+      expect(((await again.json()) as { alreadySignedOff?: boolean }).alreadySignedOff).toBe(true);
+      const row = rows(store, 'assessmentCases').find((r) => r.id === c.id);
+      expect(row?.signedOffAt).toBe(first);
+      expect(row?.signedOffName).toBe('A. Assessor');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not let a later attempt un-certify a signed case', async () => {
+    /*
+      The recompute runs on every outcome POST and derives state purely from the
+      attempt rows. Without the signedOffAt conjunct, resolving anything
+      afterwards would silently walk a certified case back down to
+      awaiting_sign_off — un-certifying someone who has been certified.
+    */
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyCase(base);
+      await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
+
+      // A part outside the experienced pathway, resolved after the fact.
+      const extra = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/p3/attempts`, { method: 'POST', headers: auth() })
+      ).json()) as { id: string };
+      if (extra.id) {
+        await fetch(`${base}/assessment-cases/${c.id}/attempts/${extra.id}/outcome`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ outcome: 'satisfactory' }),
+        });
+      }
+
+      expect(rows(store, 'assessmentCases').find((r) => r.id === c.id)?.state).toBe('competent');
     } finally {
       server.close();
     }

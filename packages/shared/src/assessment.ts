@@ -65,12 +65,34 @@ export const NS_DISPOSITIONS = [
 export type NotSatisfactoryDisposition = (typeof NS_DISPOSITIONS)[number];
 
 /**
- * Case-level state. `competent` and `closed` are both terminal; they are
- * distinct because a closed case reached no competence and an auditor must be
- * able to tell those apart at a glance.
+ * Case-level state.
+ *
+ * `competent` and `closed` are both terminal; they are distinct because a
+ * closed case reached no competence and an auditor must be able to tell those
+ * apart at a glance.
+ *
+ * `awaiting_sign_off` sits between: every required part has passed, but the
+ * assessor has not yet approved. It is NOT terminal — the assessment is not
+ * finished until a person says so, and the printed record carries their name,
+ * signature and date. Deriving this from the attempt rows instead would leave
+ * the product unable to answer "what is waiting on me", which is the one
+ * question an assessor opens it to ask.
  */
-export const CASE_STATES = ['open', 'competent', 'closed'] as const;
+export const CASE_STATES = ['open', 'awaiting_sign_off', 'competent', 'closed'] as const;
 export type AssessmentCaseState = (typeof CASE_STATES)[number];
+
+/**
+ * States in which the case is finished and `closedAt` means something.
+ *
+ * Exists because the single state writer used to stamp `closedAt` on anything
+ * that was not `open` — a ternary that silently dates a live case the moment a
+ * fourth, non-terminal state exists. Ask this instead of comparing to 'open'.
+ */
+export const TERMINAL_CASE_STATES: readonly AssessmentCaseState[] = ['competent', 'closed'];
+
+export function isTerminalCaseState(state: AssessmentCaseState): boolean {
+  return TERMINAL_CASE_STATES.includes(state);
+}
 
 /** One part of an assessment tool. */
 export interface AssessmentPart {
@@ -107,8 +129,20 @@ export interface AssessmentPart {
    * the column is entered directly. That is the declared-per-tool flexibility.
    */
   durationColumnKey?: string;
-  /** Field id of the page-one method checklist entry this part ticks. */
-  checklistFieldId?: string;
+  /**
+   * The page-one assessment-method entry this part ticks once it passes.
+   *
+   * Replaces the bare `checklistFieldId`, which named a field but not what to
+   * write into it — and a bare id cannot address a cell of a table, which is
+   * how the method list is usually printed. It had no reader, no writer and no
+   * validator, and no stored manifest ever carried one, so reshaping it now is
+   * free.
+   */
+  checklistMark?: DeclaredMark;
+  /** This part's own printed "assessor name" box, if it prints one. */
+  assessorNameFieldId?: string;
+  /** This part's own printed date box, if it prints one. */
+  signedDateFieldId?: string;
   /**
    * Theory parts only — the questions that must ALL be answered correctly for
    * the part to reach satisfactory.
@@ -120,6 +154,29 @@ export interface AssessmentPart {
    * part has no must-pass-entirely set.
    */
   mandatoryFieldIds?: string[];
+}
+
+/**
+ * A mark the export writes on the case's behalf, and the exact value it writes.
+ *
+ * THE VALUE IS CARRIED, NEVER INFERRED. A `check_cross` field renders `false`
+ * as a CROSS, which this document's convention means "I checked this and it
+ * failed" — so "more coaching required: No" cannot be encoded as `false` on the
+ * No box. It is a tick on the No box, i.e. the literal `true`. Any scheme that
+ * derives a mark from a boolean gets this backwards on at least one field, and
+ * on a competency record that reads as a finding nobody made.
+ *
+ * `rowKey`/`columnKey` address a cell of a repeating group, because a printed
+ * method checklist is usually a table rather than a column of loose boxes.
+ */
+export interface DeclaredMark {
+  fieldId: string;
+  /** Repeating-group targets only: which row. */
+  rowKey?: string;
+  /** Repeating-group targets only: which column. */
+  columnKey?: string;
+  /** Written verbatim into the export's value map. */
+  value: SubmissionValue;
 }
 
 /** The part structure of one assessment tool, against one template. */
@@ -134,6 +191,39 @@ export interface AssessmentToolManifest {
    * content.
    */
   locationStreamFieldId?: string;
+  /**
+   * The front page's certification block.
+   *
+   * Manifest-level, not part-level, because the front page belongs to no part:
+   * `fieldsInPart` slices from a part's anchor onward, and the first anchor is
+   * the "PART 1" heading — so cover-page fields fall in no part's range at all.
+   *
+   * Every entry is optional and nothing is inferred from a missing one. A tool
+   * naming none of these exports its front page exactly as it does today:
+   * blank.
+   */
+  signOff?: {
+    /** Printed "Name of Assessor" box. Written from the sign-off, not an attempt. */
+    assessorNameFieldId?: string;
+    /** Printed signature box. Must name a field of type `signature`. */
+    assessorSignatureFieldId?: string;
+    /** Printed date box. Server-stamped at sign-off; never client-supplied. */
+    signedDateFieldId?: string;
+    /** The overall "satisfactory" mark, written when the case reaches competent. */
+    overallSatisfactory?: DeclaredMark;
+    /**
+     * The "more coaching required" pair. Exactly one is written on a RESOLVED
+     * case, chosen from the parts' FINAL outcomes — a part that failed once and
+     * passed on retry counts as satisfactory.
+     *
+     * Two separate marks rather than one boolean, because both answers are
+     * positive statements on the page and the printed form prints two boxes.
+     * Encoding "no coaching needed" as the absence of a tick would make it
+     * indistinguishable from a form nobody finished.
+     */
+    moreCoachingRequiredYes?: DeclaredMark;
+    moreCoachingRequiredNo?: DeclaredMark;
+  };
 }
 
 /**
@@ -374,6 +464,29 @@ export function caseProgress(
 /** A case is competent only when every required part has passed. */
 export function isCaseCompetent(progress: readonly PartProgress[]): boolean {
   return progress.length > 0 && progress.every((p) => p.state === 'satisfactory');
+}
+
+/**
+ * Whether the front page's "more coaching required" answer is Yes.
+ *
+ * Reads each part's FINAL state, not its history: a part failed once and passed
+ * on the retry counts as satisfactory, because coaching happened and worked and
+ * the record's job is to state where the candidate ended up. (Deliberate call by
+ * the training authority; the attempt history still holds every failure for
+ * anyone who needs the journey.)
+ *
+ * Returns null when NOTHING should be ticked — a case still in progress. A part
+ * nobody has attempted is not a coaching finding, it is an unfinished form, and
+ * ticking either box there would assert a conclusion nobody reached. Only a
+ * resolved case gets a mark, which is also the only way the Yes box is ever
+ * reachable: sign-off requires every part satisfactory, so a signed case is
+ * always No.
+ */
+export function moreCoachingRequired(progress: readonly PartProgress[]): boolean | null {
+  if (progress.length === 0) return null;
+  if (progress.some((p) => p.latestOutcome === 'not_satisfactory')) return true;
+  if (progress.every((p) => p.state === 'satisfactory')) return false;
+  return null;
 }
 
 /**

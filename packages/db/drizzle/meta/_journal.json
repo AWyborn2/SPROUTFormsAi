@@ -155,6 +155,13 @@
       "when": 1785395711805,
       "tag": "0021_flawless_stone_men",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1785453004191,
+      "tag": "0022_bumpy_argent",
+      "breakpoints": true
     }
   ]
 }
