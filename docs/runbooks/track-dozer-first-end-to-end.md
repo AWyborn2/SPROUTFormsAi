@@ -214,15 +214,21 @@ confirm it comes back not satisfactory.
 
 ## 7. Export the evidence PDF
 
-**There is no button for this yet.** The route exists and is tested, but nothing
-in the UI calls it. So from a shell, with a session cookie:
+On the case, top right: **Export evidence PDF**. It downloads named for the tool,
+the candidate and the date, so it stays identifiable months later on a shared
+drive.
 
-```bash
-curl -sS -X POST "http://localhost:5000/assessment-cases/<CASE_ID>/export" -H "cookie: fai_session=<YOUR_SESSION>" -o dozer-evidence.pdf && ls -l dozer-evidence.pdf
-```
+Available in any case state, not only once competent — a part that has not passed
+prints blank, which is what the paper form looks like mid-programme.
 
-Get `<CASE_ID>` from the case URL. Get `<YOUR_SESSION>` from the `fai_session`
-cookie in your browser devtools.
+Candidates do not see the button: the route refuses them, so offering it would
+only produce a 403 they cannot act on.
+
+If it fails, the message names the cause **and** the remedy. The six failures are
+deliberately distinct — no source PDF, a manifest that no longer fits its form, an
+attempt against an undeclared part, a missing tool, a storage fault, no permission
+— because each wants a different next step. The manifest-mismatch case also says
+plainly that nothing was drawn.
 
 **Check the PDF itself** — this is the whole point of the exercise:
 
@@ -237,13 +243,10 @@ If a mark is in the wrong cell, note which field and which page. That is the one
 error class worth stopping for: a mark in the wrong cell of a competency record
 is a statement that somebody was assessed on something nobody checked.
 
----
-
 ## Known gaps you will hit
 
 | Gap | Effect |
 |---|---|
-| No export button | Step 7 needs curl. Small to add — say the word. |
 | No location-stream question on the paper | Mining vs Raw Materials content is not gated per candidate; every candidate sees both sets. Fail-open by design. |
 | Answer key lives in git | `docs/assessment-tools/track-dozer.answer-key.json` is the complete key to a safety-critical assessment. Moves to the DB once upload-at-import exists. |
 | Rings sized from your box | If they read too tight or too loose against the printed letters, `RING_PAD` / `RING_MIN_RADIUS` in `apps/api/src/pdf/round-trip.ts` are the dials. |
