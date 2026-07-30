@@ -904,6 +904,74 @@ describe('roundTripExport — scalar hand-drawn geometry (R9)', () => {
 });
 
 /**
+ * A data URL is never drawn as text.
+ *
+ * A drawn signature is `canvas.toDataURL('image/png')` — tens of kilobytes of
+ * base64. This module has no image-embedding path, so the value used to reach
+ * `String(...)` and be drawn as a caption. pdf-lib breaks lines only on ' ' and
+ * base64 has none, so it emitted ONE unbreakable line thousands of points wide
+ * across the record, and being fully WinAnsi-encodable it never threw.
+ *
+ * It was latent only because no signature field had confirmed geometry. The
+ * scalar placement rule would have armed it, and the placement panel was until
+ * now telling reviewers these boxes "draw the signature" — i.e. inviting the
+ * hand-drawn box that arms it. Blank is the correct failure here.
+ */
+describe('roundTripExport — a data URL is never drawn as text', () => {
+  const BOX: PageBox = { page: 0, x: 120, y: 300, width: 90, height: 16, pageWidth: 600, pageHeight: 800 };
+  const PNG_DATA_URL = `data:image/png;base64,${'iVBORw0KGgoAAAANSUhEUg'.repeat(40)}`;
+
+  const signed = (type: FormField['type']): FormField => ({
+    id: 'sig',
+    type,
+    label: 'Assessor Signature',
+    required: false,
+    source: 'imported',
+    geometry: { segments: [BOX] },
+  });
+
+  it('draws nothing for a signature field holding a PNG data URL', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [signed('signature')],
+      values: { sig: PNG_DATA_URL },
+    });
+
+    expect(bytesInclude(output, 'base64')).toBe(false);
+    expect(bytesInclude(output, 'iVBORw0KGgo')).toBe(false);
+    // The page itself is intact — this degrades to blank, it does not fail.
+    expect(bytesInclude(output, LETTERHEAD)).toBe(true);
+  });
+
+  it('draws nothing when the same blob arrives under type text', async () => {
+    // Extraction folds signature boxes into text inputs, so the guard cannot
+    // be a `signature`-type branch — it has to be about the VALUE.
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [signed('text')],
+      values: { sig: PNG_DATA_URL },
+    });
+
+    expect(bytesInclude(output, 'base64')).toBe(false);
+    expect(bytesInclude(output, LETTERHEAD)).toBe(true);
+  });
+
+  it('still draws an ordinary value that merely mentions data', async () => {
+    // The guard keys on the `data:` URL scheme, not on the word — it must not
+    // swallow a legitimate answer.
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [signed('text')],
+      // Short enough not to wrap: maxWidth here is 84pt and pdf-lib breaks on
+      // spaces, so a longer phrase would come back as its first line only.
+      values: { sig: 'data ok' },
+    });
+
+    expect(drawnGlyphs(output).some((g) => g.text === 'data ok')).toBe(true);
+  });
+});
+
+/**
  * Checkbox-group per-option geometry. A checkbox group prints a row of `☐`
  * boxes; the reviewer draws one box per option (each carrying its `optionKey`),
  * and every SELECTED option is drawn as a checkmark in its own box — not as the
