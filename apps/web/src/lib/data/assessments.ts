@@ -67,6 +67,8 @@ export interface AssessmentCaseDetail {
   toolId: string;
   toolName: string;
   candidateUserId: string;
+  /** Resolved for display and for the exported document's filename. */
+  candidateName: string;
   assessorUserId: string | null;
   pathway: AssessmentPathway;
   locationStream: string | null;
@@ -227,6 +229,21 @@ export const assessmentsApi = {
       `/assessment-cases/${caseId}/attempts/${attemptId}`,
       { values },
     ),
+
+/**
+   * The completed assessment as a filled copy of the ORIGINAL PDF.
+   *
+   * A blob rather than JSON: the server overlays the case's answers onto the
+   * source document and streams the bytes back, because the artefact an auditor
+   * reads has to be the form the candidate actually sat, not a rendering of our
+   * own devising.
+   *
+   * Every way this can fail is a distinct condition the caller has to explain —
+   * see `caseExportProblem`. A generic "export failed" would leave a training
+   * officer with no idea whether to place geometry, pass a part, or call someone.
+   */
+  exportCasePdf: (caseId: string) =>
+    apiClient.postForBlob(`/assessment-cases/${caseId}/export`),
 
   recordOutcome: ({ caseId, attemptId, ...body }: RecordOutcomeInput) =>
     apiClient.post<{

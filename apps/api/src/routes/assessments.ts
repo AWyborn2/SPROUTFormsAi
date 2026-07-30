@@ -703,12 +703,20 @@ assessmentCasesRouter.get(
       })
     ).filter((c) => c.appealOfCaseId === row.id);
 
+    // Resolved for display and for the exported document's filename. An
+    // evidence PDF gets emailed and filed, so a UUID in its name makes it a
+    // document nobody can identify later.
+    const candidate = await db.query.users.findFirst({
+      where: eq(schema.users.id, row.candidateUserId),
+    });
+
     res.json({
       id: row.id,
       toolId: tool.id,
       toolName: tool.name,
       appeals: appeals.map((c) => ({ id: c.id, state: c.state, createdAt: c.createdAt })),
       candidateUserId: row.candidateUserId,
+      candidateName: candidate?.name ?? '',
       assessorUserId: row.assessorUserId,
       pathway: row.pathway,
       locationStream: row.locationStream,

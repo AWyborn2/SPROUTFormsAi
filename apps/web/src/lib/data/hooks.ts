@@ -745,6 +745,17 @@ export function useAssessmentCases() {
   return useQuery({ queryKey: keys.assessmentCases, queryFn: () => assessmentsApi.listCases() });
 }
 
+/**
+ * Build the evidence PDF for a case.
+ *
+ * A mutation rather than a query: it is an action someone waits on, and caching
+ * a document that changes every time a part is marked would eventually hand
+ * somebody a stale competency record.
+ */
+export function useExportCasePdf() {
+  return useMutation({ mutationFn: (caseId: string) => assessmentsApi.exportCasePdf(caseId) });
+}
+
 /** Every case's progress in one read — the dashboard's only query. */
 export function useAssessmentProgress() {
   return useQuery({ queryKey: keys.assessmentProgress, queryFn: () => assessmentsApi.listProgress() });
