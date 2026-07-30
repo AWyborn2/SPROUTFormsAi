@@ -989,3 +989,198 @@ describe('DELETE /forms/:id', () => {
     }
   });
 });
+
+/**
+ * Reading and editing ONE version's fields.
+ *
+ * These exist so geometry can be placed on an already-published form without
+ * re-importing it. Re-importing re-extracts, which re-assigns every field id —
+ * and an assessment tool's manifest, answer keys and outcome targets are all
+ * keyed to those ids. Copying a published version into a draft keeps the ids,
+ * so only the placement changes.
+ *
+ * The load-bearing rule is that a PUBLISHED version is frozen (see the schema
+ * comment on `fields`). Submissions pin to a version; rewriting one rewrites
+ * what past records render against.
+ */
+describe('GET /forms/:id/versions/:versionId', () => {
+  const TEMPLATE = { id: 'f1', orgId: 'org-1', name: 'Track Dozer', currentVersionId: 'v2' };
+  const DRAFT = {
+    id: 'v3',
+    templateId: 'f1',
+    versionLabel: 'v3',
+    state: 'draft',
+    fields: [{ id: 'ai_1', type: 'text', label: 'Name', required: false, source: 'imported' }],
+    container: { kind: 'card' },
+    sourcePdfAssetId: 'org-1/dozer.pdf',
+  };
+
+  it('serves that version’s own fields, not the current one’s', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      formTemplateVersionsFindFirst: DRAFT,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/f1/versions/v3`, { headers: authHeader() });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+
+      expect(body.id).toBe('v3');
+      expect(body.state).toBe('draft');
+      expect(body.fields).toHaveLength(1);
+      // The editor needs the source PDF to draw against — without it there is
+      // nothing to place boxes on.
+      expect(body.sourcePdfAssetId).toBe('org-1/dozer.pdf');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for a version belonging to another template', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      formTemplateVersionsFindFirst: { ...DRAFT, templateId: 'other-form' },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/f1/versions/v3`, { headers: authHeader() });
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s when the template is in another org', async () => {
+    mockDbValue = fakeDb({
+      formTemplatesFindFirst: undefined,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/f1/versions/v3`, { headers: authHeader() });
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('PATCH /forms/:id/versions/:versionId', () => {
+  const TEMPLATE = { id: 'f1', orgId: 'org-1', name: 'Track Dozer', currentVersionId: 'v2' };
+  const FIELDS = [
+    {
+      id: 'ai_137',
+      type: 'checkbox_group',
+      label: 'Correct & controlled steering techniques',
+      required: false,
+      source: 'imported',
+      options: ['tick', 'na'],
+      geometry: {
+        segments: [
+          { page: 6, x: 500, y: 620, width: 12, height: 14, pageWidth: 595, pageHeight: 842, optionKey: 'tick' },
+        ],
+      },
+    },
+  ];
+
+  function patch(base: string, versionId: string, body: unknown) {
+    return fetch(`${base}/forms/f1/versions/${versionId}`, {
+      method: 'PATCH',
+      headers: { ...authHeader(), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('saves geometry onto a draft version', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      formTemplateVersionsFindFirst: { id: 'v3', templateId: 'f1', state: 'draft', fields: [] },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patch(base, 'v3', { fields: FIELDS });
+      expect(res.status).toBe(200);
+
+      const write = updateSet.mock.calls.find(([t]) => t === schema.formTemplateVersions);
+      const saved = write?.[1] as { fields: typeof FIELDS };
+      expect(saved.fields[0]!.geometry.segments).toHaveLength(1);
+      expect(saved.fields[0]!.geometry.segments[0]!.optionKey).toBe('tick');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses to rewrite a PUBLISHED version', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      formTemplateVersionsFindFirst: { id: 'v2', templateId: 'f1', state: 'published', fields: [] },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patch(base, 'v2', { fields: FIELDS });
+      // A published version is frozen: submissions pin to it, so rewriting one
+      // rewrites what already-signed records render against.
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('version_published');
+      expect(updateSet.mock.calls.find(([t]) => t === schema.formTemplateVersions)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a caller who cannot edit forms', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      formTemplateVersionsFindFirst: { id: 'v3', templateId: 'f1', state: 'draft', fields: [] },
+      rolePermissionsFindFirst: VIEWER_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patch(base, 'v3', { fields: FIELDS });
+      expect(res.status).toBe(403);
+      expect(updateSet.mock.calls.find(([t]) => t === schema.formTemplateVersions)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for a version belonging to another template', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      formTemplateVersionsFindFirst: { id: 'v3', templateId: 'other-form', state: 'draft', fields: [] },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      expect((await patch(base, 'v3', { fields: FIELDS })).status).toBe(404);
+      expect(updateSet.mock.calls.find(([t]) => t === schema.formTemplateVersions)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects a body with no fields array', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      formTemplateVersionsFindFirst: { id: 'v3', templateId: 'f1', state: 'draft', fields: [] },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      expect((await patch(base, 'v3', {})).status).toBe(400);
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+});

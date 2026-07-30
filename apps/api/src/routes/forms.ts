@@ -312,7 +312,118 @@ formsRouter.post('/:id/versions', requireTenant, withErrorHandling(async (req, r
     .where(eq(schema.formTemplates.id, template.id));
 
   const dto = await summaryDto(template.id);
-  res.status(201).json(dto);
+  // The new version's id, so a caller that forked a draft in order to edit it
+  // can go straight there instead of guessing which version it just made.
+  res.status(201).json({ ...dto, createdVersionId: version.id });
+}));
+
+/**
+ * One version's own fields — the geometry editor's read side.
+ *
+ * `GET /forms/:id` serves the CURRENT version, which is the wrong answer while
+ * editing a draft fork. This serves whichever version is asked for, plus the
+ * source PDF handle, because placing boxes needs the page images to draw on.
+ */
+formsRouter.get('/:id/versions/:versionId', requireTenant, withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const tenant = req.tenant!;
+  if (!(await hasPermission(tenant, 'forms', 'view'))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  const template = await db.query.formTemplates.findFirst({
+    where: and(eq(schema.formTemplates.id, req.params.id!), eq(schema.formTemplates.orgId, tenant.orgId)),
+  });
+  if (!template) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+  const version = await db.query.formTemplateVersions.findFirst({
+    where: eq(schema.formTemplateVersions.id, req.params.versionId!),
+  });
+  // The template scopes the org; this scopes the version to the template, so a
+  // version id from another form is a miss rather than a cross-form read.
+  if (!version || version.templateId !== template.id) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+
+  res.json({
+    id: version.id,
+    templateId: version.templateId,
+    label: version.versionLabel,
+    state: version.state,
+    isCurrent: template.currentVersionId === version.id,
+    fields: version.fields ?? [],
+    container: version.container,
+    sourcePdfAssetId: version.sourcePdfAssetId,
+  });
+}));
+
+const patchVersionBody = z.object({ fields: z.array(z.custom<FormField>()) });
+
+/**
+ * Rewrite a DRAFT version's fields.
+ *
+ * This exists so geometry can be placed on an existing form without
+ * re-importing it. Re-importing re-extracts, which re-assigns every field id —
+ * and an assessment tool's manifest, answer keys and outcome targets are all
+ * keyed to those ids, so a re-import silently invalidates the lot. Forking the
+ * published version into a draft preserves the ids; only placement changes.
+ *
+ * A PUBLISHED version is refused outright. Submissions pin to a version, so
+ * rewriting one rewrites what already-signed records render against — the same
+ * rule the schema states on `fields`. Publish the draft instead, which is an
+ * ordinary new version and leaves the old one intact.
+ */
+formsRouter.patch('/:id/versions/:versionId', requireTenant, withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const tenant = req.tenant!;
+  if (!(await hasPermission(tenant, 'forms', 'edit'))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  const parsed = patchVersionBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return;
+  }
+  const template = await db.query.formTemplates.findFirst({
+    where: and(eq(schema.formTemplates.id, req.params.id!), eq(schema.formTemplates.orgId, tenant.orgId)),
+  });
+  if (!template) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+  const version = await db.query.formTemplateVersions.findFirst({
+    where: eq(schema.formTemplateVersions.id, req.params.versionId!),
+  });
+  if (!version || version.templateId !== template.id) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+  if (version.state === 'published') {
+    res.status(409).json({ error: 'version_published' });
+    return;
+  }
+
+  await db
+    .update(schema.formTemplateVersions)
+    .set({ fields: parsed.data.fields })
+    .where(eq(schema.formTemplateVersions.id, version.id));
+
+  await db
+    .update(schema.formTemplates)
+    .set({ updatedAt: new Date() })
+    .where(eq(schema.formTemplates.id, template.id));
+
+  res.json({ id: version.id, state: version.state, fieldCount: parsed.data.fields.length });
 }));
 
 formsRouter.post('/:id/versions/:versionId/publish', requireTenant, withErrorHandling(async (req, res) => {

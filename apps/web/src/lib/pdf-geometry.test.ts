@@ -1168,29 +1168,44 @@ describe('proposeInlineOptionCells', () => {
     expect(t!.x + t!.width).toBeLessThan(f!.x);
   });
 
-  it('estimates a box beside the answer when no checkbox is in the text layer', () => {
-    const res = proposeInline(stackedChoices(), 'Q3. What is the purpose of performing a walk around pre-start inspection?', [
-      'Inspect for damage',
-      'Identify faults with the machine',
-      'Ensure equipment is safe to operate',
-      'All the above',
-    ])!;
+  it('refuses when no checkbox glyph is in the text layer at all', () => {
+    // The side a box sits on is MEASURED, never assumed — both layouts are real
+    // in this library. With no glyph anywhere there is no evidence for either,
+    // and placing every box on a guessed side put marks ~20pt off the printed
+    // ones on the dozer's "No [] Yes []" rows.
+    const res = proposeInline(
+      stackedChoices(),
+      'Q3. What is the purpose of performing a walk around pre-start inspection?',
+      ['Inspect for damage', 'Identify faults with the machine', 'Ensure equipment is safe to operate', 'All the above'],
+    );
+
+    expect(res).toBeNull();
+  });
+
+  it('estimates only the option whose own glyph is missing, on the measured side', () => {
+    // Three of four answers carry a printed box, so the SIDE is known even
+    // though the fourth's box is not — that is evidence, not a guess.
+    const page = [
+      { text: 'Q3. What is the purpose of performing a walk around pre-start inspection?', x: 37.5, y: 630.8, width: 400 },
+      { text: '☐', x: 48, y: 614, width: 9 },
+      { text: 'Inspect for damage', x: 60, y: 614, width: 90 },
+      { text: '☐', x: 48, y: 597.1, width: 9 },
+      { text: 'Identify faults with the machine', x: 60, y: 597.1, width: 140 },
+      { text: '☐', x: 48, y: 580.3, width: 9 },
+      { text: 'Ensure equipment is safe to operate', x: 60, y: 580.3, width: 160 },
+      // No glyph on this row.
+      { text: 'All the above', x: 60, y: 563.5, width: 62 },
+    ];
+    const res = proposeInline(
+      page,
+      'Q3. What is the purpose of performing a walk around pre-start inspection?',
+      ['Inspect for damage', 'Identify faults with the machine', 'Ensure equipment is safe to operate', 'All the above'],
+    )!;
 
     expect(res).not.toBeNull();
     expect(res.segments).toHaveLength(4);
-    // Left of the answer text, and on that answer's own baseline.
+    // Every box before its words, matching the three that were measured.
     for (const segment of res.segments) expect(segment.x).toBeLessThan(60);
-    expect(res.segments[0]!.y).toBeGreaterThan(res.segments[3]!.y);
-  });
-
-  it('says an estimated box needs checking, and does not read as certain', () => {
-    const res = proposeInline(stackedChoices(), 'Q3. What is the purpose of performing a walk around pre-start inspection?', [
-      'Inspect for damage',
-      'Identify faults with the machine',
-      'Ensure equipment is safe to operate',
-      'All the above',
-    ])!;
-
     expect(res.confidence).toBe(0.5);
     expect(res.notes.join(' ')).toMatch(/estimated/i);
   });
@@ -1249,5 +1264,114 @@ describe('proposeInlineOptionCells — refusals', () => {
     ];
 
     expect(proposeInline(page, Q1, ['True', 'False'])).toBeNull();
+  });
+});
+
+/**
+ * The measured Track Dozer assessment-summary row, which prints its box AFTER
+ * the word: "More coaching and/or training required?  No []  Yes []".
+ *
+ * Reported from a real mapping session: every box landed left of its word,
+ * about twenty points off the printed one, because the rule looked only to the
+ * left of the answer and then estimated a box there.
+ */
+describe('proposeInlineOptionCells — a checkbox printed AFTER its answer', () => {
+  function boxAfterWord(): PositionedText[] {
+    return [
+      { text: 'More coaching and/or training required?', x: 196, y: 615, width: 152 },
+      { text: 'No', x: 400, y: 615, width: 12 },
+      { text: '☐', x: 416, y: 615, width: 9 },
+      { text: 'Yes', x: 447, y: 615, width: 16 },
+      { text: '☐', x: 467, y: 615, width: 9 },
+      { text: 'Detail further action:', x: 500, y: 615, width: 84 },
+    ];
+  }
+
+  it('places each box on the printed glyph, to the RIGHT of its word', () => {
+    const res = proposeInline(boxAfterWord(), 'More coaching and/or training required?', ['No', 'Yes'])!;
+
+    expect(res).not.toBeNull();
+    // The glyphs are at 416 and 467 — not at 379 and 426, which is where a
+    // left-hand assumption would have put them.
+    expect(res.segments.map((s) => s.x)).toEqual([416, 467]);
+  });
+
+  it('reports full confidence, because both boxes were found rather than estimated', () => {
+    const res = proposeInline(boxAfterWord(), 'More coaching and/or training required?', ['No', 'Yes'])!;
+
+    expect(res.confidence).toBe(1);
+    expect(res.notes.join(' ')).toMatch(/AFTER/);
+  });
+
+  it('does not mistake the neighbouring answer’s word for a marker', () => {
+    const res = proposeInline(boxAfterWord(), 'More coaching and/or training required?', ['No', 'Yes'])!;
+    const [no, yes] = res.segments;
+
+    // "Yes" sits between No's box and Yes's box; taking it would put No's mark
+    // on the other answer entirely.
+    expect(no!.x + no!.width).toBeLessThan(yes!.x);
+    expect(no!.width).toBeLessThanOrEqual(9);
+  });
+});
+
+/**
+ * A numbered question whose text WRAPS.
+ *
+ * Reported from a mapping session: Q2 matched and placed correctly while Q1 —
+ * the longer question directly above it — found nothing. The page numbers its
+ * rows ("1. The track dozer…") and the extracted label carries its own ("Q1.
+ * …"), and only the label's number was being stripped. On a question short
+ * enough to fit one line that made no difference; on one that wrapped, the row
+ * held just the first line, whose leading "1 " then broke containment in both
+ * directions.
+ */
+describe('proposeInlineOptionCells — a numbered question that wraps', () => {
+  const LABEL =
+    'Q1. The track dozer must be isolated with a lock and hasp before you can carry out any maintenance activity';
+
+  /** The question over two printed lines, each answer lettered beneath it. */
+  function wrappedQuestion(): PositionedText[] {
+    return [
+      { text: '1.', x: 40, y: 630.8, width: 8 },
+      { text: 'The track dozer must be isolated with a lock and hasp before you', x: 58, y: 630.8, width: 300 },
+      { text: 'can carry out any maintenance activity', x: 58, y: 620.4, width: 170 },
+      { text: 'a)', x: 70, y: 604, width: 9 },
+      { text: 'True', x: 88, y: 604, width: 18 },
+      { text: 'b)', x: 70, y: 587.2, width: 9 },
+      { text: 'False', x: 88, y: 587.2, width: 20 },
+    ];
+  }
+
+  it('matches the question and rings both answers', () => {
+    const res = proposeInline(wrappedQuestion(), LABEL, ['True', 'False']);
+
+    expect(res).not.toBeNull();
+    expect(res!.segments).toHaveLength(2);
+  });
+
+  it('places each box on its own printed letter', () => {
+    const res = proposeInline(wrappedQuestion(), LABEL, ['True', 'False'])!;
+
+    // The "a)" and "b)" runs at x=70 are the markers an assessor circles.
+    expect(res.segments.map((s) => s.x)).toEqual([70, 70]);
+    // ...on their own rows, so the two boxes are not the same cell.
+    expect(res.segments[0]!.y).toBeGreaterThan(res.segments[1]!.y);
+  });
+
+  it('reports the boxes as found rather than estimated', () => {
+    const res = proposeInline(wrappedQuestion(), LABEL, ['True', 'False'])!;
+
+    expect(res.confidence).toBe(1);
+    expect(res.notes.join(' ')).toMatch(/BEFORE/);
+  });
+
+  it('still refuses a label whose words are not on the page', () => {
+    // The looser matching must not make everything match something.
+    expect(
+      proposeInline(wrappedQuestion(), 'Q9. When ripping you must only rip in one direction', [
+        'True',
+        'False',
+      ]),
+    ).toBeNull();
   });
 });

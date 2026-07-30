@@ -24,6 +24,7 @@ import type { TextPage } from '../../lib/pdf-geometry.js';
 import {
   adjustGeometryBand,
   adjustGeometryBoundary,
+  allGeometryPlacements,
   geometryProposal,
   proposeGeometry,
 } from '../../lib/data/import-session.js';
@@ -88,6 +89,18 @@ export function ImportReviewScreen() {
   // appears as it is placed), and otherwise the selected field's own box.
   const overlaySlot = drawSlot ?? selectedFieldId;
   const bandOverlay = overlaySlot ? (geometryProposal(overlaySlot) ?? null) : null;
+
+  /**
+   * Every box placed so far, drawn on the page and kept there.
+   *
+   * Read from the session on each render rather than memoized: it changes on
+   * every draw, confirm and discard, and those are exactly the moments the
+   * overlay has to be right. The whole list is small — one entry per placed box.
+   */
+  const placements = allGeometryPlacements().map((m) => ({
+    ...m,
+    active: m.slot === overlaySlot,
+  }));
   /**
    * Where a dragged band edge may land, from the overlay page's own text (U10).
    * Derived here rather than in the viewer because the screen already holds the
@@ -235,6 +248,7 @@ export function ImportReviewScreen() {
                 onSelectField={handleSelectField}
                 onTextLayer={setTextPages}
                 bandOverlay={bandOverlay}
+                placements={placements}
                 bandSnapTargets={bandSnapTargets}
                 drawArmed={drawSlot != null}
                 onDrawBox={

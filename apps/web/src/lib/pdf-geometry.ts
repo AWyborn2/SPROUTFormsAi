@@ -743,6 +743,8 @@ function normalizeForMatch(text: string): string {
  * the label and the page always prints.
  */
 function stripEnumeration(text: string): string {
+  // Also handles a bare leading letter enumeration ("a b) True" normalizes to
+  // "a true"), which the stacked multiple-choice rows carry.
   return text.replace(/^(?:q(?:uestion)?\s*)?\d+\s*/, '').trim();
 }
 
@@ -836,7 +838,11 @@ function bandMatches(rows: Row[], band: GeometryBand, label: string, headerY: nu
   // reviewer draw it, which is the visible failure rather than the silent one.
   if (wanted.length < 12) return false;
 
-  const text = bandText(rows, band, headerY);
+  // The printed side is stripped too. The page numbers its rows ("1. Plan and
+  // Prepare") while the extracted label often does not, and an unstripped number
+  // sits at the front of the haystack where it breaks containment in both
+  // directions.
+  const text = stripEnumeration(bandText(rows, band, headerY));
   if (text.length === 0) return false;
   return text.includes(wanted) || wanted.includes(text);
 }
@@ -991,26 +997,43 @@ export function proposeInlineOptionCells(input: FieldProposeInput): FieldProposa
   // Where the question is printed. Ambiguity refuses, exactly as it does for
   // the column rule — the dozer asks "True / False" of many questions, and the
   // label is the only thing telling them apart.
-  const starts = rows.filter((r) => {
-    const text = normalizeForMatch(r.items.map((i) => i.text).join(' '));
-    return text.length > 0 && (text.includes(wanted) || wanted.includes(text));
-  });
-  if (starts.length !== 1) return null;
+  const matchingRows: number[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    // Enumeration stripped from the PRINTED row as well as the label. The page
+    // prints "1. The track dozer must be isolated…" while the extracted label
+    // reads "Q1. …", and leaving the row's number in place broke containment in
+    // both directions for any question long enough to wrap.
+    const text = stripEnumeration(normalizeForMatch(rows[i]!.items.map((x) => x.text).join(' ')));
+    // A short row is not evidence. Without this floor a bare "true" or a page
+    // number could satisfy `wanted.includes(text)` for any question at all.
+    if (text.length < 12) continue;
+    if (text.includes(wanted) || wanted.includes(text)) matchingRows.push(i);
+  }
 
-  const startIndex = rows.indexOf(starts[0]!);
+  // ADJACENT matches are one wrapped question, not two questions. A question
+  // printed over two lines matches on both of them — each line's words are a
+  // subset of the label — and counting that as ambiguity refused every long
+  // question while short ones placed correctly. Genuine ambiguity is matches in
+  // SEPARATED places, which is what this still refuses.
+  const runs: number[][] = [];
+  for (const i of matchingRows) {
+    const last = runs[runs.length - 1];
+    if (last && i === last[last.length - 1]! + 1) last.push(i);
+    else runs.push([i]);
+  }
+  if (runs.length !== 1) return null;
+
+  const startIndex = runs[0]![0]!;
   const window = rows.slice(startIndex, startIndex + INLINE_SEARCH_ROWS);
 
-  const pitch = rowPitch(window.slice(1).map((r, i) => window[i]!.y - r.y));
-  const size = Math.min(SYNTHETIC_MARKER_SIZE, pitch > 0 ? pitch * 0.7 : SYNTHETIC_MARKER_SIZE);
-
-  const segments: PageBox[] = [];
-  let synthesized = 0;
-
+  // Locate every option's printed text first. Nothing can be placed until all
+  // of them are found: a partial placement is worse than none, because the
+  // options a reviewer can see placed are the ones they stop checking.
+  const located: { option: string; row: Row; item: PositionedText }[] = [];
   for (const option of input.options) {
     const needle = normalizeForMatch(option);
     if (needle.length < 2) return null;
 
-    // Every run whose own text carries this option, anywhere in the window.
     const hits: { row: Row; item: PositionedText }[] = [];
     for (const row of window) {
       for (const item of row.items) {
@@ -1021,19 +1044,34 @@ export function proposeInlineOptionCells(input: FieldProposeInput): FieldProposa
     // this option names, and guessing between them records an answer nobody
     // gave.
     if (hits.length !== 1) return null;
+    located.push({ option, row: hits[0]!.row, item: hits[0]!.item });
+  }
 
-    const { row, item } = hits[0]!;
+  // WHICH SIDE the checkbox sits on is measured, never assumed. Both layouts
+  // are real and this module cannot tell them apart a priori: the dozer prints
+  // "No ☐ Yes ☐" with the box AFTER the word, while a stacked multiple-choice
+  // prints "☐ All the above" with it BEFORE. Assuming one put every mark about
+  // twenty points off the printed box on the other.
+  const sightings = located
+    .map(({ row, item }) => ({ before: markerBefore(row, item), after: markerAfter(row, item) }))
+    .map((m) => (m.after ? ('after' as const) : m.before ? ('before' as const) : null))
+    .filter((side): side is 'before' | 'after' => side !== null);
 
-    // The printed checkbox, when it reaches the text layer: a short narrow run
-    // immediately before the option's words on the same baseline.
-    const marker = row.items.find(
-      (candidate) =>
-        candidate !== item &&
-        candidate.width > 0 &&
-        candidate.width <= MARKER_MAX_WIDTH &&
-        candidate.x < item.x &&
-        item.x - (candidate.x + candidate.width) <= MARKER_GAP,
-    );
+  // No marker glyph anywhere on this field. It is drawn as vector strokes,
+  // which this module never reads, and there is no evidence for which side it
+  // is on — so refuse rather than place every box on a guessed side.
+  if (sightings.length === 0) return null;
+
+  const side = sightings.filter((x) => x === 'after').length >= sightings.length / 2 ? 'after' : 'before';
+
+  const pitch = rowPitch(window.slice(1).map((r, i) => window[i]!.y - r.y));
+  const size = Math.min(SYNTHETIC_MARKER_SIZE, pitch > 0 ? pitch * 0.7 : SYNTHETIC_MARKER_SIZE);
+
+  const segments: PageBox[] = [];
+  let synthesized = 0;
+
+  for (const { option, row, item } of located) {
+    const marker = side === 'after' ? markerAfter(row, item) : markerBefore(row, item);
 
     if (marker) {
       segments.push({
@@ -1049,11 +1087,13 @@ export function proposeInlineOptionCells(input: FieldProposeInput): FieldProposa
       continue;
     }
 
-    // No marker in the text layer — it is drawn as vector strokes, which this
-    // module never reads. Place a box in the gap the marker occupies, which is
-    // approximate but cannot stray onto another option.
-    const x = item.x - SYNTHETIC_MARKER_GAP - size;
-    if (x < 0) return null;
+    // This option's own glyph is missing while its siblings' are present, so
+    // the side is known even though the box is not. Estimate it there.
+    const x =
+      side === 'after'
+        ? item.x + item.width + SYNTHETIC_MARKER_GAP
+        : item.x - SYNTHETIC_MARKER_GAP - size;
+    if (x < 0 || x + size > input.pageWidth) return null;
     synthesized++;
     segments.push({
       page: input.page,
@@ -1080,14 +1120,57 @@ export function proposeInlineOptionCells(input: FieldProposeInput): FieldProposa
 
   const notes: string[] = [];
   let confidence = 1;
+  notes.push(
+    side === 'after'
+      ? 'Checkboxes read as printed AFTER each answer.'
+      : 'Checkboxes read as printed BEFORE each answer.',
+  );
   if (synthesized > 0) {
     // Halved rather than nudged: an estimated box is the case a reviewer most
     // needs to look at, and it should not read as nearly-certain.
     confidence = 0.5;
     notes.push(
-      `${synthesized} of ${segments.length} checkbox(es) are not in the PDF's text layer — those boxes are estimated from the answer's position and should be checked against the page.`,
+      `${synthesized} of ${segments.length} checkbox(es) were not found in the PDF's text layer — those boxes are estimated and should be checked against the page.`,
     );
   }
 
   return { segments, confidence, notes };
+}
+
+/** A short narrow run immediately BEFORE the option's words, same baseline. */
+function markerBefore(row: Row, item: PositionedText): PositionedText | undefined {
+  return nearestMarker(
+    row.items.filter((c) => c !== item && c.x < item.x),
+    (c) => item.x - (c.x + c.width),
+  );
+}
+
+/** A short narrow run immediately AFTER the option's words, same baseline. */
+function markerAfter(row: Row, item: PositionedText): PositionedText | undefined {
+  return nearestMarker(
+    row.items.filter((c) => c !== item && c.x >= item.x + item.width),
+    (c) => c.x - (item.x + item.width),
+  );
+}
+
+/**
+ * The closest candidate that is narrow enough to be a box or bullet rather than
+ * a word, and close enough to belong to this option rather than the next.
+ */
+function nearestMarker(
+  candidates: PositionedText[],
+  gapOf: (c: PositionedText) => number,
+): PositionedText | undefined {
+  let best: PositionedText | undefined;
+  let bestGap = Infinity;
+  for (const candidate of candidates) {
+    if (!(candidate.width > 0) || candidate.width > MARKER_MAX_WIDTH) continue;
+    const gap = gapOf(candidate);
+    if (gap < 0 || gap > MARKER_GAP) continue;
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = candidate;
+    }
+  }
+  return best;
 }

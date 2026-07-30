@@ -44,6 +44,7 @@ import type {
   FormDetail,
   FormSourceType,
   FormSummary,
+  FormVersionDetail,
   Member,
   MemberStatus,
   OrgBilling,
@@ -451,6 +452,53 @@ export const store = {
         publish: input.publish,
       })
       .then(toFormSummary);
+  },
+
+/**
+   * One version's own fields — what the geometry editor reads.
+   *
+   * `form(id)` serves the CURRENT version, which is the wrong answer while
+   * editing a draft fork.
+   */
+  formVersion(input: { formId: string; versionId: string }): Promise<FormVersionDetail> {
+    return apiClient.get<FormVersionDetail>(`/forms/${input.formId}/versions/${input.versionId}`);
+  },
+
+  /**
+   * Save edited fields onto a DRAFT version.
+   *
+   * The API refuses a published version outright — submissions pin to a
+   * version, so rewriting one rewrites what already-signed records render
+   * against. Fork a draft and publish that instead.
+   */
+  saveVersionFields(input: {
+    formId: string;
+    versionId: string;
+    fields: FormField[];
+  }): Promise<{ id: string; state: string; fieldCount: number }> {
+    return apiClient.patch(`/forms/${input.formId}/versions/${input.versionId}`, {
+      fields: input.fields,
+    });
+  },
+
+/**
+   * Fork the current version into an editable DRAFT, same fields, same ids.
+   *
+   * The route inherits `sourcePdfAssetId` and the container from the current
+   * version, so the fork can be drawn against the same original document. Field
+   * IDS ARE PRESERVED, which is the whole point: a re-import would re-extract
+   * and renumber them, invalidating any assessment tool keyed to them.
+   */
+  forkDraftVersion(input: {
+    formId: string;
+    fields: FormField[];
+  }): Promise<{ form: FormSummary; versionId: string }> {
+    return apiClient
+      .post<FormSummaryDto & { createdVersionId: string }>(`/forms/${input.formId}/versions`, {
+        fields: input.fields,
+        publish: false,
+      })
+      .then((dto) => ({ form: toFormSummary(dto), versionId: dto.createdVersionId }));
   },
 
   publishFormVersion(input: { formId: string; versionId: string }): Promise<FormSummary> {
