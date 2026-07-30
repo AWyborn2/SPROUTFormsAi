@@ -33,21 +33,19 @@ function validState(over: Partial<ChcIntakeState> = {}): ChcIntakeState {
     first_name: 'Rebecca',
     last_name: 'Hsu',
     gender: 'Female',
-    indigenous: 'No',
+    ethnicity: 'Caucasian',
     starter_type: 'New starter',
     // 2 clear weeks out, a Monday, no holiday in between.
     induction_date: '2026-06-22',
     department: 'Maintenance',
     role: ['Tyre Fitter'],
-    in_beakon: 'Yes',
     ...over,
   };
 }
 
 /** The Beakon-conditional block filled in, for the `in_beakon: 'No'` path. */
-function beakonNoState(over: Partial<ChcIntakeState> = {}): ChcIntakeState {
+function completeState(over: Partial<ChcIntakeState> = {}): ChcIntakeState {
   return validState({
-    in_beakon: 'No',
     mobile: '0412 345 678',
     email: 'rebecca@example.com',
     dob: '1994-03-11',
@@ -152,34 +150,28 @@ describe('induction date rule', () => {
 });
 
 describe('validateChcIntake', () => {
-  it('passes a complete Beakon-yes submission', () => {
-    expect(validateChcIntake(validState(), MONDAY_2026_06_08)).toEqual({});
+  it('passes a complete submission', () => {
+    expect(validateChcIntake(completeState(), MONDAY_2026_06_08)).toEqual({});
   });
 
   it('passes a complete Beakon-no submission', () => {
-    expect(validateChcIntake(beakonNoState(), MONDAY_2026_06_08)).toEqual({});
+    expect(validateChcIntake(completeState(), MONDAY_2026_06_08)).toEqual({});
   });
 
-  it('does not require the Beakon block when the starter IS in Beakon', () => {
-    // The whole conditional section is empty here and that is correct — the
-    // same rule the platform applies to a hidden required field.
-    const errors = validateChcIntake(validState({ in_beakon: 'Yes' }), MONDAY_2026_06_08);
-    expect(errors.mobile).toBeUndefined();
-    expect(errors.photo).toBeUndefined();
-    expect(errors.drivers_licence).toBeUndefined();
-  });
-
-  it('requires the Beakon block when the starter is NOT in Beakon', () => {
-    const errors = validateChcIntake(validState({ in_beakon: 'No' }), MONDAY_2026_06_08);
+  it('requires the contact and document details from every intake', () => {
+    // These used to be conditional on "already in Beakon?". That question is
+    // gone: the form collects everything every time, which is what removes the
+    // Beakon round-trip from the mobilisation entirely.
+    const errors = validateChcIntake(validState(), MONDAY_2026_06_08);
     expect(errors.mobile).toBe('Required');
     expect(errors.photo).toBe('Required');
     expect(errors.drivers_licence).toBe('Required');
   });
 
-  it('distinguishes an unanswered Yes/No from an answered No', () => {
-    const errors = validateChcIntake(validState({ indigenous: '' }), MONDAY_2026_06_08);
-    expect(errors.indigenous).toBe('Please select');
-    expect(validateChcIntake(validState({ indigenous: 'No' }), MONDAY_2026_06_08).indigenous)
+  it('requires an ethnicity to be chosen', () => {
+    expect(validateChcIntake(validState({ ethnicity: '' }), MONDAY_2026_06_08).ethnicity)
+      .toBe('Please select');
+    expect(validateChcIntake(completeState({ ethnicity: 'Aboriginal' }), MONDAY_2026_06_08).ethnicity)
       .toBeUndefined();
   });
 
@@ -202,20 +194,20 @@ describe('validateChcIntake', () => {
 
   it('rejects an expired licence', () => {
     const errors = validateChcIntake(
-      beakonNoState({ licence_expiry: '2026-01-01' }),
+      completeState({ licence_expiry: '2026-01-01' }),
       MONDAY_2026_06_08,
     );
     expect(errors.licence_expiry).toBe('Licence has expired');
   });
 
   it('rejects a date of birth that is not in the past', () => {
-    const errors = validateChcIntake(beakonNoState({ dob: '2026-06-08' }), MONDAY_2026_06_08);
+    const errors = validateChcIntake(completeState({ dob: '2026-06-08' }), MONDAY_2026_06_08);
     expect(errors.dob).toBe('Date of birth must be in the past');
   });
 
   it('rejects a malformed postcode, phone, and email', () => {
     const errors = validateChcIntake(
-      beakonNoState({ postcode: '63', mobile: 'call me', email: 'nope' }),
+      completeState({ postcode: '63', mobile: 'call me', email: 'nope' }),
       MONDAY_2026_06_08,
     );
     expect(errors.postcode).toBe('Enter a 4-digit postcode');
@@ -226,13 +218,12 @@ describe('validateChcIntake', () => {
 
 describe('chcSubmissionValues', () => {
   it('maps onto the template field ids', () => {
-    const values = chcSubmissionValues(validState());
+    const values = chcSubmissionValues(completeState());
     expect(values[CHC_FIELD_IDS.firstName]).toBe('Rebecca');
     expect(values[CHC_FIELD_IDS.lastName]).toBe('Hsu');
     expect(values[CHC_FIELD_IDS.department]).toBe('Maintenance');
-    // Yes/No answers become the booleans `boolean_yes_no` stores.
-    expect(values[CHC_FIELD_IDS.indigenous]).toBe(false);
-    expect(values[CHC_FIELD_IDS.inBeakon]).toBe(true);
+    // Ethnicity is stored as the chosen string, in BISTrainer's own vocabulary.
+    expect(values[CHC_FIELD_IDS.ethnicity]).toBe('Caucasian');
   });
 
   it('answers only the chosen department’s role field', () => {
@@ -249,18 +240,25 @@ describe('chcSubmissionValues', () => {
     );
     expect(ops[CHC_FIELD_IDS.roleOperations]).toEqual(['Dozer Operator', 'Grader Operator']);
 
-    const admin = chcSubmissionValues(validState({ department: 'Admin', role: ['General Office'] }));
+    const admin = chcSubmissionValues(completeState({ department: 'Admin', role: ['General Office'] }));
     expect(typeof admin[CHC_FIELD_IDS.roleAdmin]).toBe('string');
   });
 
-  it('omits the Beakon block entirely when it was never shown', () => {
-    const values = chcSubmissionValues(validState({ in_beakon: 'Yes' }));
-    expect(CHC_FIELD_IDS.mobile in values).toBe(false);
-    expect(CHC_FIELD_IDS.photo in values).toBe(false);
+  it('always submits the contact and document details', () => {
+    const values = chcSubmissionValues(completeState());
+    expect(CHC_FIELD_IDS.mobile in values).toBe(true);
+    expect(CHC_FIELD_IDS.photo in values).toBe(true);
+  });
+
+  it('submits the ethnicity as chosen, and no retired Beakon answer', () => {
+    const values = chcSubmissionValues(completeState({ ethnicity: 'Torres Strait Islander' }));
+    expect(values[CHC_FIELD_IDS.ethnicity]).toBe('Torres Strait Islander');
+    expect(CHC_FIELD_IDS.inBeakon in values).toBe(false);
+    expect(CHC_FIELD_IDS.indigenous in values).toBe(false);
   });
 
   it('carries file refs through as objects, not filenames', () => {
-    const values = chcSubmissionValues(beakonNoState());
+    const values = chcSubmissionValues(completeState());
     expect(values[CHC_FIELD_IDS.photo]).toMatchObject({
       kind: 'file',
       key: 'org-1/upload-a.jpg',
@@ -273,27 +271,24 @@ describe('the screen and the template agree', () => {
 
   it('every submitted value targets a real template field', () => {
     const ids = new Set(fields.map((f) => f.id));
-    for (const state of [validState(), beakonNoState()]) {
+    for (const state of [completeState()]) {
       for (const key of Object.keys(chcSubmissionValues(state))) {
         expect(ids.has(key), `${key} is not a field in the template`).toBe(true);
       }
     }
   });
 
-  it('the template hides the Additional Details section when in Beakon', () => {
-    const values = chcSubmissionValues(validState({ in_beakon: 'Yes' })) as Record<
-      string,
-      SubmissionValue
-    >;
+  it('the template shows the Additional Details section unconditionally', () => {
+    const values = chcSubmissionValues(completeState()) as Record<string, SubmissionValue>;
     const visibleIds = new Set(visibleFields(fields, values).map((f) => f.id));
-    expect(visibleIds.has(CHC_FIELD_IDS.mobile)).toBe(false);
-    expect(visibleIds.has(CHC_FIELD_IDS.photo)).toBe(false);
-    // The question that drives it stays visible.
-    expect(visibleIds.has(CHC_FIELD_IDS.inBeakon)).toBe(true);
+    expect(visibleIds.has(CHC_FIELD_IDS.mobile)).toBe(true);
+    expect(visibleIds.has(CHC_FIELD_IDS.photo)).toBe(true);
+    // The question that used to gate it is no longer part of the form at all.
+    expect(fields.some((f) => f.id === CHC_FIELD_IDS.inBeakon)).toBe(false);
   });
 
   it('the template reveals the Additional Details section when NOT in Beakon', () => {
-    const values = chcSubmissionValues(beakonNoState()) as Record<string, SubmissionValue>;
+    const values = chcSubmissionValues(completeState()) as Record<string, SubmissionValue>;
     const visibleIds = new Set(visibleFields(fields, values).map((f) => f.id));
     expect(visibleIds.has(CHC_FIELD_IDS.mobile)).toBe(true);
     expect(visibleIds.has(CHC_FIELD_IDS.photo)).toBe(true);
