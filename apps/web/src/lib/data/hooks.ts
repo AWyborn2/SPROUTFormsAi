@@ -79,6 +79,7 @@ const keys = {
   assessmentTools: ['assessmentTools'] as const,
   assessmentCases: ['assessmentCases'] as const,
   assessmentCase: (id: string) => ['assessmentCases', id] as const,
+  formVersion: (formId: string, versionId: string) => ['forms', formId, 'versions', versionId] as const,
   assessmentAttempt: (caseId: string, attemptId: string) =>
     ['assessmentCases', caseId, 'attempts', attemptId] as const,
   competencyRules: ['competencyRules'] as const,
@@ -257,6 +258,39 @@ export function useCreateVersionFromImport() {
 }
 
 /** Publish an existing draft version from version history — flips live fill links to it immediately. */
+/** One version's own fields — the geometry editor's read. */
+export function useFormVersion(formId: string | undefined, versionId: string | undefined) {
+  return useQuery({
+    queryKey: keys.formVersion(formId ?? '', versionId ?? ''),
+    queryFn: () => store.formVersion({ formId: formId!, versionId: versionId! }),
+    enabled: Boolean(formId && versionId),
+  });
+}
+
+/** Save edited fields onto a draft version. Refused on a published one. */
+export function useSaveVersionFields(formId: string, versionId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (fields: FormField[]) => store.saveVersionFields({ formId, versionId, fields }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.formVersion(formId, versionId) });
+      void qc.invalidateQueries({ queryKey: keys.form(formId) });
+    },
+  });
+}
+
+/** Fork the current version into a draft so its placement can be edited. */
+export function useForkDraftVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { formId: string; fields: FormField[] }) => store.forkDraftVersion(input),
+    onSuccess: (_r, input) => {
+      void qc.invalidateQueries({ queryKey: keys.form(input.formId) });
+      void qc.invalidateQueries({ queryKey: keys.forms });
+    },
+  });
+}
+
 export function usePublishFormVersion() {
   const qc = useQueryClient();
   return useMutation({

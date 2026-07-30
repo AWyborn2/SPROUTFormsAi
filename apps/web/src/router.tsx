@@ -16,6 +16,7 @@ import { ImportReviewScreen } from './screens/import/ImportReviewScreen.js';
 import { ImportPublishScreen } from './screens/import/ImportPublishScreen.js';
 import { FillScreen } from './screens/fill/FillScreen.js';
 import { InviteScreen } from './screens/invite/InviteScreen.js';
+import { GeometryEditorScreen } from './screens/import/GeometryEditorScreen.js';
 import { ResetPasswordScreen } from './screens/invite/ResetPasswordScreen.js';
 import { ApiKeysScreen } from './screens/enterprise/ApiKeysScreen.js';
 import { TeamScreen } from './screens/enterprise/TeamScreen.js';
@@ -57,6 +58,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   assessments: <AssessmentCasesScreen />,
   'assessment-case': <AssessmentCaseScreen />,
   'assessment-part-fill': <CasePartFillScreen />,
+  'geometry-editor': <GeometryEditorScreen />,
   'chc-intake': <ChcIntakeScreen />,
   mobile: <MobileScreen />,
 };

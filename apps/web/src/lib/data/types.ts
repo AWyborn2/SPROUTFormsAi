@@ -371,3 +371,21 @@ export interface CompetencyRule {
   competency: string;
   enabled: boolean;
 }
+
+/**
+ * One template version, read on its own rather than through the form.
+ *
+ * Carries `sourcePdfAssetId` because the geometry editor has nothing to place
+ * boxes on without the original page images.
+ */
+export interface FormVersionDetail {
+  id: string;
+  templateId: string;
+  label: string;
+  state: 'draft' | 'published' | 'archived';
+  /** True when this version is the one live fills and submissions pin to. */
+  isCurrent: boolean;
+  fields: FormField[];
+  container: FormContainer;
+  sourcePdfAssetId: string | null;
+}

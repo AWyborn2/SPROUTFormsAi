@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Button, Dialog, Icon, useToast, type BadgeVariant } from '@formai/ui';
 import { ApiError } from '../lib/data/api-client.js';
-import {
+import { useForkDraftVersion,
   useArchiveForm,
   useCreateFillLink,
   useDeleteForm,
@@ -43,6 +43,7 @@ function statusBadge(status: TemplateStatus) {
 /** Form library — the list of every template with its version history. */
 export function TemplatesScreen() {
   const navigate = useNavigate();
+  const forkDraft = useForkDraftVersion();
   const { toast } = useToast();
   const { data: forms = [] } = useForms();
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
@@ -468,11 +469,38 @@ export function TemplatesScreen() {
                         >
                           Publish
                         </button>
+                        {/* Placement is editable on a draft only — a published
+                            version is frozen because submissions pin to it. */}
+                        <button
+                          onClick={() => navigate(`/app/forms/${selected!.id}/versions/${v.id}/placement`)}
+                          className="text-[11.5px] font-semibold text-text-accent hover:underline"
+                        >
+                          Place fields
+                        </button>
                       </>
                     ) : i === 0 ? (
-                      <Badge variant="success" dot>
-                        Current
-                      </Badge>
+                      <>
+                        <Badge variant="success" dot>
+                          Current
+                        </Badge>
+                        {/* Forking preserves every field id, so an assessment
+                            tool keyed to them survives. Re-importing would not. */}
+                        <button
+                          disabled={forkDraft.isPending}
+                          onClick={() =>
+                            forkDraft.mutate(
+                              { formId: selected!.id, fields: selected!.fields },
+                              {
+                                onSuccess: ({ versionId }) =>
+                                  navigate(`/app/forms/${selected!.id}/versions/${versionId}/placement`),
+                              },
+                            )
+                          }
+                          className="text-[11.5px] font-semibold text-text-accent hover:underline disabled:opacity-60"
+                        >
+                          {forkDraft.isPending ? 'Forking…' : 'Edit placement'}
+                        </button>
+                      </>
                     ) : null}
                   </div>
                   {v.note && (

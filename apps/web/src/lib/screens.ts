@@ -65,6 +65,10 @@ export const SCREENS: ScreenDef[] = [
   // Filling one part of a case. Addressed by ATTEMPT id, not part key: a retry
   // is a distinct attempt row, and the URL has to say which one is being
   // answered or a resumed link would reopen the wrong one.
+  // Placing field geometry on an existing form, without re-importing it. A
+  // re-import re-extracts and re-assigns every field id, which silently
+  // invalidates any assessment tool keyed to those ids.
+  { key: 'geometry-editor', path: '/app/forms/:id/versions/:versionId/placement', group: 'Core product loop', label: 'Field placement', icon: 'square-dashed', shell: 'app' },
   { key: 'assessment-part-fill', path: '/app/assessments/:id/attempts/:attemptId', group: 'Assessments', label: 'Complete assessment part', icon: 'pen-line', shell: 'app' },
   { key: 'api-keys', path: '/app/settings/api-keys', group: 'Enterprise & org', label: 'API keys', icon: 'key', shell: 'app', inNav: true },
   { key: 'whitelabel', path: '/app/settings/branding', group: 'Enterprise & org', label: 'Branding', icon: 'sliders-horizontal', shell: 'app', inNav: true },

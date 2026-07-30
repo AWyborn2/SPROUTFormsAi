@@ -20,6 +20,8 @@ vi.mock('./api-client.js', async (importOriginal) => {
       ...actual.apiClient,
       postForBlob: vi.fn(),
       post: vi.fn(),
+      patch: vi.fn(),
+      get: vi.fn(),
       delete: vi.fn(),
     },
   };
@@ -153,5 +155,64 @@ describe('form lifecycle methods', () => {
     const body = postMock.mock.calls[0]![1] as Record<string, unknown>;
     expect(body).not.toHaveProperty('sourcePdfAssetId');
     expect(body).toMatchObject({ publish: true });
+  });
+});
+
+/**
+ * The geometry editor's client surface.
+ *
+ * Shape drift here surfaces to a user as an unexplained 400 or as placement
+ * silently not saving, so the request shapes are pinned rather than inferred.
+ */
+describe('version placement editing', () => {
+  const FIELDS: FormField[] = [
+    { id: 'ai_137', type: 'checkbox_group', label: 'Steering', required: false, source: 'imported' },
+  ];
+
+  it('reads ONE version, not the form’s current one', async () => {
+    vi.mocked(apiClient.get).mockResolvedValue({ id: 'v3', fields: [] });
+    await store.formVersion({ formId: 'f1', versionId: 'v3' });
+
+    // /forms/f1 would serve whichever version is current — the wrong answer
+    // while editing a draft fork.
+    expect(apiClient.get).toHaveBeenCalledWith('/forms/f1/versions/v3');
+  });
+
+  it('PATCHes fields onto a specific version', async () => {
+    vi.mocked(apiClient.patch).mockResolvedValue({ id: 'v3', state: 'draft', fieldCount: 1 });
+    await store.saveVersionFields({ formId: 'f1', versionId: 'v3', fields: FIELDS });
+
+    expect(apiClient.patch).toHaveBeenCalledWith('/forms/f1/versions/v3', { fields: FIELDS });
+  });
+
+  it('forks a DRAFT — never publishing — and returns the new version id', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({
+      id: 'f1',
+      name: 'Track Dozer',
+      versions: [],
+      createdVersionId: 'v4',
+    });
+    const res = await store.forkDraftVersion({ formId: 'f1', fields: FIELDS });
+
+    // publish:false is load-bearing — forking must not flip every live fill
+    // link to a half-placed version.
+    expect(apiClient.post).toHaveBeenCalledWith('/forms/f1/versions', {
+      fields: FIELDS,
+      publish: false,
+    });
+    // The id comes back explicitly rather than being guessed from a refetch.
+    expect(res.versionId).toBe('v4');
+  });
+
+  it('carries the same field ids into the fork', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({ id: 'f1', name: 'x', versions: [], createdVersionId: 'v4' });
+    await store.forkDraftVersion({ formId: 'f1', fields: FIELDS });
+
+    // The whole reason this exists instead of a re-import: an assessment tool's
+    // manifest, answer keys and outcome targets are keyed to these ids.
+    // `lastCall`, not `calls[0]` — only postForBlob is reset between tests here,
+    // so `post` accumulates calls from earlier ones.
+    const [, body] = vi.mocked(apiClient.post).mock.lastCall as [string, { fields: FormField[] }];
+    expect(body.fields.map((f) => f.id)).toEqual(['ai_137']);
   });
 });
