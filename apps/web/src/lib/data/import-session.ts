@@ -25,7 +25,12 @@ import type {
   RepeatingColumn,
   VisibilityCondition,
 } from '@formai/shared';
-import { isChoiceField, resolveGeometry, statusForConfidence } from '@formai/shared';
+import {
+  isChoiceField,
+  linkOutcomeTargets,
+  resolveGeometry,
+  statusForConfidence,
+} from '@formai/shared';
 import type { BuilderAction, BuilderState } from '../field-editor/reducer.js';
 import { builderReducer, initialBuilderState } from '../field-editor/reducer.js';
 import { ApiError, apiClient } from './api-client.js';
@@ -1283,6 +1288,19 @@ function publishableAnswerSets(field: ReviewField): AnswerSet[] {
 }
 
 export function reviewedToFields(fields: ReviewField[]): FormField[] {
+  /*
+    Question-to-outcome links are resolved HERE, over the reviewed list, not
+    carried through from extraction.
+
+    The reviewer reorders, deletes and adds fields, and the link has to describe
+    the document being published rather than the one that came out of the model.
+    Resolving against the raw extraction would keep a target pointing at a cell
+    the reviewer removed, and `resolveGeometry` would then draw a verdict into a
+    field that no longer exists.
+  */
+  const { links } = linkOutcomeTargets(fields);
+  const outcomeByQuestion = new Map(links.map((l) => [l.questionId, l.outcomeId]));
+
   return fields.map((f) => ({
     id: f.id,
     type: f.type,
@@ -1315,6 +1333,11 @@ export function reviewedToFields(fields: ReviewField[]): FormField[] {
     // and because absent geometry degrades to a data-only export, refusing to
     // publish it is visible and correctable rather than silently wrong.
     ...(publishableGeometry(f) ? { geometry: publishableGeometry(f)! } : {}),
+    // The outcome cell this question's verdict is written into. Extraction
+    // reports the printed reference; the pairing is resolved above.
+    ...(outcomeByQuestion.has(f.id)
+      ? { outcomeTarget: { fieldId: outcomeByQuestion.get(f.id)! } }
+      : {}),
   }));
 }
 

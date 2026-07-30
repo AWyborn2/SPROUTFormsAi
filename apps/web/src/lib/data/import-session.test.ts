@@ -1388,3 +1388,73 @@ describe('allGeometryPlacements', () => {
     expect(allGeometryPlacements()).toEqual([]);
   });
 });
+
+/**
+ * Question-to-outcome links crossing the publish boundary.
+ *
+ * `reviewedToFields` is a WHITELIST — a property missing from it is dropped even
+ * though review displayed it correctly — so a link that resolves perfectly and
+ * then fails to publish is the likely failure here, not a bad pairing.
+ *
+ * Resolved over the REVIEWED list rather than carried from extraction, because
+ * the reviewer reorders and deletes: a target resolved against the raw
+ * extraction can outlive the cell it names.
+ */
+describe('reviewedToFields — outcome targets', () => {
+  const q = (id: string, ref?: string): ReviewField => ({
+    id,
+    label: `Question ${id}`,
+    type: 'radio',
+    confidence: 1,
+    options: ['True', 'False'],
+    ...(ref ? { questionRef: ref } : {}),
+  });
+
+  const cell = (id: string, ref?: string): ReviewField => ({
+    id,
+    label: `${ref ?? id} Outcome`,
+    type: 'check_cross',
+    confidence: 1,
+    ...(ref ? { questionRef: ref } : {}),
+  });
+
+  it('publishes the resolved outcomeTarget on the question', () => {
+    const out = reviewedToFields([q('ai_29', 'Q1'), cell('ai_30', 'Q1')]);
+
+    expect(out[0]!.outcomeTarget).toEqual({ fieldId: 'ai_30' });
+  });
+
+  it('never puts a target on the outcome cell itself', () => {
+    const out = reviewedToFields([q('ai_29', 'Q1'), cell('ai_30', 'Q1')]);
+
+    expect(out[1]!.outcomeTarget).toBeUndefined();
+  });
+
+  it('drops the link when the reviewer deleted the outcome cell', () => {
+    // The reason this resolves at publish time. Against the raw extraction the
+    // target would still name ai_30, and the exporter would write a verdict into
+    // a field the document no longer has.
+    const out = reviewedToFields([q('ai_29', 'Q1')]);
+
+    expect(out[0]!.outcomeTarget).toBeUndefined();
+  });
+
+  it('follows the reviewer’s reordering rather than the extracted order', () => {
+    // Two questions and two cells, interleaved differently from extraction.
+    const out = reviewedToFields([
+      q('ai_31', 'Q2'),
+      cell('ai_32', 'Q2'),
+      q('ai_29', 'Q1'),
+      cell('ai_30', 'Q1'),
+    ]);
+
+    expect(out.find((f) => f.id === 'ai_31')!.outcomeTarget).toEqual({ fieldId: 'ai_32' });
+    expect(out.find((f) => f.id === 'ai_29')!.outcomeTarget).toEqual({ fieldId: 'ai_30' });
+  });
+
+  it('publishes no target when extraction supplied no references', () => {
+    const out = reviewedToFields([q('ai_29'), cell('ai_30')]);
+
+    expect(out[0]!.outcomeTarget).toBeUndefined();
+  });
+});
