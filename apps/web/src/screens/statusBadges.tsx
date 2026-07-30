@@ -57,7 +57,11 @@ const CASE_STATE: Record<AssessmentCaseState, { variant: BadgeVariant; label: st
 };
 
 export function CaseStateBadge({ state, size }: { state: AssessmentCaseState; size?: 'sm' | 'md' }) {
-  const b = CASE_STATE[state];
+  // Falls back rather than throwing on a state outside the union. The type says
+  // that cannot happen, but these rows come from the API and are read by an
+  // auditor — a mislabelled badge is recoverable, a blank screen is not. The two
+  // screens this replaced both carried the same guard.
+  const b = CASE_STATE[state] ?? CASE_STATE.open;
   return (
     <Badge variant={b.variant} size={size} dot>
       {b.label}
