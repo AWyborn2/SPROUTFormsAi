@@ -367,6 +367,24 @@ assessmentCasesRouter.post(
       return;
     }
 
+    /*
+      The candidate must be a member of this org. `candidateUserId` was only
+      validated as a UUID, so any org could open a case against any user id in
+      the system and accumulate a competency record against a stranger — while
+      consuming one of its own candidate seats doing it. Same check, and the
+      same reason, as the competency grant in competencies.ts.
+    */
+    const candidateMembership = await db.query.memberships.findFirst({
+      where: and(
+        eq(schema.memberships.userId, candidateUserId),
+        eq(schema.memberships.orgId, tenant.orgId),
+      ),
+    });
+    if (!candidateMembership) {
+      res.status(404).json({ error: 'candidate_not_in_org' });
+      return;
+    }
+
     const [candidateGaps, assessorGaps] = await Promise.all([
       unmetPrerequisites(db, tenant.orgId, candidateUserId, tool.candidatePrerequisiteIds),
       unmetPrerequisites(db, tenant.orgId, assessorUserId, tool.assessorCompetencyIds),

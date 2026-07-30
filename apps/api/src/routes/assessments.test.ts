@@ -203,6 +203,17 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
     competencyHolders: [],
     auditLogEntries: [],
     users: [],
+    /*
+      Case creation requires the candidate to be a member of THIS org — without
+      it, any org could open a case against any user id in the system. The fake
+      db had no memberships table at all, which is the shape of harness that
+      lets such a gap survive: the missing check had nothing to fail against.
+    */
+    memberships: [
+      { id: nextId(), orgId: ORG, userId: ADMIN, role: 'admin', status: 'active' },
+      { id: nextId(), orgId: ORG, userId: CANDIDATE, role: 'candidate', status: 'active' },
+      { id: nextId(), orgId: ORG, userId: OTHER_CANDIDATE, role: 'candidate', status: 'active' },
+    ],
   };
 
   const nameOf = (table: unknown) =>
@@ -377,6 +388,33 @@ describe('POST /assessment-cases', () => {
       });
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toBe('rpl_justification_required');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a candidate who is not a member of this org, and opens nothing', async () => {
+    // candidateUserId was only checked for UUID shape, so a well-formed id
+    // belonging to another org's user opened a real case — building a
+    // competency record against a stranger, on this org's candidate seat.
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const res = await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          toolId: tool.id,
+          candidateUserId: '00000000-0000-4000-8000-0000000000ff',
+          pathway: 'new',
+        }),
+      });
+
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error: string }).error).toBe('candidate_not_in_org');
+      expect(rows(store, 'assessmentCases')).toHaveLength(0);
     } finally {
       server.close();
     }

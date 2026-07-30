@@ -144,6 +144,11 @@ function makeDb() {
     auditLogEntries: [],
     users: [{ id: CANDIDATE, name: 'Dale Rivers', email: 'dale@x.io' }],
     competencies: [],
+    // Case creation checks the candidate belongs to this org.
+    memberships: [
+      { id: nextId(), orgId: ORG, userId: ADMIN, role: 'admin', status: 'active' },
+      { id: nextId(), orgId: ORG, userId: CANDIDATE, role: 'candidate', status: 'active' },
+    ],
   };
 
   const table = (t: unknown): string => {
