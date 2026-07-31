@@ -7,6 +7,7 @@
  */
 import type {
   BrandingKit,
+  CompetencyStatus,
   ExtractionResult,
   FormContainer,
   FormField,
@@ -372,6 +373,31 @@ export interface Competency {
   gracePeriodDays: number | null;
   /** CSS-var colour token for the competency's dot. */
   color: string;
+}
+
+/**
+ * One person's hold on one competency, and whether it still counts.
+ *
+ * This is what `Competency.holders` cannot tell you: which people, and how many
+ * of them are actually in date. The list arrives already sorted by what needs
+ * doing — expired, then grace, then expiring, then held — so screens render it
+ * in order rather than re-deriving urgency.
+ */
+export interface CompetencyHolder {
+  userId: string;
+  /** "Unknown user" when the grant outlived the user row it points at. */
+  name: string;
+  email: string | null;
+  /** Free-text pointer at an external record. Display only; nothing resolves it. */
+  evidenceRef: string | null;
+  grantedAt: string;
+  /** ISO instant, or null when the competency has no validity period. */
+  expiresAt: string | null;
+  status: CompetencyStatus;
+  /** Still satisfies a requirement — held, expiring or grace. */
+  current: boolean;
+  /** Wording for a status worth saying out loud; null when there is nothing. */
+  note: string | null;
 }
 
 /** A rule gating one form section behind a required competency. */

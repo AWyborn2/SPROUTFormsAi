@@ -1,16 +1,121 @@
 import { useState } from 'react';
-import { describeValidity } from '@formai/shared';
-import { Button, Icon, Input, Select, Switch, useToast } from '@formai/ui';
+import { describeValidity, type CompetencyStatus } from '@formai/shared';
+import { Badge, Button, Icon, Input, Select, Switch, useToast, type BadgeVariant } from '@formai/ui';
 import type { Competency } from '../../lib/data/types.js';
 import { useForms } from '../../lib/data/hooks.js';
 import {
   useAddRule,
   useCompetencies,
+  useCompetencyHolders,
   useCompetencyRules,
   useRemoveRule,
   useSetCompetencyValidity,
   useToggleRule,
 } from '../../lib/data/hooks.js';
+
+/**
+ * How each status reads, and how loudly.
+ *
+ * `grace` is deliberately a WARNING and not a danger: the person still counts,
+ * they are inside the window the authority allows for requalifying, and
+ * colouring it like a lapse would send someone to stand a worker down who is
+ * entitled to keep working. `expiring` is the same colour because it calls for
+ * the same action — book them — just with more runway.
+ */
+const STATUS_STYLE: Record<CompetencyStatus, { label: string; variant: BadgeVariant }> = {
+  held: { label: 'Current', variant: 'success' },
+  expiring: { label: 'Expiring', variant: 'warning' },
+  grace: { label: 'In grace', variant: 'warning' },
+  expired: { label: 'Expired', variant: 'danger' },
+  revoked: { label: 'Revoked', variant: 'neutral' },
+};
+
+/** ISO instant → the date alone. Nobody schedules requalification by the hour. */
+function onDate(iso: string | null): string {
+  return iso ? iso.slice(0, 10) : '—';
+}
+
+/**
+ * Who holds this competency, and who has let it lapse.
+ *
+ * `Competency.holders` can say "12 people hold this" but never which twelve,
+ * and being a stored count of grants it cannot say how many are still in date.
+ * So an admin could set a validity and then have no way to see who it had just
+ * lapsed — this is the answer to that.
+ *
+ * The order comes from the API and is not re-sorted here: expired first, then
+ * grace, then expiring, then current, nearest date leading within each group.
+ * The reason to open this list is to find who needs booking.
+ */
+function HolderRegister({ competencyId }: { competencyId: string }) {
+  const { data: holders, isLoading, isError } = useCompetencyHolders(competencyId);
+
+  if (isLoading) {
+    return <div className="px-[18px] pb-3 text-[11px] text-text-tertiary">Loading holders…</div>;
+  }
+  if (isError) {
+    return (
+      <div className="px-[18px] pb-3 text-[11px] text-danger-text">
+        Could not load who holds this.
+      </div>
+    );
+  }
+  if (!holders || holders.length === 0) {
+    return (
+      <div className="px-[18px] pb-3 text-[11px] text-text-tertiary">
+        Nobody holds this yet. It is granted automatically when an assessment that awards it is
+        signed off.
+      </div>
+    );
+  }
+
+  const lapsed = holders.filter((h) => !h.current).length;
+
+  return (
+    <div className="border-t border-border-subtle bg-surface-sunken px-[18px] py-2.5">
+      {lapsed > 0 && (
+        <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-danger-text">
+          <Icon name="shield-alert" size={12} />
+          {lapsed} of {holders.length} no longer current
+        </div>
+      )}
+      <ul className="flex flex-col gap-1.5">
+        {holders.map((h) => {
+          const style = STATUS_STYLE[h.status];
+          // Grace counts as current but its date HAS passed, which is exactly
+          // what distinguishes it from expiring.
+          const past = h.status === 'expired' || h.status === 'grace';
+          return (
+            <li key={h.userId} className="flex items-center gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[12.5px] font-medium">{h.name}</div>
+                <div className="text-[10.5px] text-text-tertiary">
+                  {/*
+                    PAST TENSE FOR A DATE THAT HAS PASSED. "Expires 2025-01-15"
+                    against a lapsed ticket reads as a future event, and the
+                    badge beside it having to correct that is one glance too
+                    many on a register whose whole job is telling you who is
+                    qualified right now.
+
+                    And no date at all on a perpetual competency: an expiry
+                    that does not exist should say so, not print a dash the
+                    reader has to interpret.
+                  */}
+                  {!h.expiresAt
+                    ? 'No expiry set'
+                    : `${past ? 'Expired' : 'Expires'} ${onDate(h.expiresAt)}`}
+                </div>
+              </div>
+              <Badge variant={style.variant} dot>
+                {style.label}
+              </Badge>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
 
 /**
  * How long one competency stays valid, editable in place.
@@ -141,6 +246,12 @@ export function CompetencyScreen() {
   const [ruleForm, setRuleForm] = useState('f3');
   const [ruleComp, setRuleComp] = useState('c1');
   const [ruleSection, setRuleSection] = useState('');
+  /**
+   * Which register is open. One at a time, and none by default: each one is a
+   * request, and a page of twenty competencies must not fire twenty of them to
+   * show a list nobody has asked to see.
+   */
+  const [openRegister, setOpenRegister] = useState<string | null>(null);
 
   // Preview: first enabled rule, else first rule, else a placeholder.
   const previewRule = rules.find((r) => r.enabled) ?? rules[0];
@@ -174,27 +285,41 @@ export function CompetencyScreen() {
             <div className="font-heading text-[15px] font-bold">Competencies</div>
             <div className="mt-0.5 text-xs text-text-tertiary">Held records synced from your LMS</div>
           </div>
-          {competencies.map((c) => (
-            <div
-              key={c.id}
-              className="flex items-start gap-3 border-b border-border-subtle px-[18px] py-[13px] last:border-b-0"
-            >
-              <span className="mt-1 h-2.5 w-2.5 flex-none rounded-[3px]" style={{ background: c.color }} />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-[13.5px] font-semibold">{c.name}</div>
-                <div className="font-mono text-[11px] text-text-tertiary">{c.code}</div>
-                <ValidityEditor competency={c} />
+          {competencies.map((c) => {
+            const open = openRegister === c.id;
+            return (
+              <div key={c.id} className="border-b border-border-subtle last:border-b-0">
+                <div className="flex items-start gap-3 px-[18px] py-[13px]">
+                  <span
+                    className="mt-1 h-2.5 w-2.5 flex-none rounded-[3px]"
+                    style={{ background: c.color }}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[13.5px] font-semibold">{c.name}</div>
+                    <div className="font-mono text-[11px] text-text-tertiary">{c.code}</div>
+                    <ValidityEditor competency={c} />
+                  </div>
+                  {/*
+                    The count is granted-and-not-revoked, NOT how many are in
+                    date — expiry moves with the calendar and a stored integer
+                    cannot. So it is the button that opens the register, which
+                    IS able to answer the currency question, rather than a
+                    number sitting there implying it already has.
+                  */}
+                  <button
+                    onClick={() => setOpenRegister(open ? null : c.id)}
+                    aria-expanded={open}
+                    aria-label={`${open ? 'Hide' : 'Show'} who holds ${c.name}`}
+                    className="fai-chip-btn flex flex-none items-center gap-1 rounded-sm px-1.5 py-1 text-text-secondary hover:bg-surface-hover"
+                  >
+                    <span className="font-heading text-sm font-bold">{c.holders}</span>
+                    <Icon name={open ? 'chevron-up' : 'chevron-down'} size={13} />
+                  </button>
+                </div>
+                {open && <HolderRegister competencyId={c.id} />}
               </div>
-              {/*
-                Granted and not revoked — NOT how many are in date. Expiry moves
-                with the calendar and this number does not, so it deliberately
-                answers the question a stored integer can stay true to.
-              */}
-              <span className="font-heading text-sm font-bold" title="Holders granted this competency">
-                {c.holders}
-              </span>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <div className="rounded-lg border border-border-accent bg-surface-accent-soft p-[16px_18px]">
