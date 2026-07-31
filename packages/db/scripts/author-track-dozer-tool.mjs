@@ -393,6 +393,17 @@ async function main() {
   };
 
   const SCALARS = ['text', 'textarea', 'signature', 'date'];
+  /*
+     WHO THE CERTIFICATE IS FOR. The cover page's identity boxes belong to no
+     part, so nobody can type into them through the fill surface — the export
+     seeds this one from the case. Without it the document states a verdict, a
+     date and an assessor for an unnamed person.
+  */
+  const candidateNameField = findOne(
+    'candidate name',
+    /candidate.*name|name.*candidate/,
+    SCALARS,
+  );
   const sigField = findOne('assessor signature', /assessor.*signature|signature.*assessor/, SCALARS);
   const assessorNameField = findOne(
     'assessor name',
@@ -449,6 +460,7 @@ async function main() {
   if (declared.length) {
     console.log(`\nFront-page certification block: ${declared.length} pointer(s) resolved`);
     for (const [what, f] of [
+      ['candidate name', candidateNameField],
       ['assessor signature', sigField],
       ['assessor name', assessorNameField],
       ['signed date', signedDateField],
@@ -480,13 +492,33 @@ async function main() {
   const manifest = {
     parts,
     ...(streamField ? { locationStreamFieldId: streamField.id } : {}),
+    ...(candidateNameField ? { candidateNameFieldId: candidateNameField.id } : {}),
     ...(declared.length ? { signOff } : {}),
   };
   console.log(`
 Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryFieldIds.join(', ') || 'none'}`);
 
   // ── competencies by code ────────────────────────────────────────────────
-  const codes = { candidate: ['Q34666893', 'Q50001782'], assessor: ['Q34666893', 'Q50071833', 'Q50073293'] };
+  /*
+     WHAT PASSING THIS AWARDS.
+
+     `assessment_tools.awarded_competency_ids` is what the sign-off route
+     iterates to put the candidate on the register — the thing the product
+     exists to maintain. It was never written here, so the column kept its `[]`
+     default, the grant loop ran zero times, and a signed-off case reached
+     `competent` while the register stayed empty and said nothing about it.
+
+     Supplied by code via `--awards`, because which competency this assessment
+     confers is a training-authority decision rather than something derivable
+     from the document. Passing none is legitimate — the assessment still runs
+     and the certificate still prints — so it warns rather than refusing.
+  */
+  const awardsCode = flag('--awards');
+  const codes = {
+    candidate: ['Q34666893', 'Q50001782'],
+    assessor: ['Q34666893', 'Q50071833', 'Q50073293'],
+    awarded: awardsCode ? [awardsCode] : [],
+  };
   const rows = await sql`select id, code from competencies where org_id = ${template.org_id}`;
   const byCode = new Map(rows.map((r) => [r.code, r.id]));
   const pick = (list, who) =>
@@ -497,6 +529,21 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
     });
   const candidatePrereqs = pick(codes.candidate, 'Candidate');
   const assessorComps = pick(codes.assessor, 'Assessor');
+  const awardedComps = pick(codes.awarded, 'Awarded');
+  if (!awardsCode) {
+    warnings.push(
+      'No --awards <code> given, so passing this assessment grants NOTHING. The case will ' +
+        'reach competent and the certificate will print, but the competency register will ' +
+        'not record the candidate. Pass --awards with the competency code this assessment confers.',
+    );
+  } else if (awardedComps.length === 0) {
+    warnings.push(
+      `--awards ${awardsCode} does not match a competency in this org, so nothing will be granted. ` +
+        'Create the competency first, then re-run.',
+    );
+  } else {
+    console.log(`\nPassing this assessment awards: ${awardsCode}`);
+  }
 
   // ── validate exactly as the API would ───────────────────────────────────
   problems.push(...validateManifest(manifest, fields));
@@ -527,13 +574,17 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
   // ── persist ─────────────────────────────────────────────────────────────
   await sql`update form_template_versions set fields = ${sql.json(fields)} where id = ${version.id}`;
   await sql`
-    insert into assessment_tools (org_id, template_id, name, manifest, candidate_prerequisite_ids, assessor_competency_ids)
-    values (${template.org_id}, ${template.id}, ${'Authorised to Operate Track Dozer'}, ${sql.json(manifest)}, ${sql.json(candidatePrereqs)}, ${sql.json(assessorComps)})
+    insert into assessment_tools (org_id, template_id, name, manifest, candidate_prerequisite_ids, assessor_competency_ids, awarded_competency_ids)
+    values (${template.org_id}, ${template.id}, ${'Authorised to Operate Track Dozer'}, ${sql.json(manifest)}, ${sql.json(candidatePrereqs)}, ${sql.json(assessorComps)}, ${sql.json(awardedComps)})
     on conflict (template_id) do update
       set manifest = excluded.manifest,
           name = excluded.name,
           candidate_prerequisite_ids = excluded.candidate_prerequisite_ids,
-          assessor_competency_ids = excluded.assessor_competency_ids
+          assessor_competency_ids = excluded.assessor_competency_ids,
+          -- Omitted before, so the column kept its [] default and the sign-off
+          -- route's grant loop ran zero times: a competent case that put nobody
+          -- on the register.
+          awarded_competency_ids = excluded.awarded_competency_ids
   `;
   const [tool] = await sql`select id from assessment_tools where template_id = ${template.id}`;
   console.log(`\nWritten. Tool id: ${tool.id}`);

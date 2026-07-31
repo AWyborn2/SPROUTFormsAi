@@ -1353,6 +1353,19 @@ assessmentCasesRouter.post(
     }
 
     const attempts = await attemptsFor(db, row.id);
+    /*
+      Resolved here rather than read off a filled field, because the cover page
+      belongs to NO part — `fieldsInPart` slices from part 1's anchor onward, so
+      the identity boxes fall outside every part and the fill route never serves
+      them. Nobody can type into them. Without this the exported document
+      carries the assessor's name, the date and the verdict for nobody at all.
+
+      Empty when the user row is gone; the box then prints blank rather than a
+      placeholder, which is the same degradation every other pointer uses.
+    */
+    const candidate = await db.query.users.findFirst({
+      where: eq(schema.users.id, row.candidateUserId),
+    });
 
     try {
       const out = await exportCasePdf({
@@ -1361,6 +1374,7 @@ assessmentCasesRouter.post(
         manifest: tool.manifest,
         pathway: row.pathway as AssessmentPathway,
         locationStream: row.locationStream,
+        candidateName: candidate?.name ?? '',
         attempts: attempts.map((a) => ({
           partKey: a.partKey,
           attemptNumber: a.attemptNumber,

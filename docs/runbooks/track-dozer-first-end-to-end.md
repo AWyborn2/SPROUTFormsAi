@@ -36,12 +36,27 @@ git checkout main && git pull
 ```
 
 ```bash
-pnpm install
+pnpm install && pnpm --filter @formai/shared build && pnpm db:migrate
 ```
 
-No migration needed — the schema is unchanged since `0020`.
+All three, every time — not conditionally.
 
-**Check:** `git log --oneline -1` shows commit `7af82ad` or later.
+- **`db:migrate` is not optional.** `0022` adds the `awaiting_sign_off` enum
+  value and the four `signed_off_*` columns, and the ORM selects them on every
+  read — so without it the tool list and case list return 500 long before you
+  reach sign-off. Nothing migrates on boot; that is a deliberate decision.
+- **`shared build` is not optional either.** The authoring script in step 4 runs
+  under plain `node`, which resolves `@formai/shared` to `dist/` — gitignored,
+  and never populated by the dev servers. Skip it and step 4 dies with
+  `ERR_MODULE_NOT_FOUND`.
+
+**Check the plan tier before anything else.** Every assessment route sits behind
+`requirePlanFeature('assessments')`, which is false on individual and team, and
+those tiers also carry a candidate seat limit of zero — so the tool list, the
+case list and the candidate picker are all empty or erroring. The web app
+discards the 403 body and renders "Could not load assessment cases", which reads
+like a bug rather than a plan gate. Set the org to **Business** in
+Settings → Billing first.
 
 ---
 
@@ -129,28 +144,48 @@ answer's own `a)` / `b)` marker.
 Q1 is the one to try first. It failed to match before the wrap fix, so it is the
 canary: if Q1 proposes, the fix worked.
 
-### 3d. Outcome cells — 31 boxes, propagated from one you draw
+### 3d. Outcome cells — 31 boxes, all by hand
 
-These have no automatic rule — their labels are names the extractor invented and
-appear nowhere on the page. So:
+These have no automatic rule: their labels are names the extractor invented and
+appear nowhere on the page, so nothing can match them to a place.
 
-1. Draw the **first** outcome cell by hand, on the printed tick/cross box beside
-   question 1.
-2. Every subsequent one is offered as that same box on its own question's row,
-   at confidence **0.75** — the column is yours, the row is derived.
+Draw all 31, on the printed tick/cross box beside each question.
 
-**Check:** each proposed cell sits on its own question's row, not the row above
-or below. If they are consistently a few points high or low, tell me the
-direction — the offset is measured from your exemplar, so a systematic drift
-means the measurement is off.
+> An exemplar-propagation rule exists in the codebase and is fully tested, but
+> has **no caller** — nothing offers it in the panel, so no box is proposed from
+> the one you draw. This step used to promise that; it does not happen. Wiring
+> it up is worth doing before the next tool, not before this run.
 
-### 3e. Scalars — ~35 boxes, all by hand
+**Check:** each box sits on its own question's row. The confirm gate is per box,
+so a mistake here is a mark in the wrong cell of a competency record — the one
+error class worth slowing down for.
 
-Names, dates, signatures, textareas. No rule covers these; draw each one.
+### 3e. Scalars — ~35 boxes, mostly by hand
 
-**Check before publishing:** the header counter reads close to `150/150`. A
-field left unplaced exports as recorded data rather than a mark on the page —
-visibly incomplete, which is the safe failure, but you want to know which.
+Names, dates, signatures, textareas.
+
+**Some are now offered.** A single-line **text, date, number or time** caption
+sitting in a bordered cell gets a measured box — the panel says what it measured
+("… bounded on all four sides by printed lines") with a **Use this box** button.
+Every edge comes from a printed stroke, including the height.
+
+It declines, with a stated reason, for:
+
+- **signatures and textareas** — always by hand;
+- labels under 12 characters ("Date", "Name") — too short to identify a place;
+- any caption printed more than once across the 18 pages;
+- any caption not inside a bordered cell.
+
+So expect a mix. Where it declines it says why, which is the difference between
+"this looked and refused" and "nothing ran".
+
+**Check before publishing:** sweep each page and confirm every field you meant
+to place is drawn — placed boxes stay visible on every page, so gaps are
+findable by eye. There is no counter on this screen; step 5's script is the
+authoritative number and it only runs after publish. Publishing short is the
+designed safe failure: an unplaced field exports as recorded data rather than a
+mark, which is visibly incomplete, and the fix is a draft fork that keeps every
+field id.
 
 ---
 
@@ -188,7 +223,7 @@ the six part anchors it found, and the 31 question/outcome pairs it mapped.
 Then, only once the report looks right:
 
 ```bash
-cd packages/db && DATABASE_URL=postgresql://postgres:password@helium/heliumdb?sslmode=disable node scripts/author-track-dozer-tool.mjs --key ~/track-dozer.answer-key.json --write
+cd packages/db && DATABASE_URL=postgresql://postgres:password@helium/heliumdb?sslmode=disable node scripts/author-track-dozer-tool.mjs --key ~/track-dozer.answer-key.json --awards <competency-code> --write
 ```
 
 ---
@@ -220,7 +255,35 @@ In the app:
 
 **Check:** the computed outcome matches what you expect from the answers you
 gave. Deliberately get one mandatory question wrong on a second attempt and
-confirm it comes back not satisfactory.
+confirm it comes back **not satisfactory** — and that the case stays open with
+"more coaching required" rather than refusing to record it.
+
+---
+
+## 6.5 Sign the case off
+
+**Do not skip this.** Marking the last part no longer makes a case competent —
+it moves it to **Awaiting assessor sign-off**. Only an assessor approving it
+reaches `competent`, because that is the state the printed record's name,
+signature and date attest to, and none of them exist until a person supplies
+them. Skip this step and the case parks forever and the certificate exports
+with its front page blank.
+
+1. Pass every part the pathway requires. The badge should change to
+   **Awaiting assessor sign-off**.
+2. Top right: **Sign off and certify**.
+3. Type your name as it should print, and draw your signature. The date is
+   stamped by the server and is not asked for — a certification date is a claim
+   about when a judgement was made.
+
+**Check three things:**
+
+- The badge now reads **Competent**.
+- The toast names any competency granted. If it names none, the tool has no
+  `--awards` code (step 4) — the case is still competent, but nobody has been
+  added to the register.
+- Try signing off a case with an outstanding part: it refuses with the parts
+  named, and there is no override.
 
 ---
 
@@ -250,6 +313,18 @@ plainly that nothing was drawn.
 - Each outcome cell has a **tick or a cross** — not the letter `X`, and not
   blank for an incorrect answer.
 - Parts outside the pathway print blank. That is correct, and mirrors the paper.
+
+**And the front page, which is what makes it a certificate rather than a marked
+paper.** Every one of these is written only if step 4 resolved a pointer for it,
+so a blank here means the manifest did not name the field — check step 4's
+report before assuming the export is broken:
+
+- **The candidate's name.** If this is blank the document certifies a verdict
+  for nobody, which is the one omission an auditor cannot work around.
+- The assessor's **name**, **signature** and the **sign-off date**.
+- The **satisfactory** tick, and exactly one of the **more coaching required**
+  Yes/No pair — never both, never neither on a finished case.
+- Each part's own assessor name and date box, where the paper prints them.
 
 If a mark is in the wrong cell, note which field and which page. That is the one
 error class worth stopping for: a mark in the wrong cell of a competency record

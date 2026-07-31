@@ -311,3 +311,67 @@ describe('exportCasePdf — a signed case cannot have a blank required part', ()
     expect(out.byteLength).toBeGreaterThan(0);
   });
 });
+
+/**
+ * Who the certificate is FOR.
+ *
+ * The cover page's identity boxes belong to no part — `fieldsInPart` slices
+ * from part 1's anchor onward, so they fall outside every part's range and the
+ * fill route never serves them. Nobody can type into them, and nothing else
+ * wrote them, so the exported document carried the assessor's name, the date
+ * and the verdict for NOBODY. An auditor holding it could not tell who had been
+ * assessed.
+ */
+describe('assembleCaseValues — the candidate', () => {
+  const NAMED: AssessmentToolManifest = { ...BASE, candidateNameFieldId: 'cover-name' };
+
+  it('seeds the candidate name onto the cover page', () => {
+    const { values } = assembleCaseValues({
+      manifest: NAMED,
+      pathway: 'experienced',
+      attempts: [passed('p1'), passed('p2')],
+      candidateName: 'Dale Rivers',
+    });
+
+    expect(values['cover-name']).toBe('Dale Rivers');
+  });
+
+  it('writes nothing when the manifest does not name the box', () => {
+    // Same degradation as every other pointer: unnamed means blank, never a
+    // guess at which field the name belongs in.
+    const { values } = assembleCaseValues({
+      manifest: BASE,
+      pathway: 'experienced',
+      attempts: [passed('p1'), passed('p2')],
+      candidateName: 'Dale Rivers',
+    });
+
+    expect(values['cover-name']).toBeUndefined();
+  });
+
+  it('leaves the box blank rather than printing an empty string', () => {
+    // The user row can be gone. A blank box is a visible gap; a box containing
+    // '' looks like a name that was recorded as nothing.
+    const { values } = assembleCaseValues({
+      manifest: NAMED,
+      pathway: 'experienced',
+      attempts: [passed('p1'), passed('p2')],
+      candidateName: '',
+    });
+
+    expect(values['cover-name']).toBeUndefined();
+  });
+
+  it('names the candidate even on a case nobody has signed', () => {
+    // Identity is not part of the certification block — a mid-programme export
+    // still has to say who it is about.
+    const { values } = assembleCaseValues({
+      manifest: NAMED,
+      pathway: 'experienced',
+      attempts: [passed('p1')],
+      candidateName: 'Dale Rivers',
+    });
+
+    expect(values['cover-name']).toBe('Dale Rivers');
+  });
+});

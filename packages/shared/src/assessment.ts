@@ -192,6 +192,14 @@ export interface AssessmentToolManifest {
    */
   locationStreamFieldId?: string;
   /**
+   * The cover page's candidate-name box.
+   *
+   * Seeded from the CASE at export. It belongs to no part, so nobody can type
+   * into it through the fill surface — without this the evidence document
+   * certifies a verdict for an unnamed person.
+   */
+  candidateNameFieldId?: string;
+  /**
    * The front page's certification block.
    *
    * Manifest-level, not part-level, because the front page belongs to no part:
@@ -506,6 +514,12 @@ export function validateManifest(
     nothing and reports nothing. This may surface a latent break on an existing
     tool, which is the point.
   */
+  if (manifest.candidateNameFieldId && !fieldIds.has(manifest.candidateNameFieldId)) {
+    problems.push(
+      `Manifest names candidateNameFieldId "${manifest.candidateNameFieldId}", which is not in this version.`,
+    );
+  }
+
   if (manifest.locationStreamFieldId && !fieldIds.has(manifest.locationStreamFieldId)) {
     problems.push(
       `Manifest names locationStreamFieldId "${manifest.locationStreamFieldId}", which is not in this version.`,
