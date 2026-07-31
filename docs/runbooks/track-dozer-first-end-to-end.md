@@ -162,21 +162,33 @@ version and makes it current.
 Then re-derive the manifest, answer keys and outcome targets against the new
 field ids:
 
+The answer key is no longer kept in this repository. Point the script at wherever
+you keep it with `--key` (or set `ANSWER_KEY_PATH`):
+
 ```bash
-cd packages/db && DATABASE_URL=postgresql://postgres:password@helium/heliumdb?sslmode=disable node scripts/author-track-dozer-tool.mjs
+cd packages/db && DATABASE_URL=postgresql://postgres:password@helium/heliumdb?sslmode=disable node scripts/author-track-dozer-tool.mjs --key ~/track-dozer.answer-key.json
 ```
 
-**This is a dry run. Read the report.** It shows the six part anchors it found
-and the 31 question/outcome pairs it mapped.
+**This is a dry run. Read the report.** It echoes which answer key it loaded,
+the six part anchors it found, and the 31 question/outcome pairs it mapped.
 
-**Check:** exactly **31 pairs** and **6 part anchors**. If the pair count is
-anything else the script refuses to write, which is correct — it means the
-re-import shifted something and the mapping would be wrong.
+**Check three things:**
+
+1. Exactly **31 pairs** and **6 part anchors**. Anything else and the script
+   refuses to write, which is correct — it means the re-import shifted
+   something and the mapping would be wrong. The report now names the questions
+   that have no outcome box, so you can see where.
+2. The pairing breakdown: ideally **"31 from the published questionRef link, 0
+   inferred from document order"**. A pair read off the printed reference is one
+   the extraction confirmed; an inferred one rests on layout order. A few
+   inferred are survivable, but a high count means the references did not
+   extract and you should look at the import before writing.
+3. The key path echoed at the top is the one you meant.
 
 Then, only once the report looks right:
 
 ```bash
-cd packages/db && DATABASE_URL=postgresql://postgres:password@helium/heliumdb?sslmode=disable node scripts/author-track-dozer-tool.mjs --write
+cd packages/db && DATABASE_URL=postgresql://postgres:password@helium/heliumdb?sslmode=disable node scripts/author-track-dozer-tool.mjs --key ~/track-dozer.answer-key.json --write
 ```
 
 ---

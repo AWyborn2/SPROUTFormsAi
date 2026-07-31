@@ -76,26 +76,32 @@ describe('markDescription', () => {
   });
 
   /*
-    THIS TEST USED TO ASSERT THE OPPOSITE — that a signature box "draws the
-    signature". It does not, and cannot: round-trip.ts has no signature branch,
-    apps/api/src/pdf contains no image-embedding call at all, and the value is a
-    base64 PNG data URL. The renderer falls through to String(value) and stamps
-    the raw data URL across the page as one unbreakable line.
+    THIS PAIR HAS NOW BEEN REWRITTEN TWICE, in opposite directions, and both
+    times the copy followed the renderer rather than the other way round.
 
-    A module whose whole purpose is to stop the panel promising marks the
-    exporter does not draw cannot itself promise the one it cannot keep.
+    It first promised "the signature" when the exporter had no image path at
+    all. That was corrected to a warning telling reviewers to leave the box
+    unplaced. round-trip.ts now embeds the PNG, so the promise is keepable again
+    — and the warning had to go in the same change, because copy telling a
+    reviewer to skip the box would leave the signature block empty on every
+    certificate.
   */
-  it('refuses to promise a signature the exporter cannot draw', () => {
+  it('promises the signature, now that the exporter draws one', () => {
     const d = markDescription({ type: 'signature' });
 
-    expect(d.mark).not.toBe('the signature');
-    expect(d.detail).toMatch(/cannot be drawn|raw image data/i);
+    expect(d.mark).toMatch(/signature/);
+    expect(d.mark).not.toMatch(/nothing usable/i);
   });
 
-  it('warns a reviewer off placing a signature box at all', () => {
-    // The actionable half. Without it a reviewer places 5 boxes that each
-    // deface a page of the record.
-    expect(markSentence({ type: 'signature' })).toMatch(/leave it unplaced/i);
+  it('no longer tells a reviewer to leave the box unplaced', () => {
+    // The actionable half, inverted: the signature block needs that box.
+    expect(markSentence({ type: 'signature' })).not.toMatch(/leave it unplaced/i);
+  });
+
+  it('says the signature keeps its proportions', () => {
+    // A reviewer who does not know this redraws the box when a wide one leaves
+    // space around a small signature.
+    expect(markDescription({ type: 'signature' }).detail).toMatch(/distort|proportion|scaled/i);
   });
 
   it('falls back to text for an ordinary field', () => {

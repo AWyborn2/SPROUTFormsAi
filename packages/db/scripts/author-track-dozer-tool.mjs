@@ -6,10 +6,13 @@
  *
  *   pnpm --filter @formai/shared build
  *   cd packages/db
- *   DATABASE_URL=... node scripts/author-track-dozer-tool.mjs            # dry run
- *   DATABASE_URL=... node scripts/author-track-dozer-tool.mjs --write    # persist
+ *   DATABASE_URL=... node scripts/author-track-dozer-tool.mjs --key ../key.json          # dry run
+ *   DATABASE_URL=... node scripts/author-track-dozer-tool.mjs --key ../key.json --write  # persist
  *
- * Optional: --template-id <uuid> when name matching finds the wrong template.
+ * `--key` (or ANSWER_KEY_PATH) points at the answer key. It is a flag rather
+ * than a fixed path so the key does not have to live in this repository — see
+ * the note beside KEY_PATH. Optional: --template-id <uuid> when name matching
+ * finds the wrong template.
  *
  * DRY RUN BY DEFAULT. Everything here is heuristic — imported field ids and
  * labels come from AI extraction, so this script's job is to propose a
@@ -27,25 +30,79 @@
  *  5. Attaches prerequisite/assessor competencies found by code.
  *  6. Upserts the assessment_tools row.
  *
- * Questions are paired with the check_cross that FOLLOWS them, and the pairs
- * are consumed in document order against the key's three sections. If the pair
- * count does not equal the key's answer count EXACTLY, nothing is written —
- * an off-by-one would silently shift every subsequent answer onto the wrong
- * question, which on a safety assessment is worse than not running at all.
+ * Questions are paired with their outcome box by the link publish resolved from
+ * the printed references, falling back to document adjacency only where no link
+ * exists (`pairQuestionsWithOutcomes`). The pairs are then consumed IN ORDER
+ * against the key's three sections, because the key identifies its answers by
+ * section and number and nothing on a published field carries that number. If
+ * the pair count does not equal the key's answer count EXACTLY, nothing is
+ * written — an off-by-one would silently shift every subsequent answer onto the
+ * wrong question, which on a safety assessment is worse than not running.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
-import { validateAnswerKeys, validateManifest } from '@formai/shared';
+import { pairQuestionsWithOutcomes, validateAnswerKeys, validateManifest } from '@formai/shared';
 
 const WRITE = process.argv.includes('--write');
-const tplArgIdx = process.argv.indexOf('--template-id');
-const TEMPLATE_ID = tplArgIdx > -1 ? process.argv[tplArgIdx + 1] : null;
+const flag = (name) => {
+  const i = process.argv.indexOf(name);
+  return i > -1 ? process.argv[i + 1] : null;
+};
+const TEMPLATE_ID = flag('--template-id');
 
+/*
+  WHERE THE ANSWER KEY COMES FROM.
+
+  It used to be read from a fixed path inside the repository, which is why a
+  complete answer key to a safety-critical assessment was committed. `--key`
+  takes it from anywhere — a path outside the checkout, a mounted secret, a file
+  an operator drops next to the script and deletes afterwards — so the copy in
+  the repo can be removed.
+
+  The in-repo path stays as the fallback ONLY while that copy still exists, so
+  this keeps working for whoever runs it before the file moves. Once the file is
+  gone the fallback simply reports where to put one. Note that removing it from
+  the working tree does not remove it from git HISTORY: anyone with repository
+  access can still recover it, so treat those answers as disclosed and reissue
+  them if that matters.
+
+  Confidentiality at RUNTIME is already handled elsewhere — GET /forms and
+  GET /forms/:id gate on forms.view, so a candidate cannot read a key through
+  the API. This flag is about not shipping one in the source tree.
+*/
 const here = dirname(fileURLToPath(import.meta.url));
-const KEY_PATH = join(here, '..', '..', '..', 'docs', 'assessment-tools', 'track-dozer.answer-key.json');
-const KEY = JSON.parse(readFileSync(KEY_PATH, 'utf-8'));
+const DEFAULT_KEY_PATH = join(here, '..', '..', '..', 'docs', 'assessment-tools', 'track-dozer.answer-key.json');
+const KEY_PATH = flag('--key') ?? process.env.ANSWER_KEY_PATH ?? DEFAULT_KEY_PATH;
+
+let KEY;
+try {
+  KEY = JSON.parse(readFileSync(KEY_PATH, 'utf-8'));
+} catch (err) {
+  console.error(
+    `Could not read an answer key at ${KEY_PATH}\n` +
+      `  ${err instanceof Error ? err.message : String(err)}\n\n` +
+      `Point the script at one:\n` +
+      `  node scripts/author-track-dozer-tool.mjs --key /path/to/answer-key.json\n` +
+      `or set ANSWER_KEY_PATH. The key is deliberately not kept in this repository.`,
+  );
+  process.exit(1);
+}
+
+/*
+  Shape-check before anything else. A key that parses but has no sections would
+  otherwise reach the pairing logic and report "0 pairs expected", which reads
+  like a document problem rather than a malformed key.
+*/
+for (const name of ['general', 'bbmMining', 'rawMaterials']) {
+  const section = KEY?.sections?.[name];
+  if (!Array.isArray(section?.questions)) {
+    console.error(`Answer key at ${KEY_PATH} has no "${name}" section with a questions array.`);
+    process.exit(1);
+  }
+}
+console.log(`Answer key: ${KEY_PATH}`);
 
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is required.');
@@ -113,26 +170,56 @@ async function main() {
   console.log(`Template: ${template.name} (${template.id})`);
   console.log(`Version:  ${version.id} — ${fields.length} fields\n`);
 
-  // ── theory questions, in document order ─────────────────────────────────
-  //
-  // Questions are paired with the check_cross that FOLLOWS them: the assessment
-  // profile emits each outcome box immediately after its question, so adjacency
-  // is the pairing rule rather than a label match (labels vary — "Q1 Outcome",
-  // "BBM Q1 Outcome", "7b. Outcome").
-  const CHOICE = new Set(['checkbox_group', 'radio', 'dropdown', 'boolean_yes_no']);
-  const paired = [];
-  for (let i = 0; i < fields.length; i++) {
-    const f = fields[i];
-    if (!CHOICE.has(f.type)) continue;
-    const next = fields[i + 1];
-    if (next?.type === 'check_cross') paired.push({ question: f, outcome: next });
-  }
-  console.log(`Question/outcome pairs found: ${paired.length}`);
+  /* ── theory questions, in document order ─────────────────────────────────
 
-  // The key's three sections in printed order. Pairs are consumed in document
-  // order, which is why the run-length check below is the safety net: if the
-  // counts do not line up exactly, the mapping is not trustworthy and nothing
-  // is written.
+     THE PUBLISHED LINK WINS.
+
+     This used to pair every question with the check_cross that FOLLOWS it, on
+     the reasoning that outcome labels vary too much to match ("Q1 Outcome",
+     "BBM Q1 Outcome", "7b. Outcome") so adjacency was the only rule available.
+
+     That reasoning is out of date. `questionRef` was shipped precisely to solve
+     the label-variance problem: extraction records each question's PRINTED
+     reference and the reference on its outcome box, and publish resolves the
+     pairing from those (`linkOutcomeTargets`, applied in `reviewedToFields`).
+     By the time this script runs, the fields it is reading already carry a
+     resolved `outcomeTarget` — and overwriting it with a positional guess threw
+     away the better answer.
+
+     Adjacency survives as a FALLBACK for a question publish could not link,
+     because a document with no printed references still has to be authorable.
+     It is reported per question, so an operator can see which pairings were
+     read off the page and which were inferred from order.
+  */
+  // The rule lives in @formai/shared beside the resolver whose output it reads,
+  // where it is unit tested. This script had no tests and writes answer keys
+  // onto a safety record; a pairing rule is not the place for an untested copy.
+  const { pairs: paired, unpaired, fromLink, fromAdjacency } = pairQuestionsWithOutcomes(fields);
+  console.log(
+    `Question/outcome pairs found: ${paired.length} ` +
+      `(${fromLink} from the published questionRef link, ${fromAdjacency} inferred from document order)`,
+  );
+
+  /*
+    The key's three sections in printed order.
+
+    The key identifies its answers by SECTION AND NUMBER — "general Q7" — and
+    nothing on a published field carries that number: `questionRef` is consumed
+    at publish to resolve `outcomeTarget` and is not kept on the FormField. So
+    document order is the only thing linking a key entry to its question, and
+    the entries are consumed by a cursor.
+
+    THAT IS WHY THE COUNT CHECK IS ALL-OR-NOTHING, and why it stays that way.
+    If the counts disagree, one missing pair shifts every later entry by one and
+    the script would write question 8's answers onto question 7 — silently
+    marking a candidate wrong on a question they answered correctly, and right
+    on one they did not, on a safety record. Writing nothing is the only safe
+    response to a misalignment we cannot localise.
+
+    What DID change is the diagnosis: the failure now names the questions with
+    no outcome box, so the operator can fix the import instead of being told
+    only that two numbers differ.
+  */
   const sectionOrder = [
     ['general', KEY.sections.general],
     ['bbmMining', KEY.sections.bbmMining],
@@ -140,9 +227,15 @@ async function main() {
   ];
   const expected = sectionOrder.reduce((n, [, sec]) => n + sec.questions.length, 0);
   if (paired.length !== expected) {
+    const missing = unpaired.map((f) => `  · ${f.id} "${(f.label ?? '').slice(0, 60)}"`);
+
     problems.push(
       `Found ${paired.length} question/outcome pairs but the key has ${expected} answers. ` +
-        `Nothing written — confirm the import produced one outcome box per question.`,
+        `Nothing written — a missing pair shifts every later answer onto the wrong ` +
+        `question, and the mapping cannot be localised.` +
+        (missing.length
+          ? `\n  Choice fields with no outcome box:\n${missing.join('\n')}`
+          : `\n  Every choice field paired, so the key and the document disagree on how many questions there are.`),
     );
   }
 
@@ -153,7 +246,7 @@ async function main() {
     let cursor = 0;
     for (const [name, section] of sectionOrder) {
       for (const entry of section.questions) {
-        const { question, outcome } = paired[cursor++];
+        const { question, outcome, how } = paired[cursor++];
         const mapped = entry.answers.map((l) => ({ letter: l, value: mapLetter(l, question) }));
         const bad = mapped.filter((m) => m.value === null);
         if (bad.length) {
@@ -163,9 +256,18 @@ async function main() {
           continue;
         }
         question.answerKey = mapped.map((m) => m.value);
-        question.outcomeTarget = { fieldId: outcome.id };
+        /*
+          Only WRITE a link this script derived. When the pairing came from the
+          published `outcomeTarget` this is already the same id, and leaving it
+          untouched keeps the field exactly as publish resolved it — the point
+          of reading the link rather than recomputing it.
+        */
+        if (how === 'adjacency') question.outcomeTarget = { fieldId: outcome.id };
         if (section.mandatory) mandatoryFieldIds.push(question.id);
-        keyed.push(`${name.padEnd(13)} Q${String(entry.n).padStart(2)} → ${question.id} [${entry.answers.join(',')}] ✓→ ${outcome.id}`);
+        keyed.push(
+          `${name.padEnd(13)} Q${String(entry.n).padStart(2)} → ${question.id} ` +
+            `[${entry.answers.join(',')}] ✓→ ${outcome.id} (${how === 'link' ? 'printed ref' : 'document order'})`,
+        );
       }
     }
   }

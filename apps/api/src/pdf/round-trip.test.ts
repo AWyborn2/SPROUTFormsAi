@@ -1,3 +1,18 @@
+/**
+ * A drawn signature reaches the page as an IMAGE, and every failure is blank.
+ *
+ * A signature is  — tens of kilobytes of base64.
+ * Before image embedding existed the value reached  and was drawn
+ * as a caption: pdf-lib breaks lines only on ' ' and base64 has none, so it
+ * emitted ONE unbreakable line thousands of points wide across the record, and
+ * being fully WinAnsi-encodable it never threw. A guard was added to draw
+ * nothing instead.
+ *
+ * round-trip.ts now embeds the PNG. The guard still matters, because it is what
+ * a malformed or unsupported payload falls back to: a missing signature is a
+ * visible gap someone chases up, a broken one is a crashed export or a defaced
+ * certificate.
+ */
 ﻿import zlib from 'node:zlib';
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
@@ -904,22 +919,27 @@ describe('roundTripExport — scalar hand-drawn geometry (R9)', () => {
 });
 
 /**
- * A data URL is never drawn as text.
+ * A drawn signature reaches the page as an IMAGE, and every failure is blank.
  *
- * A drawn signature is `canvas.toDataURL('image/png')` — tens of kilobytes of
- * base64. This module has no image-embedding path, so the value used to reach
- * `String(...)` and be drawn as a caption. pdf-lib breaks lines only on ' ' and
- * base64 has none, so it emitted ONE unbreakable line thousands of points wide
- * across the record, and being fully WinAnsi-encodable it never threw.
+ * A signature is `canvas.toDataURL('image/png')` — tens of kilobytes of base64.
+ * Before image embedding existed the value reached `String(...)` and was drawn
+ * as a caption: pdf-lib breaks lines only on ' ' and base64 has none, so it
+ * emitted ONE unbreakable line thousands of points wide across the record, and
+ * being fully WinAnsi-encodable it never threw. A guard was added to draw
+ * nothing instead.
  *
- * It was latent only because no signature field had confirmed geometry. The
- * scalar placement rule would have armed it, and the placement panel was until
- * now telling reviewers these boxes "draw the signature" — i.e. inviting the
- * hand-drawn box that arms it. Blank is the correct failure here.
+ * `round-trip.ts` now embeds the PNG. The guard still matters, because it is
+ * what a malformed or unsupported payload falls back to: a missing signature is
+ * a visible gap someone chases up, while a broken one is either a crashed
+ * export or a defaced certificate.
  */
-describe('roundTripExport — a data URL is never drawn as text', () => {
+describe('roundTripExport — a drawn signature', () => {
   const BOX: PageBox = { page: 0, x: 120, y: 300, width: 90, height: 16, pageWidth: 600, pageHeight: 800 };
+  /** Header bytes repeated — passes the PNG magic check, fails to decode. */
   const PNG_DATA_URL = `data:image/png;base64,${'iVBORw0KGgoAAAANSUhEUg'.repeat(40)}`;
+  /** A real 1×1 PNG. Small on purpose: the fit maths is what is under test. */
+  const REAL_PNG =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
   const signed = (type: FormField['type']): FormField => ({
     id: 'sig',
@@ -930,7 +950,39 @@ describe('roundTripExport — a data URL is never drawn as text', () => {
     geometry: { segments: [BOX] },
   });
 
-  it('draws nothing for a signature field holding a PNG data URL', async () => {
+  it('embeds a real signature as an image', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [signed('signature')],
+      values: { sig: REAL_PNG },
+    });
+
+    // An image XObject reached the document — the signature is on the page.
+    expect(bytesInclude(output, '/Image')).toBe(true);
+    // And it is NOT drawn as text.
+    expect(bytesInclude(output, 'iVBORw0KGgo')).toBe(false);
+    expect(bytesInclude(output, LETTERHEAD)).toBe(true);
+  });
+
+  it('embeds it when the same blob arrives under type text', async () => {
+    // Extraction folds signature boxes into text inputs, so the branch cannot
+    // key on the `signature` TYPE — it has to be about the value.
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [signed('text')],
+      values: { sig: REAL_PNG },
+    });
+
+    expect(bytesInclude(output, '/Image')).toBe(true);
+  });
+
+  it('draws nothing at all for a malformed PNG', async () => {
+    /*
+      The payload below carries the PNG magic number but decodes to nothing
+      usable, so the decoder throws. That must not reach the caller: an export
+      that dies takes the whole evidence document with it, and one that draws
+      the raw bytes ruins the page. Blank, and the rest of the document intact.
+    */
     const output = await roundTripExport({
       originalPdf: await makeFlatPdf(),
       fields: [signed('signature')],
@@ -939,20 +991,20 @@ describe('roundTripExport — a data URL is never drawn as text', () => {
 
     expect(bytesInclude(output, 'base64')).toBe(false);
     expect(bytesInclude(output, 'iVBORw0KGgo')).toBe(false);
-    // The page itself is intact — this degrades to blank, it does not fail.
     expect(bytesInclude(output, LETTERHEAD)).toBe(true);
   });
 
-  it('draws nothing when the same blob arrives under type text', async () => {
-    // Extraction folds signature boxes into text inputs, so the guard cannot
-    // be a `signature`-type branch — it has to be about the VALUE.
+  it('draws nothing for a format the decoder was not told about', async () => {
+    // Only PNG is recognised, because pdf-lib must be told which decoder to
+    // use and guessing wrong throws inside the export. A JPEG data URL — which
+    // no surface here produces — falls through to blank rather than crashing.
     const output = await roundTripExport({
       originalPdf: await makeFlatPdf(),
-      fields: [signed('text')],
-      values: { sig: PNG_DATA_URL },
+      fields: [signed('signature')],
+      values: { sig: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ==' },
     });
 
-    expect(bytesInclude(output, 'base64')).toBe(false);
+    expect(bytesInclude(output, '/9j/4AAQ')).toBe(false);
     expect(bytesInclude(output, LETTERHEAD)).toBe(true);
   });
 
