@@ -146,21 +146,26 @@ answer's own `a)` / `b)` marker.
 Q1 is the one to try first. It failed to match before the wrap fix, so it is the
 canary: if Q1 proposes, the fix worked.
 
-### 3d. Outcome cells — 31 boxes, all by hand
+### 3d. Outcome cells — draw one, the other 30 are offered
 
-These have no automatic rule: their labels are names the extractor invented and
-appear nowhere on the page, so nothing can match them to a place.
+Their labels are names the extractor invented and appear nowhere on the page, so
+nothing can locate them from the document. But they are all the same box in the
+same column, one per question row — so:
 
-Draw all 31, on the printed tick/cross box beside each question.
+1. Draw the **first** outcome cell by hand, on the printed tick/cross box beside
+   its question, and **confirm it**. Confirmation is what makes it an exemplar:
+   it is the signal a human checked it against the page, and an unconfirmed box
+   would propagate a guess thirty times over.
+2. Every other outcome cell then offers **Use this box** — the same column and
+   size, with the row derived from its own question's printed label, at
+   confidence 0.75.
 
-> An exemplar-propagation rule exists in the codebase and is fully tested, but
-> has **no caller** — nothing offers it in the panel, so no box is proposed from
-> the one you draw. This step used to promise that; it does not happen. Wiring
-> it up is worth doing before the next tool, not before this run.
+**Check:** each offered box sits on **its own question's row**, not the one above
+or below. The confirm gate is per box, so a mistake here is a mark in the wrong
+cell of a competency record — the one error class worth slowing down for.
 
-**Check:** each box sits on its own question's row. The confirm gate is per box,
-so a mistake here is a mark in the wrong cell of a competency record — the one
-error class worth slowing down for.
+If a cell offers nothing, its question's label could not be matched on the page —
+too short, or printed more than once. Draw that one by hand and carry on.
 
 ### 3e. Scalars — ~35 boxes, mostly by hand
 
@@ -225,7 +230,7 @@ the six part anchors it found, and the 31 question/outcome pairs it mapped.
 Then, only once the report looks right:
 
 ```bash
-cd packages/db && DATABASE_URL=postgresql://postgres:password@helium/heliumdb?sslmode=disable node scripts/author-track-dozer-tool.mjs --key ~/track-dozer.answer-key.json --awards <competency-code> --write
+cd packages/db && DATABASE_URL=postgresql://postgres:password@helium/heliumdb?sslmode=disable node scripts/author-track-dozer-tool.mjs --key ~/track-dozer.answer-key.json --write
 ```
 
 ---
@@ -281,9 +286,11 @@ with its front page blank.
 **Check three things:**
 
 - The badge now reads **Competent**.
-- The toast names any competency granted. If it names none, the tool has no
-  `--awards` code (step 4) — the case is still competent, but nobody has been
-  added to the register.
+- The toast names the competency granted: **ATO - Track Dozer** (`Q34666893`).
+  If it names none, that competency is not recorded in this org — step 4's dry
+  run says so. The case is still competent and the certificate still prints;
+  only the register is untouched. Create it and re-run step 4 with `--write`;
+  the grant is an upsert, so re-running is safe.
 - Try signing off a case with an outstanding part: it refuses with the parts
   named, and there is no override.
 
