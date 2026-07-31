@@ -590,17 +590,32 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
      would have needed the Track Dozer authorisation before being allowed to sit
      the assessment that grants it. Every case would have opened carrying a
      prerequisite warning that could never be satisfied except by having already
-     passed. Confirmed against the BisTrainer training matrix, which resolves
-     the four codes this script uses:
+     passed.
 
-       Q34666893  ATO - Track Dozer            ← what passing AWARDS
-       Q50001782  Licence - Driver Car (C)     ← a real candidate prerequisite
-       Q50071833  Worsley Assessor Skill Set   ← a real assessor competency
-       Q50073293  not present in the matrix    ← see the warning below
+     THE DOCUMENT ITSELF SETTLES THIS. Its ASSESSMENT SUMMARY block reads:
 
-     It stays on the ASSESSOR list, which is not circular and is the point: the
-     person signing off a Track Dozer assessment should hold the Track Dozer
-     ticket themselves.
+       Category of Assessment   Q34666893 ATO Track Dozer
+       Prerequisites            Q50001782 Driver's Licence C OR higher class
+
+     So Q34666893 is the CATEGORY — what this assessment is, and therefore what
+     it awards — and the only prerequisite the paper names is the licence.
+
+     The same page lists who may conduct it: "an Appointed Training Dept Trainer
+     or Worsley Assessor who holds the following qualifications":
+
+       Q34666893  ATO Track Dozer
+       Q50071833  Worsley Assessor Skill Set
+       Q50073293  Authority to Assess Mobile Equipment
+
+     which is why Q34666893 stays on the ASSESSOR list too. That is not
+     circular and is the point: whoever signs off a Track Dozer assessment
+     should hold the Track Dozer ticket themselves.
+
+     Q50073293 is absent from the BisTrainer training matrix because that report
+     records what PEOPLE hold, and an assessor authority nobody in it holds has
+     no column. `pick` warns when a code is not recorded in the org; assessor
+     eligibility warns and never blocks, so a missing one is visible without
+     stopping an assessment.
   */
   const AWARDED_DEFAULT = 'Q34666893';
   const awardsCode = flag('--awards') ?? AWARDED_DEFAULT;
