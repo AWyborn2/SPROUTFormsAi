@@ -6,10 +6,13 @@
  *
  *   pnpm --filter @formai/shared build
  *   cd packages/db
- *   DATABASE_URL=... node scripts/author-track-dozer-tool.mjs            # dry run
- *   DATABASE_URL=... node scripts/author-track-dozer-tool.mjs --write    # persist
+ *   DATABASE_URL=... node scripts/author-track-dozer-tool.mjs --key ../key.json          # dry run
+ *   DATABASE_URL=... node scripts/author-track-dozer-tool.mjs --key ../key.json --write  # persist
  *
- * Optional: --template-id <uuid> when name matching finds the wrong template.
+ * `--key` (or ANSWER_KEY_PATH) points at the answer key. It is a flag rather
+ * than a fixed path so the key does not have to live in this repository — see
+ * the note beside KEY_PATH. Optional: --template-id <uuid> when name matching
+ * finds the wrong template.
  *
  * DRY RUN BY DEFAULT. Everything here is heuristic — imported field ids and
  * labels come from AI extraction, so this script's job is to propose a
@@ -27,11 +30,14 @@
  *  5. Attaches prerequisite/assessor competencies found by code.
  *  6. Upserts the assessment_tools row.
  *
- * Questions are paired with the check_cross that FOLLOWS them, and the pairs
- * are consumed in document order against the key's three sections. If the pair
- * count does not equal the key's answer count EXACTLY, nothing is written —
- * an off-by-one would silently shift every subsequent answer onto the wrong
- * question, which on a safety assessment is worse than not running at all.
+ * Questions are paired with their outcome box by the link publish resolved from
+ * the printed references, falling back to document adjacency only where no link
+ * exists (`pairQuestionsWithOutcomes`). The pairs are then consumed IN ORDER
+ * against the key's three sections, because the key identifies its answers by
+ * section and number and nothing on a published field carries that number. If
+ * the pair count does not equal the key's answer count EXACTLY, nothing is
+ * written — an off-by-one would silently shift every subsequent answer onto the
+ * wrong question, which on a safety assessment is worse than not running.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -40,12 +46,63 @@ import postgres from 'postgres';
 import { pairQuestionsWithOutcomes, validateAnswerKeys, validateManifest } from '@formai/shared';
 
 const WRITE = process.argv.includes('--write');
-const tplArgIdx = process.argv.indexOf('--template-id');
-const TEMPLATE_ID = tplArgIdx > -1 ? process.argv[tplArgIdx + 1] : null;
+const flag = (name) => {
+  const i = process.argv.indexOf(name);
+  return i > -1 ? process.argv[i + 1] : null;
+};
+const TEMPLATE_ID = flag('--template-id');
 
+/*
+  WHERE THE ANSWER KEY COMES FROM.
+
+  It used to be read from a fixed path inside the repository, which is why a
+  complete answer key to a safety-critical assessment was committed. `--key`
+  takes it from anywhere — a path outside the checkout, a mounted secret, a file
+  an operator drops next to the script and deletes afterwards — so the copy in
+  the repo can be removed.
+
+  The in-repo path stays as the fallback ONLY while that copy still exists, so
+  this keeps working for whoever runs it before the file moves. Once the file is
+  gone the fallback simply reports where to put one. Note that removing it from
+  the working tree does not remove it from git HISTORY: anyone with repository
+  access can still recover it, so treat those answers as disclosed and reissue
+  them if that matters.
+
+  Confidentiality at RUNTIME is already handled elsewhere — GET /forms and
+  GET /forms/:id gate on forms.view, so a candidate cannot read a key through
+  the API. This flag is about not shipping one in the source tree.
+*/
 const here = dirname(fileURLToPath(import.meta.url));
-const KEY_PATH = join(here, '..', '..', '..', 'docs', 'assessment-tools', 'track-dozer.answer-key.json');
-const KEY = JSON.parse(readFileSync(KEY_PATH, 'utf-8'));
+const DEFAULT_KEY_PATH = join(here, '..', '..', '..', 'docs', 'assessment-tools', 'track-dozer.answer-key.json');
+const KEY_PATH = flag('--key') ?? process.env.ANSWER_KEY_PATH ?? DEFAULT_KEY_PATH;
+
+let KEY;
+try {
+  KEY = JSON.parse(readFileSync(KEY_PATH, 'utf-8'));
+} catch (err) {
+  console.error(
+    `Could not read an answer key at ${KEY_PATH}\n` +
+      `  ${err instanceof Error ? err.message : String(err)}\n\n` +
+      `Point the script at one:\n` +
+      `  node scripts/author-track-dozer-tool.mjs --key /path/to/answer-key.json\n` +
+      `or set ANSWER_KEY_PATH. The key is deliberately not kept in this repository.`,
+  );
+  process.exit(1);
+}
+
+/*
+  Shape-check before anything else. A key that parses but has no sections would
+  otherwise reach the pairing logic and report "0 pairs expected", which reads
+  like a document problem rather than a malformed key.
+*/
+for (const name of ['general', 'bbmMining', 'rawMaterials']) {
+  const section = KEY?.sections?.[name];
+  if (!Array.isArray(section?.questions)) {
+    console.error(`Answer key at ${KEY_PATH} has no "${name}" section with a questions array.`);
+    process.exit(1);
+  }
+}
+console.log(`Answer key: ${KEY_PATH}`);
 
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is required.');
