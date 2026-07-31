@@ -50,13 +50,15 @@ All three, every time — not conditionally.
   and never populated by the dev servers. Skip it and step 4 dies with
   `ERR_MODULE_NOT_FOUND`.
 
-**Check the plan tier before anything else.** Every assessment route sits behind
-`requirePlanFeature('assessments')`, which is false on individual and team, and
-those tiers also carry a candidate seat limit of zero — so the tool list, the
-case list and the candidate picker are all empty or erroring. The web app
-discards the 403 body and renders "Could not load assessment cases", which reads
-like a bug rather than a plan gate. Set the org to **Business** in
-Settings → Billing first.
+**If the org is Business or Enterprise, skip this paragraph** — both enable
+`assessments` and `competencyGating`, and Enterprise has no candidate seat cap.
+
+On **individual or team** every assessment route is refused:
+`requirePlanFeature('assessments')` is false on both, and they carry a candidate
+seat limit of zero, so the tool list, the case list and the candidate picker all
+come back empty or erroring. The web app discards the 403 body and renders
+"Could not load assessment cases", which reads like a bug rather than a plan
+gate — worth knowing before you go hunting. Settings → Billing to change it.
 
 ---
 
