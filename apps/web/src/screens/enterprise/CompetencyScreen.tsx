@@ -1,13 +1,128 @@
 import { useState } from 'react';
+import { describeValidity } from '@formai/shared';
 import { Button, Icon, Input, Select, Switch, useToast } from '@formai/ui';
+import type { Competency } from '../../lib/data/types.js';
 import { useForms } from '../../lib/data/hooks.js';
 import {
   useAddRule,
   useCompetencies,
   useCompetencyRules,
   useRemoveRule,
+  useSetCompetencyValidity,
   useToggleRule,
 } from '../../lib/data/hooks.js';
+
+/**
+ * How long one competency stays valid, editable in place.
+ *
+ * This is where expiry becomes real: every competency starts perpetual, and a
+ * saved validity applies IMMEDIATELY to everyone who already holds it, because
+ * expiry counts from each person's own grant date rather than from today. So
+ * setting "3 years" on a ticket the workforce earned years ago lapses the ones
+ * that genuinely lapsed — which is the point, and worth saying out loud before
+ * an admin presses save.
+ *
+ * Blank means never expires. Not zero, not "expires today" — a competency
+ * nobody has stated a validity for behaves exactly as it did before any of this
+ * existed.
+ */
+function ValidityEditor({ competency }: { competency: Competency }) {
+  const { toast } = useToast();
+  const save = useSetCompetencyValidity();
+  const [editing, setEditing] = useState(false);
+  const [years, setYears] = useState('');
+  const [grace, setGrace] = useState('');
+
+  function open() {
+    const months = competency.validForMonths;
+    setYears(months && months % 12 === 0 ? String(months / 12) : '');
+    setGrace(competency.gracePeriodDays ? String(competency.gracePeriodDays) : '');
+    setEditing(true);
+  }
+
+  function onSave() {
+    const trimmed = years.trim();
+    const parsedYears = trimmed === '' ? null : Number(trimmed);
+    if (parsedYears !== null && (!Number.isInteger(parsedYears) || parsedYears < 1 || parsedYears > 50)) {
+      toast({ variant: 'warning', message: 'Enter a whole number of years, or leave it blank for no expiry.' });
+      return;
+    }
+    const parsedGrace = grace.trim() === '' ? null : Number(grace.trim());
+    if (parsedGrace !== null && (!Number.isInteger(parsedGrace) || parsedGrace < 0 || parsedGrace > 365)) {
+      toast({ variant: 'warning', message: 'A grace period is a whole number of days, up to 365.' });
+      return;
+    }
+
+    save.mutate(
+      {
+        id: competency.id,
+        validForMonths: parsedYears === null ? null : parsedYears * 12,
+        // A grace period with no validity has nothing to be grace for.
+        gracePeriodDays: parsedYears === null ? null : parsedGrace,
+      },
+      {
+        onSuccess: () => {
+          setEditing(false);
+          toast({
+            variant: 'success',
+            message:
+              parsedYears === null
+                ? `${competency.name} no longer expires.`
+                : `${competency.name} is valid for ${parsedYears} year${parsedYears === 1 ? '' : 's'}, counted from each person's grant date.`,
+          });
+        },
+      },
+    );
+  }
+
+  if (!editing) {
+    return (
+      <button
+        onClick={open}
+        aria-label={`Set how long ${competency.name} stays valid`}
+        className="fai-chip-btn mt-0.5 rounded-sm text-left text-[11px] text-text-tertiary hover:text-text-accent"
+      >
+        {describeValidity(competency)}
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      <div className="flex items-end gap-2">
+        <Input
+          label="Valid for (years)"
+          placeholder="Never expires"
+          value={years}
+          onChange={(e) => setYears(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') onSave();
+          }}
+        />
+        <Input
+          label="Grace (days)"
+          placeholder="0"
+          value={grace}
+          onChange={(e) => setGrace(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') onSave();
+          }}
+        />
+      </div>
+      <p className="text-[11px] text-text-tertiary">
+        Applies to everyone who already holds it, counted from the day they earned it.
+      </p>
+      <div className="flex gap-2">
+        <Button size="sm" onClick={onSave} disabled={save.isPending}>
+          Save
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 /**
  * Competency gating — the rule builder (which competency unlocks which form
@@ -62,14 +177,22 @@ export function CompetencyScreen() {
           {competencies.map((c) => (
             <div
               key={c.id}
-              className="flex items-center gap-3 border-b border-border-subtle px-[18px] py-[13px] last:border-b-0"
+              className="flex items-start gap-3 border-b border-border-subtle px-[18px] py-[13px] last:border-b-0"
             >
-              <span className="h-2.5 w-2.5 flex-none rounded-[3px]" style={{ background: c.color }} />
+              <span className="mt-1 h-2.5 w-2.5 flex-none rounded-[3px]" style={{ background: c.color }} />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[13.5px] font-semibold">{c.name}</div>
                 <div className="font-mono text-[11px] text-text-tertiary">{c.code}</div>
+                <ValidityEditor competency={c} />
               </div>
-              <span className="font-heading text-sm font-bold">{c.holders}</span>
+              {/*
+                Granted and not revoked — NOT how many are in date. Expiry moves
+                with the calendar and this number does not, so it deliberately
+                answers the question a stored integer can stay true to.
+              */}
+              <span className="font-heading text-sm font-bold" title="Holders granted this competency">
+                {c.holders}
+              </span>
             </div>
           ))}
         </div>

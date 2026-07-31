@@ -360,8 +360,16 @@ export interface Competency {
   name: string;
   /** Nationally-recognised code, e.g. "RIIWHS204E". */
   code: string;
-  /** How many people currently hold it. */
+  /**
+   * How many people have been granted it and not had it revoked. NOT how many
+   * are currently in date — expiry moves with the calendar, and a stored count
+   * cannot. Currency is per person, from `GET /competencies/held/:userId`.
+   */
   holders: number;
+  /** How long it stays valid from the day it was earned. Null never expires. */
+  validForMonths: number | null;
+  /** How long past expiry it still counts while the holder requalifies. */
+  gracePeriodDays: number | null;
   /** CSS-var colour token for the competency's dot. */
   color: string;
 }

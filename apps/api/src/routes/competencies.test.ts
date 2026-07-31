@@ -167,6 +167,170 @@ describe('POST /competencies', () => {
       server.close();
     }
   });
+
+  it('stores a validity period when one is given', async () => {
+    const { db, insertValues } = fakeDb({
+      insertedCompetency: { id: 'c-new', name: 'ATO - Track Dozer', code: 'Q34666893', holders: 0 },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: 'ATO - Track Dozer',
+          code: 'Q34666893',
+          validForMonths: 36,
+          gracePeriodDays: 30,
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(insertValues).toHaveBeenCalledWith(
+        schema.competencies,
+        expect.objectContaining({ validForMonths: 36, gracePeriodDays: 30 }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('leaves a competency perpetual when no validity is given', async () => {
+    // NOT zero, NOT "expires today" — a competency nobody has stated a validity
+    // for has to keep behaving exactly as it did before expiry existed.
+    const { db, insertValues } = fakeDb({
+      insertedCompetency: { id: 'c-new', name: 'Site Induction', code: 'SI', holders: 0 },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/competencies`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Site Induction', code: 'SI' }),
+      });
+
+      expect(insertValues).toHaveBeenCalledWith(
+        schema.competencies,
+        expect.objectContaining({ validForMonths: null, gracePeriodDays: null }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('PATCH /competencies/:id', () => {
+  const EXISTING = {
+    id: 'c1',
+    orgId: 'org-1',
+    name: 'ATO - Track Dozer',
+    code: 'Q34666893',
+    holders: 12,
+    validForMonths: null,
+    gracePeriodDays: null,
+  };
+
+  it('sets how long a qualification stays valid', async () => {
+    const { db, updateSet } = fakeDb({ competenciesFindFirst: EXISTING });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ validForMonths: 36 }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(updateSet).toHaveBeenCalledWith(schema.competencies, { validForMonths: 36 });
+      const body = (await res.json()) as { validForMonths: number; name: string };
+      expect(body.validForMonths).toBe(36);
+      expect(body.name).toBe('ATO - Track Dozer');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('only writes the columns that were sent', async () => {
+    // A partial patch that also carried name/code/grace would blank whatever the
+    // caller left out — this route is reached from a settings form that shows
+    // one field at a time.
+    const { db, updateSet } = fakeDb({ competenciesFindFirst: EXISTING });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/competencies/c1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ gracePeriodDays: 90 }),
+      });
+
+      expect(updateSet).toHaveBeenCalledWith(schema.competencies, { gracePeriodDays: 90 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepts an explicit null to make a qualification perpetual again', async () => {
+    // Distinct from omitting the field. Null is the only way to say "this stops
+    // expiring", and it has to survive the send-only-what-changed filter.
+    const { db, updateSet } = fakeDb({
+      competenciesFindFirst: { ...EXISTING, validForMonths: 36 },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ validForMonths: null }),
+      });
+
+      expect(updateSet).toHaveBeenCalledWith(schema.competencies, { validForMonths: null });
+      const body = (await res.json()) as { validForMonths: number | null };
+      expect(body.validForMonths).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects a nonsensical validity', async () => {
+    const { db, updateSet } = fakeDb({ competenciesFindFirst: EXISTING });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ validForMonths: 0 }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for a competency outside the caller org', async () => {
+    const { db, updateSet } = fakeDb({ competenciesFindFirst: undefined });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ validForMonths: 36 }),
+      });
+
+      expect(res.status).toBe(404);
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe('DELETE /competencies/:id', () => {
@@ -459,16 +623,159 @@ describe('competency holders', () => {
     }
   });
 
-  it('lists what a user holds, scoped to the caller org', async () => {
+  /*
+    THIS USED TO ASSERT A BARE {competencyId, evidenceRef} PAIR.
+
+    Holding a row and being currently qualified stopped being the same question
+    once qualifications gained a validity period — and this lookup is what
+    prerequisite warnings and assessor eligibility both read. It now reports a
+    STATUS per competency; a caller that only wants "do they have it" reads
+    `current`, which covers held, expiring and grace.
+  */
+  const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
+
+  it('lists what a user holds, with its status', async () => {
     mockDbValue = fakeDb({
-      competencyHoldersFindMany: [{ competencyId: 'c1', evidenceRef: 'CERT-9' }],
+      competencyHoldersFindMany: [
+        { competencyId: 'c1', evidenceRef: 'CERT-9', grantedAt: daysAgo(365) },
+      ],
+      competenciesFindMany: [{ id: 'c1', name: 'ATO - Track Dozer', validForMonths: 36 }],
     }).db;
     const { server, base } = startApp();
     try {
       const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
 
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual([{ competencyId: 'c1', evidenceRef: 'CERT-9' }]);
+      const [row] = (await res.json()) as { competencyId: string; status: string; current: boolean }[];
+      expect(row!.competencyId).toBe('c1');
+      expect(row!.status).toBe('held');
+      expect(row!.current).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports a lapsed ticket as expired, and NOT current', async () => {
+    // Five years on a three-year ticket. Before this it read exactly like one
+    // earned this morning, and satisfied every prerequisite check.
+    mockDbValue = fakeDb({
+      competencyHoldersFindMany: [{ competencyId: 'c1', grantedAt: daysAgo(5 * 365) }],
+      competenciesFindMany: [{ id: 'c1', name: 'ATO - Track Dozer', validForMonths: 36 }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { status: string; current: boolean; note: string }[];
+      expect(row!.status).toBe('expired');
+      expect(row!.current).toBe(false);
+      expect(row!.note).toContain('expired on');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('counts a ticket inside its grace period as still current', async () => {
+    // Grace is set per competency by an admin, and within it the person is
+    // requalifying rather than unqualified.
+    mockDbValue = fakeDb({
+      competencyHoldersFindMany: [{ competencyId: 'c1', grantedAt: daysAgo(3 * 365 + 20) }],
+      competenciesFindMany: [
+        { id: 'c1', name: 'ATO - Track Dozer', validForMonths: 36, gracePeriodDays: 90 },
+      ],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { status: string; current: boolean }[];
+      expect(row!.status).toBe('grace');
+      expect(row!.current).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('never expires a qualification with no validity set', async () => {
+    /*
+      The migration story. No competency carries a validity yet, so nothing
+      lapses the day this ships — a qualification starts expiring only when an
+      admin gives it one.
+    */
+    mockDbValue = fakeDb({
+      competencyHoldersFindMany: [{ competencyId: 'c1', grantedAt: daysAgo(10 * 365) }],
+      competenciesFindMany: [{ id: 'c1', name: 'Site Induction' }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { status: string; current: boolean; expiresAt: null }[];
+      expect(row!.status).toBe('held');
+      expect(row!.current).toBe(true);
+      expect(row!.expiresAt).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  /*
+    WHO IS ASKING CHANGES WHEN THE WARNING STARTS.
+
+    An assessor planning next quarter's work needs to know a ticket lapses
+    inside 90 days, or they roster someone onto a job they will not be qualified
+    for by the time it runs. A person looking at their own record 90 days out
+    just sees an alarm they can do nothing about for two months, so their window
+    is 30. The three tests below differ only in who is asking.
+  */
+  const FORTY_DAYS_LEFT = {
+    competencyHoldersFindMany: [{ competencyId: 'c1', grantedAt: daysAgo(3 * 365 - 40) }],
+    competenciesFindMany: [{ id: 'c1', name: 'ATO - Track Dozer', validForMonths: 36 }],
+  };
+
+  it('warns an assessor 40 days out', async () => {
+    mockDbValue = fakeDb(FORTY_DAYS_LEFT).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { status: string; note: string }[];
+      expect(row!.status).toBe('expiring');
+      expect(row!.note).toContain('expires on');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not warn a candidate at the same 40 days out', async () => {
+    mockDbValue = fakeDb(FORTY_DAYS_LEFT).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}?audience=candidate`, {
+        headers: authHeader(),
+      });
+
+      const [row] = (await res.json()) as { status: string; current: boolean; note: null }[];
+      expect(row!.status).toBe('held');
+      expect(row!.current).toBe(true);
+      expect(row!.note).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('treats someone reading their own record as the candidate', async () => {
+    // No query parameter. Reading your own record IS the candidate case, and a
+    // surface that forgot to say so would otherwise get the assessor window.
+    mockDbValue = fakeDb(FORTY_DAYS_LEFT).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${tenant.userId}`, {
+        headers: authHeader(),
+      });
+
+      const [row] = (await res.json()) as { status: string }[];
+      expect(row!.status).toBe('held');
     } finally {
       server.close();
     }

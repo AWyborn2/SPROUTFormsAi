@@ -674,6 +674,26 @@ export function useCompetencyRules() {
   return useQuery({ queryKey: keys.competencyRules, queryFn: () => store.listCompetencyRules() });
 }
 
+/** Set, change or clear how long a competency stays valid. */
+export function useSetCompetencyValidity() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      id: string;
+      validForMonths: number | null;
+      gracePeriodDays: number | null;
+    }) =>
+      store.setCompetencyValidity(input.id, {
+        validForMonths: input.validForMonths,
+        gracePeriodDays: input.gracePeriodDays,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.competencies });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
 export function useAddRule() {
   const qc = useQueryClient();
   return useMutation({

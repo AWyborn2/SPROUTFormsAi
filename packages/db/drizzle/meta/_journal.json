@@ -162,6 +162,13 @@
       "when": 1785453004191,
       "tag": "0022_bumpy_argent",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1785473734670,
+      "tag": "0023_gigantic_nextwave",
+      "breakpoints": true
     }
   ]
 }
