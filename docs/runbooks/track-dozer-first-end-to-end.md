@@ -42,9 +42,10 @@ pnpm install && pnpm --filter @formai/shared build && pnpm db:migrate
 All three, every time — not conditionally.
 
 - **`db:migrate` is not optional.** `0022` adds the `awaiting_sign_off` enum
-  value and the four `signed_off_*` columns, and the ORM selects them on every
-  read — so without it the tool list and case list return 500 long before you
-  reach sign-off. Nothing migrates on boot; that is a deliberate decision.
+  value and the four `signed_off_*` columns, and `0023` adds the expiry columns
+  — the ORM selects all of them on every read, so without it the tool list and
+  case list return 500 long before you reach sign-off. Nothing migrates on boot;
+  that is a deliberate decision.
 - **`shared build` is not optional either.** The authoring script in step 4 runs
   under plain `node`, which resolves `@formai/shared` to `dist/` — gitignored,
   and never populated by the dev servers. Skip it and step 4 dies with
@@ -293,6 +294,29 @@ with its front page blank.
   the grant is an upsert, so re-running is safe.
 - Try signing off a case with an outstanding part: it refuses with the parts
   named, and there is no override.
+
+### Set the ticket's validity, once
+
+**Enterprise → Competencies**, click the line under **ATO - Track Dozer** — it
+reads *Never expires* until you set it — and enter **3 years**. Add a grace
+period if your authority allows one; leave it blank if not.
+
+Do this once, for real, before anyone relies on the register. Every competency
+starts perpetual, which is the only honest default for one nobody has stated a
+period for, but ATO - Track Dozer is a three-year ticket and the failure is
+silent: grants land, the register looks healthy, and nothing lapses in three
+years' time. Step 4's dry run warns when it is still unset.
+
+Setting it is **retroactive by design** — expiry counts from each person's own
+grant date, not from today — so an org that imports historical grants first and
+sets the validity afterwards still gets the right dates. Setting it back to
+blank makes the competency perpetual again and un-lapses everyone.
+
+After that, an out-of-date ticket **warns and never blocks**. Opening a case
+against a candidate whose prerequisite has lapsed says *has expired* rather than
+*missing* — a different instruction: book a requalification, do not enrol them in
+training they have already done. A ticket inside its grace period counts
+normally.
 
 ---
 

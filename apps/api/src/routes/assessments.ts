@@ -7,6 +7,8 @@ import {
   ASSESSMENT_PATHWAYS,
   NS_DISPOSITIONS,
   caseProgress,
+  competencyStatus,
+  countsAsHeld,
   fieldsInPart,
   fieldsInSection,
   isCaseCompetent,
@@ -164,7 +166,27 @@ async function fieldsForVersion(database: Database, versionId: string): Promise<
 }
 
 /**
- * Competency ids the user does NOT hold, from a required list.
+ * Never held it, or held it and let it lapse.
+ *
+ * Kept apart because they send the reader somewhere different: `missing` means
+ * enrol this person, `expired` means book them a requalification. Collapsing
+ * both into "missing" told an assessor to arrange training a candidate has
+ * already done.
+ */
+export interface PrerequisiteGap {
+  competencyId: string;
+  reason: 'missing' | 'expired';
+}
+
+/** Prose for one gap, addressed to whoever has it. */
+function describeGap(who: 'candidate' | 'assessor', gap: PrerequisiteGap): string {
+  return gap.reason === 'expired'
+    ? `${who} competency ${gap.competencyId} has expired`
+    : `${who} missing competency ${gap.competencyId}`;
+}
+
+/**
+ * Required competencies the user is not currently qualified in.
  *
  * Returned as warnings, never as a refusal — an out-of-date competency record
  * is far more common than an unqualified person, and blocking on it would stop
@@ -176,7 +198,7 @@ async function unmetPrerequisites(
   orgId: string,
   userId: string | null,
   requiredIds: readonly string[],
-): Promise<string[]> {
+): Promise<PrerequisiteGap[]> {
   if (!userId || requiredIds.length === 0) return [];
   const held = await database.query.competencyHolders.findMany({
     where: and(
@@ -189,8 +211,51 @@ async function unmetPrerequisites(
       isNull(schema.competencyHolders.revokedAt),
     ),
   });
-  const heldIds = new Set(held.map((h) => h.competencyId));
-  return requiredIds.filter((id) => !heldIds.has(id));
+  if (held.length === 0) {
+    return requiredIds.map((competencyId) => ({ competencyId, reason: 'missing' as const }));
+  }
+
+  /*
+    A LAPSED TICKET IS NOT A HELD ONE.
+
+    Holding a row said nothing about whether the qualification was still valid,
+    so a three-year ticket earned five years ago satisfied a prerequisite
+    exactly as well as one earned this morning.
+
+    Expiry is derived from the grant date and the qualification's own validity
+    period, so this needs the competencies too. `expiring` and `grace` still
+    COUNT — a ticket near its date, or inside the window the authority allows
+    for requalifying, must not make somebody ineligible.
+
+    Still warnings, never refusals: an expired RECORD is far more common than an
+    expired person, and the whole doctrine here is that stale data must not stop
+    a real assessment being written down.
+  */
+  const competencies = await database.query.competencies.findMany({
+    where: and(
+      eq(schema.competencies.orgId, orgId),
+      inArray(schema.competencies.id, held.map((h) => h.competencyId)),
+    ),
+  });
+  const validityById = new Map(competencies.map((c) => [c.id, c]));
+  const heldById = new Map(held.map((h) => [h.competencyId, h]));
+
+  const now = new Date();
+  const gaps: PrerequisiteGap[] = [];
+  for (const competencyId of requiredIds) {
+    const grant = heldById.get(competencyId);
+    const validity = grant ? validityById.get(competencyId) : undefined;
+    // No grant, or a grant pointing at a competency this org does not have:
+    // either way there is nothing here that proves the person is qualified.
+    if (!grant || !validity) {
+      gaps.push({ competencyId, reason: 'missing' });
+      continue;
+    }
+    if (!countsAsHeld(competencyStatus(grant, validity, now, 'assessor'))) {
+      gaps.push({ competencyId, reason: 'expired' });
+    }
+  }
+  return gaps;
 }
 
 function toAttemptFacts(rows: { partKey: string; attemptNumber: number; outcome: string | null }[]): AttemptFact[] {
@@ -430,8 +495,8 @@ assessmentCasesRouter.post(
       unmetPrerequisites(db, tenant.orgId, assessorUserId, tool.assessorCompetencyIds),
     ]);
     const warnings = [
-      ...candidateGaps.map((id) => `candidate missing competency ${id}`),
-      ...assessorGaps.map((id) => `assessor missing competency ${id}`),
+      ...candidateGaps.map((gap) => describeGap('candidate', gap)),
+      ...assessorGaps.map((gap) => describeGap('assessor', gap)),
     ];
 
     const [row] = await db
@@ -1910,7 +1975,7 @@ assessmentCasesRouter.post(
       signedOffName: parsed.data.assessorName,
       granted,
       warnings: [
-        ...assessorGaps.map((id) => `assessor missing competency ${id}`),
+        ...assessorGaps.map((gap) => describeGap('assessor', gap)),
         ...grantProblems,
       ],
     });

@@ -29,6 +29,25 @@ export const competencies = pgTable(
     name: text().notNull(),
     code: text().notNull(),
     holders: integer().notNull().default(0),
+    /*
+      HOW LONG THIS QUALIFICATION LASTS, in months from the grant date. NULL
+      means it never expires — which is every competency until an admin sets
+      one, and is deliberately the migration story: nothing lapses the day this
+      ships, and a qualification starts expiring the moment it is given a
+      validity.
+
+      Set here rather than per grant because it is a property of the
+      qualification: "ATO - Track Dozer is valid for three years" is true of the
+      ticket, not of one person's copy of it. Expiry is DERIVED from this, so
+      setting it applies at once to every existing grant, however old.
+    */
+    validForMonths: integer('valid_for_months'),
+    /*
+      Days past expiry during which it still counts, flagged. Per competency and
+      admin-set rather than a global constant, because different qualifications
+      allow different runway to requalify. NULL or 0 makes expiry a hard date.
+    */
+    gracePeriodDays: integer('grace_period_days'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [index('competencies_org_idx').on(t.orgId)],
@@ -90,6 +109,30 @@ export const competencyHolders = pgTable(
     */
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     revokedReason: text('revoked_reason'),
+    /*
+      WHEN IT WAS LAST GRANTED — the date expiry counts from.
+
+      Distinct from `createdAt` because granting is an UPSERT: requalifying
+      updates the existing row rather than inserting a second one, and
+      `createdAt` therefore records when the person FIRST earned the ticket and
+      never moves again. Deriving expiry from that would mean a three-year
+      ticket earned in 2022 and re-earned last week still reads as expired.
+
+      Defaults to now so existing rows get a sane date, which is also what makes
+      "backfill from the grant date" work: those rows already carry a creation
+      time, and this column adopts it.
+    */
+    grantedAt: timestamp('granted_at', { withTimezone: true }).defaultNow().notNull(),
+    /*
+      An explicit end date that OVERRIDES the derived one. Null normally, so
+      expiry follows the qualification's validity period.
+
+      Exists for a date that does not fit the formula: a ticket issued with a
+      short validity, one extended by hand, or one imported from the training
+      system with its own recorded expiry. Without it, a BIS sync would have to
+      either lie about the grant date or lose the real expiry.
+    */
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [

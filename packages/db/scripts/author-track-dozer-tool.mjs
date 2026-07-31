@@ -655,7 +655,8 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
     assessor: ['Q34666893'],
     awarded: [awardsCode],
   };
-  const rows = await sql`select id, code from competencies where org_id = ${template.org_id}`;
+  const rows = await sql`
+    select id, code, valid_for_months from competencies where org_id = ${template.org_id}`;
   const byCode = new Map(rows.map((r) => [r.code, r.id]));
   const pick = (list, who) =>
     list.flatMap((c) => {
@@ -682,6 +683,23 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
     );
   } else {
     console.log(`\nPassing this assessment awards: ${awardsCode} (ATO - Track Dozer)`);
+
+    /*
+      ATO - Track Dozer IS a three-year ticket. A competency with no validity
+      never expires, which is the right default for one nobody has stated a
+      period for — but it is the wrong answer for this one specifically, and
+      the failure is silent: the grant lands, the register looks healthy, and
+      nothing lapses in three years' time.
+    */
+    const awarded = rows.find((r) => r.code === awardsCode);
+    if (awarded && awarded.valid_for_months == null) {
+      warnings.push(
+        `${awardsCode} has no validity period, so grants of it will never expire. The document ` +
+          'states three years. Set it on Enterprise → Competencies (or PATCH /competencies/' +
+          `${awarded.id} with {"validForMonths": 36}). Expiry counts from each grant date, so ` +
+          'setting it later still dates existing tickets correctly.',
+      );
+    }
   }
 
   // ── validate exactly as the API would ───────────────────────────────────

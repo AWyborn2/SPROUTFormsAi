@@ -244,6 +244,9 @@ interface CompetencyDto {
   name: string;
   code: string;
   holders: number;
+  /** Optional: the column is nullable, and JSON drops an undefined. */
+  validForMonths?: number | null;
+  gracePeriodDays?: number | null;
 }
 
 /** Shape returned by `GET /dashboard` (see apps/api routes/dashboard.ts). */
@@ -335,7 +338,15 @@ function colorForCompetency(id: string): string {
 }
 
 function toCompetency(dto: CompetencyDto): Competency {
-  return { id: dto.id, name: dto.name, code: dto.code, holders: dto.holders, color: colorForCompetency(dto.id) };
+  return {
+    id: dto.id,
+    name: dto.name,
+    code: dto.code,
+    holders: dto.holders,
+    validForMonths: dto.validForMonths ?? null,
+    gracePeriodDays: dto.gracePeriodDays ?? null,
+    color: colorForCompetency(dto.id),
+  };
 }
 
 function toCompetencyRule(dto: CompetencyRuleDto): CompetencyRule {
@@ -790,6 +801,21 @@ export const store = {
 
   listCompetencies(): Promise<Competency[]> {
     return apiClient.get<CompetencyDto[]>('/competencies').then((rows) => rows.map(toCompetency));
+  },
+
+  /**
+   * Change how long a competency stays valid.
+   *
+   * Applies to everyone who already holds it, immediately: expiry is counted
+   * from each person's own grant date rather than frozen when the grant was
+   * made, so setting "36 months" dates every existing ticket from when it was
+   * actually earned. Sending null makes the competency perpetual again.
+   */
+  setCompetencyValidity(
+    id: string,
+    validity: { validForMonths: number | null; gracePeriodDays: number | null },
+  ): Promise<Competency> {
+    return apiClient.patch<CompetencyDto>(`/competencies/${id}`, validity).then(toCompetency);
   },
 
   listCompetencyRules(): Promise<CompetencyRule[]> {

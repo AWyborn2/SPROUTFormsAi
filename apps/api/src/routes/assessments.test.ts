@@ -458,6 +458,99 @@ describe('POST /assessment-cases', () => {
       server.close();
     }
   });
+
+  /*
+    PREREQUISITES AND EXPIRY.
+
+    A prerequisite was satisfied by the mere existence of a holder row, so a
+    three-year ticket earned five years ago cleared the check exactly as well as
+    one earned this morning. These open a case with the seeded competency as a
+    candidate prerequisite and vary only how long ago it was granted.
+  */
+  async function caseWithPrerequisite(
+    base: string,
+    store: Record<string, Record<string, unknown>[]>,
+    grantedDaysAgo: number,
+    validity: { validForMonths?: number; gracePeriodDays?: number },
+  ) {
+    Object.assign(rows(store, 'competencies')[0]!, validity);
+    rows(store, 'competencyHolders').push({
+      id: nextId(),
+      orgId: ORG,
+      competencyId: COMPETENCY,
+      userId: CANDIDATE,
+      grantedAt: new Date(Date.now() - grantedDaysAgo * 24 * 60 * 60 * 1000),
+      revokedAt: null,
+    });
+
+    const created = await fetch(`${base}/assessment-tools`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({
+        templateId: TEMPLATE,
+        name: 'Track Dozer',
+        manifest: MANIFEST,
+        candidatePrerequisiteIds: [COMPETENCY],
+      }),
+    });
+    const tool = (await created.json()) as { id: string };
+
+    const res = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
+    });
+    return (await res.json()) as { prerequisiteWarnings: string[] };
+  }
+
+  it('warns that a prerequisite has EXPIRED, not that it is missing', async () => {
+    // The wording carries the action: "missing" sends an assessor to enrol
+    // somebody in training they have already done, "expired" sends them to book
+    // a requalification.
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const body = await caseWithPrerequisite(base, store, 5 * 365, { validForMonths: 36 });
+
+      expect(body.prerequisiteWarnings).toHaveLength(1);
+      expect(body.prerequisiteWarnings[0]).toContain('has expired');
+      expect(body.prerequisiteWarnings[0]).not.toContain('missing');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepts a prerequisite still inside its grace period', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const body = await caseWithPrerequisite(base, store, 3 * 365 + 20, {
+        validForMonths: 36,
+        gracePeriodDays: 90,
+      });
+
+      expect(body.prerequisiteWarnings).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepts an ancient prerequisite when the competency never expires', async () => {
+    // The day this ships, no competency carries a validity. Nothing may start
+    // failing prerequisites until an admin states one.
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const body = await caseWithPrerequisite(base, store, 10 * 365, {});
+
+      expect(body.prerequisiteWarnings).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
 });
 
 // ── attempts ────────────────────────────────────────────────────────────────

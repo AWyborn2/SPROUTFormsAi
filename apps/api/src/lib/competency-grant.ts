@@ -22,7 +22,20 @@ type Database = NonNullable<typeof dbType>;
  * has to filter `revokedAt IS NULL`, and so does the count.
  */
 
-/** Holders of a competency, EXCLUDING revoked grants, written back to the count. */
+/**
+ * Holders of a competency, EXCLUDING revoked grants, written back to the count.
+ *
+ * DELIBERATELY COUNTS GRANTED, NOT CURRENT. Expiry is derived from each grant's
+ * date, so the number of people currently qualified changes as the clock moves,
+ * with no write to trigger a resync — a stored count that excluded expired
+ * grants would be wrong every day after it was written, and silently so. A
+ * count that means "has been granted this, and not had it taken away" is
+ * something a stored integer can actually stay true to.
+ *
+ * Whether a particular person is CURRENT is a per-holder question, answered by
+ * `competencyStatus` at the point of asking. Any screen that shows this number
+ * beside a claim about currency has to get the currency from there.
+ */
 export async function syncHolderCount(database: Database, competencyId: string): Promise<number> {
   // A SQL aggregate, not findMany().length — this table grows with people ×
   // competencies, and loading every row to count it would scale with the
@@ -79,6 +92,12 @@ export interface GrantInput {
   evidenceRef?: string | null;
   /** The assessment case that earned it, when the product granted it itself. */
   sourceCaseId?: string | null;
+  /**
+   * An explicit end date, overriding the one derived from the qualification's
+   * validity. For a date imported from the training system that does not fit
+   * the formula. Omit for a normal grant.
+   */
+  expiresAt?: Date | null;
 }
 
 /**
@@ -119,6 +138,22 @@ export async function grantCompetency(
     ),
   });
 
+  /*
+    REQUALIFYING RESTARTS THE CLOCK.
+
+    Granting is an upsert — a second grant updates the existing row rather than
+    inserting a new one — so `createdAt` records when the person FIRST earned
+    the ticket and never moves again. Expiry counts from `grantedAt`, which is
+    why it is a separate column and why it is stamped on both paths: without
+    this, someone who re-sat a three-year assessment last week would still read
+    as expired from their 2022 grant.
+
+    An explicit `expiresAt` is cleared on a re-grant unless a new one is
+    supplied. It is an override for an imported date, and carrying a stale one
+    forward would silently cap the new grant at the old ticket's end date.
+  */
+  const grantedAt = new Date();
+
   if (existing) {
     await database
       .update(schema.competencyHolders)
@@ -126,6 +161,8 @@ export async function grantCompetency(
         evidenceRef: input.evidenceRef ?? existing.evidenceRef ?? null,
         sourceCaseId: input.sourceCaseId ?? existing.sourceCaseId ?? null,
         grantedByUserId: tenant.userId,
+        grantedAt,
+        expiresAt: input.expiresAt ?? null,
         // A fresh grant supersedes an earlier revocation — the person has just
         // demonstrated the competency again.
         revokedAt: null,
@@ -140,6 +177,8 @@ export async function grantCompetency(
       evidenceRef: input.evidenceRef ?? null,
       sourceCaseId: input.sourceCaseId ?? null,
       grantedByUserId: tenant.userId,
+      grantedAt,
+      expiresAt: input.expiresAt ?? null,
     });
   }
 

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
+import { competencyStatus, countsAsHeld, expiryNote, expiryOf } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -32,14 +33,44 @@ competenciesRouter.get(
       where: eq(schema.competencies.orgId, tenant.orgId),
       orderBy: (c, { desc }) => [desc(c.createdAt)],
     });
-    res.json(rows.map((c) => ({ id: c.id, name: c.name, code: c.code, holders: c.holders })));
+    res.json(
+      rows.map((c) => ({
+        id: c.id,
+        name: c.name,
+        code: c.code,
+        holders: c.holders,
+        // Null on both means this qualification never expires — the state every
+        // competency starts in, and what an admin reviews to change.
+        validForMonths: c.validForMonths,
+        gracePeriodDays: c.gracePeriodDays,
+      })),
+    );
   }),
 );
+
+/*
+  `validForMonths` and `gracePeriodDays` are both optional and both default to
+  NULL — never expires. That is deliberate: a qualification does not start
+  lapsing because someone created it, only because someone stated how long it
+  lasts. 600 months is a sanity ceiling, not a policy.
+*/
+const validityFields = {
+  validForMonths: z.number().int().positive().max(600).nullable().optional(),
+  gracePeriodDays: z.number().int().nonnegative().max(365).nullable().optional(),
+};
 
 const createCompetencyBody = z.object({
   name: z.string().min(1),
   code: z.string().min(1),
   holders: z.number().int().nonnegative().optional(),
+  ...validityFields,
+});
+
+/** Everything on a competency an admin may change after creating it. */
+const updateCompetencyBody = z.object({
+  name: z.string().min(1).optional(),
+  code: z.string().min(1).optional(),
+  ...validityFields,
 });
 
 competenciesRouter.post(
@@ -64,10 +95,86 @@ competenciesRouter.post(
         name: parsed.data.name,
         code: parsed.data.code,
         holders: parsed.data.holders ?? 0,
+        validForMonths: parsed.data.validForMonths ?? null,
+        gracePeriodDays: parsed.data.gracePeriodDays ?? null,
       })
       .returning();
     if (!row) throw new Error('competency_create_failed: insert returned no row');
-    res.status(201).json({ id: row.id, name: row.name, code: row.code, holders: row.holders });
+    res.status(201).json({
+      id: row.id,
+      name: row.name,
+      code: row.code,
+      holders: row.holders,
+      validForMonths: row.validForMonths,
+      gracePeriodDays: row.gracePeriodDays,
+    });
+  }),
+);
+
+/**
+ * Change a competency — including how long it stays valid.
+ *
+ * This is the route that makes expiry real. Every qualification starts with no
+ * validity and therefore never expires; setting one here applies IMMEDIATELY to
+ * every existing grant of it, because expiry is derived from each grant's own
+ * date rather than frozen when it was made. So an admin setting "36 months" on
+ * ATO - Track Dozer instantly gives every holder a real expiry counted from
+ * when they actually earned it — which is what reviewing the backlog means.
+ *
+ * Clearing it back to null makes the qualification perpetual again and un-lapses
+ * everyone. That is a real action an admin might need, so it is expressible.
+ */
+competenciesRouter.patch(
+  '/:id',
+  requireTenant,
+  requirePlanFeature('competencyGating'),
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const parsed = updateCompetencyBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tenant = req.tenant!;
+    const existing = await findOwnedCompetency(db, req.params.id!, tenant.orgId);
+    if (!existing) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    // Only what was SENT. `undefined` leaves a column alone; an explicit null
+    // clears it, which is how "this no longer expires" is expressed.
+    const patch: Record<string, unknown> = {};
+    for (const key of ['name', 'code', 'validForMonths', 'gracePeriodDays'] as const) {
+      if (parsed.data[key] !== undefined) patch[key] = parsed.data[key];
+    }
+    if (Object.keys(patch).length > 0) {
+      await db.update(schema.competencies).set(patch).where(eq(schema.competencies.id, existing.id));
+    }
+
+    // The row as it now stands. No re-select: nothing on this table is computed
+    // by the database, so the loaded row plus the patch just applied IS the new
+    // row, and a second query would only be a slower way to learn that.
+    const row = { ...existing, ...patch } as typeof existing;
+
+    await recordAudit(db, tenant, {
+      action: 'Updated competency',
+      target: `${row.code}: ${Object.keys(patch).join(', ') || 'no change'}`,
+      category: 'settings',
+      icon: 'award',
+    });
+
+    res.json({
+      id: row.id,
+      name: row.name,
+      code: row.code,
+      holders: row.holders,
+      validForMonths: row.validForMonths,
+      gracePeriodDays: row.gracePeriodDays,
+    });
   }),
 );
 
@@ -191,8 +298,17 @@ competenciesRouter.delete(
 );
 
 /**
- * The competency ids a user holds in this org. This is the lookup prerequisite
- * warnings and assessor eligibility both read.
+ * What a user holds in this org, and whether each still counts.
+ *
+ * Returns a STATUS per competency rather than a bare list, because "holds a
+ * row" and "is currently qualified" stopped being the same question once
+ * qualifications gained a validity period. `held` and `expiring` are current;
+ * `grace` is lapsed but still counts, flagged; `expired` does not count.
+ *
+ * The warning window depends on WHO IS ASKING. A candidate looking at their own
+ * record gets 30 days — a prompt to act. Anyone looking at someone else's is
+ * planning a reassessment around a training calendar and gets 90. Pass
+ * `?audience=candidate` to ask for the short one; it is inferred otherwise.
  */
 competenciesRouter.get(
   '/held/:userId',
@@ -214,7 +330,46 @@ competenciesRouter.get(
         isNull(schema.competencyHolders.revokedAt),
       ),
     });
-    res.json(rows.map((r) => ({ competencyId: r.competencyId, evidenceRef: r.evidenceRef })));
+    if (rows.length === 0) {
+      res.json([]);
+      return;
+    }
+
+    const competencies = await db.query.competencies.findMany({
+      where: and(
+        eq(schema.competencies.orgId, tenant.orgId),
+        inArray(schema.competencies.id, rows.map((r) => r.competencyId)),
+      ),
+    });
+    const byId = new Map(competencies.map((c) => [c.id, c]));
+
+    // Someone reading their OWN record is the candidate case; reading another's
+    // is the planning case. Explicit override for a surface that knows better.
+    const audience =
+      req.query.audience === 'candidate' || req.params.userId === tenant.userId
+        ? 'candidate'
+        : 'assessor';
+
+    // One instant for the whole response, so two entries cannot disagree about
+    // what "today" is.
+    const now = new Date();
+    res.json(
+      rows.map((r) => {
+        const competency = byId.get(r.competencyId);
+        const validity = competency ?? {};
+        const status = competencyStatus(r, validity, now, audience);
+        const expiry = expiryOf(r, validity);
+        return {
+          competencyId: r.competencyId,
+          evidenceRef: r.evidenceRef,
+          status,
+          /** True while it still satisfies a requirement — held, expiring or grace. */
+          current: countsAsHeld(status),
+          expiresAt: expiry ? expiry.toISOString() : null,
+          note: competency ? expiryNote(status, expiry, competency.name) : null,
+        };
+      }),
+    );
   }),
 );
 
