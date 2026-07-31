@@ -38,6 +38,7 @@ import type {
   CreatedApiKey,
   BrandScanProposal,
   Competency,
+  CompetencyHolder,
   CompetencyRule,
   DashboardSummary,
   FillLink,
@@ -816,6 +817,17 @@ export const store = {
     validity: { validForMonths: number | null; gracePeriodDays: number | null },
   ): Promise<Competency> {
     return apiClient.patch<CompetencyDto>(`/competencies/${id}`, validity).then(toCompetency);
+  },
+
+  /**
+   * Who holds one competency, and whether each of them is still current.
+   *
+   * Returned already sorted by urgency — expired first, then grace, expiring,
+   * held — because the reason to open this list is to find who needs booking.
+   * Screens render it in order rather than re-sorting.
+   */
+  listCompetencyHolders(competencyId: string): Promise<CompetencyHolder[]> {
+    return apiClient.get<CompetencyHolder[]>(`/competencies/${competencyId}/holders`);
   },
 
   listCompetencyRules(): Promise<CompetencyRule[]> {

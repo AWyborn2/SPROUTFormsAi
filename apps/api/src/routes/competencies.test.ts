@@ -44,6 +44,7 @@ function fakeDb(opts: {
   insertedRule?: unknown;
   competencyHoldersFindFirst?: unknown;
   competencyHoldersFindMany?: unknown[];
+  usersFindMany?: unknown[];
   /** Result of the SQL aggregate syncHolderCount runs. */
   holderCount?: number;
   membershipsFindFirst?: unknown;
@@ -73,6 +74,7 @@ function fakeDb(opts: {
       },
       users: {
         findFirst: vi.fn().mockResolvedValue(undefined),
+        findMany: vi.fn().mockResolvedValue(opts.usersFindMany ?? []),
       },
       competencyHolders: {
         findFirst: vi.fn().mockResolvedValue(opts.competencyHoldersFindFirst),
@@ -601,7 +603,16 @@ describe('competency holders', () => {
     }
   });
 
-  it('recomputes the count down to zero on revoke', async () => {
+  /*
+    THIS USED TO ASSERT `deleteWhere` — THE ROW WAS ERASED.
+
+    Every other revocation in this codebase is soft: `revokeGrantsFromCase`
+    sets revokedAt and keeps the row, and the schema says a hard delete would
+    leave the register disagreeing with the audit log. So an appeal preserved
+    the record while an admin clicking revoke destroyed it, and the audit entry
+    was left pointing at a row that no longer existed.
+  */
+  it('revokes without erasing, and recomputes the count down to zero', async () => {
     const f = fakeDb({
       competenciesFindFirst: competency,
       competencyHoldersFindMany: [],
@@ -616,8 +627,57 @@ describe('competency holders', () => {
 
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ competencyId: 'c1', holders: 0 });
-      expect(f.deleteWhere).toHaveBeenCalledWith(schema.competencyHolders, expect.anything());
+      // The row survives, stamped.
+      expect(f.deleteWhere).not.toHaveBeenCalled();
+      expect(f.updateSet).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ revokedAt: expect.any(Date) }),
+      );
+      // And it stops counting: the aggregate excludes revoked rows.
       expect(f.updateSet).toHaveBeenCalledWith(schema.competencies, { holders: 0 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records why, so an auditor is not left guessing', async () => {
+    const f = fakeDb({ competenciesFindFirst: competency, competencyHoldersFindMany: [] });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/competencies/c1/holders/${HOLDER_ID}`, {
+        method: 'DELETE',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: 'Appeal upheld — result set aside' }),
+      });
+
+      expect(f.updateSet).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ revokedReason: 'Appeal upheld — result set aside' }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stores a reason even when the caller sends no body', async () => {
+    // A DELETE with no body is the existing caller shape, and must keep
+    // working — but an unexplained revocation is the one an auditor most wants
+    // explained, so it still records how it happened.
+    const f = fakeDb({ competenciesFindFirst: competency, competencyHoldersFindMany: [] });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders/${HOLDER_ID}`, {
+        method: 'DELETE',
+        headers: authHeader(),
+      });
+
+      expect(res.status).toBe(200);
+      expect(f.updateSet).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ revokedReason: 'Revoked by an administrator' }),
+      );
     } finally {
       server.close();
     }
@@ -786,6 +846,231 @@ describe('competency holders', () => {
     const { server, base } = startApp();
     try {
       const res = await fetch(`${base}/competencies/held/${OUTSIDER_ID}`, { headers: authHeader() });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/*
+  GET /competencies/:id/holders — the inverse lookup.
+
+  `competencies.holders` could say "12 people hold this" but never which twelve,
+  and being a stored count of grants it cannot say how many are still in date.
+  So an admin could set a validity and then had no way to see who it had just
+  lapsed. This route is what makes that visible, which means the ORDER is part
+  of its contract: the reason to open the list is to find who needs booking.
+*/
+describe('GET /competencies/:id/holders', () => {
+  const TRACK_DOZER = {
+    id: 'c1',
+    orgId: 'org-1',
+    name: 'ATO - Track Dozer',
+    code: 'Q34666893',
+    holders: 3,
+    validForMonths: 36,
+    gracePeriodDays: null,
+  };
+  const ago = (days: number) => new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+  const PEOPLE = [
+    { id: 'u-current', name: 'Ada Current', email: 'ada@example.com' },
+    { id: 'u-lapsed', name: 'Bo Lapsed', email: 'bo@example.com' },
+    { id: 'u-soon', name: 'Cy Soon', email: 'cy@example.com' },
+  ];
+
+  it('names each holder and says whether they are still current', async () => {
+    mockDbValue = fakeDb({
+      competenciesFindFirst: TRACK_DOZER,
+      competencyHoldersFindMany: [
+        { userId: 'u-current', grantedAt: ago(200), evidenceRef: 'CERT-1', revokedAt: null },
+      ],
+      usersFindMany: PEOPLE,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+
+      expect(res.status).toBe(200);
+      const [row] = (await res.json()) as {
+        userId: string;
+        name: string;
+        email: string;
+        status: string;
+        current: boolean;
+        expiresAt: string;
+      }[];
+      expect(row!.userId).toBe('u-current');
+      expect(row!.name).toBe('Ada Current');
+      expect(row!.email).toBe('ada@example.com');
+      expect(row!.status).toBe('held');
+      expect(row!.current).toBe(true);
+      expect(row!.expiresAt).toBeTruthy();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('derives the expiry from the grant date and the competency period', async () => {
+    // Not just "a date" — three years on from the day this person earned it.
+    // The date portion only: the derivation adds months calendrically in local
+    // time, so the instant can differ by an offset while the day does not.
+    mockDbValue = fakeDb({
+      competenciesFindFirst: TRACK_DOZER,
+      competencyHoldersFindMany: [
+        { userId: 'u-current', grantedAt: new Date('2024-01-15T00:00:00.000Z'), revokedAt: null },
+      ],
+      usersFindMany: PEOPLE,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { grantedAt: string; expiresAt: string }[];
+      expect(row!.grantedAt).toBe('2024-01-15T00:00:00.000Z');
+      expect(row!.expiresAt.slice(0, 10)).toBe('2027-01-15');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('orders dated holders ahead of undated ones within a status group', async () => {
+    /*
+      A competency with no validity, where individual grants carry an imported
+      expiry — which is what the per-grant `expiresAt` override exists for. The
+      comparator used to compare dates only when BOTH sides had one and fall
+      through to the name otherwise, which is intransitive: the resulting order
+      then depended on the order rows came back in rather than on the data.
+    */
+    const PERPETUAL = { ...TRACK_DOZER, validForMonths: null };
+    mockDbValue = fakeDb({
+      competenciesFindFirst: PERPETUAL,
+      competencyHoldersFindMany: [
+        { userId: 'u-current', grantedAt: ago(10), revokedAt: null },
+        {
+          userId: 'u-soon',
+          grantedAt: ago(10),
+          expiresAt: new Date(Date.now() + 400 * 24 * 60 * 60 * 1000),
+          revokedAt: null,
+        },
+        {
+          userId: 'u-lapsed',
+          grantedAt: ago(10),
+          expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000),
+          revokedAt: null,
+        },
+      ],
+      usersFindMany: PEOPLE,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+
+      const rows = (await res.json()) as { name: string; status: string; expiresAt: string | null }[];
+      // All three are 'held', so ordering is decided entirely by the tie-break.
+      expect(rows.map((r) => r.status)).toEqual(['held', 'held', 'held']);
+      expect(rows.map((r) => r.name)).toEqual(['Bo Lapsed', 'Cy Soon', 'Ada Current']);
+      expect(rows[2]!.expiresAt).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('puts who needs doing something first, not who is alphabetically first', async () => {
+    /*
+      Ada is fine, Bo has lapsed, Cy is close. Alphabetically that is exactly
+      the wrong order — the two people who need booking would sit below the one
+      who does not, and on a real register they would be below two hundred.
+    */
+    mockDbValue = fakeDb({
+      competenciesFindFirst: TRACK_DOZER,
+      competencyHoldersFindMany: [
+        { userId: 'u-current', grantedAt: ago(200), revokedAt: null },
+        { userId: 'u-lapsed', grantedAt: ago(5 * 365), revokedAt: null },
+        { userId: 'u-soon', grantedAt: ago(3 * 365 - 40), revokedAt: null },
+      ],
+      usersFindMany: PEOPLE,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+
+      const rows = (await res.json()) as { name: string; status: string }[];
+      expect(rows.map((r) => r.status)).toEqual(['expired', 'expiring', 'held']);
+      expect(rows.map((r) => r.name)).toEqual(['Bo Lapsed', 'Cy Soon', 'Ada Current']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('always uses the assessor window, never the candidate one', async () => {
+    // Everyone reading this list is looking at other people's records to plan
+    // reassessments. 40 days out is a warning here; on someone's own record it
+    // would not be.
+    mockDbValue = fakeDb({
+      competenciesFindFirst: TRACK_DOZER,
+      competencyHoldersFindMany: [
+        { userId: 'u-soon', grantedAt: ago(3 * 365 - 40), revokedAt: null },
+      ],
+      usersFindMany: PEOPLE,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      // Even asked for as a candidate — this route has no such mode.
+      const res = await fetch(`${base}/competencies/c1/holders?audience=candidate`, {
+        headers: authHeader(),
+      });
+
+      const [row] = (await res.json()) as { status: string; note: string }[];
+      expect(row!.status).toBe('expiring');
+      expect(row!.note).toContain('expires on');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not invent a name when the user row is gone', async () => {
+    // A grant outliving its user row means something went wrong upstream.
+    // Rendering a blank cell hides it; naming it does not.
+    mockDbValue = fakeDb({
+      competenciesFindFirst: TRACK_DOZER,
+      competencyHoldersFindMany: [{ userId: 'u-vanished', grantedAt: ago(10), revokedAt: null }],
+      usersFindMany: [],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { name: string; email: null }[];
+      expect(row!.name).toBe('Unknown user');
+      expect(row!.email).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for a competency outside the caller org', async () => {
+    // Without the ownership check this would list another org's register from
+    // an id alone.
+    mockDbValue = fakeDb({ competenciesFindFirst: undefined }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns an empty list for a competency nobody holds', async () => {
+    mockDbValue = fakeDb({ competenciesFindFirst: TRACK_DOZER, competencyHoldersFindMany: [] }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
 
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual([]);

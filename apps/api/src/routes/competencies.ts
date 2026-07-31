@@ -212,6 +212,15 @@ const grantBody = z.object({
   evidenceRef: z.string().max(200).optional(),
 });
 
+/**
+ * Why a competency was taken away. Optional because a DELETE may carry no body
+ * at all — an existing caller sending nothing must keep working — but stored
+ * either way, since the revocation itself outlives the person who did it.
+ */
+const revokeBody = z.object({
+  reason: z.string().max(500).optional(),
+});
+
 /** Grant a competency to a person. Idempotent — re-granting is a no-op. */
 competenciesRouter.post(
   '/:id/holders',
@@ -260,9 +269,95 @@ competenciesRouter.post(
   }),
 );
 
-/** Revoke a competency from a person. */
+/**
+ * Revoke a competency from a person — WITHOUT ERASING THE RECORD.
+ *
+ * THIS USED TO HARD-DELETE THE ROW, and that contradicted every other
+ * revocation in this codebase. `revokeGrantsFromCase` sets `revokedAt` and
+ * keeps the row; the schema says so at the column: "A hard delete would leave
+ * the register silently disagreeing with the audit log." So an appeal-driven
+ * revocation preserved the record while an admin clicking revoke destroyed it —
+ * two paths disagreeing about the same act, with the audit entry left pointing
+ * at a row that no longer existed.
+ *
+ * Something that WAS true has to stay visible to the audit conversation about
+ * it. The row survives, stops conferring anything (every eligibility read
+ * filters `revokedAt IS NULL`, including the count), and can be re-granted:
+ * `grantCompetency` upserts and clears the revocation, which is what
+ * requalifying after an overturned result looks like.
+ *
+ * Still DELETE rather than PATCH — it is the destructive verb from the caller's
+ * point of view, and the URL is unchanged.
+ */
 competenciesRouter.delete(
   '/:id/holders/:userId',
+  requireTenant,
+  requirePlanFeature('competencyGating'),
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const parsed = revokeBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tenant = req.tenant!;
+    const competency = await findOwnedCompetency(db, req.params.id!, tenant.orgId);
+    if (!competency) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    await db
+      .update(schema.competencyHolders)
+      .set({
+        revokedAt: new Date(),
+        // Never null: a revocation with no stated reason is the one an auditor
+        // most wants explained, so the default says at least how it happened.
+        revokedReason: parsed.data.reason ?? 'Revoked by an administrator',
+      })
+      .where(
+        and(
+          eq(schema.competencyHolders.competencyId, competency.id),
+          eq(schema.competencyHolders.userId, req.params.userId!),
+          // Already-revoked rows are left alone: re-revoking would overwrite
+          // the date and reason of the revocation that actually happened.
+          isNull(schema.competencyHolders.revokedAt),
+        ),
+      );
+    await recordAudit(db, tenant, {
+      action: 'Revoked competency',
+      target: `${competency.code} → ${req.params.userId}`,
+      category: 'settings',
+      icon: 'award',
+    });
+
+    const holders = await syncHolderCount(db, competency.id);
+    res.json({ competencyId: competency.id, holders });
+  }),
+);
+
+/**
+ * Who holds one competency, and whether each of them is still current.
+ *
+ * The inverse of `/held/:userId`, and the question an admin actually asks:
+ * `competencies.holders` can say "12 people hold this" but never which twelve,
+ * and — being a stored count of grants — it cannot say how many are still in
+ * date. Nothing surfaced that until this route: an admin could set a validity
+ * and then had no way to see who it had just lapsed.
+ *
+ * Always the ASSESSOR window (90 days). Everyone reading this is looking at
+ * other people's records to plan reassessments; the 30-day candidate window is
+ * for someone reading their own, which this route is not.
+ *
+ * Revoked grants are excluded. They are kept for the audit trail and confer
+ * nothing, so listing them here would pad the register with people who are not
+ * holders.
+ */
+competenciesRouter.get(
+  '/:id/holders',
   requireTenant,
   requirePlanFeature('competencyGating'),
   withErrorHandling(async (req, res) => {
@@ -277,23 +372,82 @@ competenciesRouter.delete(
       return;
     }
 
-    await db
-      .delete(schema.competencyHolders)
-      .where(
-        and(
-          eq(schema.competencyHolders.competencyId, competency.id),
-          eq(schema.competencyHolders.userId, req.params.userId!),
-        ),
-      );
-    await recordAudit(db, tenant, {
-      action: 'Revoked competency',
-      target: `${competency.code} → ${req.params.userId}`,
-      category: 'settings',
-      icon: 'award',
+    const rows = await db.query.competencyHolders.findMany({
+      where: and(
+        eq(schema.competencyHolders.competencyId, competency.id),
+        eq(schema.competencyHolders.orgId, tenant.orgId),
+        isNull(schema.competencyHolders.revokedAt),
+      ),
+    });
+    if (rows.length === 0) {
+      res.json([]);
+      return;
+    }
+
+    /*
+      One query for every holder's identity rather than one per row. This list
+      is people × one competency, so a per-row lookup would issue a query per
+      holder on a screen whose whole purpose is showing all of them at once.
+    */
+    const users = await db.query.users.findMany({
+      where: inArray(
+        schema.users.id,
+        rows.map((r) => r.userId),
+      ),
+    });
+    const userById = new Map(users.map((u) => [u.id, u]));
+
+    // One instant for the whole response, so two holders cannot disagree about
+    // what "today" is and sort inconsistently.
+    const now = new Date();
+    const holders = rows.map((r) => {
+      const status = competencyStatus(r, competency, now, 'assessor');
+      const expiry = expiryOf(r, competency);
+      const user = userById.get(r.userId);
+      return {
+        userId: r.userId,
+        // A grant can outlive the user row it points at only if that row was
+        // deleted out from under it; name it rather than rendering a blank.
+        name: user?.name ?? 'Unknown user',
+        email: user?.email ?? null,
+        evidenceRef: r.evidenceRef,
+        grantedAt: r.grantedAt.toISOString(),
+        expiresAt: expiry ? expiry.toISOString() : null,
+        status,
+        current: countsAsHeld(status),
+        note: expiryNote(status, expiry, competency.name),
+      };
     });
 
-    const holders = await syncHolderCount(db, competency.id);
-    res.json({ competencyId: competency.id, holders });
+    /*
+      SORTED BY WHAT NEEDS DOING, not alphabetically. The reason to open this
+      list is to find who has lapsed and who is about to, so those come first;
+      within a group the nearest date leads. A name-sorted register would bury
+      the two people who need booking among two hundred who do not.
+    */
+    const URGENCY = { expired: 0, grace: 1, expiring: 2, held: 3, revoked: 4 } as const;
+    holders.sort((a, b) => {
+      const byUrgency = URGENCY[a.status] - URGENCY[b.status];
+      if (byUrgency !== 0) return byUrgency;
+
+      /*
+        DATED BEFORE UNDATED, then by date. A holder can lack an expiry while
+        their neighbour has one — the competency carries no validity, but an
+        individual grant carries an imported `expiresAt` — and an earlier
+        version of this only compared dates when BOTH sides had one, falling
+        through to the name otherwise. That makes the comparator intransitive:
+        A before B by date, B before C by name, C before A by name, and the
+        resulting order depends on the input order rather than the data.
+      */
+      if (a.expiresAt !== b.expiresAt) {
+        if (!a.expiresAt) return 1;
+        if (!b.expiresAt) return -1;
+        return a.expiresAt < b.expiresAt ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
+
+    res.json(holders);
   }),
 );
 

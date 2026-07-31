@@ -76,6 +76,13 @@ const keys = {
   auditLog: ['auditLog'] as const,
   billing: ['billing'] as const,
   competencies: ['competencies'] as const,
+  /**
+   * Nested under `competencies` on purpose: changing a competency's validity
+   * re-dates every one of its holders, so invalidating the list has to sweep
+   * the registers too. A sibling key would leave an open register showing
+   * statuses computed against the old period.
+   */
+  competencyHolders: (id: string) => ['competencies', id, 'holders'] as const,
   assessmentTools: ['assessmentTools'] as const,
   assessmentCases: ['assessmentCases'] as const,
   /**
@@ -672,6 +679,21 @@ export function useCompetencies() {
 
 export function useCompetencyRules() {
   return useQuery({ queryKey: keys.competencyRules, queryFn: () => store.listCompetencyRules() });
+}
+
+/**
+ * Who holds one competency, and whether each is still current.
+ *
+ * No `enabled` guard and no nullable id: the register is mounted only for the
+ * competency actually expanded, so calling this hook IS the decision to fetch.
+ * A hook that took null and disabled itself would put that decision in two
+ * places and let a caller mount the component without meaning to load it.
+ */
+export function useCompetencyHolders(competencyId: string) {
+  return useQuery({
+    queryKey: keys.competencyHolders(competencyId),
+    queryFn: () => store.listCompetencyHolders(competencyId),
+  });
 }
 
 /** Set, change or clear how long a competency stays valid. */
