@@ -432,6 +432,61 @@ export function rulesFromSegments(
   return { xs: dedupe(xs), ys: dedupe(ys) };
 }
 
+/** A printed horizontal rule-line, keeping the extent `RuleLines` discards. */
+export interface RuleSpan {
+  y: number;
+  x1: number;
+  x2: number;
+}
+
+/**
+ * Horizontal rule-lines WITH their endpoints.
+ *
+ * `rulesFromSegments` collapses every rule to a bare y, which is all a drag-snap
+ * target needs. Placing a box on a printed write-on line needs the opposite: the
+ * line's own start and end ARE the box's x and width, measured rather than
+ * guessed. That distinction is why a scalar placement rule can exist at all —
+ * `PositionedText` carries no height and no strokes, so a text-only rule has no
+ * vertical signal whatever and would have to invent one.
+ *
+ * Two near-coincident spans merge: a write-on line drawn as a thin filled
+ * rectangle reaches us as its two long edges, and an overdrawn rule as two lines
+ * a hair apart. Both are one printed line. `mergeY` defaults to the same
+ * tolerance used to decide whether two text runs share a baseline, because it
+ * answers the same question about the same page.
+ */
+export function horizontalRuleSpans(
+  segments: readonly DrawSegment[],
+  {
+    minLength = 18,
+    tolerance = 0.5,
+    mergeY = 1.5,
+  }: { minLength?: number; tolerance?: number; mergeY?: number } = {},
+): RuleSpan[] {
+  const spans: RuleSpan[] = [];
+  for (const s of segments) {
+    if (![s.x1, s.y1, s.x2, s.y2].every(Number.isFinite)) continue;
+    if (Math.abs(s.y2 - s.y1) > tolerance) continue;
+    if (Math.abs(s.x2 - s.x1) < minLength) continue;
+    spans.push({ y: (s.y1 + s.y2) / 2, x1: Math.min(s.x1, s.x2), x2: Math.max(s.x1, s.x2) });
+  }
+
+  spans.sort((a, b) => a.y - b.y || a.x1 - b.x1);
+
+  const merged: RuleSpan[] = [];
+  for (const s of spans) {
+    const prev = merged[merged.length - 1];
+    // Same line, and touching or overlapping horizontally — one printed rule.
+    if (prev && Math.abs(s.y - prev.y) <= mergeY && s.x1 <= prev.x2 + 1) {
+      prev.x2 = Math.max(prev.x2, s.x2);
+      prev.y = (prev.y + s.y) / 2;
+      continue;
+    }
+    merged.push({ ...s });
+  }
+  return merged;
+}
+
 /**
  * Where a dragged edge may land: both edges of every printed run on the page.
  *
@@ -997,9 +1052,17 @@ export function panelState(
     };
   }
 
-  // A non-table field has nothing to derive — its value prints in one place.
-  // Offer the draw tool directly rather than the "derived grid" language a
-  // table uses, so the copy only ever names the action actually available (R5).
+  /*
+    A non-table field has no GRID to derive — its value prints in one place. It
+    may still have a box, measured off the printed write-on line beside its
+    caption; the panel offers that separately, because it is one box rather than
+    a grid and a reviewer confirms it differently.
+
+    This still returns `draw-only` so the copy names the action always
+    available. Do not read it as "nothing can be proposed for a scalar" — that
+    was true until the ruled-cell rule, and a stale comment asserting the
+    opposite of the code is how the next reader gets it wrong (R5).
+  */
   if (field.type !== 'repeating_group') {
     return {
       kind: 'draw-only',

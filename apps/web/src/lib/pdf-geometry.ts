@@ -21,6 +21,7 @@
  */
 import { resolveGeometry } from '@formai/shared';
 import type { GeometryBand, PageBox, RepeatingColumn } from '@formai/shared';
+import type { RuleSpan } from '../screens/import/inspector/geometry-actions.js';
 
 /**
  * One positioned text run, in PDF point space (origin bottom-left).
@@ -47,6 +48,21 @@ export interface TextPage {
   items: PositionedText[];
   width: number;
   height: number;
+  /**
+   * Printed horizontal rule-lines on this page, with their endpoints.
+   *
+   * Optional, and absence means "NOT MEASURED" — a rule reading this must refuse
+   * rather than fall back to inferring an answer area from white space. There is
+   * no vertical signal in the text layer at all: `PositionedText` carries no
+   * height and no strokes, so any such fallback is an invented y, and an
+   * invented y on a competency record is a mark in whatever box happens to be
+   * there.
+   *
+   * Carried on the page because the extractor that produces it needs pdf.js and
+   * so lives in the viewer, while the rules that consume it live here — which
+   * keeps this module a pure function over positioned geometry.
+   */
+  rules?: readonly RuleSpan[];
 }
 
 export interface TableProposal {
