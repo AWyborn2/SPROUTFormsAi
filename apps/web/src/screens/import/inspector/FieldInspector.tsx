@@ -193,6 +193,9 @@ export function FieldInspector({ field, index, count, onSelect, textPages, activ
           <GeometryInspector
             field={field}
             textPages={textPages}
+            /* Lets an outcome cell find its parent question and a sibling box
+               a reviewer already confirmed. Nothing else reads it. */
+            fields={fields}
             activeDrawSlot={activeDrawSlot}
             onToggleDrawSlot={onToggleDrawSlot}
           />

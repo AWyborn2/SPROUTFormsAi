@@ -489,6 +489,76 @@ async function main() {
     );
   }
 
+  /* ── each part's own assessor name and date boxes ───────────────────────
+
+     The paper prints a sign-off line at the end of EVERY part, not only on the
+     cover. `assembleCaseValues` already writes those from the ATTEMPT's columns
+     — the assessor who marked that part, on the date they marked it, which is
+     exactly why those live as columns rather than in `values`. Nothing named
+     them, so every part's line printed empty.
+
+     Scoped to the part's own field range rather than searched document-wide:
+     the same label appears once per part, so a global search would find six and
+     refuse them all as ambiguous. A part runs from its anchor to the next
+     part's anchor — the same slice the manifest already uses.
+
+     Fields already claimed by the front-page block are excluded. Two claimants
+     on one field is a hard problem in `validateManifest` — correctly, since the
+     merge order would let one silently overwrite the other — and the cover
+     page's own boxes may sit inside a part's range.
+  */
+  const claimed = new Set(
+    [
+      signOff.assessorNameFieldId,
+      signOff.signedDateFieldId,
+      signOff.assessorSignatureFieldId,
+      candidateNameField && candidateNameField.id,
+    ].filter(Boolean),
+  );
+
+  const indexOfId = new Map(fields.map((f, i) => [f.id, i]));
+  const partBoxReport = [];
+
+  parts.forEach((part, i) => {
+    const from = indexOfId.get(part.startFieldId);
+    if (from === undefined) return;
+    const nextAnchor = parts[i + 1] && parts[i + 1].startFieldId;
+    const to = nextAnchor !== undefined ? (indexOfId.get(nextAnchor) ?? fields.length) : fields.length;
+    const within = fields.slice(from, to).filter((f) => !claimed.has(f.id));
+
+    const oneWithin = (what, re, types) => {
+      const hits = within.filter((f) => types.includes(f.type) && re.test(norm(f.label)));
+      if (hits.length === 1) return hits[0];
+      if (hits.length > 1) {
+        warnings.push(
+          `${part.key} ${what}: ${hits.length} fields match (${hits.map((f) => f.id).join(', ')}) — ` +
+            `none declared, because printing it in the wrong one is worse than a blank box.`,
+        );
+      }
+      return undefined;
+    };
+
+    const nameField = oneWithin('assessor name', /assessor.*name|name.*assessor|assessor.*print/, SCALARS);
+    const dateField = oneWithin('date', /\bdate\b/, ['date', 'text']);
+
+    if (nameField) {
+      part.assessorNameFieldId = nameField.id;
+      claimed.add(nameField.id);
+    }
+    if (dateField) {
+      part.signedDateFieldId = dateField.id;
+      claimed.add(dateField.id);
+    }
+    partBoxReport.push(
+      `  ${part.key.padEnd(14)} name → ${nameField ? nameField.id : '—'}   date → ${dateField ? dateField.id : '—'}`,
+    );
+  });
+
+  if (partBoxReport.length) {
+    console.log("\nPer-part assessor boxes (written from each attempt's own columns):");
+    for (const line of partBoxReport) console.log(line);
+  }
+
   const manifest = {
     parts,
     ...(streamField ? { locationStreamFieldId: streamField.id } : {}),
@@ -513,11 +583,31 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
      from the document. Passing none is legitimate — the assessment still runs
      and the certificate still prints — so it warns rather than refusing.
   */
-  const awardsCode = flag('--awards');
+  /*
+     Q34666893 IS "ATO - Track Dozer" — the ticket this assessment awards.
+
+     It was listed as a candidate PREREQUISITE, which is circular: a candidate
+     would have needed the Track Dozer authorisation before being allowed to sit
+     the assessment that grants it. Every case would have opened carrying a
+     prerequisite warning that could never be satisfied except by having already
+     passed. Confirmed against the BisTrainer training matrix, which resolves
+     the four codes this script uses:
+
+       Q34666893  ATO - Track Dozer            ← what passing AWARDS
+       Q50001782  Licence - Driver Car (C)     ← a real candidate prerequisite
+       Q50071833  Worsley Assessor Skill Set   ← a real assessor competency
+       Q50073293  not present in the matrix    ← see the warning below
+
+     It stays on the ASSESSOR list, which is not circular and is the point: the
+     person signing off a Track Dozer assessment should hold the Track Dozer
+     ticket themselves.
+  */
+  const AWARDED_DEFAULT = 'Q34666893';
+  const awardsCode = flag('--awards') ?? AWARDED_DEFAULT;
   const codes = {
-    candidate: ['Q34666893', 'Q50001782'],
+    candidate: ['Q50001782'],
     assessor: ['Q34666893', 'Q50071833', 'Q50073293'],
-    awarded: awardsCode ? [awardsCode] : [],
+    awarded: [awardsCode],
   };
   const rows = await sql`select id, code from competencies where org_id = ${template.org_id}`;
   const byCode = new Map(rows.map((r) => [r.code, r.id]));
@@ -530,19 +620,15 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
   const candidatePrereqs = pick(codes.candidate, 'Candidate');
   const assessorComps = pick(codes.assessor, 'Assessor');
   const awardedComps = pick(codes.awarded, 'Awarded');
-  if (!awardsCode) {
+  if (awardedComps.length === 0) {
     warnings.push(
-      'No --awards <code> given, so passing this assessment grants NOTHING. The case will ' +
-        'reach competent and the certificate will print, but the competency register will ' +
-        'not record the candidate. Pass --awards with the competency code this assessment confers.',
-    );
-  } else if (awardedComps.length === 0) {
-    warnings.push(
-      `--awards ${awardsCode} does not match a competency in this org, so nothing will be granted. ` +
-        'Create the competency first, then re-run.',
+      `Awarded competency ${awardsCode} is not recorded in this org, so passing this assessment ` +
+        'will grant NOTHING. The case still reaches competent and the certificate still prints — ' +
+        'only the register stays empty. Create the competency with that code, then re-run: the ' +
+        'grant is an upsert, so re-running is safe.',
     );
   } else {
-    console.log(`\nPassing this assessment awards: ${awardsCode}`);
+    console.log(`\nPassing this assessment awards: ${awardsCode} (ATO - Track Dozer)`);
   }
 
   // ── validate exactly as the API would ───────────────────────────────────

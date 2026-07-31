@@ -12,10 +12,10 @@
  */
 import { useMemo, useState } from 'react';
 import { Button, Icon, Switch } from '@formai/ui';
-import { isChoiceField } from '@formai/shared';
+import { isChoiceField, linkOutcomeTargets } from '@formai/shared';
 import type { GeometryBand, PageBox } from '@formai/shared';
 import type { TextPage } from '../../../lib/pdf-geometry.js';
-import { proposeScalarCell } from '../../../lib/pdf-geometry.js';
+import { proposeFromExemplar, proposeScalarCell } from '../../../lib/pdf-geometry.js';
 import { markSentence } from '../../../lib/mark-description.js';
 import {
   adjustGeometryBand,
@@ -44,13 +44,18 @@ export interface GeometryInspectorProps {
   field: ReviewField;
   /** Page text from the viewer; empty until the PDF has been read. */
   textPages: readonly TextPage[];
+  /**
+   * Every field in the session. Used only to find an outcome cell's parent
+   * question and a sibling exemplar; absent simply disables that offer.
+   */
+  fields?: readonly ReviewField[];
   /** The draw-armed slot (this field's id, or a checkbox option's `optionSlotId`). */
   activeDrawSlot?: string | null;
   /** Arm/disarm the draw gesture for one slot on the PDF overlay (KTD5). */
   onToggleDrawSlot?: (slot: string) => void;
 }
 
-export function GeometryInspector({ field, textPages, activeDrawSlot = null, onToggleDrawSlot }: GeometryInspectorProps) {
+export function GeometryInspector({ field, textPages, fields, activeDrawSlot = null, onToggleDrawSlot }: GeometryInspectorProps) {
   const proposal = geometryProposal(field.id);
   const confirmed = geometryConfirmed(field.id);
   // This field's own box is armed when the active slot IS the field id; a
@@ -78,6 +83,45 @@ export function GeometryInspector({ field, textPages, activeDrawSlot = null, onT
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [field.id, field.type, columnSig, rowCount, textPages, Boolean(proposal)],
   );
+
+
+  /*
+    An outcome cell's box, copied from one the reviewer already placed.
+
+    Outcome cells cannot be located from the page: their labels are names the
+    extractor invented and appear nowhere in the document. But they are all the
+    same box in the same column, one per question row — so once a human has
+    placed ONE, every other can reuse its column and size, with only the row
+    derived from the question's own printed label.
+
+    `proposeFromExemplar` has existed and been tested since the outcome-cell
+    work; it simply had no caller, so all 31 stayed hand-drawn. This is the
+    caller.
+
+    The parent question is resolved the same way publish resolves it — by
+    printed reference through `linkOutcomeTargets` — rather than by adjacency,
+    because the whole point of the reference is that adjacency shifts.
+  */
+  const exemplarCell = useMemo(() => {
+    if (proposal || field.type !== 'check_cross' || !fields) return null;
+
+    const { links } = linkOutcomeTargets(fields);
+    const link = links.find((l) => l.outcomeId === field.id);
+    if (!link) return null;
+    const question = fields.find((f) => f.id === link.questionId);
+    if (!question?.label) return null;
+
+    // A sibling the reviewer has already CONFIRMED. Confirmation is the signal
+    // that a human checked it against the page; copying an unconfirmed box
+    // would propagate a guess thirty times over.
+    const exemplar = fields.find(
+      (f) => f.type === 'check_cross' && f.id !== field.id && geometryConfirmed(f.id) && geometryProposal(f.id),
+    );
+    const box = exemplar ? geometryProposal(exemplar.id) : undefined;
+    if (!box) return null;
+
+    return proposeFromExemplar({ pages: textPages, exemplar: box, questionLabel: question.label });
+  }, [proposal, field.type, field.id, fields, textPages]);
 
   /*
     A scalar's box, measured off the printed CELL beneath its caption. Same
@@ -204,6 +248,32 @@ export function GeometryInspector({ field, textPages, activeDrawSlot = null, onT
       {state.kind === 'draw-only' ? (
         <>
           <p className="text-[11.5px] leading-snug text-text-tertiary">{state.reason}</p>
+          {/*
+            An outcome cell's box, copied from one already confirmed. Offered
+            only from the SECOND cell onward: the first is drawn by hand, and
+            every later one reuses that column with the row derived from its own
+            question's printed label.
+          */}
+          {exemplarCell?.segments[0] && (
+            <div className="rounded-md border border-border-accent bg-surface-2 p-[10px_11px]">
+              {exemplarCell.notes.map((n: string) => (
+                <p key={n} className="text-[11.5px] leading-snug text-text-secondary">
+                  {n}
+                </p>
+              ))}
+              <p className="mt-1 text-[11px] leading-snug text-text-tertiary">
+                Check it sits on this question’s row before confirming.
+              </p>
+              <Button
+                variant="ghost"
+                leadingIcon="wand-2"
+                onClick={() => proposeGeometry(field.id, exemplarCell.segments[0]!)}
+                className="mt-1.5 justify-center"
+              >
+                Use this box
+              </Button>
+            </div>
+          )}
           {/*
             A box measured off the printed cell, or the reason there is none.
             Stating the refusal matters as much as making the offer: without it
