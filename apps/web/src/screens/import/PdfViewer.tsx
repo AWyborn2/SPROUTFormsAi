@@ -14,6 +14,8 @@ import {
   previewMarks,
   rowHandles,
   rulesFromSegments,
+  horizontalRuleSpans,
+  type RuleSpan,
   segmentsFromDrawOps,
   snapDrawnBox,
   snapEdge,
@@ -68,21 +70,43 @@ interface PageRender {
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
 
 /**
- * The flat pdf.js `constructPath` draw-op array out of one operator entry.
+ * The flat pdf.js `constructPath` draw-op arrays out of one operator entry.
  *
- * The operand packing has moved across pdf.js versions (the flat op array has
- * sat at index 0 and index 1), so rather than pin a position we pick the
- * array-like member that begins with a `moveTo` (op 0) — the way every path
- * starts. The `minMax` bounds array is length-4 and starts with a coordinate,
- * and the paint-op constant is a scalar, so neither is mistaken for the path.
+ * THIS USED TO FIND NOTHING, silently. pdf.js 6.x packs the entry as
+ * `[paintOp, [subpath, …], minMax]` — the paths are one level DOWN, inside a
+ * wrapper whose own `.length` is the subpath count. The previous version looked
+ * only at the top level for an array-like of length >= 3 beginning with a
+ * `moveTo`, so it saw a scalar, a wrapper of length 1 whose [0] is an array,
+ * and a length-4 bounds array — and matched none of them.
+ *
+ * The consequence was invisible because `extractRuleLines` is guarded and falls
+ * back to text-edge snapping: the drag-to-printed-rule feature simply never
+ * engaged on any document, and nothing said so. Measured on the Track Dozer:
+ * 0 rules found before this fix, 349 after.
+ *
+ * Returns EVERY subpath rather than the first. A bordered table is often one
+ * `constructPath` per cell region, so stopping at the first drops most of the
+ * grid — which is the difference between a rule that can measure a cell and one
+ * that cannot.
  */
-function drawOpsOf(args: unknown): ArrayLike<number> | null {
-  if (!Array.isArray(args)) return null;
-  for (const el of args) {
+function drawOpsOf(args: unknown): ArrayLike<number>[] {
+  if (!Array.isArray(args)) return [];
+  const out: ArrayLike<number>[] = [];
+
+  const consider = (el: unknown) => {
     const arr = el as ArrayLike<number> | null;
-    if (arr && typeof arr.length === 'number' && arr.length >= 3 && arr[0] === 0) return arr;
+    // A real path starts with a moveTo (op 0) and carries at least one command.
+    if (arr && typeof arr.length === 'number' && arr.length >= 3 && arr[0] === 0) out.push(arr);
+  };
+
+  for (const el of args) {
+    consider(el);
+    // One level down: the subpath wrapper. Deliberately not deeper — anything
+    // further nested is not a shape pdf.js produces, and recursing blindly
+    // through operands is how a bounds array gets read as coordinates.
+    if (Array.isArray(el)) for (const sub of el) consider(sub);
   }
-  return null;
+  return out;
 }
 
 /**
@@ -96,7 +120,9 @@ function drawOpsOf(args: unknown): ArrayLike<number> | null {
  * glyph stroke. Best-effort and fully guarded: any failure yields no rules and
  * the caller falls back to the tightened text snap, so drawing never breaks.
  */
-async function extractRuleLines(page: pdfjs.PDFPageProxy): Promise<{ xs: number[]; ys: number[] }> {
+async function extractRuleLines(
+  page: pdfjs.PDFPageProxy,
+): Promise<{ xs: number[]; ys: number[]; spans: RuleSpan[] }> {
   try {
     const { fnArray, argsArray } = await page.getOperatorList();
     const segments: DrawSegment[] = [];
@@ -113,21 +139,28 @@ async function extractRuleLines(page: pdfjs.PDFPageProxy): Promise<{ xs: number[
         const a = argsArray[i] as number[] | undefined;
         if (a && a.length >= 6) ctm = matrixMultiply(ctm, [a[0]!, a[1]!, a[2]!, a[3]!, a[4]!, a[5]!]);
       } else if (fn === pdfjs.OPS.constructPath) {
-        const ops = drawOpsOf(argsArray[i]);
-        if (!ops) continue;
-        for (const s of segmentsFromDrawOps(ops)) {
-          const [x1, y1] = applyMatrix(ctm, s.x1, s.y1);
-          const [x2, y2] = applyMatrix(ctm, s.x2, s.y2);
-          segments.push({ x1, y1, x2, y2 });
+        for (const ops of drawOpsOf(argsArray[i])) {
+          for (const s of segmentsFromDrawOps(ops)) {
+            const [x1, y1] = applyMatrix(ctm, s.x1, s.y1);
+            const [x2, y2] = applyMatrix(ctm, s.x2, s.y2);
+            segments.push({ x1, y1, x2, y2 });
+          }
         }
       }
     }
 
     // 18pt floor: real table rules run tens to hundreds of points; nothing a
     // glyph stroke or a checkbox tick could reach, so only grid lines survive.
-    return rulesFromSegments(segments, { minLength: 18 });
+    //
+    // `spans` keeps the horizontal rules' ENDPOINTS, which xs/ys discard.
+    // Snapping only needs a coordinate; placing a box on a printed write-on
+    // line needs the line's extent, because that extent IS the box's width.
+    return {
+      ...rulesFromSegments(segments, { minLength: 18 }),
+      spans: horizontalRuleSpans(segments, { minLength: 18 }),
+    };
   } catch {
-    return { xs: [], ys: [] };
+    return { xs: [], ys: [], spans: [] };
   }
 }
 
@@ -615,6 +648,14 @@ export function PdfViewer({
         // `transform[4]`/`[5]` are the run's x and BASELINE y in PDF points,
         // which is already the space geometry is stored in.
         const content = await page.getTextContent();
+
+        // Printed grid rule-lines, so a hand-drawn box snaps to the real cell
+        // borders rather than the nearest caption (draw-jump fix). Best-effort.
+        // Read BEFORE the push, because the page carries its own spans now: the
+        // scalar rule measures a box off a printed line, and a page without
+        // them refuses rather than inventing a vertical position.
+        const rules = await extractRuleLines(page);
+
         textPages.push({
           items: content.items
             .map((item) => ('str' in item ? item : null))
@@ -629,11 +670,8 @@ export function PdfViewer({
           // bands inside a segment box measured against THIS page.
           width: natural.width,
           height: natural.height,
+          rules: rules.spans,
         });
-
-        // Printed grid rule-lines, so a hand-drawn box snaps to the real cell
-        // borders rather than the nearest caption (draw-jump fix). Best-effort.
-        const rules = await extractRuleLines(page);
 
         const viewport = page.getViewport({ scale: RENDER_SCALE });
         const canvas = document.createElement('canvas');
