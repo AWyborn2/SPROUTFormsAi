@@ -351,7 +351,137 @@ async function main() {
     if (i === 0 && mandatoryFieldIds.length) part.mandatoryFieldIds = mandatoryFieldIds;
     parts.push(part);
   });
-  const manifest = { parts, ...(streamField ? { locationStreamFieldId: streamField.id } : {}) };
+
+  /* ── the front page's certification block ───────────────────────────────
+
+     The exporter and the renderer have been ready for this since the sign-off
+     work: `assembleCaseValues` writes the assessor's name, signature and date
+     plus the overall verdict, and `round-trip.ts` embeds the signature PNG. But
+     every one of those writes is gated on the MANIFEST naming the field, and
+     nothing named any — so a signed-off case exported with its front page
+     blank, by design and with nothing to say why.
+
+     Located by label, like every other anchor here, and every one is OPTIONAL:
+     a pointer that resolves is declared, a pointer that does not is warned
+     about and omitted. That asymmetry is deliberate. A missing pointer exports
+     a blank box, which someone notices; a WRONG pointer prints an assessor's
+     name or a satisfactory tick in the wrong place on a document certifying
+     that a person is safe to operate a dozer.
+
+     Note what `sigField` accepts. Extraction never emits a `signature` field —
+     buttons, signatures and unknown surfaces are all classified as text inputs
+     — so requiring that type would find nothing on any real import. The
+     renderer keys on the VALUE being a data URL rather than on the type, which
+     is what makes a text-typed box workable.
+  */
+  /*
+     ONE match or none. Absence and ambiguity get the same answer, as everywhere
+     else in this file that has to identify a field: two matches means we do not
+     know which, and the cost of choosing wrong is an assessor's name or a
+     satisfactory tick printed in the wrong place on a certificate.
+  */
+  const findOne = (what, re, types) => {
+    const hits = fields.filter((f) => types.includes(f.type) && re.test(norm(f.label)));
+    if (hits.length === 1) return hits[0];
+    if (hits.length > 1) {
+      warnings.push(
+        `${what}: ${hits.length} fields match (${hits.map((f) => f.id).join(', ')}) — none declared, ` +
+          `because printing it in the wrong one is worse than leaving the box blank.`,
+      );
+    }
+    return undefined;
+  };
+
+  const SCALARS = ['text', 'textarea', 'signature', 'date'];
+  const sigField = findOne('assessor signature', /assessor.*signature|signature.*assessor/, SCALARS);
+  const assessorNameField = findOne(
+    'assessor name',
+    /name of assessor|assessor.*name|assessor.*print/,
+    SCALARS,
+  );
+  /*
+     Anchored to the assessor block rather than to "date" alone, because this
+     document prints a date beside almost everything — the candidate
+     declaration, every logbook row, the cover page.
+
+     \b matters more than it looks: without it "date" matches inside
+     "CANDIdate Signature", which made that field a candidate for the assessor's
+     sign-off date. The ambiguity guard caught it, but a document with only that
+     one match would have declared it and printed the assessment date into the
+     candidate's signature box.
+  */
+  const signedDateField = findOne(
+    'assessor sign-off date',
+    /(assessor|assessment)[^]*\bdate\b|\bdate\b[^]*(assessor|assessment|sign)/,
+    ['date', 'text'],
+  );
+
+  /*
+     The verdict marks. Each carries the LITERAL value to write, never a
+     boolean the exporter interprets: a `check_cross` renders `false` as a
+     CROSS, which on this document means "checked and failed", so "more
+     coaching required: No" has to be a TICK on the No box rather than a false
+     on a single box. That is why the pair is two separate marks.
+  */
+  const MARKS = ['check_cross', 'checkbox', 'boolean_yes_no'];
+  const markField = (what, re) => findOne(what, re, MARKS);
+
+  const overallField = markField('overall satisfactory', /competent|satisfactor/);
+  const coachYesField = markField('more coaching — Yes', /coaching.*yes|further.*training.*yes/);
+  const coachNoField = markField('more coaching — No', /coaching.*no|further.*training.*no/);
+
+  const signOff = {};
+  if (sigField) signOff.assessorSignatureFieldId = sigField.id;
+  if (assessorNameField) signOff.assessorNameFieldId = assessorNameField.id;
+  if (signedDateField) signOff.signedDateFieldId = signedDateField.id;
+  if (overallField) signOff.overallSatisfactory = { fieldId: overallField.id, value: true };
+  /*
+     Both coaching boxes or neither — validateManifest rejects half a pair,
+     because one box alone cannot express the answer it is missing and the
+     front page prints both.
+  */
+  if (coachYesField && coachNoField) {
+    signOff.moreCoachingRequiredYes = { fieldId: coachYesField.id, value: true };
+    signOff.moreCoachingRequiredNo = { fieldId: coachNoField.id, value: true };
+  }
+
+  const declared = Object.keys(signOff);
+  if (declared.length) {
+    console.log(`\nFront-page certification block: ${declared.length} pointer(s) resolved`);
+    for (const [what, f] of [
+      ['assessor signature', sigField],
+      ['assessor name', assessorNameField],
+      ['signed date', signedDateField],
+      ['overall satisfactory', overallField],
+      ['more coaching — Yes', coachYesField],
+      ['more coaching — No', coachNoField],
+    ]) {
+      console.log(
+        f ? `  ${what.padEnd(22)} → ${f.id} ("${(f.label ?? '').slice(0, 46)}")` : `  ${what.padEnd(22)} → NOT FOUND`,
+      );
+    }
+  }
+
+  if (!sigField) {
+    warnings.push(
+      'No assessor signature box found — the signature will not print on the exported certificate. ' +
+        'Retype the field in review if the label differs, or place it and re-run.',
+    );
+  }
+  // `a !== b !== c` chains left-to-right and compares a boolean against a
+  // field — coerce both sides first.
+  if (Boolean(coachYesField) !== Boolean(coachNoField)) {
+    warnings.push(
+      'Only one of the more-coaching Yes/No boxes was found, so neither is declared — ' +
+        'the front page prints both and one alone cannot express the other answer.',
+    );
+  }
+
+  const manifest = {
+    parts,
+    ...(streamField ? { locationStreamFieldId: streamField.id } : {}),
+    ...(declared.length ? { signOff } : {}),
+  };
   console.log(`
 Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryFieldIds.join(', ') || 'none'}`);
 

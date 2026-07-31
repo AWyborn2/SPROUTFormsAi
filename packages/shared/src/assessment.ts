@@ -26,7 +26,7 @@
  * decision.
  */
 
-import type { FormField } from './form-field.js';
+import type { FormField, FormFieldType } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 
 /**
@@ -205,7 +205,8 @@ export interface AssessmentToolManifest {
   signOff?: {
     /** Printed "Name of Assessor" box. Written from the sign-off, not an attempt. */
     assessorNameFieldId?: string;
-    /** Printed signature box. Must name a field of type `signature`. */
+    /** Printed signature box. Any field that can carry one — extraction folds
+     *  signatures into TEXT inputs, so this is rarely typed `signature`. */
     assessorSignatureFieldId?: string;
     /** Printed date box. Server-stamped at sign-off; never client-supplied. */
     signedDateFieldId?: string;
@@ -463,13 +464,30 @@ export function validateManifest(
       }
     }
 
-    // The signature box must really be a signature field. Naming a text field
-    // would route a PNG data URL down the scalar path, where the renderer
-    // refuses it — a certified record with an empty signature box.
+    /*
+      THIS USED TO DEMAND type === 'signature', and that was unsatisfiable.
+
+      Extraction never emits a `signature` field — buttons, signatures and
+      unknown surfaces are all classified as text inputs (extract.ts). So no
+      imported document could satisfy the rule, and naming the box an author
+      could actually see was rejected.
+
+      The original reasoning — that a text field would route the PNG down the
+      scalar path, where the renderer refuses it — was true when written and is
+      no longer. The renderer's signature branch keys on the VALUE being a
+      `data:` URL rather than on the field's type, precisely because extraction
+      folds signatures into text.
+
+      What must still be refused is a field that structurally cannot hold one. A
+      choice field, a table, an outcome cell or a heading named here would drop
+      the signature or draw something else in its place, and on a certificate
+      that is worse than an empty box.
+    */
+    const SIGNABLE: readonly FormFieldType[] = ['signature', 'text', 'textarea'];
     const sig = fields.find((f) => f.id === signOff.assessorSignatureFieldId);
-    if (sig && sig.type !== 'signature') {
+    if (sig && !SIGNABLE.includes(sig.type)) {
       problems.push(
-        `signOff.assessorSignatureFieldId "${sig.id}" is a ${sig.type}, not a signature field.`,
+        `signOff.assessorSignatureFieldId "${sig.id}" is a ${sig.type}, which cannot carry a signature.`,
       );
     }
 
