@@ -617,11 +617,42 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
      eligibility warns and never blocks, so a missing one is visible without
      stopping an assessment.
   */
+  /*
+     THE ASSESSOR RULE IS CONDITIONAL, AND THIS LIST CANNOT SAY SO.
+
+     The paper names three assessor qualifications, but they are not three
+     things one person holds. Per the training authority:
+
+       Q50071833  Worsley Assessor Skill Set          → MINE assessments,
+                                                        valid only if the
+                                                        assessor ALSO holds the
+                                                        category (Q34666893)
+       Q50073293  Authority to Assess Mobile Equip.   → RAW MATERIALS
+
+     So the real rule is `Q34666893 AND (Q50071833 OR Q50073293)`, with the
+     branch chosen by the assessment's location stream.
+
+     `unmetPrerequisites` is a pure AND — it returns every required id the
+     person does not hold. Listing all three therefore warns on EVERY case: a
+     mine assessor is told they lack the raw-materials authority, and vice
+     versa. A warning that always fires is one people learn to scroll past, and
+     these are recorded on the case for an auditor to read.
+
+     So only the universally-required code goes in. That is incomplete rather
+     than wrong, which is the right way round: it never cries wolf, and the
+     stream-specific half is a modelling gap rather than a silent omission.
+
+     Not modelled yet on purpose. Doing it properly needs the case's location
+     stream — and this document prints no location-stream question at all (see
+     the warning `streamField` raises below), so there is nothing to branch on
+     for the Track Dozer. Building the branch now would be building on a field
+     nothing populates.
+  */
   const AWARDED_DEFAULT = 'Q34666893';
   const awardsCode = flag('--awards') ?? AWARDED_DEFAULT;
   const codes = {
     candidate: ['Q50001782'],
-    assessor: ['Q34666893', 'Q50071833', 'Q50073293'],
+    assessor: ['Q34666893'],
     awarded: [awardsCode],
   };
   const rows = await sql`select id, code from competencies where org_id = ${template.org_id}`;
@@ -634,6 +665,13 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
     });
   const candidatePrereqs = pick(codes.candidate, 'Candidate');
   const assessorComps = pick(codes.assessor, 'Assessor');
+  warnings.push(
+    'Assessor eligibility checks only Q34666893 (ATO Track Dozer). The stream-specific ' +
+      'half — Q50071833 Worsley Assessor Skill Set for MINE, Q50073293 Authority to Assess ' +
+      'Mobile Equipment for RAW MATERIALS — is not modelled: it is an OR chosen by location ' +
+      'stream, and this document prints no stream question to branch on. Confirm the assessor ' +
+      'holds the right one for the stream by hand.',
+  );
   const awardedComps = pick(codes.awarded, 'Awarded');
   if (awardedComps.length === 0) {
     warnings.push(
