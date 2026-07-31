@@ -37,7 +37,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
-import { validateAnswerKeys, validateManifest } from '@formai/shared';
+import { pairQuestionsWithOutcomes, validateAnswerKeys, validateManifest } from '@formai/shared';
 
 const WRITE = process.argv.includes('--write');
 const tplArgIdx = process.argv.indexOf('--template-id');
@@ -113,26 +113,56 @@ async function main() {
   console.log(`Template: ${template.name} (${template.id})`);
   console.log(`Version:  ${version.id} — ${fields.length} fields\n`);
 
-  // ── theory questions, in document order ─────────────────────────────────
-  //
-  // Questions are paired with the check_cross that FOLLOWS them: the assessment
-  // profile emits each outcome box immediately after its question, so adjacency
-  // is the pairing rule rather than a label match (labels vary — "Q1 Outcome",
-  // "BBM Q1 Outcome", "7b. Outcome").
-  const CHOICE = new Set(['checkbox_group', 'radio', 'dropdown', 'boolean_yes_no']);
-  const paired = [];
-  for (let i = 0; i < fields.length; i++) {
-    const f = fields[i];
-    if (!CHOICE.has(f.type)) continue;
-    const next = fields[i + 1];
-    if (next?.type === 'check_cross') paired.push({ question: f, outcome: next });
-  }
-  console.log(`Question/outcome pairs found: ${paired.length}`);
+  /* ── theory questions, in document order ─────────────────────────────────
 
-  // The key's three sections in printed order. Pairs are consumed in document
-  // order, which is why the run-length check below is the safety net: if the
-  // counts do not line up exactly, the mapping is not trustworthy and nothing
-  // is written.
+     THE PUBLISHED LINK WINS.
+
+     This used to pair every question with the check_cross that FOLLOWS it, on
+     the reasoning that outcome labels vary too much to match ("Q1 Outcome",
+     "BBM Q1 Outcome", "7b. Outcome") so adjacency was the only rule available.
+
+     That reasoning is out of date. `questionRef` was shipped precisely to solve
+     the label-variance problem: extraction records each question's PRINTED
+     reference and the reference on its outcome box, and publish resolves the
+     pairing from those (`linkOutcomeTargets`, applied in `reviewedToFields`).
+     By the time this script runs, the fields it is reading already carry a
+     resolved `outcomeTarget` — and overwriting it with a positional guess threw
+     away the better answer.
+
+     Adjacency survives as a FALLBACK for a question publish could not link,
+     because a document with no printed references still has to be authorable.
+     It is reported per question, so an operator can see which pairings were
+     read off the page and which were inferred from order.
+  */
+  // The rule lives in @formai/shared beside the resolver whose output it reads,
+  // where it is unit tested. This script had no tests and writes answer keys
+  // onto a safety record; a pairing rule is not the place for an untested copy.
+  const { pairs: paired, unpaired, fromLink, fromAdjacency } = pairQuestionsWithOutcomes(fields);
+  console.log(
+    `Question/outcome pairs found: ${paired.length} ` +
+      `(${fromLink} from the published questionRef link, ${fromAdjacency} inferred from document order)`,
+  );
+
+  /*
+    The key's three sections in printed order.
+
+    The key identifies its answers by SECTION AND NUMBER — "general Q7" — and
+    nothing on a published field carries that number: `questionRef` is consumed
+    at publish to resolve `outcomeTarget` and is not kept on the FormField. So
+    document order is the only thing linking a key entry to its question, and
+    the entries are consumed by a cursor.
+
+    THAT IS WHY THE COUNT CHECK IS ALL-OR-NOTHING, and why it stays that way.
+    If the counts disagree, one missing pair shifts every later entry by one and
+    the script would write question 8's answers onto question 7 — silently
+    marking a candidate wrong on a question they answered correctly, and right
+    on one they did not, on a safety record. Writing nothing is the only safe
+    response to a misalignment we cannot localise.
+
+    What DID change is the diagnosis: the failure now names the questions with
+    no outcome box, so the operator can fix the import instead of being told
+    only that two numbers differ.
+  */
   const sectionOrder = [
     ['general', KEY.sections.general],
     ['bbmMining', KEY.sections.bbmMining],
@@ -140,9 +170,15 @@ async function main() {
   ];
   const expected = sectionOrder.reduce((n, [, sec]) => n + sec.questions.length, 0);
   if (paired.length !== expected) {
+    const missing = unpaired.map((f) => `  · ${f.id} "${(f.label ?? '').slice(0, 60)}"`);
+
     problems.push(
       `Found ${paired.length} question/outcome pairs but the key has ${expected} answers. ` +
-        `Nothing written — confirm the import produced one outcome box per question.`,
+        `Nothing written — a missing pair shifts every later answer onto the wrong ` +
+        `question, and the mapping cannot be localised.` +
+        (missing.length
+          ? `\n  Choice fields with no outcome box:\n${missing.join('\n')}`
+          : `\n  Every choice field paired, so the key and the document disagree on how many questions there are.`),
     );
   }
 
@@ -153,7 +189,7 @@ async function main() {
     let cursor = 0;
     for (const [name, section] of sectionOrder) {
       for (const entry of section.questions) {
-        const { question, outcome } = paired[cursor++];
+        const { question, outcome, how } = paired[cursor++];
         const mapped = entry.answers.map((l) => ({ letter: l, value: mapLetter(l, question) }));
         const bad = mapped.filter((m) => m.value === null);
         if (bad.length) {
@@ -163,9 +199,18 @@ async function main() {
           continue;
         }
         question.answerKey = mapped.map((m) => m.value);
-        question.outcomeTarget = { fieldId: outcome.id };
+        /*
+          Only WRITE a link this script derived. When the pairing came from the
+          published `outcomeTarget` this is already the same id, and leaving it
+          untouched keeps the field exactly as publish resolved it — the point
+          of reading the link rather than recomputing it.
+        */
+        if (how === 'adjacency') question.outcomeTarget = { fieldId: outcome.id };
         if (section.mandatory) mandatoryFieldIds.push(question.id);
-        keyed.push(`${name.padEnd(13)} Q${String(entry.n).padStart(2)} → ${question.id} [${entry.answers.join(',')}] ✓→ ${outcome.id}`);
+        keyed.push(
+          `${name.padEnd(13)} Q${String(entry.n).padStart(2)} → ${question.id} ` +
+            `[${entry.answers.join(',')}] ✓→ ${outcome.id} (${how === 'link' ? 'printed ref' : 'document order'})`,
+        );
       }
     }
   }

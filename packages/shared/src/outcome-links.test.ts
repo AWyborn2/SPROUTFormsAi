@@ -11,7 +11,12 @@
  * legitimately appears more than once. Resolution therefore has to be LOCAL.
  */
 import { describe, expect, it } from 'vitest';
-import { applyOutcomeLinks, linkOutcomeTargets, type LinkableField } from './outcome-links.js';
+import {
+  applyOutcomeLinks,
+  linkOutcomeTargets,
+  pairQuestionsWithOutcomes,
+  type LinkableField,
+} from './outcome-links.js';
 import type { FormField } from './form-field.js';
 
 const question = (id: string, ref?: string): LinkableField => ({
@@ -190,5 +195,139 @@ describe('applyOutcomeLinks', () => {
     ]);
 
     expect(out[1]!.outcomeTarget).toBeUndefined();
+  });
+});
+
+/**
+ * Pairing at AUTHORING time, against an already-published version.
+ *
+ * This is what the answer-key seeding script consumes. It matters more than it
+ * looks: the key identifies its answers by section and number, nothing on a
+ * published field carries that number, so the script aligns key entries against
+ * these pairs BY ORDER. A pair in the wrong place writes question 8's answers
+ * onto question 7 — marking a candidate wrong on one they answered correctly
+ * and right on one they did not, on a safety record.
+ */
+describe('pairQuestionsWithOutcomes', () => {
+  const question = (id: string, over: Partial<FormField> = {}): FormField => ({
+    id,
+    type: 'radio',
+    label: id,
+    required: false,
+    source: 'imported',
+    options: ['a', 'b'],
+    ...over,
+  });
+  const box = (id: string): FormField => ({
+    id,
+    type: 'check_cross',
+    label: id,
+    required: false,
+    source: 'imported',
+  });
+
+  it('uses the link publish already resolved', () => {
+    const fields = [question('q1', { outcomeTarget: { fieldId: 'o1' } }), box('o1')];
+
+    const { pairs, fromLink, fromAdjacency } = pairQuestionsWithOutcomes(fields);
+
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]!.outcome.id).toBe('o1');
+    expect(pairs[0]!.how).toBe('link');
+    expect([fromLink, fromAdjacency]).toEqual([1, 0]);
+  });
+
+  it('follows the link even when it is NOT the adjacent box', () => {
+    /*
+      The whole point. The script used to take the next check_cross in document
+      order; where the printed references say otherwise, they win — they are
+      read off the page, adjacency is inferred from layout.
+    */
+    const fields = [
+      question('q1', { outcomeTarget: { fieldId: 'o2' } }),
+      box('o1'),
+      box('o2'),
+    ];
+
+    const { pairs } = pairQuestionsWithOutcomes(fields);
+
+    expect(pairs[0]!.outcome.id).toBe('o2');
+    expect(pairs[0]!.how).toBe('link');
+  });
+
+  it('falls back to the adjacent box when nothing was linked', () => {
+    // A document whose references the model could not read still has to be
+    // authorable — but the caller is told the pairing was inferred.
+    const fields = [question('q1'), box('o1')];
+
+    const { pairs, fromAdjacency } = pairQuestionsWithOutcomes(fields);
+
+    expect(pairs[0]!.outcome.id).toBe('o1');
+    expect(pairs[0]!.how).toBe('adjacency');
+    expect(fromAdjacency).toBe(1);
+  });
+
+  it('ignores a link pointing at something that is not an outcome box', () => {
+    // A stale or hand-edited target must not silently become the verdict cell.
+    const fields = [
+      question('q1', { outcomeTarget: { fieldId: 'q2' } }),
+      question('q2'),
+      box('o1'),
+    ];
+
+    const { pairs } = pairQuestionsWithOutcomes(fields);
+
+    expect(pairs[0]!.how).toBe('adjacency');
+    expect(pairs[0]!.outcome.id).toBe('o1');
+  });
+
+  it('reports a question with no box rather than skipping it silently', () => {
+    /*
+      This is what turns "31 expected, 30 found" into something actionable. The
+      script refuses on a count mismatch — correctly, because it cannot localise
+      the shift — so naming the gap is the only way an operator can fix it.
+    */
+    const fields = [question('q1'), question('q2'), box('o2')];
+
+    const { pairs, unpaired } = pairQuestionsWithOutcomes(fields);
+
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]!.question.id).toBe('q2');
+    expect(unpaired.map((f) => f.id)).toEqual(['q1']);
+  });
+
+  it('preserves document order, which the key is aligned against', () => {
+    const fields = [
+      question('q1', { outcomeTarget: { fieldId: 'o1' } }),
+      box('o1'),
+      question('q2'),
+      box('o2'),
+      question('q3', { outcomeTarget: { fieldId: 'o3' } }),
+      box('o3'),
+    ];
+
+    const { pairs, fromLink, fromAdjacency } = pairQuestionsWithOutcomes(fields);
+
+    expect(pairs.map((p) => p.question.id)).toEqual(['q1', 'q2', 'q3']);
+    expect(pairs.map((p) => p.how)).toEqual(['link', 'adjacency', 'link']);
+    expect([fromLink, fromAdjacency]).toEqual([2, 1]);
+  });
+
+  it('does not treat an option-less choice field as a question', () => {
+    // Same rule the resolver above uses: with no options there is nothing to
+    // mark, so it is not a question and must not consume a box.
+    const fields = [question('q1', { options: [] }), box('o1')];
+
+    expect(pairQuestionsWithOutcomes(fields).pairs).toHaveLength(0);
+  });
+
+  it('never pairs one box with two questions', () => {
+    const fields = [question('q1'), box('o1'), question('q2')];
+
+    const { pairs, unpaired } = pairQuestionsWithOutcomes(fields);
+
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]!.question.id).toBe('q1');
+    expect(unpaired.map((f) => f.id)).toEqual(['q2']);
   });
 });

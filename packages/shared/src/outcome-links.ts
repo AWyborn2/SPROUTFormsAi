@@ -124,3 +124,74 @@ export function applyOutcomeLinks<T extends FormField>(
     return { ...field, outcomeTarget: { fieldId: outcomeId } };
   });
 }
+
+/** How a question was matched to the box that records its verdict. */
+export type PairingSource = 'link' | 'adjacency';
+
+export interface KeyingPair {
+  question: FormField;
+  outcome: FormField;
+  how: PairingSource;
+}
+
+export interface KeyingPairs {
+  pairs: KeyingPair[];
+  /** Choice fields with no outcome box at all — the reason a count is short. */
+  unpaired: FormField[];
+  fromLink: number;
+  fromAdjacency: number;
+}
+
+/**
+ * Pair each question with its outcome box, for a tool being AUTHORED against an
+ * already-published version.
+ *
+ * THE PUBLISHED LINK WINS. By the time a tool is authored, publish has already
+ * resolved `outcomeTarget` from the printed references (`linkOutcomeTargets`
+ * above). The authoring script used to ignore that and re-pair every question
+ * with the next `check_cross` in document order — throwing away the answer read
+ * off the page in favour of the guess this module exists to replace, and
+ * overwriting the stored link with it.
+ *
+ * Adjacency survives as a FALLBACK, because a document whose references the
+ * model could not read still has to be authorable. Which route was used is
+ * reported per pair rather than averaged into a count: "29 read off the page,
+ * 2 inferred from order" tells an author exactly where to look, and a caller
+ * writing a link back should only write the ones it inferred.
+ *
+ * Order is preserved — callers align a key's entries against it — and every
+ * choice field with no box is returned, so a caller refusing on a count
+ * mismatch can say WHICH questions are missing one instead of only that two
+ * numbers differ.
+ */
+export function pairQuestionsWithOutcomes(fields: readonly FormField[]): KeyingPairs {
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  const pairs: KeyingPair[] = [];
+  const unpaired: FormField[] = [];
+  let fromLink = 0;
+  let fromAdjacency = 0;
+
+  for (let i = 0; i < fields.length; i++) {
+    const question = fields[i]!;
+    if (!isQuestion(question)) continue;
+
+    const linkedId = question.outcomeTarget?.fieldId;
+    const linked = linkedId ? byId.get(linkedId) : undefined;
+    if (linked?.type === 'check_cross') {
+      pairs.push({ question, outcome: linked, how: 'link' });
+      fromLink++;
+      continue;
+    }
+
+    const next = fields[i + 1];
+    if (next?.type === 'check_cross') {
+      pairs.push({ question, outcome: next, how: 'adjacency' });
+      fromAdjacency++;
+      continue;
+    }
+
+    unpaired.push(question);
+  }
+
+  return { pairs, unpaired, fromLink, fromAdjacency };
+}
