@@ -351,12 +351,174 @@ async function main() {
     if (i === 0 && mandatoryFieldIds.length) part.mandatoryFieldIds = mandatoryFieldIds;
     parts.push(part);
   });
-  const manifest = { parts, ...(streamField ? { locationStreamFieldId: streamField.id } : {}) };
+
+  /* ── the front page's certification block ───────────────────────────────
+
+     The exporter and the renderer have been ready for this since the sign-off
+     work: `assembleCaseValues` writes the assessor's name, signature and date
+     plus the overall verdict, and `round-trip.ts` embeds the signature PNG. But
+     every one of those writes is gated on the MANIFEST naming the field, and
+     nothing named any — so a signed-off case exported with its front page
+     blank, by design and with nothing to say why.
+
+     Located by label, like every other anchor here, and every one is OPTIONAL:
+     a pointer that resolves is declared, a pointer that does not is warned
+     about and omitted. That asymmetry is deliberate. A missing pointer exports
+     a blank box, which someone notices; a WRONG pointer prints an assessor's
+     name or a satisfactory tick in the wrong place on a document certifying
+     that a person is safe to operate a dozer.
+
+     Note what `sigField` accepts. Extraction never emits a `signature` field —
+     buttons, signatures and unknown surfaces are all classified as text inputs
+     — so requiring that type would find nothing on any real import. The
+     renderer keys on the VALUE being a data URL rather than on the type, which
+     is what makes a text-typed box workable.
+  */
+  /*
+     ONE match or none. Absence and ambiguity get the same answer, as everywhere
+     else in this file that has to identify a field: two matches means we do not
+     know which, and the cost of choosing wrong is an assessor's name or a
+     satisfactory tick printed in the wrong place on a certificate.
+  */
+  const findOne = (what, re, types) => {
+    const hits = fields.filter((f) => types.includes(f.type) && re.test(norm(f.label)));
+    if (hits.length === 1) return hits[0];
+    if (hits.length > 1) {
+      warnings.push(
+        `${what}: ${hits.length} fields match (${hits.map((f) => f.id).join(', ')}) — none declared, ` +
+          `because printing it in the wrong one is worse than leaving the box blank.`,
+      );
+    }
+    return undefined;
+  };
+
+  const SCALARS = ['text', 'textarea', 'signature', 'date'];
+  /*
+     WHO THE CERTIFICATE IS FOR. The cover page's identity boxes belong to no
+     part, so nobody can type into them through the fill surface — the export
+     seeds this one from the case. Without it the document states a verdict, a
+     date and an assessor for an unnamed person.
+  */
+  const candidateNameField = findOne(
+    'candidate name',
+    /candidate.*name|name.*candidate/,
+    SCALARS,
+  );
+  const sigField = findOne('assessor signature', /assessor.*signature|signature.*assessor/, SCALARS);
+  const assessorNameField = findOne(
+    'assessor name',
+    /name of assessor|assessor.*name|assessor.*print/,
+    SCALARS,
+  );
+  /*
+     Anchored to the assessor block rather than to "date" alone, because this
+     document prints a date beside almost everything — the candidate
+     declaration, every logbook row, the cover page.
+
+     \b matters more than it looks: without it "date" matches inside
+     "CANDIdate Signature", which made that field a candidate for the assessor's
+     sign-off date. The ambiguity guard caught it, but a document with only that
+     one match would have declared it and printed the assessment date into the
+     candidate's signature box.
+  */
+  const signedDateField = findOne(
+    'assessor sign-off date',
+    /(assessor|assessment)[^]*\bdate\b|\bdate\b[^]*(assessor|assessment|sign)/,
+    ['date', 'text'],
+  );
+
+  /*
+     The verdict marks. Each carries the LITERAL value to write, never a
+     boolean the exporter interprets: a `check_cross` renders `false` as a
+     CROSS, which on this document means "checked and failed", so "more
+     coaching required: No" has to be a TICK on the No box rather than a false
+     on a single box. That is why the pair is two separate marks.
+  */
+  const MARKS = ['check_cross', 'checkbox', 'boolean_yes_no'];
+  const markField = (what, re) => findOne(what, re, MARKS);
+
+  const overallField = markField('overall satisfactory', /competent|satisfactor/);
+  const coachYesField = markField('more coaching — Yes', /coaching.*yes|further.*training.*yes/);
+  const coachNoField = markField('more coaching — No', /coaching.*no|further.*training.*no/);
+
+  const signOff = {};
+  if (sigField) signOff.assessorSignatureFieldId = sigField.id;
+  if (assessorNameField) signOff.assessorNameFieldId = assessorNameField.id;
+  if (signedDateField) signOff.signedDateFieldId = signedDateField.id;
+  if (overallField) signOff.overallSatisfactory = { fieldId: overallField.id, value: true };
+  /*
+     Both coaching boxes or neither — validateManifest rejects half a pair,
+     because one box alone cannot express the answer it is missing and the
+     front page prints both.
+  */
+  if (coachYesField && coachNoField) {
+    signOff.moreCoachingRequiredYes = { fieldId: coachYesField.id, value: true };
+    signOff.moreCoachingRequiredNo = { fieldId: coachNoField.id, value: true };
+  }
+
+  const declared = Object.keys(signOff);
+  if (declared.length) {
+    console.log(`\nFront-page certification block: ${declared.length} pointer(s) resolved`);
+    for (const [what, f] of [
+      ['candidate name', candidateNameField],
+      ['assessor signature', sigField],
+      ['assessor name', assessorNameField],
+      ['signed date', signedDateField],
+      ['overall satisfactory', overallField],
+      ['more coaching — Yes', coachYesField],
+      ['more coaching — No', coachNoField],
+    ]) {
+      console.log(
+        f ? `  ${what.padEnd(22)} → ${f.id} ("${(f.label ?? '').slice(0, 46)}")` : `  ${what.padEnd(22)} → NOT FOUND`,
+      );
+    }
+  }
+
+  if (!sigField) {
+    warnings.push(
+      'No assessor signature box found — the signature will not print on the exported certificate. ' +
+        'Retype the field in review if the label differs, or place it and re-run.',
+    );
+  }
+  // `a !== b !== c` chains left-to-right and compares a boolean against a
+  // field — coerce both sides first.
+  if (Boolean(coachYesField) !== Boolean(coachNoField)) {
+    warnings.push(
+      'Only one of the more-coaching Yes/No boxes was found, so neither is declared — ' +
+        'the front page prints both and one alone cannot express the other answer.',
+    );
+  }
+
+  const manifest = {
+    parts,
+    ...(streamField ? { locationStreamFieldId: streamField.id } : {}),
+    ...(candidateNameField ? { candidateNameFieldId: candidateNameField.id } : {}),
+    ...(declared.length ? { signOff } : {}),
+  };
   console.log(`
 Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryFieldIds.join(', ') || 'none'}`);
 
   // ── competencies by code ────────────────────────────────────────────────
-  const codes = { candidate: ['Q34666893', 'Q50001782'], assessor: ['Q34666893', 'Q50071833', 'Q50073293'] };
+  /*
+     WHAT PASSING THIS AWARDS.
+
+     `assessment_tools.awarded_competency_ids` is what the sign-off route
+     iterates to put the candidate on the register — the thing the product
+     exists to maintain. It was never written here, so the column kept its `[]`
+     default, the grant loop ran zero times, and a signed-off case reached
+     `competent` while the register stayed empty and said nothing about it.
+
+     Supplied by code via `--awards`, because which competency this assessment
+     confers is a training-authority decision rather than something derivable
+     from the document. Passing none is legitimate — the assessment still runs
+     and the certificate still prints — so it warns rather than refusing.
+  */
+  const awardsCode = flag('--awards');
+  const codes = {
+    candidate: ['Q34666893', 'Q50001782'],
+    assessor: ['Q34666893', 'Q50071833', 'Q50073293'],
+    awarded: awardsCode ? [awardsCode] : [],
+  };
   const rows = await sql`select id, code from competencies where org_id = ${template.org_id}`;
   const byCode = new Map(rows.map((r) => [r.code, r.id]));
   const pick = (list, who) =>
@@ -367,6 +529,21 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
     });
   const candidatePrereqs = pick(codes.candidate, 'Candidate');
   const assessorComps = pick(codes.assessor, 'Assessor');
+  const awardedComps = pick(codes.awarded, 'Awarded');
+  if (!awardsCode) {
+    warnings.push(
+      'No --awards <code> given, so passing this assessment grants NOTHING. The case will ' +
+        'reach competent and the certificate will print, but the competency register will ' +
+        'not record the candidate. Pass --awards with the competency code this assessment confers.',
+    );
+  } else if (awardedComps.length === 0) {
+    warnings.push(
+      `--awards ${awardsCode} does not match a competency in this org, so nothing will be granted. ` +
+        'Create the competency first, then re-run.',
+    );
+  } else {
+    console.log(`\nPassing this assessment awards: ${awardsCode}`);
+  }
 
   // ── validate exactly as the API would ───────────────────────────────────
   problems.push(...validateManifest(manifest, fields));
@@ -397,13 +574,17 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
   // ── persist ─────────────────────────────────────────────────────────────
   await sql`update form_template_versions set fields = ${sql.json(fields)} where id = ${version.id}`;
   await sql`
-    insert into assessment_tools (org_id, template_id, name, manifest, candidate_prerequisite_ids, assessor_competency_ids)
-    values (${template.org_id}, ${template.id}, ${'Authorised to Operate Track Dozer'}, ${sql.json(manifest)}, ${sql.json(candidatePrereqs)}, ${sql.json(assessorComps)})
+    insert into assessment_tools (org_id, template_id, name, manifest, candidate_prerequisite_ids, assessor_competency_ids, awarded_competency_ids)
+    values (${template.org_id}, ${template.id}, ${'Authorised to Operate Track Dozer'}, ${sql.json(manifest)}, ${sql.json(candidatePrereqs)}, ${sql.json(assessorComps)}, ${sql.json(awardedComps)})
     on conflict (template_id) do update
       set manifest = excluded.manifest,
           name = excluded.name,
           candidate_prerequisite_ids = excluded.candidate_prerequisite_ids,
-          assessor_competency_ids = excluded.assessor_competency_ids
+          assessor_competency_ids = excluded.assessor_competency_ids,
+          -- Omitted before, so the column kept its [] default and the sign-off
+          -- route's grant loop ran zero times: a competent case that put nobody
+          -- on the register.
+          awarded_competency_ids = excluded.awarded_competency_ids
   `;
   const [tool] = await sql`select id from assessment_tools where template_id = ${template.id}`;
   console.log(`\nWritten. Tool id: ${tool.id}`);

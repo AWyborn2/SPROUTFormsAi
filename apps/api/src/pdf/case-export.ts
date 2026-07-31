@@ -68,6 +68,12 @@ export interface AssembleCaseInput {
   pathway: AssessmentPathway;
   /** The case's declared stream, seeded so visibility matches the assessment. */
   locationStream?: string | null;
+  /**
+   * Who was assessed. Seeded onto the cover page, which belongs to no part and
+   * is therefore fillable by nobody — without it the document certifies a
+   * verdict for an unnamed person.
+   */
+  candidateName?: string | null;
   attempts: readonly CaseAttemptRecord[];
   /**
    * Null until the assessor signs. The whole certification block is gated on
@@ -167,6 +173,7 @@ export function assembleCaseValues({
   manifest,
   pathway,
   locationStream,
+  candidateName,
   attempts,
   signOff,
   resolved,
@@ -215,6 +222,26 @@ export function assembleCaseValues({
   // different set of questions than the candidate was actually assessed on.
   if (manifest.locationStreamFieldId && locationStream) {
     values[manifest.locationStreamFieldId] = locationStream;
+  }
+
+  /*
+    WHO THIS CERTIFIES.
+
+    The cover page's identity boxes belong to NO part — `fieldsInPart` slices
+    from part 1's anchor onward, so they fall outside every part's range, and
+    the fill route serves only a part's fields. Neither the candidate nor the
+    assessor can type into them, and nothing else wrote them either.
+
+    So the exported document carried the assessor's name, the date and the
+    verdict for NOBODY: a certificate with no subject. An auditor holding it
+    could not tell who had been assessed.
+
+    Seeded from the CASE rather than from a filled field, for the same reason as
+    the location stream above — the case is what the assessment was conducted
+    against, so it is what the evidence document has to say.
+  */
+  if (manifest.candidateNameFieldId && candidateName) {
+    values[manifest.candidateNameFieldId] = candidateName;
   }
 
   /*
@@ -286,6 +313,7 @@ export async function exportCasePdf({
   manifest,
   pathway,
   locationStream,
+  candidateName,
   attempts,
   signOff,
   resolved,
@@ -299,6 +327,7 @@ export async function exportCasePdf({
     manifest,
     pathway,
     locationStream,
+    candidateName,
     attempts,
     signOff,
     resolved,
