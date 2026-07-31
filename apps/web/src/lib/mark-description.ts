@@ -65,24 +65,24 @@ export function markDescription(field: Pick<FormField, 'type' | 'options' | 'pri
 
   if (field.type === 'signature') {
     /*
-      NOT "the signature". The exporter cannot draw one.
+      This said "nothing usable yet" and told reviewers to leave the box
+      unplaced, because the exporter genuinely could not draw a signature: the
+      value is a base64 PNG data URL and there was no image-embedding call
+      anywhere in the PDF layer, so it fell through to the text path.
 
-      A signature value is a base64 PNG data URL (SignaturePad's toDataURL), and
-      there is no image-embedding call anywhere in apps/api/src/pdf — no
-      embedPng, no drawImage. `round-trip.ts` has no signature branch at all, so
-      the value falls through to the scalar text path and is drawn with
-      String(value): thousands of characters of base64 on one unbreakable line,
-      because pdf-lib wraps only on spaces and base64 has none.
+      `round-trip.ts` now embeds it, scaled to fit the box and centred, so the
+      promise is keepable and the warning had to go with the same change — copy
+      telling a reviewer to skip the box would leave the signature block empty
+      on every certificate.
 
-      This module exists to stop the panel promising a mark the exporter does
-      not draw, so it must not make that promise about the one case it cannot
-      keep. When image embedding lands, this becomes "the signature" and the
-      warning goes.
+      The aspect-ratio note is not decoration. A reviewer drawing a short wide
+      box gets a small signature centred in it rather than a stretched one, and
+      knowing that in advance is what stops them redrawing it three times.
     */
     return {
-      mark: 'nothing usable yet',
+      mark: 'the signature, scaled to fit',
       detail:
-        'Signature images cannot be drawn onto the exported PDF — placing a box here will print the raw image data across the page. Leave it unplaced until that is supported.',
+        'Drawn at its own proportions and centred, so a box much wider or taller than the signature leaves space around it rather than distorting it.',
     };
   }
 

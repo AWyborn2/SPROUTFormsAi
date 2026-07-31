@@ -98,6 +98,59 @@ function verdictOf(value: SubmissionValue | undefined): boolean | undefined {
   return undefined;
 }
 
+
+/**
+ * The PNG bytes of a `data:image/png;base64,...` value, or null.
+ *
+ * Null for anything else, INCLUDING a JPEG data URL. pdf-lib needs to be told
+ * which decoder to use, and guessing wrong throws inside the export rather than
+ * degrading — so this recognises only what SignaturePad actually emits
+ * (`canvas.toDataURL('image/png')`) and everything else falls through to the
+ * blank path.
+ */
+function pngDataUrlBytes(value: SubmissionValue | undefined): Uint8Array | null {
+  if (typeof value !== 'string') return null;
+  const match = /^data:image\/png;base64,([A-Za-z0-9+/=\s]+)$/.exec(value);
+  if (!match) return null;
+  try {
+    const bytes = Buffer.from(match[1]!.replace(/\s+/g, ''), 'base64');
+    // A truncated or empty payload decodes without throwing, so check the PNG
+    // magic number rather than trusting the length.
+    if (bytes.length < 8) return null;
+    const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47];
+    if (!PNG_MAGIC.every((b, i) => bytes[i] === b)) return null;
+    return new Uint8Array(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fit a drawn signature inside its box, preserving aspect ratio and centring it.
+ *
+ * Signatures are drawn on a canvas of whatever size the pad happened to be, and
+ * the box is whatever the reviewer placed. Stretching to fill would distort a
+ * person's signature on the document that certifies them, which is the one
+ * thing a signature must not be.
+ */
+function fitInside(
+  box: { x: number; y: number; width: number; height: number },
+  image: { width: number; height: number },
+): { x: number; y: number; width: number; height: number } {
+  // 2pt inset so the ink never touches the printed cell border.
+  const maxW = Math.max(1, box.width - 4);
+  const maxH = Math.max(1, box.height - 4);
+  const scale = Math.min(maxW / image.width, maxH / image.height);
+  const width = image.width * scale;
+  const height = image.height * scale;
+  return {
+    x: box.x + (box.width - width) / 2,
+    y: box.y + (box.height - height) / 2,
+    width,
+    height,
+  };
+}
+
 /** Render a scalar value to the string drawn on the page. */
 function scalarText(value: SubmissionValue | undefined): string {
   if (value === null || value === undefined) return '';
@@ -216,6 +269,36 @@ export async function roundTripExport({
       if (verdict === undefined) continue;
       const { x, y, size } = boxMarkPlacement(pos);
       drawMark(page, verdict ? 'tick' : 'cross', x, y, size);
+      continue;
+    }
+
+    /*
+      A DRAWN SIGNATURE IS AN IMAGE, and this is the only place in the export
+      that draws one.
+
+      It must come BEFORE the scalar text path, which refuses a data URL and
+      draws nothing — that refusal exists because a signature reaching
+      `String(value)` emits one unbreakable line of base64 straight across the
+      record. With this branch the value is drawn as what it is; without it the
+      guard still holds and the box stays blank.
+
+      Keyed on the VALUE, not the field type, for the same reason the guard is:
+      extraction folds signature boxes into text inputs, so the blob arrives
+      typed `text` as often as `signature`.
+
+      EVERY failure draws nothing. A malformed payload, an unsupported format, a
+      decoder that throws — all fall through to blank, because a missing
+      signature is a visible gap someone chases up, while a broken one is either
+      a crashed export or a defaced page.
+    */
+    const png = pngDataUrlBytes(value);
+    if (png) {
+      try {
+        const image = await doc.embedPng(png);
+        page.drawImage(image, fitInside(pos, image));
+      } catch {
+        // Deliberately blank — see above.
+      }
       continue;
     }
 
