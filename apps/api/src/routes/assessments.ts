@@ -34,6 +34,7 @@ import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission, permissionScope } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
+import { grantCompetency, revokeGrantsFromCase } from '../lib/competency-grant.js';
 import { CaseExportError, exportCasePdf } from '../pdf/index.js';
 import { getStorageClient } from '../storage/index.js';
 import { db } from '../db.js';
@@ -202,6 +203,22 @@ function toAttemptFacts(rows: { partKey: string; attemptNumber: number; outcome:
 
 // ── assessment tools ────────────────────────────────────────────────────────
 
+/*
+  EVERY PROPERTY OF THE TYPE MUST APPEAR HERE.
+
+  A plain z.object STRIPS unknown keys, and nothing in this router uses
+  .strict() or .passthrough(). So a property present in AssessmentToolManifest
+  but missing from this schema is silently discarded on the HTTP path while the
+  authoring script keeps it — two writers producing two different manifests,
+  with no error anywhere to say so.
+*/
+const declaredMarkSchema = z.object({
+  fieldId: z.string().min(1),
+  rowKey: z.string().optional(),
+  columnKey: z.string().optional(),
+  value: z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(z.string())]),
+});
+
 const partSchema = z.object({
   key: z.string().min(1),
   ordinal: z.number().int().positive(),
@@ -211,7 +228,9 @@ const partSchema = z.object({
   startFieldId: z.string().min(1),
   minimumHours: z.number().positive().optional(),
   durationColumnKey: z.string().optional(),
-  checklistFieldId: z.string().optional(),
+  checklistMark: declaredMarkSchema.optional(),
+  assessorNameFieldId: z.string().optional(),
+  signedDateFieldId: z.string().optional(),
   mandatoryFieldIds: z.array(z.string()).optional(),
 });
 
@@ -221,9 +240,21 @@ const toolBody = z.object({
   manifest: z.object({
     parts: z.array(partSchema).min(1),
     locationStreamFieldId: z.string().optional(),
+    signOff: z
+      .object({
+        assessorNameFieldId: z.string().optional(),
+        assessorSignatureFieldId: z.string().optional(),
+        signedDateFieldId: z.string().optional(),
+        overallSatisfactory: declaredMarkSchema.optional(),
+        moreCoachingRequiredYes: declaredMarkSchema.optional(),
+        moreCoachingRequiredNo: declaredMarkSchema.optional(),
+      })
+      .optional(),
   }),
   candidatePrerequisiteIds: z.array(z.string().uuid()).optional(),
   assessorCompetencyIds: z.array(z.string().uuid()).optional(),
+  /** What passing this tool AWARDS. Granted on sign-off, linked to the case. */
+  awardedCompetencyIds: z.array(z.string().uuid()).optional(),
 });
 
 /**
@@ -283,6 +314,7 @@ assessmentToolsRouter.post(
         manifest: manifest as AssessmentToolManifest,
         candidatePrerequisiteIds: parsed.data.candidatePrerequisiteIds ?? [],
         assessorCompetencyIds: parsed.data.assessorCompetencyIds ?? [],
+        awardedCompetencyIds: parsed.data.awardedCompetencyIds ?? [],
       })
       .returning();
     if (!row) throw new Error('tool_create_failed: insert returned no row');
@@ -1334,7 +1366,22 @@ assessmentCasesRouter.post(
           attemptNumber: a.attemptNumber,
           outcome: a.outcome,
           values: a.values,
+          // COLUMNS, not values. Dropping them here is why every printed
+          // "assessor name" and date box exported blank.
+          assessorName: a.assessorName,
+          signedAt: a.signedAt,
         })),
+        /*
+          Null until the assessor signs, which gates the whole certification
+          block. A mid-programme export prints the front page blank, exactly as
+          it does today.
+        */
+        signOff: row.signedOffAt
+          ? { at: row.signedOffAt, name: row.signedOffName, signature: row.signedOffSignature }
+          : null,
+        // Resolved = finished either way. The coaching pair is written on a
+        // resolved case only; while it is open, neither box is ticked.
+        resolved: isTerminalCaseState(row.state as AssessmentCaseState),
       });
       res.setHeader('Content-Type', 'application/pdf');
       res.send(Buffer.from(out));
@@ -1456,11 +1503,32 @@ assessmentCasesRouter.post(
       icon: 'scale',
     });
 
+    /*
+      A DISPUTED RESULT STOPS CONFERRING ELIGIBILITY.
+
+      The disputed case keeps `state = 'competent'` forever — an appeal creates a
+      new case and never edits the original — so without this, a competency
+      granted by a result now under appeal would go on satisfying prerequisites
+      for as long as the appeal ran. Somebody could be gated INTO another
+      assessment by a verdict that is being contested.
+
+      Revoked, not deleted: the record that it was once held survives, and if
+      the appeal is itself signed off satisfactory the grant helper's upsert
+      clears the revocation and repoints the evidence at the appeal.
+    */
+    const revoked = await revokeGrantsFromCase(
+      db,
+      tenant,
+      disputed.id,
+      `superseded by appeal ${appeal.id}`,
+    );
+
     res.status(201).json({
       id: appeal.id,
       appealOfCaseId: disputed.id,
       assessorUserId: parsed.data.assessorUserId,
       pathway: appeal.pathway,
+      revokedGrants: revoked,
     });
   }),
 );
@@ -1794,11 +1862,43 @@ assessmentCasesRouter.post(
       icon: 'circle-check',
     });
 
+    /*
+      THE POINT OF THE WHOLE THING: passing the assessment puts the candidate on
+      the register it exists to maintain.
+
+      Fired here rather than where the last part is marked, so the grant follows
+      the human approval rather than the arithmetic. `sourceCaseId` makes the
+      evidence FOLLOWABLE — `evidenceRef` is documented as display-only, a
+      string nothing resolves, and "linked to the case as evidence" has to be
+      more than that.
+
+      A grant that cannot be made does NOT fail the sign-off. Refusing to record
+      a completed safety assessment because a register write did not land is the
+      wrong failure; the sign-off is the assessor's decision and it stands. What
+      could not be granted is reported and audited instead.
+    */
+    const granted: string[] = [];
+    const grantProblems: string[] = [];
+    for (const competencyId of tool.awardedCompetencyIds ?? []) {
+      const result = await grantCompetency(db, tenant, {
+        competencyId,
+        userId: row.candidateUserId,
+        evidenceRef: `assessment-case:${row.id}`,
+        sourceCaseId: row.id,
+      });
+      if (result.ok) granted.push(result.outcome.code);
+      else grantProblems.push(`competency ${competencyId} not granted (${result.reason})`);
+    }
+
     res.json({
       state: 'competent',
       signedOffAt: signedOffAt.toISOString(),
       signedOffName: parsed.data.assessorName,
-      warnings: assessorGaps.map((id) => `assessor missing competency ${id}`),
+      granted,
+      warnings: [
+        ...assessorGaps.map((id) => `assessor missing competency ${id}`),
+        ...grantProblems,
+      ],
     });
   }),
 );

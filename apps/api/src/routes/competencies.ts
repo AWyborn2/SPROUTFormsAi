@@ -1,11 +1,12 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { and, count, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
+import { findOwnedCompetency, grantCompetency, syncHolderCount } from '../lib/competency-grant.js';
 import { db } from '../db.js';
 
 /**
@@ -92,45 +93,12 @@ competenciesRouter.delete(
   }),
 );
 
-/**
- * Recount a competency's holders from the join and write it back.
- *
- * `competencies.holders` predates the join table and is still what every
- * existing display reads, so it is recomputed rather than incremented: a
- * derived count that drifts is worse than no count, and an idempotent grant or
- * a cascade-deleted user would both make a +1/-1 counter wrong.
- */
-async function syncHolderCount(database: NonNullable<typeof db>, competencyId: string) {
-  // A SQL aggregate, not findMany().length — this table grows with people ×
-  // competencies, and loading every row to count it would scale with the
-  // workforce on a request that only needs one number.
-  const [result] = await database
-    .select({ count: count() })
-    .from(schema.competencyHolders)
-    .where(eq(schema.competencyHolders.competencyId, competencyId));
-  const holders = result?.count ?? 0;
-  await database
-    .update(schema.competencies)
-    .set({ holders })
-    .where(eq(schema.competencies.id, competencyId));
-  return holders;
-}
-
-/** Load a competency within the caller's org, or null. */
-async function findOwnedCompetency(
-  database: NonNullable<typeof db>,
-  competencyId: string,
-  orgId: string,
-) {
-  return (
-    (await database.query.competencies.findFirst({
-      where: and(
-        eq(schema.competencies.id, competencyId),
-        eq(schema.competencies.orgId, orgId),
-      ),
-    })) ?? null
-  );
-}
+/*
+  `syncHolderCount` and `findOwnedCompetency` moved to lib/competency-grant.ts
+  when the signed-off assessment became a second granter. They were
+  module-private here, and a second copy over there is exactly how the
+  denormalised `holders` count drifts out of agreement with its own join table.
+*/
 
 const grantBody = z.object({
   userId: z.string().uuid(),
@@ -153,50 +121,35 @@ competenciesRouter.post(
       return;
     }
     const tenant = req.tenant!;
-    const competency = await findOwnedCompetency(db, req.params.id!, tenant.orgId);
-    if (!competency) {
-      res.status(404).json({ error: 'not_found' });
+
+    /*
+      One implementation, shared with the automatic grant a signed-off
+      assessment performs. Two copies is how `holders` drifts: it is a
+      denormalised count and the only holder figure any screen shows, so a
+      writer that forgot to resync it would leave the register disagreeing with
+      itself, silently.
+
+      This is now an UPSERT. The old body guarded with `if (!existing)` and did
+      nothing when a row was already present, so a re-grant discarded the new
+      evidenceRef and the surviving row kept pointing at whatever earned it
+      first — with no room for a second row, since (competencyId, userId) is
+      unique.
+    */
+    const result = await grantCompetency(db, tenant, {
+      competencyId: req.params.id!,
+      userId: parsed.data.userId,
+      evidenceRef: parsed.data.evidenceRef ?? null,
+    });
+    if (!result.ok) {
+      // Kept distinct: an admin granting by hand needs to know whether they
+      // picked the wrong competency or the wrong person.
+      res.status(404).json({ error: result.reason === 'user_not_in_org' ? 'user_not_in_org' : 'not_found' });
       return;
     }
 
-    // The holder must be a member of this org. Without this check any org could
-    // record a grant against any user id and read it back as eligibility.
-    const membership = await db.query.memberships.findFirst({
-      where: and(
-        eq(schema.memberships.userId, parsed.data.userId),
-        eq(schema.memberships.orgId, tenant.orgId),
-      ),
-    });
-    if (!membership) {
-      res.status(404).json({ error: 'user_not_in_org' });
-      return;
-    }
-
-    const existing = await db.query.competencyHolders.findFirst({
-      where: and(
-        eq(schema.competencyHolders.competencyId, competency.id),
-        eq(schema.competencyHolders.userId, parsed.data.userId),
-      ),
-    });
-
-    if (!existing) {
-      await db.insert(schema.competencyHolders).values({
-        orgId: tenant.orgId,
-        competencyId: competency.id,
-        userId: parsed.data.userId,
-        evidenceRef: parsed.data.evidenceRef ?? null,
-        grantedByUserId: tenant.userId,
-      });
-      await recordAudit(db, tenant, {
-        action: 'Granted competency',
-        target: `${competency.code} → ${parsed.data.userId}`,
-        category: 'settings',
-        icon: 'award',
-      });
-    }
-
-    const holders = await syncHolderCount(db, competency.id);
-    res.status(existing ? 200 : 201).json({ competencyId: competency.id, holders });
+    res
+      .status(result.outcome.created ? 201 : 200)
+      .json({ competencyId: result.outcome.competencyId, holders: result.outcome.holders });
   }),
 );
 
@@ -255,6 +208,10 @@ competenciesRouter.get(
       where: and(
         eq(schema.competencyHolders.userId, req.params.userId!),
         eq(schema.competencyHolders.orgId, tenant.orgId),
+        // This IS the eligibility lookup, so a revoked grant must not appear.
+        // The row survives for the audit trail; it just stops conferring
+        // anything, which is the entire point of revoking without deleting.
+        isNull(schema.competencyHolders.revokedAt),
       ),
     });
     res.json(rows.map((r) => ({ competencyId: r.competencyId, evidenceRef: r.evidenceRef })));
