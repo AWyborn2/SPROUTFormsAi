@@ -52,10 +52,34 @@ describe('horizontalRuleSpans', () => {
     expect(spans[0]!.x2).toBe(380);
   });
 
-  it('joins two touching segments of one overdrawn rule', () => {
+  /*
+    THIS TEST USED TO ASSERT THE OPPOSITE — that two touching segments join.
+
+    They must not. Adjacent cells on a table row share a baseline and their
+    borders meet end-to-end, so joining them collapses the row into one
+    full-width rule and destroys the per-cell extents. Measured on the real
+    document, one cover-page row carries three cell borders AND the table's
+    outer border, all at y≈701:
+
+      31.4 → 221.8 · 222.3 → 384.8 · 385.3 → 563.5 · and 31.4 → 563.5
+
+    With touching merged, every caption on that row measured the whole table
+    instead of its own cell, and two different fields proposed the same box.
+  */
+  it('keeps two touching segments apart — they are adjacent cell borders', () => {
     const spans = horizontalRuleSpans([seg(200, 698, 290, 698), seg(290, 698, 380, 698)]);
 
-    expect(spans).toEqual([{ y: 698, x1: 200, x2: 380 }]);
+    expect(spans).toHaveLength(2);
+    expect(spans.map((s) => s.x2)).toEqual([290, 380]);
+  });
+
+  it('keeps a cell border out of the outer border that contains it', () => {
+    // The other half of the same defect: merging on overlap alone swallows a
+    // cell's border into the table's, which is a superset of it.
+    const spans = horizontalRuleSpans([seg(31, 701.5, 222, 701.5), seg(31, 701.9, 563, 701.9)]);
+
+    expect(spans).toHaveLength(2);
+    expect(spans.map((s) => Math.round(s.x2))).toEqual([222, 563]);
   });
 
   it('keeps two separate lines on the same baseline apart', () => {

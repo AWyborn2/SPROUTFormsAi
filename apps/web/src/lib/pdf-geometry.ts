@@ -20,7 +20,7 @@
  * fixtures with no PDF in the loop.
  */
 import { resolveGeometry } from '@formai/shared';
-import type { GeometryBand, PageBox, RepeatingColumn } from '@formai/shared';
+import type { FormFieldType, GeometryBand, PageBox, RepeatingColumn } from '@formai/shared';
 import type { RuleSpan } from '../screens/import/inspector/geometry-actions.js';
 
 /**
@@ -1358,4 +1358,355 @@ function nearestBaseline(rows: Row[], box: PageBox): number | undefined {
     }
   }
   return best;
+}
+
+/* ── scalar fields, from the cell beneath their caption ─────────────────────
+   Everything above derives a box from the TEXT layer. A scalar field — a name,
+   a date, a swipe-card number — cannot be, and the reason is structural:
+   `PositionedText` is {text, x, y, width}. No height. No strokes. Text can
+   constrain x and has nothing whatever to say about y or extent, so a
+   text-only rule must INVENT both, and an invented vertical position on a
+   competency record is a mark in whatever box happens to be there.
+
+   MEASURED, on the real document, before this was designed: every scalar
+   caption on the Track Dozer sits in its own bordered header cell, and its
+   answer area is the cell DIRECTLY BENEATH — blank, and bounded on all four
+   sides by printed strokes.
+
+     "Candidate's Company Name"   caption cell y 702→720, answer cell y 678→702, x 222.3→384.8
+     "Employee Swipe card Number" caption cell y 702→720, answer cell y 678→702, x 385.3→563.5
+     "Name of Assessor [Print]"   caption cell y 182.9→200.4, answer y 150.4→182.9, x 165.6→322.0
+     "Materials Required"         caption cell y 670.9→691.5, answer y 642→670.9, x 29→167
+
+   So every edge of the proposed box is a printed stroke, INCLUDING its height,
+   which an earlier design had to hardcode. The rule refuses whenever a stroke
+   is missing.
+
+   An earlier attempt looked for a write-on line beside the caption. That is a
+   real layout, just not this document's: measured against the actual PDF it
+   placed nothing, because the three cover-page captions share one row with no
+   rule within 90pt vertically. The lesson is in the ordering — measure the
+   document, then design.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/** Two rules are the same printed line when their y agree within this. */
+const CELL_RULE_TOLERANCE = 1.5;
+
+/**
+ * How far above the caption's baseline its cell's top rule may sit, and how far
+ * below its bottom rule may. Measured cell heights on the target document run
+ * 17.5 to 32.5pt with the baseline inside; 40 admits every one with margin
+ * while staying far short of the next row.
+ */
+const CELL_SEARCH = 40;
+
+/** A cell shorter than this cannot hold a legible value. */
+const MIN_CELL_HEIGHT = 10;
+
+/**
+ * Below this the box stops bounding its value: the exporter permits
+ * max(20, width - 6) points of text, so under 26 the permitted text is WIDER
+ * than the box and spills right with no wrap and no clipping.
+ */
+const MIN_CELL_WIDTH = 26;
+
+/**
+ * The answer cell's rules must cover this much of the caption cell's width to
+ * count as the same column. Below it they are a different part of the table,
+ * and the row beneath the caption is not this field's answer area.
+ */
+const COLUMN_OVERLAP = 0.6;
+
+/** Single-line values the exporter draws as text. An ALLOWLIST, deliberately:
+ *  a denylist would have to name every type that must not reach here, and
+ *  `check_cross` reaches the same panel body while needing the opposite mark. */
+const SCALAR_TYPES: readonly FormFieldType[] = ['text', 'date', 'number', 'time'];
+
+export type ScalarRefusalCode =
+  | 'unsupported-type'
+  | 'label-too-short'
+  | 'label-not-found'
+  | 'label-ambiguous'
+  | 'label-wrapped'
+  | 'no-rule-data'
+  | 'caption-not-in-a-cell'
+  | 'no-cell-beneath'
+  | 'cell-not-blank'
+  | 'cell-too-small'
+  | 'validator-rejected';
+
+export interface ScalarProposal {
+  box: PageBox;
+  confidence: number;
+  /** Reviewer-facing sentences describing what was measured. */
+  notes: string[];
+}
+
+/**
+ * Placed, or refused WITH A STATED REASON.
+ *
+ * Not `null`. An invisible refusal is nearly as harmful as a wrong box: the
+ * reviewer cannot tell "this rule looked and declined" from "no rule ever ran",
+ * so they do not know the field still needs drawing by hand.
+ */
+export type ScalarOutcome =
+  | { placed: true; proposal: ScalarProposal }
+  | { placed: false; code: ScalarRefusalCode; reason: string };
+
+export interface ScalarProposeInput {
+  pages: readonly TextPage[];
+  type: FormFieldType;
+  label: string;
+}
+
+function refuseScalar(code: ScalarRefusalCode, reason: string): ScalarOutcome {
+  return { placed: false, code, reason };
+}
+
+/**
+ * The SHORTEST contiguous run of items on `row` whose joined text holds
+ * `wanted` — this caption, isolated from any others sharing its baseline.
+ *
+ * Shortest rather than longest: on a row carrying three captions the longest
+ * matching span is the whole row, which measures the table's outer border
+ * instead of the cell's.
+ */
+function captionSpan(row: Row, wanted: string): PositionedText[] | null {
+  const items = row.items;
+  let best: PositionedText[] | null = null;
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i; j < items.length; j++) {
+      const candidate = items.slice(i, j + 1);
+      const text = stripEnumeration(normalizeForMatch(candidate.map((x) => x.text).join(' ')));
+      if (!containsTokens(text, wanted)) continue;
+      if (!best || candidate.length < best.length) best = candidate;
+      break;
+    }
+  }
+  return best;
+}
+
+/**
+ * The nearest rule covering `left..right`, searching from `fromY` in `dir`.
+ *
+ * Of the rules on that nearest line, returns the NARROWEST. A table draws its
+ * cell borders and its outer border on the same baseline, and both cover the
+ * caption — taking whichever happened to sort first gave a caption the whole
+ * table's width instead of its own cell's, which on the cover page handed three
+ * different fields the same box.
+ */
+function nearestCoveringRule(
+  rules: readonly RuleSpan[],
+  left: number,
+  right: number,
+  fromY: number,
+  dir: 'up' | 'down',
+  within: number,
+): RuleSpan | undefined {
+  const covering = rules.filter((r) => {
+    const dy = dir === 'up' ? r.y - fromY : fromY - r.y;
+    if (dy <= CELL_RULE_TOLERANCE || dy > within) return false;
+    return r.x1 <= left + 2 && r.x2 >= right - 2;
+  });
+  if (covering.length === 0) return undefined;
+
+  const nearestY = covering.reduce(
+    (best, r) => {
+      const dy = dir === 'up' ? r.y - fromY : fromY - r.y;
+      return dy < best ? dy : best;
+    },
+    Number.POSITIVE_INFINITY,
+  );
+
+  return covering
+    .filter((r) => Math.abs((dir === 'up' ? r.y - fromY : fromY - r.y) - nearestY) <= CELL_RULE_TOLERANCE)
+    .sort((a, b) => a.x2 - a.x1 - (b.x2 - b.x1))[0];
+}
+
+/**
+ * Offer a box for a single-line scalar field: the printed CELL directly beneath
+ * its caption.
+ *
+ * Refuses on absence, on ambiguity, on every field type whose export path would
+ * deface the page, and whenever a bounding stroke is missing. Absence and
+ * ambiguity get the same answer, as everywhere in this module — a second
+ * candidate means we do not know which, and guessing is the failure this whole
+ * file exists to prevent.
+ */
+export function proposeScalarCell(input: ScalarProposeInput): ScalarOutcome {
+  if (!SCALAR_TYPES.includes(input.type)) {
+    return refuseScalar(
+      'unsupported-type',
+      'This kind of field is not placed from a printed cell — draw it by hand.',
+    );
+  }
+
+  const wanted = stripEnumeration(normalizeForMatch(input.label));
+  if (wanted.length < 12) {
+    return refuseScalar('label-too-short', 'The label is too short to identify a place on the page.');
+  }
+
+  // Locate the caption across the whole document, refusing the moment a second
+  // occurrence turns up — the same short-circuit the exemplar rule uses.
+  const hits: { page: number; rows: Row[]; run: number[] }[] = [];
+  for (let p = 0; p < input.pages.length; p++) {
+    const rows = toRows(input.pages[p]!.items);
+    for (const run of labelRuns(rows, wanted)) {
+      hits.push({ page: p, rows, run });
+      if (hits.length > 1) {
+        return refuseScalar(
+          'label-ambiguous',
+          'That label appears more than once, so which cell belongs to it is not decidable.',
+        );
+      }
+    }
+  }
+  const hit = hits[0];
+  if (!hit) return refuseScalar('label-not-found', 'That label was not found in the page text.');
+  if (hit.run.length !== 1) {
+    return refuseScalar(
+      'label-wrapped',
+      'The label wraps across lines, so its own cell is not decidable from one baseline.',
+    );
+  }
+
+  const page = input.pages[hit.page]!;
+  if (page.rules === undefined) {
+    // Distinct from "no cell here". One means the extractor never ran, the other
+    // that this caption is not in a bordered cell; they need opposite fixes.
+    return refuseScalar(
+      'no-rule-data',
+      'Printed lines were not read from this page, so no cell can be measured.',
+    );
+  }
+
+  const row = hit.rows[hit.run[0]!]!;
+  /*
+    THIS CAPTION'S OWN EXTENT, not the whole row's.
+
+    The cover page prints three captions on one baseline ("Candidate's Name",
+    "Candidate's Company Name", "Employee Swipe card Number"), each in its own
+    cell. Measuring the ROW instead of the caption spans all three, which then
+    matches the table's full-width borders rather than the cell's — and hands
+    EVERY caption on that row the same box. Two different fields proposing an
+    identical placement is exactly how a value lands in another field's cell.
+  */
+  const span = captionSpan(row, wanted);
+  if (!span) {
+    return refuseScalar('label-not-found', 'The label could not be isolated within its own line.');
+  }
+  const capLeft = Math.min(...span.map((i) => i.x));
+  const capRight = Math.max(...span.map((i) => i.x + i.width));
+
+  /*
+    The caption's OWN cell. Both strokes are required: a caption with a rule
+    under it but none over it is as likely to be a heading with a border as a
+    table cell, and the difference decides whether the space beneath belongs to
+    this field at all.
+  */
+  const above = nearestCoveringRule(page.rules, capLeft, capRight, row.y, 'up', CELL_SEARCH);
+  const below = nearestCoveringRule(page.rules, capLeft, capRight, row.y, 'down', CELL_SEARCH);
+  if (!above || !below) {
+    return refuseScalar(
+      'caption-not-in-a-cell',
+      'That label is not inside a bordered cell, so the space beneath it cannot be identified as its answer.',
+    );
+  }
+
+  // The answer cell's floor: the next rule down, in the caption cell's column.
+  const floor = nearestCoveringRule(page.rules, below.x1, below.x2, below.y, 'down', CELL_SEARCH);
+  if (!floor) {
+    return refuseScalar(
+      'no-cell-beneath',
+      'There is no bordered cell beneath that label to place a value in.',
+    );
+  }
+
+  /*
+    Column agreement. The floor must run under the same column the caption's
+    cell does; a rule that merely passes nearby is part of a different part of
+    the table, and the row beneath would not be this field's answer.
+  */
+  const overlap = Math.min(below.x2, floor.x2) - Math.max(below.x1, floor.x1);
+  if (overlap < (below.x2 - below.x1) * COLUMN_OVERLAP) {
+    return refuseScalar(
+      'no-cell-beneath',
+      'The line beneath that label belongs to a different column, so no cell is bounded.',
+    );
+  }
+
+  // Every edge measured. x from the caption cell's own rule — the narrower,
+  // column-scoped one — so a full-width floor cannot widen the box past its
+  // column.
+  const x = Math.max(0, below.x1);
+  const right = Math.min(page.width, below.x2);
+  const y = floor.y;
+  const height = below.y - floor.y;
+  const width = right - x;
+
+  if (width < MIN_CELL_WIDTH || height < MIN_CELL_HEIGHT) {
+    return refuseScalar('cell-too-small', 'The cell beneath that label is too small to hold a value.');
+  }
+
+  /*
+    Corroboration from evidence the derivation did not consume: the cell must be
+    EMPTY. The box came from the strokes; this reads the text. It is what
+    refuses a caption whose "answer" row is actually the next caption row, and
+    on a filled copy of the form it refuses rather than drawing over an existing
+    entry.
+  */
+  for (const r of hit.rows) {
+    if (r.y <= y || r.y >= below.y) continue;
+    for (const item of r.items) {
+      const mid = item.x + item.width / 2;
+      if (mid > x && mid < right) {
+        return refuseScalar(
+          'cell-not-blank',
+          'The cell beneath that label already has something printed in it.',
+        );
+      }
+    }
+  }
+
+  const box: PageBox = {
+    page: hit.page,
+    x,
+    y,
+    width,
+    height,
+    pageWidth: page.width,
+    pageHeight: page.height,
+  };
+
+  // The shipped validator has the last word. A proposal it rejects is dropped
+  // silently downstream, leaving the reviewer an empty grid and no reason why.
+  if (resolveGeometry({ geometry: { segments: [box] } }, hit.page + 1).segments.length === 0) {
+    return refuseScalar('validator-rejected', 'The measured cell did not pass geometry validation.');
+  }
+
+  return {
+    placed: true,
+    proposal: {
+      box,
+      /*
+        Every edge came from a printed stroke — nothing was estimated. But which
+        cell belongs to which caption is still an inference from layout, and
+        that is the part a reviewer is being asked to confirm. 0.75 is the
+        module's existing figure for "measured geometry, derived association".
+      */
+      confidence: 0.75,
+      notes: [
+        'Measured from the printed cell beneath "' +
+          input.label +
+          '" on page ' +
+          (hit.page + 1) +
+          ' — ' +
+          Math.round(width) +
+          ' × ' +
+          Math.round(height) +
+          'pt, bounded on all four sides by printed lines.',
+        'That cell is empty. Check it is the right one before confirming.',
+      ],
+    },
+  };
 }

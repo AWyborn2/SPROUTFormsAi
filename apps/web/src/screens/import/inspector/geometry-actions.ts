@@ -232,11 +232,15 @@ export function deriveAcrossPages(
  * hand-drawn box.
  *
  * A non-table field is deliberately NOT unsupported any more (U2/R9): it cannot
- * carry a *derived* grid — there is nothing to derive for a scalar — but it can
- * carry a hand-drawn single-box placement, surfaced through the `draw-only`
- * panel state and confirmed exactly like a grid. The only true dead-end left is
- * a repeating table whose extraction captured no option columns: there is no
- * grid to confirm and no per-cell placement to draw.
+ * carry a derived GRID, but it can carry a single-box placement — drawn by hand,
+ * or measured off the printed cell beneath its caption by `proposeScalarCell`.
+ * Both are surfaced through the `draw-only` panel state and confirmed exactly
+ * like a grid. (This used to read "there is nothing to derive for a scalar",
+ * which the cell rule made false; a stale comment asserting the opposite of the
+ * code is how the next reader gets it wrong.)
+ *
+ * The only true dead-end left is a repeating table whose extraction captured no
+ * option columns: there is no grid to confirm and no per-cell placement to draw.
  */
 export function unsupportedReason(
   field: Pick<FormField, 'type' | 'columns'>,
@@ -476,11 +480,35 @@ export function horizontalRuleSpans(
   const merged: RuleSpan[] = [];
   for (const s of spans) {
     const prev = merged[merged.length - 1];
-    // Same line, and touching or overlapping horizontally — one printed rule.
-    if (prev && Math.abs(s.y - prev.y) <= mergeY && s.x1 <= prev.x2 + 1) {
-      prev.x2 = Math.max(prev.x2, s.x2);
-      prev.y = (prev.y + s.y) / 2;
-      continue;
+    if (prev && Math.abs(s.y - prev.y) <= mergeY) {
+      /*
+        THE SAME LINE TWICE — both endpoints, not merely overlapping.
+
+        Merging exists for ONE line reaching us as two: a rule printed as a thin
+        filled rectangle arrives as its two long edges, and an overdrawn rule as
+        two near-coincident lines. In both cases the extents are the same.
+
+        Anything looser destroys the per-cell extents a table is made of, and a
+        cell's extent is the whole point of reading these. Measured on the real
+        document, on one cover-page row at y≈701:
+
+          31.4 → 221.8   cell border
+          222.3 → 384.8  cell border
+          385.3 → 563.5  cell border
+          31.4 → 563.5   the table's OUTER border, same baseline
+
+        A "touching" test merges the cells end-to-end into one full-width rule.
+        An "overlaps by half" test merges each cell into the outer border, which
+        contains it entirely. Either way every caption on the row measures the
+        table instead of its own cell, and two fields end up proposing the same
+        box — which is how a value lands in another field's cell.
+      */
+      if (Math.abs(s.x1 - prev.x1) <= 2 && Math.abs(s.x2 - prev.x2) <= 2) {
+        prev.x1 = Math.min(prev.x1, s.x1);
+        prev.x2 = Math.max(prev.x2, s.x2);
+        prev.y = (prev.y + s.y) / 2;
+        continue;
+      }
     }
     merged.push({ ...s });
   }
