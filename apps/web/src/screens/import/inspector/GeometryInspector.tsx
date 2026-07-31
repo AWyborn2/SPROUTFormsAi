@@ -15,6 +15,7 @@ import { Button, Icon, Switch } from '@formai/ui';
 import { isChoiceField } from '@formai/shared';
 import type { GeometryBand, PageBox } from '@formai/shared';
 import type { TextPage } from '../../../lib/pdf-geometry.js';
+import { proposeScalarCell } from '../../../lib/pdf-geometry.js';
 import { markSentence } from '../../../lib/mark-description.js';
 import {
   adjustGeometryBand,
@@ -76,6 +77,21 @@ export function GeometryInspector({ field, textPages, activeDrawSlot = null, onT
     () => (proposal ? null : deriveAcrossPages(field, textPages)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [field.id, field.type, columnSig, rowCount, textPages, Boolean(proposal)],
+  );
+
+  /*
+    A scalar's box, measured off the printed CELL beneath its caption. Same
+    guard as : only when nothing is stored, so a reviewer's own box is
+    never recomputed away.
+
+    An OFFER, never applied automatically. It reports 0.75 because every edge
+    was measured off a printed stroke but WHICH cell belongs to which caption is
+    still an inference from layout — and that inference is the part the reviewer
+    is being asked to confirm.
+  */
+  const scalarCell = useMemo(
+    () => (proposal ? null : proposeScalarCell({ pages: textPages, type: field.type, label: field.label })),
+    [proposal, textPages, field.type, field.label],
   );
 
   const state = panelState(field, proposal, confirmed, derived);
@@ -188,6 +204,35 @@ export function GeometryInspector({ field, textPages, activeDrawSlot = null, onT
       {state.kind === 'draw-only' ? (
         <>
           <p className="text-[11.5px] leading-snug text-text-tertiary">{state.reason}</p>
+          {/*
+            A box measured off the printed cell, or the reason there is none.
+            Stating the refusal matters as much as making the offer: without it
+            a reviewer cannot tell "this looked and declined" from "nothing ever
+            ran", so they do not know the field still needs drawing by hand.
+          */}
+          {scalarCell?.placed ? (
+            <div className="rounded-md border border-border-accent bg-surface-2 p-[10px_11px]">
+              {scalarCell.proposal.notes.map((n: string) => (
+                <p key={n} className="text-[11.5px] leading-snug text-text-secondary">
+                  {n}
+                </p>
+              ))}
+              <Button
+                variant="ghost"
+                leadingIcon="wand-2"
+                onClick={() => proposeGeometry(field.id, scalarCell.proposal.box)}
+                className="mt-1.5 justify-center"
+              >
+                Use this box
+              </Button>
+            </div>
+          ) : (
+            scalarCell && (
+              <p className="text-[11.5px] leading-snug text-text-tertiary">
+                No box was measured: {scalarCell.reason}
+              </p>
+            )
+          )}
           {drawButton}
         </>
       ) : state.kind === 'needs-subdivision' ? (
