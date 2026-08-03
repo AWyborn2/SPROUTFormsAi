@@ -34,6 +34,13 @@ import {
 import type { BuilderAction, BuilderState } from '../field-editor/reducer.js';
 import { builderReducer, initialBuilderState } from '../field-editor/reducer.js';
 import { ApiError, apiClient } from './api-client.js';
+import type { ImportDraftStore, ImportSnapshot } from './import-draft-store.js';
+import {
+  IMPORT_SNAPSHOT_VERSION,
+  draftKey,
+  indexedDbDraftStore,
+  isRestorable,
+} from './import-draft-store.js';
 
 /**
  * An extracted field plus the reviewer's resolution state. Backed by the shared
@@ -198,26 +205,120 @@ function dispatchEdit(action: BuilderAction): void {
   if (!editor) return;
   editor = builderReducer(editor, action);
   session = { ...session, fields: derivedReviewFields() };
-  listeners.forEach((l) => l());
+  notify();
 }
 
 /** Patch a field's extraction metadata (note / resolved) without touching the editor. */
 function setMeta(id: string, patch: { note?: string; resolved?: boolean }): void {
   reviewMeta.set(id, { ...reviewMeta.get(id), ...patch });
   session = { ...session, fields: derivedReviewFields() };
-  listeners.forEach((l) => l());
+  notify();
 }
 
 const listeners = new Set<() => void>();
 
+/**
+ * Where the local autosave writes. Swappable so the capture/restore logic —
+ * the part that can actually be wrong — is testable without IndexedDB, which
+ * jsdom does not have.
+ */
+let draftStore: ImportDraftStore = indexedDbDraftStore();
+export function setImportDraftStore(store: ImportDraftStore): void {
+  draftStore = store;
+}
+
+/**
+ * How long the reviewer has to stop before a save is written.
+ *
+ * Dragging a band edge fires on every pixel, so writing per change would put
+ * hundreds of serialisations of a whole extraction through IndexedDB during one
+ * adjustment. Long enough to coalesce a drag, short enough that what is lost to
+ * a crash is the last second of work rather than the last ten minutes.
+ */
+export const AUTOSAVE_DEBOUNCE_MS = 750;
+
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * ONE notification path, and the reason it exists.
+ *
+ * Every mutation in this module ended in `listeners.forEach(...)` — six
+ * separate sites. Hanging the autosave off the store subscription instead would
+ * have worked, but only while every future mutation remembered to notify, and a
+ * path that forgot would lose work silently, which is the exact failure this
+ * whole feature exists to prevent. Routing every one through here makes
+ * "changed the session" and "scheduled a save" the same statement.
+ */
+function notify(): void {
+  listeners.forEach((l) => l());
+  scheduleAutosave();
+}
+
+function scheduleAutosave(): void {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    const snapshot = captureImportSnapshot();
+    const key = draftKey(snapshot?.assetId ?? null);
+    // Nothing worth saving yet, or nothing to key it by. Not an error: it is
+    // every moment before the extraction lands.
+    if (!snapshot || !key) return;
+    void draftStore.save(key, snapshot);
+  }, AUTOSAVE_DEBOUNCE_MS);
+}
+
+/** Write immediately rather than on the timer — for `beforeunload`. */
+export function flushImportAutosave(): void {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  const snapshot = captureImportSnapshot();
+  const key = draftKey(snapshot?.assetId ?? null);
+  if (snapshot && key) void draftStore.save(key, snapshot);
+}
+
+/** The autosave held for one uploaded document, if there is one worth offering. */
+export async function loadSavedImport(assetId: string): Promise<ImportSnapshot | null> {
+  const key = draftKey(assetId);
+  if (!key) return null;
+  const snapshot = await draftStore.load(key);
+  return isRestorable(snapshot) ? snapshot : null;
+}
+
+/**
+ * The most recent unfinished import, for the wizard's entry point to offer.
+ *
+ * Asked for by no id at all, because of how the work goes missing: after a
+ * refresh the session is empty, so the screen that should offer the work back
+ * has nothing to look it up by.
+ */
+export async function latestSavedImport(): Promise<ImportSnapshot | null> {
+  const snapshot = await draftStore.latest();
+  return isRestorable(snapshot) ? snapshot : null;
+}
+
+/**
+ * Drop the autosave for a document.
+ *
+ * Called once the work has a permanent home — the form is published, or the
+ * reviewer has deliberately abandoned it. NOT called by `resetImportSession`:
+ * entering step 1 resets, so clearing there would destroy the saved work at
+ * precisely the moment the wizard is about to offer it back.
+ */
+export async function clearSavedImport(assetId: string): Promise<void> {
+  const key = draftKey(assetId);
+  if (key) await draftStore.clear(key);
+}
+
 function emit() {
   session = { ...session, fields: editor ? derivedReviewFields() : session.fields.slice() };
-  listeners.forEach((l) => l());
+  notify();
 }
 
 function update(patch: Partial<ImportSession>) {
   session = { ...session, ...patch };
-  listeners.forEach((l) => l());
+  notify();
 }
 
 function subscribe(cb: () => void) {
@@ -240,12 +341,114 @@ export function resetImportSession() {
   geometryProposals.clear();
   confirmedGeometry.clear();
   session = emptySession();
-  listeners.forEach((l) => l());
+  notify();
 }
 
 /** Enter (or leave, with null) re-extract mode — set by step 1 from its `?form=` param, after reset. */
 export function setImportTarget(formId: string | null) {
   update({ targetFormId: formId });
+}
+
+/* ── saving and resuming ──────────────────────────────────────────────────
+ *
+ * Everything above this line is state that only ever lived in these module
+ * variables. Mapping an eighteen-page assessment is hours of it, and a refresh
+ * threw the lot away — so the two functions here are the whole basis of both
+ * saving modes: the local autosave and the named server draft serialise exactly
+ * the same thing, and differ only in where they put it.
+ */
+
+/**
+ * Freeze the review into something storable, or null when there is nothing
+ * worth keeping.
+ *
+ * Refuses before the extraction has landed. A session mid-upload has no fields
+ * and no asset, and writing one would mean later offering to "restore" a
+ * document the reviewer has not yet seen.
+ */
+export function captureImportSnapshot(): ImportSnapshot | null {
+  if (!editor || !session.assetId || session.fields.length === 0) return null;
+
+  return {
+    version: IMPORT_SNAPSHOT_VERSION,
+    savedAt: new Date().toISOString(),
+    fileName: session.fileName,
+    pageCount: session.pageCount,
+    designNotes: [...session.designNotes],
+    assetId: session.assetId,
+    extraction: session.extraction,
+    targetFormId: session.targetFormId,
+    documentType: heldDocumentType,
+    // The editor's list, WITHOUT its undo stack — see the type's own note.
+    fields: editor.fields.map((f) => ({ ...f })),
+    reviewMeta: [...reviewMeta.entries()].map(([id, meta]) => [id, { ...meta }]),
+    acceptedAnswerSets: [...acceptedAnswerSets],
+    placements: [...geometryProposals.entries()].map(([slot, box]) => ({
+      slot,
+      box,
+      confirmed: confirmedGeometry.has(slot),
+    })),
+  };
+}
+
+/**
+ * Put the reviewer back where they were.
+ *
+ * REPLACES, never merges. A merge would have to decide what happens when a
+ * restored placement and a live one disagree about the same slot, and there is
+ * no answer to that a reviewer could predict — so restoring is an explicit act
+ * that discards whatever is in the wizard, and the caller is responsible for
+ * asking first.
+ *
+ * `status` lands on 'ready' rather than being restored: the statuses that could
+ * have been saved describe a pipeline run that is no longer happening, and
+ * 'uploading' would leave a spinner over a session with nothing in flight. Any
+ * saved `error` is dropped for the same reason — it belonged to that run.
+ */
+export function restoreImportSnapshot(snapshot: ImportSnapshot): boolean {
+  if (!isRestorable(snapshot)) return false;
+
+  // Orphan anything still in flight, exactly as a reset does — otherwise a
+  // slow extraction from before the restore lands on top of it afterwards.
+  runId += 1;
+  // The bytes are not in the snapshot, so a retry has nothing to replay. The
+  // viewer already falls back to fetching the asset, which is the only thing
+  // that needed them.
+  heldBase64 = null;
+  heldDocumentType = snapshot.documentType;
+
+  reviewMeta.clear();
+  for (const [id, meta] of snapshot.reviewMeta) reviewMeta.set(id, { ...meta });
+
+  acceptedAnswerSets.clear();
+  for (const key of snapshot.acceptedAnswerSets) acceptedAnswerSets.add(key);
+
+  geometryProposals.clear();
+  confirmedGeometry.clear();
+  for (const placement of snapshot.placements) {
+    geometryProposals.set(placement.slot, placement.box);
+    if (placement.confirmed) confirmedGeometry.add(placement.slot);
+  }
+
+  editor = initialBuilderState({
+    formId: null,
+    name: '',
+    fields: snapshot.fields.map((f) => ({ ...f })),
+  });
+
+  session = {
+    status: 'ready',
+    fileName: snapshot.fileName,
+    pageCount: snapshot.pageCount,
+    designNotes: [...snapshot.designNotes],
+    fields: derivedReviewFields(),
+    assetId: snapshot.assetId,
+    extraction: snapshot.extraction,
+    error: null,
+    targetFormId: snapshot.targetFormId,
+  };
+  notify();
+  return true;
 }
 
 export const MAX_UPLOAD_MB = 25;
@@ -1366,11 +1569,17 @@ export function reviewedToFields(fields: ReviewField[]): FormField[] {
  * id), but a checkbox group needs one per option. Rather than a second store,
  * each option's box is proposed/confirmed under a COMPOSITE slot id, reusing the
  * whole `proposeGeometry`/`confirmGeometry`/`rejectGeometry` pipeline unchanged.
- * The ` ` separator cannot occur in a field id or option value, so the slot
+ * The NUL separator cannot occur in a field id or option value, so the slot
  * can never collide with a real field id (a plain scalar/table draw).
+ *
+ * WRITTEN AS AN ESCAPE, NEVER AS A LITERAL NUL BYTE. It used to be literal, and
+ * three raw NULs in this source made the whole 1400-line file BINARY to grep and
+ * ripgrep — so every content search across the repo silently skipped the entire
+ * import feature and reported no matches rather than an error. The escape is
+ * byte-identical at runtime and leaves the file searchable.
  */
 export function optionSlotId(fieldId: string, optionKey: string): string {
-  return `${fieldId} opt ${optionKey}`;
+  return `${fieldId}\u0000opt\u0000${optionKey}`;
 }
 
 /**

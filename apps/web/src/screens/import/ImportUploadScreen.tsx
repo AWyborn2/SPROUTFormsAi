@@ -3,9 +3,36 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Button, FileDropzone, Icon } from '@formai/ui';
 import { DOCUMENT_TYPE_HINTS, DOCUMENT_TYPE_LABELS, DOCUMENT_TYPES, type DocumentType } from '@formai/shared';
 import { useForm } from '../../lib/data/hooks.js';
-import { resetImportSession, setImportTarget, startExtraction } from '../../lib/data/import-session.js';
+import type { ImportSnapshot } from '../../lib/data/import-draft-store.js';
+import {
+  clearSavedImport,
+  latestSavedImport,
+  resetImportSession,
+  restoreImportSnapshot,
+  setImportTarget,
+  startExtraction,
+} from '../../lib/data/import-session.js';
 import { formatFileSize, validateUploadFile } from './upload-validation.js';
 import { ImportStepper } from './ImportStepper.js';
+
+/** "3 minutes ago" — how long an interruption lasted, in the words used about one. */
+function howLongAgo(iso: string): string {
+  const minutes = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
+/** How much of the saved work is placement — the part that costs hours to redo. */
+function describeProgress(snapshot: ImportSnapshot): string {
+  const fields = snapshot.fields.length;
+  const confirmed = snapshot.placements.filter((p) => p.confirmed).length;
+  const placement = confirmed > 0 ? `, ${confirmed} placement${confirmed === 1 ? '' : 's'} confirmed` : '';
+  return `${fields} field${fields === 1 ? '' : 's'}${placement}`;
+}
 
 /**
  * Import step 1 — upload the source PDF. With `?form=<id>` the wizard runs in
@@ -20,12 +47,48 @@ export function ImportUploadScreen() {
   const [error, setError] = useState<string | null>(null);
   const [documentType, setDocumentType] = useState<DocumentType>('generic');
 
+  /**
+   * Unfinished work from a previous visit, offered rather than restored.
+   *
+   * OFFERED, because resuming replaces whatever is in the wizard and the
+   * reviewer may well have come here to start something else entirely. Silently
+   * reinstating an old document under a screen headed "upload a PDF" would be
+   * the wizard deciding what they meant.
+   */
+  const [resumable, setResumable] = useState<ImportSnapshot | null>(null);
+
   // Fresh session each time the wizard is entered from the top; the target
   // (if any) is set AFTER the reset so a plain "Import PDF" entry clears it.
   useEffect(() => {
     resetImportSession();
     setImportTarget(targetFormId);
   }, [targetFormId]);
+
+  useEffect(() => {
+    let live = true;
+    void latestSavedImport().then((snapshot) => {
+      if (live) setResumable(snapshot);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  function resume() {
+    if (!resumable) return;
+    if (!restoreImportSnapshot(resumable)) return;
+    // Re-extract mode is a property of THIS visit, not of the saved work: the
+    // snapshot carries the target it was saved with, and the restore reinstates
+    // it, so a plain "Import PDF" entry must not inherit an old retarget.
+    setImportTarget(targetFormId);
+    navigate('/app/import/review');
+  }
+
+  async function discardResumable() {
+    if (!resumable?.assetId) return;
+    await clearSavedImport(resumable.assetId);
+    setResumable(null);
+  }
 
   function handleFiles(files: File[]) {
     const candidate = files[0];
@@ -52,6 +115,29 @@ export function ImportUploadScreen() {
       <ImportStepper currentStep={0} />
 
       <div className="mx-auto max-w-[640px]">
+        {resumable && (
+          <div className="mb-6 rounded-lg border border-border-accent bg-surface-accent-soft p-[14px_18px]">
+            <div className="flex items-start gap-2.5">
+              <Icon name="rotate-ccw" size={16} className="mt-0.5 flex-none text-accent" />
+              <div className="min-w-0 flex-1">
+                <div className="text-[13.5px] font-semibold">Pick up where you left off</div>
+                <div className="mt-0.5 text-[12.5px] text-text-secondary">
+                  <span className="font-medium">{resumable.fileName}</span> · {describeProgress(resumable)}{' '}
+                  · saved {howLongAgo(resumable.savedAt)}
+                </div>
+              </div>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <Button size="sm" leadingIcon="rotate-ccw" onClick={resume}>
+                Resume
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => void discardResumable()}>
+                Discard
+              </Button>
+            </div>
+          </div>
+        )}
+
         {targetFormId ? (
           <>
             <h3 className="mb-1.5 text-[23px]">Re-extract from an updated PDF</h3>
