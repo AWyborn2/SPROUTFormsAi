@@ -30,6 +30,8 @@ import {
   handleAdjustment,
   itemsInBox,
   matrixMultiply,
+  moveBand,
+  moveBoundary,
   nudgedEdge,
   panelState,
   previewMarks,
@@ -1355,5 +1357,100 @@ describe('applyFieldChanges', () => {
     const optionKeys = (survivingState[0]!.geometry?.segments ?? []).map((s) => s.optionKey);
     expect(optionKeys).toEqual(['No']);
     expect(optionKeys).not.toContain('Yes');
+  });
+});
+
+describe('moveBand / moveBoundary (U6, R7/R8) — pure core of import-session.ts adjustGeometryBand/Boundary', () => {
+  /**
+   * The exact fixture `import-session.test.ts`'s "geometry review (U4, R8)"
+   * suite uses for `adjustGeometryBand`/`adjustGeometryBoundary`, so every
+   * case below can be cross-checked input-for-input against what that suite
+   * already asserts for `adjustGeometryBand('f1', ...)` /
+   * `adjustGeometryBoundary('f1', ...)` against the same starting segment.
+   */
+  const SEGMENT: PageBox = {
+    page: 6,
+    x: 37.5,
+    y: 570,
+    width: 520,
+    height: 80,
+    pageWidth: 595,
+    pageHeight: 842,
+    columnBands: [
+      { key: 'tick', start: 496, end: 511.7 },
+      { key: 'cross', start: 511.7, end: 531.9 },
+      { key: 'na', start: 531.9, end: 556.7 },
+    ],
+    rowBands: [
+      { key: 'r0', start: 620, end: 640 },
+      { key: 'r1', start: 600, end: 620 },
+    ],
+  };
+
+  it('Covers AE5. moves a column band edge, matching adjustGeometryBand("f1", "column", "na", "end", 560)', () => {
+    const next = moveBand(SEGMENT, 'column', 'na', 'end', 560);
+
+    expect(next?.columnBands?.find((b) => b.key === 'na')?.end).toBe(560);
+  });
+
+  it('Covers AE5. grows the segment box to contain a band dragged past its edge', () => {
+    // 560 sits beyond the box's right edge of 557.5 — matches
+    // import-session.test.ts's "grows the segment box to contain a band
+    // dragged past its edge".
+    const next = moveBand(SEGMENT, 'column', 'na', 'end', 560);
+
+    expect(next).not.toBeNull();
+    expect(next!.x + next!.width).toBeGreaterThanOrEqual(560);
+    expect(resolveGeometry({ geometry: { segments: [next!] } }).dropped).toEqual([]);
+  });
+
+  it('never grows the box beyond the page — matches adjustGeometryBand("f1", "column", "na", "end", 900)', () => {
+    // 900 exceeds the 595pt page, so the shipped validator refuses the whole
+    // edit rather than producing a box that runs off the paper.
+    expect(moveBand(SEGMENT, 'column', 'na', 'end', 900)).toBeNull();
+  });
+
+  it('refuses an adjustment that would overlap a neighbouring band — matches adjustGeometryBand("f1", "column", "tick", "end", 540)', () => {
+    expect(moveBand(SEGMENT, 'column', 'tick', 'end', 540)).toBeNull();
+  });
+
+  it('refuses an inverted adjustment — matches adjustGeometryBand("f1", "column", "cross", "end", 400)', () => {
+    expect(moveBand(SEGMENT, 'column', 'cross', 'end', 400)).toBeNull();
+  });
+
+  it('moves a row band as well as a column band — matches adjustGeometryBand("f1", "row", "r1", "start", 595)', () => {
+    const next = moveBand(SEGMENT, 'row', 'r1', 'start', 595);
+
+    expect(next?.rowBands?.find((b) => b.key === 'r1')?.start).toBe(595);
+  });
+
+  it('refuses a band key that does not exist on the given axis', () => {
+    expect(moveBand(SEGMENT, 'column', 'nope', 'end', 505)).toBeNull();
+  });
+
+  it('Covers AE5. moves both bands sharing an interior boundary, leaving no gap — matches adjustGeometryBoundary("f1", "column", "tick", "cross", 505)', () => {
+    const next = moveBoundary(SEGMENT, 'column', 'tick', 'cross', 505);
+
+    const bands = next?.columnBands!;
+    expect(bands.find((b) => b.key === 'tick')!.end).toBe(505);
+    expect(bands.find((b) => b.key === 'cross')!.start).toBe(505);
+  });
+
+  it('refuses a boundary drag past either neighbour rather than inverting a band — matches adjustGeometryBoundary("f1", "column", "tick", "cross", 490 / 540)', () => {
+    // left of tick.start
+    expect(moveBoundary(SEGMENT, 'column', 'tick', 'cross', 490)).toBeNull();
+    // right of cross.end
+    expect(moveBoundary(SEGMENT, 'column', 'tick', 'cross', 540)).toBeNull();
+  });
+
+  it('publishes a boundary-adjusted grid the shipped validator accepts — matches adjustGeometryBoundary("f1", "column", "cross", "na", 528)', () => {
+    const next = moveBoundary(SEGMENT, 'column', 'cross', 'na', 528);
+
+    expect(next).not.toBeNull();
+    expect(resolveGeometry({ geometry: { segments: [next!] } }).dropped).toEqual([]);
+  });
+
+  it('ignores a boundary between bands that do not exist — matches adjustGeometryBoundary("f1", "column", "tick", "nope", 505)', () => {
+    expect(moveBoundary(SEGMENT, 'column', 'tick', 'nope', 505)).toBeNull();
   });
 });

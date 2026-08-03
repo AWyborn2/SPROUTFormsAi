@@ -13,10 +13,27 @@
  */
 import { useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { DEFAULT_CONTAINER, type FormField, type PageBox } from '@formai/shared';
 import type { FormVersionDetail } from '../../lib/data/types.js';
-import type { FieldProposal } from '../../lib/pdf-geometry.js';
+import type { FieldProposal, PositionedText } from '../../lib/pdf-geometry.js';
+import type { BandHandle } from './inspector/geometry-actions.js';
+import type { PlacementMark } from './PdfViewer.js';
+
+/**
+ * The subset of real `PdfViewerProps` this suite exercises through the
+ * stubbed `PdfViewer` (U6) — `PdfViewerProps` itself is not exported, and the
+ * stub only ever needs these fields, so this stands in for it rather than
+ * widening the real component's public surface just for a test.
+ */
+interface MockPdfViewerProps {
+  onTextLayer: (pages: unknown[]) => void;
+  bandOverlay?: PageBox | null;
+  bandSnapTargets?: readonly number[];
+  bandSnapTargetsY?: readonly number[];
+  onBandEdge?: (handle: BandHandle, value: number) => void;
+  placements?: readonly PlacementMark[];
+}
 
 const navigate = vi.fn();
 vi.mock('react-router-dom', () => ({
@@ -43,17 +60,34 @@ vi.mock('@formai/ui', async () => {
   return { ...actual, useToast: () => ({ toast }) };
 });
 
-// `PdfViewer` does real pdf.js canvas rendering — irrelevant here and
-// impractical to run under jsdom. Stubbed to a component that feeds
-// `onTextLayer` one page. Both `selectField` and the panel's own proposal
-// `useMemo` bail out while `textPages` is empty, so a non-empty pages array
-// is required for either to run at all — an empty `items` list is enough,
-// since the derivation function itself is stubbed below.
+/**
+ * `PdfViewer` does real pdf.js canvas rendering — irrelevant here and
+ * impractical to run under jsdom. Stubbed to a component that feeds
+ * `onTextLayer` one page. Both `selectField` and the panel's own proposal
+ * `useMemo` bail out while `textPages` is empty, so a non-empty pages array
+ * is required for either to run at all — an empty `items` list is enough,
+ * since the derivation function itself is stubbed below.
+ *
+ * `pdfViewerPropsSpy` records every render's props (U6) so a test can inspect
+ * what `GeometryEditorScreen` computed for `bandOverlay`/`bandSnapTargets`/
+ * `bandSnapTargetsY`/`onBandEdge`/`placements` without needing the real
+ * `BandGrid` DOM, which lives entirely inside the stubbed-out `PdfViewer`.
+ * `stubTextLayerItems` lets a test drive what the one fed page's `items` are
+ * (defaulting to none), so a snap-target test can assert the value fed to
+ * `PdfViewer` was actually derived from this page's own text.
+ */
+const { pdfViewerPropsSpy, stubTextLayerItems } = vi.hoisted(() => ({
+  pdfViewerPropsSpy: vi.fn<(props: MockPdfViewerProps) => void>(),
+  stubTextLayerItems: { current: [] as { text: string; x: number; y: number; width: number }[] },
+}));
+
 vi.mock('./PdfViewer.js', () => ({
-  PdfViewer: ({ onTextLayer }: { onTextLayer: (pages: unknown[]) => void }) => {
+  PdfViewer: (props: MockPdfViewerProps) => {
+    pdfViewerPropsSpy(props);
     useEffect(() => {
-      onTextLayer([{ width: 595, height: 842, items: [] }]);
-    }, [onTextLayer]);
+      props.onTextLayer([{ width: 595, height: 842, items: stubTextLayerItems.current }]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [props.onTextLayer]);
     return null;
   },
 }));
@@ -143,6 +177,37 @@ function renderWithFields(fields: FormField[]) {
   render(<GeometryEditorScreen />);
 }
 
+/**
+ * A repeating-table field already placed with ONE banded segment (U6) — a
+ * non-choice field, so `bandOverlayFor`'s per-option exclusion does not apply
+ * and its own existing segment is eligible to become the `bandOverlay`.
+ */
+function tableFieldWithSegment(id: string, label: string): FormField {
+  return {
+    id,
+    type: 'repeating_group',
+    label,
+    required: false,
+    source: 'imported',
+    columns: [{ key: 'item', label: 'Item', type: 'text' }],
+    geometry: {
+      segments: [
+        {
+          page: 0,
+          x: 10,
+          y: 10,
+          width: 100,
+          height: 50,
+          pageWidth: 595,
+          pageHeight: 842,
+          columnBands: [{ key: 'c1', start: 20, end: 40 }],
+          rowBands: [{ key: 'r1', start: 15, end: 25 }],
+        },
+      ],
+    },
+  };
+}
+
 /** A field whose 3 options are already fully placed — the `expectedBoxes` boundary. */
 function fullyPlacedChoiceField(id: string, label: string): FormField {
   return choiceField(id, label, ['Yes', 'No', 'Maybe'], {
@@ -171,6 +236,7 @@ afterEach(() => {
   vi.clearAllMocks();
   version.data = undefined;
   version.isLoading = false;
+  stubTextLayerItems.current = [];
 });
 
 describe('GeometryEditorScreen — batched "Place all N" (U2/KTD3)', () => {
@@ -458,5 +524,87 @@ describe('GeometryEditorScreen — needs-review queue: bulk confirm and step-thr
     expect(screen.getByLabelText('Review Field A')).toBeDefined();
     expect(screen.getByLabelText('Review Field C')).toBeDefined();
     expect(screen.queryByLabelText('Review Field B')).toBeNull();
+  });
+});
+
+describe('GeometryEditorScreen — band overlay wiring (U6, R7/R8)', () => {
+  it('Covers AE5: a field with no segment/proposal renders no band overlay, and nothing crashes (unchanged manual-draw case)', () => {
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(null);
+    renderWithField(choiceField('f1', 'Unmatched field', ['Yes', 'No', 'Maybe']));
+
+    fireEvent.click(screen.getByText('Unmatched field'));
+
+    const lastProps = pdfViewerPropsSpy.mock.calls.at(-1)![0];
+    expect(lastProps.bandOverlay).toBeNull();
+    expect(lastProps.bandSnapTargets).toEqual([]);
+    expect(lastProps.bandSnapTargetsY).toEqual([]);
+
+    // Arming Draw on it (the manual fallback) still renders no band overlay
+    // and does not throw — a hand-drawn box has no existing segment to
+    // band-edit until it is actually drawn.
+    fireEvent.click(screen.getAllByText('Draw')[0]!);
+    const afterArming = pdfViewerPropsSpy.mock.calls.at(-1)![0];
+    expect(afterArming.bandOverlay).toBeNull();
+  });
+
+  it('Covers AE5: selecting an already-placed non-choice field shows its own segment as the band overlay, with snap targets from the same page', () => {
+    const items: PositionedText[] = [
+      { text: 'A', x: 100, y: 50, width: 20 },
+      { text: 'B', x: 300, y: 50, width: 15 },
+    ];
+    stubTextLayerItems.current = items;
+
+    renderWithField(tableFieldWithSegment('f1', 'A grid field'));
+    fireEvent.click(screen.getByText('A grid field'));
+
+    const lastProps = pdfViewerPropsSpy.mock.calls.at(-1)![0];
+    // The field's own placed segment, not a fresh proposal — it already has
+    // geometry, so `selectField` (R4) never re-derives it.
+    expect(lastProps.bandOverlay).toMatchObject({
+      page: 0,
+      columnBands: [{ key: 'c1', start: 20, end: 40 }],
+    });
+    // Computed from the SAME page's text items the overlay's segment sits on
+    // — the printed edges 100/120 and 300/315 (x, x+width) from `items`.
+    expect(lastProps.bandSnapTargets).toEqual([100, 120, 300, 315]);
+  });
+
+  it('Covers AE5: onBandEdge drags an already-placed field\'s own segment and writes the moved band back into edited', () => {
+    renderWithField(tableFieldWithSegment('f1', 'A grid field'));
+    fireEvent.click(screen.getByText('A grid field'));
+
+    const propsBefore = pdfViewerPropsSpy.mock.calls.at(-1)![0];
+    expect(propsBefore.onBandEdge).toBeTypeOf('function');
+
+    // The right edge of column band `c1` (`columnHandles`' outer-edge shape:
+    // `right-c1` names the handle, `left: 'c1'` names the band it owns).
+    const handle: BandHandle = { key: 'right-c1', label: 'Drag the right edge of c1', at: 40, axis: 'column', left: 'c1' };
+    act(() => propsBefore.onBandEdge!(handle, 45));
+
+    const propsAfter = pdfViewerPropsSpy.mock.calls.at(-1)![0];
+    expect(propsAfter.bandOverlay).toMatchObject({
+      columnBands: [{ key: 'c1', start: 20, end: 45 }],
+    });
+    // The overlay's own placements entry reflects the same moved band, and
+    // is `confirmed: true` — it is a segment already in `edited`, not a
+    // parked proposal.
+    const mark = propsAfter.placements?.find((p) => p.slot.startsWith('f1#'));
+    expect(mark?.box.columnBands?.find((b) => b.key === 'c1')?.end).toBe(45);
+    expect(mark?.confirmed).toBe(true);
+  });
+
+  it('an inverted onBandEdge move is refused — the segment is left unchanged', () => {
+    renderWithField(tableFieldWithSegment('f1', 'A grid field'));
+    fireEvent.click(screen.getByText('A grid field'));
+
+    const propsBefore = pdfViewerPropsSpy.mock.calls.at(-1)![0];
+    const handle: BandHandle = { key: 'left-c1', label: 'Drag the left edge of c1', at: 20, axis: 'column', right: 'c1' };
+    // Past the band's own end (40) — an inverted move, refused.
+    act(() => propsBefore.onBandEdge!(handle, 50));
+
+    const propsAfter = pdfViewerPropsSpy.mock.calls.at(-1)![0];
+    expect(propsAfter.bandOverlay).toMatchObject({
+      columnBands: [{ key: 'c1', start: 20, end: 40 }],
+    });
   });
 });

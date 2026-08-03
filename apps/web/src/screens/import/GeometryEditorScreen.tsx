@@ -11,6 +11,11 @@ import {
   classifyProposalTier,
   deriveAcrossPages,
   deriveOptionCellsAcrossPages,
+  moveBand,
+  moveBoundary,
+  snapTargets,
+  snapTargetsY,
+  type BandHandle,
   type FieldChange,
 } from './inspector/geometry-actions.js';
 
@@ -74,6 +79,75 @@ export function GeometryEditorScreen() {
   const selected = fields.find((f) => f.id === selectedId) ?? null;
 
   const onTextLayer = useCallback((pages: TextPage[]) => setTextPages(pages), []);
+
+  /**
+   * The band grid currently shown in the editor, and where an edit to it
+   * lands (R7/R8/U6) — see `bandOverlayFor`. Computed as a hook (not inline
+   * below the early returns further down) because those returns are
+   * conditional and every hook in this component must run on every render.
+   */
+  const overlay = useMemo(
+    () => bandOverlayFor(drawTarget, selectedId, proposalPreviews, fields),
+    [drawTarget, selectedId, proposalPreviews, fields],
+  );
+  const bandOverlay = overlay?.box ?? null;
+
+  /**
+   * Where a dragged band edge may land, from the overlay page's own text —
+   * the same `snapTargets`/`snapTargetsY` helpers and reasoning
+   * `ImportReviewScreen` uses (U10/U3): this screen already holds the text
+   * layer, so the viewer stays a presentational surface that reports a
+   * coordinate rather than deciding what a legal one is.
+   */
+  const bandSnapTargets = useMemo(
+    () => (bandOverlay ? snapTargets(textPages[bandOverlay.page]?.items ?? []) : []),
+    [bandOverlay, textPages],
+  );
+  const bandSnapTargetsY = useMemo(
+    () => (bandOverlay ? snapTargetsY(textPages[bandOverlay.page]?.items ?? []) : []),
+    [bandOverlay, textPages],
+  );
+
+  /**
+   * A band edge was dragged/nudged to `value` (R7/R8/U6) — routes through the
+   * same validated `moveBand`/`moveBoundary` the import review screen's
+   * session-map adjustment uses, so a drag, a snap and a keyboard nudge on
+   * this screen behave identically to the import review screen (AE5). Writes
+   * land wherever `overlay.source` says: a placed segment inside `edited`
+   * (via `mutate()`), or — for a parked needs-review proposal — back into
+   * `proposalPreviews`, so the proposal stays unconfirmed until the reviewer
+   * explicitly applies it (R8's confirm gate).
+   */
+  function onBandEdge(handle: BandHandle, value: number) {
+    if (!overlay) return;
+    const next =
+      handle.left && handle.right
+        ? moveBoundary(overlay.box, handle.axis, handle.left, handle.right, value)
+        : handle.right
+          ? moveBand(overlay.box, handle.axis, handle.right, 'start', value)
+          : handle.left
+            ? moveBand(overlay.box, handle.axis, handle.left, 'end', value)
+            : null;
+    if (!next) return;
+
+    if (overlay.source.kind === 'preview') {
+      const { fieldId } = overlay.source;
+      setProposalPreviews((prev) =>
+        prev.map((p) => (p.fieldId === fieldId && 'segment' in p.proposal ? { ...p, proposal: { ...p.proposal, segment: next } } : p)),
+      );
+      return;
+    }
+
+    const { fieldId, optionKey } = overlay.source;
+    mutate(fieldId, (f) => {
+      const segments = f.geometry?.segments ?? [];
+      if (!segments.some((s) => (s.optionKey ?? null) === optionKey)) return f;
+      return {
+        ...f,
+        geometry: { segments: segments.map((s) => ((s.optionKey ?? null) === optionKey ? next : s)) },
+      };
+    });
+  }
 
   /**
    * Apply one field-level edit.
@@ -304,19 +378,38 @@ export function GeometryEditorScreen() {
 
   /**
    * Every box on every field, so a reviewer can see what they have already
-   * placed instead of only the field they happen to have selected.
+   * placed instead of only the field they happen to have selected — plus
+   * every box a parked needs-review proposal is offering, so that mark is
+   * visible too rather than invisible until confirmed (R7/AE5).
    *
-   * Saved geometry is shown as confirmed: it is already persisted, or staged for
-   * the next Save, and either way a human put it there.
+   * Saved geometry (`edited`/`fields`) is `confirmed: true`: it is already
+   * persisted, or staged for the next Save, and either way a human put it
+   * there deliberately (drawn, applied, or auto-confirmed). A field's box is
+   * `confirmed: false` for as long as it exists ONLY as a parked
+   * `proposalPreviews` entry — extraction's proposal, not yet applied — so
+   * the reviewer sees at a glance which marks on the page still need a look,
+   * exactly as the import review screen distinguishes proposed from
+   * confirmed geometry.
    */
-  const placements = fields.flatMap((f) =>
-    geometrySegments(f).map((box, i) => ({
-      slot: `${f.id}#${box.optionKey ?? i}`,
-      box,
-      confirmed: true,
-      active: f.id === selectedId,
-    })),
-  );
+  const placements = [
+    ...fields.flatMap((f) =>
+      geometrySegments(f).map((box, i) => ({
+        slot: `${f.id}#${box.optionKey ?? i}`,
+        box,
+        confirmed: true,
+        active: f.id === selectedId,
+      })),
+    ),
+    ...proposalPreviews.flatMap(({ fieldId, proposal }) => {
+      const boxes = 'segment' in proposal ? [proposal.segment] : proposal.segments;
+      return boxes.map((box, i) => ({
+        slot: `${fieldId}#preview#${box.optionKey ?? i}`,
+        box,
+        confirmed: false,
+        active: fieldId === selectedId,
+      }));
+    }),
+  ];
 
   const placedCount = fields.filter((f) => geometrySegments(f).length > 0).length;
   const placeable = fields.filter((f) => f.type !== 'section_header');
@@ -446,6 +539,10 @@ export function GeometryEditorScreen() {
             onSelectField={setSelectedId}
             onTextLayer={onTextLayer}
             placements={placements}
+            bandOverlay={bandOverlay}
+            bandSnapTargets={bandSnapTargets}
+            bandSnapTargetsY={bandSnapTargetsY}
+            onBandEdge={onBandEdge}
             drawArmed={drawTarget !== null}
             onDrawBox={(box) => {
               if (!drawTarget) return;
@@ -514,6 +611,72 @@ function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
  */
 function isPerOptionField(field: FormField): boolean {
   return isChoiceField(field.type) && !field.printSelectedValue && (field.options?.length ?? 0) > 0;
+}
+
+/**
+ * Where a band-edge adjustment made to the current `bandOverlay` should land
+ * (R7/R8/U6).
+ *
+ * `'segment'` targets a box already living in `edited`/`fields` — a redraw
+ * target's existing box, or the selected field's own placed segment — and is
+ * written back with `mutate()`. `'preview'` targets a parked needs-review
+ * proposal's segment, which is NOT yet in `edited`: it stays parked (R8's
+ * confirm gate holds) and the adjustment updates `proposalPreviews` instead,
+ * so a reviewer can fine-tune a proposal's grid before confirming it.
+ */
+type BandOverlaySource =
+  | { kind: 'segment'; fieldId: string; optionKey: string | null }
+  | { kind: 'preview'; fieldId: string };
+
+interface BandOverlayInfo {
+  box: PageBox;
+  source: BandOverlaySource;
+}
+
+/**
+ * The band grid currently shown in the editor, and where an edit to it should
+ * be written (R7/R8/U6) — every mark on screen (auto-confirmed, needs-review,
+ * or hand-drawn) renders as the real glyph and is drag/snap/keyboard-nudgeable,
+ * matching the import review screen (AE5).
+ *
+ * Precedence: the field currently being drawn (its own existing box, for a
+ * redraw fine-tune — nothing while a box has never been placed for that exact
+ * slot); else the selected field's parked needs-review proposal (only a
+ * `TableProposal` carries a single banded segment — a per-option
+ * `FieldProposal` has one scalar box per option and nothing to band-edit
+ * here); else the selected field's own existing segment, so a reviewer can
+ * fine-tune an already-placed field.
+ */
+function bandOverlayFor(
+  drawTarget: DrawTarget | null,
+  selectedId: string | null,
+  proposalPreviews: readonly { fieldId: string; proposal: FieldProposal | TableProposal }[],
+  fields: readonly FormField[],
+): BandOverlayInfo | null {
+  if (drawTarget) {
+    const field = fields.find((f) => f.id === drawTarget.fieldId);
+    const segment = (field?.geometry?.segments ?? []).find(
+      (s) => (s.optionKey ?? null) === drawTarget.optionKey,
+    );
+    if (!segment) return null;
+    return { box: segment, source: { kind: 'segment', fieldId: drawTarget.fieldId, optionKey: drawTarget.optionKey } };
+  }
+
+  if (!selectedId) return null;
+
+  const preview = proposalPreviews.find((p) => p.fieldId === selectedId);
+  if (preview) {
+    if ('segment' in preview.proposal) {
+      return { box: preview.proposal.segment, source: { kind: 'preview', fieldId: selectedId } };
+    }
+    return null; // FieldProposal: per-option scalar boxes, nothing to band-edit
+  }
+
+  const field = fields.find((f) => f.id === selectedId);
+  if (!field || isPerOptionField(field)) return null;
+  const segment = field.geometry?.segments?.[0];
+  if (!segment) return null;
+  return { box: segment, source: { kind: 'segment', fieldId: selectedId, optionKey: segment.optionKey ?? null } };
 }
 
 /**
