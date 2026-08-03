@@ -551,6 +551,162 @@ describe('POST /assessment-cases', () => {
       server.close();
     }
   });
+
+  /*
+    WHO MAY ASSESS THIS DEPENDS ON WHERE IT HAPPENS.
+
+    Per the training authority: Q50071833 (Worsley Assessor Skill Set)
+    authorises MINE assessments, Q50073293 (Authority to Assess Mobile
+    Equipment) authorises RAW MATERIALS, and Q34666893 (the category) is
+    required in both. So the rule is `Q34666893 AND (Q50071833 OR Q50073293)`,
+    with the branch decided by the case's location stream rather than chosen.
+
+    A flat AND list fails both ways: all three warns on every case about a
+    combination nobody holds, and one silently accepts an assessor authorised
+    for the other site. The assessor holds nothing in these, so every
+    requirement that APPLIES surfaces as a gap — which is what makes the absent
+    one meaningful.
+  */
+  const WORSLEY = '00000000-0000-4000-8000-0000000000e1';
+  const MOBILE_PLANT = '00000000-0000-4000-8000-0000000000e2';
+
+  async function caseInStream(base: string, locationStream?: string, byStream = true) {
+    const created = await fetch(`${base}/assessment-tools`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({
+        templateId: TEMPLATE,
+        name: 'Track Dozer',
+        manifest: MANIFEST,
+        assessorCompetencyIds: [COMPETENCY],
+        ...(byStream
+          ? { assessorStreamCompetencyIds: { Mining: [WORSLEY], 'Raw Materials': [MOBILE_PLANT] } }
+          : {}),
+      }),
+    });
+    const tool = (await created.json()) as { id: string };
+
+    const res = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({
+        toolId: tool.id,
+        candidateUserId: CANDIDATE,
+        pathway: 'experienced',
+        ...(locationStream ? { locationStream } : {}),
+      }),
+    });
+    return (await res.json()) as { prerequisiteWarnings: string[] };
+  }
+
+  it('asks for the mine authority at the mine, and not the other one', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const warnings = (await caseInStream(base, 'Mining')).prerequisiteWarnings.join('\n');
+
+      expect(warnings).toContain(COMPETENCY);
+      expect(warnings).toContain(WORSLEY);
+      expect(warnings).not.toContain(MOBILE_PLANT);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('asks for the raw materials authority there, and not the mine one', async () => {
+    // The failure that matters: this must not accept the Worsley skill set.
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const warnings = (await caseInStream(base, 'Raw Materials')).prerequisiteWarnings.join('\n');
+
+      expect(warnings).toContain(MOBILE_PLANT);
+      expect(warnings).not.toContain(WORSLEY);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('matches the stream however it was typed', async () => {
+    // Free text somebody enters by hand. An unrecognised stream contributes no
+    // requirement at all, so a near-miss spelling skips the check silently —
+    // which is why the comparison is normalised rather than exact.
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const warnings = (await caseInStream(base, '  raw materials  ')).prerequisiteWarnings.join('\n');
+
+      expect(warnings).toContain(MOBILE_PLANT);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('says the check was only partial when the case names no stream', async () => {
+    /*
+      Reporting just the always-required half would present a partial check as a
+      complete one. The case still opens — eligibility never blocks — but the
+      warning has to say what went unchecked and name the streams, because the
+      fix is to set one and nobody can guess the spelling.
+    */
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const warnings = (await caseInStream(base)).prerequisiteWarnings.join('\n');
+
+      expect(warnings).toContain('only partly checked');
+      expect(warnings).toContain('Mining');
+      expect(warnings).toContain('Raw Materials');
+      // And it invented no gap for a requirement it could not resolve.
+      expect(warnings).not.toContain(WORSLEY);
+      expect(warnings).not.toContain(MOBILE_PLANT);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('warns rather than passing when the stream is one it does not know', async () => {
+    /*
+      THE FAILURE THIS WHOLE FEATURE NEARLY SHIPPED WITH.
+
+      An unrecognised stream used to resolve to the always-required half with a
+      clean result, on the reasoning that a location outside the list carries no
+      extra requirement. But this value is free text shared with the document's
+      own stream question, so a value outside the list is far more likely a
+      near-miss spelling of a location the rule DOES cover.
+
+      "Mine" against a tool keyed "Mining" reduced the rule from
+      `category AND (mining OR raw materials)` to the category alone and called
+      it fully checked — so an assessor holding only the raw-materials authority
+      could sign off a mining assessment with nothing anywhere saying so.
+    */
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const warnings = (await caseInStream(base, 'Mine')).prerequisiteWarnings.join('\n');
+
+      expect(warnings).toContain('only partly checked');
+      // Quotes what was actually recorded, so the typo is visible.
+      expect(warnings).toContain('"Mine"');
+      expect(warnings).toContain('Mining');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('says nothing about streams for a tool whose rule does not vary', async () => {
+    // Every tool that existed before this column. A missing stream is not a gap
+    // when nothing depended on it — warning here would fire on every case.
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const warnings = (await caseInStream(base, undefined, false)).prerequisiteWarnings.join('\n');
+
+      expect(warnings).not.toContain('only partly checked');
+    } finally {
+      server.close();
+    }
+  });
 });
 
 // ── attempts ────────────────────────────────────────────────────────────────

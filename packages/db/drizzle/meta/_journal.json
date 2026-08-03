@@ -169,6 +169,13 @@
       "when": 1785473734670,
       "tag": "0023_gigantic_nextwave",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1785715309223,
+      "tag": "0024_open_rockslide",
+      "breakpoints": true
     }
   ]
 }

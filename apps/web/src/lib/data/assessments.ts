@@ -28,6 +28,15 @@ export interface AssessmentToolSummary {
   name: string;
   templateId: string;
   parts: { key: string; label: string; kind: PartKind }[];
+  /**
+   * Location streams whose assessor requirements differ, if any.
+   *
+   * Offered as choices when opening a case. The stream is free text matched
+   * case-insensitively, and a value the tool does not recognise contributes no
+   * requirement at all — so guessing the wording skips the check silently.
+   * Empty on a tool whose assessor rule does not depend on where.
+   */
+  locationStreams: string[];
 }
 
 export interface AssessmentCaseRow {

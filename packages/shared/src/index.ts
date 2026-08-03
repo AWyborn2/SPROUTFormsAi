@@ -20,6 +20,7 @@ export * from './submission-validation.js';
 export * from './org.js';
 export * from './competency.js';
 export * from './competency-expiry.js';
+export * from './assessor-eligibility.js';
 export * from './assessment.js';
 export * from './marking.js';
 export * from './outcome-links.js';

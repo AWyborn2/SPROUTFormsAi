@@ -681,6 +681,23 @@ export function useCompetencyRules() {
   return useQuery({ queryKey: keys.competencyRules, queryFn: () => store.listCompetencyRules() });
 }
 
+/** Add a competency to the register. */
+export function useCreateCompetency() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      name: string;
+      code: string;
+      validForMonths: number | null;
+      gracePeriodDays: number | null;
+    }) => store.createCompetency(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.competencies });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
 /**
  * Who holds one competency, and whether each is still current.
  *
