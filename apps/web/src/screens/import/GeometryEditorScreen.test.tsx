@@ -66,14 +66,29 @@ vi.mock('./PdfViewer.js', () => ({
  * each test can drive a different tier by controlling the returned
  * confidence; hoisted because `vi.mock` factories run before the rest of the
  * module body executes.
+ *
+ * `applyFieldChangesSpy` wraps the REAL `applyFieldChanges` (it still calls
+ * through to `actual.applyFieldChanges`) purely to count invocations — this is
+ * how the U4 bulk tests prove "Auto-place remaining fields" folds every
+ * auto-confirm field's changes into ONE `mutateMany`/`applyFieldChanges` call
+ * for the whole run, not one call per field (the KTD3-shaped bug U2 already
+ * fixed once for the "Place all N" button).
  */
-const { deriveOptionCellsAcrossPagesMock } = vi.hoisted(() => ({
+const { deriveOptionCellsAcrossPagesMock, applyFieldChangesSpy } = vi.hoisted(() => ({
   deriveOptionCellsAcrossPagesMock: vi.fn(),
+  applyFieldChangesSpy: vi.fn(),
 }));
 
 vi.mock('./inspector/geometry-actions.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./inspector/geometry-actions.js')>();
-  return { ...actual, deriveOptionCellsAcrossPages: deriveOptionCellsAcrossPagesMock };
+  return {
+    ...actual,
+    deriveOptionCellsAcrossPages: deriveOptionCellsAcrossPagesMock,
+    applyFieldChanges: (...args: Parameters<typeof actual.applyFieldChanges>) => {
+      applyFieldChangesSpy(...args);
+      return actual.applyFieldChanges(...args);
+    },
+  };
 });
 
 const { GeometryEditorScreen } = await import('./GeometryEditorScreen.js');
@@ -111,17 +126,39 @@ function proposal(confidence: number): FieldProposal {
 }
 
 function renderWithField(field: FormField) {
+  renderWithFields([field]);
+}
+
+function renderWithFields(fields: FormField[]) {
   version.data = {
     id: 'v1',
     templateId: 'form1',
     label: 'Draft v1',
     state: 'draft',
     isCurrent: false,
-    fields: [field],
+    fields,
     container: DEFAULT_CONTAINER,
     sourcePdfAssetId: 'asset-1',
   };
   render(<GeometryEditorScreen />);
+}
+
+/** A field whose 3 options are already fully placed — the `expectedBoxes` boundary. */
+function fullyPlacedChoiceField(id: string, label: string): FormField {
+  return choiceField(id, label, ['Yes', 'No', 'Maybe'], {
+    segments: (['Yes', 'No', 'Maybe'] as const).map(
+      (optionKey, i): PageBox => ({
+        page: 0,
+        x: i * 20,
+        y: 0,
+        width: 10,
+        height: 10,
+        pageWidth: 595,
+        pageHeight: 842,
+        optionKey,
+      }),
+    ),
+  });
 }
 
 beforeEach(() => {
@@ -235,6 +272,90 @@ describe('GeometryEditorScreen — select-to-propose with auto-tiering (U3)', ()
     // `selectField` itself does not ALSO call it: a second call here would
     // mean selection re-derived and re-tiered an already-placed field.
     expect(deriveOptionCellsAcrossPagesMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/3\/3 placed/)).toBeDefined();
+  });
+});
+
+describe('GeometryEditorScreen — bulk "Auto-place remaining fields" (U4)', () => {
+  it('Covers AE4: runs the same tiering across every unplaced field, applying auto-confirm fields in one batched update and leaving needs-review/no-match fields untouched', () => {
+    renderWithFields([
+      choiceField('f1', 'Auto A', ['Yes', 'No', 'Maybe']),
+      choiceField('f2', 'Auto B', ['Yes', 'No', 'Maybe']),
+      choiceField('f3', 'Needs review', ['Yes', 'No', 'Maybe']),
+      choiceField('f4', 'No match', ['Yes', 'No', 'Maybe']),
+    ]);
+
+    // Drive a different tier per field by label, standing in for what real
+    // derivation would settle on per field.
+    deriveOptionCellsAcrossPagesMock.mockImplementation((field: { label: string }) => {
+      if (field.label === 'Needs review') return proposal(0.6);
+      if (field.label === 'No match') return null;
+      return proposal(1);
+    });
+    applyFieldChangesSpy.mockClear();
+
+    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+
+    // The two auto-confirm fields landed all 3 options each...
+    expect(screen.getAllByText(/3\/3 placed/)).toHaveLength(2);
+    // ...while the needs-review and no-match fields are exactly as before.
+    expect(screen.getAllByText(/0\/3 placed/)).toHaveLength(2);
+    expect(screen.getByText('2 of 4 answerable fields placed')).toBeDefined();
+
+    // The crux of the fix: every auto-confirm field's changes were folded
+    // into ONE `applyFieldChanges` call for the whole run (inside a single
+    // `mutateMany`), not one call per field. Two separate per-field calls
+    // would still reach the same end state here (each call's functional
+    // `setState` updater threads off the previous one), so this call-count
+    // assertion — not just the placed-count checks above — is what actually
+    // distinguishes one batched call from N separate ones.
+    expect(applyFieldChangesSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('Covers AE4: a field already fully placed is excluded from the loop — derivation is never even called for it, and it is left unchanged', () => {
+    renderWithFields([fullyPlacedChoiceField('f-full', 'Full field'), choiceField('f-eligible', 'Eligible field', ['Yes', 'No', 'Maybe'])]);
+
+    deriveOptionCellsAcrossPagesMock.mockClear();
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(1));
+
+    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+
+    // Only the eligible field was ever handed to derivation — the fully
+    // placed field's box count (3 >= expectedBoxes of 3) excluded it before
+    // `deriveProposal` was ever reached.
+    expect(deriveOptionCellsAcrossPagesMock).toHaveBeenCalledTimes(1);
+    expect(deriveOptionCellsAcrossPagesMock.mock.calls[0]![0]).toMatchObject({ label: 'Eligible field' });
+
+    // Both fields read 3/3 now — the already-placed field unchanged, the
+    // eligible one freshly auto-confirmed.
+    expect(screen.getAllByText(/3\/3 placed/)).toHaveLength(2);
+  });
+
+  it('a field with some but not all options placed is still evaluated, and gets its missing options auto-placed', () => {
+    renderWithField(
+      choiceField('f1', 'Partial field', ['Yes', 'No', 'Maybe'], {
+        segments: [
+          { page: 0, x: 0, y: 0, width: 10, height: 10, pageWidth: 595, pageHeight: 842, optionKey: 'Yes' },
+        ],
+      }),
+    );
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(1));
+
+    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+
+    expect(screen.getByText(/3\/3 placed/)).toBeDefined();
+  });
+
+  it('is a no-op when every field is already fully placed — no crash, no state change', () => {
+    renderWithField(fullyPlacedChoiceField('f-full', 'Full field'));
+    deriveOptionCellsAcrossPagesMock.mockClear();
+
+    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+
+    // Fully placed already, so nothing was eligible: derivation never ran...
+    expect(deriveOptionCellsAcrossPagesMock).not.toHaveBeenCalled();
+    // ...and nothing was staged for save.
+    expect(screen.queryByText(/unsaved changes/)).toBeNull();
     expect(screen.getByText(/3\/3 placed/)).toBeDefined();
   });
 });

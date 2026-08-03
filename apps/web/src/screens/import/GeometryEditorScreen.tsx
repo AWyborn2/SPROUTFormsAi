@@ -52,16 +52,23 @@ export function GeometryEditorScreen() {
   const [drawTarget, setDrawTarget] = useState<DrawTarget | null>(null);
   const [dirty, setDirty] = useState(false);
   /**
-   * The proposal for the currently-selected field, when it tiered
-   * `needs-review` (U3/R2) — kept only for preview, never applied on its own.
-   * An `auto-confirm` tier is applied immediately instead of parked here, and
-   * a `no-match` tier has nothing to park, so this is non-null only while a
-   * needs-review proposal is awaiting the reviewer's own decision.
+   * The proposal(s) currently parked for review — every field that tiered
+   * `needs-review` (U3/R2) and hasn't been applied or dismissed yet. An
+   * `auto-confirm` tier is applied immediately instead of parked here, and a
+   * `no-match` tier has nothing to park.
+   *
+   * A list rather than a single entry: `selectField` still only ever puts one
+   * field in it, but the bulk "Auto-place remaining fields" pass (U4) can
+   * surface several needs-review fields from one run, so the shape is
+   * generalized to hold all of them. No UI reads this array yet — a
+   * bulk-review queue (step through, confirm, reject) is U5's job, not this
+   * unit's. Nothing beyond storage is built here.
    */
-  const [proposalPreview, setProposalPreview] = useState<{
-    fieldId: string;
-    proposal: FieldProposal | TableProposal;
-  } | null>(null);
+  const [proposalPreviews, setProposalPreviews] = useState<
+    { fieldId: string; proposal: FieldProposal | TableProposal }[]
+  >([]);
+  /** Busy flag around the bulk auto-place pass (U4), for the button's affordance. */
+  const [isAutoPlacing, setIsAutoPlacing] = useState(false);
 
   const fields = edited ?? version?.fields ?? [];
   const selected = fields.find((f) => f.id === selectedId) ?? null;
@@ -104,54 +111,75 @@ export function GeometryEditorScreen() {
    * Select a field and, when it isn't placed yet, propose and auto-tier it
    * (U3/R1/R2) — replacing "Draw" as the first step for most fields.
    *
-   * `geometrySegments(field).length === 0` is today's eligibility check; a
-   * later unit refines it for a partially-placed field. R4: an already-placed
-   * field is left exactly as it behaves today — selecting it neither
-   * re-derives nor re-tiers, it just shows its existing box.
+   * `geometrySegments(field).length === 0` is today's eligibility check; the
+   * bulk auto-place pass (U4) uses a more permissive one for a partially-placed
+   * field, but selection's own eligibility is unchanged by that unit. R4: an
+   * already-placed field is left exactly as it behaves today — selecting it
+   * neither re-derives nor re-tiers, it just shows its existing box.
    */
   function selectField(field: FormField) {
     setSelectedId(field.id);
     setDrawTarget(null);
-    setProposalPreview(null);
+    setProposalPreviews([]);
 
     if (geometrySegments(field).length > 0) return;
-    if (textPages.length === 0) return;
 
-    const proposal = isPerOptionField(field)
-      ? deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages)
-      : field.type === 'repeating_group'
-        ? deriveAcrossPages(field, textPages)
-        : null;
-
+    const proposal = deriveProposal(field, textPages);
     const tier = classifyProposalTier(proposal);
     if (tier === 'no-match') return;
 
     if (tier === 'needs-review') {
       // Parked for preview only — `edited` stays untouched until the
       // reviewer applies it themselves.
-      setProposalPreview({ fieldId: field.id, proposal: proposal! });
+      setProposalPreviews([{ fieldId: field.id, proposal: proposal! }]);
       return;
     }
 
     // auto-confirm: every option's change (or the table's one box) lands in
     // a single `mutateMany` batch, not a loop of individual `mutate()` calls
     // — the exact bug U2 fixed for the "Place all N" button (KTD3).
-    if (isPerOptionField(field)) {
-      const p = proposal as FieldProposal;
-      const changes: FieldChange[] = p.segments
-        .filter((segment) => segment.optionKey !== undefined)
-        .map((segment) => ({
-          fieldId: field.id,
-          change: (f) => {
-            const kept = (f.geometry?.segments ?? []).filter((s) => s.optionKey !== segment.optionKey);
-            return { ...f, geometry: { segments: [...kept, segment] } };
-          },
-        }));
-      mutateMany(changes);
-    } else {
-      const t = proposal as TableProposal;
-      mutateMany([{ fieldId: field.id, change: (f) => ({ ...f, geometry: { segments: [t.segment] } }) }]);
+    mutateMany(changesForProposal(field, proposal!));
+  }
+
+  /**
+   * Run the same propose-and-tier pass `selectField` runs for one field, across
+   * EVERY not-yet-fully-placed field in one go (U4/R3).
+   *
+   * Eligibility is `geometrySegments(f).length < expectedBoxes(f)` — NOT
+   * `=== 0` — so a field with some but not all of its options already placed
+   * (e.g. 1 of 3) is still evaluated for its missing options, while a fully
+   * placed field is excluded and left bit-for-bit untouched (R4): it is never
+   * even handed to `deriveProposal`.
+   *
+   * Every auto-confirm field's changes are collected into ONE running array
+   * and applied with a single `mutateMany` call at the end — the crux of the
+   * KTD3 batching fix U2 made for "Place all N", now extended to the bulk
+   * pass instead of calling `mutateMany` once per field. needs-review fields
+   * are parked into `proposalPreviews`; no-match fields are left alone.
+   */
+  function autoPlaceRemaining() {
+    setIsAutoPlacing(true);
+
+    const changes: FieldChange[] = [];
+    const reviews: { fieldId: string; proposal: FieldProposal | TableProposal }[] = [];
+
+    for (const field of fields) {
+      if (geometrySegments(field).length >= expectedBoxes(field)) continue;
+
+      const proposal = deriveProposal(field, textPages);
+      const tier = classifyProposalTier(proposal);
+      if (tier === 'no-match') continue;
+      if (tier === 'needs-review') {
+        reviews.push({ fieldId: field.id, proposal: proposal! });
+        continue;
+      }
+      changes.push(...changesForProposal(field, proposal!));
     }
+
+    if (changes.length > 0) mutateMany(changes);
+    if (reviews.length > 0) setProposalPreviews(reviews);
+
+    setIsAutoPlacing(false);
   }
 
   /** Replace one option's box, keyed by `optionKey`, leaving siblings alone. */
@@ -244,6 +272,14 @@ export function GeometryEditorScreen() {
           </p>
         </div>
         <div className="flex items-center gap-2.5">
+          <Button
+            variant="outline"
+            leadingIcon="wand-sparkles"
+            disabled={isAutoPlacing}
+            onClick={autoPlaceRemaining}
+          >
+            {isAutoPlacing ? 'Auto-placing…' : 'Auto-place remaining fields'}
+          </Button>
           <Button
             variant="outline"
             leadingIcon="save"
@@ -365,6 +401,49 @@ function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
  */
 function isPerOptionField(field: FormField): boolean {
   return isChoiceField(field.type) && !field.printSelectedValue && (field.options?.length ?? 0) > 0;
+}
+
+/**
+ * Derive a proposal for one field, the same way for every caller — `selectField`
+ * and the bulk "Auto-place remaining fields" pass (U4) both route through this
+ * so they classify identically. Empty `textPages` (the text layer hasn't loaded
+ * yet) refuses rather than deriving off nothing.
+ */
+function deriveProposal(
+  field: FormField,
+  textPages: readonly TextPage[],
+): FieldProposal | TableProposal | null {
+  if (textPages.length === 0) return null;
+  if (isPerOptionField(field)) {
+    return deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages);
+  }
+  if (field.type === 'repeating_group') {
+    return deriveAcrossPages(field, textPages);
+  }
+  return null;
+}
+
+/**
+ * Turn an `auto-confirm`-tier proposal into the `FieldChange`(s) that place
+ * it — every option's box for a per-option field, or the table's one grid box
+ * — shared by `selectField`'s single-field auto-confirm and the bulk pass
+ * (U4) so both apply a proposal identically.
+ */
+function changesForProposal(field: FormField, proposal: FieldProposal | TableProposal): FieldChange[] {
+  if (isPerOptionField(field)) {
+    const p = proposal as FieldProposal;
+    return p.segments
+      .filter((segment) => segment.optionKey !== undefined)
+      .map((segment) => ({
+        fieldId: field.id,
+        change: (f: FormField) => {
+          const kept = (f.geometry?.segments ?? []).filter((s) => s.optionKey !== segment.optionKey);
+          return { ...f, geometry: { segments: [...kept, segment] } };
+        },
+      }));
+  }
+  const t = proposal as TableProposal;
+  return [{ fieldId: field.id, change: (f: FormField) => ({ ...f, geometry: { segments: [t.segment] } }) }];
 }
 
 function FieldRow({
