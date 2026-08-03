@@ -307,6 +307,16 @@ const toolBody = z.object({
   manifest: z.object({
     parts: z.array(partSchema).min(1),
     locationStreamFieldId: z.string().optional(),
+    /*
+      The rule above, broken in exactly the way it warns about. This was on the
+      manifest type and absent here, so a tool created or edited over HTTP lost
+      the pointer while the same tool authored by the script kept it — and the
+      cover page belongs to no part, so this is the ONLY way a name reaches the
+      certificate. The failure is a signed, competent evidence PDF certifying
+      nobody, which the runbook calls the one omission an auditor cannot work
+      around.
+    */
+    candidateNameFieldId: z.string().optional(),
     signOff: z
       .object({
         assessorNameFieldId: z.string().optional(),
