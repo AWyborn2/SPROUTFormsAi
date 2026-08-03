@@ -25,8 +25,11 @@ import {
   MAX_ATTACHMENT_BYTES,
   applyCalcs,
   applySelection,
+  groupPairingOptions,
   incompleteFixedRowIndices,
   isFileRef,
+  isMatchingQuestion,
+  parsePairingOption,
   resolveAnswerSets,
   selectedOption,
 } from '@formai/shared';
@@ -82,9 +85,17 @@ export interface FieldInputProps {
  * field with nothing to type into would make speaking the only way to answer
  * it, which voice is never allowed to be. Exported because Smart Fill has to
  * refuse to write the same fields for the same reason.
+ *
+ * A MATCHING QUESTION IS EXCLUDED FOR A DIFFERENT REASON, and a stronger one.
+ * Its options are pairings, so speech would have to be coerced into a set of
+ * "statement -> sign" strings — which at best produces noise, and at worst lets
+ * a candidate answer "Match the statement with the appropriate SIGNAGE" by
+ * saying the sign's name. That is the visual-recognition bypass the question
+ * exists to test for, offered by the form itself.
  */
 export function canDictateField(field: FormField): boolean {
-  return isDictatable(field.type) && field.type !== 'check_cross';
+  if (!isDictatable(field.type) || field.type === 'check_cross') return false;
+  return !isMatchingQuestion(field.options);
 }
 
 /** Types whose control is one labelable element that accepts an `id`. */
@@ -283,6 +294,58 @@ export function FieldInput({
         );
       case 'checkbox_group': {
         const selected = Array.isArray(value) ? (value as string[]) : [];
+        const toggle = (option: string, checked: boolean) =>
+          onChange(checked ? [...selected, option] : selected.filter((x) => x !== option));
+
+        /*
+          A MATCHING QUESTION IS A CHECKBOX GROUP WEARING A DIFFERENT LAYOUT.
+
+          "Match the statement with the appropriate signage" is stored as every
+          possible pairing — three statements against three signs is nine
+          options — so a flat list gives the candidate nine lines each
+          repeating a whole statement, and asks them to sort the block mentally
+          before they can answer.
+
+          Grouped by statement it reads the way the paper does: the statement
+          once, then its candidate answers. The VALUE is unchanged — the same
+          array of the same pairing strings — so marking, storage and the
+          exported evidence see exactly what a flat group would have produced.
+          Presentation only.
+        */
+        if (isMatchingQuestion(field.options)) {
+          return (
+            <div className="flex flex-col gap-3.5" role="group" aria-labelledby={labelId}>
+              {groupPairingOptions(field.options ?? []).map((group, index) => {
+                const groupId = `${labelId}-match-${index}`;
+                return (
+                  <div key={group.left} role="group" aria-labelledby={groupId}>
+                    <div id={groupId} className="mb-1.5 text-[13px] font-semibold text-text-secondary">
+                      {group.left}
+                    </div>
+                    <div className="flex flex-col gap-2 pl-3">
+                      {group.options.map((option) => (
+                        <Checkbox
+                          key={option}
+                          /*
+                            The RIGHT half only. The left half is the heading
+                            directly above it, and repeating it on every choice
+                            is what made the flat list unreadable. The stored
+                            value is still the whole pairing.
+                          */
+                          label={parsePairingOption(option)?.right ?? option}
+                          checked={selected.includes(option)}
+                          disabled={disabled}
+                          onChange={(e) => toggle(option, e.target.checked)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        }
+
         return (
           <div className="flex flex-col gap-2" role="group" aria-labelledby={labelId}>
             {(field.options ?? []).map((o) => (
@@ -291,11 +354,7 @@ export function FieldInput({
                 label={o}
                 checked={selected.includes(o)}
                 disabled={disabled}
-                onChange={(e) =>
-                  onChange(
-                    e.target.checked ? [...selected, o] : selected.filter((x) => x !== o),
-                  )
-                }
+                onChange={(e) => toggle(o, e.target.checked)}
               />
             ))}
           </div>
