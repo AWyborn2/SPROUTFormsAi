@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Button, Icon } from '@formai/ui';
 import { ASSESSMENT_PATHWAYS, type AssessmentPathway } from '@formai/shared';
 import { CaseStateBadge } from '../statusBadges.js';
+import type { AssessmentToolSummary } from '../../lib/data/assessments.js';
 import {
   useAssessmentCases,
   useAssessmentTools,
@@ -151,7 +152,12 @@ function NewCaseForm({
   onClose,
   onCreated,
 }: {
-  tools: { id: string; name: string }[];
+  /*
+    The whole summary, not just {id, name}. The form needs each tool's
+    `locationStreams` to know whether this assessment's assessor requirements
+    depend on where it happens — and narrowing the prop is what hid that.
+  */
+  tools: AssessmentToolSummary[];
   onClose: () => void;
   onCreated: (id: string) => void;
 }) {
@@ -171,6 +177,9 @@ function NewCaseForm({
   const [locationStream, setLocationStream] = useState('');
   const [rplJustification, setRplJustification] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  /** Streams the SELECTED tool distinguishes. Empty when its rule is flat. */
+  const streams = tools.find((t) => t.id === toolId)?.locationStreams ?? [];
 
   async function submit() {
     setError(null);
@@ -255,15 +264,46 @@ function NewCaseForm({
           </p>
         </div>
 
+        {/*
+          THE STREAM DECIDES WHO MAY ASSESS THIS.
+
+          Q50071833 authorises mine assessments and Q50073293 authorises raw
+          materials, so a tool that distinguishes them cannot check its assessor
+          without knowing which site this is. When it does, the choices come
+          from the tool itself rather than a placeholder somebody has to read
+          and retype: matching is case-insensitive, but an unrecognised stream
+          contributes no requirement at all, so a near-miss spelling skips the
+          check silently instead of failing loudly.
+
+          Still free text underneath, because the same value answers the
+          document's own stream question during filling, and a tool may carry
+          location content without varying its assessor rule.
+        */}
         <div>
-          <label htmlFor="nc-stream" className={label}>Location stream (optional)</label>
+          <label htmlFor="nc-stream" className={label}>
+            Location stream {streams.length > 0 ? '' : '(optional)'}
+          </label>
           <input
             id="nc-stream"
+            list={streams.length > 0 ? 'nc-stream-options' : undefined}
             value={locationStream}
             onChange={(e) => setLocationStream(e.target.value)}
-            placeholder="mining / raw_materials"
+            placeholder={streams.length > 0 ? streams.join(' / ') : 'mining / raw_materials'}
             className={`${field} mt-1`}
           />
+          {streams.length > 0 && (
+            <>
+              <datalist id="nc-stream-options">
+                {streams.map((s) => (
+                  <option key={s} value={s} />
+                ))}
+              </datalist>
+              <p className="mt-1 text-xs text-text-tertiary">
+                This assessment has different assessor requirements per site. Leave it blank and
+                that half of the check is skipped — the case still opens, and says so.
+              </p>
+            </>
+          )}
         </div>
 
         {pathway === 'rpl' && (
