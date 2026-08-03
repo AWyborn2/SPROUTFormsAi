@@ -65,6 +65,10 @@ export const SCREENS: ScreenDef[] = [
   // the literal segment is listed ahead of the parameter it would otherwise be
   // read as; the API declares its matching endpoint in the same order.
   { key: 'assessment-progress', path: '/app/assessments/progress', group: 'Assessments', label: 'Assessment progress', icon: 'gauge', shell: 'app' },
+  // Who fills each section of an assessment, and in what order. Under a literal
+  // /tools/ segment rather than another parameter on /assessments/:id, which
+  // would be read as a case id — the same reason `progress` is declared above.
+  { key: 'workflow-builder', path: '/app/assessments/tools/:toolId/workflow', group: 'Assessments', label: 'Assessment workflow', icon: 'workflow', shell: 'app' },
   { key: 'assessment-case', path: '/app/assessments/:id', group: 'Assessments', label: 'Assessment case', icon: 'clipboard-list', shell: 'app' },
   // Filling one part of a case. Addressed by ATTEMPT id, not part key: a retry
   // is a distinct attempt row, and the URL has to say which one is being
