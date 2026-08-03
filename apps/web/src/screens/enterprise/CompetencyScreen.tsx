@@ -8,6 +8,7 @@ import {
   useCompetencies,
   useCompetencyHolders,
   useCompetencyRules,
+  useCreateCompetency,
   useRemoveRule,
   useSetCompetencyValidity,
   useToggleRule,
@@ -131,6 +132,39 @@ function HolderRegister({ competencyId }: { competencyId: string }) {
  * nobody has stated a validity for behaves exactly as it did before any of this
  * existed.
  */
+type ValidityParse =
+  | { ok: true; validForMonths: number | null; gracePeriodDays: number | null }
+  | { ok: false; message: string };
+
+/**
+ * Years and grace as an admin types them, or what is wrong with them.
+ *
+ * Shared by the editor and the create form so the two cannot come to disagree
+ * about what a blank means. Blank years is a PERPETUAL competency — not zero,
+ * not "expires today" — and a grace period with no validity has nothing to be
+ * grace for, so it is dropped rather than stored against an expiry that will
+ * never arrive.
+ */
+function parseValidity(years: string, grace: string): ValidityParse {
+  const typedYears = years.trim();
+  const parsedYears = typedYears === '' ? null : Number(typedYears);
+  if (parsedYears !== null && (!Number.isInteger(parsedYears) || parsedYears < 1 || parsedYears > 50)) {
+    return { ok: false, message: 'Enter a whole number of years, or leave it blank for no expiry.' };
+  }
+
+  const typedGrace = grace.trim();
+  const parsedGrace = typedGrace === '' ? null : Number(typedGrace);
+  if (parsedGrace !== null && (!Number.isInteger(parsedGrace) || parsedGrace < 0 || parsedGrace > 365)) {
+    return { ok: false, message: 'A grace period is a whole number of days, up to 365.' };
+  }
+
+  return {
+    ok: true,
+    validForMonths: parsedYears === null ? null : parsedYears * 12,
+    gracePeriodDays: parsedYears === null ? null : parsedGrace,
+  };
+}
+
 function ValidityEditor({ competency }: { competency: Competency }) {
   const { toast } = useToast();
   const save = useSetCompetencyValidity();
@@ -146,24 +180,18 @@ function ValidityEditor({ competency }: { competency: Competency }) {
   }
 
   function onSave() {
-    const trimmed = years.trim();
-    const parsedYears = trimmed === '' ? null : Number(trimmed);
-    if (parsedYears !== null && (!Number.isInteger(parsedYears) || parsedYears < 1 || parsedYears > 50)) {
-      toast({ variant: 'warning', message: 'Enter a whole number of years, or leave it blank for no expiry.' });
+    const parsed = parseValidity(years, grace);
+    if (!parsed.ok) {
+      toast({ variant: 'warning', message: parsed.message });
       return;
     }
-    const parsedGrace = grace.trim() === '' ? null : Number(grace.trim());
-    if (parsedGrace !== null && (!Number.isInteger(parsedGrace) || parsedGrace < 0 || parsedGrace > 365)) {
-      toast({ variant: 'warning', message: 'A grace period is a whole number of days, up to 365.' });
-      return;
-    }
+    const parsedYears = parsed.validForMonths === null ? null : parsed.validForMonths / 12;
 
     save.mutate(
       {
         id: competency.id,
-        validForMonths: parsedYears === null ? null : parsedYears * 12,
-        // A grace period with no validity has nothing to be grace for.
-        gracePeriodDays: parsedYears === null ? null : parsedGrace,
+        validForMonths: parsed.validForMonths,
+        gracePeriodDays: parsed.gracePeriodDays,
       },
       {
         onSuccess: () => {
@@ -222,6 +250,155 @@ function ValidityEditor({ competency }: { competency: Competency }) {
           Save
         </Button>
         <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Add a competency to the register.
+ *
+ * `POST /competencies` has existed since gating shipped and nothing called it,
+ * so an org with an empty register could only fill one with hand-written SQL.
+ * The first real deployment reached sign-off with zero competencies recorded:
+ * every assessment signed off granted nothing, the case still went competent
+ * and the certificate still printed, and only the register stayed empty. That
+ * is a silent failure of the one record this product exists to keep.
+ *
+ * NO MATCHING DELETE, deliberately. `competency_holders.competency_id`
+ * cascades, so removing a competency erases every record of who ever held it —
+ * the exact erasure the revoke path was just fixed to avoid. A one-click
+ * control for that does not belong beside a create form.
+ */
+function NewCompetency({ existing }: { existing: Competency[] }) {
+  const { toast } = useToast();
+  const create = useCreateCompetency();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [code, setCode] = useState('');
+  const [years, setYears] = useState('');
+  const [grace, setGrace] = useState('');
+
+  function reset() {
+    setName('');
+    setCode('');
+    setYears('');
+    setGrace('');
+    setOpen(false);
+  }
+
+  function onCreate() {
+    const trimmedName = name.trim();
+    const trimmedCode = code.trim();
+    if (!trimmedName || !trimmedCode) {
+      // The code is what the authoring script and every training-system export
+      // match on, so a competency without one is invisible to both.
+      toast({ variant: 'warning', message: 'A competency needs both a name and a code.' });
+      return;
+    }
+    /*
+      Nothing in the database stops two competencies sharing a code — there is
+      no unique index on (org_id, code). The authoring script resolves a tool's
+      competencies through a code→id map built from an unordered select, so a
+      duplicate makes which one an assessment awards depend on row order. This
+      is a guard, not enforcement, but it catches the way it would actually
+      happen: somebody adding the same ticket twice.
+    */
+    const clash = existing.find((c) => c.code.trim().toLowerCase() === trimmedCode.toLowerCase());
+    if (clash) {
+      toast({
+        variant: 'warning',
+        message: `${clash.code} is already on the register as “${clash.name}”.`,
+      });
+      return;
+    }
+    const parsed = parseValidity(years, grace);
+    if (!parsed.ok) {
+      toast({ variant: 'warning', message: parsed.message });
+      return;
+    }
+
+    create.mutate(
+      {
+        name: trimmedName,
+        code: trimmedCode,
+        validForMonths: parsed.validForMonths,
+        gracePeriodDays: parsed.gracePeriodDays,
+      },
+      {
+        onSuccess: (added) => {
+          reset();
+          toast({ variant: 'success', message: `${added.name} (${added.code}) added to the register.` });
+        },
+        /*
+          Without this the failure is INVISIBLE. The global mutation handler
+          only reacts to 401, nothing renders `create.error`, and this route
+          403s on a plan without competency gating and 400s on a rejected body —
+          so the button would simply re-enable with the form still filled and
+          the admin left unsure whether the click registered.
+        */
+        onError: (err) => {
+          toast({
+            variant: 'warning',
+            message: err instanceof Error ? err.message : 'Could not add the competency.',
+          });
+        },
+      },
+    );
+  }
+
+  if (!open) {
+    return (
+      <div className="border-t border-border-subtle px-[18px] py-2.5">
+        <Button size="sm" variant="ghost" leadingIcon="plus" onClick={() => setOpen(true)}>
+          Add competency
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-border-subtle bg-surface-sunken px-[18px] py-3">
+      <Input
+        label="Name"
+        placeholder="ATO - Track Dozer"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+      />
+      <Input
+        label="Code"
+        placeholder="Q34666893"
+        value={code}
+        onChange={(e) => setCode(e.target.value)}
+      />
+      <div className="flex items-end gap-2">
+        <Input
+          label="Valid for (years)"
+          placeholder="Never expires"
+          value={years}
+          onChange={(e) => setYears(e.target.value)}
+        />
+        <Input
+          label="Grace (days)"
+          placeholder="0"
+          value={grace}
+          onChange={(e) => setGrace(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') onCreate();
+          }}
+        />
+      </div>
+      <p className="text-[11px] text-text-tertiary">
+        The code must match the one your training system uses — it is what links an assessment to
+        the ticket it awards.
+      </p>
+      <div className="flex gap-2">
+        <Button size="sm" onClick={onCreate} disabled={create.isPending}>
+          Add
+        </Button>
+        <Button size="sm" variant="ghost" onClick={reset}>
           Cancel
         </Button>
       </div>
@@ -320,6 +497,7 @@ export function CompetencyScreen() {
               </div>
             );
           })}
+          <NewCompetency existing={competencies} />
         </div>
 
         <div className="rounded-lg border border-border-accent bg-surface-accent-soft p-[16px_18px]">

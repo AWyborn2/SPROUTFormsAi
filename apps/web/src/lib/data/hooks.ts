@@ -21,6 +21,7 @@ import type {
   SubmissionValue,
 } from '@formai/shared';
 import { ApiError, apiClient } from './api-client.js';
+import type { ImportSnapshot } from './import-draft-store.js';
 import { store } from './store.js';
 import {
   assessmentsApi,
@@ -75,6 +76,7 @@ const keys = {
   perms: ['perms'] as const,
   auditLog: ['auditLog'] as const,
   billing: ['billing'] as const,
+  importDrafts: ['importDrafts'] as const,
   competencies: ['competencies'] as const,
   /**
    * Nested under `competencies` on purpose: changing a competency's validity
@@ -671,6 +673,40 @@ export function useUpdateWhiteLabel() {
   });
 }
 
+/* ── Saved imports ───────────────────────────────────────────────────────── */
+
+/**
+ * Imports saved on the server, as distinct from the wizard's local autosave.
+ * Summaries only — a snapshot is an entire extraction, and the list exists to
+ * choose from rather than to load from.
+ */
+export function useImportDrafts() {
+  return useQuery({ queryKey: keys.importDrafts, queryFn: () => store.listImportDrafts() });
+}
+
+export function useSaveImportDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { name: string; assetId: string; snapshot: ImportSnapshot }) =>
+      store.saveImportDraft(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.importDrafts });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+export function useDiscardImportDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => store.discardImportDraft(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.importDrafts });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
 /* ── Competency gating (Phase 4) ─────────────────────────────────────────── */
 
 export function useCompetencies() {
@@ -679,6 +715,23 @@ export function useCompetencies() {
 
 export function useCompetencyRules() {
   return useQuery({ queryKey: keys.competencyRules, queryFn: () => store.listCompetencyRules() });
+}
+
+/** Add a competency to the register. */
+export function useCreateCompetency() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      name: string;
+      code: string;
+      validForMonths: number | null;
+      gracePeriodDays: number | null;
+    }) => store.createCompetency(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.competencies });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
 }
 
 /**

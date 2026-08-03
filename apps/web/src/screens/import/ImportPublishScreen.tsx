@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, Icon, Input, useToast } from '@formai/ui';
 import { useCreateVersionFromImport, useForm, usePublishImport } from '../../lib/data/hooks.js';
-import { reviewedToFields, useImportSession } from '../../lib/data/import-session.js';
+import { clearSavedImport, reviewedToFields, useImportSession } from '../../lib/data/import-session.js';
 import { canExportSubmission } from '../../lib/data/store.js';
 import { stripFileExtension } from './upload-validation.js';
 import { ImportStepper } from './ImportStepper.js';
@@ -55,6 +55,10 @@ export function ImportPublishScreen() {
       },
       {
         onSuccess: () => {
+          // The work has a permanent home now, so the autosave has nothing left
+          // to protect — and leaving it would offer this finished form back as
+          // "unfinished" the next time the wizard is opened.
+          if (session.assetId) void clearSavedImport(session.assetId);
           toast({
             message: `${trimmedName} is live${
               tableCount > 0
@@ -84,6 +88,9 @@ export function ImportPublishScreen() {
       },
       {
         onSuccess: (summary) => {
+          // Same as publishing: a saved version IS the permanent home, whether
+          // or not it went live.
+          if (session.assetId) void clearSavedImport(session.assetId);
           toast({
             variant: 'success',
             message: publishNow

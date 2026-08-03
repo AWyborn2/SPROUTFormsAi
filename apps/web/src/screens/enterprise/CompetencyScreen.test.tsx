@@ -15,6 +15,7 @@ import type { Competency, CompetencyHolder } from '../../lib/data/types.js';
 
 const competencies: { data: Competency[] } = { data: [] };
 const setValidityMutate = vi.fn();
+const createMutate = vi.fn();
 const holdersResult: { data: CompetencyHolder[] | undefined; isLoading: boolean; isError: boolean } = {
   data: [],
   isLoading: false,
@@ -31,6 +32,7 @@ vi.mock('../../lib/data/hooks.js', () => ({
   useToggleRule: () => ({ mutate: vi.fn() }),
   useRemoveRule: () => ({ mutate: vi.fn() }),
   useSetCompetencyValidity: () => ({ mutate: setValidityMutate, isPending: false }),
+  useCreateCompetency: () => ({ mutate: createMutate, isPending: false }),
   useCompetencyHolders: (id: string) => {
     holdersAskedFor = id;
     return holdersResult;
@@ -312,5 +314,189 @@ describe('CompetencyScreen holder register', () => {
 
     expect(screen.getByText(/Could not load/)).toBeDefined();
     expect(screen.queryByText(/Nobody holds this yet/)).toBeNull();
+  });
+});
+
+/*
+  ADDING A COMPETENCY.
+
+  POST /competencies existed since gating shipped and nothing called it, so an
+  org with an empty register could only fill one with hand-written SQL — and
+  the first real deployment reached sign-off with zero competencies recorded,
+  granting nothing while every case still went competent and every certificate
+  still printed.
+*/
+describe('CompetencyScreen add competency', () => {
+  function openForm() {
+    fireEvent.click(screen.getByText('Add competency'));
+  }
+
+  function type(label: string, value: string) {
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+  }
+
+  it('adds a competency with its code and validity', () => {
+    render(<CompetencyScreen />);
+    openForm();
+
+    type('Name', 'ATO - Track Dozer');
+    type('Code', 'Q34666893');
+    type('Valid for (years)', '3');
+    fireEvent.click(screen.getByText('Add'));
+
+    expect(createMutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'ATO - Track Dozer',
+        code: 'Q34666893',
+        validForMonths: 36,
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('refuses a competency with no code', () => {
+    // The code is what the authoring script and every training-system export
+    // match on. A competency without one is invisible to both, so it would sit
+    // in the register looking fine and award nothing.
+    render(<CompetencyScreen />);
+    openForm();
+
+    type('Name', 'Site Induction');
+    fireEvent.click(screen.getByText('Add'));
+
+    expect(createMutate).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'warning' }));
+  });
+
+  it('refuses a name that is only whitespace', () => {
+    render(<CompetencyScreen />);
+    openForm();
+
+    type('Name', '   ');
+    type('Code', 'Q1');
+    fireEvent.click(screen.getByText('Add'));
+
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it('creates a perpetual competency when no validity is given', () => {
+    // Same rule as the editor: blank is perpetual, never zero.
+    render(<CompetencyScreen />);
+    openForm();
+
+    type('Name', 'Site Induction');
+    type('Code', 'SI-1');
+    fireEvent.click(screen.getByText('Add'));
+
+    expect(createMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ validForMonths: null, gracePeriodDays: null }),
+      expect.anything(),
+    );
+  });
+
+  it('drops a grace period that has no expiry to be grace for', () => {
+    render(<CompetencyScreen />);
+    openForm();
+
+    type('Name', 'Site Induction');
+    type('Code', 'SI-1');
+    type('Grace (days)', '30');
+    fireEvent.click(screen.getByText('Add'));
+
+    expect(createMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ validForMonths: null, gracePeriodDays: null }),
+      expect.anything(),
+    );
+  });
+
+  it('trims what was typed', () => {
+    render(<CompetencyScreen />);
+    openForm();
+
+    type('Name', '  ATO - Track Dozer  ');
+    type('Code', ' Q34666893 ');
+    fireEvent.click(screen.getByText('Add'));
+
+    expect(createMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'ATO - Track Dozer', code: 'Q34666893' }),
+      expect.anything(),
+    );
+  });
+
+  it('offers no way to delete a competency', () => {
+    /*
+      competency_holders.competency_id CASCADES, so deleting a competency erases
+      every record of who ever held it — the same erasure the revoke path was
+      just fixed to avoid. A one-click control for that does not belong beside a
+      create form, however convenient it would be.
+
+      THIS USED TO ASSERT queryByLabelText(/Delete ATO - Track Dozer/), which
+      passed trivially: *ByLabelText matches aria-label and <label> only, never
+      button text, so the regex could not have matched a delete button even if
+      one existed. Asserted over every control the screen actually renders
+      instead — which does catch one being added.
+    */
+    competencies.data = [TRACK_DOZER];
+    render(<CompetencyScreen />);
+
+    const controls = [
+      ...screen.getAllByRole('button'),
+      ...screen.queryAllByRole('menuitem'),
+    ].map((el) => `${el.textContent ?? ''} ${el.getAttribute('aria-label') ?? ''}`.toLowerCase());
+
+    expect(controls.some((c) => /delete|remove|destroy/.test(c) && c.includes('track dozer'))).toBe(
+      false,
+    );
+  });
+
+  it('refuses a code the register already carries', () => {
+    /*
+      Nothing in the database stops two competencies sharing a code — there is
+      no unique index on (org_id, code) — and the authoring script resolves a
+      tool's competencies through a code→id map built from an unordered select,
+      so a duplicate makes which one an assessment awards depend on row order.
+    */
+    competencies.data = [TRACK_DOZER];
+    render(<CompetencyScreen />);
+    openForm();
+
+    type('Name', 'Track Dozer (old ticket)');
+    type('Code', TRACK_DOZER.code);
+    fireEvent.click(screen.getByText('Add'));
+
+    expect(createMutate).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'warning' }));
+  });
+
+  it('catches a duplicate code however it was cased', () => {
+    competencies.data = [TRACK_DOZER];
+    render(<CompetencyScreen />);
+    openForm();
+
+    type('Name', 'Track Dozer (old ticket)');
+    type('Code', ' q34666893 ');
+    fireEvent.click(screen.getByText('Add'));
+
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it('says so when the create fails, instead of looking like nothing happened', () => {
+    /*
+      The global mutation handler only reacts to 401, and nothing renders
+      create.error — so without an onError a 403 from a plan without competency
+      gating, or a 400 from a rejected body, left the button re-enabled with the
+      form still filled and no way to tell the click had registered.
+    */
+    createMutate.mockImplementation((_input, opts) => opts?.onError?.(new Error('feature_not_available')));
+    render(<CompetencyScreen />);
+    openForm();
+
+    type('Name', 'Site Induction');
+    type('Code', 'SI-1');
+    fireEvent.click(screen.getByText('Add'));
+
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: 'warning', message: expect.stringContaining('feature_not_available') }),
+    );
   });
 });

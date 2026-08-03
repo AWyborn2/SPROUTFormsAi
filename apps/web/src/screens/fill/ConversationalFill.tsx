@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { Icon, MicButton } from '@formai/ui';
 import type { FormField, SmartFillResult, SubmissionValue } from '@formai/shared';
+import { isMatchingQuestion } from '@formai/shared';
 import { FieldInput, canDictateField } from '../fields/FieldRenderer.js';
 import { fillSpanClass, resolveFillSpan } from '../../lib/fill-layout.js';
 import {
@@ -248,7 +249,11 @@ export function ConversationalFill({
                   <li key={f.id} className="flex items-start justify-between gap-3 py-2">
                     <span className="min-w-0 flex-1">
                       <span className="block text-[12px] text-text-tertiary">{f.label}</span>
-                      <span className="block text-[13px] text-text-primary">
+                      {/* `whitespace-pre-line` so a matching answer's one
+                          pairing per line survives to the screen — without it
+                          formatAnswer's newlines collapse and the run is
+                          unbroken again. */}
+                      <span className="block whitespace-pre-line text-[13px] text-text-primary">
                         {formatAnswer(values[f.id])}
                       </span>
                       {tone && (
@@ -490,7 +495,20 @@ function SmartFillPanel({ onTranscript, pending, outcome }: SmartFillPanelProps)
 /** Human-readable echo of an answer on the review screen. */
 function formatAnswer(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—';
-  if (Array.isArray(value)) return value.length ? value.join(', ') : '—';
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '—';
+    /*
+      A matching answer is one pairing per statement, and joining those with
+      ", " makes a single unbroken run — three statements against three signs
+      is around 230 characters of it. This is the last screen a candidate sees
+      before submitting, and catching a mis-tapped answer is the entire purpose
+      of the step, so one pairing per line is the difference between reviewing
+      it and scrolling past it.
+    */
+    const strings = value.filter((v): v is string => typeof v === 'string');
+    if (strings.length === value.length && isMatchingQuestion(strings)) return strings.join('\n');
+    return value.join(', ');
+  }
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'object') return 'Provided';
   return String(value);

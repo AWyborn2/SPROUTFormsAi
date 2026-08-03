@@ -618,7 +618,7 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
      stopping an assessment.
   */
   /*
-     THE ASSESSOR RULE IS CONDITIONAL, AND THIS LIST CANNOT SAY SO.
+     THE ASSESSOR RULE IS CONDITIONAL, AND IT IS NOW MODELLED AS ONE.
 
      The paper names three assessor qualifications, but they are not three
      things one person holds. Per the training authority:
@@ -632,21 +632,22 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
      So the real rule is `Q34666893 AND (Q50071833 OR Q50073293)`, with the
      branch chosen by the assessment's location stream.
 
-     `unmetPrerequisites` is a pure AND — it returns every required id the
-     person does not hold. Listing all three therefore warns on EVERY case: a
-     mine assessor is told they lack the raw-materials authority, and vice
-     versa. A warning that always fires is one people learn to scroll past, and
-     these are recorded on the case for an auditor to read.
+     `assessorCompetencyIds` is a pure AND and cannot say that: listing all
+     three warns on EVERY case, telling a mine assessor they lack the
+     raw-materials authority and vice versa. A warning that always fires is one
+     people learn to scroll past, and these are recorded on the case for an
+     auditor to read. Listing one silently accepts an assessor authorised for
+     the other site, which is the failure that actually matters.
 
-     So only the universally-required code goes in. That is incomplete rather
-     than wrong, which is the right way round: it never cries wolf, and the
-     stream-specific half is a modelling gap rather than a silent omission.
+     `assessorStreamCompetencyIds` carries the location-specific half. The
+     always-required category stays in `assessorCompetencyIds`, so "valid only
+     if the assessor also holds the category" falls out of the two being ANDed
+     rather than needing to be said twice.
 
-     Not modelled yet on purpose. Doing it properly needs the case's location
-     stream — and this document prints no location-stream question at all (see
-     the warning `streamField` raises below), so there is nothing to branch on
-     for the Track Dozer. Building the branch now would be building on a field
-     nothing populates.
+     This document prints no location-stream question, so `locationStream` is
+     whatever the person opening the case selects — the new-case form offers
+     these stream names, and a case left blank says so in its warnings rather
+     than passing a check it did not make.
   */
   const AWARDED_DEFAULT = 'Q34666893';
   const awardsCode = flag('--awards') ?? AWARDED_DEFAULT;
@@ -654,6 +655,28 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
     candidate: ['Q50001782'],
     assessor: ['Q34666893'],
     awarded: [awardsCode],
+  };
+  /*
+     Location stream → the authority that covers assessing there.
+
+     "Mining", NOT "Mine". These keys are matched against the case's
+     `location_stream`, which is ONE free-text value this system already has a
+     vocabulary for: the document's own section headings are "BBM Mining Only"
+     and "Raw Materials Operators Only", the Department dropdown this script
+     asks for above is spelled "Mining / Raw Materials", and the same value is
+     fed back as the ANSWER to that question when a part is filled.
+
+     Keying this "Mine" — as it was first written, in this file, three hundred
+     lines below its own instruction to create "options Mining / Raw Materials" —
+     meant a case recording "Mining" matched nothing. The resolver then required
+     the category alone, and an assessor holding only the raw-materials
+     authority signed off a mining assessment. The resolver now flags an
+     unrecognised stream rather than passing it, so that particular mistake is
+     loud instead of silent; the names still have to agree.
+  */
+  const STREAM_CODES = {
+    Mining: 'Q50071833',
+    'Raw Materials': 'Q50073293',
   };
   const rows = await sql`
     select id, code, valid_for_months from competencies where org_id = ${template.org_id}`;
@@ -666,13 +689,38 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
     });
   const candidatePrereqs = pick(codes.candidate, 'Candidate');
   const assessorComps = pick(codes.assessor, 'Assessor');
-  warnings.push(
-    'Assessor eligibility checks only Q34666893 (ATO Track Dozer). The stream-specific ' +
-      'half — Q50071833 Worsley Assessor Skill Set for MINE, Q50073293 Authority to Assess ' +
-      'Mobile Equipment for RAW MATERIALS — is not modelled: it is an OR chosen by location ' +
-      'stream, and this document prints no stream question to branch on. Confirm the assessor ' +
-      'holds the right one for the stream by hand.',
-  );
+
+  const assessorStreams = {};
+  for (const [stream, code] of Object.entries(STREAM_CODES)) {
+    const id = byCode.get(code);
+    if (id) {
+      assessorStreams[stream] = [id];
+    } else {
+      /*
+        The stream is deliberately OMITTED rather than recorded with an empty
+        list. An empty list is a positive claim that this location needs nothing
+        extra, and a case there would then report a complete check. Leaving the
+        key out makes the stream unrecognised instead, which the resolver flags
+        on every case — so the gap follows the assessments rather than living
+        only in this script's console output.
+      */
+      warnings.push(
+        `Assessor authority ${code} (${stream}) is not recorded in this org, so cases in the ` +
+          `"${stream}" stream will each carry a warning that the location-specific half of the ` +
+          'assessor check could not be made. Create the competency with that code and re-run: ' +
+          'the tool row is upserted, so re-running is safe.',
+      );
+    }
+  }
+  if (Object.keys(assessorStreams).length > 0) {
+    console.log(
+      `\nAssessor rule: ${codes.assessor.join(', ')} always, plus ` +
+        Object.entries(STREAM_CODES)
+          .filter(([s]) => assessorStreams[s])
+          .map(([s, c]) => `${c} in ${s}`)
+          .join(' / '),
+    );
+  }
   const awardedComps = pick(codes.awarded, 'Awarded');
   if (awardedComps.length === 0) {
     warnings.push(
@@ -706,8 +754,45 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
   problems.push(...validateManifest(manifest, fields));
   problems.push(...validateAnswerKeys(fields));
 
+  /*
+     A PRINTED VERDICT BOX THAT NO QUESTION CLAIMS.
+
+     The count check earlier compares the answer key against the questions this
+     script could PAIR — and a question the extractor did not type as a choice
+     field is missing from both sides, so the counts agree and the run looks
+     clean. That is exactly what happens to the two matching questions ("Match
+     the statement with the appropriate signage", "Match the correct response
+     with the horn Signals"): they extract as free-response text, `isQuestion`
+     is false for them, and they appear in neither `pairs` nor `unpaired`.
+
+     The paper still prints a tick/cross box beside each. So the detectable
+     signal is the box: an outcome cell no question claims is a verdict the
+     document expects and nothing will ever write, and the theory percentage is
+     computed without that question entirely.
+
+     Reported on EVERY run rather than only on the failure path, because a clean
+     run is precisely when nobody goes looking.
+  */
+  const claimedOutcomes = new Set(paired.map((p) => p.outcome.id));
+  const orphanOutcomes = fields.filter(
+    (f) => f.type === 'check_cross' && !claimedOutcomes.has(f.id),
+  );
+  if (orphanOutcomes.length) {
+    warnings.push(
+      `${orphanOutcomes.length} printed outcome box(es) belong to no keyed question, so those ` +
+        'questions are NOT auto-marked and the theory percentage is computed without them: ' +
+        orphanOutcomes.map((f) => `${f.id} "${(f.label ?? '').slice(0, 40)}"`).join(', ') +
+        '. A matching question is the usual cause — it extracts as free-response text. Retype it ' +
+        'as a checkbox group whose options are the PAIRINGS (buildMatchingQuestion in ' +
+        '@formai/shared builds them) and add it to the key.',
+    );
+  }
+
   // ── report ──────────────────────────────────────────────────────────────
-  console.log(`\nAnswer keys applied: ${keyed.length}/31`);
+  // `expected` rather than a hardcoded 31: the key file is the authority on how
+  // many questions there are, and a literal here would keep reading "29/31"
+  // after a key legitimately changed size.
+  console.log(`\nAnswer keys applied: ${keyed.length}/${expected}`);
   for (const k of keyed) console.log(`  ${k}`);
   if (skipped.length) {
     console.log(`\nSKIPPED (not auto-marked until fixed): ${skipped.length}`);
@@ -731,13 +816,18 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
   // ── persist ─────────────────────────────────────────────────────────────
   await sql`update form_template_versions set fields = ${sql.json(fields)} where id = ${version.id}`;
   await sql`
-    insert into assessment_tools (org_id, template_id, name, manifest, candidate_prerequisite_ids, assessor_competency_ids, awarded_competency_ids)
-    values (${template.org_id}, ${template.id}, ${'Authorised to Operate Track Dozer'}, ${sql.json(manifest)}, ${sql.json(candidatePrereqs)}, ${sql.json(assessorComps)}, ${sql.json(awardedComps)})
+    insert into assessment_tools (org_id, template_id, name, manifest, candidate_prerequisite_ids, assessor_competency_ids, assessor_stream_competency_ids, awarded_competency_ids)
+    values (${template.org_id}, ${template.id}, ${'Authorised to Operate Track Dozer'}, ${sql.json(manifest)}, ${sql.json(candidatePrereqs)}, ${sql.json(assessorComps)}, ${sql.json(assessorStreams)}, ${sql.json(awardedComps)})
     on conflict (template_id) do update
       set manifest = excluded.manifest,
           name = excluded.name,
           candidate_prerequisite_ids = excluded.candidate_prerequisite_ids,
           assessor_competency_ids = excluded.assessor_competency_ids,
+          -- The location-specific half of the assessor rule: Worsley Assessor
+          -- Skill Set for the mine, Authority to Assess Mobile Equipment for
+          -- raw materials. A flat AND list cannot state either without warning
+          -- on every case in the other stream.
+          assessor_stream_competency_ids = excluded.assessor_stream_competency_ids,
           -- Omitted before, so the column kept its [] default and the sign-off
           -- route's grant loop ran zero times: a competent case that put nobody
           -- on the register.

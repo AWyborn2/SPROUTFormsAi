@@ -1449,3 +1449,180 @@ describe('roundTripExport — a standalone check_cross outcome cell', () => {
     expect(drawnMarks(output)[0]!.kind).toBe('cross');
   });
 });
+
+/*
+  THE PAGE FONT IS WINANSI, AND PDF-LIB THROWS ON WHAT IT CANNOT ENCODE.
+
+  Not degrades — throws. So one curly apostrophe in an answer failed the export
+  of a completed assessment's evidence PDF, which is the record an investigation
+  reads. Values here come out of a PDF and out of typed answers, so smart quotes
+  and dashes are ordinary rather than exotic.
+
+  This surfaced while adding matching questions, whose option values join two
+  halves of document prose and were about to do it with a "→".
+*/
+describe('roundTripExport — characters the page font cannot encode', () => {
+  const textField = (): FormField => ({
+    id: 'site',
+    type: 'text',
+    label: 'Site',
+    required: false,
+    source: 'imported',
+    sourcePosition: { page: 0, x: 40, y: 700, width: 300, height: 20, pageWidth: 600, pageHeight: 800 },
+  });
+
+  it('exports rather than throwing on a curly apostrophe', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [textField()],
+      values: { site: 'Operator’s cab' },
+    });
+
+    // Straightened, not dropped: the reader still gets the word.
+    expect(bytesInclude(output, "Operator's cab")).toBe(true);
+  });
+
+  it('transliterates an arrow, which is how a matching answer joins its halves', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [textField()],
+      values: { site: 'Statement → Sign' },
+    });
+
+    expect(bytesInclude(output, 'Statement -> Sign')).toBe(true);
+  });
+
+  it('handles an em dash and an ellipsis', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [textField()],
+      values: { site: 'Bay 3—north…' },
+    });
+
+    expect(bytesInclude(output, 'Bay 3-north...')).toBe(true);
+  });
+
+  it('marks an unrenderable character visibly rather than dropping it', async () => {
+    // A silent deletion would leave a record that reads as complete and is not.
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [textField()],
+      values: { site: 'Bay 中 3' },
+    });
+
+    expect(bytesInclude(output, 'Bay ? 3')).toBe(true);
+  });
+
+  it('leaves ordinary text exactly as it was', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [textField()],
+      values: { site: 'Warehouse B - level 2 (north)' },
+    });
+
+    expect(bytesInclude(output, 'Warehouse B - level 2 (north)')).toBe(true);
+  });
+});
+
+/*
+  A MATCHING ANSWER MUST NOT BE PAINTED ACROSS THE PAGE.
+
+  Its value is a SET of pairings — nine options for a three-by-three question —
+  and scalarText joins them. A matching field is authored with no geometry, so
+  normally it never reaches the drawing code at all; these cover what happens
+  when one carries a box anyway, which is a mis-authored field rather than an
+  exotic one.
+
+  The hazard is specific: drawText bounds the WIDTH but not the height, so ~230
+  characters wrapped inside a 20pt-high box runs downward across whatever is
+  printed beneath it, on a certified competency record, and nothing raises.
+*/
+describe('roundTripExport — matching questions', () => {
+  const PAIRINGS = [
+    'Restricted area -> Biosecurity sign',
+    'Restricted area -> Traffic hazard sign',
+    'Permission to pass -> Biosecurity sign',
+    'Permission to pass -> Traffic hazard sign',
+  ];
+
+  const matchingField = (extra: Partial<FormField> = {}): FormField => ({
+    id: 'q7',
+    type: 'checkbox_group',
+    label: 'Match the statement with the appropriate signage.',
+    required: true,
+    source: 'imported',
+    options: PAIRINGS,
+    ...extra,
+  });
+
+  const ANSWER = { q7: ['Restricted area -> Biosecurity sign', 'Permission to pass -> Traffic hazard sign'] };
+
+  it('draws nothing for a matching field with no geometry', async () => {
+    // The normal case, and the reason the export needed no work: the printed
+    // page already carries the statements and the signs, and the verdict
+    // reaches the margin through the separate outcome box.
+    const original = await makeFlatPdf();
+    const output = await roundTripExport({
+      originalPdf: original,
+      fields: [matchingField()],
+      values: ANSWER,
+    });
+
+    expect(bytesInclude(output, 'Biosecurity sign')).toBe(false);
+    expect(bytesInclude(output, LETTERHEAD)).toBe(true);
+  });
+
+  it('draws nothing even when the field wrongly carries a single box', async () => {
+    /*
+      THE ONE THAT WOULD HAVE DEFACED THE RECORD. Without the guard this falls
+      through to the scalar path and joins every selected pairing into one long
+      string, drawn into a 20pt box with no height bound.
+    */
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [
+        matchingField({
+          sourcePosition: {
+            page: 0,
+            x: 40,
+            y: 700,
+            width: 200,
+            height: 20,
+            pageWidth: 600,
+            pageHeight: 800,
+          },
+        }),
+      ],
+      values: ANSWER,
+    });
+
+    expect(bytesInclude(output, 'Biosecurity sign')).toBe(false);
+    expect(bytesInclude(output, '->')).toBe(false);
+  });
+
+  it('still draws an ordinary checkbox group that happens to have a box', async () => {
+    // The guard keys on the OPTIONS being pairings, not on the type — an
+    // ordinary group must be unaffected.
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [
+        matchingField({
+          id: 'plain',
+          options: ['Helmet', 'Gloves'],
+          sourcePosition: {
+            page: 0,
+            x: 40,
+            y: 700,
+            width: 300,
+            height: 20,
+            pageWidth: 600,
+            pageHeight: 800,
+          },
+        }),
+      ],
+      values: { plain: ['Helmet'] },
+    });
+
+    expect(bytesInclude(output, 'Helmet')).toBe(true);
+  });
+});

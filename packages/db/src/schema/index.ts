@@ -10,3 +10,4 @@ export * from './submissions.ts';
 export * from './fill-links.ts';
 export * from './governance.ts';
 export * from './assessments.ts';
+export * from './import-drafts.ts';
