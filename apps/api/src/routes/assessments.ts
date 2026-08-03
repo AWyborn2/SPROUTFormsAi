@@ -24,7 +24,11 @@ import {
   requiredParts,
   resolveAssessorRequirements,
   validateWorkflow,
+  hiddenFieldIds,
+  sectionForPart,
   workflowOf,
+  writableFieldIds,
+  type WorkflowRole,
   streamCheckWarning,
   totalLoggedHours,
   stripMarkingSecrets,
@@ -1332,6 +1336,25 @@ assessmentCasesRouter.get(
 
     const allFields = await fieldsForVersion(db, attempt.templateVersionId);
 
+    /*
+      WHICH PARTY IS ASKING. The candidate on the case is the candidate;
+      anybody else with access to it is acting as the assessor. Derived from the
+      case rather than from the org role, because "assessor" here means "the
+      person on the other side of this assessment", and an admin opening a case
+      to fill in for an assessor is doing exactly that.
+
+      A supervisor is not yet distinguishable — nothing on the case names one —
+      so a workflow that assigns them work resolves to no writable fields rather
+      than to somebody else's. That is the safe direction: a section nobody can
+      currently fill is visible as stuck, where guessing would let the wrong
+      person sign a logbook.
+    */
+    const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
+    const section = sectionForPart(workflowOf(manifest), attempt.partKey);
+    const partFields = fieldsInPart(allFields, manifest, attempt.partKey);
+    const hidden = new Set(hiddenFieldIds(section, partFields, party));
+    const visibleFields = partFields.filter((f) => !hidden.has(f.id));
+
     res.json({
       id: attempt.id,
       partKey: attempt.partKey,
@@ -1363,7 +1386,23 @@ assessmentCasesRouter.get(
         : null,
       minimumHours: part.minimumHours ?? null,
       durationColumnKey: part.durationColumnKey ?? null,
-      fields: stripMarkingSecrets(fieldsInPart(allFields, manifest, attempt.partKey)),
+      fields: stripMarkingSecrets(visibleFields),
+      /*
+        WHAT THIS CALLER MAY CHANGE, decided here rather than on the screen.
+
+        The fill surface renders what it is given and disables what is not in
+        this list; it does not work out scope itself, for the same reason the
+        case screen does not work out part state. A second implementation of the
+        rule deciding who may write a competency record is a rule that can
+        disagree with itself.
+
+        Hidden fields are REMOVED from `fields` above rather than listed here.
+        Read-only and absent are different answers to different questions: a
+        candidate sees the practical criteria they will be marked against — that
+        is the standard being applied to them — and never sees the assessor's
+        private comments.
+      */
+      writableFieldIds: writableFieldIds(section, visibleFields, party),
       values: attempt.values ?? {},
     });
   }),
@@ -1546,13 +1585,33 @@ assessmentCasesRouter.patch(
       workflow ownership lets two.
     */
     const stored = (attempt.values ?? {}) as Record<string, SubmissionValue>;
+    /*
+      AND ONLY WITH THE FIELDS THIS PARTY OWNS.
+
+      Part scoping alone stopped a candidate writing ANOTHER part's checklist.
+      It did not stop them writing THIS part's, which is the case the customer
+      described: the candidate fills nothing in a practical, but the practical
+      is one part and its fields are all in it.
+
+      So the allowed set narrows from "this part's fields" to "the fields the
+      workflow says this party may write". A tool with no workflow authored
+      still resolves to the whole part, so nothing changes until somebody
+      configures it — and `writableFieldIds` also drops `prefill` and `auto`
+      fields, whose values come from the case record or from marking and must
+      not be typed over.
+    */
+    const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
     const allowed = tool
       ? new Set(
-          fieldsInPart(
-            await fieldsForVersion(db, attempt.templateVersionId),
-            tool.manifest,
-            attempt.partKey,
-          ).map((f) => f.id),
+          writableFieldIds(
+            sectionForPart(workflowOf(tool.manifest), attempt.partKey),
+            fieldsInPart(
+              await fieldsForVersion(db, attempt.templateVersionId),
+              tool.manifest,
+              attempt.partKey,
+            ),
+            party,
+          ),
         )
       : null;
 

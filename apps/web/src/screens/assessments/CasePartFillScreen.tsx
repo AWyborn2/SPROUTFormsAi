@@ -98,6 +98,12 @@ export function CasePartFillScreen() {
   const handedIn = attempt.submittedAt !== null;
   const readOnly = marked || handedIn;
   const rendered = visibleFillFields(attempt.fields, answers, sources);
+  /*
+    Which fields this caller may change, as the server decided. A tool with no
+    workflow authored sends every field of the part, so nothing renders
+    read-only until somebody configures it.
+  */
+  const writable = new Set(attempt.writableFieldIds ?? []);
 
   function setValue(fieldId: string, v: SubmissionValue) {
     setValues((prev) => ({ ...prev, [fieldId]: v }));
@@ -177,7 +183,14 @@ export function CasePartFillScreen() {
             <FieldInput
               field={f}
               value={values[f.id] ?? null}
-              disabled={readOnly}
+              /*
+                Two reasons a field is read-only, and neither is computed here.
+                The attempt as a whole may be frozen — handed in, or marked — or
+                the workflow may say this party does not fill this field, which
+                is what `writableFieldIds` carries. The screen renders what the
+                server decided rather than working the scope out a second time.
+              */
+              disabled={readOnly || !writable.has(f.id)}
               onChange={(v) => setValue(f.id, v)}
             />
           </div>
