@@ -7,8 +7,10 @@ import type { TextPage } from '../../lib/pdf-geometry.js';
 import { markSentence } from '../../lib/mark-description.js';
 import { PdfViewer } from './PdfViewer.js';
 import {
+  applyFieldChanges,
   deriveAcrossPages,
   deriveOptionCellsAcrossPages,
+  type FieldChange,
 } from './inspector/geometry-actions.js';
 
 /**
@@ -54,8 +56,35 @@ export function GeometryEditorScreen() {
 
   const onTextLayer = useCallback((pages: TextPage[]) => setTextPages(pages), []);
 
+  /**
+   * Apply one field-level edit.
+   *
+   * Routes through the functional `setState` updater rather than closing over
+   * the render's `fields` — `prev` is guaranteed correct even when `mutate` is
+   * called more than once synchronously in the same handler (KTD3), because
+   * React threads each functional update through the last one's result before
+   * anything re-renders. `applyFieldChanges` still does the actual field-array
+   * rewrite, so a single edit and a batch of edits (`mutateMany`) share one
+   * code path.
+   */
   function mutate(fieldId: string, change: (f: FormField) => FormField) {
-    setEdited(fields.map((f) => (f.id === fieldId ? change(f) : f)));
+    setEdited((prev) => applyFieldChanges(prev ?? fields, [{ fieldId, change }]));
+    setDirty(true);
+  }
+
+  /**
+   * Apply several field-level edits as ONE batch (U2).
+   *
+   * The safe primitive for anything that used to loop `mutate()` — the
+   * "Place all N" button today, and the bulk auto-place / bulk-confirm later
+   * units build — because every change in `changes` folds over a single
+   * snapshot inside `applyFieldChanges` instead of each call recomputing from
+   * the same pre-click `fields`. Not yet called from this screen; it exists so
+   * later units have somewhere safe to route a loop.
+   */
+  function mutateMany(changes: FieldChange[]) {
+    if (changes.length === 0) return;
+    setEdited((prev) => applyFieldChanges(prev ?? fields, changes));
     setDirty(true);
   }
 

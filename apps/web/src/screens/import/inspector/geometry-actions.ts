@@ -1126,6 +1126,42 @@ export function classifyProposalTier(
   return proposal.confidence === 1 ? 'auto-confirm' : 'needs-review';
 }
 
+/** One field-level edit to fold into a batch (U2/KTD3). */
+export interface FieldChange {
+  fieldId: string;
+  change: (field: FormField) => FormField;
+}
+
+/**
+ * Apply every change in one pass over a single snapshot (U2/KTD3).
+ *
+ * `GeometryEditorScreen`'s `mutate()` used to recompute `fields.map(...)` fresh
+ * off the SAME pre-click `fields` snapshot for every call, so N synchronous
+ * `mutate()` calls inside one handler — the "Place all N" button already loops
+ * once per segment, and a later bulk auto-confirm will loop once per field —
+ * left only the LAST call's `setEdited(...)` result in state: every earlier
+ * change in the batch was silently discarded. Folding every change over one
+ * accumulating snapshot here, in a pure function `GeometryEditorScreen` calls
+ * from a single functional `setState` updater, is what makes calling this once
+ * with the whole batch correct regardless of how many changes land on the same
+ * field or how many fields are touched.
+ *
+ * Changes targeting the same `fieldId` apply in ARRAY ORDER against the
+ * accumulating result, not all against the original snapshot — so two changes
+ * to one field (place one option, then another) compose instead of the second
+ * clobbering the first.
+ */
+export function applyFieldChanges(
+  fields: readonly FormField[],
+  changes: readonly FieldChange[],
+): FormField[] {
+  let next: FormField[] = [...fields];
+  for (const { fieldId, change } of changes) {
+    next = next.map((f) => (f.id === fieldId ? change(f) : f));
+  }
+  return next;
+}
+
 /**
  * Propose one checkmark box per option for a NON-TABLE choice field, across the
  * whole document.

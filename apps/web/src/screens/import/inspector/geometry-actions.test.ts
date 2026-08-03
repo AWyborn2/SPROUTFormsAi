@@ -16,9 +16,11 @@ import {
   SNAP_RANGE,
   DRAW_SNAP_RANGE,
   appendRowBelow,
+  applyFieldChanges,
   applyMatrix,
   classifyProposalTier,
   columnHandles,
+  type FieldChange,
   deleteRowBand,
   type DerivableField,
   deriveAcrossPages,
@@ -1237,5 +1239,121 @@ describe('deriveOptionCellsAcrossPages — routing between the two shapes', () =
     if (res) {
       expect(res.segments.map((s) => s.x)).toEqual([430, 480]);
     }
+  });
+});
+
+/**
+ * `applyFieldChanges` (U2/KTD3).
+ *
+ * `GeometryEditorScreen`'s `mutate()` used to compute `fields.map(...)` fresh
+ * off the same pre-click `fields` snapshot on every call, so more than one
+ * synchronous `mutate()` call in a single handler — the "Place all N" button
+ * already loops once per segment — left only the LAST call's result in state.
+ * This is the pure-function regression coverage for the fold-over-one-snapshot
+ * fix; `GeometryEditorScreen` itself now only calls this via a functional
+ * `setState` updater, so proving the fold is correct here is what proves the
+ * bug cannot recur regardless of how the component wires it up.
+ */
+describe('applyFieldChanges', () => {
+  function choiceField(id: string, options: string[]): FormField {
+    return { id, type: 'checkbox_group', label: id, required: false, source: 'imported', options };
+  }
+
+  function box(optionKey: string): PageBox {
+    return { page: 0, x: 0, y: 0, width: 10, height: 10, pageWidth: 595, pageHeight: 842, optionKey };
+  }
+
+  /**
+   * Mirrors `GeometryEditorScreen`'s `setOptionBox` change body exactly: drop
+   * any existing box for this option, then append the new one. Reused so the
+   * regression tests exercise the real shape of change a caller passes, not a
+   * toy replacement function.
+   */
+  function setOptionBoxChange(optionKey: string): (f: FormField) => FormField {
+    return (f) => {
+      const kept = (f.geometry?.segments ?? []).filter((s) => s.optionKey !== optionKey);
+      return { ...f, geometry: { segments: [...kept, box(optionKey)] } };
+    };
+  }
+
+  it('applies two changes to the SAME field — both option boxes land, not just the last (KTD3 regression)', () => {
+    // This is the direct regression test: it MUST fail if `applyFieldChanges`
+    // recomputes each change from the original `fields` snapshot instead of
+    // folding over the accumulating result (verified by temporarily reverting
+    // the implementation to that pattern and re-running — see report).
+    const field = choiceField('f1', ['Yes', 'No']);
+    const changes: FieldChange[] = [
+      { fieldId: 'f1', change: setOptionBoxChange('Yes') },
+      { fieldId: 'f1', change: setOptionBoxChange('No') },
+    ];
+
+    const result = applyFieldChanges([field], changes);
+
+    const optionKeys = (result[0]!.geometry?.segments ?? []).map((s) => s.optionKey);
+    expect(optionKeys).toEqual(['Yes', 'No']);
+  });
+
+  it('applies changes to two DIFFERENT fields, independent of call order', () => {
+    const a = choiceField('a', ['Yes']);
+    const b = choiceField('b', ['No']);
+    const changesInOrder: FieldChange[] = [
+      { fieldId: 'a', change: setOptionBoxChange('Yes') },
+      { fieldId: 'b', change: setOptionBoxChange('No') },
+    ];
+    const changesReversed: FieldChange[] = [...changesInOrder].reverse();
+
+    for (const changes of [changesInOrder, changesReversed]) {
+      const result = applyFieldChanges([a, b], changes);
+      expect(result.find((f) => f.id === 'a')?.geometry?.segments?.[0]?.optionKey).toBe('Yes');
+      expect(result.find((f) => f.id === 'b')?.geometry?.segments?.[0]?.optionKey).toBe('No');
+    }
+  });
+
+  it('returns the input unchanged for an empty changes array', () => {
+    const fields = [choiceField('a', ['Yes']), choiceField('b', ['No'])];
+
+    expect(applyFieldChanges(fields, [])).toEqual(fields);
+  });
+
+  it('characterizes the "Place all N" loop: N option-box changes for ONE field in one pass all land', () => {
+    // Mirrors the loop in `PlacementPanel`'s "Place all N" button exactly: one
+    // change per proposed segment, all for the same field, applied in one
+    // batch. Before U2 this was N separate `mutate()` calls each recomputing
+    // from the same pre-click snapshot — only the last one survived.
+    const field = choiceField('f1', ['Yes', 'No', 'Maybe']);
+    const changes: FieldChange[] = ['Yes', 'No', 'Maybe'].map((optionKey) => ({
+      fieldId: 'f1',
+      change: setOptionBoxChange(optionKey),
+    }));
+
+    const result = applyFieldChanges([field], changes);
+
+    const optionKeys = (result[0]!.geometry?.segments ?? []).map((s) => s.optionKey);
+    expect(optionKeys).toEqual(['Yes', 'No', 'Maybe']);
+  });
+
+  it('documents why this is a real regression test: the OLD per-call-from-original-snapshot pattern drops all but the last change', () => {
+    /*
+      This does not call `applyFieldChanges` — it reproduces the OLD `mutate()`
+      shape directly: every call maps from the SAME captured `fields`, exactly
+      as `GeometryEditorScreen` did before U2. Calling `setEdited(value)` more
+      than once synchronously with a plain (non-functional) value means only
+      the LAST call's value ends up as state — earlier calls' results are
+      simply overwritten, never merged. This is why two changes to one field,
+      like the "Place all N" loop makes, used to lose everything but the last.
+    */
+    const original = [choiceField('f1', ['Yes', 'No'])];
+    const oldMutate = (fields: FormField[], fieldId: string, change: (f: FormField) => FormField) =>
+      fields.map((f) => (f.id === fieldId ? change(f) : f));
+
+    const pendingStates = [
+      oldMutate(original, 'f1', setOptionBoxChange('Yes')),
+      oldMutate(original, 'f1', setOptionBoxChange('No')),
+    ];
+    const survivingState = pendingStates[pendingStates.length - 1]!; // only the last setEdited(...) call wins
+
+    const optionKeys = (survivingState[0]!.geometry?.segments ?? []).map((s) => s.optionKey);
+    expect(optionKeys).toEqual(['No']);
+    expect(optionKeys).not.toContain('Yes');
   });
 });
