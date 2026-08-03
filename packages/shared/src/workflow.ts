@@ -156,6 +156,51 @@ export function orderedSections(workflow: AssessmentWorkflow): WorkflowSection[]
 }
 
 /**
+ * The section covering one printed part, or null.
+ *
+ * Null when an authored workflow leaves the part uncovered — `validateWorkflow`
+ * warns about that rather than refusing it, so each caller has to decide what
+ * an uncovered part means. On the fill surface it means the pre-workflow
+ * behaviour stands, because the alternative is a part nobody can open.
+ */
+export function sectionForPart(
+  workflow: AssessmentWorkflow,
+  partKey: string,
+): WorkflowSection | null {
+  return workflow.sections.find((s) => s.partKey === partKey) ?? null;
+}
+
+/**
+ * Which of these fields a role may WRITE.
+ *
+ * Deliberately not a filter over what they may SEE. A candidate is meant to
+ * read the practical criteria they will be marked against — that is the
+ * standard being applied to them — while never being able to mark themselves
+ * against it. Visibility and writability are separate questions and this
+ * answers only the second.
+ */
+export function writableFieldIds(
+  section: WorkflowSection | null,
+  fields: readonly FormField[],
+  role: WorkflowRole,
+): string[] {
+  // Nothing configured for this part: the behaviour that predates workflows
+  // stands, and every field of the part is writable.
+  if (!section) return fields.map((f) => f.id);
+  return fields.filter((f) => canWrite(section, f.id, role)).map((f) => f.id);
+}
+
+/** Which of these fields a role may not even see. */
+export function hiddenFieldIds(
+  section: WorkflowSection | null,
+  fields: readonly FormField[],
+  role: WorkflowRole,
+): string[] {
+  if (!section) return [];
+  return fields.filter((f) => effectiveAccess(section, f.id, role) === 'hidden').map((f) => f.id);
+}
+
+/**
  * The workflow a tool has when nobody has configured one.
  *
  * Synthesised on read and never stored, so an unconfigured tool keeps behaving

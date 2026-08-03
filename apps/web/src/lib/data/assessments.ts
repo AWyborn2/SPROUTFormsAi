@@ -157,7 +157,18 @@ export interface AttemptFillView {
   streamField: FormField | null;
   minimumHours: number | null;
   durationColumnKey: string | null;
+  /** Everything this caller may SEE. Hidden fields are already absent. */
   fields: FormField[];
+  /**
+   * Of those, the ones they may CHANGE.
+   *
+   * Read-only and absent answer different questions: a candidate sees the
+   * practical criteria they will be marked against — that is the standard being
+   * applied to them — and never sees the assessor's private comments. The
+   * server decides both, and this screen renders what it is given rather than
+   * working out scope a second time.
+   */
+  writableFieldIds: string[];
   values: Record<string, SubmissionValue>;
 }
 

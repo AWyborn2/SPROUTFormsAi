@@ -2782,3 +2782,164 @@ describe('attempt writes are scoped to their part', () => {
     }
   });
 });
+
+/*
+  AND ONLY WITH THE FIELDS THIS PARTY OWNS.
+
+  Part scoping stopped a candidate writing ANOTHER part's checklist. It did not
+  stop them writing THIS part's — which is the case the customer described: the
+  candidate fills nothing in a practical, but the practical is one part and its
+  fields are all in it.
+
+  The caller here IS the candidate (ADMIN opens the case, so these use a case
+  whose candidate is the caller) — that is what makes the party resolution the
+  thing under test rather than incidental.
+*/
+describe('workflow ownership is enforced on an attempt', () => {
+  /** A tool whose Part 1 the candidate may read but not write. */
+  const READ_ONLY_THEORY = {
+    roles: ['candidate', 'assessor'] as const,
+    sections: [
+      { key: 'p1', ordinal: 1, label: 'Part 1', partKey: 'p1', access: { candidate: 'view', assessor: 'fill' } },
+      { key: 'p2', ordinal: 2, label: 'Part 2', partKey: 'p2', access: { candidate: 'view', assessor: 'fill' } },
+      { key: 'p3', ordinal: 3, label: 'Part 3', partKey: 'p3', access: { candidate: 'fill', assessor: 'view' } },
+      { key: 'p4', ordinal: 4, label: 'Part 4', partKey: 'p4', access: { candidate: 'view', assessor: 'fill' } },
+    ],
+  };
+
+  async function caseAsCandidate(base: string, workflow?: unknown) {
+    const created = await fetch(`${base}/assessment-tools`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({
+        templateId: TEMPLATE,
+        name: 'Track Dozer',
+        manifest: workflow ? { ...MANIFEST, workflow } : MANIFEST,
+      }),
+    });
+    const tool = (await created.json()) as { id: string };
+    // The CALLER is the candidate, so party resolution puts them on the
+    // candidate side of their own case.
+    const caseRes = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ toolId: tool.id, candidateUserId: ADMIN, pathway: 'new' }),
+    });
+    const c = (await caseRes.json()) as { id: string };
+    const attemptRes = await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, {
+      method: 'POST',
+      headers: auth(),
+    });
+    return { caseId: c.id, attemptId: ((await attemptRes.json()) as { id: string }).id };
+  }
+
+  it('refuses a field the workflow says this party may only VIEW', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseAsCandidate(base, READ_ONLY_THEORY);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { fields: string[] }).fields).toEqual(['q1']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('allows it when the workflow says this party fills it', async () => {
+    const FILLS = {
+      ...READ_ONLY_THEORY,
+      sections: READ_ONLY_THEORY.sections.map((s) =>
+        s.key === 'p1' ? { ...s, access: { candidate: 'fill', assessor: 'view' } } : s,
+      ),
+    };
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseAsCandidate(base, FILLS);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('changes nothing for a tool with no workflow authored', async () => {
+    // The migration story. Every existing tool must keep behaving exactly as it
+    // did until somebody opens the builder.
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseAsCandidate(base);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('tells the fill surface what may be changed', async () => {
+    /*
+      Decided server-side and sent, rather than worked out on the screen. A
+      second implementation of the rule deciding who may write a competency
+      record is a rule that can disagree with itself.
+    */
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseAsCandidate(base, READ_ONLY_THEORY);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(),
+      });
+
+      const body = (await res.json()) as { fields: { id: string }[]; writableFieldIds: string[] };
+      // Visible — a candidate reads the standard they are held to…
+      expect(body.fields.some((f) => f.id === 'q1')).toBe(true);
+      // …and cannot mark themselves against it.
+      expect(body.writableFieldIds).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('removes a HIDDEN field rather than sending it read-only', async () => {
+    // Read-only and absent are different answers. Assessor comments are not
+    // the candidate's business at all.
+    const HIDES = {
+      ...READ_ONLY_THEORY,
+      sections: READ_ONLY_THEORY.sections.map((s) =>
+        s.key === 'p1'
+          ? { ...s, fieldAccess: { q1: { candidate: 'hidden' as const } } }
+          : s,
+      ),
+    };
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseAsCandidate(base, HIDES);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(),
+      });
+
+      const body = (await res.json()) as { fields: { id: string }[] };
+      expect(body.fields.some((f) => f.id === 'q1')).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+});
