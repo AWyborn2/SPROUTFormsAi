@@ -25,12 +25,7 @@ import type {
   RepeatingColumn,
   VisibilityCondition,
 } from '@formai/shared';
-import {
-  isChoiceField,
-  linkOutcomeTargets,
-  resolveGeometry,
-  statusForConfidence,
-} from '@formai/shared';
+import { isChoiceField, linkOutcomeTargets, statusForConfidence } from '@formai/shared';
 import type { BuilderAction, BuilderState } from '../field-editor/reducer.js';
 import { builderReducer, initialBuilderState } from '../field-editor/reducer.js';
 import { ApiError, apiClient } from './api-client.js';
@@ -42,6 +37,7 @@ import {
   indexedDbDraftStore,
   isRestorable,
 } from './import-draft-store.js';
+import { moveBand, moveBoundary } from '../../screens/import/inspector/geometry-actions.js';
 
 /**
  * An extracted field plus the reviewer's resolution state. Backed by the shared
@@ -913,29 +909,6 @@ export function answerSetAccepted(fieldId: string, setKey: string): boolean {
 const geometryProposals = new Map<string, PageBox>();
 const confirmedGeometry = new Set<string>();
 
-/**
- * Widen a segment box so it contains every one of its bands, clamped to the
- * page. Bands outside the box are rejected by the shared validator, so an
- * adjustment that pushes past the current edge has to carry the box with it.
- */
-function growToFit(segment: PageBox): PageBox {
-  const cols = segment.columnBands ?? [];
-  const rows = segment.rowBands ?? [];
-
-  const left = Math.max(Math.min(segment.x, ...cols.map((b) => b.start)), 0);
-  const right = Math.min(
-    Math.max(segment.x + segment.width, ...cols.map((b) => b.end)),
-    segment.pageWidth,
-  );
-  const bottom = Math.max(Math.min(segment.y, ...rows.map((b) => b.start)), 0);
-  const top = Math.min(
-    Math.max(segment.y + segment.height, ...rows.map((b) => b.end)),
-    segment.pageHeight,
-  );
-
-  return { ...segment, x: left, y: bottom, width: right - left, height: top - bottom };
-}
-
 /** Record a proposed footprint for a field, replacing any earlier proposal. */
 export function proposeGeometry(fieldId: string, segment: PageBox): void {
   geometryProposals.set(fieldId, segment);
@@ -1008,30 +981,8 @@ export function adjustGeometryBand(
   const segment = geometryProposals.get(fieldId);
   if (!segment) return;
 
-  const bands = axis === 'column' ? segment.columnBands : segment.rowBands;
-  const band = bands?.find((b) => b.key === key);
-  if (!band) return;
-
-  const moved = { ...band, [edge]: value };
-  if (!(moved.end > moved.start)) return; // an inverted band is not an edit
-
-  const withMove: PageBox = {
-    ...segment,
-    ...(axis === 'column'
-      ? { columnBands: segment.columnBands!.map((b) => (b.key === key ? moved : b)) }
-      : { rowBands: segment.rowBands!.map((b) => (b.key === key ? moved : b)) }),
-  };
-
-  // Grow the box to contain the moved band. Bands must lie inside the segment,
-  // so without this a reviewer dragging the outermost edge outward would see
-  // the control simply do nothing — the edit is legitimate, it is the box that
-  // was too small.
-  const next = growToFit(withMove);
-
-  // Reject an edit the shipped validator would refuse, rather than storing a
-  // grid that silently vanishes at publish. Overlapping a neighbour is the
-  // common case when dragging an edge past it.
-  if (resolveGeometry({ geometry: { segments: [next] } }).segments.length !== 1) return;
+  const next = moveBand(segment, axis, key, edge, value);
+  if (!next) return;
 
   geometryProposals.set(fieldId, next);
   confirmedGeometry.delete(fieldId);
@@ -1057,20 +1008,8 @@ export function adjustGeometryBoundary(
   const segment = geometryProposals.get(fieldId);
   if (!segment) return;
 
-  const bands = (axis === 'column' ? segment.columnBands : segment.rowBands) ?? [];
-  const left = bands.find((b) => b.key === leftKey);
-  const right = bands.find((b) => b.key === rightKey);
-  if (!left || !right) return;
-  if (!(value > left.start) || !(value < right.end)) return;
-
-  const moved = bands.map((b) =>
-    b.key === leftKey ? { ...b, end: value } : b.key === rightKey ? { ...b, start: value } : b,
-  );
-  const next = growToFit({
-    ...segment,
-    ...(axis === 'column' ? { columnBands: moved } : { rowBands: moved }),
-  });
-  if (resolveGeometry({ geometry: { segments: [next] } }).segments.length !== 1) return;
+  const next = moveBoundary(segment, axis, leftKey, rightKey, value);
+  if (!next) return;
 
   geometryProposals.set(fieldId, next);
   confirmedGeometry.delete(fieldId);

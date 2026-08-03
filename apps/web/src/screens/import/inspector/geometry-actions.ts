@@ -8,7 +8,7 @@
  * be read and tested directly.
  */
 import type { FormField, GeometryBand, GroupOrdinal, PageBox, RepeatingColumn } from '@formai/shared';
-import { markPlacement } from '@formai/shared';
+import { markPlacement, resolveGeometry } from '@formai/shared';
 import type {
   FieldProposal,
   PositionedText,
@@ -733,6 +733,115 @@ export function snapEdge(value: number, targets: readonly number[], range = SNAP
 }
 
 /**
+ * Widen a segment box so it contains every one of its bands, clamped to the
+ * page. Bands outside the box are rejected by the shared validator, so an
+ * adjustment that pushes past the current edge has to carry the box with it.
+ *
+ * Mirrors `import-session.ts`'s private helper of the same name exactly — both
+ * `moveBand`/`moveBoundary` here and `adjustGeometryBand`/`adjustGeometryBoundary`
+ * there need it, and this module is the pure-function home, so the definition
+ * lives here and `import-session.ts` no longer needs its own copy.
+ */
+function growToFit(segment: PageBox): PageBox {
+  const cols = segment.columnBands ?? [];
+  const rows = segment.rowBands ?? [];
+
+  const left = Math.max(Math.min(segment.x, ...cols.map((b) => b.start)), 0);
+  const right = Math.min(
+    Math.max(segment.x + segment.width, ...cols.map((b) => b.end)),
+    segment.pageWidth,
+  );
+  const bottom = Math.max(Math.min(segment.y, ...rows.map((b) => b.start)), 0);
+  const top = Math.min(
+    Math.max(segment.y + segment.height, ...rows.map((b) => b.end)),
+    segment.pageHeight,
+  );
+
+  return { ...segment, x: left, y: bottom, width: right - left, height: top - bottom };
+}
+
+/**
+ * Move one band edge, the pure core of `import-session.ts`'s `adjustGeometryBand`
+ * (R8/U6/KTD5).
+ *
+ * Extracted so the Placement screen (`GeometryEditorScreen`) can drive the same
+ * validated band-drag/nudge the import review screen uses, writing the result
+ * into its own `edited` field array instead of the import session's
+ * `geometryProposals` map. Returns `null` for an inverted band, a grow-past-page
+ * edit, or an edit the shipped validator (`resolveGeometry`) would refuse —
+ * exactly the refusals `adjustGeometryBand` encodes as "do nothing".
+ */
+export function moveBand(
+  segment: PageBox,
+  axis: 'column' | 'row',
+  key: string,
+  edge: 'start' | 'end',
+  value: number,
+): PageBox | null {
+  const bands = axis === 'column' ? segment.columnBands : segment.rowBands;
+  const band = bands?.find((b) => b.key === key);
+  if (!band) return null;
+
+  const moved = { ...band, [edge]: value };
+  if (!(moved.end > moved.start)) return null; // an inverted band is not an edit
+
+  const withMove: PageBox = {
+    ...segment,
+    ...(axis === 'column'
+      ? { columnBands: segment.columnBands!.map((b) => (b.key === key ? moved : b)) }
+      : { rowBands: segment.rowBands!.map((b) => (b.key === key ? moved : b)) }),
+  };
+
+  // Grow the box to contain the moved band. Bands must lie inside the segment,
+  // so without this a reviewer dragging the outermost edge outward would see
+  // the control simply do nothing — the edit is legitimate, it is the box that
+  // was too small.
+  const next = growToFit(withMove);
+
+  // Reject an edit the shipped validator would refuse, rather than storing a
+  // grid that silently vanishes at publish. Overlapping a neighbour is the
+  // common case when dragging an edge past it.
+  if (resolveGeometry({ geometry: { segments: [next] } }).segments.length !== 1) return null;
+
+  return next;
+}
+
+/**
+ * Move the shared boundary between two adjacent bands, the pure core of
+ * `import-session.ts`'s `adjustGeometryBoundary` (R8/U6/KTD5).
+ *
+ * `centresToBands` makes bands contiguous — `bands[i].end === bands[i+1].start`
+ * — so an interior edge belongs to two bands at once. Moving only one of them
+ * opens a gap the exporter cannot resolve: a tick printed in it falls in no
+ * column at all. The two edges are therefore one control, moved together or
+ * not at all, validated the same way `moveBand` is.
+ */
+export function moveBoundary(
+  segment: PageBox,
+  axis: 'column' | 'row',
+  leftKey: string,
+  rightKey: string,
+  value: number,
+): PageBox | null {
+  const bands = (axis === 'column' ? segment.columnBands : segment.rowBands) ?? [];
+  const left = bands.find((b) => b.key === leftKey);
+  const right = bands.find((b) => b.key === rightKey);
+  if (!left || !right) return null;
+  if (!(value > left.start) || !(value < right.end)) return null;
+
+  const moved = bands.map((b) =>
+    b.key === leftKey ? { ...b, end: value } : b.key === rightKey ? { ...b, start: value } : b,
+  );
+  const next = growToFit({
+    ...segment,
+    ...(axis === 'column' ? { columnBands: moved } : { rowBands: moved }),
+  });
+  if (resolveGeometry({ geometry: { segments: [next] } }).segments.length !== 1) return null;
+
+  return next;
+}
+
+/**
  * Vertical snap targets: the printed text baselines on a page (U1).
  *
  * The horizontal `snapTargets` gives the left/right edges a column-band drag
@@ -1104,6 +1213,62 @@ export function panelState(
     reason:
       'The page did not give enough signal to place this table confidently, so nothing could be placed automatically. That is fine to leave — the form still publishes and exports its answers as data. To place it yourself, draw the table’s box on the PDF and lay out its grid inside it.',
   };
+}
+
+/**
+ * Which confidence tier a proposal falls into, for the auto-detect flow (U1,
+ * R1/R2).
+ *
+ * Reuses the exact boundary `panelState` already treats as clean:
+ * `confidence === 1` is a full match with nothing inferred, versus
+ * `confidence < 1` — which `panelState` already surfaces as a caution note —
+ * needing a reviewer's eyes. `null` means detection found nothing to propose
+ * at all, which is its own tier rather than a low-confidence `needs-review`:
+ * there is no box to review, only a field to hand-place.
+ */
+export type ProposalTier = 'auto-confirm' | 'needs-review' | 'no-match';
+
+export function classifyProposalTier(
+  proposal: FieldProposal | TableProposal | null,
+): ProposalTier {
+  if (!proposal) return 'no-match';
+  return proposal.confidence === 1 ? 'auto-confirm' : 'needs-review';
+}
+
+/** One field-level edit to fold into a batch (U2/KTD3). */
+export interface FieldChange {
+  fieldId: string;
+  change: (field: FormField) => FormField;
+}
+
+/**
+ * Apply every change in one pass over a single snapshot (U2/KTD3).
+ *
+ * `GeometryEditorScreen`'s `mutate()` used to recompute `fields.map(...)` fresh
+ * off the SAME pre-click `fields` snapshot for every call, so N synchronous
+ * `mutate()` calls inside one handler — the "Place all N" button already loops
+ * once per segment, and a later bulk auto-confirm will loop once per field —
+ * left only the LAST call's `setEdited(...)` result in state: every earlier
+ * change in the batch was silently discarded. Folding every change over one
+ * accumulating snapshot here, in a pure function `GeometryEditorScreen` calls
+ * from a single functional `setState` updater, is what makes calling this once
+ * with the whole batch correct regardless of how many changes land on the same
+ * field or how many fields are touched.
+ *
+ * Changes targeting the same `fieldId` apply in ARRAY ORDER against the
+ * accumulating result, not all against the original snapshot — so two changes
+ * to one field (place one option, then another) compose instead of the second
+ * clobbering the first.
+ */
+export function applyFieldChanges(
+  fields: readonly FormField[],
+  changes: readonly FieldChange[],
+): FormField[] {
+  let next: FormField[] = [...fields];
+  for (const { fieldId, change } of changes) {
+    next = next.map((f) => (f.id === fieldId ? change(f) : f));
+  }
+  return next;
 }
 
 /**
