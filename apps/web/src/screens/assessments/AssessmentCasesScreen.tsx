@@ -80,6 +80,35 @@ export function AssessmentCasesScreen() {
         </div>
       )}
 
+      {/*
+        The way into the workflow builder. On the case list rather than buried
+        in settings, because "who fills what" is a question that comes up while
+        looking at cases — and until this link existed the screen was reachable
+        only by typing its URL.
+      */}
+      {!isCandidate && tools && tools.length > 0 && (
+        <div className="flex flex-col gap-1.5 rounded-md border border-border bg-surface-card p-4">
+          <span className="font-mono text-[10.5px] uppercase tracking-wide text-text-tertiary">
+            Assessment workflows
+          </span>
+          <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+            {tools.map((t) => (
+              <Link
+                key={t.id}
+                to={`/app/assessments/tools/${t.id}/workflow`}
+                className="inline-flex items-center gap-1.5 text-[13px] font-medium text-text-accent hover:underline"
+              >
+                <Icon name="workflow" size={13} />
+                {t.name}
+              </Link>
+            ))}
+          </div>
+          <span className="text-[11.5px] text-text-tertiary">
+            Set who fills each section, and the order the work happens in.
+          </span>
+        </div>
+      )}
+
       {isLoading && <p className="text-[13.5px] text-text-tertiary">Loading cases…</p>}
       {error && (
         <p role="alert" className="text-[13.5px] text-danger">

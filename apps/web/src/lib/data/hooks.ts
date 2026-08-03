@@ -14,6 +14,7 @@ import {
 } from '@tanstack/react-query';
 import type {
   AssessmentPathway,
+  AssessmentWorkflow,
   BrandingKit,
   FormContainer,
   FormField,
@@ -834,6 +835,29 @@ export type { FormSummary, FormDetail, SubmissionRow, SubmissionDetail };
 
 export function useAssessmentTools() {
   return useQuery({ queryKey: keys.assessmentTools, queryFn: () => assessmentsApi.listTools() });
+}
+
+/** One tool, with its workflow and the current version's fields. */
+export function useAssessmentTool(toolId: string) {
+  return useQuery({
+    queryKey: [...keys.assessmentTools, toolId] as const,
+    queryFn: () => assessmentsApi.getTool(toolId),
+  });
+}
+
+/** Save a workflow. Resolves with whatever warnings the server raised. */
+export function useSaveWorkflow(toolId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (workflow: AssessmentWorkflow) => assessmentsApi.saveWorkflow(toolId, workflow),
+    onSuccess: () => {
+      // Prefix invalidation, so the detail AND the list refresh: the list
+      // carries each tool's parts, and a workflow change can alter what a
+      // candidate is shown.
+      qc.invalidateQueries({ queryKey: keys.assessmentTools });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
 }
 
 export function useAssessmentCases() {

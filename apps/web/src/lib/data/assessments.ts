@@ -13,6 +13,8 @@
  */
 import type {
   AssessmentPathway,
+  AssessmentToolManifest,
+  AssessmentWorkflow,
   FormField,
   NotSatisfactoryDisposition,
   AssessmentCaseState,
@@ -178,8 +180,48 @@ export interface RecordOutcomeInput {
   belowThresholdReason?: string;
 }
 
+/** One tool, with everything the workflow builder needs to render. */
+export interface AssessmentToolDetail {
+  id: string;
+  name: string;
+  templateId: string;
+  manifest: AssessmentToolManifest;
+  /** Always present — synthesised from the parts when nobody has configured one. */
+  workflow: AssessmentWorkflow;
+  /** True while that synthesised default is what is stored, i.e. nothing yet. */
+  workflowIsDefault: boolean;
+  /** The current version's fields, in document order. */
+  fields: FormField[];
+  problems: string[];
+  warnings: string[];
+}
+
 export const assessmentsApi = {
   listTools: () => apiClient.get<AssessmentToolSummary[]>('/assessment-tools'),
+
+  /**
+   * One tool with everything the workflow builder renders.
+   *
+   * The manifest AND the version's fields in one response — the builder draws
+   * the document beside the process, so fetching them separately would let it
+   * show half a screen against a version the other half does not describe.
+   */
+  getTool: (id: string) => apiClient.get<AssessmentToolDetail>(`/assessment-tools/${id}`),
+
+  /**
+   * Save a workflow.
+   *
+   * WARNINGS come back with a 200: an unfinished configuration is a real thing
+   * to save and return to, and refusing it would make the builder unusable
+   * halfway through a first pass. Structural problems 400 and nothing is
+   * written, because a half-applied workflow decides who may write a competency
+   * record.
+   */
+  saveWorkflow: (id: string, workflow: AssessmentWorkflow) =>
+    apiClient.patch<{ id: string; workflow: AssessmentWorkflow; warnings: string[] }>(
+      `/assessment-tools/${id}`,
+      { workflow },
+    ),
 
   listCases: () => apiClient.get<AssessmentCaseRow[]>('/assessment-cases'),
 
