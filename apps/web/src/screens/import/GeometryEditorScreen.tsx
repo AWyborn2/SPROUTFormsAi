@@ -3,11 +3,12 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
 import { geometrySegments, isChoiceField, type FormField, type PageBox } from '@formai/shared';
 import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../../lib/data/hooks.js';
-import type { TextPage } from '../../lib/pdf-geometry.js';
+import type { FieldProposal, TableProposal, TextPage } from '../../lib/pdf-geometry.js';
 import { markSentence } from '../../lib/mark-description.js';
 import { PdfViewer } from './PdfViewer.js';
 import {
   applyFieldChanges,
+  classifyProposalTier,
   deriveAcrossPages,
   deriveOptionCellsAcrossPages,
   type FieldChange,
@@ -50,6 +51,17 @@ export function GeometryEditorScreen() {
   /** Which box the next drag fills, or null when drawing is not armed. */
   const [drawTarget, setDrawTarget] = useState<DrawTarget | null>(null);
   const [dirty, setDirty] = useState(false);
+  /**
+   * The proposal for the currently-selected field, when it tiered
+   * `needs-review` (U3/R2) — kept only for preview, never applied on its own.
+   * An `auto-confirm` tier is applied immediately instead of parked here, and
+   * a `no-match` tier has nothing to park, so this is non-null only while a
+   * needs-review proposal is awaiting the reviewer's own decision.
+   */
+  const [proposalPreview, setProposalPreview] = useState<{
+    fieldId: string;
+    proposal: FieldProposal | TableProposal;
+  } | null>(null);
 
   const fields = edited ?? version?.fields ?? [];
   const selected = fields.find((f) => f.id === selectedId) ?? null;
@@ -79,13 +91,67 @@ export function GeometryEditorScreen() {
    * "Place all N" button today, and the bulk auto-place / bulk-confirm later
    * units build — because every change in `changes` folds over a single
    * snapshot inside `applyFieldChanges` instead of each call recomputing from
-   * the same pre-click `fields`. Not yet called from this screen; it exists so
-   * later units have somewhere safe to route a loop.
+   * the same pre-click `fields`. `selectField`'s auto-confirm path (U3) is the
+   * first caller; later units route their own loops through it too.
    */
   function mutateMany(changes: FieldChange[]) {
     if (changes.length === 0) return;
     setEdited((prev) => applyFieldChanges(prev ?? fields, changes));
     setDirty(true);
+  }
+
+  /**
+   * Select a field and, when it isn't placed yet, propose and auto-tier it
+   * (U3/R1/R2) — replacing "Draw" as the first step for most fields.
+   *
+   * `geometrySegments(field).length === 0` is today's eligibility check; a
+   * later unit refines it for a partially-placed field. R4: an already-placed
+   * field is left exactly as it behaves today — selecting it neither
+   * re-derives nor re-tiers, it just shows its existing box.
+   */
+  function selectField(field: FormField) {
+    setSelectedId(field.id);
+    setDrawTarget(null);
+    setProposalPreview(null);
+
+    if (geometrySegments(field).length > 0) return;
+    if (textPages.length === 0) return;
+
+    const proposal = isPerOptionField(field)
+      ? deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages)
+      : field.type === 'repeating_group'
+        ? deriveAcrossPages(field, textPages)
+        : null;
+
+    const tier = classifyProposalTier(proposal);
+    if (tier === 'no-match') return;
+
+    if (tier === 'needs-review') {
+      // Parked for preview only — `edited` stays untouched until the
+      // reviewer applies it themselves.
+      setProposalPreview({ fieldId: field.id, proposal: proposal! });
+      return;
+    }
+
+    // auto-confirm: every option's change (or the table's one box) lands in
+    // a single `mutateMany` batch, not a loop of individual `mutate()` calls
+    // — the exact bug U2 fixed for the "Place all N" button (KTD3).
+    if (isPerOptionField(field)) {
+      const p = proposal as FieldProposal;
+      const changes: FieldChange[] = p.segments
+        .filter((segment) => segment.optionKey !== undefined)
+        .map((segment) => ({
+          fieldId: field.id,
+          change: (f) => {
+            const kept = (f.geometry?.segments ?? []).filter((s) => s.optionKey !== segment.optionKey);
+            return { ...f, geometry: { segments: [...kept, segment] } };
+          },
+        }));
+      mutateMany(changes);
+    } else {
+      const t = proposal as TableProposal;
+      mutateMany([{ fieldId: field.id, change: (f) => ({ ...f, geometry: { segments: [t.segment] } }) }]);
+    }
   }
 
   /** Replace one option's box, keyed by `optionKey`, leaving siblings alone. */
@@ -220,15 +286,7 @@ export function GeometryEditorScreen() {
       <div className="flex min-h-0 flex-1">
         <aside className="w-[340px] shrink-0 overflow-y-auto border-r border-border">
           {placeable.map((f) => (
-            <FieldRow
-              key={f.id}
-              field={f}
-              selected={f.id === selectedId}
-              onSelect={() => {
-                setSelectedId(f.id);
-                setDrawTarget(null);
-              }}
-            />
+            <FieldRow key={f.id} field={f} selected={f.id === selectedId} onSelect={() => selectField(f)} />
           ))}
         </aside>
 
@@ -298,6 +356,15 @@ interface DrawTarget {
 
 function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
   return a !== null && a.fieldId === b.fieldId && a.optionKey === b.optionKey;
+}
+
+/**
+ * Whether a field gets one box per option (a ticking checkbox/radio group)
+ * rather than a single scalar box — the same test `PlacementPanel` uses to
+ * choose `deriveOptionCellsAcrossPages` over the table/scalar paths.
+ */
+function isPerOptionField(field: FormField): boolean {
+  return isChoiceField(field.type) && !field.printSelectedValue && (field.options?.length ?? 0) > 0;
 }
 
 function FieldRow({
