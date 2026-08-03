@@ -34,6 +34,7 @@ import {
 import type { BuilderAction, BuilderState } from '../field-editor/reducer.js';
 import { builderReducer, initialBuilderState } from '../field-editor/reducer.js';
 import { ApiError, apiClient } from './api-client.js';
+import { cloneCandidates, cloneRefusal, clonedBox } from './placement-clone.js';
 import type { ImportDraftStore, ImportSnapshot } from './import-draft-store.js';
 import {
   IMPORT_SNAPSHOT_VERSION,
@@ -347,6 +348,99 @@ export function resetImportSession() {
 /** Enter (or leave, with null) re-extract mode — set by step 1 from its `?form=` param, after reset. */
 export function setImportTarget(formId: string | null) {
   update({ targetFormId: formId });
+}
+
+/* ── reusing a placement on a part that prints the same thing ─────────────── */
+
+/**
+ * Every slot a field's placement occupies — itself, or one per option.
+ *
+ * A choice field's boxes live under composite slot ids, so anything that acts
+ * on "a field's placement" has to gather them; treating the field id as the
+ * whole story would copy nothing at all for a checkbox group, which is most of
+ * a practical checklist.
+ */
+function placementSlotsOf(field: ReviewField): { slot: string; optionKey?: string }[] {
+  const options = field.options ?? [];
+  if (options.length === 0) return [{ slot: field.id }];
+  return options.map((optionKey) => ({ slot: optionSlotId(field.id, optionKey), optionKey }));
+}
+
+/**
+ * Reuse one field's placement on another that prints the same thing.
+ *
+ * The whole reason this exists: Parts 2, 4 and 6 of an assessment are one
+ * checklist printed three times, and placing each by hand means measuring the
+ * same rows and columns three times for no more accuracy than the first.
+ *
+ * Lands on `page` at the source's horizontal position and size, and ALWAYS
+ * UNCONFIRMED — `proposeGeometry` clears confirmation by construction, which is
+ * exactly right here: the shape is reused, the human judgement is not. The
+ * reviewer drags it vertically into place on the target page and confirms, the
+ * one step that cannot be copied.
+ *
+ * Returns how many boxes moved across, or a refusal.
+ */
+export function copyPlacementToField(
+  sourceFieldId: string,
+  targetFieldId: string,
+  page: number,
+): { ok: true; copied: number } | { ok: false; reason: string } {
+  const fields = session.fields;
+  const source = fields.find((f) => f.id === sourceFieldId);
+  const target = fields.find((f) => f.id === targetFieldId);
+  if (!source || !target) return { ok: false, reason: 'That field is no longer in this import.' };
+
+  const refusal = cloneRefusal(source, target);
+  if (refusal) return { ok: false, reason: refusal };
+
+  const sourceSlots = placementSlotsOf(source);
+  const targetSlots = placementSlotsOf(target);
+  // Guaranteed by cloneRefusal's option check, but the two lists are built
+  // separately and an index mismatch here would place option boxes against the
+  // wrong answers — worth the assertion rather than the assumption.
+  if (sourceSlots.length !== targetSlots.length) {
+    return { ok: false, reason: 'These fields do not have the same number of boxes.' };
+  }
+
+  const copies: [string, PageBox][] = [];
+  for (const [i, from] of sourceSlots.entries()) {
+    const box = geometryProposals.get(from.slot);
+    if (!box) continue; // that option was never placed — nothing to carry over
+    const to = targetSlots[i]!;
+    const cloned = clonedBox(box, page, box.pageWidth, box.pageHeight);
+    copies.push([
+      to.slot,
+      // The optionKey has to be the TARGET's, not the source's. They are equal
+      // today because the options must match to get this far, but carrying the
+      // source's would silently survive any future loosening of that rule.
+      to.optionKey ? { ...cloned, optionKey: to.optionKey } : cloned,
+    ]);
+  }
+
+  if (copies.length === 0) {
+    return { ok: false, reason: 'That field has no placement to copy yet.' };
+  }
+
+  for (const [slot, box] of copies) {
+    geometryProposals.set(slot, box);
+    confirmedGeometry.delete(slot);
+  }
+  notify();
+  return { ok: true, copied: copies.length };
+}
+
+/** Fields whose placement could be reused here, each with why it cannot. */
+export function placementSourcesFor(
+  targetFieldId: string,
+): { field: ReviewField; refusal: string | null }[] {
+  const target = session.fields.find((f) => f.id === targetFieldId);
+  if (!target) return [];
+  return cloneCandidates(target, session.fields, (id) => {
+    const field = session.fields.find((f) => f.id === id);
+    if (!field) return false;
+    return placementSlotsOf(field).some((s) => geometryProposals.has(s.slot));
+  }) as { field: ReviewField; refusal: string | null }[];
 }
 
 /* ── saving and resuming ──────────────────────────────────────────────────

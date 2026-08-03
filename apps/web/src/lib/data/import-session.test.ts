@@ -58,6 +58,8 @@ import {
   renameFixedRowItem,
   AUTOSAVE_DEBOUNCE_MS,
   captureImportSnapshot,
+  copyPlacementToField,
+  placementSourcesFor,
   clearSavedImport,
   flushImportAutosave,
   loadSavedImport,
@@ -1780,5 +1782,153 @@ describe('local autosave', () => {
     await vi.advanceTimersByTimeAsync(AUTOSAVE_DEBOUNCE_MS + 10);
 
     expect(await loadSavedImport('asset-abc')).toBeNull();
+  });
+});
+
+/*
+  REUSING A PLACEMENT ON A PART THAT PRINTS THE SAME THING.
+
+  Parts 2, 4 and 6 of an assessment are one checklist printed three times, so
+  placing each by hand means measuring the same rows and columns three times for
+  no more accuracy than the first.
+
+  `placement-clone.test.ts` pins WHEN a copy is allowed. These pin what the copy
+  does to the store, and the one that matters most is that it lands
+  UNCONFIRMED — the shape is reused, the human judgement is not.
+*/
+describe('copying a placement between fields', () => {
+  const EXTRACTION_PAIR: ExtractionResult = {
+    ...EXTRACTION,
+    fields: [
+      { id: 'p2', label: 'Part 2 checklist', type: 'checkbox_group', confidence: 0.9, options: ['yes', 'no'] },
+      { id: 'p4', label: 'Part 4 checklist', type: 'checkbox_group', confidence: 0.9, options: ['yes', 'no'] },
+      { id: 'other', label: 'Comments', type: 'text', confidence: 0.9 },
+    ],
+  };
+
+  async function readyPair() {
+    postMock.mockResolvedValueOnce({ assetId: 'asset-abc' });
+    postMock.mockResolvedValueOnce(EXTRACTION_PAIR);
+    await startExtraction(makeFile());
+  }
+
+  const box = (x: number, page = 2): PageBox => ({
+    page,
+    x,
+    y: 500,
+    width: 14,
+    height: 14,
+    pageWidth: 600,
+    pageHeight: 800,
+  });
+
+  it('carries every option box across, onto the target page', async () => {
+    await readyPair();
+    proposeGeometry(optionSlotId('p2', 'yes'), box(200));
+    proposeGeometry(optionSlotId('p2', 'no'), box(260));
+    confirmGeometry(optionSlotId('p2', 'yes'));
+    confirmGeometry(optionSlotId('p2', 'no'));
+
+    const result = copyPlacementToField('p2', 'p4', 7);
+
+    expect(result).toEqual({ ok: true, copied: 2 });
+    expect(geometryProposal(optionSlotId('p4', 'yes'))?.x).toBe(200);
+    expect(geometryProposal(optionSlotId('p4', 'no'))?.x).toBe(260);
+    // The target's page, not the source's.
+    expect(geometryProposal(optionSlotId('p4', 'yes'))?.page).toBe(7);
+    expect(geometryProposal(optionSlotId('p2', 'yes'))?.page).toBe(2);
+  });
+
+  it('lands UNCONFIRMED even when the source was confirmed', async () => {
+    /*
+      The one that would be dangerous. Only confirmed geometry publishes, so a
+      copy that inherited confirmation would put marks on a competency record
+      against a grid nobody had looked at on THAT page — which is the whole
+      thing the confirm step exists to prevent, defeated by the convenience
+      feature.
+    */
+    await readyPair();
+    proposeGeometry(optionSlotId('p2', 'yes'), box(200));
+    confirmGeometry(optionSlotId('p2', 'yes'));
+
+    copyPlacementToField('p2', 'p4', 7);
+
+    expect(geometryConfirmed(optionSlotId('p2', 'yes'))).toBe(true);
+    expect(geometryProposal(optionSlotId('p4', 'yes'))).toBeDefined();
+    expect(geometryConfirmed(optionSlotId('p4', 'yes'))).toBe(false);
+  });
+
+  it('un-confirms a target that had already been confirmed', async () => {
+    // Replacing a confirmed grid with a different one must not leave the old
+    // confirmation attached to the new shape.
+    await readyPair();
+    proposeGeometry(optionSlotId('p2', 'yes'), box(200));
+    proposeGeometry(optionSlotId('p4', 'yes'), box(999));
+    confirmGeometry(optionSlotId('p4', 'yes'));
+
+    copyPlacementToField('p2', 'p4', 7);
+
+    expect(geometryProposal(optionSlotId('p4', 'yes'))?.x).toBe(200);
+    expect(geometryConfirmed(optionSlotId('p4', 'yes'))).toBe(false);
+  });
+
+  it('refuses across fields that are not the same shape', async () => {
+    await readyPair();
+    proposeGeometry(optionSlotId('p2', 'yes'), box(200));
+
+    const result = copyPlacementToField('p2', 'other', 7);
+
+    expect(result.ok).toBe(false);
+    expect(geometryProposal('other')).toBeUndefined();
+  });
+
+  it('refuses when the source has no placement to give', async () => {
+    await readyPair();
+
+    const result = copyPlacementToField('p2', 'p4', 7);
+
+    expect(result).toEqual({ ok: false, reason: 'That field has no placement to copy yet.' });
+  });
+
+  it('offers only fields that have something placed', async () => {
+    await readyPair();
+    proposeGeometry(optionSlotId('p2', 'yes'), box(200));
+
+    const sources = placementSourcesFor('p4');
+
+    expect(sources.map((s) => s.field.id)).toEqual(['p2']);
+    expect(sources[0]?.refusal).toBeNull();
+  });
+
+  it('names the mismatch rather than hiding an incompatible source', async () => {
+    // "No sources available" on a page of visibly similar tables reads as a
+    // broken feature; the reason is usually a real difference in the document.
+    await readyPair();
+    proposeGeometry('other', box(200));
+
+    const sources = placementSourcesFor('p4');
+
+    expect(sources.map((s) => s.field.id)).toEqual(['other']);
+    expect(sources[0]?.refusal).toContain('different kinds');
+  });
+
+  it('is saved by the autosave like any other change', async () => {
+    // The copy mutates the store directly rather than going through
+    // proposeGeometry, so it has its own path to the save.
+    vi.useFakeTimers();
+    const store = memoryDraftStore();
+    setImportDraftStore(store);
+    try {
+      await readyPair();
+      proposeGeometry(optionSlotId('p2', 'yes'), box(200));
+      copyPlacementToField('p2', 'p4', 7);
+
+      await vi.advanceTimersByTimeAsync(AUTOSAVE_DEBOUNCE_MS + 10);
+
+      const saved = await store.load('asset:asset-abc');
+      expect(saved?.placements.map((p) => p.slot)).toContain(optionSlotId('p4', 'yes'));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
