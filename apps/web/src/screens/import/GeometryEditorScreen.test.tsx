@@ -359,3 +359,104 @@ describe('GeometryEditorScreen — bulk "Auto-place remaining fields" (U4)', () 
     expect(screen.getByText(/3\/3 placed/)).toBeDefined();
   });
 });
+
+describe('GeometryEditorScreen — needs-review queue: bulk confirm and step-through (U5)', () => {
+  function threePendingFields() {
+    return [
+      choiceField('f1', 'Field A', ['Yes', 'No', 'Maybe']),
+      choiceField('f2', 'Field B', ['Yes', 'No', 'Maybe']),
+      choiceField('f3', 'Field C', ['Yes', 'No', 'Maybe']),
+    ];
+  }
+
+  it('Covers AE6: with no pending fields, the review queue section is hidden', () => {
+    renderWithField(choiceField('f1', 'Solo field', ['Yes', 'No', 'Maybe']));
+
+    expect(screen.queryByText(/need review/)).toBeNull();
+    expect(screen.queryByText('Confirm all proposed')).toBeNull();
+  });
+
+  it('Covers AE6: "Confirm all proposed" applies all 3 pending fields in one batched update and empties the review queue', () => {
+    renderWithFields(threePendingFields());
+    // Every field tiers needs-review, so the bulk pass parks all 3 rather than
+    // auto-confirming any of them.
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(0.6));
+
+    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+
+    // The queue count reflects the addition from the bulk pass.
+    expect(screen.getByText('3 fields need review')).toBeDefined();
+    expect(screen.getAllByText(/0\/3 placed/)).toHaveLength(3);
+
+    applyFieldChangesSpy.mockClear();
+    fireEvent.click(screen.getByText('Confirm all proposed'));
+
+    // The crux of the batching assertion: every one of the 3 pending fields'
+    // changes were folded into ONE `applyFieldChanges` call (inside a single
+    // `mutateMany`), not one call per field — three separate per-field calls
+    // would still reach the same end state below (each threading off the
+    // previous functional `setState` update), so this call-count check is
+    // what actually proves single-call batching rather than a loop of calls
+    // that merely converges to the right answer.
+    expect(applyFieldChangesSpy).toHaveBeenCalledTimes(1);
+
+    // All 3 fields landed all 3 options each, and the queue emptied.
+    expect(screen.getAllByText(/3\/3 placed/)).toHaveLength(3);
+    expect(screen.queryByText(/need review/)).toBeNull();
+    expect(screen.queryByText('Confirm all proposed')).toBeNull();
+  });
+
+  it('Covers AE6: opening one needs-review field and rejecting it clears only that field, leaving the other 2 pending', () => {
+    renderWithFields(threePendingFields());
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(0.6));
+
+    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+    expect(screen.getByText('3 fields need review')).toBeDefined();
+
+    // Open Field B from the queue — this should just navigate (select it in
+    // the main panel) without touching the parked proposals.
+    fireEvent.click(screen.getByLabelText('Review Field B'));
+    expect(screen.getByText('3 fields need review')).toBeDefined();
+
+    // Reject it.
+    fireEvent.click(screen.getByLabelText('Reject Field B'));
+
+    // Only Field B's proposal cleared — Field A and Field C are still
+    // pending, unconfirmed (still 0/3 placed), and still in the queue.
+    expect(screen.getByText('2 fields need review')).toBeDefined();
+    expect(screen.getByLabelText('Review Field A')).toBeDefined();
+    expect(screen.getByLabelText('Review Field C')).toBeDefined();
+    expect(screen.queryByLabelText('Review Field B')).toBeNull();
+    expect(screen.getAllByText(/0\/3 placed/)).toHaveLength(3);
+
+    // Field B fell back to the plain draw-only state: rejecting only cleared
+    // its parked review-queue entry (asserted above), and the manual Draw
+    // fallback still works on it — it's still the selected field, having
+    // been opened via `openReviewField` (R6).
+    const drawButtons = screen.getAllByText('Draw');
+    fireEvent.click(drawButtons[0]!);
+    expect(screen.getByText('Drawing…')).toBeDefined();
+  });
+
+  it('Covers AE6: confirming one field individually applies just that field, scoped to it, leaving the other 2 pending', () => {
+    renderWithFields(threePendingFields());
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(0.6));
+
+    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+    expect(screen.getByText('3 fields need review')).toBeDefined();
+
+    applyFieldChangesSpy.mockClear();
+    fireEvent.click(screen.getByLabelText('Confirm Field B'));
+
+    // Scoped to just Field B: one batched call for this single field...
+    expect(applyFieldChangesSpy).toHaveBeenCalledTimes(1);
+    // ...Field B is now placed, Field A and Field C remain unconfirmed...
+    expect(screen.getAllByText(/3\/3 placed/)).toHaveLength(1);
+    expect(screen.getAllByText(/0\/3 placed/)).toHaveLength(2);
+    // ...and the queue reflects the removal, with only the other 2 left.
+    expect(screen.getByText('2 fields need review')).toBeDefined();
+    expect(screen.getByLabelText('Review Field A')).toBeDefined();
+    expect(screen.getByLabelText('Review Field C')).toBeDefined();
+    expect(screen.queryByLabelText('Review Field B')).toBeNull();
+  });
+});

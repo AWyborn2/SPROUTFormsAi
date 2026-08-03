@@ -182,6 +182,66 @@ export function GeometryEditorScreen() {
     setIsAutoPlacing(false);
   }
 
+  /**
+   * Open a needs-review field from the queue (U5/R5 step-through) without
+   * re-running `selectField`'s own derive-and-tier pass — the field's parked
+   * proposal in `proposalPreviews` is left exactly as it is. Re-selecting
+   * through `selectField` would re-derive and risk landing on a different
+   * tier than the one already parked (and would also clear the whole
+   * `proposalPreviews` list via its own reset). This is just navigation: show
+   * the field's existing box/proposal in the main panel via `selectedId`.
+   */
+  function openReviewField(fieldId: string) {
+    setSelectedId(fieldId);
+    setDrawTarget(null);
+  }
+
+  /**
+   * "Confirm all proposed" (U5/R5 bulk action) — every parked needs-review
+   * proposal's changes are collected into ONE `FieldChange[]` and applied
+   * with a single `mutateMany` call, the same KTD3-shaped batching every
+   * other bulk action in this screen already uses, rather than looping
+   * `confirmProposed` once per field.
+   */
+  function confirmAllProposed() {
+    if (proposalPreviews.length === 0) return;
+
+    const changes: FieldChange[] = [];
+    for (const { fieldId, proposal } of proposalPreviews) {
+      const field = fields.find((f) => f.id === fieldId);
+      if (!field) continue;
+      changes.push(...changesForProposal(field, proposal));
+    }
+
+    mutateMany(changes);
+    setProposalPreviews([]);
+  }
+
+  /**
+   * Confirm ONE needs-review field (U5/R5 step-through) — applies just that
+   * field's parked proposal via a single-field `mutateMany` call and removes
+   * it from the queue, leaving every other pending field untouched.
+   */
+  function confirmProposed(fieldId: string) {
+    const entry = proposalPreviews.find((p) => p.fieldId === fieldId);
+    if (!entry) return;
+    const field = fields.find((f) => f.id === fieldId);
+    if (!field) return;
+
+    mutateMany(changesForProposal(field, entry.proposal));
+    setProposalPreviews((prev) => prev.filter((p) => p.fieldId !== fieldId));
+  }
+
+  /**
+   * Reject ONE needs-review field (U5/R6) — clears its parked proposal
+   * without touching `edited` at all. Once it is out of `proposalPreviews`
+   * the existing UI already treats an unplaced field with no active proposal
+   * as draw-only, exactly like a `no-match` field — nothing else to build.
+   */
+  function rejectProposed(fieldId: string) {
+    setProposalPreviews((prev) => prev.filter((p) => p.fieldId !== fieldId));
+  }
+
   /** Replace one option's box, keyed by `optionKey`, leaving siblings alone. */
   function setOptionBox(fieldId: string, optionKey: string, box: PageBox | null) {
     mutate(fieldId, (f) => {
@@ -321,6 +381,59 @@ export function GeometryEditorScreen() {
 
       <div className="flex min-h-0 flex-1">
         <aside className="w-[340px] shrink-0 overflow-y-auto border-r border-border">
+          {proposalPreviews.length > 0 && (
+            <div className="border-b border-border bg-[var(--accent-soft)] p-[12px_14px]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[12.5px] font-semibold">
+                  {proposalPreviews.length} field{proposalPreviews.length === 1 ? '' : 's'} need review
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  leadingIcon="check-check"
+                  onClick={confirmAllProposed}
+                >
+                  Confirm all proposed
+                </Button>
+              </div>
+              <div className="mt-2 flex flex-col gap-1.5">
+                {proposalPreviews.map(({ fieldId }) => {
+                  const field = fields.find((f) => f.id === fieldId);
+                  const label = field?.label || fieldId;
+                  return (
+                    <div key={fieldId} className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        aria-label={`Review ${label}`}
+                        onClick={() => openReviewField(fieldId)}
+                        className={`min-w-0 flex-1 truncate rounded-sm px-1.5 py-1 text-left text-[12px] ${
+                          fieldId === selectedId ? 'bg-[var(--accent-soft)] font-semibold' : 'hover:bg-surface-hover'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        aria-label={`Confirm ${label}`}
+                        onClick={() => confirmProposed(fieldId)}
+                      >
+                        Confirm
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        aria-label={`Reject ${label}`}
+                        onClick={() => rejectProposed(fieldId)}
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {placeable.map((f) => (
             <FieldRow key={f.id} field={f} selected={f.id === selectedId} onSelect={() => selectField(f)} />
           ))}
