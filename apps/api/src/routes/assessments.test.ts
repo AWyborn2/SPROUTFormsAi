@@ -298,6 +298,43 @@ afterEach(() => {
 // ── tool authoring ──────────────────────────────────────────────────────────
 
 describe('POST /assessment-tools', () => {
+  /*
+    A z.object STRIPS unknown keys. So a manifest property this schema omits is
+    discarded in silence on the HTTP path while the authoring script keeps it —
+    two writers, two different manifests, no error anywhere to say so.
+
+    `candidateNameFieldId` was the one that got missed, and it is the pointer
+    that puts a NAME on the certificate: the cover page belongs to no part, so
+    nothing else can seed it. A tool created over HTTP therefore certified
+    nobody, while the same tool authored by the script named the candidate.
+  */
+  it('keeps every manifest pointer it is given, including the candidate name', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-tools`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          templateId: TEMPLATE,
+          name: 'Track Dozer',
+          // Any real field id: validateManifest checks it exists in this
+          // version, which is the half that was already working.
+          manifest: { ...MANIFEST, candidateNameFieldId: 'q-mining' },
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      const tool = rows(store, 'assessmentTools')[0];
+      expect((tool?.manifest as { candidateNameFieldId?: string })?.candidateNameFieldId).toBe(
+        'q-mining',
+      );
+    } finally {
+      server.close();
+    }
+  });
+
   it('creates a tool when the manifest matches the template', async () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
@@ -1933,6 +1970,90 @@ describe('POST /assessment-cases/:id/sign-off', () => {
       headers: auth(),
       body: JSON.stringify(body),
     });
+
+  /*
+    THE AUDIT ROW READ "(assessor missing [object Object])".
+
+    `unmetPrerequisites` changed from returning competency ids to returning
+    {competencyId, reason}. Two call sites moved to `describeGap`; this one was
+    interpolating the array straight into a template string, which does not
+    fail — it stringifies.
+
+    It matters more than the two that were caught. Sign-off is the only place
+    the person who ACTUALLY signs is checked: case creation checks whoever was
+    named as assessor when it was opened, who need not be the same person. And
+    these gaps are never written to the case, so this row is their only durable
+    record — the HTTP response carries them too, but that is a toast.
+  */
+  it('names the competency in the audit trail when the signer is not qualified', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // A tool requiring a competency the signing assessor does not hold.
+      const created = await fetch(`${base}/assessment-tools`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          templateId: TEMPLATE,
+          name: 'Track Dozer',
+          manifest: MANIFEST,
+          assessorCompetencyIds: [COMPETENCY],
+        }),
+      });
+      const tool = (await created.json()) as { id: string };
+
+      const c = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
+        })
+      ).json()) as { id: string };
+
+      const theory = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, {
+          method: 'POST',
+          headers: auth(),
+        })
+      ).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({}),
+      });
+      const prac = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/parts/p2/attempts`, {
+          method: 'POST',
+          headers: auth(),
+        })
+      ).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${prac.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'A. Assessor' }),
+      });
+
+      const signed = await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
+      expect(signed.status).toBe(200);
+
+      const entry = rows(store, 'auditLogEntries').find(
+        (e) => e.action === 'Signed off assessment case',
+      );
+      expect(entry).toBeDefined();
+      const target = String(entry!.target);
+      expect(target).not.toContain('[object Object]');
+      expect(target).toContain(COMPETENCY);
+      expect(target).toContain('assessor missing competency');
+    } finally {
+      server.close();
+    }
+  });
 
   it('certifies the case, stamping the name, signature and its own date', async () => {
     const { db, store } = makeDb();

@@ -305,6 +305,16 @@ const toolBody = z.object({
   manifest: z.object({
     parts: z.array(partSchema).min(1),
     locationStreamFieldId: z.string().optional(),
+    /*
+      The rule above, broken in exactly the way it warns about. This was on the
+      manifest type and absent here, so a tool created or edited over HTTP lost
+      the pointer while the same tool authored by the script kept it — and the
+      cover page belongs to no part, so this is the ONLY way a name reaches the
+      certificate. The failure is a signed, competent evidence PDF certifying
+      nobody, which the runbook calls the one omission an auditor cannot work
+      around.
+    */
+    candidateNameFieldId: z.string().optional(),
     signOff: z
       .object({
         assessorNameFieldId: z.string().optional(),
@@ -1934,9 +1944,29 @@ assessmentCasesRouter.post(
       })
       .where(eq(schema.assessmentCases.id, row.id));
 
+    /*
+      THIS PRINTED `[object Object]`.
+
+      `unmetPrerequisites` used to return competency ids and now returns
+      {competencyId, reason} — the two other call sites were moved to
+      `describeGap`, this one was not, and template interpolation on an object
+      array does not fail, it stringifies. So the audit row read "(assessor
+      missing [object Object])".
+
+      That row matters more than the two that were fixed. Sign-off is the ONLY
+      place the person who actually signs is checked — case creation checks
+      whoever was NAMED as assessor when it was opened, who need not be the same
+      person — and these gaps are never written to the case. The HTTP response
+      carries them, but that is a toast the assessor dismisses. This line is
+      their only durable record.
+    */
     await recordAudit(db, tenant, {
       action: 'Signed off assessment case',
-      target: `${row.id} → ${parsed.data.assessorName}${assessorGaps.length ? ` (assessor missing ${assessorGaps.join(', ')})` : ''}`,
+      target: `${row.id} → ${parsed.data.assessorName}${
+        assessorGaps.length
+          ? ` (${assessorGaps.map((gap) => describeGap('assessor', gap)).join('; ')})`
+          : ''
+      }`,
       category: 'submissions',
       icon: 'circle-check',
     });
