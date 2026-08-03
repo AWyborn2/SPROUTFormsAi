@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Button, FileDropzone, Icon } from '@formai/ui';
 import { DOCUMENT_TYPE_HINTS, DOCUMENT_TYPE_LABELS, DOCUMENT_TYPES, type DocumentType } from '@formai/shared';
-import { useForm } from '../../lib/data/hooks.js';
+import { useDiscardImportDraft, useForm, useImportDrafts } from '../../lib/data/hooks.js';
+import { store } from '../../lib/data/store.js';
 import type { ImportSnapshot } from '../../lib/data/import-draft-store.js';
 import {
   clearSavedImport,
@@ -74,6 +75,33 @@ export function ImportUploadScreen() {
     };
   }, []);
 
+  /**
+   * Imports saved on the server, as distinct from the local autosave above.
+   *
+   * Both are offered here because this is the one screen a reviewer reaches
+   * when they mean to work on an import — but they answer different questions:
+   * the banner is "you were interrupted", this is "you parked something, or a
+   * colleague did".
+   */
+  const { data: drafts = [] } = useImportDrafts();
+  const discardDraft = useDiscardImportDraft();
+  const [openingDraft, setOpeningDraft] = useState<string | null>(null);
+
+  async function openDraft(id: string) {
+    setOpeningDraft(id);
+    try {
+      const draft = await store.getImportDraft(id);
+      if (!restoreImportSnapshot(draft.snapshot)) {
+        setOpeningDraft(null);
+        return;
+      }
+      setImportTarget(targetFormId);
+      navigate('/app/import/review');
+    } catch {
+      setOpeningDraft(null);
+    }
+  }
+
   function resume() {
     if (!resumable) return;
     if (!restoreImportSnapshot(resumable)) return;
@@ -135,6 +163,46 @@ export function ImportUploadScreen() {
                 Discard
               </Button>
             </div>
+          </div>
+        )}
+
+        {drafts.length > 0 && (
+          <div className="mb-6 overflow-hidden rounded-lg border border-border bg-surface-card">
+            <div className="border-b border-border-subtle px-[18px] py-3">
+              <div className="text-[13.5px] font-semibold">Saved imports</div>
+              <div className="mt-0.5 text-[12px] text-text-tertiary">
+                Mappings parked to finish later — yours or a colleague’s.
+              </div>
+            </div>
+            {drafts.map((draft) => (
+              <div
+                key={draft.id}
+                className="flex items-center gap-3 border-b border-border-subtle px-[18px] py-2.5 last:border-b-0"
+              >
+                <Icon name="file-clock" size={15} className="flex-none text-text-tertiary" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[13px] font-medium">{draft.name}</div>
+                  <div className="text-[11px] text-text-tertiary">
+                    saved {howLongAgo(draft.updatedAt)}
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={openingDraft === draft.id}
+                  onClick={() => void openDraft(draft.id)}
+                >
+                  {openingDraft === draft.id ? 'Opening…' : 'Open'}
+                </Button>
+                <button
+                  onClick={() => discardDraft.mutate(draft.id)}
+                  aria-label={`Discard ${draft.name}`}
+                  className="fai-chip-btn grid h-[28px] w-[28px] flex-none place-items-center rounded-sm text-text-tertiary hover:bg-surface-hover"
+                >
+                  <Icon name="trash-2" size={13} />
+                </button>
+              </div>
+            ))}
           </div>
         )}
 

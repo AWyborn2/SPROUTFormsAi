@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Badge, Button, Icon, Select, Switch, type BadgeVariant } from '@formai/ui';
+import { Badge, Button, Icon, Input, Select, Switch, useToast, type BadgeVariant } from '@formai/ui';
 import type { ExtractedField, ExtractionStatus } from '@formai/shared';
 import {
   addFixedRowItem,
@@ -11,6 +11,7 @@ import {
   lowestUnresolvedField,
   removeFixedRowItem,
   renameFixedRowItem,
+  captureImportSnapshot,
   retryExtraction,
   redoFieldEdit,
   reviewStatus,
@@ -19,6 +20,7 @@ import {
   useImportSession,
   type ReviewField,
 } from '../../lib/data/import-session.js';
+import { useSaveImportDraft } from '../../lib/data/hooks.js';
 import { FIELD_META, typeOptionsFor } from '../../lib/field-editor/reducer.js';
 import { outcomeUnits, type OutcomeLinkStatus } from '../../lib/outcome-units.js';
 import type { TextPage } from '../../lib/pdf-geometry.js';
@@ -65,6 +67,88 @@ export function displayTitleFromFileName(fileName: string): string {
  */
 export function offersSignatureRemap(field: Pick<ReviewField, 'type'>): boolean {
   return field.type === 'text';
+}
+
+/**
+ * Save this mapping on the server, under a name.
+ *
+ * The wizard already autosaves locally, and that covers being interrupted. This
+ * is the other thing the work needs: a laptop can die, a form can be started by
+ * one person and finished by another, and a mapping can be parked for a
+ * fortnight while the paper document goes through a revision. None of that is
+ * served by a copy living in one browser profile on one machine.
+ *
+ * Saving under a name already used OVERWRITES it — what "save" means everywhere
+ * else, and the alternative is seven drafts called "Track Dozer".
+ */
+function SaveDraftControl() {
+  const { toast } = useToast();
+  const save = useSaveImportDraft();
+  const session = useImportSession();
+  const [open, setOpen] = useState(false);
+  // Defaulted from the file, because that is what the reviewer already calls it.
+  const [name, setName] = useState('');
+
+  // Nothing to save until the extraction has landed and given us an asset to
+  // key the mapping against.
+  if (!session.assetId || session.status !== 'ready') return null;
+
+  function start() {
+    setName(session.fileName.replace(/\.pdf$/i, ''));
+    setOpen(true);
+  }
+
+  function doSave() {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      toast({ variant: 'warning', message: 'Give the draft a name so you can find it again.' });
+      return;
+    }
+    const snapshot = captureImportSnapshot();
+    if (!snapshot || !session.assetId) {
+      toast({ variant: 'warning', message: 'There is nothing to save yet.' });
+      return;
+    }
+    save.mutate(
+      { name: trimmed, assetId: session.assetId, snapshot },
+      {
+        onSuccess: () => {
+          setOpen(false);
+          toast({ variant: 'success', message: `Saved as “${trimmed}” — pick it up from the import screen.` });
+        },
+        onError: () => {
+          toast({ variant: 'danger', message: 'Could not save the draft — try again.' });
+        },
+      },
+    );
+  }
+
+  if (!open) {
+    return (
+      <Button variant="ghost" leadingIcon="save" onClick={start}>
+        Save draft
+      </Button>
+    );
+  }
+
+  return (
+    <div className="flex items-end gap-2">
+      <Input
+        label="Draft name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') doSave();
+        }}
+      />
+      <Button onClick={doSave} disabled={save.isPending}>
+        Save
+      </Button>
+      <Button variant="ghost" onClick={() => setOpen(false)}>
+        Cancel
+      </Button>
+    </div>
+  );
 }
 
 /** Import step 2 — review the extracted fields, correct low-confidence ones. */
@@ -510,7 +594,7 @@ export function ImportReviewScreen() {
             </div>
           )}
 
-          <div className="mt-[18px] flex items-center justify-between">
+          <div className="mt-[18px] flex items-center justify-between gap-3">
             <button
               onClick={() => navigate('/app/import')}
               className="inline-flex items-center gap-1 text-[13.5px] text-text-tertiary"
@@ -518,13 +602,22 @@ export function ImportReviewScreen() {
               <Icon name="arrow-left" size={14} />
               Upload
             </button>
-            <Button
-              trailingIcon="arrow-right"
-              disabled={!ready}
-              onClick={() => navigate('/app/import/publish')}
-            >
-              Continue
-            </Button>
+            <div className="flex items-center gap-2">
+              {/*
+                Saving is offered HERE rather than only at the end, because the
+                point of a saved draft is the mapping that is not finished —
+                offering it only on the last step would mean it could only be
+                used by someone who no longer needs it.
+              */}
+              <SaveDraftControl />
+              <Button
+                trailingIcon="arrow-right"
+                disabled={!ready}
+                onClick={() => navigate('/app/import/publish')}
+              >
+                Continue
+              </Button>
+            </div>
           </div>
         </div>
       </div>
