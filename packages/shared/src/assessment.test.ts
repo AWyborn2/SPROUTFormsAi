@@ -140,6 +140,59 @@ describe('validateManifest', () => {
     expect(validateManifest(manifest, fields).some((p) => p.includes('ghost'))).toBe(true);
   });
 
+  /*
+    A MUST-PASS QUESTION THAT CANNOT BE MARKED IS A LIE.
+
+    `markTheory` skips any field without an answerKey, and `validateAnswerKeys`
+    only inspects fields that HAVE one — so an unkeyed question passed every
+    check while contributing nothing to the outcome it was declared to gate.
+    The theory paper's matching questions are exactly this: extracted as
+    free-response text, sitting in the must-pass section, silently unmarked,
+    with the part free to reach 100% without them.
+  */
+  it('rejects a mandatory question with no answer key', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [part({ key: 'a', ordinal: 1, mandatoryFieldIds: ['q-match'] })],
+    };
+
+    const problems = validateManifest(manifest, [...fields, question('q-match')]);
+
+    expect(problems.some((p) => p.includes('q-match') && p.includes('answer key'))).toBe(true);
+  });
+
+  it('rejects a mandatory question whose answer key is empty', () => {
+    // An empty key marks nothing, exactly like a missing one — `markTheory`
+    // tests `length === 0` on the same line as the absent case.
+    const manifest: AssessmentToolManifest = {
+      parts: [part({ key: 'a', ordinal: 1, mandatoryFieldIds: ['q-empty'] })],
+    };
+
+    const problems = validateManifest(manifest, [...fields, question('q-empty', { answerKey: [] })]);
+
+    expect(problems.some((p) => p.includes('q-empty'))).toBe(true);
+  });
+
+  it('accepts a mandatory question that carries a key', () => {
+    const keyed = question('q-keyed', { answerKey: ['a'], outcomeTarget: { fieldId: 'oc-1' } });
+    const manifest: AssessmentToolManifest = {
+      parts: [part({ key: 'a', ordinal: 1, mandatoryFieldIds: ['q-keyed'] })],
+    };
+
+    expect(validateManifest(manifest, [...fields, keyed])).toEqual([]);
+  });
+
+  it('says nothing about an unkeyed question OUTSIDE the mandatory set', () => {
+    /*
+      The rule is about the must-pass set, not about answer keys in general. A
+      question the assessor marks by hand is a real shape — it simply does not
+      gate the outcome, which is exactly what leaving it out of
+      `mandatoryFieldIds` says.
+    */
+    const manifest: AssessmentToolManifest = { parts: [part({ key: 'a', ordinal: 1 })] };
+
+    expect(validateManifest(manifest, [...fields, question('q-free')])).toEqual([]);
+  });
+
   it('reports every problem rather than stopping at the first', () => {
     const manifest: AssessmentToolManifest = {
       parts: [
