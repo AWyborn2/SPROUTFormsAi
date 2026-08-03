@@ -17,6 +17,7 @@ import {
   geometrySegments,
   isChoiceField,
   isFileRef,
+  isMatchingQuestion,
   markPlacement,
   resolveAnswerSets,
   selectedOption,
@@ -276,6 +277,24 @@ export async function roundTripExport({
         drawCheckboxOptions(pages, value, optionSegments, field.answerKey);
         continue;
       }
+
+      /*
+        A MATCHING ANSWER IS NEVER SCALAR TEXT.
+
+        Its value is a SET of pairings — nine options for a three-by-three
+        question — and `scalarText` joins them, so falling through here draws
+        roughly 230 characters into whatever single box the field happens to
+        carry. `drawText` below bounds the width but NOT the height, so the
+        wrapped remainder runs downward across whatever is printed beneath it,
+        on a certified competency record, with nothing raised.
+
+        And it would say nothing worth saying even if it fitted: the printed
+        page already carries the statements and the signs, and the verdict
+        reaches the margin through the separate outcome box. A matching field
+        should carry no geometry at all — this is the guard for when one
+        arrives anyway, which is a mis-authored field rather than a rare one.
+      */
+      if (isMatchingQuestion(field.options)) continue;
     }
 
     // A scalar field occupies one box; if geometry ever gives it several, the

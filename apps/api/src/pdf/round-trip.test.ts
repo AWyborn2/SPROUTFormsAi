@@ -1523,3 +1523,106 @@ describe('roundTripExport — characters the page font cannot encode', () => {
     expect(bytesInclude(output, 'Warehouse B - level 2 (north)')).toBe(true);
   });
 });
+
+/*
+  A MATCHING ANSWER MUST NOT BE PAINTED ACROSS THE PAGE.
+
+  Its value is a SET of pairings — nine options for a three-by-three question —
+  and scalarText joins them. A matching field is authored with no geometry, so
+  normally it never reaches the drawing code at all; these cover what happens
+  when one carries a box anyway, which is a mis-authored field rather than an
+  exotic one.
+
+  The hazard is specific: drawText bounds the WIDTH but not the height, so ~230
+  characters wrapped inside a 20pt-high box runs downward across whatever is
+  printed beneath it, on a certified competency record, and nothing raises.
+*/
+describe('roundTripExport — matching questions', () => {
+  const PAIRINGS = [
+    'Restricted area -> Biosecurity sign',
+    'Restricted area -> Traffic hazard sign',
+    'Permission to pass -> Biosecurity sign',
+    'Permission to pass -> Traffic hazard sign',
+  ];
+
+  const matchingField = (extra: Partial<FormField> = {}): FormField => ({
+    id: 'q7',
+    type: 'checkbox_group',
+    label: 'Match the statement with the appropriate signage.',
+    required: true,
+    source: 'imported',
+    options: PAIRINGS,
+    ...extra,
+  });
+
+  const ANSWER = { q7: ['Restricted area -> Biosecurity sign', 'Permission to pass -> Traffic hazard sign'] };
+
+  it('draws nothing for a matching field with no geometry', async () => {
+    // The normal case, and the reason the export needed no work: the printed
+    // page already carries the statements and the signs, and the verdict
+    // reaches the margin through the separate outcome box.
+    const original = await makeFlatPdf();
+    const output = await roundTripExport({
+      originalPdf: original,
+      fields: [matchingField()],
+      values: ANSWER,
+    });
+
+    expect(bytesInclude(output, 'Biosecurity sign')).toBe(false);
+    expect(bytesInclude(output, LETTERHEAD)).toBe(true);
+  });
+
+  it('draws nothing even when the field wrongly carries a single box', async () => {
+    /*
+      THE ONE THAT WOULD HAVE DEFACED THE RECORD. Without the guard this falls
+      through to the scalar path and joins every selected pairing into one long
+      string, drawn into a 20pt box with no height bound.
+    */
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [
+        matchingField({
+          sourcePosition: {
+            page: 0,
+            x: 40,
+            y: 700,
+            width: 200,
+            height: 20,
+            pageWidth: 600,
+            pageHeight: 800,
+          },
+        }),
+      ],
+      values: ANSWER,
+    });
+
+    expect(bytesInclude(output, 'Biosecurity sign')).toBe(false);
+    expect(bytesInclude(output, '->')).toBe(false);
+  });
+
+  it('still draws an ordinary checkbox group that happens to have a box', async () => {
+    // The guard keys on the OPTIONS being pairings, not on the type — an
+    // ordinary group must be unaffected.
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [
+        matchingField({
+          id: 'plain',
+          options: ['Helmet', 'Gloves'],
+          sourcePosition: {
+            page: 0,
+            x: 40,
+            y: 700,
+            width: 300,
+            height: 20,
+            pageWidth: 600,
+            pageHeight: 800,
+          },
+        }),
+      ],
+      values: { plain: ['Helmet'] },
+    });
+
+    expect(bytesInclude(output, 'Helmet')).toBe(true);
+  });
+});
