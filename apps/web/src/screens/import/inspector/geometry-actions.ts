@@ -1107,6 +1107,26 @@ export function panelState(
 }
 
 /**
+ * Which confidence tier a proposal falls into, for the auto-detect flow (U1,
+ * R1/R2).
+ *
+ * Reuses the exact boundary `panelState` already treats as clean:
+ * `confidence === 1` is a full match with nothing inferred, versus
+ * `confidence < 1` — which `panelState` already surfaces as a caution note —
+ * needing a reviewer's eyes. `null` means detection found nothing to propose
+ * at all, which is its own tier rather than a low-confidence `needs-review`:
+ * there is no box to review, only a field to hand-place.
+ */
+export type ProposalTier = 'auto-confirm' | 'needs-review' | 'no-match';
+
+export function classifyProposalTier(
+  proposal: FieldProposal | TableProposal | null,
+): ProposalTier {
+  if (!proposal) return 'no-match';
+  return proposal.confidence === 1 ? 'auto-confirm' : 'needs-review';
+}
+
+/**
  * Propose one checkmark box per option for a NON-TABLE choice field, across the
  * whole document.
  *

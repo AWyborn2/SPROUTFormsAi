@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest';
 import type { FormField, GroupOrdinal, PageBox } from '@formai/shared';
 import { markPlacement, resolveGeometry } from '@formai/shared';
-import type { PositionedText, TextPage } from '../../../lib/pdf-geometry.js';
+import type { FieldProposal, PositionedText, TableProposal, TextPage } from '../../../lib/pdf-geometry.js';
 import {
   NEAR_EQUAL_CONFIDENCE,
   NUDGE_POINTS,
@@ -17,6 +17,7 @@ import {
   DRAW_SNAP_RANGE,
   appendRowBelow,
   applyMatrix,
+  classifyProposalTier,
   columnHandles,
   deleteRowBand,
   type DerivableField,
@@ -308,6 +309,40 @@ describe('panelState', () => {
     const state = panelState(tableField(), proposal.segment, true, proposal);
 
     if (state.kind === 'proposed') expect(state.confirmed).toBe(true);
+  });
+});
+
+describe('classifyProposalTier', () => {
+  // A minimal box — its geometry is irrelevant here, only `confidence` is under
+  // test — reused for both proposal shapes so the fixtures stay tiny.
+  const box: PageBox = { page: 0, x: 0, y: 0, width: 10, height: 10, pageWidth: 595, pageHeight: 842 };
+  const tableProposal = (confidence: number): TableProposal => ({
+    segment: box,
+    confidence,
+    anchorsLocated: 2,
+    anchorsInferred: 0,
+    notes: [],
+  });
+  const fieldProposal = (confidence: number): FieldProposal => ({
+    segments: [box],
+    confidence,
+    notes: [],
+  });
+
+  it('classifies a null proposal as no-match', () => {
+    expect(classifyProposalTier(null)).toBe('no-match');
+  });
+
+  it('classifies confidence 1 as auto-confirm, for both proposal shapes', () => {
+    expect(classifyProposalTier(tableProposal(1))).toBe('auto-confirm');
+    expect(classifyProposalTier(fieldProposal(1))).toBe('auto-confirm');
+  });
+
+  it('classifies anything below 1 as needs-review, for both proposal shapes', () => {
+    expect(classifyProposalTier(tableProposal(0.6))).toBe('needs-review');
+    expect(classifyProposalTier(tableProposal(0.99))).toBe('needs-review');
+    expect(classifyProposalTier(fieldProposal(0.6))).toBe('needs-review');
+    expect(classifyProposalTier(fieldProposal(0.99))).toBe('needs-review');
   });
 });
 
