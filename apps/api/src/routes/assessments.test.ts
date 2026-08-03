@@ -2672,3 +2672,113 @@ describe('GET /assessment-cases/:id — candidate name', () => {
     }
   });
 });
+
+/*
+  AN ATTEMPT MAY ONLY BE WRITTEN WITH ITS OWN PART'S FIELDS.
+
+  The save route asked who owned the CASE and never what part the attempt was
+  for, so any field id in the body was accepted. A candidate could open their
+  own theory attempt and post the practical's observation checklist — the
+  criteria their assessor is meant to mark while watching them operate the
+  machine — and it would be stored against the case and merged into the
+  evidence PDF.
+*/
+describe('attempt writes are scoped to their part', () => {
+  async function openAttempt(base: string) {
+    const tool = await seedTool(base);
+    const caseRes = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+    });
+    const c = (await caseRes.json()) as { id: string };
+    const attemptRes = await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, {
+      method: 'POST',
+      headers: auth(),
+    });
+    return { caseId: c.id, attempt: (await attemptRes.json()) as { id: string } };
+  }
+
+  function save(base: string, caseId: string, attemptId: string, values: Record<string, unknown>) {
+    return fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ values }),
+    });
+  }
+
+  it('refuses a field belonging to a DIFFERENT part', async () => {
+    // `log-table` is Part 3's. Writing it through a Part 1 attempt is the hole.
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attempt } = await openAttempt(base);
+      const res = await save(base, caseId, attempt.id, { 'log-table': [{ duration: 99 }] });
+
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; fields: string[] };
+      expect(body.error).toBe('field_not_in_part');
+      expect(body.fields).toEqual(['log-table']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepts a field that IS in the part', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attempt } = await openAttempt(base);
+      const res = await save(base, caseId, attempt.id, { q1: ['a'] });
+
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not delete a field the client left out', async () => {
+    /*
+      The route replaced the whole value map, so an omitted key vanished.
+      Harmless while one party writes an attempt; silent data loss the moment
+      workflow ownership lets two write one part.
+    */
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attempt } = await openAttempt(base);
+      await save(base, caseId, attempt.id, { q1: ['a'], 'q-mining': 'noted' });
+      await save(base, caseId, attempt.id, { q1: ['b'] });
+
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attempt.id}`, {
+        headers: auth(),
+      });
+      const body = (await res.json()) as { values: Record<string, unknown> };
+      expect(body.values['q-mining']).toBe('noted');
+      expect(body.values.q1).toEqual(['b']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('tolerates an unchanged echo of a foreign key', async () => {
+    /*
+      The fill screen seeds its state from the stored values and PATCHes the
+      whole map back. Rejecting outright would permanently 403 any attempt
+      already carrying a stray key — and real data does, under keys the manifest
+      never named.
+    */
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attempt } = await openAttempt(base);
+      // Nothing stored under it, and nothing sent for it either — an echo of
+      // undefined is not a change.
+      const res = await save(base, caseId, attempt.id, { q1: ['a'], 'log-table': undefined });
+
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+});

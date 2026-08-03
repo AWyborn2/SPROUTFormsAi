@@ -28,6 +28,7 @@
 
 import type { FormField, FormFieldType } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
+import type { AssessmentWorkflow } from './workflow.js';
 
 /**
  * The routes through an assessment tool.
@@ -199,6 +200,15 @@ export interface AssessmentToolManifest {
    * certifies a verdict for an unnamed person.
    */
   candidateNameFieldId?: string;
+  /**
+   * Who does what, and in what order — see `workflow.ts`.
+   *
+   * Optional, and absent on every tool authored before it existed. A tool
+   * without one behaves exactly as it always has: `workflowOf` synthesises a
+   * section per part in document order, so nothing changes until somebody
+   * configures it.
+   */
+  workflow?: AssessmentWorkflow;
   /**
    * The front page's certification block.
    *
