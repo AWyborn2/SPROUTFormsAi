@@ -11,6 +11,7 @@ import {
   classifyProposalTier,
   deriveAcrossPages,
   deriveOptionCellsAcrossPages,
+  handleAdjustment,
   moveBand,
   moveBoundary,
   snapTargets,
@@ -101,11 +102,11 @@ export function GeometryEditorScreen() {
    */
   const bandSnapTargets = useMemo(
     () => (bandOverlay ? snapTargets(textPages[bandOverlay.page]?.items ?? []) : []),
-    [bandOverlay, textPages],
+    [bandOverlay?.page, textPages],
   );
   const bandSnapTargetsY = useMemo(
     () => (bandOverlay ? snapTargetsY(textPages[bandOverlay.page]?.items ?? []) : []),
-    [bandOverlay, textPages],
+    [bandOverlay?.page, textPages],
   );
 
   /**
@@ -120,14 +121,12 @@ export function GeometryEditorScreen() {
    */
   function onBandEdge(handle: BandHandle, value: number) {
     if (!overlay) return;
+    const adjustment = handleAdjustment(handle);
+    if (!adjustment) return;
     const next =
-      handle.left && handle.right
-        ? moveBoundary(overlay.box, handle.axis, handle.left, handle.right, value)
-        : handle.right
-          ? moveBand(overlay.box, handle.axis, handle.right, 'start', value)
-          : handle.left
-            ? moveBand(overlay.box, handle.axis, handle.left, 'end', value)
-            : null;
+      adjustment.kind === 'boundary'
+        ? moveBoundary(overlay.box, handle.axis, adjustment.leftKey, adjustment.rightKey, value)
+        : moveBand(overlay.box, handle.axis, adjustment.key, adjustment.edge, value);
     if (!next) return;
 
     if (overlay.source.kind === 'preview') {
@@ -194,7 +193,10 @@ export function GeometryEditorScreen() {
   function selectField(field: FormField) {
     setSelectedId(field.id);
     setDrawTarget(null);
-    setProposalPreviews([]);
+    // Scoped to this field only — every OTHER field's parked needs-review
+    // proposal must survive selecting something else in the sidebar. A flat
+    // `setProposalPreviews([])` here used to wipe the whole queue on any click.
+    setProposalPreviews((prev) => prev.filter((p) => p.fieldId !== field.id));
 
     if (geometrySegments(field).length > 0) return;
 
@@ -204,8 +206,11 @@ export function GeometryEditorScreen() {
 
     if (tier === 'needs-review') {
       // Parked for preview only — `edited` stays untouched until the
-      // reviewer applies it themselves.
-      setProposalPreviews([{ fieldId: field.id, proposal: proposal! }]);
+      // reviewer applies it themselves. Replace only this field's entry.
+      setProposalPreviews((prev) => [
+        ...prev.filter((p) => p.fieldId !== field.id),
+        { fieldId: field.id, proposal: proposal! },
+      ]);
       return;
     }
 
@@ -234,26 +239,38 @@ export function GeometryEditorScreen() {
   function autoPlaceRemaining() {
     setIsAutoPlacing(true);
 
-    const changes: FieldChange[] = [];
-    const reviews: { fieldId: string; proposal: FieldProposal | TableProposal }[] = [];
+    // Yield a frame first: the loop below is synchronous and, for a large
+    // form, long enough that setting isAutoPlacing(true) and (false) in the
+    // same tick would otherwise batch into one commit and the "Auto-placing…"
+    // state would never actually paint.
+    requestAnimationFrame(() => {
+      const changes: FieldChange[] = [];
+      const reviews: { fieldId: string; proposal: FieldProposal | TableProposal }[] = [];
 
-    for (const field of fields) {
-      if (geometrySegments(field).length >= expectedBoxes(field)) continue;
+      for (const field of fields) {
+        if (geometrySegments(field).length >= expectedBoxes(field)) continue;
 
-      const proposal = deriveProposal(field, textPages);
-      const tier = classifyProposalTier(proposal);
-      if (tier === 'no-match') continue;
-      if (tier === 'needs-review') {
-        reviews.push({ fieldId: field.id, proposal: proposal! });
-        continue;
+        const proposal = deriveProposal(field, textPages);
+        const tier = classifyProposalTier(proposal);
+        if (tier === 'no-match') continue;
+        if (tier === 'needs-review') {
+          reviews.push({ fieldId: field.id, proposal: proposal! });
+          continue;
+        }
+        changes.push(...changesForProposal(field, proposal!));
       }
-      changes.push(...changesForProposal(field, proposal!));
-    }
 
-    if (changes.length > 0) mutateMany(changes);
-    if (reviews.length > 0) setProposalPreviews(reviews);
+      if (changes.length > 0) mutateMany(changes);
+      if (reviews.length > 0) {
+        // Merge rather than replace — a field whose parked proposal the
+        // reviewer already fine-tuned via onBandEdge (and every field NOT
+        // touched by this pass) must survive a second bulk run.
+        const freshIds = new Set(reviews.map((r) => r.fieldId));
+        setProposalPreviews((prev) => [...prev.filter((p) => !freshIds.has(p.fieldId)), ...reviews]);
+      }
 
-    setIsAutoPlacing(false);
+      setIsAutoPlacing(false);
+    });
   }
 
   /**
@@ -708,8 +725,13 @@ function deriveProposal(
 function changesForProposal(field: FormField, proposal: FieldProposal | TableProposal): FieldChange[] {
   if (isPerOptionField(field)) {
     const p = proposal as FieldProposal;
+    // `deriveOptionCellsAcrossPages` derives a box for every option from the
+    // field's label/options alone — it has no view of which are already
+    // placed. Skip any option that already has a box, so a partially-placed
+    // field's existing (possibly hand-corrected) segments aren't clobbered.
+    const alreadyPlaced = new Set((field.geometry?.segments ?? []).map((s) => s.optionKey));
     return p.segments
-      .filter((segment) => segment.optionKey !== undefined)
+      .filter((segment) => segment.optionKey !== undefined && !alreadyPlaced.has(segment.optionKey))
       .map((segment) => ({
         fieldId: field.id,
         change: (f: FormField) => {
@@ -759,9 +781,7 @@ function FieldRow({
 
 /** How many boxes this field needs: one per option for a ticking choice field. */
 function expectedBoxes(field: FormField): number {
-  return isChoiceField(field.type) && !field.printSelectedValue && (field.options?.length ?? 0) > 0
-    ? field.options!.length
-    : 1;
+  return isPerOptionField(field) ? field.options!.length : 1;
 }
 
 function PlacementPanel({
@@ -779,8 +799,7 @@ function PlacementPanel({
   onSetOptionBox: (optionKey: string, box: PageBox | null) => void;
   onSetScalarBox: (box: PageBox | null) => void;
 }) {
-  const perOption =
-    isChoiceField(field.type) && !field.printSelectedValue && (field.options?.length ?? 0) > 0;
+  const perOption = isPerOptionField(field);
 
   /**
    * The automatic proposal, if the page settles one.

@@ -178,6 +178,22 @@ function renderWithFields(fields: FormField[]) {
 }
 
 /**
+ * Click "Auto-place remaining fields" and flush the deferred pass.
+ *
+ * `autoPlaceRemaining` defers its work a frame (via `requestAnimationFrame`)
+ * so the "Auto-placing…" busy state has a chance to actually paint before the
+ * synchronous loop runs — see `GeometryEditorScreen.tsx`. jsdom's rAF is a
+ * real (if approximate) timer, so a click alone does not run the pass; this
+ * helper waits for it the same way the browser would.
+ */
+async function clickAutoPlace() {
+  fireEvent.click(screen.getByText('Auto-place remaining fields'));
+  await act(async () => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
+}
+
+/**
  * A repeating-table field already placed with ONE banded segment (U6) — a
  * non-choice field, so `bandOverlayFor`'s per-option exclusion does not apply
  * and its own existing segment is eligible to become the `bandOverlay`.
@@ -343,7 +359,7 @@ describe('GeometryEditorScreen — select-to-propose with auto-tiering (U3)', ()
 });
 
 describe('GeometryEditorScreen — bulk "Auto-place remaining fields" (U4)', () => {
-  it('Covers AE4: runs the same tiering across every unplaced field, applying auto-confirm fields in one batched update and leaving needs-review/no-match fields untouched', () => {
+  it('Covers AE4: runs the same tiering across every unplaced field, applying auto-confirm fields in one batched update and leaving needs-review/no-match fields untouched', async () => {
     renderWithFields([
       choiceField('f1', 'Auto A', ['Yes', 'No', 'Maybe']),
       choiceField('f2', 'Auto B', ['Yes', 'No', 'Maybe']),
@@ -360,7 +376,7 @@ describe('GeometryEditorScreen — bulk "Auto-place remaining fields" (U4)', () 
     });
     applyFieldChangesSpy.mockClear();
 
-    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+    await clickAutoPlace();
 
     // The two auto-confirm fields landed all 3 options each...
     expect(screen.getAllByText(/3\/3 placed/)).toHaveLength(2);
@@ -378,13 +394,13 @@ describe('GeometryEditorScreen — bulk "Auto-place remaining fields" (U4)', () 
     expect(applyFieldChangesSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('Covers AE4: a field already fully placed is excluded from the loop — derivation is never even called for it, and it is left unchanged', () => {
+  it('Covers AE4: a field already fully placed is excluded from the loop — derivation is never even called for it, and it is left unchanged', async () => {
     renderWithFields([fullyPlacedChoiceField('f-full', 'Full field'), choiceField('f-eligible', 'Eligible field', ['Yes', 'No', 'Maybe'])]);
 
     deriveOptionCellsAcrossPagesMock.mockClear();
     deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(1));
 
-    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+    await clickAutoPlace();
 
     // Only the eligible field was ever handed to derivation — the fully
     // placed field's box count (3 >= expectedBoxes of 3) excluded it before
@@ -397,7 +413,7 @@ describe('GeometryEditorScreen — bulk "Auto-place remaining fields" (U4)', () 
     expect(screen.getAllByText(/3\/3 placed/)).toHaveLength(2);
   });
 
-  it('a field with some but not all options placed is still evaluated, and gets its missing options auto-placed', () => {
+  it('a field with some but not all options placed is still evaluated, and gets its missing options auto-placed', async () => {
     renderWithField(
       choiceField('f1', 'Partial field', ['Yes', 'No', 'Maybe'], {
         segments: [
@@ -407,16 +423,16 @@ describe('GeometryEditorScreen — bulk "Auto-place remaining fields" (U4)', () 
     );
     deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(1));
 
-    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+    await clickAutoPlace();
 
     expect(screen.getByText(/3\/3 placed/)).toBeDefined();
   });
 
-  it('is a no-op when every field is already fully placed — no crash, no state change', () => {
+  it('is a no-op when every field is already fully placed — no crash, no state change', async () => {
     renderWithField(fullyPlacedChoiceField('f-full', 'Full field'));
     deriveOptionCellsAcrossPagesMock.mockClear();
 
-    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+    await clickAutoPlace();
 
     // Fully placed already, so nothing was eligible: derivation never ran...
     expect(deriveOptionCellsAcrossPagesMock).not.toHaveBeenCalled();
@@ -442,13 +458,13 @@ describe('GeometryEditorScreen — needs-review queue: bulk confirm and step-thr
     expect(screen.queryByText('Confirm all proposed')).toBeNull();
   });
 
-  it('Covers AE6: "Confirm all proposed" applies all 3 pending fields in one batched update and empties the review queue', () => {
+  it('Covers AE6: "Confirm all proposed" applies all 3 pending fields in one batched update and empties the review queue', async () => {
     renderWithFields(threePendingFields());
     // Every field tiers needs-review, so the bulk pass parks all 3 rather than
     // auto-confirming any of them.
     deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(0.6));
 
-    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+    await clickAutoPlace();
 
     // The queue count reflects the addition from the bulk pass.
     expect(screen.getByText('3 fields need review')).toBeDefined();
@@ -472,11 +488,11 @@ describe('GeometryEditorScreen — needs-review queue: bulk confirm and step-thr
     expect(screen.queryByText('Confirm all proposed')).toBeNull();
   });
 
-  it('Covers AE6: opening one needs-review field and rejecting it clears only that field, leaving the other 2 pending', () => {
+  it('Covers AE6: opening one needs-review field and rejecting it clears only that field, leaving the other 2 pending', async () => {
     renderWithFields(threePendingFields());
     deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(0.6));
 
-    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+    await clickAutoPlace();
     expect(screen.getByText('3 fields need review')).toBeDefined();
 
     // Open Field B from the queue — this should just navigate (select it in
@@ -504,11 +520,11 @@ describe('GeometryEditorScreen — needs-review queue: bulk confirm and step-thr
     expect(screen.getByText('Drawing…')).toBeDefined();
   });
 
-  it('Covers AE6: confirming one field individually applies just that field, scoped to it, leaving the other 2 pending', () => {
+  it('Covers AE6: confirming one field individually applies just that field, scoped to it, leaving the other 2 pending', async () => {
     renderWithFields(threePendingFields());
     deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(0.6));
 
-    fireEvent.click(screen.getByText('Auto-place remaining fields'));
+    await clickAutoPlace();
     expect(screen.getByText('3 fields need review')).toBeDefined();
 
     applyFieldChangesSpy.mockClear();
@@ -524,6 +540,57 @@ describe('GeometryEditorScreen — needs-review queue: bulk confirm and step-thr
     expect(screen.getByLabelText('Review Field A')).toBeDefined();
     expect(screen.getByLabelText('Review Field C')).toBeDefined();
     expect(screen.queryByLabelText('Review Field B')).toBeNull();
+  });
+});
+
+describe('GeometryEditorScreen — review-fix regressions (P1 findings from code review)', () => {
+  it('regression: selecting an unrelated field from the plain sidebar list does not clear other fields\' parked needs-review proposals', async () => {
+    renderWithFields([
+      choiceField('f1', 'Field A', ['Yes', 'No', 'Maybe']),
+      choiceField('f2', 'Field B', ['Yes', 'No', 'Maybe']),
+      choiceField('f3', 'Field C', ['Yes', 'No', 'Maybe']),
+      choiceField('f4', 'Unrelated field', ['Yes', 'No', 'Maybe']),
+    ]);
+    deriveOptionCellsAcrossPagesMock.mockImplementation((field: { label: string }) =>
+      field.label === 'Unrelated field' ? null : proposal(0.6),
+    );
+
+    await clickAutoPlace();
+    expect(screen.getByText('3 fields need review')).toBeDefined();
+
+    // Select a field NOT in the queue, via its plain sidebar row — this used
+    // to call `setProposalPreviews([])` unconditionally and wipe every
+    // OTHER field's parked proposal too.
+    fireEvent.click(screen.getByText('Unrelated field'));
+
+    expect(screen.getByText('3 fields need review')).toBeDefined();
+    expect(screen.getByLabelText('Review Field A')).toBeDefined();
+    expect(screen.getByLabelText('Review Field B')).toBeDefined();
+    expect(screen.getByLabelText('Review Field C')).toBeDefined();
+  });
+
+  it("regression: bulk auto-place does not overwrite an already-placed option's existing box on a partially-placed field", async () => {
+    const existingBox: PageBox = {
+      page: 0,
+      x: 999,
+      y: 999,
+      width: 10,
+      height: 10,
+      pageWidth: 595,
+      pageHeight: 842,
+      optionKey: 'Yes',
+    };
+    renderWithField(choiceField('f1', 'Partial field', ['Yes', 'No', 'Maybe'], { segments: [existingBox] }));
+    // Fresh derivation always proposes a box for every option (it has no view
+    // of what's already placed) — here at x = i*20, so 'Yes' would land at
+    // x=0 if the already-placed box were overwritten.
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(1));
+
+    await clickAutoPlace();
+
+    expect(screen.getByText(/3\/3 placed/)).toBeDefined();
+    const mark = pdfViewerPropsSpy.mock.calls.at(-1)![0].placements?.find((p) => p.slot === 'f1#Yes');
+    expect(mark?.box.x).toBe(999);
   });
 });
 
