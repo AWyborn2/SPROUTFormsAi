@@ -17,9 +17,14 @@ import {
   type AssessmentCaseState,
   logbookRows,
   markTheory,
+  ACCESS_LEVELS,
+  VALUE_SOURCES,
+  WORKFLOW_ROLES,
   orderedParts,
   requiredParts,
   resolveAssessorRequirements,
+  validateWorkflow,
+  workflowOf,
   streamCheckWarning,
   totalLoggedHours,
   stripMarkingSecrets,
@@ -301,6 +306,40 @@ const partSchema = z.object({
   mandatoryFieldIds: z.array(z.string()).optional(),
 });
 
+/**
+ * The configured workflow, as it arrives over HTTP.
+ *
+ * Structure only. Whether it makes SENSE — a section covering a part the tool
+ * does not have, a dependency loop, a field two sections both claim — is
+ * `validateWorkflow`'s job, because those answers need the manifest and the
+ * version's fields, which zod cannot see.
+ */
+const accessLevel = z.enum(ACCESS_LEVELS);
+const fieldAccess = z.union([accessLevel, z.literal('inherit')]);
+
+const workflowSchema = z.object({
+  roles: z.array(z.enum(WORKFLOW_ROLES)).min(1),
+  sections: z.array(
+    z.object({
+      key: z.string().min(1),
+      ordinal: z.number().int().nonnegative(),
+      label: z.string().min(1),
+      partKey: z.string().min(1).optional(),
+      fieldIds: z.array(z.string().min(1)).optional(),
+      access: z.record(z.enum(WORKFLOW_ROLES), accessLevel),
+      fieldAccess: z.record(z.string(), z.record(z.enum(WORKFLOW_ROLES), fieldAccess)).optional(),
+      fieldSource: z.record(z.string(), z.enum(VALUE_SOURCES)).optional(),
+      requires: z.array(z.string().min(1)).optional(),
+    }),
+  ),
+});
+
+/** What may be changed on an existing tool. Everything optional — it is a patch. */
+const updateToolBody = z.object({
+  name: z.string().min(1).optional(),
+  workflow: workflowSchema.optional(),
+});
+
 const toolBody = z.object({
   templateId: z.string().uuid(),
   name: z.string().min(1),
@@ -317,6 +356,13 @@ const toolBody = z.object({
       around.
     */
     candidateNameFieldId: z.string().optional(),
+    /*
+      Who does what, and when. The same trap this file warns about above: a
+      manifest property this schema does not name is silently STRIPPED, so a
+      builder that appeared to save a workflow would discard it and the tool
+      would quietly fall back to the derived default.
+    */
+    workflow: workflowSchema.optional(),
     signOff: z
       .object({
         assessorNameFieldId: z.string().optional(),
@@ -448,6 +494,147 @@ assessmentToolsRouter.get(
         locationStreams: Object.keys(t.assessorStreamCompetencyIds ?? {}),
       })),
     );
+  }),
+);
+
+/**
+ * One tool, with everything the workflow builder needs to render.
+ *
+ * The manifest AND the current version's fields, in one response. The builder
+ * shows the document on one side and the process on the other, so splitting
+ * them across two round trips would let it draw half a screen against a version
+ * the other half does not describe.
+ *
+ * `workflow` is always present — synthesised from the parts when nobody has
+ * configured one — so the builder never has to invent a starting state, and
+ * what it shows on first open is exactly what the server is already enforcing.
+ */
+assessmentToolsRouter.get(
+  '/:id',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const tool = await loadTool(db, req.params.id!, tenant.orgId);
+    if (!tool) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const template = await db.query.formTemplates.findFirst({
+      where: and(
+        eq(schema.formTemplates.id, tool.templateId),
+        eq(schema.formTemplates.orgId, tenant.orgId),
+      ),
+    });
+    const fields = template?.currentVersionId
+      ? await fieldsForVersion(db, template.currentVersionId)
+      : [];
+
+    const workflow = workflowOf(tool.manifest);
+    const { problems, warnings } = validateWorkflow(workflow, tool.manifest, fields);
+
+    res.json({
+      id: tool.id,
+      name: tool.name,
+      templateId: tool.templateId,
+      manifest: tool.manifest,
+      workflow,
+      /*
+        Whether the stored workflow is real or synthesised. The builder needs to
+        say "this is the default, nobody has configured it" rather than implying
+        somebody chose it — and an author who has genuinely never opened this
+        screen should not be shown a configuration presented as theirs.
+      */
+      workflowIsDefault: tool.manifest.workflow === undefined,
+      /*
+        Answer-key-bearing fields are served to the builder because it is an
+        AUTHORING surface — the same place keys are set. Fill surfaces get
+        `stripMarkingSecrets`; this deliberately does not.
+      */
+      fields,
+      problems,
+      warnings,
+    });
+  }),
+);
+
+/**
+ * Change a tool after creation.
+ *
+ * There has been no way to do this: a tool was write-once, so a manifest
+ * corrected after the fact needed a direct SQL script. That is why the workflow
+ * builder needs this route before it needs a screen.
+ *
+ * Refuses to store a structurally broken workflow. `warnings` come back with a
+ * 200 — an unfinished configuration is a real state to save and return to, and
+ * refusing it would make the builder unusable halfway through a first pass.
+ */
+assessmentToolsRouter.patch(
+  '/:id',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await hasPermission(tenant, 'assessments', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = updateToolBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tool = await loadTool(db, req.params.id!, tenant.orgId);
+    if (!tool) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const manifest: AssessmentToolManifest = parsed.data.workflow
+      ? { ...tool.manifest, workflow: parsed.data.workflow }
+      : tool.manifest;
+
+    const template = await db.query.formTemplates.findFirst({
+      where: and(
+        eq(schema.formTemplates.id, tool.templateId),
+        eq(schema.formTemplates.orgId, tenant.orgId),
+      ),
+    });
+    const fields = template?.currentVersionId
+      ? await fieldsForVersion(db, template.currentVersionId)
+      : [];
+
+    const { problems, warnings } = validateWorkflow(workflowOf(manifest), manifest, fields);
+    if (problems.length > 0) {
+      // Nothing written. A half-applied workflow is worse than a rejected one:
+      // it decides who may write a competency record.
+      res.status(400).json({ error: 'invalid_workflow', problems });
+      return;
+    }
+
+    await db
+      .update(schema.assessmentTools)
+      .set({
+        ...(parsed.data.name ? { name: parsed.data.name } : {}),
+        ...(parsed.data.workflow ? { manifest } : {}),
+      })
+      .where(eq(schema.assessmentTools.id, tool.id));
+
+    await recordAudit(db, tenant, {
+      action: 'Updated assessment tool',
+      target: `${parsed.data.name ?? tool.name}${parsed.data.workflow ? ' (workflow)' : ''}`,
+      category: 'settings',
+      icon: 'clipboard-check',
+    });
+
+    res.json({ id: tool.id, workflow: workflowOf(manifest), warnings });
   }),
 );
 
@@ -1332,9 +1519,60 @@ assessmentCasesRouter.patch(
       return;
     }
 
-    let values = parsed.data.values as Record<string, SubmissionValue>;
     const tool = await loadTool(db, row.toolId, tenant.orgId);
     const part = tool ? orderedParts(tool.manifest).find((p) => p.key === attempt.partKey) : undefined;
+
+    /*
+      AN ATTEMPT MAY ONLY BE WRITTEN WITH ITS OWN PART'S FIELDS.
+
+      This route asked who owned the CASE and never what part the attempt was
+      for, so any field id in the body was accepted. A candidate could open
+      their own theory attempt and post the practical's observation checklist —
+      the criteria their assessor is meant to mark while watching them operate
+      the machine — and it would be stored against the case and merged into the
+      evidence PDF.
+
+      Scoped to the attempt's PINNED version rather than the template's current
+      one: the attempt records what was asked at the time, and a template edited
+      mid-programme must not change what an open attempt is allowed to contain.
+
+      Two shapes matter here. An unchanged echo of a foreign key is tolerated,
+      because the fill screen seeds its state from the stored values and PATCHes
+      the whole map back — rejecting outright would permanently 409 any attempt
+      already holding a stray key, and real data does carry rows under keys the
+      manifest never named. And the merge is onto the stored map rather than a
+      replacement, so a key the client omits is no longer silently deleted —
+      harmless while one party writes an attempt, silent data loss the moment
+      workflow ownership lets two.
+    */
+    const stored = (attempt.values ?? {}) as Record<string, SubmissionValue>;
+    const allowed = tool
+      ? new Set(
+          fieldsInPart(
+            await fieldsForVersion(db, attempt.templateVersionId),
+            tool.manifest,
+            attempt.partKey,
+          ).map((f) => f.id),
+        )
+      : null;
+
+    let values: Record<string, SubmissionValue> = { ...stored };
+    if (allowed) {
+      const foreign: string[] = [];
+      for (const [key, value] of Object.entries(parsed.data.values)) {
+        if (allowed.has(key)) {
+          values[key] = value as SubmissionValue;
+        } else if (JSON.stringify(value) !== JSON.stringify(stored[key])) {
+          foreign.push(key);
+        }
+      }
+      if (foreign.length > 0) {
+        res.status(403).json({ error: 'field_not_in_part', fields: foreign });
+        return;
+      }
+    } else {
+      values = { ...stored, ...(parsed.data.values as Record<string, SubmissionValue>) };
+    }
 
     let hours: number | null = null;
     let thresholdReached = false;
