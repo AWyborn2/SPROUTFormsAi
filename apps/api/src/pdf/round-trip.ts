@@ -151,6 +151,41 @@ function fitInside(
   };
 }
 
+/**
+ * Make a string safe for the page font, which is WinAnsi.
+ *
+ * `StandardFonts.Helvetica` cannot encode anything outside WinAnsi, and pdf-lib
+ * THROWS rather than substituting — so one curly apostrophe in an answer fails
+ * the whole export. That is the worst available failure here: the evidence PDF
+ * is the record of a completed assessment, and refusing to produce it because
+ * of a punctuation mark is far worse than producing it with a straight quote.
+ *
+ * Values come out of a PDF and out of typed answers, so smart quotes, dashes
+ * and arrows are ordinary rather than exotic. The common ones are transliterated
+ * to their ASCII equivalent; anything else still outside the range becomes '?',
+ * which is visibly wrong on the page rather than silently absent.
+ */
+const WINANSI_SUBSTITUTIONS: Array<[RegExp, string]> = [
+  [/[‘’‚‛]/g, "'"],
+  [/[“”„‟]/g, '"'],
+  [/[‐-―]/g, '-'],
+  [/[→⇒]/g, '->'],
+  [/←/g, '<-'],
+  [/…/g, '...'],
+  [/[   ]/g, ' '],
+  [/[✓✔]/g, 'Y'],
+  [/[✗✘✕]/g, 'N'],
+];
+
+export function winAnsiSafe(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of WINANSI_SUBSTITUTIONS) out = out.replace(pattern, replacement);
+  // WinAnsi covers most of Latin-1 plus a scattering of higher code points.
+  // Rather than encode that table, anything above it is replaced — the font
+  // cannot draw it either way, and '?' says so.
+  return out.replace(/[^ -ÿ]/g, '?');
+}
+
 /** Render a scalar value to the string drawn on the page. */
 function scalarText(value: SubmissionValue | undefined): string {
   if (value === null || value === undefined) return '';
@@ -307,7 +342,7 @@ export async function roundTripExport({
 
     const size = Math.min(11, Math.max(8, pos.height - 4));
     // Baseline a few points up from the field's bottom edge.
-    page.drawText(text, {
+    page.drawText(winAnsiSafe(text), {
       x: pos.x + 3,
       y: pos.y + Math.max(3, (pos.height - size) / 2),
       size,
@@ -468,7 +503,7 @@ function drawRepeatingGroup(
         // Placement is the shared `markPlacement` (@formai/shared) so the
         // exported mark lands exactly where the review preview draws it.
         const { x, y, size } = markPlacement(rowBand, band);
-        page.drawText(text, {
+        page.drawText(winAnsiSafe(text), {
           x,
           y,
           size,

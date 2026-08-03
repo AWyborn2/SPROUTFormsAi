@@ -337,7 +337,8 @@ export function validateManifest(
 
   const seenKeys = new Set<string>();
   const seenOrdinals = new Set<number>();
-  const fieldIds = new Set(fields.map((f) => f.id));
+  const byFieldId = new Map(fields.map((f) => [f.id, f]));
+  const fieldIds = new Set(byFieldId.keys());
 
   for (const part of parts) {
     if (seenKeys.has(part.key)) problems.push(`Duplicate part key "${part.key}".`);
@@ -365,6 +366,36 @@ export function validateManifest(
     for (const id of part.mandatoryFieldIds ?? []) {
       if (!fieldIds.has(id)) {
         problems.push(`Part "${part.key}" names mandatory field "${id}", which is not in this version.`);
+        continue;
+      }
+
+      /*
+        A MUST-PASS QUESTION THAT CANNOT BE MARKED IS A LIE.
+
+        `markTheory` skips any field without an `answerKey` — and
+        `validateAnswerKeys` only inspects fields that HAVE one, so an unkeyed
+        question passed every check while contributing nothing. Listing it here
+        says it gates the part's outcome; the marking code never looks at it.
+        The part could reach 100% with the question never assessed, and nothing
+        anywhere said so.
+
+        That is exactly what the theory paper's matching questions do today:
+        extracted as free-response text, sitting in the must-pass section,
+        silently unmarked.
+
+        A hard problem rather than a warning, because both fixes are cheap and
+        the status quo is not: give the question an answer key (see
+        `buildMatchingQuestion` for the matching shape), or take it out of the
+        mandatory set. An unmarked question genuinely does not gate the outcome
+        — removing it makes the manifest say what the code does.
+      */
+      const field = byFieldId.get(id);
+      if (field && (!field.answerKey || field.answerKey.length === 0)) {
+        problems.push(
+          `Part "${part.key}" makes field "${id}" mandatory, but it has no answer key, so marking ` +
+            'skips it and it cannot gate the outcome. Give it an answer key or drop it from ' +
+            'mandatoryFieldIds.',
+        );
       }
     }
 

@@ -754,8 +754,45 @@ Mandatory (must-be-100%) questions: ${mandatoryFieldIds.length} — ${mandatoryF
   problems.push(...validateManifest(manifest, fields));
   problems.push(...validateAnswerKeys(fields));
 
+  /*
+     A PRINTED VERDICT BOX THAT NO QUESTION CLAIMS.
+
+     The count check earlier compares the answer key against the questions this
+     script could PAIR — and a question the extractor did not type as a choice
+     field is missing from both sides, so the counts agree and the run looks
+     clean. That is exactly what happens to the two matching questions ("Match
+     the statement with the appropriate signage", "Match the correct response
+     with the horn Signals"): they extract as free-response text, `isQuestion`
+     is false for them, and they appear in neither `pairs` nor `unpaired`.
+
+     The paper still prints a tick/cross box beside each. So the detectable
+     signal is the box: an outcome cell no question claims is a verdict the
+     document expects and nothing will ever write, and the theory percentage is
+     computed without that question entirely.
+
+     Reported on EVERY run rather than only on the failure path, because a clean
+     run is precisely when nobody goes looking.
+  */
+  const claimedOutcomes = new Set(paired.map((p) => p.outcome.id));
+  const orphanOutcomes = fields.filter(
+    (f) => f.type === 'check_cross' && !claimedOutcomes.has(f.id),
+  );
+  if (orphanOutcomes.length) {
+    warnings.push(
+      `${orphanOutcomes.length} printed outcome box(es) belong to no keyed question, so those ` +
+        'questions are NOT auto-marked and the theory percentage is computed without them: ' +
+        orphanOutcomes.map((f) => `${f.id} "${(f.label ?? '').slice(0, 40)}"`).join(', ') +
+        '. A matching question is the usual cause — it extracts as free-response text. Retype it ' +
+        'as a checkbox group whose options are the PAIRINGS (buildMatchingQuestion in ' +
+        '@formai/shared builds them) and add it to the key.',
+    );
+  }
+
   // ── report ──────────────────────────────────────────────────────────────
-  console.log(`\nAnswer keys applied: ${keyed.length}/31`);
+  // `expected` rather than a hardcoded 31: the key file is the authority on how
+  // many questions there are, and a literal here would keep reading "29/31"
+  // after a key legitimately changed size.
+  console.log(`\nAnswer keys applied: ${keyed.length}/${expected}`);
   for (const k of keyed) console.log(`  ${k}`);
   if (skipped.length) {
     console.log(`\nSKIPPED (not auto-marked until fixed): ${skipped.length}`);
