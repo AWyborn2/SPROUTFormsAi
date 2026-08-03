@@ -19,6 +19,7 @@ import { inductionsRouter } from './routes/inductions.js';
 import { invitesRouter, publicInvitesRouter } from './routes/invites.js';
 import { passwordResetRouter } from './routes/password-reset.js';
 import { orgRouter } from './routes/org.js';
+import { importDraftsRouter } from './routes/import-drafts.js';
 import { pdfRouter } from './routes/pdf.js';
 import { submissionsRouter } from './routes/submissions.js';
 import { teamRouter } from './routes/team.js';
@@ -56,6 +57,15 @@ export function createApp(): Express {
   const attachmentJson = express.json({ limit: '16mb' });
   app.use('/uploads', attachmentJson, uploadsRouter);
   app.use('/fill/:token/uploads', attachmentJson);
+
+  /*
+    And again, for the same registration-order reason. A saved import carries a
+    whole extraction plus every placement box on an eighteen-page document, which
+    is a long way past the global 2 MB parser — that would 413 a reviewer's
+    afternoon of work before this router ever saw the body. Scoped to this path
+    so everything else keeps the tighter limit.
+  */
+  app.use('/import-drafts', express.json({ limit: '40mb' }), importDraftsRouter);
 
   app.use(express.json({ limit: '2mb' }));
 

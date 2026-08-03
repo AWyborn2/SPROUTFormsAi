@@ -16,6 +16,7 @@
  * Query hooks in `hooks.ts` read through this; the hook surface —
  * and therefore the screens — is unchanged either way.
  */
+import type { ImportSnapshot } from './import-draft-store.js';
 import type {
   BrandingKit,
   FormContainer,
@@ -238,6 +239,16 @@ interface AuditEntryDto {
   category: AuditCategory;
   icon: string;
   createdAt: string;
+}
+
+/** A saved import, without its snapshot. */
+export interface ImportDraftSummary {
+  id: string;
+  name: string;
+  assetId: string;
+  savedByUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface CompetencyDto {
@@ -852,6 +863,35 @@ export const store = {
    */
   listCompetencyHolders(competencyId: string): Promise<CompetencyHolder[]> {
     return apiClient.get<CompetencyHolder[]>(`/competencies/${competencyId}/holders`);
+  },
+
+  /* ── Saved imports ─────────────────────────────────────────────────────── */
+
+  /**
+   * Save a half-mapped import under a name, on the server.
+   *
+   * Distinct from the wizard's local autosave, which covers an interruption.
+   * This is for what a browser copy cannot survive — a dead laptop, a form one
+   * person starts and another finishes, a mapping parked while the paper
+   * document goes through a revision. Saving under a name already used
+   * overwrites it, which is what "save" means everywhere else.
+   */
+  saveImportDraft(input: { name: string; assetId: string; snapshot: ImportSnapshot }): Promise<ImportDraftSummary> {
+    return apiClient.post<ImportDraftSummary>('/import-drafts', input);
+  },
+
+  /** Every saved import in this org, most recently touched first. Summaries only. */
+  listImportDrafts(): Promise<ImportDraftSummary[]> {
+    return apiClient.get<ImportDraftSummary[]>('/import-drafts');
+  },
+
+  /** One saved import WITH its snapshot — what resuming actually loads. */
+  getImportDraft(id: string): Promise<ImportDraftSummary & { snapshot: ImportSnapshot }> {
+    return apiClient.get<ImportDraftSummary & { snapshot: ImportSnapshot }>(`/import-drafts/${id}`);
+  },
+
+  discardImportDraft(id: string): Promise<void> {
+    return apiClient.delete<void>(`/import-drafts/${id}`);
   },
 
   listCompetencyRules(): Promise<CompetencyRule[]> {

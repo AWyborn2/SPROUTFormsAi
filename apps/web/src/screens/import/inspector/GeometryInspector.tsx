@@ -20,9 +20,12 @@ import { markSentence } from '../../../lib/mark-description.js';
 import {
   adjustGeometryBand,
   confirmGeometry,
+  copyPlacementToField,
   geometryConfirmed,
   geometryProposal,
+  getImportSession,
   optionSlotId,
+  placementSourcesFor,
   proposeGeometry,
   rejectGeometry,
   setFieldPrintSelectedValue,
@@ -53,6 +56,117 @@ export interface GeometryInspectorProps {
   activeDrawSlot?: string | null;
   /** Arm/disarm the draw gesture for one slot on the PDF overlay (KTD5). */
   onToggleDrawSlot?: (slot: string) => void;
+}
+
+/**
+ * Reuse a placement already made on a part that prints the same thing.
+ *
+ * Parts 2, 4 and 6 of an assessment are ONE checklist printed three times, and
+ * placing each by hand means measuring the same rows and columns three times
+ * for no more accuracy than the first.
+ *
+ * The copy brings the shape — columns, rows, width, horizontal position — onto
+ * the page named here, and lands it UNCONFIRMED. The vertical position is the
+ * part that genuinely differs between pages, so the reviewer drags it into
+ * place and confirms: the same two steps they would end on anyway, without the
+ * measuring.
+ *
+ * Sources that CANNOT be used are listed with the reason rather than hidden. On
+ * a page of visibly similar tables an empty list reads as a broken feature,
+ * where "'Part 2 checklist' has 22 rows, this one has 24" is usually the thing
+ * the reviewer most wanted to know about their document.
+ */
+function PlacementCopy({ field }: { field: ReviewField }) {
+  const [open, setOpen] = useState(false);
+  const [page, setPage] = useState<number | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  const candidates = placementSourcesFor(field.id);
+  if (candidates.length === 0) return null;
+
+  const usable = candidates.filter((c) => c.refusal === null);
+  const blocked = candidates.filter((c) => c.refusal !== null);
+  const pageCount = getImportSession().pageCount;
+  // Pages are one-based for a person reading a printed document.
+  const chosenPage = page ?? 1;
+
+  function copyFrom(sourceId: string) {
+    const result = copyPlacementToField(sourceId, field.id, chosenPage - 1);
+    if (result.ok) {
+      setOpen(false);
+      setProblem(null);
+    } else {
+      setProblem(result.reason);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="fai-chip-btn flex items-center gap-1.5 self-start rounded-sm text-[11.5px] text-text-accent hover:bg-surface-hover"
+      >
+        <Icon name="copy" size={12} />
+        Copy a placement from another part
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-border-accent bg-surface-accent-soft p-[10px_12px]">
+      <div className="text-[12px] font-semibold">Copy a placement onto this field</div>
+
+      <label className="flex items-center gap-2 text-[11.5px] text-text-secondary">
+        Onto page
+        <select
+          value={chosenPage}
+          onChange={(e) => setPage(Number(e.target.value))}
+          className="rounded-sm border border-border bg-surface-card px-1.5 py-0.5 text-[11.5px]"
+        >
+          {Array.from({ length: Math.max(1, pageCount) }, (_, i) => (
+            <option key={i + 1} value={i + 1}>
+              {i + 1}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {usable.length === 0 && (
+        <div className="text-[11.5px] text-text-tertiary">
+          Nothing placed so far has the same shape as this field.
+        </div>
+      )}
+
+      {usable.map(({ field: source }) => (
+        <button
+          key={source.id}
+          onClick={() => copyFrom(source.id)}
+          className="fai-chip-btn truncate rounded-sm border border-border bg-surface-card px-2 py-1 text-left text-[11.5px] hover:bg-surface-hover"
+        >
+          {source.label || source.id}
+        </button>
+      ))}
+
+      {blocked.map(({ field: source, refusal }) => (
+        <div key={source.id} className="text-[11px] text-text-tertiary">
+          <span className="font-medium">{source.label || source.id}</span> — {refusal}
+        </div>
+      ))}
+
+      {problem && <div className="text-[11.5px] text-danger-text">{problem}</div>}
+
+      <div className="text-[10.5px] text-text-tertiary">
+        The copy arrives unconfirmed — drag it into position on that page, then confirm it.
+      </div>
+
+      <button
+        onClick={() => setOpen(false)}
+        className="fai-chip-btn self-start rounded-sm text-[11px] text-text-tertiary hover:bg-surface-hover"
+      >
+        Cancel
+      </button>
+    </div>
+  );
 }
 
 export function GeometryInspector({ field, textPages, fields, activeDrawSlot = null, onToggleDrawSlot }: GeometryInspectorProps) {
@@ -223,6 +337,13 @@ export function GeometryInspector({ field, textPages, fields, activeDrawSlot = n
 
   return (
     <div className="flex flex-col gap-2 border-t border-border-subtle pt-3">
+      {/*
+        Offered only while this field is UNPLACED. Once a box exists, redrawing
+        or adjusting it is the right tool, and a copy control still sitting
+        there invites replacing hand-corrected geometry with a bulk paste.
+      */}
+      {!proposal && <PlacementCopy field={field} />}
+
       <div className="flex items-center gap-1.5">
         <Icon name={isTable ? 'grid-2x2' : 'square-dashed'} size={14} className="text-text-tertiary" />
         <span className="text-[12.5px] font-semibold">
@@ -593,7 +714,11 @@ function OptionBoxesGeometry({
   // adjusted even one box is mid-placement, and replacing their work with a
   // fresh derivation on the next render is the one thing this must never do.
   const anyPlaced = options.some((o) => geometryProposal(optionSlotId(field.id, o)) !== undefined);
-  const optionSig = options.join(' ');
+  // Joined on a NUL because no option value can contain one, so the signature
+  // cannot collide across different option lists. Written as an ESCAPE: a literal
+  // NUL in the source makes the whole file binary to grep and ripgrep, and every
+  // content search across the repo then skips it silently.
+  const optionSig = options.join('\u0000');
   const derived = useMemo(
     () => (anyPlaced ? null : deriveOptionCellsAcrossPages(field, textPages)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
