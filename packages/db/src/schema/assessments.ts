@@ -46,11 +46,41 @@ export const assessmentTools = pgTable(
       .$type<string[]>()
       .notNull()
       .default([]),
-    /** Competency ids an ASSESSOR must hold to assess this tool. */
+    /** Competency ids an ASSESSOR must hold to assess this tool, in every stream. */
     assessorCompetencyIds: jsonb('assessor_competency_ids')
       .$type<string[]>()
       .notNull()
       .default([]),
+    /*
+      EXTRA assessor requirements that depend on WHERE the assessment happens,
+      keyed by the case's `location_stream`.
+
+      The Track Dozer rule is `Q34666893 AND (Q50071833 OR Q50073293)`, and the
+      OR is not a free choice: Q50071833 (Worsley Assessor Skill Set) authorises
+      MINE assessments, Q50073293 (Authority to Assess Mobile Equipment)
+      authorises RAW MATERIALS. `assessorCompetencyIds` is a flat AND and cannot
+      express that — listing all three demands qualifications nobody holds
+      together, and listing one silently accepts an assessor authorised for the
+      other site.
+
+      So the always-required half stays above and the location-specific half
+      lives here: `{ "Mining": [<Q50071833 id>], "Raw Materials": [<Q50073293 id>] }`.
+
+      THE KEYS MUST USE THE VOCABULARY THE DOCUMENT ALREADY USES — "Mining", not
+      "Mine". This is matched against `assessment_cases.location_stream`, which
+      is one free-text value also fed back as the answer to the document's own
+      stream question, so the eligibility rule does not get to pick its own
+      names. Matching is case-insensitive and trimmed; a stream that matches no
+      key is FLAGGED rather than treated as a location with no requirement,
+      because a near-miss spelling is far likelier than an unregulated site.
+
+      Empty on a tool whose requirements do not vary by location — which is
+      every tool that existed before this column.
+    */
+    assessorStreamCompetencyIds: jsonb('assessor_stream_competency_ids')
+      .$type<Record<string, string[]>>()
+      .notNull()
+      .default({}),
     /*
       Competency ids this tool AWARDS on sign-off. The tool declared what a
       candidate must bring and what an assessor must hold, but never what

@@ -19,6 +19,8 @@ import {
   markTheory,
   orderedParts,
   requiredParts,
+  resolveAssessorRequirements,
+  streamCheckWarning,
   totalLoggedHours,
   stripMarkingSecrets,
   validateAnswerKeys,
@@ -318,6 +320,14 @@ const toolBody = z.object({
   }),
   candidatePrerequisiteIds: z.array(z.string().uuid()).optional(),
   assessorCompetencyIds: z.array(z.string().uuid()).optional(),
+  /**
+   * Extra assessor requirements per location stream, keyed by stream name.
+   *
+   * The half of the rule a flat AND list cannot state: Q50071833 authorises
+   * mine assessments and Q50073293 authorises raw materials, so which one an
+   * assessor needs depends on where the assessment happens.
+   */
+  assessorStreamCompetencyIds: z.record(z.string().min(1), z.array(z.string().uuid())).optional(),
   /** What passing this tool AWARDS. Granted on sign-off, linked to the case. */
   awardedCompetencyIds: z.array(z.string().uuid()).optional(),
 });
@@ -379,6 +389,7 @@ assessmentToolsRouter.post(
         manifest: manifest as AssessmentToolManifest,
         candidatePrerequisiteIds: parsed.data.candidatePrerequisiteIds ?? [],
         assessorCompetencyIds: parsed.data.assessorCompetencyIds ?? [],
+        assessorStreamCompetencyIds: parsed.data.assessorStreamCompetencyIds ?? {},
         awardedCompetencyIds: parsed.data.awardedCompetencyIds ?? [],
       })
       .returning();
@@ -413,6 +424,18 @@ assessmentToolsRouter.get(
         name: t.name,
         templateId: t.templateId,
         parts: orderedParts(t.manifest).map((p) => ({ key: p.key, label: p.label, kind: p.kind })),
+        /*
+          The location streams this tool's assessor rule distinguishes, so the
+          new-case form can offer them instead of leaving somebody to guess the
+          spelling. Matching is case-insensitive, but "Raw Mats" is not "Raw
+          Materials" under any normalisation, and a stream the tool does not
+          recognise silently contributes no requirement.
+
+          Names only, never the competency ids behind them: which qualification
+          authorises which site is not something the case form needs, and this
+          list is served to anyone who may open a case.
+        */
+        locationStreams: Object.keys(t.assessorStreamCompetencyIds ?? {}),
       })),
     );
   }),
@@ -490,13 +513,26 @@ assessmentCasesRouter.post(
       return;
     }
 
+    /*
+      WHO MAY ASSESS THIS DEPENDS ON WHERE IT HAPPENS. Q50071833 authorises mine
+      assessments and Q50073293 authorises raw materials, so the requirement is
+      resolved against this case's stream rather than read as a flat list.
+    */
+    const assessorNeeds = resolveAssessorRequirements(
+      { always: tool.assessorCompetencyIds, byStream: tool.assessorStreamCompetencyIds },
+      locationStream,
+    );
+
     const [candidateGaps, assessorGaps] = await Promise.all([
       unmetPrerequisites(db, tenant.orgId, candidateUserId, tool.candidatePrerequisiteIds),
-      unmetPrerequisites(db, tenant.orgId, assessorUserId, tool.assessorCompetencyIds),
+      unmetPrerequisites(db, tenant.orgId, assessorUserId, assessorNeeds.required),
     ]);
+    // A partial check reported as a complete one is worse than saying so.
+    const streamWarning = streamCheckWarning(assessorNeeds, locationStream);
     const warnings = [
       ...candidateGaps.map((gap) => describeGap('candidate', gap)),
       ...assessorGaps.map((gap) => describeGap('assessor', gap)),
+      ...(streamWarning ? [streamWarning] : []),
     ];
 
     const [row] = await db
@@ -1911,15 +1947,27 @@ assessmentCasesRouter.post(
       return;
     }
 
-    // Warned on, never blocking — the same doctrine as case creation. An
-    // out-of-date competency record is far more common than an unqualified
-    // assessor, and refusing here would stop a real assessment over data entry.
+    /*
+      Warned on, never blocking — the same doctrine as case creation. An
+      out-of-date competency record is far more common than an unqualified
+      assessor, and refusing here would stop a real assessment over data entry.
+
+      Resolved against THIS CASE'S stream, and against the person signing off
+      rather than the one the case was opened against: the case may have been
+      opened by one assessor and certified by another, and it is the signature
+      on the certificate whose authority matters.
+    */
+    const assessorNeeds = resolveAssessorRequirements(
+      { always: tool.assessorCompetencyIds, byStream: tool.assessorStreamCompetencyIds },
+      row.locationStream,
+    );
     const assessorGaps = await unmetPrerequisites(
       db,
       tenant.orgId,
       tenant.userId,
-      tool.assessorCompetencyIds,
+      assessorNeeds.required,
     );
+    const signOffStreamWarning = streamCheckWarning(assessorNeeds, row.locationStream);
 
     const signedOffAt = new Date();
     await db
@@ -1934,9 +1982,26 @@ assessmentCasesRouter.post(
       })
       .where(eq(schema.assessmentCases.id, row.id));
 
+    /*
+      THIS TARGET IS THE ONLY DURABLE RECORD OF THE SIGN-OFF-TIME CHECK.
+
+      The case's `prerequisiteWarnings` column is written once, at creation,
+      against the assessor the case was OPENED with — and the case screen labels
+      it as such. Sign-off deliberately checks whoever is signing, who may be
+      someone else, so if this line does not say what was found, nothing does.
+
+      It used to interpolate `assessorGaps` directly. Those became objects when
+      gaps gained a reason, so every such entry read "assessor missing
+      [object Object]" — an audit trail recording that something was wrong and
+      not what.
+    */
+    const signOffNotes = [
+      ...assessorGaps.map((gap) => describeGap('assessor', gap)),
+      ...(signOffStreamWarning ? [signOffStreamWarning] : []),
+    ];
     await recordAudit(db, tenant, {
       action: 'Signed off assessment case',
-      target: `${row.id} → ${parsed.data.assessorName}${assessorGaps.length ? ` (assessor missing ${assessorGaps.join(', ')})` : ''}`,
+      target: `${row.id} → ${parsed.data.assessorName}${signOffNotes.length ? ` (${signOffNotes.join('; ')})` : ''}`,
       category: 'submissions',
       icon: 'circle-check',
     });
@@ -1976,6 +2041,7 @@ assessmentCasesRouter.post(
       granted,
       warnings: [
         ...assessorGaps.map((gap) => describeGap('assessor', gap)),
+        ...(signOffStreamWarning ? [signOffStreamWarning] : []),
         ...grantProblems,
       ],
     });

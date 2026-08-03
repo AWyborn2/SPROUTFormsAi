@@ -816,6 +816,30 @@ export const store = {
   },
 
   /**
+   * Add a competency to the register.
+   *
+   * `POST /competencies` has existed since gating shipped, but nothing called
+   * it — so an org with an empty register had no way to populate one except
+   * hand-written SQL, and the first real deployment reached sign-off with zero
+   * competencies recorded. Every assessment signed off granted nothing: the
+   * case still went competent and the certificate still printed, and only the
+   * register stayed empty.
+   *
+   * There is deliberately no matching delete. `competency_holders.competency_id`
+   * cascades, so removing a competency erases every record of who held it —
+   * the exact erasure the revoke path was just fixed to avoid. Deleting one
+   * stays a deliberate act performed against the API.
+   */
+  createCompetency(input: {
+    name: string;
+    code: string;
+    validForMonths: number | null;
+    gracePeriodDays: number | null;
+  }): Promise<Competency> {
+    return apiClient.post<CompetencyDto>('/competencies', input).then(toCompetency);
+  },
+
+  /**
    * Change how long a competency stays valid.
    *
    * Applies to everyone who already holds it, immediately: expiry is counted

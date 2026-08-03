@@ -42,10 +42,10 @@ pnpm install && pnpm --filter @formai/shared build && pnpm db:migrate
 All three, every time — not conditionally.
 
 - **`db:migrate` is not optional.** `0022` adds the `awaiting_sign_off` enum
-  value and the four `signed_off_*` columns, and `0023` adds the expiry columns
-  — the ORM selects all of them on every read, so without it the tool list and
-  case list return 500 long before you reach sign-off. Nothing migrates on boot;
-  that is a deliberate decision.
+  value and the four `signed_off_*` columns, `0023` adds the expiry columns and
+  `0024` the per-stream assessor requirements — the ORM selects all of them on
+  every read, so without it the tool list and case list return 500 long before
+  you reach sign-off. Nothing migrates on boot; that is a deliberate decision.
 - **`shared build` is not optional either.** The authoring script in step 4 runs
   under plain `node`, which resolves `@formai/shared` to `dist/` — gitignored,
   and never populated by the dev servers. Skip it and step 4 dies with
@@ -255,6 +255,13 @@ In the app:
 
 1. **Assessments** → **New case**. Pick the Track Dozer tool, a candidate, and
    the **New and inexperienced** pathway (that is the six-part programme).
+   **Set the location stream** — the field now offers *Mining* and *Raw Materials*
+   because the tool declares different assessor requirements for each:
+   `Q50071833` (Worsley Assessor Skill Set) authorises the mine, `Q50073293`
+   (Authority to Assess Mobile Equipment) authorises raw materials, and
+   `Q34666893` is required at both. Leave it blank and the case still opens, but
+   it carries a warning saying that half of the assessor check was skipped —
+   which is the honest answer, not a pass.
 2. Open the case → **Part 1 Theory** → **Start this part**.
 3. **Open answers**, fill the 31 theory questions, **Hand in for marking**.
 4. Back on the case, record the outcome. Theory shows no
@@ -367,7 +374,7 @@ is a statement that somebody was assessed on something nobody checked.
 
 | Gap | Effect |
 |---|---|
-| No location-stream question on the paper | Mining vs Raw Materials content is not gated per candidate; every candidate sees both sets. Fail-open by design. |
+| No location-stream question on the paper | Mining vs Raw Materials *content* is not gated per candidate; every candidate sees both sets. Fail-open by design. Assessor eligibility is a separate matter — see below. |
 | Answer key lives in git | `docs/assessment-tools/track-dozer.answer-key.json` is the complete key to a safety-critical assessment. Moves to the DB once upload-at-import exists. |
 | Rings sized from your box | If they read too tight or too loose against the printed letters, `RING_PAD` / `RING_MIN_RADIUS` in `apps/api/src/pdf/round-trip.ts` are the dials. |
 

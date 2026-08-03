@@ -173,8 +173,15 @@
     {
       "idx": 24,
       "version": "7",
-      "when": 1785720489606,
-      "tag": "0024_smooth_exiles",
+      "when": 1785715309223,
+      "tag": "0024_open_rockslide",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1785722009849,
+      "tag": "0025_natural_ma_gnuci",
       "breakpoints": true
     }
   ]
