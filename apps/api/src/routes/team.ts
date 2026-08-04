@@ -11,7 +11,7 @@ import { isUniqueViolation } from '../lib/db-errors.js';
 import { recordAudit } from '../audit/record.js';
 import { sendInviteEmail } from '../email/resend.js';
 import { env } from '../env.js';
-import { checkSeatAvailability, seatLimitError } from '../lib/seats.js';
+import { checkSeatAvailability, lockOrgForSeats, poolFor, seatLimitError } from '../lib/seats.js';
 import { db } from '../db.js';
 
 export const teamRouter: Router = Router();
@@ -335,6 +335,26 @@ teamRouter.patch(
         return;
       }
       const nextInviteRole = parsed.data.role;
+
+      // Same pool-crossing rule as the membership branch below, but ADVISORY:
+      // a pending invite reserves nothing, so this is the courtesy refusal the
+      // dialog shows, exactly as at invite creation. It is here because
+      // without it "create a viewer invite, then PATCH it to candidate" walks
+      // straight around the creation-time check on the candidate pool. Same-pool
+      // changes need no check — creation already cleared that pool.
+      if (poolFor(invite.role) !== poolFor(nextInviteRole)) {
+        const inviteOrg = await db.query.organizations.findFirst({
+          where: eq(schema.organizations.id, tenant.orgId),
+        });
+        if (inviteOrg) {
+          const check = await checkSeatAvailability(db, inviteOrg, nextInviteRole);
+          if (!check.ok) {
+            res.status(403).json(seatLimitError(check, inviteOrg.planTier));
+            return;
+          }
+        }
+      }
+
       await db.update(schema.invites).set({ role: nextInviteRole }).where(eq(schema.invites.id, invite.id));
       if (invite.role !== nextInviteRole) {
         await recordAudit(db, tenant, {
@@ -357,7 +377,39 @@ teamRouter.patch(
     const previousRole = membership.role;
     const nextRole = parsed.data.role;
 
-    await db.update(schema.memberships).set({ role: nextRole }).where(eq(schema.memberships.id, membership.id));
+    // ── Seat limit check ──────────────────────────────────────────────────
+    // A role change only consumes a seat when it CROSSES pools. Promoting an
+    // operator who now runs their own inductions (candidate → assessor) moves
+    // them out of the candidate pool and into the staff one, which is a new
+    // staff seat; viewer → builder moves nobody and can never breach a limit,
+    // so a full pool it is not joining must not refuse it. Crossing the other
+    // way frees a seat and is always allowed.
+    //
+    // The member is not in the target pool yet, so the plain `used < limit`
+    // asks the right question. A non-active membership is in NEITHER pool —
+    // the count is of active rows — so re-roling a suspended member consumes
+    // nothing and is not gated.
+    //
+    // Transaction and row lock for the same reason invite acceptance has
+    // them: the count and the UPDATE it guards must be one indivisible step,
+    // or two admins promoting two candidates at once both pass a count that
+    // neither of them has changed yet. See lib/seats.ts.
+    const consumesSeat = membership.status === 'active' && poolFor(previousRole) !== poolFor(nextRole);
+    const refusal = await db.transaction(async (tx) => {
+      if (consumesSeat) {
+        const org = await lockOrgForSeats(tx, tenant.orgId);
+        if (org) {
+          const check = await checkSeatAvailability(tx, org, nextRole);
+          if (!check.ok) return seatLimitError(check, org.planTier);
+        }
+      }
+      await tx.update(schema.memberships).set({ role: nextRole }).where(eq(schema.memberships.id, membership.id));
+      return null;
+    });
+    if (refusal) {
+      res.status(403).json(refusal);
+      return;
+    }
 
     if (previousRole !== nextRole) {
       await recordAudit(db, tenant, {
