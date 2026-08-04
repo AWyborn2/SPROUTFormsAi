@@ -58,36 +58,64 @@ function fakeDb(opts: {
   insertedCompetency?: unknown;
   /** Resolved by the seat-limit `db.select({ count }).from(memberships).where(...)` query. */
   activeSeatCount?: number;
+  /**
+   * The org row the in-transaction `SELECT ... FOR UPDATE` returns. Defaults to
+   * `organizationsFindFirst` — override only to make the locked read differ
+   * from the unlocked one.
+   */
+  lockedOrg?: unknown;
 }) {
   const updateSet = vi.fn();
   const deleteWhere = vi.fn();
   const insertValues = vi.fn();
+  const forUpdate = vi.fn();
+  /** Every statement in order, tagged with the surface that issued it. */
+  const ops: Array<{ on: 'root' | 'tx'; op: 'lock' | 'count' | 'update'; table?: unknown }> = [];
+  const lockedOrg = 'lockedOrg' in opts ? opts.lockedOrg : opts.organizationsFindFirst;
 
-  const db = {
-    query: {
-      rolePermissions: {
-        findFirst: vi.fn().mockResolvedValue(opts.rolePermissionsFindFirst),
-        findMany: vi.fn().mockResolvedValue(opts.rolePermissionsFindMany ?? []),
-      },
-      memberships: {
-        findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst),
-        findMany: vi.fn().mockResolvedValue(opts.membershipsFindMany ?? []),
-      },
-      users: {
-        findFirst: vi.fn().mockResolvedValue(opts.usersFindFirst),
-        findMany: vi.fn().mockResolvedValue(opts.usersFindMany ?? []),
-      },
-      organizations: {
-        findFirst: vi.fn().mockResolvedValue(opts.organizationsFindFirst),
-      },
-      invites: {
-        findFirst: vi.fn().mockResolvedValue(opts.invitesFindFirst),
-        findMany: vi.fn().mockResolvedValue(opts.invitesFindMany ?? []),
-      },
+  const query = {
+    rolePermissions: {
+      findFirst: vi.fn().mockResolvedValue(opts.rolePermissionsFindFirst),
+      findMany: vi.fn().mockResolvedValue(opts.rolePermissionsFindMany ?? []),
     },
+    memberships: {
+      findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst),
+      findMany: vi.fn().mockResolvedValue(opts.membershipsFindMany ?? []),
+    },
+    users: {
+      findFirst: vi.fn().mockResolvedValue(opts.usersFindFirst),
+      findMany: vi.fn().mockResolvedValue(opts.usersFindMany ?? []),
+    },
+    organizations: {
+      findFirst: vi.fn().mockResolvedValue(opts.organizationsFindFirst),
+    },
+    invites: {
+      findFirst: vi.fn().mockResolvedValue(opts.invitesFindFirst),
+      findMany: vi.fn().mockResolvedValue(opts.invitesFindMany ?? []),
+    },
+  };
+
+  const makeSurface = (on: 'root' | 'tx') => ({
+    query,
     select: vi.fn(() => ({
-      from: vi.fn(() => ({
-        where: vi.fn().mockResolvedValue([{ count: opts.activeSeatCount ?? 0 }]),
+      from: vi.fn((table: unknown) => ({
+        where: () => {
+          const isOrg = table === schema.organizations;
+          const rows = isOrg ? (lockedOrg ? [lockedOrg] : []) : [{ count: opts.activeSeatCount ?? 0 }];
+          // A thenable rather than a Promise, so the mock can tell an awaited
+          // count apart from a `.for('update')` lock on the same builder.
+          return {
+            then: (resolve: (r: unknown[]) => void) => {
+              ops.push({ on, op: 'count', table });
+              resolve(rows);
+            },
+            for: (mode: string) => {
+              forUpdate(mode);
+              ops.push({ on, op: 'lock', table });
+              return Promise.resolve(rows);
+            },
+          };
+        },
       })),
     })),
     insert: vi.fn((table: unknown) => ({
@@ -105,6 +133,7 @@ function fakeDb(opts: {
     update: vi.fn((table: unknown) => ({
       set: (v: unknown) => {
         updateSet(table, v);
+        ops.push({ on, op: 'update', table });
         return { where: vi.fn().mockResolvedValue(undefined) };
       },
     })),
@@ -114,9 +143,13 @@ function fakeDb(opts: {
         return Promise.resolve(undefined);
       },
     })),
-  } as unknown as Db;
+  });
 
-  return { db, updateSet, deleteWhere, insertValues };
+  const tx = makeSurface('tx');
+  const transaction = vi.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx));
+  const db = { ...makeSurface('root'), transaction } as unknown as Db;
+
+  return { db, updateSet, deleteWhere, insertValues, forUpdate, ops, transaction };
 }
 
 beforeEach(() => {
@@ -730,6 +763,213 @@ describe('PATCH /team/members/:id', () => {
     } finally {
       server.close();
     }
+  });
+
+  /**
+   * A role change is the third way a seat gets consumed, alongside invite
+   * creation and acceptance — and the only one where the person already exists.
+   *
+   * What makes it different is that it only costs anything when it CROSSES
+   * pools. Getting that wrong in the safe-looking direction is its own bug: a
+   * full staff pool refusing viewer → builder would block ordinary admin work
+   * over a seat nobody is taking.
+   */
+  describe('seat limits', () => {
+    const FULL_STAFF_ORG = {
+      id: 'org-1',
+      name: 'Meridian Operations',
+      planTier: 'team',
+      seatLimit: 5,
+      candidateSeatLimit: 200,
+    };
+
+    function patchRole(base: string, id: string, role: string) {
+      return fetch(`${base}/team/members/${id}`, {
+        method: 'PATCH',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ role }),
+      });
+    }
+
+    it('refuses a candidate → staff promotion when the staff pool is full', async () => {
+      const { db, updateSet } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'candidate', status: 'active' },
+        usersFindFirst: { id: 'u2', name: 'Dale Rivers', email: 'dale@x.io' },
+        organizationsFindFirst: FULL_STAFF_ORG,
+        activeSeatCount: 5,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await patchRole(base, 'm1', 'assessor');
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({
+          error: 'seat_limit_reached',
+          seatLimit: 5,
+          seatUsed: 5,
+        });
+        expect(updateSet.mock.calls.find(([table]) => table === schema.memberships)).toBeUndefined();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('allows a same-pool change even when that pool is full, without counting at all', async () => {
+      const { db, updateSet, ops } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'viewer', status: 'active' },
+        usersFindFirst: { id: 'u2', name: 'Priya Nair', email: 'priya@x.io' },
+        organizationsFindFirst: FULL_STAFF_ORG,
+        activeSeatCount: 5,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        // viewer and builder are both staff: this member is already counted,
+        // so the full pool has nothing to say about it.
+        expect((await patchRole(base, 'm1', 'builder')).status).toBe(200);
+        expect(updateSet.mock.calls.find(([table]) => table === schema.memberships)?.[1]).toEqual({
+          role: 'builder',
+        });
+        expect(ops.some((o) => o.op === 'count' || o.op === 'lock')).toBe(false);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('allows a staff → candidate demotion that frees a staff seat', async () => {
+      const { db, updateSet } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'builder', status: 'active' },
+        usersFindFirst: { id: 'u2', name: 'Priya Nair', email: 'priya@x.io' },
+        // Staff is full, but the candidate pool is what this change joins.
+        organizationsFindFirst: FULL_STAFF_ORG,
+        activeSeatCount: 5,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        expect((await patchRole(base, 'm1', 'candidate')).status).toBe(200);
+        expect(updateSet.mock.calls.find(([table]) => table === schema.memberships)?.[1]).toEqual({
+          role: 'candidate',
+        });
+      } finally {
+        server.close();
+      }
+    });
+
+    it('refuses the same demotion when it is the CANDIDATE pool that is full', async () => {
+      const { db, updateSet } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'builder', status: 'active' },
+        usersFindFirst: { id: 'u2', name: 'Priya Nair', email: 'priya@x.io' },
+        organizationsFindFirst: { ...FULL_STAFF_ORG, seatLimit: 50, candidateSeatLimit: 3 },
+        activeSeatCount: 3,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await patchRole(base, 'm1', 'candidate');
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ error: 'candidate_limit_reached', seatLimit: 3 });
+        expect(updateSet.mock.calls.find(([table]) => table === schema.memberships)).toBeUndefined();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('does not gate a suspended member, who is in neither pool', async () => {
+      const { db, updateSet, ops } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'candidate', status: 'suspended' },
+        usersFindFirst: { id: 'u2', name: 'Dale Rivers', email: 'dale@x.io' },
+        organizationsFindFirst: FULL_STAFF_ORG,
+        activeSeatCount: 5,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        // The count is of ACTIVE rows, so this change moves no total.
+        expect((await patchRole(base, 'm1', 'assessor')).status).toBe(200);
+        expect(updateSet.mock.calls.find(([table]) => table === schema.memberships)?.[1]).toEqual({
+          role: 'assessor',
+        });
+        expect(ops.some((o) => o.op === 'count' || o.op === 'lock')).toBe(false);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('locks the org row, then counts, then updates — all on the one transaction', async () => {
+      const { db, forUpdate, ops, transaction } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'candidate', status: 'active' },
+        usersFindFirst: { id: 'u2', name: 'Dale Rivers', email: 'dale@x.io' },
+        organizationsFindFirst: FULL_STAFF_ORG,
+        activeSeatCount: 4, // the last free staff seat
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        expect((await patchRole(base, 'm1', 'assessor')).status).toBe(200);
+        expect(transaction).toHaveBeenCalledTimes(1);
+        expect(forUpdate).toHaveBeenCalledWith('update');
+
+        // Two admins promoting two candidates at once would otherwise both
+        // pass a count neither of them had changed yet.
+        const seatOps = ops.filter(
+          (o) => o.op === 'lock' || o.op === 'count' || (o.op === 'update' && o.table === schema.memberships),
+        );
+        expect(seatOps.map((o) => `${o.on}:${o.op}`)).toEqual(['tx:lock', 'tx:count', 'tx:update']);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('refuses re-roling a PENDING invite into a full pool, closing the creation-check bypass', async () => {
+      const { db, updateSet } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: undefined,
+        invitesFindFirst: { id: 'inv-1', orgId: 'org-1', email: 'sam@x.io', role: 'viewer', acceptedAt: null },
+        organizationsFindFirst: { ...FULL_STAFF_ORG, candidateSeatLimit: 3 },
+        activeSeatCount: 3,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        // Otherwise: create a viewer invite, PATCH it to candidate, and the
+        // candidate limit checked at creation never applies.
+        const res = await patchRole(base, 'inv-1', 'candidate');
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ error: 'candidate_limit_reached' });
+        expect(updateSet.mock.calls.find(([table]) => table === schema.invites)).toBeUndefined();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('leaves a same-pool invite re-role alone when the staff pool is full', async () => {
+      const { db, updateSet } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: undefined,
+        invitesFindFirst: { id: 'inv-1', orgId: 'org-1', email: 'sam@x.io', role: 'viewer', acceptedAt: null },
+        organizationsFindFirst: FULL_STAFF_ORG,
+        activeSeatCount: 5,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        // Creating this invite already cleared the staff pool; nothing about
+        // viewer → builder asks for a second seat.
+        expect((await patchRole(base, 'inv-1', 'builder')).status).toBe(200);
+        expect(updateSet.mock.calls.find(([table]) => table === schema.invites)?.[1]).toEqual({
+          role: 'builder',
+        });
+      } finally {
+        server.close();
+      }
+    });
   });
 });
 

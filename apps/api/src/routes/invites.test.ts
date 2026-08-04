@@ -39,52 +39,110 @@ const PENDING_INVITE = {
 };
 
 function insertResult(rows: unknown[]) {
-  const awaitable = Promise.resolve(undefined) as Promise<undefined> & { returning: () => Promise<unknown[]> };
+  const awaitable = Promise.resolve(undefined) as Promise<undefined> & {
+    returning: () => Promise<unknown[]>;
+    onConflictDoNothing: () => Promise<undefined>;
+  };
   awaitable.returning = vi.fn().mockResolvedValue(rows);
+  awaitable.onConflictDoNothing = vi.fn().mockResolvedValue(undefined);
   return awaitable;
 }
 
+/** One org shape for the seat tests. Staff pool of 2, candidate pool of 3. */
+const SMALL_ORG = {
+  id: 'org-invited',
+  name: 'Meridian Operations',
+  planTier: 'team',
+  seatLimit: 2,
+  candidateSeatLimit: 3,
+};
+
+/**
+ * `organizationsFindFirst` answers the UNLOCKED reads; `lockedOrg` answers the
+ * `SELECT ... FOR UPDATE` inside the transaction and defaults to it. `seatsUsed`
+ * is the membership count, and `txSeatsUsed` overrides it for the transaction
+ * alone — the pair is how a test models a pool that filled up in the gap
+ * between the advisory read and the lock.
+ *
+ * `ops` logs every statement in order, tagged with the surface that issued it
+ * ('root' or 'tx'), so a test can assert the lock, the count and the membership
+ * INSERT were genuinely one transaction rather than three loose statements.
+ */
 function fakeDb(opts: {
   invitesFindFirst?: unknown;
   membershipsFindFirst?: unknown;
   organizationsFindFirst?: unknown;
   usersFindFirst?: unknown;
+  lockedOrg?: unknown;
+  seatsUsed?: number;
+  txSeatsUsed?: number;
   /** Rows the invite-claiming UPDATE returns — `[]` models losing the race. */
   claimResult?: unknown[];
-  membershipInsertError?: unknown;
 }) {
   const insertValues = vi.fn();
   const updateSet = vi.fn();
+  const forUpdate = vi.fn();
+  const ops: Array<{ on: 'root' | 'tx'; op: 'lock' | 'count' | 'insert' | 'update'; table?: unknown }> = [];
+  const lockedOrg = 'lockedOrg' in opts ? opts.lockedOrg : opts.organizationsFindFirst;
 
-  const db = {
-    query: {
-      invites: { findFirst: vi.fn().mockResolvedValue(opts.invitesFindFirst) },
-      memberships: { findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst) },
-      organizations: { findFirst: vi.fn().mockResolvedValue(opts.organizationsFindFirst) },
-      users: {
-        // `in` rather than `??` so a test can say "no such user" with an
-        // explicit undefined — the signup path turns entirely on that answer.
-        findFirst: vi
-          .fn()
-          .mockResolvedValue('usersFindFirst' in opts ? opts.usersFindFirst : { id: 'u1', name: 'Sam Lee' }),
-      },
+  const query = {
+    invites: { findFirst: vi.fn().mockResolvedValue(opts.invitesFindFirst) },
+    memberships: { findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst) },
+    organizations: { findFirst: vi.fn().mockResolvedValue(opts.organizationsFindFirst) },
+    users: {
+      // `in` rather than `??` so a test can say "no such user" with an
+      // explicit undefined — the signup path turns entirely on that answer.
+      findFirst: vi
+        .fn()
+        .mockResolvedValue('usersFindFirst' in opts ? opts.usersFindFirst : { id: 'u1', name: 'Sam Lee' }),
     },
+  };
+
+  const makeSurface = (on: 'root' | 'tx') => ({
+    query,
+    select: vi.fn(() => ({
+      from: (table: unknown) => ({
+        where: () => {
+          const used = (on === 'tx' ? opts.txSeatsUsed ?? opts.seatsUsed : opts.seatsUsed) ?? 0;
+          const rows =
+            table === schema.organizations ? (lockedOrg ? [lockedOrg] : []) : [{ count: used }];
+          // A thenable rather than a Promise, so the mock can tell an awaited
+          // count apart from a `.for('update')` lock on the same builder.
+          return {
+            then: (resolve: (r: unknown[]) => void) => {
+              ops.push({ on, op: 'count', table });
+              resolve(rows);
+            },
+            for: (mode: string) => {
+              forUpdate(mode);
+              ops.push({ on, op: 'lock', table });
+              return Promise.resolve(rows);
+            },
+          };
+        },
+      }),
+    })),
     insert: vi.fn((table: unknown) => ({
       values: (v: unknown) => {
         insertValues(table, v);
-        if (table === schema.memberships && opts.membershipInsertError) throw opts.membershipInsertError;
+        ops.push({ on, op: 'insert', table });
         return insertResult([{ id: 'new', ...(v as object) }]);
       },
     })),
     update: vi.fn((table: unknown) => ({
       set: (v: unknown) => {
         updateSet(table, v);
+        ops.push({ on, op: 'update', table });
         return { where: () => ({ returning: () => Promise.resolve(opts.claimResult ?? [PENDING_INVITE]) }) };
       },
     })),
-  } as unknown as Db;
+  });
 
-  return { db, insertValues, updateSet };
+  const tx = makeSurface('tx');
+  const transaction = vi.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx));
+  const db = { ...makeSurface('root'), transaction } as unknown as Db;
+
+  return { db, insertValues, updateSet, forUpdate, ops, transaction };
 }
 
 afterEach(() => {
@@ -225,6 +283,122 @@ describe('POST /invites/:token/accept', () => {
     } finally {
       server.close();
     }
+  });
+
+  /**
+   * Acceptance is the only thing holding the seat count down: a pending invite
+   * reserves nothing, so an org can hold far more outstanding invites than it
+   * has free seats, and a site induction hands out bulk QR codes that get
+   * redeemed within seconds of each other.
+   *
+   * What these cover is that the count and the membership INSERT are ONE step
+   * behind a row lock. Two acceptances reading `used = limit - 1` separately
+   * would both pass and both join, and nothing downstream would notice —
+   * `memberships_user_org_uq` only stops one user joining twice.
+   */
+  describe('seat limits', () => {
+    it('refuses when the staff pool is already full, leaving the token unspent', async () => {
+      const { db, insertValues, updateSet } = fakeDb({
+        invitesFindFirst: PENDING_INVITE,
+        membershipsFindFirst: undefined,
+        lockedOrg: SMALL_ORG,
+        seatsUsed: 2,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/invites/tok-abc/accept`, {
+          method: 'POST',
+          headers: authHeader(memberTenant),
+        });
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({
+          error: 'seat_limit_reached',
+          seatLimit: 2,
+          seatUsed: 2,
+        });
+        expect(insertValues.mock.calls.find(([t]) => t === schema.memberships)).toBeUndefined();
+        // Not consumed: the holder can still redeem it once a seat frees.
+        expect(updateSet.mock.calls.find(([t]) => t === schema.invites)).toBeUndefined();
+        expect(res.headers.get('set-cookie')).toBeNull();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('locks the org row, then counts, then inserts — all on the one transaction', async () => {
+      const { db, forUpdate, ops, transaction } = fakeDb({
+        invitesFindFirst: PENDING_INVITE,
+        membershipsFindFirst: undefined,
+        lockedOrg: SMALL_ORG,
+        seatsUsed: 1, // the last free seat
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/invites/tok-abc/accept`, {
+          method: 'POST',
+          headers: authHeader(memberTenant),
+        });
+        expect(res.status).toBe(200);
+        expect(transaction).toHaveBeenCalledTimes(1);
+        expect(forUpdate).toHaveBeenCalledWith('update');
+
+        // The order is the fix. A lock that came after the count, or a count
+        // taken on the root client, would leave exactly the gap this closes.
+        const seatOps = ops.filter(
+          (o) => o.op === 'lock' || o.op === 'count' || (o.op === 'insert' && o.table === schema.memberships),
+        );
+        expect(seatOps.map((o) => `${o.on}:${o.op}`)).toEqual(['tx:lock', 'tx:count', 'tx:insert']);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('draws a candidate invite on the candidate pool, not the staff one', async () => {
+      const { db } = fakeDb({
+        invitesFindFirst: { ...PENDING_INVITE, role: 'candidate' },
+        membershipsFindFirst: undefined,
+        lockedOrg: SMALL_ORG,
+        // Full on candidates, room to spare on staff — the pools are separate,
+        // so this must refuse rather than borrow a staff seat.
+        seatsUsed: 3,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/invites/tok-abc/accept`, {
+          method: 'POST',
+          headers: authHeader(memberTenant),
+        });
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ error: 'candidate_limit_reached', seatLimit: 3 });
+      } finally {
+        server.close();
+      }
+    });
+
+    it('skips the count entirely on an unlimited pool', async () => {
+      const { db, ops } = fakeDb({
+        invitesFindFirst: { ...PENDING_INVITE, role: 'candidate' },
+        membershipsFindFirst: undefined,
+        // Enterprise: candidateSeatLimit null means unlimited, not "inherit".
+        lockedOrg: { ...SMALL_ORG, planTier: 'enterprise', candidateSeatLimit: null },
+        seatsUsed: 900,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/invites/tok-abc/accept`, {
+          method: 'POST',
+          headers: authHeader(memberTenant),
+        });
+        expect(res.status).toBe(200);
+        expect(ops.some((o) => o.op === 'count' && o.table === schema.memberships)).toBe(false);
+      } finally {
+        server.close();
+      }
+    });
   });
 
   it('records an audit entry in the invited org, not the caller\'s previous one', async () => {
@@ -388,5 +562,84 @@ describe('POST /invites/:token/signup', () => {
     } finally {
       server.close();
     }
+  });
+
+  /**
+   * The same race as `/accept`, with an account creation in the middle of it.
+   * This path checks seats TWICE on purpose: once unlocked so a doomed request
+   * is refused before a bcrypt hash is spent on it, then again under the lock,
+   * which is the one that actually binds.
+   */
+  describe('seat limits', () => {
+    it('refuses a full org before opening a transaction at all', async () => {
+      const { db, insertValues, transaction } = fakeDb({
+        invitesFindFirst: PENDING_INVITE,
+        usersFindFirst: undefined,
+        organizationsFindFirst: SMALL_ORG,
+        seatsUsed: 2,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await signup(base, 'tok-abc', GOOD);
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ error: 'seat_limit_reached' });
+        // Cheap refusal: no hash, no transaction, no account.
+        expect(transaction).not.toHaveBeenCalled();
+        expect(insertValues.mock.calls.find(([t]) => t === schema.users)).toBeUndefined();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('still refuses when the pool fills between the unlocked read and the lock', async () => {
+      const { db, insertValues, updateSet } = fakeDb({
+        invitesFindFirst: PENDING_INVITE,
+        usersFindFirst: undefined,
+        organizationsFindFirst: SMALL_ORG,
+        seatsUsed: 1, // the advisory read saw the last free seat...
+        txSeatsUsed: 2, // ...and someone took it before the lock was granted
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await signup(base, 'tok-abc', GOOD);
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ error: 'seat_limit_reached', seatUsed: 2 });
+
+        // Nothing was written. An orphaned users row would be worse than no
+        // row: the retry, once a seat frees, hits `account_exists` — and this
+        // route will not touch an existing account, so the invite becomes
+        // permanently unredeemable by the person holding it.
+        expect(insertValues.mock.calls.find(([t]) => t === schema.users)).toBeUndefined();
+        expect(insertValues.mock.calls.find(([t]) => t === schema.memberships)).toBeUndefined();
+        expect(updateSet.mock.calls.find(([t]) => t === schema.invites)).toBeUndefined();
+        expect(res.headers.get('set-cookie')).toBeNull();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('creates the account, claims the invite and joins the org on one transaction', async () => {
+      const { db, ops, transaction } = fakeDb({
+        invitesFindFirst: PENDING_INVITE,
+        usersFindFirst: undefined,
+        organizationsFindFirst: SMALL_ORG,
+        seatsUsed: 1,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        expect((await signup(base, 'tok-abc', GOOD)).status).toBe(201);
+        expect(transaction).toHaveBeenCalledTimes(1);
+
+        // Everything that would have to be undone together ran inside it. The
+        // audit entry is the one deliberate exception, as on `/accept`.
+        const rootWrites = ops.filter((o) => (o.op === 'insert' || o.op === 'update') && o.on === 'root');
+        expect(rootWrites.map((o) => o.table)).toEqual([schema.auditLogEntries]);
+      } finally {
+        server.close();
+      }
+    });
   });
 });
