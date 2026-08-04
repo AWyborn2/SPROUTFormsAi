@@ -10,8 +10,9 @@ import type { Role } from '@formai/shared';
  * operators, so charging candidates against the staff limit would exhaust every
  * tier at a single site.
  *
- * Shared by the two places a membership can be created — invite creation
- * (`team.ts`) and invite acceptance (`invites.ts`). They MUST agree: if only one
+ * Shared by every place a pool can GAIN a membership — invite creation
+ * (`team.ts`), invite acceptance (`invites.ts`), and changing an existing
+ * member's role across the split (`team.ts`). They MUST agree: if only one
  * split the pools, an invite that passed creation would be refused on
  * acceptance, stranding the person holding the link.
  */
@@ -28,6 +29,17 @@ export interface SeatCheck {
 }
 
 /**
+ * Which pool a role draws on — the single definition of the split.
+ *
+ * Exported because changing an existing member's role has to tell a
+ * POOL-CROSSING change (which needs a seat check, since it adds one to the
+ * destination pool) from one that stays put: Viewer → Builder moves nobody.
+ */
+export function poolFor(role: Role): 'staff' | 'candidate' {
+  return role === 'candidate' ? 'candidate' : 'staff';
+}
+
+/**
  * The limit governing `role` for this org.
  *
  * Resolution order matches the pre-existing staff-seat rule: the explicit
@@ -40,10 +52,11 @@ function limitFor(
   role: Role,
 ): { limit: number | null; pool: 'staff' | 'candidate' } {
   const tier = PLAN_CONFIG[org.planTier as PlanTier];
-  if (role === 'candidate') {
-    return { limit: org.candidateSeatLimit ?? tier?.candidateSeatLimit ?? null, pool: 'candidate' };
+  const pool = poolFor(role);
+  if (pool === 'candidate') {
+    return { limit: org.candidateSeatLimit ?? tier?.candidateSeatLimit ?? null, pool };
   }
-  return { limit: org.seatLimit ?? tier?.seatLimit ?? null, pool: 'staff' };
+  return { limit: org.seatLimit ?? tier?.seatLimit ?? null, pool };
 }
 
 /**

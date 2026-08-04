@@ -710,6 +710,113 @@ describe('PATCH /team/members/:id', () => {
     }
   });
 
+  /**
+   * The candidate pool has to be closed at BOTH ends. Invite creation and
+   * invite acceptance already refuse a full pool, so promoting someone who is
+   * already a member was the last way in — and it wrote the role with no check
+   * at all, taking the org past `candidateSeatLimit` silently.
+   */
+  it('403s when promoting an existing member into a full candidate pool', async () => {
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'viewer', status: 'active' },
+      usersFindFirst: { id: 'u2', name: 'Priya Nair', email: 'priya@x.io' },
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Mine Co',
+        planTier: 'business',
+        seatLimit: 15,
+        candidateSeatLimit: 200,
+      },
+      activeSeatCount: 200,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members/m1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ role: 'candidate' }),
+      });
+      expect(res.status).toBe(403);
+      // The same refusal shape the invite path returns, so one UI handles both.
+      const body = (await res.json()) as { error: string; seatLimit: number; seatUsed: number };
+      expect(body.error).toBe('candidate_limit_reached');
+      expect(body.seatLimit).toBe(200);
+      expect(body.seatUsed).toBe(200);
+      // Refused BEFORE the write — the member keeps the role they had.
+      expect(updateSet.mock.calls.find(([table]) => table === schema.memberships)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  /** And in reverse: a candidate moving into a full staff pool. */
+  it('403s when moving a candidate into a full staff pool', async () => {
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'candidate', status: 'active' },
+      usersFindFirst: { id: 'u2', name: 'Priya Nair', email: 'priya@x.io' },
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Mine Co',
+        planTier: 'business',
+        seatLimit: 15,
+        candidateSeatLimit: 200,
+      },
+      activeSeatCount: 15,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members/m1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ role: 'assessor' }),
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe('seat_limit_reached');
+      expect(updateSet.mock.calls.find(([table]) => table === schema.memberships)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * Viewer and Builder draw on the SAME staff pool, so the change moves no
+   * totals and no check applies. A full pool must not stop an org rearranging
+   * the people already inside it — the seat count here is at the limit, and the
+   * change still goes through.
+   */
+  it('allows a same-pool role change with the staff pool already full', async () => {
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'viewer', status: 'active' },
+      usersFindFirst: { id: 'u2', name: 'Priya Nair', email: 'priya@x.io' },
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Mine Co',
+        planTier: 'business',
+        seatLimit: 15,
+        candidateSeatLimit: 200,
+      },
+      activeSeatCount: 15,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members/m1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ role: 'builder' }),
+      });
+      expect(res.status).toBe(200);
+      expect(updateSet.mock.calls.find(([table]) => table === schema.memberships)?.[1]).toEqual({ role: 'builder' });
+    } finally {
+      server.close();
+    }
+  });
+
   it('re-roles a pending invite so the change survives to acceptance', async () => {
     const { db, updateSet } = fakeDb({
       rolePermissionsFindFirst: ADMIN_PERMS,

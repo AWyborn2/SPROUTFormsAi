@@ -11,7 +11,7 @@ import { isUniqueViolation } from '../lib/db-errors.js';
 import { recordAudit } from '../audit/record.js';
 import { sendInviteEmail } from '../email/resend.js';
 import { env } from '../env.js';
-import { checkSeatAvailability, seatLimitError } from '../lib/seats.js';
+import { checkSeatAvailability, poolFor, seatLimitError } from '../lib/seats.js';
 import { db } from '../db.js';
 
 export const teamRouter: Router = Router();
@@ -356,6 +356,35 @@ teamRouter.patch(
     const user = await db.query.users.findFirst({ where: eq(schema.users.id, membership.userId) });
     const previousRole = membership.role;
     const nextRole = parsed.data.role;
+
+    /*
+      Seat limit check — the other way into a pool.
+
+      Invite creation and invite acceptance both refuse a full pool, so
+      promoting someone who is ALREADY a member was the one remaining route in,
+      and it wrote the role with no check at all: an org could pass its
+      candidate allowance simply by re-roling its viewers, with no 403 and no
+      warning.
+
+      Only a POOL-CROSSING change matters. Viewer → Builder stays in the staff
+      pool and moves no totals, so it must not be blocked by a full staff pool —
+      that would stop an org rearranging the people it has already paid for.
+
+      Only active memberships are counted (see lib/seats.ts), so an invited or
+      suspended one cannot push the destination pool past its limit by moving.
+    */
+    if (membership.status === 'active' && poolFor(previousRole) !== poolFor(nextRole)) {
+      const org = await db.query.organizations.findFirst({
+        where: eq(schema.organizations.id, tenant.orgId),
+      });
+      if (org) {
+        const check = await checkSeatAvailability(db, org, nextRole);
+        if (!check.ok) {
+          res.status(403).json(seatLimitError(check, org.planTier));
+          return;
+        }
+      }
+    }
 
     await db.update(schema.memberships).set({ role: nextRole }).where(eq(schema.memberships.id, membership.id));
 
