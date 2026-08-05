@@ -535,6 +535,35 @@ export const store = {
       .then((dto) => ({ form: toFormSummary(dto), versionId: dto.createdVersionId }));
   },
 
+  /**
+   * Create a form whose first version is a DRAFT, and hand back both ids.
+   *
+   * The builder needs somewhere to put geometry before anything is published:
+   * geometry lives on a version's fields, so the version has to exist while the
+   * tool is still being authored. `publishImport` cannot be reused — it
+   * hardcodes `publish: true`, which would put an unfinished assessment in front
+   * of fillers.
+   *
+   * `POST /forms` returns the created version's id as `currentVersionId` whether
+   * or not it published, so one call is enough; the template's status stays
+   * `draft` until the builder publishes it.
+   */
+  createDraftForm(input: {
+    name: string;
+    fields: FormField[];
+    sourcePdfAssetId?: string;
+  }): Promise<{ formId: string; versionId: string }> {
+    return apiClient
+      .post<FormSummaryDto>('/forms', {
+        name: input.name,
+        sourceType: 'pdf_import',
+        fields: input.fields,
+        ...(input.sourcePdfAssetId ? { sourcePdfAssetId: input.sourcePdfAssetId } : {}),
+        publish: false,
+      })
+      .then((dto) => ({ formId: dto.id, versionId: dto.currentVersionId ?? '' }));
+  },
+
   publishFormVersion(input: { formId: string; versionId: string }): Promise<FormSummary> {
     return apiClient
       .post<FormSummaryDto>(`/forms/${input.formId}/versions/${input.versionId}/publish`, {})

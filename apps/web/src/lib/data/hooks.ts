@@ -277,6 +277,25 @@ export function useCreateVersionFromImport() {
   });
 }
 
+/**
+ * Create the builder's draft form + version.
+ *
+ * Called once, when the builder first needs somewhere to place geometry. From
+ * that point the VERSION owns the fields — the builder draft owns the structure,
+ * the answer keys and the manifest that sit on top of them — so there is exactly
+ * one copy of the field list and it is the one the exporter reads.
+ */
+export function useCreateDraftForm() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { name: string; fields: FormField[]; sourcePdfAssetId?: string }) =>
+      store.createDraftForm(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.forms });
+    },
+  });
+}
+
 /** Publish an existing draft version from version history — flips live fill links to it immediately. */
 /** One version's own fields — the geometry editor's read. */
 export function useFormVersion(formId: string | undefined, versionId: string | undefined) {
