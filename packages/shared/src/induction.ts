@@ -185,15 +185,44 @@ export function isIsoDate(value: string): boolean {
   return ISO_DATE_PATTERN.test(value);
 }
 
-function text(values: Record<string, SubmissionValue>, id: string | undefined): string {
-  const value = id === undefined ? undefined : values[id];
+/** Nothing was answered here — the three encodings of "blank" this data has. */
+function blank(value: SubmissionValue | undefined): boolean {
+  return value === undefined || value === null || value === '';
+}
+
+/**
+ * The answer to one canonical question, wherever it actually landed.
+ *
+ * A submission's `values` may be keyed EITHER way, and both are legitimate:
+ *
+ *  - by the stored template's own field ids, when the answers came through the
+ *    generic fill renderer or a public fill link; or
+ *  - by the CANONICAL ids, when they came through `ChcIntakeScreen`, which
+ *    hard-codes `CHC_FIELD_IDS` and writes them whatever the stored template
+ *    happens to call its fields.
+ *
+ * So the template-resolved id is preferred — that is the question the form
+ * actually asked — and the canonical id is the fallback. Reading only the
+ * resolved id loses every answer the bespoke screen wrote into a template whose
+ * ids have moved on; reading only the canonical id is the original bug.
+ */
+function answerTo(
+  values: Record<string, SubmissionValue>,
+  at: Map<string, string>,
+  canonical: string,
+): SubmissionValue | undefined {
+  const resolved = at.get(canonical);
+  const onTemplate = resolved === undefined ? undefined : values[resolved];
+  return blank(onTemplate) ? values[canonical] : onTemplate;
+}
+
+function text(value: SubmissionValue | undefined): string {
   if (typeof value === 'string') return value.trim();
   if (typeof value === 'number') return String(value);
   return '';
 }
 
-function tribool(values: Record<string, SubmissionValue>, id: string | undefined): boolean | null {
-  const value = id === undefined ? undefined : values[id];
+function tribool(value: SubmissionValue | undefined): boolean | null {
   if (typeof value === 'boolean') return value;
   // `boolean_yes_no` normalises to the strings 'true'/'false' on some surfaces
   // (see `scalarAnswer` in visibility.ts), so both encodings arrive here.
@@ -202,8 +231,7 @@ function tribool(values: Record<string, SubmissionValue>, id: string | undefined
   return null;
 }
 
-function document(values: Record<string, SubmissionValue>, id: string | undefined): StarterDocument {
-  const value = id === undefined ? undefined : values[id];
+function document(value: SubmissionValue | undefined): StarterDocument {
   if (!isFileRef(value)) return { present: false };
   // The storage key is deliberately not carried through: it is only useful to
   // an authenticated fetch, and this profile is built to be handed onward.
@@ -254,64 +282,64 @@ export function readStarterProfile(
   const at = resolveChcIntakeFields(fields);
   if (!REQUIRED_SHAPE.every((id) => at.has(id))) return null;
 
-  const department = text(values, at.get(CHC_FIELD_IDS.department));
+  /** This submission's answer to a canonical question, from either keying. */
+  const answer = (canonical: string) => answerTo(values, at, canonical);
+
+  const department = text(answer(CHC_FIELD_IDS.department));
   const roleQuestion = CHC_ROLE_FIELD_BY_DEPARTMENT[department];
-  const roleFieldId = roleQuestion ? at.get(roleQuestion) : undefined;
-  const roleValue = roleFieldId ? values[roleFieldId] : undefined;
+  const roleValue = roleQuestion ? answer(roleQuestion) : undefined;
   const roles = Array.isArray(roleValue)
     ? roleValue.filter((r): r is string => typeof r === 'string')
     : typeof roleValue === 'string' && roleValue
       ? [roleValue]
       : [];
 
-  const firstName = text(values, at.get(CHC_FIELD_IDS.firstName));
-  const lastName = text(values, at.get(CHC_FIELD_IDS.lastName));
-  const ethnicity = text(values, at.get(CHC_FIELD_IDS.ethnicity));
+  const firstName = text(answer(CHC_FIELD_IDS.firstName));
+  const lastName = text(answer(CHC_FIELD_IDS.lastName));
+  const ethnicity = text(answer(CHC_FIELD_IDS.ethnicity));
 
   // The role question counts only once a department has named which one applies
   // — before that, "no role field" is the form working as designed.
-  const expected = department
-    ? [...REPORTED_QUESTIONS, CHC_ROLE_FIELD_BY_DEPARTMENT[department]].filter(
-        (id): id is string => !!id,
-      )
-    : REPORTED_QUESTIONS;
+  const expected = roleQuestion ? [...REPORTED_QUESTIONS, roleQuestion] : REPORTED_QUESTIONS;
 
   return {
     firstName,
-    middleName: text(values, at.get(CHC_FIELD_IDS.middleName)),
+    middleName: text(answer(CHC_FIELD_IDS.middleName)),
     lastName,
     fullName: [firstName, lastName].filter(Boolean).join(' '),
-    gender: text(values, at.get(CHC_FIELD_IDS.gender)),
+    gender: text(answer(CHC_FIELD_IDS.gender)),
     ethnicity,
-    // The two RETIRED questions read straight off `values`, never through the
-    // resolver. No current template declares them, so resolving would find
-    // nothing and report every pre-#80 submission as unanswered — which is the
-    // fallback's whole purpose defeated. Their ids were never reassigned, so
-    // the raw key is unambiguous.
+    // The RETIRED questions have no field on any current template, so they
+    // resolve to nothing and reach `values` through `answerTo`'s canonical
+    // fallback — which is exactly what keeps pre-#80 submissions readable.
     indigenous: ethnicity
       ? isIndigenousEthnicity(ethnicity)
-      : tribool(values, CHC_FIELD_IDS.indigenous),
-    starterType: text(values, at.get(CHC_FIELD_IDS.starterType)),
-    inductionDate: text(values, at.get(CHC_FIELD_IDS.inductionDate)),
+      : tribool(answer(CHC_FIELD_IDS.indigenous)),
+    starterType: text(answer(CHC_FIELD_IDS.starterType)),
+    inductionDate: text(answer(CHC_FIELD_IDS.inductionDate)),
     department,
     roles,
-    inBeakon: tribool(values, CHC_FIELD_IDS.inBeakon),
-    mobile: text(values, at.get(CHC_FIELD_IDS.mobile)),
-    email: text(values, at.get(CHC_FIELD_IDS.email)),
-    photo: document(values, at.get(CHC_FIELD_IDS.photo)),
-    driversLicence: document(values, at.get(CHC_FIELD_IDS.driversLicence)),
+    inBeakon: tribool(answer(CHC_FIELD_IDS.inBeakon)),
+    mobile: text(answer(CHC_FIELD_IDS.mobile)),
+    email: text(answer(CHC_FIELD_IDS.email)),
+    photo: document(answer(CHC_FIELD_IDS.photo)),
+    driversLicence: document(answer(CHC_FIELD_IDS.driversLicence)),
     sensitive: {
-      dob: text(values, at.get(CHC_FIELD_IDS.dob)),
-      addressStreet: text(values, at.get(CHC_FIELD_IDS.addressStreet)),
-      suburb: text(values, at.get(CHC_FIELD_IDS.suburb)),
-      postcode: text(values, at.get(CHC_FIELD_IDS.postcode)),
-      emergencyContactName: text(values, at.get(CHC_FIELD_IDS.emergencyContactName)),
-      emergencyContactPhone: text(values, at.get(CHC_FIELD_IDS.emergencyContactPhone)),
-      licenceClass: text(values, at.get(CHC_FIELD_IDS.licenceClass)),
-      licenceExpiry: text(values, at.get(CHC_FIELD_IDS.licenceExpiry)),
-      licenceNumber: text(values, at.get(CHC_FIELD_IDS.licenceNumber)),
+      dob: text(answer(CHC_FIELD_IDS.dob)),
+      addressStreet: text(answer(CHC_FIELD_IDS.addressStreet)),
+      suburb: text(answer(CHC_FIELD_IDS.suburb)),
+      postcode: text(answer(CHC_FIELD_IDS.postcode)),
+      emergencyContactName: text(answer(CHC_FIELD_IDS.emergencyContactName)),
+      emergencyContactPhone: text(answer(CHC_FIELD_IDS.emergencyContactPhone)),
+      licenceClass: text(answer(CHC_FIELD_IDS.licenceClass)),
+      licenceExpiry: text(answer(CHC_FIELD_IDS.licenceExpiry)),
+      licenceNumber: text(answer(CHC_FIELD_IDS.licenceNumber)),
     },
-    notCollected: expected.filter((id) => !at.has(id)),
+    // A gap only when the version did not ask AND no answer reached us anyway.
+    // An answer the bespoke screen collected against a template that never
+    // carried the question is still an answer; calling it uncollected would
+    // send a human chasing something they already have.
+    notCollected: expected.filter((id) => !at.has(id) && blank(answer(id))),
   };
 }
 

@@ -206,6 +206,30 @@ describe('readStarterProfile', () => {
       ).not.toBeNull();
     });
 
+    /**
+     * `ChcIntakeScreen` hard-codes `CHC_FIELD_IDS` and writes them whatever the
+     * stored template calls its fields, so the answer can sit under the
+     * CANONICAL id while the template's question carries a builder one.
+     * Resolving and then reading only the resolved id loses exactly those
+     * answers — the regression that made this fix worse than the bug it fixed.
+     */
+    it('reads an answer the bespoke screen wrote under the canonical id', () => {
+      const profile = readStarterProfile(
+        reIded(CHC_FIELD_IDS.ethnicity, 'b7'),
+        fullValues({ [CHC_FIELD_IDS.ethnicity]: 'Aboriginal' }),
+      )!;
+      expect(profile.ethnicity).toBe('Aboriginal');
+      expect(profile.indigenous).toBe(true);
+    });
+
+    it('prefers the question the form actually asked when both carry a value', () => {
+      const profile = readStarterProfile(
+        reIded(CHC_FIELD_IDS.ethnicity, 'b7'),
+        fullValues({ [CHC_FIELD_IDS.ethnicity]: 'Caucasian', b7: 'Aboriginal' }),
+      )!;
+      expect(profile.ethnicity).toBe('Aboriginal');
+    });
+
     it('refuses to guess when two questions carry the same options', () => {
       const renamed = reIded(CHC_FIELD_IDS.ethnicity, 'b7');
       const ethnicity = renamed.find((f) => f.id === 'b7')!;
@@ -307,10 +331,26 @@ describe('assessInductionReadiness', () => {
     // A seat can still be booked without an ethnicity — a REGISTRATION cannot,
     // and the difference is invisible if the answer arrives as an empty string.
     const withoutEthnicity = chcIntakeFields().filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
-    const profile = readStarterProfile(withoutEthnicity, fullValues())!;
+    const profile = readStarterProfile(
+      withoutEthnicity,
+      fullValues({ [CHC_FIELD_IDS.ethnicity]: '' }),
+    )!;
     const verdict = assessInductionReadiness(profile, { today: TUESDAY });
     expect(verdict.readiness).toBe('ready');
     expect(verdict.warnings).toContain('intake_incomplete');
+  });
+
+  it('stays quiet when the answer arrived even though the version lacks the field', () => {
+    // The bespoke intake screen asks in code and writes the canonical id, so it
+    // collects answers a stale template never declared. Those are answers, not
+    // gaps — reporting them would send someone chasing what they already have.
+    const withoutEthnicity = chcIntakeFields().filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    const profile = readStarterProfile(withoutEthnicity, fullValues())!;
+    expect(profile.ethnicity).toBe('Caucasian');
+    expect(profile.notCollected).not.toContain(CHC_FIELD_IDS.ethnicity);
+    expect(assessInductionReadiness(profile, { today: TUESDAY }).warnings).not.toContain(
+      'intake_incomplete',
+    );
   });
 
   it('blocks a starter already covered by a booking', () => {
