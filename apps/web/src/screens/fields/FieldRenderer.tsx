@@ -37,6 +37,7 @@ import type { RepeatingRowValue } from '@formai/shared';
 import { ApiError, uploadAttachment } from '../../lib/data/api-client.js';
 import { resolveRepeatingRows } from '../../lib/fixed-rows.js';
 import { coerceSpokenValue, isDictatable, useDictation } from '../../lib/voice/index.js';
+import { MatchingField } from './MatchingField.js';
 
 export interface FieldInputProps {
   field: FormField;
@@ -369,6 +370,29 @@ export function FieldInput({
           Presentation only.
         */
         if (isMatchingQuestion(field.options)) {
+          /*
+            AN AUTHORED PRESENTATION WINS; THE GROUPED LIST IS THE FALLBACK.
+
+            `matchPresentation` is set by the pair builder and is render-only by
+            type — `markTheory` reads `answerKey` and nothing else — so choosing
+            between these two changes what a candidate manipulates and nothing
+            about what is stored or how it is marked. A question authored before
+            presentations existed has none, and renders exactly as it always
+            has.
+          */
+          if (field.matchPresentation) {
+            return (
+              <MatchingField
+                options={field.options ?? []}
+                value={selected}
+                presentation={field.matchPresentation}
+                disabled={disabled}
+                labelId={labelId}
+                onChange={onChange}
+              />
+            );
+          }
+
           return (
             <div className="flex flex-col gap-3.5" role="group" aria-labelledby={labelId}>
               {groupPairingOptions(field.options ?? []).map((group, index) => {

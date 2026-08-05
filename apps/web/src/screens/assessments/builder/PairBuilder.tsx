@@ -79,6 +79,25 @@ export function PairBuilder({ seed, presentation, onSave, onCancel }: PairBuilde
   const question = useMemo(() => ({ lefts, rights, correct }), [lefts, rights, correct]);
   const unpaired = useMemo(() => unpairedPrompts(question), [question]);
 
+  /*
+    A STATEMENT WITH TWO CORRECT ANSWERS CANNOT BE DRAWN AS AN INTERACTIVE.
+
+    A line from a dot, and a card in a slot, are both singular by shape — one
+    answer per statement is all either can express. The model permits a
+    non-bijection deliberately, and the grouped checkbox list can express it, so
+    the question is authorable; it just cannot use these presentations.
+
+    The check has to live HERE. A fill surface never sees `answerKey` —
+    `stripMarkingSecrets` removes it from every payload, by design — so the
+    renderer cannot make this judgement, and a candidate would be handed a
+    question they physically cannot answer correctly.
+  */
+  const multiAnswerPrompts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const pair of correct) counts.set(pair.left, (counts.get(pair.left) ?? 0) + 1);
+    return [...counts.entries()].filter(([, n]) => n > 1).map(([left]) => left);
+  }, [correct]);
+
   const isPaired = (left: string, right: string) =>
     correct.some((p) => p.left === left && p.right === right);
 
@@ -315,6 +334,15 @@ export function PairBuilder({ seed, presentation, onSave, onCancel }: PairBuilde
         ))}
         <span className="text-[11px] text-text-tertiary">Presentation only — never how it is marked.</span>
       </div>
+
+      {multiAnswerPrompts.length > 0 && (
+        <p className="rounded-[10px] border border-warning bg-warning-soft p-[8px_10px] text-[11.5px] text-warning-text">
+          {multiAnswerPrompts.join(', ')} {multiAnswerPrompts.length === 1 ? 'has' : 'have'} more
+          than one correct match, which an on-screen line or drag cannot express — one answer per
+          statement is all either shape allows. This question will render as the grouped list
+          instead, which can. The key itself is unaffected.
+        </p>
+      )}
 
       {error && (
         <p role="alert" className="rounded-[10px] border border-danger bg-danger-soft p-[8px_10px] text-[11.5px] text-danger-text">
