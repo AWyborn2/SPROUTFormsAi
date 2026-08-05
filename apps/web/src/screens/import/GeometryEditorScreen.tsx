@@ -659,6 +659,7 @@ export function GeometryEditorScreen() {
             onTextLayer={onTextLayer}
             placements={placements}
             bandOverlay={bandOverlay}
+            onMoveBox={moveOverlayBox}
             bandSnapTargets={bandSnapTargets}
             bandSnapTargetsY={bandSnapTargetsY}
             onBandEdge={onBandEdge}
