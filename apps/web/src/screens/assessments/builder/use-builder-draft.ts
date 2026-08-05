@@ -121,6 +121,10 @@ export interface BuilderDraftState {
    */
   formId?: string;
   versionId?: string;
+  /** The uploaded PDF's storage handle, for the version to carry. */
+  assetId?: string;
+  /** Record the draft version the placement step created. */
+  setVersionIds: (formId: string, versionId: string) => void;
   /** Parts as the units step shows them: derived from structure, then edited. */
   parts: DerivedPart[];
   /** The manifest those parts assemble into, ready for validateManifest. */
@@ -265,11 +269,31 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
   }));
   const [excluded, setExcluded] = useState<Set<string>>(() => new Set());
   const [keys, setKeys] = useState<DraftAnswerKey[]>([]);
-  // Set when the builder materialises a draft version to place against. No
-  // setter is exposed yet — creating it is the open question the plan records,
-  // and a half-wired creation path would produce a version nothing publishes.
-  const [formId] = useState<string | undefined>(undefined);
-  const [versionId] = useState<string | undefined>(undefined);
+  /*
+    The uploaded PDF's storage handle, kept so the draft version can carry it.
+
+    Without it the version has no `sourcePdfAssetId`, the placement screen has
+    no page to draw on, and the round-trip export has no original to overlay —
+    the document is the one thing in this pipeline that is never re-derived.
+  */
+  const [assetId, setAssetId] = useState<string | undefined>(undefined);
+  /*
+    THE DRAFT VERSION THE BUILDER PLACES AGAINST.
+
+    Created UP FRONT rather than at publish, because geometry lives on a
+    version's fields — that is where the exporter reads it — so there is nowhere
+    to put a box until one exists, and the placement step sits before publish in
+    the author's order.
+
+    From the moment it exists THE VERSION OWNS THE FIELDS. The builder draft owns
+    what sits on top of them — the structure arrangement, the answer keys, the
+    part manifest — all of which reference field IDS, and ids are preserved
+    across every version write. One copy of the field list, and it is the copy
+    the exporter reads: two that can disagree is the failure refused everywhere
+    else in this work.
+  */
+  const [formId, setFormId] = useState<string | undefined>(undefined);
+  const [versionId, setVersionId] = useState<string | undefined>(undefined);
   /*
     PARTS ARE DERIVED, WITH THE AUTHOR'S EDITS LAYERED ON TOP.
 
@@ -291,7 +315,7 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     setPhase('uploading');
     try {
       const base64 = await fileToBase64(file);
-      const { assetId } = await apiClient.post<{ assetId: string }>(
+      const { assetId: uploadedAssetId } = await apiClient.post<{ assetId: string }>(
         '/pdf/upload',
         { pdfBase64: base64 },
         { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
@@ -303,7 +327,7 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
         // Always `assessment`: this surface exists for one document class, and
         // leaving the type generic collapses a paper's questions back into
         // table rows — the failure the profile exists to prevent.
-        { assetId, fileName: file.name, documentType: 'assessment' },
+        { assetId: uploadedAssetId, fileName: file.name, documentType: 'assessment' },
         { timeoutMs: IMPORT_REQUEST_TIMEOUT_MS },
       );
 
@@ -314,6 +338,7 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
       setExtraction(result);
       setFields(seedFields(result));
       setStructure(structureFromExtraction(result));
+      setAssetId(uploadedAssetId);
       setExcluded(new Set());
       setKeys([]);
       setPartOverrides({});
@@ -348,6 +373,7 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     setStructure([]);
     setExcluded(new Set());
     setKeys([]);
+    setAssetId(undefined);
     setPartOverrides({});
     setPartOrder([]);
   }, []);
@@ -575,6 +601,19 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     [parts],
   );
 
+  /**
+   * Record the draft version this builder places against.
+   *
+   * The CREATION lives in the step that needs it, not here. This hook is
+   * state and pure reducers — pulling a react-query mutation into it would
+   * make every consumer need a QueryClientProvider to hold a field list, and
+   * a network call in a state hook is a network call every test has to mock.
+   */
+  const setVersionIds = useCallback((nextFormId: string, nextVersionId: string) => {
+    setFormId(nextFormId);
+    setVersionId(nextVersionId);
+  }, []);
+
   const stats = useMemo(() => (extraction ? statsFor(extraction) : null), [extraction]);
 
   return {
@@ -595,6 +634,8 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     keys,
     ...(formId ? { formId } : {}),
     ...(versionId ? { versionId } : {}),
+    ...(assetId ? { assetId } : {}),
+    setVersionIds,
     parts,
     manifest,
     manifestProblems,
