@@ -76,6 +76,19 @@ export interface StructurePanelProps {
   onCycleSpan: (sectionKey: string, fieldId: string) => void;
   onSetFieldType: (fieldId: string, type: FormFieldType) => void;
   onGroup: (fieldIds: string[]) => void;
+  /**
+   * Add a field the extraction MISSED, after this one.
+   *
+   * The gap this closes: the model will miss a box on some paper, and until now
+   * the only answers were to re-import and hope, or to hand-edit the published
+   * version afterwards. A product whose premise is "upload a document nobody
+   * has seen" cannot leave that uncorrectable.
+   */
+  onAddField: (sectionKey: string, afterFieldId: string | null, type: FormFieldType, label: string) => void;
+  /** Delete a field the extraction INVENTED, and every reference to it. */
+  onDeleteField: (fieldId: string) => void;
+  /** Fold a field into the previous one's description — an instruction, not a box. */
+  onFoldField: (fieldId: string, targetFieldId: string) => void;
 }
 
 export function StructurePanel({
@@ -92,6 +105,9 @@ export function StructurePanel({
   onCycleSpan,
   onSetFieldType,
   onGroup,
+  onAddField,
+  onDeleteField,
+  onFoldField,
 }: StructurePanelProps) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<Record<string, boolean>>({});
@@ -294,7 +310,7 @@ export function StructurePanel({
                         Empty — drag a field here
                       </p>
                     )}
-                    {section.fields.map((entry) => {
+                    {section.fields.map((entry, i) => {
                       const field = byId.get(entry.id);
                       const span = resolveSpan(entry, section.cols);
                       const isSelected = !!selected[entry.id];
@@ -391,6 +407,43 @@ export function StructurePanel({
                                 {span}/{section.cols}
                               </button>
                             )}
+                            {/*
+                              FOLD is offered only where there IS something above
+                              to fold into. A printed instruction read as a text
+                              box belongs to the field it qualifies, and the
+                              field above it is the one it qualifies — an
+                              instruction printed first is a heading, which the
+                              type palette already handles.
+                            */}
+                            {i > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => onFoldField(entry.id, section.fields[i - 1]!.id)}
+                                title="Make this a description of the field above"
+                                aria-label={`Fold ${field?.label ?? entry.id} into the field above`}
+                                className="flex-none rounded border border-border px-1 py-px text-text-tertiary hover:bg-surface-hover"
+                              >
+                                <Icon name="corner-left-up" size={10} />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => onAddField(section.key, entry.id, 'text', 'New field')}
+                              title="Add a field the document has that this list does not"
+                              aria-label={`Add a field after ${field?.label ?? entry.id}`}
+                              className="flex-none rounded border border-border px-1 py-px text-text-tertiary hover:bg-surface-hover"
+                            >
+                              <Icon name="plus" size={10} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onDeleteField(entry.id)}
+                              title="Delete this field and everything that references it"
+                              aria-label={`Delete ${field?.label ?? entry.id}`}
+                              className="flex-none rounded border border-border px-1 py-px text-text-tertiary hover:bg-surface-hover"
+                            >
+                              <Icon name="trash-2" size={10} />
+                            </button>
                           </div>
 
                           {typeMenuFor === entry.id && (
