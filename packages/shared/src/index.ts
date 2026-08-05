@@ -23,6 +23,7 @@ export * from './competency-expiry.js';
 export * from './assessor-eligibility.js';
 export * from './workflow.js';
 export * from './assessment.js';
+export * from './assignment.js';
 export * from './marking.js';
 export * from './outcome-links.js';
 export * from './matching.js';
