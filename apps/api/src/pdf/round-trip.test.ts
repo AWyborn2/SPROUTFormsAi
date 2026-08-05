@@ -16,8 +16,9 @@
 ﻿import zlib from 'node:zlib';
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
-import type { FormField, PageBox, SubmissionValue } from '@formai/shared';
-import { roundTripExport } from './round-trip.js';
+import { MARK_STYLES_DRAWN } from '@formai/shared';
+import type { FormField, GlyphKind, PageBox, SubmissionValue } from '@formai/shared';
+import { resolveMarkStyle, roundTripExport } from './round-trip.js';
 import { LETTERHEAD, makeFlatPdf, makeTwoPageFlatPdf } from './test-pdfs.js';
 
 /** Decode `<hex>` PDF string literals in a content stream to plain text. */
@@ -1624,5 +1625,110 @@ describe('roundTripExport — matching questions', () => {
     });
 
     expect(bytesInclude(output, 'Helmet')).toBe(true);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Authored mark styles (U16)
+ * ------------------------------------------------------------------ */
+
+describe('resolveMarkStyle', () => {
+  const box = (markStyle?: { glyph?: GlyphKind }): PageBox => ({
+    page: 0,
+    x: 0,
+    y: 0,
+    width: 10,
+    height: 10,
+    pageWidth: 595,
+    pageHeight: 842,
+    ...(markStyle ? { markStyle } : {}),
+  });
+
+  it('RETURNS THE FALLBACK UNCHANGED WHEN NOTHING IS AUTHORED', () => {
+    /*
+      THE PROPERTY THIS SEAM LIVES OR DIES BY. Every placement authored before
+      mark styles existed carries no markStyle, and there are thousands of them
+      on competency records. Absent must mean exactly today's behaviour.
+    */
+    expect(resolveMarkStyle(box(), 'tick')).toBe('tick');
+    expect(resolveMarkStyle(box(), 'cross')).toBe('cross');
+    expect(resolveMarkStyle(undefined, 'text')).toBe('text');
+    expect(resolveMarkStyle(box({}), 'tick')).toBe('tick');
+  });
+
+  it('honours a glyph the exporter can draw', () => {
+    expect(resolveMarkStyle(box({ glyph: 'cross_hand' }), 'tick')).toBe('cross');
+    expect(resolveMarkStyle(box({ glyph: 'ring' }), 'tick')).toBe('ring');
+    expect(resolveMarkStyle(box({ glyph: 'typed' }), 'tick')).toBe('text');
+    expect(resolveMarkStyle(box({ glyph: 'signature' }), 'text')).toBe('signature');
+  });
+
+  it('draws the CATEGORY, not the stylistic variant', () => {
+    // tick_hand and tick_block both resolve to the one vector tick this file
+    // draws. Pretending otherwise puts a difference on screen that never
+    // reaches the paper.
+    expect(resolveMarkStyle(box({ glyph: 'tick_hand' }), 'cross')).toBe('tick');
+    expect(resolveMarkStyle(box({ glyph: 'tick_block' }), 'cross')).toBe('tick');
+  });
+
+  it('falls back for a glyph it cannot draw, rather than drawing nothing', () => {
+    // A blank cell on this document class reads as unassessed. The author is
+    // told in the inspector; the page still gets the field's own mark.
+    for (const glyph of ['highlight', 'match_line', 'initials', 'stamp_pass', 'stamp_na'] as GlyphKind[]) {
+      expect(resolveMarkStyle(box({ glyph }), 'tick')).toBe('tick');
+    }
+  });
+
+  it('agrees with the list the builder shows an author', () => {
+    /*
+      MARK_STYLES_DRAWN is what the inspector labels as reaching the page. If
+      the two drift, the builder promises a mark the exporter never draws — the
+      exact failure KTD4 refuses.
+    */
+    for (const glyph of MARK_STYLES_DRAWN) {
+      expect(resolveMarkStyle(box({ glyph }), 'tick')).not.toBe('tick_placeholder' as never);
+      // Every drawn style must resolve to something OTHER than the fallback
+      // for at least one fallback, i.e. it must be in the mapping.
+      const resolvedAgainstText = resolveMarkStyle(box({ glyph }), 'text');
+      const resolvedAgainstTick = resolveMarkStyle(box({ glyph }), 'tick');
+      expect(resolvedAgainstText === 'text' && resolvedAgainstTick === 'tick').toBe(false);
+    }
+  });
+});
+
+describe('roundTripExport — an unauthored placement is unchanged', () => {
+  it('produces the same marks with no markStyle and with a style it cannot draw', async () => {
+    /*
+      THE CHARACTERIZATION TEST. An authored style the exporter does not draw
+      must change nothing at all about the output — not the glyph, not its
+      position. Otherwise "authored but not yet drawn" would silently become
+      "authored and drawn differently".
+    */
+    const original = await makeFlatPdf();
+    const plain = await roundTripExport({
+      originalPdf: original,
+      fields: FIELDS,
+      values: VALUES,
+    });
+    const styled = await roundTripExport({
+      originalPdf: original,
+      fields: FIELDS.map((f) =>
+        f.geometry
+          ? {
+              ...f,
+              geometry: {
+                segments: f.geometry.segments.map((s) => ({
+                  ...s,
+                  markStyle: { glyph: 'highlight' as GlyphKind },
+                })),
+              },
+            }
+          : f,
+      ),
+      values: VALUES,
+    });
+
+    expect(drawnMarks(styled)).toEqual(drawnMarks(plain));
+    expect(markXs(styled)).toEqual(markXs(plain));
   });
 });

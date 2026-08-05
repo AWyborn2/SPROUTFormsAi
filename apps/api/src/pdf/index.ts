@@ -9,7 +9,12 @@ export {
   type AnthropicMessage,
   type ExtractOptions,
 } from './extract.js';
-export { roundTripExport, type RoundTripInput } from './round-trip.js';
+export {
+  roundTripExport,
+  resolveMarkStyle,
+  type DrawnGlyph,
+  type RoundTripInput,
+} from './round-trip.js';
 export {
   assembleCaseValues,
   exportCasePdf,
