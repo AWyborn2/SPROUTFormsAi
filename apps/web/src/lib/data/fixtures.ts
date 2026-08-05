@@ -34,6 +34,8 @@ export const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
   Builder: 'Create and edit forms and submissions',
   Reviewer: 'Review and export submissions',
   Viewer: 'Read-only access to forms & data',
+  Assessor: 'Runs assessments; views the team and submissions',
+  Candidate: 'The person being assessed; sees only their own cases',
 };
 
 /** Capability categories × actions — the permission-matrix shape (vmRoles). */
@@ -43,6 +45,33 @@ export const PERM_CATEGORIES: PermCategoryDef[] = [
   { key: 'team', label: 'Team & roles', actions: [['view', 'View'], ['invite', 'Invite'], ['manage', 'Manage']] },
   { key: 'billing', label: 'Billing', actions: [['view', 'View'], ['manage', 'Manage']] },
   { key: 'audit', label: 'Audit log', actions: [['view', 'View']] },
+  // Assessments were absent from the matrix, so Assessor's and Candidate's
+  // capabilities — which are almost entirely assessment grants — never showed
+  // (R29, R30, R31). Candidate's view/edit are scoped ('own'), rendered
+  // distinctly by the screen.
+  {
+    key: 'assessments',
+    label: 'Assessments',
+    actions: [
+      ['view', 'View'],
+      ['create', 'Create'],
+      ['edit', 'Edit'],
+      ['delete', 'Delete'],
+      ['export', 'Export'],
+    ],
+  },
+  // Member profiles and personal information (R33, R34). Three grants —
+  // viewing, editing and approving a document — with no export switch, because
+  // exporting a member's record stays Admin-only whatever the matrix says.
+  {
+    key: 'profiles',
+    label: 'Profiles & personal info',
+    actions: [
+      ['view', 'View'],
+      ['edit', 'Edit'],
+      ['approve', 'Approve documents'],
+    ],
+  },
 ];
 
 /** Per-category icon + colour for audit rows (vmAudit `catMeta`). */

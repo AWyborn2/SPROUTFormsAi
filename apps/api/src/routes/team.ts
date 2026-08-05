@@ -3,7 +3,13 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { PERMISSION_CATEGORIES, ROLES, type PermissionMatrix, type Role } from '@formai/shared';
+import {
+  DEFAULT_ROLE_PERMISSIONS,
+  PERMISSION_CATEGORIES,
+  ROLES,
+  type PermissionMatrix,
+  type Role,
+} from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
@@ -12,11 +18,23 @@ import { recordAudit } from '../audit/record.js';
 import { sendInviteEmail } from '../email/resend.js';
 import { env } from '../env.js';
 import { checkSeatAvailability, lockOrgForSeats, poolFor, seatLimitError } from '../lib/seats.js';
+import { readPlacement, writePlacement } from '../lib/membership-placement.js';
 import { db } from '../db.js';
 
 export const teamRouter: Router = Router();
 
-const permissionActions = ['view', 'create', 'edit', 'delete', 'export', 'invite', 'manage'] as const;
+const canViewTeam = (tenant: { orgId: string; role: string }) => hasPermission(tenant, 'team', 'view');
+
+const permissionActions = [
+  'view',
+  'create',
+  'edit',
+  'delete',
+  'export',
+  'invite',
+  'manage',
+  'approve',
+] as const;
 
 const canManageTeam = (tenant: { orgId: string; role: string }) => hasPermission(tenant, 'team', 'manage');
 
@@ -299,6 +317,78 @@ teamRouter.post(
 /** Long enough to hand a printed code over on site, short enough to expire. */
 const PASSWORD_RESET_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+// ── Placement (R21, R22) — the same act for every member, whatever level ─────
+
+const placementBody = z.object({
+  locationIds: z.array(z.string().uuid()),
+  departmentIds: z.array(z.string().uuid()),
+  roleIds: z.array(z.string().uuid()),
+});
+
+teamRouter.get(
+  '/members/:id/placement',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await canViewTeam(tenant))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const membership = await db.query.memberships.findFirst({
+      where: and(eq(schema.memberships.id, req.params.id!), eq(schema.memberships.orgId, tenant.orgId)),
+    });
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    res.json(await readPlacement(db, membership.id));
+  }),
+);
+
+teamRouter.put(
+  '/members/:id/placement',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await canManageTeam(tenant))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = placementBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const membership = await db.query.memberships.findFirst({
+      where: and(eq(schema.memberships.id, req.params.id!), eq(schema.memberships.orgId, tenant.orgId)),
+    });
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const result = await writePlacement(db, tenant.orgId, membership.id, parsed.data);
+    if (!result.ok) {
+      res.status(400).json({ error: 'invalid_placement', code: result.error.code, subjectId: result.error.subjectId });
+      return;
+    }
+    await recordAudit(db, tenant, {
+      action: 'Placed member',
+      target: membership.id,
+      category: 'team',
+      icon: 'map-pin',
+    });
+    res.json(await readPlacement(db, membership.id));
+  }),
+);
+
 const patchMemberBody = z.object({ role: z.enum(ROLES) });
 
 teamRouter.patch(
@@ -498,8 +588,15 @@ teamRouter.get(
     const rows = await db.query.rolePermissions.findMany({
       where: eq(schema.rolePermissions.orgId, tenant.orgId),
     });
+    const stored = new Map(rows.map((r) => [r.role, r.matrix]));
+    // Return EVERY access level (R28), falling back to the product default for
+    // one the org never customised — so Assessor and Candidate show the
+    // capabilities they already hold rather than reading as all-off, matching
+    // what the enforcement side (permissions.ts matrixFor) resolves.
     const result: Partial<Record<Role, PermissionMatrix>> = {};
-    for (const r of rows) result[r.role] = r.matrix;
+    for (const role of ROLES) {
+      result[role] = stored.get(role) ?? DEFAULT_ROLE_PERMISSIONS[role];
+    }
     res.json(result);
   }),
 );
@@ -535,34 +632,48 @@ teamRouter.patch(
       const row = await db.query.rolePermissions.findFirst({
         where: and(eq(schema.rolePermissions.orgId, tenant.orgId), eq(schema.rolePermissions.role, role)),
       });
+      // The matrix this change applies to: the stored one, or the product
+      // default when the org never customised this level. Assessor and Candidate
+      // are exactly the levels most likely to have no stored row, so without
+      // this a toggle on either wrote nothing and returned 200 unchanged.
+      const baseMatrix = row?.matrix ?? DEFAULT_ROLE_PERMISSIONS[role];
+
+      // A scoped ('own') grant cannot be represented by this two-state control,
+      // and the toggle below would read it as truthy and collapse it to `false`
+      // — silently destroying the scope that keeps a candidate confined to their
+      // own records. Refuse instead.
+      if (baseMatrix[category]?.[action] === 'own') {
+        res.status(409).json({
+          error: 'scoped_permission',
+          message: `${role}: ${category}.${action} is scoped to own records and cannot be toggled here.`,
+        });
+        return;
+      }
+
+      const nextAllowed = allowed ?? !(baseMatrix[category]?.[action] ?? false);
+      const nextMatrix: PermissionMatrix = {
+        ...baseMatrix,
+        [category]: { ...baseMatrix[category], [action]: nextAllowed },
+      };
       if (row) {
-        // A scoped ('own') grant cannot be represented by this two-state
-        // control, and the toggle below would read it as truthy and collapse it
-        // to `false` — silently destroying the scope that keeps a candidate
-        // confined to their own records. Refuse instead.
-        if (row.matrix[category]?.[action] === 'own') {
-          res.status(409).json({
-            error: 'scoped_permission',
-            message: `${role}: ${category}.${action} is scoped to own records and cannot be toggled here.`,
-          });
-          return;
-        }
-        const nextAllowed = allowed ?? !(row.matrix[category]?.[action] ?? false);
-        const nextMatrix: PermissionMatrix = {
-          ...row.matrix,
-          [category]: { ...row.matrix[category], [action]: nextAllowed },
-        };
         await db
           .update(schema.rolePermissions)
           .set({ matrix: nextMatrix })
           .where(eq(schema.rolePermissions.id, row.id));
-        await recordAudit(db, tenant, {
-          action: 'Updated permissions',
-          target: `${role}: ${category}.${action} → ${nextAllowed ? 'allowed' : 'denied'}`,
-          category: 'settings',
-          icon: 'shield',
-        });
+      } else {
+        // Materialise the level's row from its default and insert (upsert), so
+        // the write side and the read-side fallback in permissions.ts cannot
+        // disagree.
+        await db
+          .insert(schema.rolePermissions)
+          .values({ orgId: tenant.orgId, role, matrix: nextMatrix });
       }
+      await recordAudit(db, tenant, {
+        action: 'Updated permissions',
+        target: `${role}: ${category}.${action} → ${nextAllowed ? 'allowed' : 'denied'}`,
+        category: 'settings',
+        icon: 'shield',
+      });
     }
 
     const rows = await db.query.rolePermissions.findMany({

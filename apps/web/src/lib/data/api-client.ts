@@ -151,6 +151,7 @@ export const apiClient = {
   post: <T>(path: string, body?: unknown, opts?: RequestOptions): Promise<T> =>
     request<T>('POST', path, body, opts?.timeoutMs),
   patch: <T>(path: string, body?: unknown): Promise<T> => request<T>('PATCH', path, body),
+  put: <T>(path: string, body?: unknown): Promise<T> => request<T>('PUT', path, body),
   delete: <T>(path: string): Promise<T> => request<T>('DELETE', path),
   /** POST to an endpoint that answers with a binary body (e.g. a PDF) instead of JSON. */
   postForBlob: (path: string, body?: unknown): Promise<Blob> =>

@@ -15,8 +15,11 @@ import type { SubmissionValue } from '@formai/shared';
 import {
   chcSubmissionValues,
   emptyChcIntakeState,
+  isMultiRoleDepartment,
+  rolesForDepartment,
   validateChcIntake,
   type ChcIntakeState,
+  type OrgDepartmentLite,
 } from './chc-intake-form.js';
 
 /**
@@ -316,5 +319,54 @@ describe('the screen and the template agree', () => {
     for (const f of fields) {
       if (f.visibleWhen) expect(ids.has(f.visibleWhen.fieldId)).toBe(true);
     }
+  });
+});
+
+describe('taxonomy-backed department lookups (R5, R17)', () => {
+  const orgDepartments: OrgDepartmentLite[] = [
+    {
+      name: 'Operations',
+      allowsMultipleRoles: true,
+      roles: [
+        { name: 'Dozer Operator', status: 'active' },
+        { name: 'Old Machine', status: 'retired' },
+      ],
+    },
+    {
+      name: 'Maintenance',
+      allowsMultipleRoles: false,
+      roles: [{ name: 'HD Mechanic / Fitter', status: 'active' }],
+    },
+  ];
+
+  it('reads the one-or-several rule from org taxonomy when supplied', () => {
+    expect(isMultiRoleDepartment('Operations', orgDepartments)).toBe(true);
+    expect(isMultiRoleDepartment('Maintenance', orgDepartments)).toBe(false);
+  });
+
+  it('narrows roles to the org`s active offer set, dropping retired ones', () => {
+    expect(rolesForDepartment('Operations', orgDepartments)).toEqual(['Dozer Operator']);
+  });
+
+  it('falls back to the hardcoded map when no org taxonomy is supplied', () => {
+    // Unchanged behaviour for a customer with no taxonomy yet.
+    expect(isMultiRoleDepartment('Operations')).toBe(true);
+    expect(rolesForDepartment('Maintenance').length).toBeGreaterThan(0);
+  });
+
+  it('validates a role against the org offer set when taxonomy is supplied', () => {
+    const state: ChcIntakeState = {
+      ...emptyChcIntakeState(),
+      first_name: 'A',
+      last_name: 'B',
+      gender: 'Male',
+      ethnicity: 'Caucasian',
+      starter_type: 'New starter',
+      department: 'Operations',
+      role: ['Old Machine'], // retired in the org taxonomy
+      induction_date: '',
+    };
+    const errors = validateChcIntake(state, new Date('2026-06-08'), orgDepartments);
+    expect(errors.role).toBeDefined();
   });
 });

@@ -70,13 +70,36 @@ export function emptyChcIntakeState(): ChcIntakeState {
   };
 }
 
-/** Does this department take more than one role? */
-export function isMultiRoleDepartment(department: string): boolean {
+/**
+ * A Department as the organisation's taxonomy carries it — the shape the intake
+ * needs to resolve the one-or-several rule and the offer set (R5). Supplied by
+ * the org's taxonomy when it has one; when omitted, the lookups fall back to the
+ * hardcoded CHC map, so a customer with no taxonomy yet keeps the original
+ * behaviour unchanged.
+ */
+export interface OrgDepartmentLite {
+  name: string;
+  allowsMultipleRoles: boolean;
+  roles: Array<{ name: string; status: 'active' | 'retired' }>;
+}
+
+/** Does this department take more than one role? Taxonomy-backed when supplied (R5). */
+export function isMultiRoleDepartment(department: string, orgDepartments?: OrgDepartmentLite[]): boolean {
+  if (orgDepartments) {
+    return orgDepartments.find((d) => d.name === department)?.allowsMultipleRoles ?? false;
+  }
   return CHC_DEPARTMENTS[department]?.multi ?? false;
 }
 
-/** Roles offered by a department; empty when none is chosen yet. */
-export function rolesForDepartment(department: string): readonly string[] {
+/** Roles offered by a department; empty when none is chosen yet. Taxonomy-backed when supplied (R5, R17). */
+export function rolesForDepartment(
+  department: string,
+  orgDepartments?: OrgDepartmentLite[],
+): readonly string[] {
+  if (orgDepartments) {
+    const dep = orgDepartments.find((d) => d.name === department);
+    return dep ? dep.roles.filter((r) => r.status === 'active').map((r) => r.name) : [];
+  }
   return CHC_DEPARTMENTS[department]?.roles ?? [];
 }
 
@@ -97,7 +120,11 @@ export type ChcErrors = Partial<Record<keyof ChcIntakeState, string>>;
  * when it is actually shown, matching the platform's own rule that a hidden
  * required field must never block a submit.
  */
-export function validateChcIntake(state: ChcIntakeState, now: Date = new Date()): ChcErrors {
+export function validateChcIntake(
+  state: ChcIntakeState,
+  now: Date = new Date(),
+  orgDepartments?: OrgDepartmentLite[],
+): ChcErrors {
   const errors: ChcErrors = {};
 
   if (!state.first_name.trim()) errors.first_name = 'Required';
@@ -108,14 +135,15 @@ export function validateChcIntake(state: ChcIntakeState, now: Date = new Date())
   if (!state.department) errors.department = 'Please select';
 
   if (state.role.length === 0) {
-    errors.role = isMultiRoleDepartment(state.department)
+    errors.role = isMultiRoleDepartment(state.department, orgDepartments)
       ? 'Select at least one role'
       : 'Please select';
   } else {
     // A role left over from a previously-chosen department would submit a
     // combination the site does not induct, so the selection is checked against
-    // the CURRENT department rather than merely being non-empty.
-    const offered = rolesForDepartment(state.department);
+    // the CURRENT department rather than merely being non-empty. When the org's
+    // taxonomy is supplied, the offer set comes from it (R5, R17).
+    const offered = rolesForDepartment(state.department, orgDepartments);
     if (state.role.some((r) => !offered.includes(r))) {
       errors.role = 'Select a role for the chosen department';
     }

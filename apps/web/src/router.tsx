@@ -20,6 +20,7 @@ import { GeometryEditorScreen } from './screens/import/GeometryEditorScreen.js';
 import { ResetPasswordScreen } from './screens/invite/ResetPasswordScreen.js';
 import { ApiKeysScreen } from './screens/enterprise/ApiKeysScreen.js';
 import { TeamScreen } from './screens/enterprise/TeamScreen.js';
+import { TaxonomyScreen } from './screens/enterprise/TaxonomyScreen.js';
 import { RolesScreen } from './screens/enterprise/RolesScreen.js';
 import { AuditScreen } from './screens/enterprise/AuditScreen.js';
 import { BillingScreen } from './screens/enterprise/BillingScreen.js';
@@ -52,6 +53,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   invite: <InviteScreen />,
   'reset-password': <ResetPasswordScreen />,
   team: <TeamScreen />,
+  taxonomy: <TaxonomyScreen />,
   'api-keys': <ApiKeysScreen />,
   roles: <RolesScreen />,
   audit: <AuditScreen />,

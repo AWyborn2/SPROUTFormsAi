@@ -11,6 +11,7 @@ import {
 } from '../../lib/data/hooks.js';
 import { INVITABLE_ROLES, ROLE_NAMES, type Member, type RoleName } from '../../lib/data/types.js';
 import { EMAIL_RE } from '../../lib/validation.js';
+import { PlacementDialog } from './PlacementDialog.js';
 
 /** Team management — member list, seat header, and the invite dialog. */
 export function TeamScreen() {
@@ -37,6 +38,8 @@ export function TeamScreen() {
   const [created, setCreated] = useState<{ name: string; url: string; emailSent: boolean } | null>(null);
   /** A freshly issued password-reset link, awaiting handover. */
   const [resetLink, setResetLink] = useState<{ name: string; url: string } | null>(null);
+  /** The member whose placement is open in the dialog. */
+  const [placing, setPlacing] = useState<{ id: string; name: string } | null>(null);
 
   const active = members.filter((m) => m.status === 'active').length;
   const invited = members.filter((m) => m.status === 'invited').length;
@@ -143,7 +146,7 @@ export function TeamScreen() {
       <div className="overflow-hidden rounded-lg border border-border bg-surface-card shadow-xs">
         <div className="flex items-center gap-[14px] border-b border-border-subtle px-[18px] py-[11px] font-mono text-[10.5px] uppercase tracking-[0.06em] text-text-tertiary">
           <span className="flex-1">Member</span>
-          <span className="w-[170px]">Role</span>
+          <span className="w-[170px]">Access level</span>
           <span className="w-24">Status</span>
           <span className="w-[34px]" />
         </div>
@@ -162,6 +165,7 @@ export function TeamScreen() {
               )
             }
             onRemove={() => remove.mutate(m.id)}
+            onPlace={m.status === 'active' ? () => setPlacing({ id: m.id, name: m.name }) : undefined}
             onResetPassword={
               // Only for accepted members: someone still holding an unaccepted
               // invite has no account yet, so there is nothing to reset.
@@ -177,6 +181,15 @@ export function TeamScreen() {
           />
         ))}
       </div>
+
+      {placing && (
+        <PlacementDialog
+          membershipId={placing.id}
+          memberName={placing.name}
+          open
+          onClose={() => setPlacing(null)}
+        />
+      )}
 
       {/* Invite dialog */}
       <Dialog
@@ -263,7 +276,7 @@ export function TeamScreen() {
             )}
 
             <Select
-              label="Role"
+              label="Access level"
               value={inviteRole}
               onChange={(e) => setInviteRole(e.target.value as RoleName)}
               options={INVITABLE_ROLES}
@@ -315,11 +328,14 @@ function MemberRow({
   member,
   onRole,
   onRemove,
+  onPlace,
   onResetPassword,
 }: {
   member: Member;
   onRole: (role: RoleName) => void;
   onRemove: () => void;
+  /** Absent for a member with no membership yet (a pending invite). */
+  onPlace?: () => void;
   /** Absent for a member with no account yet — nothing to reset. */
   onResetPassword?: () => void;
 }) {
@@ -342,7 +358,7 @@ function MemberRow({
         ) : (
           <div className="w-[150px]">
             <Select
-              aria-label={`Role for ${member.name}`}
+              aria-label={`Access level for ${member.name}`}
               value={member.role}
               onChange={(e) => onRole(e.target.value as RoleName)}
               options={ROLE_NAMES as unknown as string[]}
@@ -359,7 +375,17 @@ function MemberRow({
           </Badge>
         )}
       </span>
-      <span className="flex w-[68px] justify-end gap-0.5">
+      <span className="flex w-[98px] justify-end gap-0.5">
+        {onPlace && (
+          <button
+            onClick={onPlace}
+            aria-label={`Place ${member.name}`}
+            title="Set Locations, Departments and Roles"
+            className="fai-chip-btn grid h-[30px] w-[30px] place-items-center rounded-sm text-text-tertiary hover:bg-surface-hover"
+          >
+            <Icon name="map-pin" size={15} />
+          </button>
+        )}
         {onResetPassword && (
           <button
             onClick={onResetPassword}

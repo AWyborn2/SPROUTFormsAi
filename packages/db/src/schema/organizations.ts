@@ -1,7 +1,17 @@
 import { relations, sql } from 'drizzle-orm';
-import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import type { BrandingKit } from '@formai/shared';
-import { membershipStatusEnum, roleEnum } from './enums.ts';
+import { displayIdentifierEnum, membershipStatusEnum, roleEnum } from './enums.ts';
 
 /**
  * DB-level default for the branding column. Mirrors `DEFAULT_BRANDING` in
@@ -53,6 +63,21 @@ export const organizations = pgTable('organizations', {
    * API (see `maskWebhookUrl`) and never written to a log line.
    */
   inductionWebhookUrl: text('induction_webhook_url').notNull().default(''),
+  /**
+   * Whether a person may be placed at several Locations, and separately in
+   * several Departments (R24). Neither caps how many (R25). Both default off,
+   * matching the one-Location-one-Department starting point every membership
+   * carries today.
+   */
+  allowMultipleLocations: boolean('allow_multiple_locations').notNull().default(false),
+  allowMultipleDepartments: boolean('allow_multiple_departments').notNull().default(false),
+  /**
+   * Which of the two workforce numbers identifies a person on screen (R40).
+   * Defaults to the employee number; the swipe card number is the alternative.
+   * The numbers themselves are profile fields owned by the candidate profile
+   * artifact — this is only the organisation's choice between them.
+   */
+  displayIdentifier: displayIdentifierEnum('display_identifier').notNull().default('employee_number'),
 });
 
 export const users = pgTable('users', {

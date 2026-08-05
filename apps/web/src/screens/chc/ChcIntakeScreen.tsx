@@ -15,7 +15,7 @@ import {
   holidaysCoverThrough,
   nextBookableInductionDate,
 } from '@formai/shared';
-import { useCreateSubmission, useForms, useSession } from '../../lib/data/hooks.js';
+import { useCreateSubmission, useForms, useSession, useTaxonomy } from '../../lib/data/hooks.js';
 import { ApiError } from '../../lib/data/api-client.js';
 import {
   chcFullName,
@@ -26,6 +26,7 @@ import {
   validateChcIntake,
   type ChcErrors,
   type ChcIntakeState,
+  type OrgDepartmentLite,
 } from '../../lib/chc-intake-form.js';
 import { CHC_INTAKE_CSS, CHC_BORDER, CHC_NAVY, CHC_RED } from './chc-intake-styles.js';
 import { ChcFileField } from './ChcFileField.js';
@@ -58,7 +59,23 @@ type View = 'form' | 'sending' | 'document';
 export function ChcIntakeScreen() {
   const { data: session } = useSession();
   const { data: forms = [] } = useForms();
+  const { data: taxonomy } = useTaxonomy();
   const createSubmission = useCreateSubmission();
+
+  // When the organisation has a taxonomy, the Department and Role options come
+  // from it (R17); otherwise the hardcoded CHC map is the fallback, so a
+  // customer with no taxonomy yet keeps the original form unchanged.
+  const orgDepartments: OrgDepartmentLite[] | undefined =
+    taxonomy && taxonomy.departments.some((d) => d.status === 'active')
+      ? taxonomy.departments
+          .filter((d) => d.status === 'active')
+          .map((d) => ({
+            name: d.name,
+            allowsMultipleRoles: d.allowsMultipleRoles,
+            roles: d.roles.map((r) => ({ name: r.name, status: r.status })),
+          }))
+      : undefined;
+  const departmentNames = orgDepartments ? orgDepartments.map((d) => d.name) : CHC_DEPARTMENT_NAMES;
 
   const [state, setState] = useState<ChcIntakeState>(emptyChcIntakeState);
   const [errors, setErrors] = useState<ChcErrors>({});
@@ -119,7 +136,7 @@ export function ChcIntakeScreen() {
   }
 
   async function onSubmit() {
-    const found = validateChcIntake(state);
+    const found = validateChcIntake(state, undefined, orgDepartments);
     if (Object.keys(found).length > 0) {
       setErrors(found);
       setSubmitAttempted(true);
@@ -375,7 +392,7 @@ export function ChcIntakeScreen() {
                 onChange={(e) => onDepartmentChange(e.target.value)}
               >
                 <option value="">Select department…</option>
-                {CHC_DEPARTMENT_NAMES.map((d) => (
+                {departmentNames.map((d) => (
                   <option key={d} value={d}>
                     {d}
                   </option>
@@ -387,6 +404,7 @@ export function ChcIntakeScreen() {
               department={state.department}
               role={state.role}
               error={errors.role}
+              orgDepartments={orgDepartments}
               onSingle={(v) => set('role', v ? [v] : [])}
               onToggle={toggleRole}
             />
@@ -905,16 +923,18 @@ function RoleField({
   department,
   role,
   error,
+  orgDepartments,
   onSingle,
   onToggle,
 }: {
   department: string;
   role: string[];
   error?: string;
+  orgDepartments?: OrgDepartmentLite[];
   onSingle: (value: string) => void;
   onToggle: (label: string) => void;
 }) {
-  const roles = rolesForDepartment(department);
+  const roles = rolesForDepartment(department, orgDepartments);
 
   if (!department) {
     // `group`: the placeholder is a div, and a label's `for` may only
@@ -937,7 +957,7 @@ function RoleField({
     );
   }
 
-  if (!isMultiRoleDepartment(department)) {
+  if (!isMultiRoleDepartment(department, orgDepartments)) {
     return (
       <Field label="Role" required error={error} last>
         <select

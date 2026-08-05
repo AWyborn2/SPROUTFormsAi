@@ -8,11 +8,13 @@
 import type {
   BrandingKit,
   CompetencyStatus,
+  DisplayIdentifier,
   ExtractionResult,
   FormContainer,
   FormField,
   SubmissionStatus,
   SubmissionValue,
+  TaxonomyStatus,
 } from '@formai/shared';
 
 export type TemplateStatus = 'draft' | 'published' | 'archived';
@@ -147,7 +149,15 @@ export interface PublishImportInput {
  * `Role` union in @formai/shared, so screens read the same strings the design
  * validated. (@formai/shared `ROLE_LABELS` maps the two if needed later.)
  */
-export const ROLE_NAMES = ['Owner', 'Admin', 'Builder', 'Reviewer', 'Viewer'] as const;
+export const ROLE_NAMES = [
+  'Owner',
+  'Admin',
+  'Builder',
+  'Reviewer',
+  'Viewer',
+  'Assessor',
+  'Candidate',
+] as const;
 export type RoleName = (typeof ROLE_NAMES)[number];
 
 /** Roles that can be assigned via the invite dialog (Owner is not invitable). */
@@ -215,8 +225,16 @@ export interface AuditEntry {
   time: string;
 }
 
-/** Permission actions across all categories. */
-export type PermAction = 'view' | 'create' | 'edit' | 'delete' | 'export' | 'invite' | 'manage';
+/** Permission actions across all categories. `approve` is used by the profiles category (R34). */
+export type PermAction =
+  | 'view'
+  | 'create'
+  | 'edit'
+  | 'delete'
+  | 'export'
+  | 'invite'
+  | 'manage'
+  | 'approve';
 
 /** One capability category and the actions it exposes in the matrix. */
 export interface PermCategoryDef {
@@ -226,8 +244,14 @@ export interface PermCategoryDef {
   actions: Array<[PermAction, string]>;
 }
 
-/** role → category → action → allowed. Mirrors the prototype `perms` object. */
-export type PermState = Record<RoleName, Record<string, Partial<Record<PermAction, boolean>>>>;
+/**
+ * role → category → action → grant. The grant is `true` (org-wide), `false`
+ * (denied), or `'own'` (scoped to the user's own records — a Candidate confined
+ * to their own cases). The scoped value must survive to the screen so it renders
+ * distinctly rather than as a plain ON switch a toggle would collapse.
+ */
+export type PermGrant = boolean | 'own';
+export type PermState = Record<RoleName, Record<string, Partial<Record<PermAction, PermGrant>>>>;
 
 /* ── Billing / plan tiers ─────────────────────────────────────────────────── */
 
@@ -430,4 +454,54 @@ export interface FormVersionDetail {
   fields: FormField[];
   container: FormContainer;
   sourcePdfAssetId: string | null;
+}
+
+/* ── Taxonomy (Locations, Departments, Roles) ─────────────────────────────── */
+
+/** A managed Location the organisation assesses at. */
+export interface TaxLocation {
+  id: string;
+  name: string;
+  status: TaxonomyStatus;
+  createdAt: string;
+}
+
+/** A job Role offered within a Department. */
+export interface TaxRole {
+  id: string;
+  departmentId: string;
+  name: string;
+  status: TaxonomyStatus;
+  createdAt: string;
+}
+
+/** A Department, carrying the Roles it offers and its one-or-several rule (R5). */
+export interface TaxDepartment {
+  id: string;
+  name: string;
+  allowsMultipleRoles: boolean;
+  status: TaxonomyStatus;
+  createdAt: string;
+  roles: TaxRole[];
+}
+
+/** The three organisation settings that govern how far a person may spread (R24, R25, R40). */
+export interface TaxonomySettings {
+  allowMultipleLocations: boolean;
+  allowMultipleDepartments: boolean;
+  displayIdentifier: DisplayIdentifier;
+}
+
+/** The whole taxonomy in one read, for the settings screen. */
+export interface Taxonomy {
+  locations: TaxLocation[];
+  departments: TaxDepartment[];
+  settings: TaxonomySettings;
+}
+
+/** Where a member is placed — the ids on their membership (R21). */
+export interface MemberPlacement {
+  locationIds: string[];
+  departmentIds: string[];
+  roleIds: string[];
 }

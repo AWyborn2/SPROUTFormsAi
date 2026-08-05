@@ -66,6 +66,10 @@ export const PERMISSION_CATEGORIES = [
   'billing',
   'audit',
   'assessments',
+  // Member profiles and personal information (R33). The matrix carried no such
+  // category before — this is new work, not a switch that already existed. It
+  // reaches ANY member's profile, not a candidate's alone.
+  'profiles',
 ] as const;
 export type PermissionCategory = (typeof PERMISSION_CATEGORIES)[number];
 
@@ -76,7 +80,11 @@ export type PermissionAction =
   | 'delete'
   | 'export'
   | 'invite'
-  | 'manage';
+  | 'manage'
+  // Approving a document is distinct from viewing or editing it (R34): a
+  // document is approved without being changed, and a reader admitted to view
+  // one is not thereby admitted to approve it. Used by the `profiles` category.
+  | 'approve';
 
 /**
  * What a role may do with an action. `'own'` means "only records this user
@@ -134,6 +142,7 @@ const NONE: Partial<Record<PermissionAction, PermissionValue>> = {
   export: false,
   invite: false,
   manage: false,
+  approve: false,
 };
 
 /**
@@ -150,6 +159,7 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: true, manage: true },
     audit: { view: true },
     assessments: { view: true, create: true, edit: true, delete: true, export: true },
+    profiles: { view: true, edit: true, approve: true },
   },
   admin: {
     forms: { view: true, create: true, edit: true, delete: true },
@@ -158,6 +168,7 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: true, manage: false },
     audit: { view: true },
     assessments: { view: true, create: true, edit: true, delete: true, export: true },
+    profiles: { view: true, edit: true, approve: true },
   },
   builder: {
     forms: { view: true, create: true, edit: true, delete: false },
@@ -166,6 +177,7 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: false, manage: false },
     audit: { view: false },
     assessments: { view: true, create: false, edit: false, delete: false, export: false },
+    profiles: { view: false, edit: false, approve: false },
   },
   reviewer: {
     forms: { view: true, create: false, edit: false, delete: false },
@@ -174,6 +186,7 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: false, manage: false },
     audit: { view: true },
     assessments: { view: true, create: false, edit: false, delete: false, export: true },
+    profiles: { view: false, edit: false, approve: false },
   },
   viewer: {
     forms: { view: true, create: false, edit: false, delete: false },
@@ -182,6 +195,7 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: false, manage: false },
     audit: { view: false },
     assessments: { view: true, create: false, edit: false, delete: false, export: false },
+    profiles: { view: false, edit: false, approve: false },
   },
   /**
    * Runs assessments but does not administer the org. Eligibility to assess a
@@ -196,6 +210,11 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: false, manage: false },
     audit: { view: false },
     assessments: { view: true, create: true, edit: true, delete: false, export: true },
+    // R35: on the shipped default an assessor may view member profiles and the
+    // documents on them, and approve those documents — so they can judge
+    // eligibility and accept training evidence. Not edit. The candidate profile
+    // artifact owns tightening or loosening this per organisation.
+    profiles: { view: true, edit: false, approve: true },
   },
   /**
    * The workforce member being assessed. Scoped to their own cases and denied
@@ -209,6 +228,10 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { ...NONE },
     audit: { ...NONE },
     assessments: { view: 'own', edit: 'own', create: false, delete: false, export: false },
+    // A candidate's access to their OWN record sits outside this category and is
+    // fixed by the candidate profile artifact (R36); the matrix cannot grant or
+    // take it away, so the category itself grants a candidate nothing.
+    profiles: { ...NONE },
   },
 };
 
