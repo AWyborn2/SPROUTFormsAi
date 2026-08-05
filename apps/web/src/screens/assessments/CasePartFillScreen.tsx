@@ -10,6 +10,7 @@ import {
 import { partVisibility } from '../../lib/assessment-fill.js';
 import { fillSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
+import { answeredPages, theoryPages } from '../../lib/theory-pages.js';
 
 /**
  * Completing one part of an assessment case — the candidate's working surface.
@@ -98,6 +99,31 @@ export function CasePartFillScreen() {
   const handedIn = attempt.submittedAt !== null;
   const readOnly = marked || handedIn;
   const rendered = visibleFillFields(attempt.fields, answers, sources);
+
+  /*
+    ONE QUESTION PER SCREEN, WHEN THE TOOL SAYS SO (U21).
+
+    Presentation only: every field still renders through the same `FieldInput`,
+    writes the same value to the same id, and is gated by the same
+    `writableFieldIds` the server decided. The paging is a WINDOW over
+    `rendered`, not a different list, so nothing about marking, storage or the
+    evidence export can tell which presentation a candidate used.
+
+    The choice comes off the tool's manifest, made once by the author in the
+    builder. Absent means stacked, which is what every theory part rendered as
+    before this existed.
+  */
+  const paged = attempt.theoryRendering === 'one_per_screen' && attempt.partKind === 'theory';
+  const pages = useMemo(() => (paged ? theoryPages(rendered) : []), [paged, rendered]);
+  const [pageIndex, setPageIndex] = useState(0);
+  /*
+    Clamped on READ rather than reset on change: a question answered on the last
+    page can make an earlier one visible or hidden, and snapping the candidate
+    back to page one every time the list resized would lose their place.
+  */
+  const page = pages[Math.min(pageIndex, Math.max(0, pages.length - 1))];
+  const answered = paged ? answeredPages(pages, answers) : 0;
+  const shown = page ? page.fields : rendered;
   /*
     Which fields this caller may change, as the server decided. A tool with no
     workflow authored sends every field of the part, so nothing renders
@@ -177,8 +203,29 @@ export function CasePartFillScreen() {
         </div>
       )}
 
+      {paged && pages.length > 1 && (
+        <div className="flex items-center gap-3">
+          <span
+            className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-sunken"
+            role="progressbar"
+            aria-valuenow={answered}
+            aria-valuemin={0}
+            aria-valuemax={pages.length}
+            aria-label="Questions answered"
+          >
+            <span
+              className="block h-full rounded-full bg-accent"
+              style={{ width: `${Math.round((answered / pages.length) * 100)}%` }}
+            />
+          </span>
+          <span className="flex-none text-[11.5px] text-text-tertiary">
+            {answered} of {pages.length} answered
+          </span>
+        </div>
+      )}
+
       <div className="grid grid-cols-12 gap-[16px]">
-        {rendered.map((f) => (
+        {shown.map((f) => (
           <div key={f.id} className={fillSpanClass(resolveFillSpan(f, false))}>
             <FieldInput
               field={f}
@@ -195,12 +242,36 @@ export function CasePartFillScreen() {
             />
           </div>
         ))}
-        {rendered.length === 0 && (
+        {shown.length === 0 && (
           <div className="col-span-12 py-6 text-center text-[13px] text-text-tertiary">
             There's nothing to complete in this part.
           </div>
         )}
       </div>
+
+      {paged && pages.length > 1 && (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={pageIndex === 0}
+            onClick={() => setPageIndex((i) => Math.max(0, i - 1))}
+            className="inline-flex h-[32px] items-center rounded-lg border border-border px-3 text-[12px] font-semibold text-text-secondary disabled:opacity-40"
+          >
+            Previous
+          </button>
+          <span className="text-[11.5px] text-text-tertiary">
+            Question {(page?.index ?? 0) + 1} of {pages.length}
+          </span>
+          <button
+            type="button"
+            disabled={pageIndex >= pages.length - 1}
+            onClick={() => setPageIndex((i) => Math.min(pages.length - 1, i + 1))}
+            className="inline-flex h-[32px] items-center rounded-lg border border-border px-3 text-[12px] font-semibold text-text-secondary disabled:opacity-40"
+          >
+            Next
+          </button>
+        </div>
+      )}
 
       {!readOnly && (
         <div className="mt-6 flex items-center justify-end gap-3">

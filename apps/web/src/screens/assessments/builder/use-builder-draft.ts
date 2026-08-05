@@ -554,8 +554,8 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
   }, [structure, fields, setup, keys, excluded, partOverrides, partOrder]);
 
   const manifest = useMemo(
-    () => buildManifest(parts, extraction?.fields ?? []),
-    [parts, extraction],
+    () => buildManifest(parts, extraction?.fields ?? [], setup),
+    [parts, extraction, setup],
   );
 
   /*

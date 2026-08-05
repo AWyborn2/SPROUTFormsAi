@@ -264,11 +264,22 @@ export function proposeCoverPointers(
 export function buildManifest(
   parts: readonly DerivedPart[],
   extracted: readonly Pick<ExtractedField, 'id' | 'label' | 'coverSection'>[],
+  setup?: Pick<SetupAnswers, 'theoryRendering'>,
 ): AssessmentToolManifest {
   return {
     // `sectionKey` is builder bookkeeping and must not reach the stored record.
     parts: parts.map(({ sectionKey: _sectionKey, ...part }) => part),
     ...proposeCoverPointers(extracted),
+    /*
+      The setup answer follows the tool, not the draft.
+
+      Step 1 asks how theory should be presented, and until now the answer had
+      nowhere to live past publish: SetupAnswers is draft state, and the draft is
+      gone by the time a candidate opens the assessment. `stacked` is the
+      default and is what every theory part rendered as before, so only a
+      deliberate one_per_screen is worth storing.
+    */
+    ...(setup?.theoryRendering === 'one_per_screen' ? { theoryRendering: 'one_per_screen' as const } : {}),
   };
 }
 
