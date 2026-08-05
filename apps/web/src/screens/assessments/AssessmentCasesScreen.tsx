@@ -62,8 +62,24 @@ export function AssessmentCasesScreen() {
             {isCandidate ? 'My progress' : 'Progress'}
           </Link>
           {!isCandidate && (
-            <Button leadingIcon="plus" onClick={() => setCreating(true)} disabled={!tools?.length}>
+            <Button
+              variant="secondary"
+              leadingIcon="plus"
+              onClick={() => setCreating(true)}
+              disabled={!tools?.length}
+            >
               New case
+            </Button>
+          )}
+          {/*
+            The way a tool comes into existence at all. Until this screen
+            offered it, authoring one meant a node script run against the
+            database with the answer key on somebody's laptop — so the entry
+            point sat outside the product entirely.
+          */}
+          {!isCandidate && (
+            <Button leadingIcon="sparkles" onClick={() => navigate('/app/assessments/builder')}>
+              Assessment builder
             </Button>
           )}
         </div>

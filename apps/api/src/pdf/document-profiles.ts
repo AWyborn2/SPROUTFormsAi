@@ -29,6 +29,29 @@ import type { DocumentType } from '@formai/shared';
  *
  * Rule 1 is the load-bearing one. The others describe structures this class
  * reliably contains, so the model does not have to infer their meaning.
+ *
+ * Rules 8-10 each exist because of a specific thing this class of document
+ * carries that a generic read drops on the floor:
+ *
+ *  - The COVER PAGE of an assessment paper is three different documents
+ *    printed on one sheet — who the candidate is, what they must already hold
+ *    and which route they are taking, and what the assessor concluded. Read as
+ *    one undifferentiated block it cannot be split into parts, and the
+ *    pathway half — the half that gates enrolment — is the half that reads
+ *    least like a form.
+ *
+ *  - A PREREQUISITE ROW ("Driver's Licence C or higher class") is a sentence
+ *    with a tick box beside it, and a generic read treats it as a heading. It
+ *    then disappears: nothing downstream can tell it was ever printed, and the
+ *    tool is authored with no record that the candidate had to hold a licence.
+ *    That happened on the real Track Dozer paper.
+ *
+ *  - A MATCHING QUESTION has no printed option list, so a read that must
+ *    produce one invents it. `packages/shared/src/matching.ts` models these
+ *    properly — as a choice field whose options are the PAIRINGS — but it can
+ *    only build them from both sides, and nothing was ever asked for either.
+ *    The result is a question sitting in a mandatory section that marking
+ *    silently skips, which `validateManifest` calls out by name.
  */
 const ASSESSMENT_PROFILE =
   'DOCUMENT TYPE: COMPETENCY ASSESSMENT PAPER. These rules OVERRIDE the general guidance above ' +
@@ -63,7 +86,28 @@ const ASSESSMENT_PROFILE =
   'hours column as its own column — hours are totalled from it against a minimum.\n' +
   '7. SIGN-OFF BLOCKS (assessor name, signature, date, and a competent / not-yet-competent ' +
   'choice) appear once per part. Emit each as its own field, and keep the competent choice a ' +
-  '`radio`.';
+  '`radio`.\n' +
+  '8. THE COVER PAGE ALWAYS SPLITS INTO EXACTLY THREE SECTIONS, in this order, and every ' +
+  'fillable box on that page belongs to one of them. Set `coverSection` on each: ' +
+  '"candidate_declaration" — the candidate identity boxes (name, company, employee or swipe-card ' +
+  'number) and the candidate declaration signature; "pathway_prerequisites" — EVERY prerequisite ' +
+  'row, EVERY pathway statement, and EVERY assessment-method tracking row; ' +
+  '"assessor_declaration" — the coaching yes/no boxes, the further-action and mandatory comment ' +
+  'boxes, the competent / not-yet-competent boxes, and the assessor name, signature and date. ' +
+  'Emit `section_header` fields for the three as well, so the parts they open are anchorable.\n' +
+  '9. NEVER OMIT A PREREQUISITE ROW. A licence class, permit, ticket or qualification the ' +
+  'candidate must already hold ("Q50001782 Driver’s Licence C or higher class") is a ' +
+  'GATING FACT, not page furniture: emit it verbatim as its own `check_cross` field in ' +
+  '"pathway_prerequisites". A prerequisite that is read as a heading disappears from the ' +
+  'assessment entirely, and nothing downstream can tell it was ever printed.\n' +
+  '10. A MATCHING QUESTION CARRIES BOTH ITS SIDES. When a question asks the candidate to match ' +
+  'statements to answers, signs, images or signals, emit `matchLeft` (every prompt, verbatim, in ' +
+  'printed order — where the prompts are pictures, describe each one, e.g. "Sign photo — ' +
+  'red pyramid") and `matchRight` (everything they may be matched to, verbatim, in printed ' +
+  'order). Set `type` to `checkbox_group` with selectionType "multiple" and leave `options` ' +
+  'EMPTY — the pairings are built from the two sides, so an options list guessed here would ' +
+  'be a different question from the one printed. Never emit a matching question with only one ' +
+  'side: a side that cannot be read is better reported empty than invented.';
 
 const PROFILES: Partial<Record<DocumentType, string>> = {
   assessment: ASSESSMENT_PROFILE,

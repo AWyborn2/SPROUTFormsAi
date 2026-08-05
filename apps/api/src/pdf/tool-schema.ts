@@ -4,7 +4,7 @@
  * so the tool result maps straight onto our domain types. Kept as a plain JSON
  * Schema object (Anthropic tool `input_schema`).
  */
-import { FORM_FIELD_TYPES } from '@formai/shared';
+import { COVER_SECTIONS, FORM_FIELD_TYPES } from '@formai/shared';
 
 export const EXTRACT_TOOL_NAME = 'extract_form_fields';
 
@@ -101,6 +101,24 @@ export const extractFormFieldsTool = {
               type: 'string',
               description:
                 'The question reference exactly as printed ("Q1", "BBM Q3", "7"). Set it on a question AND on that question’s tick/cross outcome box; the matching string is what links the two. Omit on anything that is neither.',
+            },
+            coverSection: {
+              type: 'string',
+              enum: [...COVER_SECTIONS],
+              description:
+                'For a field on the cover / summary page only — which of its three sections the field belongs to. "candidate_declaration": the candidate identity boxes and the candidate declaration signature. "pathway_prerequisites": every prerequisite row (licence, permit, ticket, qualification), every pathway statement, and every assessment-method tracking row. "assessor_declaration": coaching yes/no, further-action and mandatory comment boxes, competent / not-yet-competent, and the assessor name, signature and date. Omit on anything not printed on the cover page.',
+            },
+            matchLeft: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'For a MATCHING question only — every prompt, verbatim, in printed order. Where the prompts are pictures, describe each one ("Sign photo — red pyramid"). Always emit together with matchRight, and leave options empty: the pairings are derived from the two sides. Never emit only one side.',
+            },
+            matchRight: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'For a MATCHING question only — everything the prompts may be matched to, verbatim, in printed order. Always emit together with matchLeft.',
             },
             note: {
               type: 'string',

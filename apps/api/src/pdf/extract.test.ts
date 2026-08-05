@@ -634,3 +634,145 @@ describe('extractForm — recorded page index', () => {
     expect(supplier?.sourcePosition?.pageWidth).toBe(600);
   });
 });
+
+/**
+ * `questionRef`, `coverSection` and the two matching sides all reach the model
+ * as schema properties and all have to survive `normalizeField` to mean
+ * anything. `questionRef` did not: it was asked for, documented at length in
+ * the assessment profile, rendered by the review UI and resolved by
+ * `linkOutcomeTargets` — and dropped at the one point every AI-extracted field
+ * passes through, so no field could ever carry one. These pin all four, because
+ * the failure is invisible from either end: the model returns the value and the
+ * consumer finds nothing, with no error in between.
+ */
+describe('extractForm — assessment field properties survive normalization', () => {
+  function fieldsResponse(fields: Record<string, unknown>[]): AnthropicMessage {
+    return {
+      content: [
+        { type: 'tool_use', name: EXTRACT_TOOL_NAME, input: { fields, designNotes: [] } },
+      ],
+    };
+  }
+
+  async function extractOne(field: Record<string, unknown>) {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(fieldsResponse([field]));
+    const result = await extractForm(pdf, {
+      fileName: 'flat.pdf',
+      documentType: 'assessment',
+      anthropic: { messages: { create } },
+    });
+    return result.fields[0];
+  }
+
+  it('carries questionRef through, so a question can be paired with its outcome box', async () => {
+    const field = await extractOne({
+      label: 'Q1. Three points of contact must be maintained?',
+      type: 'radio',
+      confidence: 0.95,
+      options: ['True', 'False'],
+      questionRef: 'Q1',
+    });
+
+    expect(field?.questionRef).toBe('Q1');
+  });
+
+  it('trims a padded questionRef, because the pairing matches character for character', async () => {
+    const field = await extractOne({
+      label: 'Outcome',
+      type: 'check_cross',
+      confidence: 0.9,
+      questionRef: '  BBM Q3  ',
+    });
+
+    expect(field?.questionRef).toBe('BBM Q3');
+  });
+
+  it('drops a blank questionRef rather than carrying an empty pairing key', async () => {
+    // An empty string would pair with every other empty string.
+    const field = await extractOne({
+      label: 'Outcome',
+      type: 'check_cross',
+      confidence: 0.9,
+      questionRef: '   ',
+    });
+
+    expect(field?.questionRef).toBeUndefined();
+  });
+
+  it('carries a declared coverSection through', async () => {
+    const field = await extractOne({
+      label: 'Q50001782 Driver’s Licence C or higher class',
+      type: 'check_cross',
+      confidence: 0.9,
+      coverSection: 'pathway_prerequisites',
+    });
+
+    expect(field?.coverSection).toBe('pathway_prerequisites');
+  });
+
+  it('drops an undeclared coverSection rather than inventing a fourth section', async () => {
+    const field = await extractOne({
+      label: 'Something',
+      type: 'text',
+      confidence: 0.9,
+      coverSection: 'front_matter',
+    });
+
+    expect(field?.coverSection).toBeUndefined();
+  });
+
+  it('carries both matching sides through, in printed order', async () => {
+    const field = await extractOne({
+      label: 'Match the statement with the appropriate signage.',
+      type: 'checkbox_group',
+      selectionType: 'multiple',
+      confidence: 0.8,
+      matchLeft: ['Access is restricted', 'Contact the person on the sign', 'Hazard ahead'],
+      matchRight: ['Sign photo — red pyramid', 'Sign photo — yellow cone', 'Sign photo — blue pyramid'],
+    });
+
+    expect(field?.matchLeft).toEqual([
+      'Access is restricted',
+      'Contact the person on the sign',
+      'Hazard ahead',
+    ]);
+    expect(field?.matchRight).toHaveLength(3);
+  });
+
+  it('keeps a one-sided matching question one-sided, so the gap stays visible', async () => {
+    // Seeding the missing side would make an unauthorable question look
+    // authorable — the pair builder needs to know which case it is in.
+    const field = await extractOne({
+      label: 'Match the correct response with the horn signals.',
+      type: 'checkbox_group',
+      confidence: 0.7,
+      matchLeft: ['3 horn blasts', '2 horn blasts', '1 horn blast'],
+    });
+
+    expect(field?.matchLeft).toHaveLength(3);
+    expect(field?.matchRight).toBeUndefined();
+  });
+
+  it('drops blank entries and empty sides rather than carrying holes', async () => {
+    const field = await extractOne({
+      label: 'Match',
+      type: 'checkbox_group',
+      confidence: 0.7,
+      matchLeft: ['One', '   ', 'Two'],
+      matchRight: [],
+    });
+
+    expect(field?.matchLeft).toEqual(['One', 'Two']);
+    expect(field?.matchRight).toBeUndefined();
+  });
+
+  it('leaves an ordinary field carrying none of them', async () => {
+    const field = await extractOne({ label: 'Site name', type: 'text', confidence: 0.98 });
+
+    expect(field?.questionRef).toBeUndefined();
+    expect(field?.coverSection).toBeUndefined();
+    expect(field?.matchLeft).toBeUndefined();
+    expect(field?.matchRight).toBeUndefined();
+  });
+});

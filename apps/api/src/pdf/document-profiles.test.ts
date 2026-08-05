@@ -84,4 +84,32 @@ describe('the assessment profile', () => {
     // "a) " on the option would make every mapping ambiguous.
     expect(p).toContain('WITHOUT the a)/b)/c) prefix');
   });
+
+  it('fixes the cover page at exactly three named sections', () => {
+    // Three, and these three, because the split is a property of the document
+    // class. A free-text section name would let two extractions of the same
+    // page disagree about which boxes gate enrolment.
+    expect(p).toContain('EXACTLY THREE SECTIONS');
+    expect(p).toContain('candidate_declaration');
+    expect(p).toContain('pathway_prerequisites');
+    expect(p).toContain('assessor_declaration');
+  });
+
+  it('refuses to let a prerequisite row be read as a heading', () => {
+    // The Track Dozer paper's driver's-licence prerequisite reads like a
+    // sentence, so a generic read drops it — and then nothing downstream can
+    // tell it was ever printed.
+    expect(p).toContain('NEVER OMIT A PREREQUISITE ROW');
+    expect(p).toContain('check_cross');
+    expect(p.toLowerCase()).toContain('licence');
+  });
+
+  it('demands both sides of a matching question, and no guessed options', () => {
+    // One side is not enough to build the pairings, and a guessed option list
+    // is a different question from the one printed.
+    expect(p).toContain('BOTH ITS SIDES');
+    expect(p).toContain('matchLeft');
+    expect(p).toContain('matchRight');
+    expect(p).toContain('Never emit a matching question with only one');
+  });
 });
