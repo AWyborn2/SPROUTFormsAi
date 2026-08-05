@@ -1316,3 +1316,135 @@ export function deriveOptionCellsAcrossPages(
 
   return hits[0] ?? null;
 }
+
+/* ------------------------------------------------------------------ *
+ * Whole-box movement
+ *
+ * Everything above moves a band EDGE — which is the right tool for saying which
+ * option column a mark belongs in, and the wrong one for "this whole box is two
+ * points too high". Placing a box was one-shot until now: it snapped where it
+ * landed and the only correction was to delete it and draw it again, on a
+ * screen where a real paper carries three hundred of them.
+ * ------------------------------------------------------------------ */
+
+/**
+ * How far a whole box moves per coarse nudge, in PDF points.
+ *
+ * Ten steps of `NUDGE_POINTS`, so Shift+arrow and ten arrows land in exactly the
+ * same place — a coarse step that is not a multiple of the fine one makes the
+ * two disagree about where a box ends up, and an author who used both cannot
+ * predict either.
+ */
+export const NUDGE_POINTS_COARSE = NUDGE_POINTS * 10;
+
+/** The step one arrow-key press moves a selected box. */
+export function nudgeStep(coarse: boolean): number {
+  return coarse ? NUDGE_POINTS_COARSE : NUDGE_POINTS;
+}
+
+/**
+ * A delta clamped so the box stays wholly on its page.
+ *
+ * A box dragged off the edge is not a placement — the exporter would draw its
+ * mark outside the media box, where it does not appear on the printed page at
+ * all. That reads on a competency record as a mark nobody made, which is the
+ * same silence a missing outcome box produces.
+ *
+ * Clamps the DELTA rather than the resulting box, so a drag that would overshoot
+ * slides along the edge instead of stopping dead: the axis that still has room
+ * keeps moving.
+ */
+export function clampDelta(
+  segment: Pick<PageBox, 'x' | 'y' | 'width' | 'height' | 'pageWidth' | 'pageHeight'>,
+  dx: number,
+  dy: number,
+): { dx: number; dy: number } {
+  return {
+    dx: Math.max(-segment.x, Math.min(dx, segment.pageWidth - segment.width - segment.x)),
+    dy: Math.max(-segment.y, Math.min(dy, segment.pageHeight - segment.height - segment.y)),
+  };
+}
+
+/**
+ * Move a whole placement box, bands and all.
+ *
+ * THE BANDS MOVE WITH IT, AND THAT IS THE WHOLE POINT. `GeometryBand.start` /
+ * `end` are absolute PDF-point coordinates in the same space as `PageBox.x` /
+ * `y` — `markPlacement` reads `columnBand.start` directly as the mark's x. Move
+ * the outline without moving the bands and the box lands where the author put
+ * it while every mark it draws stays where it was, so the preview agrees with
+ * nothing and the export puts ticks in the wrong cells. Column bands follow the
+ * x delta, row bands the y delta.
+ *
+ * Returns the SAME segment when the clamped delta is zero, so a drag held
+ * against the page edge produces no re-render and a nudge at the boundary is a
+ * no-op rather than a churn of identical states.
+ */
+export function moveSegment(segment: PageBox, dx: number, dy: number): PageBox {
+  const clamped = clampDelta(segment, dx, dy);
+  if (clamped.dx === 0 && clamped.dy === 0) return segment;
+
+  const shift = (bands: GeometryBand[] | undefined, by: number) =>
+    bands?.map((b) => ({ ...b, start: b.start + by, end: b.end + by }));
+
+  const columnBands = shift(segment.columnBands, clamped.dx);
+  const rowBands = shift(segment.rowBands, clamped.dy);
+
+  return {
+    ...segment,
+    x: segment.x + clamped.dx,
+    y: segment.y + clamped.dy,
+    ...(columnBands ? { columnBands } : {}),
+    ...(rowBands ? { rowBands } : {}),
+  };
+}
+
+/** Which way an arrow key moves a box, in PDF points. */
+export const ARROW_DELTAS: Record<string, { dx: number; dy: number }> = {
+  ArrowLeft: { dx: -1, dy: 0 },
+  ArrowRight: { dx: 1, dy: 0 },
+  // PDF y grows UPWARD, and the screen's y grows downward. ArrowUp has to mean
+  // "up the printed page", so it is a POSITIVE y here. Getting this backwards
+  // sends every box the wrong way and reads as the control being broken.
+  ArrowUp: { dx: 0, dy: 1 },
+  ArrowDown: { dx: 0, dy: -1 },
+};
+
+/**
+ * The move one key press means, or null if the key is not a movement key.
+ *
+ * Null rather than a zero delta, so a caller can tell "this key is not mine"
+ * from "this key moved nothing" and leave the event unhandled — swallowing every
+ * keystroke on a screen with a filter box would stop an author typing in it.
+ */
+export function keyMove(key: string, coarse: boolean): { dx: number; dy: number } | null {
+  const direction = ARROW_DELTAS[key];
+  if (!direction) return null;
+  const step = nudgeStep(coarse);
+  return { dx: direction.dx * step, dy: direction.dy * step };
+}
+
+/** Whether a key press should remove the selected box. */
+export function isDeleteKey(key: string): boolean {
+  return key === 'Delete' || key === 'Backspace';
+}
+
+/**
+ * Drop one page's box from a field's geometry.
+ *
+ * Returns undefined when the last segment goes, rather than an empty geometry:
+ * `geometry.ts` treats an absent footprint as "not placed", and a geometry
+ * carrying zero segments is a third state nothing downstream reads — it would
+ * pass a "has geometry" check and then draw nothing.
+ */
+export function removeSegment(
+  segments: readonly PageBox[],
+  page: number,
+  optionKey?: string,
+): PageBox[] | undefined {
+  const next = segments.filter(
+    (s) => !(s.page === page && (s.optionKey ?? undefined) === (optionKey ?? undefined)),
+  );
+  if (next.length === segments.length) return segments as PageBox[];
+  return next.length > 0 ? next : undefined;
+}
