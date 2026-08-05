@@ -70,6 +70,9 @@ function fakeDb(opts: {
         findMany: vi.fn().mockResolvedValue([]),
       },
       users: { findFirst: vi.fn().mockResolvedValue({ name: 'Ada' }) },
+      // Assign-on-requirement-change (U11) reads the Role's holders; none in these
+      // unit tests, so the assignment side effect is a no-op here.
+      membershipRoles: { findMany: vi.fn().mockResolvedValue([]) },
     },
     select: vi.fn(() => ({
       from: () => ({ where: () => Promise.resolve(opts.nameClashRows ?? []) }),

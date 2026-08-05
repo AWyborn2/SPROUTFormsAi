@@ -57,6 +57,9 @@ function fakeDb(opts: {
       membershipDepartments: { findMany: vi.fn().mockResolvedValue(opts.heldDepartments ?? []) },
       membershipRoles: { findMany: vi.fn().mockResolvedValue(opts.heldRoles ?? []) },
       users: { findFirst: vi.fn().mockResolvedValue({ name: 'Ada' }) },
+      // Assign-on-placement (U11) runs after a successful write; with no Role
+      // requirements it is a no-op, which is all these placement tests need.
+      roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue([]) },
     },
     insert: () => ({ values: () => Promise.resolve(undefined) }),
     transaction: vi.fn(async (cb: (t: typeof tx) => Promise<void>) => cb(tx)),

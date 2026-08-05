@@ -6,6 +6,7 @@ import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
+import { assignForRole } from '../lib/assignment.js';
 import { db } from '../db.js';
 
 /**
@@ -441,6 +442,12 @@ taxonomyRouter.put(
       category: 'settings',
       icon: 'briefcase',
     });
+    // Assign on requirement change (U11, R47): everyone holding this Role today
+    // gets a case for any new requirement they cannot yet meet. The same skip
+    // rule as placement change, so the two agree, and idempotent so re-saving an
+    // unchanged list creates nothing. U12 layers the preview and confirmation on
+    // top of this apply.
+    await assignForRole(db, tenant.orgId, role.id);
     res.json({ configured: true, toolIds });
   }),
 );
