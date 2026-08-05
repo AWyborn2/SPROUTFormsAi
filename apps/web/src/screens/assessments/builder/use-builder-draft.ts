@@ -4,6 +4,9 @@ import {
   hasAnyMatchSide,
   hasBothMatchSides,
   isChoiceField,
+  validateManifest,
+  type AssessmentPathway,
+  type AssessmentToolManifest,
   type BuiltMatchingQuestion,
   type BuilderStructure,
   type DraftAnswerKey,
@@ -19,6 +22,14 @@ import { apiClient, ApiError } from '../../../lib/data/api-client.js';
 import { fileToBase64, IMPORT_REQUEST_TIMEOUT_MS } from '../../../lib/data/import-session.js';
 import { retypeField } from '../../../lib/field-editor/reducer.js';
 import * as Structure from './builder-structure.js';
+import {
+  buildManifest,
+  derivePartsFromStructure,
+  movePart,
+  setPathways as setPartPathways,
+  updatePart,
+  type DerivedPart,
+} from './builder-manifest.js';
 import { structureFromExtraction } from './builder-structure.js';
 
 /**
@@ -100,6 +111,12 @@ export interface BuilderDraftState {
   title: string | null;
   pageCount: number;
   keys: DraftAnswerKey[];
+  /** Parts as the units step shows them: derived from structure, then edited. */
+  parts: DerivedPart[];
+  /** The manifest those parts assemble into, ready for validateManifest. */
+  manifest: AssessmentToolManifest;
+  /** Live problems from the SHARED validator. Never a second rule set. */
+  manifestProblems: string[];
   ingest: (file: File) => Promise<void>;
   setSetup: (patch: Partial<SetupAnswers>) => void;
   toggleExcluded: (fieldId: string) => void;
@@ -108,6 +125,17 @@ export interface BuilderDraftState {
   structureOps: StructureOps;
   /** Answer-key edits. */
   keyOps: KeyOps;
+  /** Unit / part edits. */
+  partOps: PartOps;
+}
+
+export interface PartOps {
+  /** Change PROCESS order. Never touches `ordinal` — see R14. */
+  move: (key: string, delta: number) => void;
+  setPathways: (key: string, pathways: readonly AssessmentPathway[]) => void;
+  update: (key: string, patch: Partial<Omit<DerivedPart, 'key' | 'ordinal' | 'sectionKey'>>) => void;
+  /** Drop every override and go back to what the structure derives. */
+  reset: () => void;
 }
 
 export interface KeyOps {
@@ -227,6 +255,20 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
   }));
   const [excluded, setExcluded] = useState<Set<string>>(() => new Set());
   const [keys, setKeys] = useState<DraftAnswerKey[]>([]);
+  /*
+    PARTS ARE DERIVED, WITH THE AUTHOR'S EDITS LAYERED ON TOP.
+
+    Holding a resolved list would freeze the manifest at the moment the units
+    step first opened: rename a section or key another question afterwards and
+    the part would still carry the old label and the old mandatory set, with
+    nothing saying they had diverged. Instead the base is re-derived from
+    structure on every render and these two hold only what the author changed —
+    so a structure edit flows straight through, and an edit survives it.
+  */
+  const [partOverrides, setPartOverrides] = useState<
+    Record<string, Partial<Omit<DerivedPart, 'key' | 'ordinal' | 'sectionKey'>>>
+  >({});
+  const [partOrder, setPartOrder] = useState<string[]>([]);
 
   const ingest = useCallback(async (file: File) => {
     setError(null);
@@ -259,6 +301,8 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
       setStructure(structureFromExtraction(result));
       setExcluded(new Set());
       setKeys([]);
+      setPartOverrides({});
+      setPartOrder([]);
       setGroupCount(1);
       setPhase('ready');
     } catch (err) {
@@ -289,6 +333,8 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     setStructure([]);
     setExcluded(new Set());
     setKeys([]);
+    setPartOverrides({});
+    setPartOrder([]);
   }, []);
 
   /*
@@ -450,6 +496,70 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     [],
   );
 
+  const parts = useMemo(() => {
+    const base = derivePartsFromStructure({ structure, fields, setup, keys, excluded });
+    const withEdits = base.map((p) => ({ ...p, ...(partOverrides[p.key] ?? {}) }));
+    if (partOrder.length === 0) return withEdits;
+    /*
+      The saved order is applied by KEY, and anything it does not name keeps its
+      derived position at the end. A section added after the author reordered
+      must still appear — dropping it would silently remove a part from the
+      assessment.
+    */
+    const byKey = new Map(withEdits.map((p) => [p.key, p]));
+    const ordered = partOrder.map((k) => byKey.get(k)).filter((p): p is DerivedPart => !!p);
+    const seen = new Set(ordered.map((p) => p.key));
+    return [...ordered, ...withEdits.filter((p) => !seen.has(p.key))];
+  }, [structure, fields, setup, keys, excluded, partOverrides, partOrder]);
+
+  const manifest = useMemo(
+    () => buildManifest(parts, extraction?.fields ?? []),
+    [parts, extraction],
+  );
+
+  /*
+    The problems come from the SHARED validator, live.
+
+    `validateManifest` owns every rule and its messages are written for a
+    person. Re-implementing any of them here would give the builder a second
+    rule set that agrees with publish right up until it matters.
+  */
+  const manifestProblems = useMemo(
+    () => (parts.length > 0 ? validateManifest(manifest, fields) : []),
+    [manifest, fields, parts.length],
+  );
+
+  const partOps = useMemo<PartOps>(
+    () => ({
+      move: (key, delta) =>
+        setPartOrder((prev) => {
+          const current = prev.length > 0 ? prev : parts.map((p) => p.key);
+          const asParts = current
+            .map((k) => parts.find((p) => p.key === k))
+            .filter((p): p is DerivedPart => !!p);
+          const moved = movePart(asParts, key, delta);
+          return moved === asParts ? prev : moved.map((p) => p.key);
+        }),
+      setPathways: (key, pathways) =>
+        setPartOverrides((prev) => {
+          const next = setPartPathways(parts, key, pathways).find((p) => p.key === key);
+          return next ? { ...prev, [key]: { ...prev[key], pathways: next.pathways } } : prev;
+        }),
+      update: (key, patch) =>
+        setPartOverrides((prev) => {
+          // Routed through the same pure operation the tests cover, so the hook
+          // cannot drift from it.
+          const next = updatePart(parts, key, patch).find((p) => p.key === key);
+          return next ? { ...prev, [key]: { ...prev[key], ...patch } } : prev;
+        }),
+      reset: () => {
+        setPartOverrides({});
+        setPartOrder([]);
+      },
+    }),
+    [parts],
+  );
+
   const stats = useMemo(() => (extraction ? statsFor(extraction) : null), [extraction]);
 
   return {
@@ -468,9 +578,13 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     ingest,
     setSetup,
     keys,
+    parts,
+    manifest,
+    manifestProblems,
     toggleExcluded,
     reset,
     structureOps,
     keyOps,
+    partOps,
   };
 }
