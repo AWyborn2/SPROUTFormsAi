@@ -67,7 +67,7 @@ import type {
   TaxonomySettings,
   TemplateStatus,
 } from './types.js';
-import type { TaxonomyStatus } from '@formai/shared';
+import type { AssessmentToolManifest, TaxonomyStatus } from '@formai/shared';
 
 /** Shape returned by `PATCH /org` (see apps/api routes/org.ts). */
 export interface OrgSettingsDto {
@@ -562,6 +562,23 @@ export const store = {
         publish: false,
       })
       .then((dto) => ({ formId: dto.id, versionId: dto.currentVersionId ?? '' }));
+  },
+
+  /**
+   * Create the assessment tool for a published template version.
+   *
+   * The server validates the manifest and the answer keys against the
+   * template's CURRENT version, which is only set once a version publishes —
+   * so this is the last call in the publish sequence, not the first. The
+   * builder runs the same two validators before any of it, so this refusing is
+   * a bug rather than a normal outcome.
+   */
+  createAssessmentTool(input: {
+    templateId: string;
+    name: string;
+    manifest: AssessmentToolManifest;
+  }): Promise<{ id: string }> {
+    return apiClient.post<{ id: string }>('/assessment-tools', input);
   },
 
   publishFormVersion(input: { formId: string; versionId: string }): Promise<FormSummary> {

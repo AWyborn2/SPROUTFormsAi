@@ -14,6 +14,7 @@ import {
 } from '@tanstack/react-query';
 import type {
   AssessmentPathway,
+  AssessmentToolManifest,
   AssessmentWorkflow,
   BrandingKit,
   FormContainer,
@@ -290,6 +291,18 @@ export function useCreateDraftForm() {
   return useMutation({
     mutationFn: (input: { name: string; fields: FormField[]; sourcePdfAssetId?: string }) =>
       store.createDraftForm(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.forms });
+    },
+  });
+}
+
+/** Create the assessment tool once its template version has published. */
+export function useCreateAssessmentTool() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { templateId: string; name: string; manifest: AssessmentToolManifest }) =>
+      store.createAssessmentTool(input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: keys.forms });
     },
