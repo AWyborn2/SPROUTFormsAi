@@ -25,7 +25,16 @@ export const teamRouter: Router = Router();
 
 const canViewTeam = (tenant: { orgId: string; role: string }) => hasPermission(tenant, 'team', 'view');
 
-const permissionActions = ['view', 'create', 'edit', 'delete', 'export', 'invite', 'manage'] as const;
+const permissionActions = [
+  'view',
+  'create',
+  'edit',
+  'delete',
+  'export',
+  'invite',
+  'manage',
+  'approve',
+] as const;
 
 const canManageTeam = (tenant: { orgId: string; role: string }) => hasPermission(tenant, 'team', 'manage');
 

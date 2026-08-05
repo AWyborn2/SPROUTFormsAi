@@ -1160,7 +1160,7 @@ describe('PATCH /team/permissions', () => {
         body: JSON.stringify({ role: 'candidate', category: 'assessments', action: 'view' }),
       });
       expect(res.status).toBe(409);
-      expect((await res.json()).error).toBe('scoped_permission');
+      expect(((await res.json()) as { error: string }).error).toBe('scoped_permission');
     } finally {
       server.close();
     }

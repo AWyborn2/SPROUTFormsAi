@@ -225,8 +225,16 @@ export interface AuditEntry {
   time: string;
 }
 
-/** Permission actions across all categories. */
-export type PermAction = 'view' | 'create' | 'edit' | 'delete' | 'export' | 'invite' | 'manage';
+/** Permission actions across all categories. `approve` is used by the profiles category (R34). */
+export type PermAction =
+  | 'view'
+  | 'create'
+  | 'edit'
+  | 'delete'
+  | 'export'
+  | 'invite'
+  | 'manage'
+  | 'approve';
 
 /** One capability category and the actions it exposes in the matrix. */
 export interface PermCategoryDef {

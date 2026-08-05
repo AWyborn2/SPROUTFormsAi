@@ -60,6 +60,18 @@ export const PERM_CATEGORIES: PermCategoryDef[] = [
       ['export', 'Export'],
     ],
   },
+  // Member profiles and personal information (R33, R34). Three grants —
+  // viewing, editing and approving a document — with no export switch, because
+  // exporting a member's record stays Admin-only whatever the matrix says.
+  {
+    key: 'profiles',
+    label: 'Profiles & personal info',
+    actions: [
+      ['view', 'View'],
+      ['edit', 'Edit'],
+      ['approve', 'Approve documents'],
+    ],
+  },
 ];
 
 /** Per-category icon + colour for audit rows (vmAudit `catMeta`). */
