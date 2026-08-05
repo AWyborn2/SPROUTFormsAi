@@ -3,6 +3,7 @@ import { Button, Dialog, Icon, Input, useToast } from '@formai/ui';
 import type { FormBrand, FormBrandKit } from '@formai/shared';
 import { resolveBrandKit } from '@formai/shared';
 import { BrandColorFields } from '../../components/branding/BrandColorFields.js';
+import { BrandChatPanel } from '../../components/branding/BrandChatPanel.js';
 import { BrandPdfScanPanel } from '../../components/branding/BrandPdfScanPanel.js';
 import { BrandedFormPreview } from '../../components/branding/BrandedFormPreview.js';
 import { FontPicker } from '../../components/branding/FontPicker.js';
@@ -226,8 +227,19 @@ export function ClientBrandsScreen() {
 
               {/* Fastest path to on-brand, and the one the author actually
                   has: they are holding the client's own document. */}
-              <div className="mt-[22px]">
+              <div className="mt-[22px] flex flex-col gap-2.5">
                 <BrandPdfScanPanel onApply={patch} />
+                {/* Reads the SAVED brand as its baseline, so a described change
+                    made on top of unsaved edits answers relative to the last
+                    save. Disabled while the draft is dirty rather than
+                    answering the wrong question quietly. */}
+                <BrandChatPanel brandId={selected.id} onApply={patch} disabled={dirty} />
+                {dirty && (
+                  <p className="text-[11.5px] text-text-tertiary">
+                    Save your changes to describe another one — suggestions are made from the saved
+                    brand.
+                  </p>
+                )}
               </div>
 
               <div className="mb-[9px] mt-[22px] text-[13px] font-semibold">Style preset</div>

@@ -33,6 +33,14 @@ vi.mock('../storage/index.js', () => ({
   getStorageClient: () => mockStorage,
 }));
 
+const proposeBrandEdit = vi.fn();
+vi.mock('../brand-chat/edit.js', () => ({
+  proposeBrandEdit: (...args: unknown[]) => proposeBrandEdit(...args),
+}));
+
+let mockAnthropic: unknown = { messages: { create: vi.fn() } };
+vi.mock('../anthropic.js', () => ({ getAnthropic: () => mockAnthropic }));
+
 const { createApp } = await import('../app.js');
 const { sealSession } = await import('../auth/workos.js');
 
@@ -122,6 +130,11 @@ function fakeDb(opts: {
 afterEach(() => {
   mockDbValue = null;
   mockStorage = null;
+  // `clearAllMocks` as well as `restoreAllMocks`: the module-scope `vi.fn()`
+  // spies are not restorable, so without this their call history leaks into
+  // the next test and a "was never called" assertion passes or fails on
+  // whatever ran before it.
+  vi.clearAllMocks();
   vi.restoreAllMocks();
 });
 
@@ -617,6 +630,107 @@ describe('POST /form-brands/scan', () => {
         body: JSON.stringify({ pdfBase64: 'eA==' }),
       });
       expect(res.status).toBe(401);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * POST /form-brands/:id/edit — changing a brand by describing the change.
+ *
+ * Proposes, never writes: the patch goes back to the author to see in the live
+ * preview and save through the ordinary PATCH. A guess that writes itself is a
+ * change somebody has to find and undo.
+ */
+describe('POST /form-brands/:id/edit', () => {
+  async function edit(base: string, body: unknown, t: { userId: string; orgId: string; role: string } = admin) {
+    return fetch(`${base}/form-brands/b-1/edit`, {
+      method: 'POST',
+      headers: authHeader(t),
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('returns the proposal and WRITES NOTHING', async () => {
+    proposeBrandEdit.mockResolvedValueOnce({
+      patch: { primaryColor: '#0d1a59' },
+      summary: 'Navy primary.',
+      notes: [],
+    });
+    const { db, updateSet } = fakeDb({ findFirst: BBM });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await edit(base, { instruction: 'make it navy' });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ patch: { primaryColor: '#0d1a59' } });
+      expect(updateSet).not.toHaveBeenCalled();
+      expect(db.insert).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('SHOWS THE MODEL THE BRAND’S CURRENT KIT', async () => {
+    // "A bit tighter" is relative. Without the starting point the model answers
+    // from nothing, which is how "slightly rounder" becomes a 40px radius.
+    proposeBrandEdit.mockResolvedValueOnce({ patch: {}, summary: '', notes: [] });
+    mockDbValue = fakeDb({ findFirst: BBM }).db;
+    const { server, base } = startApp();
+    try {
+      await edit(base, { instruction: 'a bit tighter' });
+      expect(proposeBrandEdit).toHaveBeenCalledWith(BBM.branding, 'a bit tighter', expect.anything());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for another org’s brand, without calling the model', async () => {
+    /*
+      The brand's own colours go into the prompt, so an unscoped lookup would
+      leak them back through the summary sentence — a data path that does not
+      look like one.
+    */
+    mockDbValue = fakeDb({ findFirst: undefined }).db;
+    const { server, base } = startApp();
+    try {
+      expect((await edit(base, { instruction: 'navy' })).status).toBe(404);
+      expect(proposeBrandEdit).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('maps a missing API key to 422, not 500', async () => {
+    // A missing key is a configuration state an operator can fix, and saying
+    // "server error" sends them looking in the wrong place.
+    proposeBrandEdit.mockRejectedValueOnce(new Error('brand_edit_unavailable: no key'));
+    mockDbValue = fakeDb({ findFirst: BBM }).db;
+    const { server, base } = startApp();
+    try {
+      expect((await edit(base, { instruction: 'navy' })).status).toBe(422);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects an empty instruction', async () => {
+    mockDbValue = fakeDb({ findFirst: BBM }).db;
+    const { server, base } = startApp();
+    try {
+      expect((await edit(base, { instruction: '' })).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a Viewer', async () => {
+    mockDbValue = fakeDb({ findFirst: BBM }).db;
+    const { server, base } = startApp();
+    try {
+      expect((await edit(base, { instruction: 'navy' }, viewer)).status).toBe(403);
+      expect(proposeBrandEdit).not.toHaveBeenCalled();
     } finally {
       server.close();
     }

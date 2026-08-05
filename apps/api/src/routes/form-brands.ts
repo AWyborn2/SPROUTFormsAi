@@ -9,6 +9,9 @@ import { hasPermission } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { getStorageClient } from '../storage/index.js';
+import { getAnthropic } from '../anthropic.js';
+import { env } from '../env.js';
+import { proposeBrandEdit } from '../brand-chat/edit.js';
 import { readBrandColors } from '../pdf/brand-colors.js';
 import { readLogoCandidates } from '../pdf/brand-logo.js';
 
@@ -192,6 +195,65 @@ formBrandsRouter.post(
     }
 
     res.json({ colors, logos, notes });
+  }),
+);
+
+/**
+ * POST /form-brands/:id/edit — change a brand by describing the change.
+ *
+ * PROPOSES, NEVER WRITES. The patch comes back for the author to see in the
+ * live preview and then save through the ordinary PATCH, exactly like the PDF
+ * scan above. The model is guessing at intent, and a guess that writes itself
+ * is a change somebody has to find and undo.
+ *
+ * The brand is loaded ORG-SCOPED and its current kit is what the model is shown,
+ * so "a bit tighter" is relative to a real starting point — and so an id from
+ * another org describes nothing, rather than leaking that org's colours back
+ * through a summary sentence.
+ */
+const editBody = z.object({
+  instruction: z.string().min(1).max(1000),
+});
+
+formBrandsRouter.post(
+  '/:id/edit',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await hasPermission(tenant, 'forms', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = editBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const brand = await db.query.formBrands.findFirst({
+      where: and(eq(schema.formBrands.id, req.params.id!), eq(schema.formBrands.orgId, tenant.orgId)),
+    });
+    if (!brand) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    try {
+      const result = await proposeBrandEdit(brand.branding, parsed.data.instruction, {
+        anthropic: getAnthropic() ?? undefined,
+        model: env.ANTHROPIC_EXTRACTION_MODEL,
+      });
+      res.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'brand_edit_failed';
+      // A missing key is a configuration state, not a fault — same mapping the
+      // extraction and answer-guide paths use.
+      const status = message.startsWith('brand_edit_unavailable') ? 422 : 500;
+      res.status(status).json({ error: message });
+    }
   }),
 );
 

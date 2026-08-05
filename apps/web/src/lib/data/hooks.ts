@@ -425,6 +425,16 @@ export function useScanBrandFromPdf() {
   });
 }
 
+/**
+ * Describe a change to a brand. Read-only on the server — the proposal is a
+ * draft the author confirms, so there is nothing to invalidate.
+ */
+export function useEditFormBrandByChat() {
+  return useMutation({
+    mutationFn: (input: { id: string; instruction: string }) => store.editFormBrandByChat(input),
+  });
+}
+
 export function useDeleteFormBrand() {
   const qc = useQueryClient();
   return useMutation({

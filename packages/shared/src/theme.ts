@@ -182,3 +182,107 @@ export function resolveTheme(...layers: (ThemeTokens | null | undefined)[]): Req
     DEFAULT_THEME,
   );
 }
+
+/**
+ * The value domain of every theme token, for input that is not a `<select>`.
+ *
+ * `sanitize` above drops unknown KEYS but keeps whatever value a known key
+ * carries, which is safe for the theme editor because each control is a select
+ * or a bounded number input — the UI is the guard. It is NOT safe for a patch
+ * authored anywhere else, and a theme value ends up in a CSS custom property.
+ *
+ * Exported separately rather than folded into `sanitize` so the existing
+ * resolution path keeps its exact behaviour: every stored theme in the product
+ * was written through those controls, and quietly dropping a value now would
+ * restyle live forms on deploy.
+ */
+const HEX = /^#[0-9a-fA-F]{6}$/;
+
+const ENUM_DOMAINS: Partial<Record<keyof ThemeTokens, readonly string[]>> = {
+  buttonShape: ['rounded', 'pill', 'square'],
+  buttonStyle: ['solid', 'outline', 'soft'],
+  shadow: ['none', 'sm', 'md', 'lg'],
+  density: ['compact', 'comfortable', 'spacious'],
+  logoSize: ['small', 'medium', 'large'],
+  logoPlacement: ['left', 'center'],
+  layout: ['card', 'hero', 'split', 'conversational'],
+};
+
+const NUMBER_DOMAINS: Partial<Record<keyof ThemeTokens, [number, number]>> = {
+  headingSize: [12, 48],
+  bodySize: [10, 24],
+  labelSize: [10, 24],
+  buttonSize: [10, 24],
+  radius: [0, 40],
+  borderWidth: [0, 6],
+};
+
+const WEIGHT_KEYS: (keyof ThemeTokens)[] = [
+  'headingWeight',
+  'bodyWeight',
+  'labelWeight',
+  'buttonWeight',
+];
+
+const COLOR_KEYS: (keyof ThemeTokens)[] = [
+  'pageBackground',
+  'formBackground',
+  'headingColor',
+  'bodyColor',
+  'labelColor',
+  'borderColor',
+];
+
+/**
+ * Keep only theme values that are actually in range, reporting what was not.
+ *
+ * A rejected value is DROPPED, never clamped to the nearest legal one. Clamping
+ * turns "make the corners 400px round" into a silent 40 and leaves the author
+ * believing the instruction was understood; dropping it says so, and the author
+ * asks again. `''` stays legal on a colour role — it means "use the product
+ * default", which is a real choice rather than a blank.
+ */
+export function sanitizeThemeValues(patch: ThemeTokens | null | undefined): {
+  theme: ThemeTokens;
+  rejected: string[];
+} {
+  const source = sanitize(patch);
+  const theme: Record<string, unknown> = {};
+  const rejected: string[] = [];
+
+  for (const [key, value] of Object.entries(source) as [keyof ThemeTokens, unknown][]) {
+    const enumDomain = ENUM_DOMAINS[key];
+    if (enumDomain) {
+      if (typeof value === 'string' && enumDomain.includes(value)) theme[key] = value;
+      else rejected.push(`${key}: ${String(value)}`);
+      continue;
+    }
+    const range = NUMBER_DOMAINS[key];
+    if (range) {
+      if (typeof value === 'number' && Number.isFinite(value) && value >= range[0] && value <= range[1]) {
+        theme[key] = value;
+      } else {
+        rejected.push(`${key}: ${String(value)}`);
+      }
+      continue;
+    }
+    if (WEIGHT_KEYS.includes(key)) {
+      if ((THEME_FONT_WEIGHTS as readonly number[]).includes(value as number)) theme[key] = value;
+      else rejected.push(`${key}: ${String(value)}`);
+      continue;
+    }
+    if (COLOR_KEYS.includes(key)) {
+      if (value === '' || (typeof value === 'string' && HEX.test(value))) {
+        theme[key] = typeof value === 'string' ? value.toLowerCase() : value;
+      } else {
+        rejected.push(`${key}: ${String(value)}`);
+      }
+      continue;
+    }
+    // Unreachable while every token appears in exactly one table above; a new
+    // token with no domain is refused rather than admitted by default.
+    rejected.push(`${key}: ${String(value)}`);
+  }
+
+  return { theme: theme as ThemeTokens, rejected };
+}
