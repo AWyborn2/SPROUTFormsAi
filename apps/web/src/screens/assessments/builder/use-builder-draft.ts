@@ -131,6 +131,15 @@ export interface KeyOps {
     built: BuiltMatchingQuestion,
     presentation: MatchPresentation,
   ) => void;
+  /**
+   * Apply a batch of keys read from a guide.
+   *
+   * REPLACES the key for each field it names and leaves every other key alone,
+   * so seeding a guide that covers one stream does not wipe the stream an
+   * author has already typed. Nothing seeded carries an attestation — a person
+   * still has to say they checked it.
+   */
+  seedKeys: (keys: readonly DraftAnswerKey[]) => void;
 }
 
 export interface StructureOps {
@@ -403,6 +412,12 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
                   { fieldId: k.fieldId, answerKey: k.answerKey, source: k.source },
           ),
         ),
+
+      seedKeys: (seeded) =>
+        setKeys((prev) => {
+          const replacing = new Set(seeded.map((k) => k.fieldId));
+          return [...prev.filter((k) => !replacing.has(k.fieldId)), ...seeded];
+        }),
 
       saveMatching: (fieldId, built, presentation) => {
         /*

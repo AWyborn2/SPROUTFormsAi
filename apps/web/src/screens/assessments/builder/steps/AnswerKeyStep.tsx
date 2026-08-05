@@ -8,6 +8,7 @@ import {
   type FormFieldType,
 } from '@formai/shared';
 import { PairBuilder } from '../PairBuilder.js';
+import { KeySourceChooser } from '../KeySourceChooser.js';
 import { seedFromField } from '../matching-authoring.js';
 import type { BuilderDraftState } from '../use-builder-draft.js';
 
@@ -117,6 +118,13 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
           />
         </span>
       </div>
+
+      <KeySourceChooser
+        sections={draft.structure}
+        fields={fields}
+        excluded={excluded}
+        onSeed={keyOps.seedKeys}
+      />
 
       {questions.map((question, i) => {
         const key = keyById.get(question.id);
