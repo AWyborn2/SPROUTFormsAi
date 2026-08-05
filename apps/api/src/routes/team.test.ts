@@ -1046,7 +1046,10 @@ describe('DELETE /team/members/:id', () => {
 });
 
 describe('GET /team/permissions', () => {
-  it('returns the full org matrix keyed by role', async () => {
+  it('returns every access level, defaulting the ones the org never customised (R28)', async () => {
+    // Only two rows stored; the response still carries all seven levels, with
+    // the rest resolved to their product defaults — so Assessor and Candidate
+    // show the capabilities they hold rather than reading as all-off.
     mockDbValue = fakeDb({
       rolePermissionsFindMany: [
         { role: 'owner', matrix: { forms: { view: true } } },
@@ -1057,8 +1060,14 @@ describe('GET /team/permissions', () => {
     try {
       const res = await fetch(`${base}/team/permissions`, { headers: authHeader(adminTenant) });
       expect(res.status).toBe(200);
-      const body = (await res.json()) as Record<string, unknown>;
-      expect(Object.keys(body)).toEqual(['owner', 'viewer']);
+      const body = (await res.json()) as Record<string, { assessments?: Record<string, unknown> }>;
+      expect(Object.keys(body).sort()).toEqual(
+        ['admin', 'assessor', 'builder', 'candidate', 'owner', 'reviewer', 'viewer'],
+      );
+      // The defaulted Assessor row carries its real assessment grants (R29, R30).
+      expect(body.assessor?.assessments).toMatchObject({ view: true, create: true });
+      // Candidate's own-scoped grant survives the round-trip (R31).
+      expect(body.candidate?.assessments).toMatchObject({ view: 'own', edit: 'own' });
     } finally {
       server.close();
     }
@@ -1104,6 +1113,54 @@ describe('PATCH /team/permissions', () => {
       expect(res.status).toBe(200);
       const permsUpdate = updateSet.mock.calls.find(([table]) => table === schema.rolePermissions);
       expect(permsUpdate?.[1]).toEqual({ matrix: { forms: { view: true, delete: true } } });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('upserts a level with no stored row rather than silently no-opping (R29)', async () => {
+    // Assessor and Candidate are the levels most likely to have no stored row —
+    // the old `if (row)` with no else wrote nothing and returned 200 unchanged.
+    const { db, insertValues } = fakeDb({ rolePermissionsFindMany: [] });
+    (db.query.rolePermissions.findFirst as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(ADMIN_PERMS) // caller's own perms
+      .mockResolvedValueOnce(undefined); // target 'assessor' has no stored row
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/permissions`, {
+        method: 'PATCH',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ role: 'assessor', category: 'assessments', action: 'delete', allowed: true }),
+      });
+      expect(res.status).toBe(200);
+      const insert = insertValues.mock.calls.find(([table]) => table === schema.rolePermissions);
+      expect(insert).toBeDefined();
+      const values = insert![1] as { role: string; matrix: Record<string, Record<string, unknown>> };
+      expect(values.role).toBe('assessor');
+      expect(values.matrix.assessments!.delete).toBe(true);
+      // The default's other grants ride along, so the insert is a full matrix.
+      expect(values.matrix.assessments!.view).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses to toggle a scoped grant even on a defaulted level (R31)', async () => {
+    const { db } = fakeDb({ rolePermissionsFindMany: [] });
+    (db.query.rolePermissions.findFirst as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(ADMIN_PERMS) // caller
+      .mockResolvedValueOnce(undefined); // candidate has no row → default carries 'own'
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/permissions`, {
+        method: 'PATCH',
+        headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
+        body: JSON.stringify({ role: 'candidate', category: 'assessments', action: 'view' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe('scoped_permission');
     } finally {
       server.close();
     }

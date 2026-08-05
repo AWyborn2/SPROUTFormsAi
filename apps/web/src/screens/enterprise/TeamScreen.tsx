@@ -146,7 +146,7 @@ export function TeamScreen() {
       <div className="overflow-hidden rounded-lg border border-border bg-surface-card shadow-xs">
         <div className="flex items-center gap-[14px] border-b border-border-subtle px-[18px] py-[11px] font-mono text-[10.5px] uppercase tracking-[0.06em] text-text-tertiary">
           <span className="flex-1">Member</span>
-          <span className="w-[170px]">Role</span>
+          <span className="w-[170px]">Access level</span>
           <span className="w-24">Status</span>
           <span className="w-[34px]" />
         </div>
@@ -276,7 +276,7 @@ export function TeamScreen() {
             )}
 
             <Select
-              label="Role"
+              label="Access level"
               value={inviteRole}
               onChange={(e) => setInviteRole(e.target.value as RoleName)}
               options={INVITABLE_ROLES}
@@ -358,7 +358,7 @@ function MemberRow({
         ) : (
           <div className="w-[150px]">
             <Select
-              aria-label={`Role for ${member.name}`}
+              aria-label={`Access level for ${member.name}`}
               value={member.role}
               onChange={(e) => onRole(e.target.value as RoleName)}
               options={ROLE_NAMES as unknown as string[]}

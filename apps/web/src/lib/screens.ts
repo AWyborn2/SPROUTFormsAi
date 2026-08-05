@@ -76,7 +76,7 @@ export const SCREENS: ScreenDef[] = [
   // Enterprise & org
   { key: 'team', path: '/app/team', group: 'Enterprise & org', label: 'Team management', icon: 'users', shell: 'app', inNav: true },
   { key: 'taxonomy', path: '/app/taxonomy', group: 'Enterprise & org', label: 'Locations & roles', icon: 'map-pin', shell: 'app', inNav: true, minAccessLevel: 'admin' },
-  { key: 'roles', path: '/app/roles', group: 'Enterprise & org', label: 'Roles & permissions', icon: 'shield', shell: 'app', inNav: true },
+  { key: 'roles', path: '/app/roles', group: 'Enterprise & org', label: 'Access levels', icon: 'shield', shell: 'app', inNav: true },
   { key: 'audit', path: '/app/audit', group: 'Enterprise & org', label: 'Audit log', icon: 'scroll-text', shell: 'app', inNav: true },
   { key: 'billing', path: '/app/billing', group: 'Enterprise & org', label: 'Billing', icon: 'credit-card', shell: 'app', inNav: true },
   { key: 'competency', path: '/app/competency', group: 'Competency gating', label: 'Competency gating', icon: 'graduation-cap', shell: 'app', inNav: true },

@@ -149,7 +149,15 @@ export interface PublishImportInput {
  * `Role` union in @formai/shared, so screens read the same strings the design
  * validated. (@formai/shared `ROLE_LABELS` maps the two if needed later.)
  */
-export const ROLE_NAMES = ['Owner', 'Admin', 'Builder', 'Reviewer', 'Viewer'] as const;
+export const ROLE_NAMES = [
+  'Owner',
+  'Admin',
+  'Builder',
+  'Reviewer',
+  'Viewer',
+  'Assessor',
+  'Candidate',
+] as const;
 export type RoleName = (typeof ROLE_NAMES)[number];
 
 /** Roles that can be assigned via the invite dialog (Owner is not invitable). */
@@ -228,8 +236,14 @@ export interface PermCategoryDef {
   actions: Array<[PermAction, string]>;
 }
 
-/** role → category → action → allowed. Mirrors the prototype `perms` object. */
-export type PermState = Record<RoleName, Record<string, Partial<Record<PermAction, boolean>>>>;
+/**
+ * role → category → action → grant. The grant is `true` (org-wide), `false`
+ * (denied), or `'own'` (scoped to the user's own records — a Candidate confined
+ * to their own cases). The scoped value must survive to the screen so it renders
+ * distinctly rather than as a plain ON switch a toggle would collapse.
+ */
+export type PermGrant = boolean | 'own';
+export type PermState = Record<RoleName, Record<string, Partial<Record<PermAction, PermGrant>>>>;
 
 /* ── Billing / plan tiers ─────────────────────────────────────────────────── */
 
