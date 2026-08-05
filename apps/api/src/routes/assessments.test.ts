@@ -26,6 +26,11 @@ const OTHER_CANDIDATE = '00000000-0000-4000-8000-00000000000d';
 const COMPETENCY = '00000000-0000-4000-8000-0000000000f1';
 const TEMPLATE = '00000000-0000-4000-8000-000000000001';
 const VERSION = '00000000-0000-4000-8000-000000000002';
+// The organisation's managed Locations (U8). A case points at one of these by
+// id; the assessor rule is keyed by the same ids.
+const MINING = '00000000-0000-4000-8000-0000000000a1';
+const RAW_MATERIALS = '00000000-0000-4000-8000-0000000000a2';
+const OFFICE = '00000000-0000-4000-8000-0000000000a3';
 
 const admin = { userId: ADMIN, orgId: ORG, role: 'admin' as const };
 const candidate = { userId: CANDIDATE, orgId: ORG, role: 'candidate' as const };
@@ -164,25 +169,79 @@ const MANIFEST: AssessmentToolManifest = {
 
 // ── stateful fake database ──────────────────────────────────────────────────
 
-/** Bound values inside a drizzle where-clause. */
-function whereValues(node: unknown, depth = 0, out: string[] = []): string[] {
-  if (!node || depth > 8) return out;
+/*
+  Keys that hang the schema metadata off a column node — the whole pgTable, its
+  encoders, its default expression. The bound param values live directly in the
+  query chunks, so skipping these keeps the walk cheap and, since a column points
+  back at its table, keeps it from looping.
+*/
+const SKIP_KEYS = new Set(['table', 'config', 'encoder', 'decoder', 'session', 'dialect', 'default']);
+
+/** Every string `.value` (a bound param) reachable under a node. */
+function stringValues(node: unknown, out: string[] = [], depth = 0): string[] {
+  if (!node || depth > 10) return out;
   if (Array.isArray(node)) {
-    for (const n of node) whereValues(n, depth + 1, out);
+    for (const n of node) stringValues(n, out, depth + 1);
     return out;
   }
   if (typeof node !== 'object') return out;
   const rec = node as Record<string, unknown>;
   if (typeof rec.value === 'string') out.push(rec.value);
-  for (const v of Object.values(rec)) whereValues(v, depth + 1, out);
+  for (const [k, v] of Object.entries(rec)) if (!SKIP_KEYS.has(k)) stringValues(v, out, depth + 1);
   return out;
+}
+
+/**
+ * A drizzle where-clause reduced to what the fake db matches on: `all` are the
+ * operands that must every one be present (an `and` of `eq`s), and each `anyOf`
+ * group is an `inArray` where the row matching ANY one operand is a match.
+ *
+ * `inArray` renders as `col in $params`, so its operands are an OR — collecting
+ * them into `all` like the eqs would demand a single row hold every id at once
+ * and match nothing. Enough structure to model these routes' reads without
+ * importing a SQL engine.
+ */
+function whereTerms(
+  node: unknown,
+  acc: { all: string[]; anyOf: string[][] } = { all: [], anyOf: [] },
+  depth = 0,
+): { all: string[]; anyOf: string[][] } {
+  if (!node || depth > 10) return acc;
+  if (Array.isArray(node)) {
+    for (const n of node) whereTerms(n, acc, depth + 1);
+    return acc;
+  }
+  if (typeof node !== 'object') return acc;
+  const rec = node as Record<string, unknown>;
+
+  const chunks = rec.queryChunks;
+  if (Array.isArray(chunks)) {
+    const text = chunks
+      .map((c) => {
+        const v = (c as { value?: unknown } | null)?.value;
+        return Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '';
+      })
+      .join('');
+    if (text.includes(' in ')) {
+      const group = stringValues(chunks);
+      if (group.length) acc.anyOf.push(group);
+      return acc;
+    }
+    for (const c of chunks) whereTerms(c, acc, depth + 1);
+    return acc;
+  }
+
+  if (typeof rec.value === 'string') acc.all.push(rec.value);
+  for (const [k, v] of Object.entries(rec)) if (!SKIP_KEYS.has(k)) whereTerms(v, acc, depth + 1);
+  return acc;
 }
 
 function matchesWhere(row: Record<string, unknown>, where: unknown): boolean {
   if (!where) return true;
-  const wanted = [...new Set(whereValues(where))];
+  const { all, anyOf } = whereTerms(where);
   const present = new Set(Object.values(row).filter((v) => typeof v === 'string'));
-  return wanted.every((w) => present.has(w));
+  if (![...new Set(all)].every((w) => present.has(w))) return false;
+  return anyOf.every((group) => group.some((w) => present.has(w)));
 }
 
 let idSeq = 0;
@@ -198,6 +257,18 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
     ],
     formTemplates: [{ id: TEMPLATE, orgId: ORG, name: 'Track Dozer', currentVersionId: VERSION }],
     formTemplateVersions: [{ id: VERSION, templateId: TEMPLATE, fields: FIELDS }],
+    /*
+      The org's managed Locations (U8). A case points at one by id and the
+      assessor rule is keyed by the same ids, so creation validates the id is one
+      of these and the eligibility check is a plain lookup. OFFICE exists but no
+      tool has a rule for it — that is a Location with no extra requirement, not a
+      near-miss (R79).
+    */
+    locations: [
+      { id: MINING, orgId: ORG, name: 'Mining', status: 'active' },
+      { id: RAW_MATERIALS, orgId: ORG, name: 'Raw Materials', status: 'active' },
+      { id: OFFICE, orgId: ORG, name: 'Head Office', status: 'active' },
+    ],
     assessmentTools: [],
     assessmentCases: [],
     assessmentPartAttempts: [],
@@ -607,7 +678,7 @@ describe('POST /assessment-cases', () => {
   const WORSLEY = '00000000-0000-4000-8000-0000000000e1';
   const MOBILE_PLANT = '00000000-0000-4000-8000-0000000000e2';
 
-  async function caseInStream(base: string, locationStream?: string, byStream = true) {
+  async function caseAtLocation(base: string, locationId?: string, byStream = true) {
     const created = await fetch(`${base}/assessment-tools`, {
       method: 'POST',
       headers: auth(),
@@ -616,8 +687,9 @@ describe('POST /assessment-cases', () => {
         name: 'Track Dozer',
         manifest: MANIFEST,
         assessorCompetencyIds: [COMPETENCY],
+        // Keyed by Location id now, not by stream name (U8).
         ...(byStream
-          ? { assessorStreamCompetencyIds: { Mining: [WORSLEY], 'Raw Materials': [MOBILE_PLANT] } }
+          ? { assessorStreamCompetencyIds: { [MINING]: [WORSLEY], [RAW_MATERIALS]: [MOBILE_PLANT] } }
           : {}),
       }),
     });
@@ -630,17 +702,17 @@ describe('POST /assessment-cases', () => {
         toolId: tool.id,
         candidateUserId: CANDIDATE,
         pathway: 'experienced',
-        ...(locationStream ? { locationStream } : {}),
+        ...(locationId ? { locationId } : {}),
       }),
     });
-    return (await res.json()) as { prerequisiteWarnings: string[] };
+    return { status: res.status, body: (await res.json()) as { prerequisiteWarnings?: string[]; error?: string } };
   }
 
   it('asks for the mine authority at the mine, and not the other one', async () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base, 'Mining')).prerequisiteWarnings.join('\n');
+      const warnings = (await caseAtLocation(base, MINING)).body.prerequisiteWarnings!.join('\n');
 
       expect(warnings).toContain(COMPETENCY);
       expect(warnings).toContain(WORSLEY);
@@ -655,7 +727,7 @@ describe('POST /assessment-cases', () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base, 'Raw Materials')).prerequisiteWarnings.join('\n');
+      const warnings = (await caseAtLocation(base, RAW_MATERIALS)).body.prerequisiteWarnings!.join('\n');
 
       expect(warnings).toContain(MOBILE_PLANT);
       expect(warnings).not.toContain(WORSLEY);
@@ -664,34 +736,40 @@ describe('POST /assessment-cases', () => {
     }
   });
 
-  it('matches the stream however it was typed', async () => {
-    // Free text somebody enters by hand. An unrecognised stream contributes no
-    // requirement at all, so a near-miss spelling skips the check silently —
-    // which is why the comparison is normalised rather than exact.
+  it('refuses a case at a Location that is not the organisation\'s', async () => {
+    /*
+      A Location is chosen from the org's list, never typed (R77), so an id that
+      is not one of the org's active Locations is a bad request, not a case
+      opened against an unknown site. This is the check that makes a near-miss
+      impossible — there is nothing to normalise because nothing is free text.
+    */
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base, '  raw materials  ')).prerequisiteWarnings.join('\n');
+      const notOurs = '00000000-0000-4000-8000-0000000000bb';
+      const { status, body } = await caseAtLocation(base, notOurs);
 
-      expect(warnings).toContain(MOBILE_PLANT);
+      expect(status).toBe(400);
+      expect(body.error).toBe('location_not_found');
     } finally {
       server.close();
     }
   });
 
-  it('says the check was only partial when the case names no stream', async () => {
+  it('says the check was only partial when the case names no Location', async () => {
     /*
       Reporting just the always-required half would present a partial check as a
       complete one. The case still opens — eligibility never blocks — but the
-      warning has to say what went unchecked and name the streams, because the
-      fix is to set one and nobody can guess the spelling.
+      warning has to say what went unchecked and name the Locations the tool has
+      a rule for, because the fix is to set one.
     */
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base)).prerequisiteWarnings.join('\n');
+      const warnings = (await caseAtLocation(base)).body.prerequisiteWarnings!.join('\n');
 
       expect(warnings).toContain('only partly checked');
+      // Named by their current Location names, resolved from the keyed ids.
       expect(warnings).toContain('Mining');
       expect(warnings).toContain('Raw Materials');
       // And it invented no gap for a requirement it could not resolve.
@@ -702,44 +780,152 @@ describe('POST /assessment-cases', () => {
     }
   });
 
-  it('warns rather than passing when the stream is one it does not know', async () => {
+  it('treats a Location the tool has no rule for as matched, not a near-miss (R79)', async () => {
     /*
-      THE FAILURE THIS WHOLE FEATURE NEARLY SHIPPED WITH.
-
-      An unrecognised stream used to resolve to the always-required half with a
-      clean result, on the reasoning that a location outside the list carries no
-      extra requirement. But this value is free text shared with the document's
-      own stream question, so a value outside the list is far more likely a
-      near-miss spelling of a location the rule DOES cover.
-
-      "Mine" against a tool keyed "Mining" reduced the rule from
-      `category AND (mining OR raw materials)` to the category alone and called
-      it fully checked — so an assessor holding only the raw-materials authority
-      could sign off a mining assessment with nothing anywhere saying so.
+      The failure the old free-text model nearly shipped with is now impossible.
+      A Location is an id chosen from the org's list, so a case at a Location the
+      tool has no rule for is a site with no extra requirement — the always-half
+      applies and the check is complete. There is no "unrecognised" state to warn
+      about, because there is no spelling to get wrong.
     */
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base, 'Mine')).prerequisiteWarnings.join('\n');
+      const warnings = (await caseAtLocation(base, OFFICE)).body.prerequisiteWarnings!.join('\n');
 
-      expect(warnings).toContain('only partly checked');
-      // Quotes what was actually recorded, so the typo is visible.
-      expect(warnings).toContain('"Mine"');
-      expect(warnings).toContain('Mining');
+      expect(warnings).not.toContain('only partly checked');
+      // The always-required half still surfaces; no location-specific gap is invented.
+      expect(warnings).toContain(COMPETENCY);
+      expect(warnings).not.toContain(WORSLEY);
+      expect(warnings).not.toContain(MOBILE_PLANT);
     } finally {
       server.close();
     }
   });
 
-  it('says nothing about streams for a tool whose rule does not vary', async () => {
-    // Every tool that existed before this column. A missing stream is not a gap
+  it('says nothing about Locations for a tool whose rule does not vary', async () => {
+    // Every tool that existed before this column. A missing Location is not a gap
     // when nothing depended on it — warning here would fire on every case.
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base, undefined, false)).prerequisiteWarnings.join('\n');
+      const warnings = (await caseAtLocation(base, undefined, false)).body.prerequisiteWarnings!.join('\n');
 
       expect(warnings).not.toContain('only partly checked');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ── the location-to-parts rule (U9) ─────────────────────────────────────────
+
+describe('PATCH /assessment-tools/:id/location-parts', () => {
+  async function makeTool(base: string) {
+    const res = await fetch(`${base}/assessment-tools`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST }),
+    });
+    return (await res.json()) as { id: string };
+  }
+
+  function setRule(
+    base: string,
+    toolId: string,
+    locationPartKeys: Record<string, string[]>,
+    session: Session = admin,
+  ) {
+    return fetch(`${base}/assessment-tools/${toolId}/location-parts`, {
+      method: 'PATCH',
+      headers: auth(session),
+      body: JSON.stringify({ locationPartKeys }),
+    });
+  }
+
+  it('declares the rule as an Admin and reads it back on the tool', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      expect((await setRule(base, tool.id, { [MINING]: ['p1', 'p2'] })).status).toBe(200);
+
+      const got = await fetch(`${base}/assessment-tools/${tool.id}`, { headers: auth() });
+      const body = (await got.json()) as {
+        locationPartKeys: Record<string, string[]>;
+        locations: Array<{ id: string; name: string }>;
+      };
+      expect(body.locationPartKeys).toEqual({ [MINING]: ['p1', 'p2'] });
+      // The active Locations the rule may distinguish come back for the editor (R76).
+      expect(body.locations.map((l) => l.id)).toContain(MINING);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a Builder and accepts an Admin (R73)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      const asBuilder = await setRule(base, tool.id, { [MINING]: ['p1'] }, {
+        userId: ADMIN,
+        orgId: ORG,
+        role: 'builder',
+      });
+      expect(asBuilder.status).toBe(403);
+
+      expect((await setRule(base, tool.id, { [MINING]: ['p1'] })).status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a rule declared for a retired Location (R118)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const RETIRED = '00000000-0000-4000-8000-0000000000b9';
+    rows(store, 'locations').push({ id: RETIRED, orgId: ORG, name: 'Old Pit', status: 'retired' });
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      const res = await setRule(base, tool.id, { [RETIRED]: ['p1'] });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('location_not_found');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('keeps a rule for a Location retired after it was declared, and still returns it (R118)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      // Declared while MINING is active…
+      expect((await setRule(base, tool.id, { [MINING]: ['p1', 'p2'] })).status).toBe(200);
+      // …then MINING retires. A rule stays with the Location it names.
+      for (const l of rows(store, 'locations')) if (l.id === MINING) l.status = 'retired';
+      // Re-saving the same map is not rejected — the entry already existed.
+      expect((await setRule(base, tool.id, { [MINING]: ['p1', 'p2'] })).status).toBe(200);
+
+      const got = await fetch(`${base}/assessment-tools/${tool.id}`, { headers: auth() });
+      const body = (await got.json()) as { locationPartKeys: Record<string, string[]> };
+      expect(body.locationPartKeys).toEqual({ [MINING]: ['p1', 'p2'] });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a part key the manifest does not declare', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      const res = await setRule(base, tool.id, { [MINING]: ['p1', 'ghost'] });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('unknown_part');
     } finally {
       server.close();
     }

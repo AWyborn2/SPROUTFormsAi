@@ -124,7 +124,7 @@ export function AssessmentCaseScreen() {
           <h1 className="font-heading text-[23px] font-bold">{c.toolName}</h1>
           <p className="mt-1 text-[13.5px] text-text-tertiary">
             {done} of {c.parts.length} parts satisfactory
-            {c.locationStream ? ` · ${c.locationStream}` : ''}
+            {c.locationName ? ` · ${c.locationName}` : ''}
           </p>
         </div>
         <div className="flex items-center gap-2.5">

@@ -299,6 +299,51 @@ export function requiredParts(
 }
 
 /**
+ * A tool's parts rule (U9): Location id → the part keys required at that
+ * Location. Keyed by id, not name, so a Location rename cannot silently detach a
+ * rule from the site it governs.
+ */
+export type LocationPartKeys = Readonly<Record<string, readonly string[]>>;
+
+/**
+ * The part keys required for a person placed at `locationIds`, given a tool's
+ * parts rule (R74, R75, R80, R81).
+ *
+ * A Location the rule LISTS requires exactly its listed keys; a Location the
+ * rule does not mention requires every part `allPartKeys` names — whether no
+ * rule was ever configured or the Location postdates the tool (R75). The answer
+ * is the union across every Location held, returned in `allPartKeys` order, so a
+ * person at several sites is assessed ONCE against the combined set rather than
+ * once per site (R80, R81).
+ *
+ * The absence rule is the safe direction: the worst outcome of a missing entry
+ * is a longer assessment, never a skipped part. A person with no Location at all
+ * narrows nothing and is therefore required every part, on the same reasoning.
+ * A listed key the manifest no longer declares is dropped rather than surfaced.
+ */
+export function resolveLocationParts(
+  allPartKeys: readonly string[],
+  rule: LocationPartKeys,
+  locationIds: readonly string[],
+): string[] {
+  const all = [...allPartKeys];
+  if (locationIds.length === 0) return all;
+
+  const required = new Set<string>();
+  for (const locationId of locationIds) {
+    const listed = rule[locationId];
+    if (listed === undefined) {
+      // No rule at this Location — every part applies (R75), which is already
+      // the whole set, so nothing the other Locations add can widen it.
+      return all;
+    }
+    for (const key of listed) required.add(key);
+  }
+  // Document order, and only keys the manifest still declares.
+  return all.filter((key) => required.has(key));
+}
+
+/**
  * The fields belonging to the section opened by `headerFieldId` — everything
  * after that header up to the next `section_header`, header excluded.
  *

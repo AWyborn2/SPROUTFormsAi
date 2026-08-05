@@ -33,12 +33,11 @@ export interface AssessmentToolSummary {
   /**
    * Location streams whose assessor requirements differ, if any.
    *
-   * Offered as choices when opening a case. The stream is free text matched
-   * case-insensitively, and a value the tool does not recognise contributes no
-   * requirement at all — so guessing the wording skips the check silently.
-   * Empty on a tool whose assessor rule does not depend on where.
+   * The organisation's managed Locations, offered as a closed list when opening
+   * a case (R77). A case is placed by choosing one, never by typing — so it
+   * cannot be a near-miss of the site the assessor rule checks (R79).
    */
-  locationStreams: string[];
+  locations: Array<{ id: string; name: string }>;
 }
 
 export interface AssessmentCaseRow {
@@ -83,7 +82,9 @@ export interface AssessmentCaseDetail {
   candidateName: string;
   assessorUserId: string | null;
   pathway: AssessmentPathway;
-  locationStream: string | null;
+  /** The managed Location this case is assessed at (R77), and its current name. */
+  locationId: string | null;
+  locationName: string | null;
   state: AssessmentCaseState;
   currentVersionId: string;
   prerequisiteWarnings: string[];
@@ -177,7 +178,8 @@ export interface CreateCaseInput {
   candidateUserId: string;
   assessorUserId?: string;
   pathway: AssessmentPathway;
-  locationStream?: string;
+  /** The managed Location id the case is assessed at, chosen from the list (R77). */
+  locationId?: string;
   rplJustification?: string;
 }
 
@@ -203,6 +205,15 @@ export interface AssessmentToolDetail {
   workflowIsDefault: boolean;
   /** The current version's fields, in document order. */
   fields: FormField[];
+  /**
+   * The organisation's active Locations, offered to the parts-rule editor (R76),
+   * and the rule as stored (U9): Location id → the part keys required there. A
+   * Location absent from the map requires every part (R75); a key may name a
+   * Location since retired, so the editor merges these rather than assuming every
+   * key is in `locations` (R118).
+   */
+  locations: Array<{ id: string; name: string }>;
+  locationPartKeys: Record<string, string[]>;
   problems: string[];
   warnings: string[];
 }
@@ -232,6 +243,21 @@ export const assessmentsApi = {
     apiClient.patch<{ id: string; workflow: AssessmentWorkflow; warnings: string[] }>(
       `/assessment-tools/${id}`,
       { workflow },
+    ),
+
+  /**
+   * Declare which parts apply at each Location (U9).
+   *
+   * Its own call, not part of `saveWorkflow`, because the server gates it on the
+   * Admin access level rather than the authoring permission (R73) — the rule
+   * decides which sections a candidate must complete to be certified, not how the
+   * document is worded. The map holds only the exceptions: a Location left out
+   * requires every part (R75).
+   */
+  setLocationParts: (id: string, locationPartKeys: Record<string, string[]>) =>
+    apiClient.patch<{ id: string; locationPartKeys: Record<string, string[]> }>(
+      `/assessment-tools/${id}/location-parts`,
+      { locationPartKeys },
     ),
 
   listCases: () => apiClient.get<AssessmentCaseRow[]>('/assessment-cases'),
