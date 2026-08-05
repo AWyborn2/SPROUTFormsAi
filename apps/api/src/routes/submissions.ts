@@ -264,8 +264,8 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
   // draft→approved transition below re-strips before the row becomes one, so
   // deferring costs the guarantee nothing.
   const isDraft = (status ?? 'submitted') === 'draft';
-  const { values: recordedValues } = isDraft
-    ? { values }
+  const { values: recordedValues, discarded } = isDraft
+    ? { values, discarded: [] as string[] }
     : stripHiddenValues(versionFields, values);
 
   const sessionUser = await db.query.users.findFirst({
@@ -278,21 +278,51 @@ submissionsRouter.post('/', requireTenant, withErrorHandling(async (req, res) =>
     return;
   }
 
-  const [row] = await db
-    .insert(schema.submissions)
-    .values({
-      orgId: tenant.orgId,
-      templateId: template.id,
-      templateVersionId: version.id,
-      submittedByUserId: sessionUser.id,
-      submitterName: sessionUser.name,
-      submitterEmail: sessionUser.email,
-      values: recordedValues,
-      status: status ?? 'submitted',
-      flag: flag ?? '',
-    })
-    .returning();
-  if (!row) throw new Error('submission_create_failed: insert returned no row');
+  // Answers thrown away leave a trace on this door too, as they already do on
+  // the public one. Without it a stripping BUG and a filler who simply never
+  // answered are indistinguishable — both leave an absence — and the absence is
+  // what a later reader has to explain. A screen posting against a template
+  // version that has moved on can lose a whole section this way, which is not
+  // something anyone notices in time without a record of it.
+  //
+  // In the SAME transaction as the row it describes, for the reason fill-links.ts
+  // gives: two separate awaits can record a submission with no trace, or fail
+  // after the insert and have the client retry into a duplicate submission. The
+  // entry is written directly rather than through `recordAudit`, which takes the
+  // connection rather than a transaction and would re-read the actor already in
+  // hand. Only written when something was actually discarded, so the ordinary
+  // submit is one insert exactly as before.
+  const row = await db.transaction(async (tx) => {
+    const [inserted] = await tx
+      .insert(schema.submissions)
+      .values({
+        orgId: tenant.orgId,
+        templateId: template.id,
+        templateVersionId: version.id,
+        submittedByUserId: sessionUser.id,
+        submitterName: sessionUser.name,
+        submitterEmail: sessionUser.email,
+        values: recordedValues,
+        status: status ?? 'submitted',
+        flag: flag ?? '',
+      })
+      .returning();
+    if (!inserted) throw new Error('submission_create_failed: insert returned no row');
+
+    if (discarded.length > 0) {
+      await tx.insert(schema.auditLogEntries).values({
+        orgId: tenant.orgId,
+        actorId: sessionUser.id,
+        actorName: sessionUser.name,
+        action: 'Submission recorded with hidden fields discarded',
+        target: `${template.name}: ${inserted.id} (not recorded: ${discarded.join(', ')})`,
+        category: 'submissions',
+        icon: 'alert-triangle',
+      });
+    }
+
+    return inserted;
+  });
 
   // Fire-and-forget: the row is committed, and the filler must not wait on
   // someone else's endpoint to learn their form saved. `.catch` is
