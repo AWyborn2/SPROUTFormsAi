@@ -30,3 +30,4 @@ export * from './audit.js';
 export * from './voice.js';
 export * from './chc-intake.js';
 export * from './induction.js';
+export * from './taxonomy.js';

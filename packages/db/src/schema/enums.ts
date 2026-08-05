@@ -16,6 +16,23 @@ export const membershipStatusEnum = pgEnum('membership_status', [
   'suspended',
 ]);
 
+/**
+ * Whether a taxonomy value (Location, Department, Role) may still be chosen.
+ * Retiring keeps the value on existing records (R114) and blocks it for new
+ * ones (R16); it is never a delete.
+ */
+export const taxonomyStatusEnum = pgEnum('taxonomy_status', ['active', 'retired']);
+
+/**
+ * Which of the two workforce numbers the organisation shows beside a person's
+ * name (R40). The numbers themselves live on the profile; this is only the
+ * organisation's choice of which one identifies its people on screen.
+ */
+export const displayIdentifierEnum = pgEnum('display_identifier', [
+  'employee_number',
+  'swipe_card_number',
+]);
+
 export const formSourceTypeEnum = pgEnum('form_source_type', [
   'pdf_import',
   'built_from_scratch',
