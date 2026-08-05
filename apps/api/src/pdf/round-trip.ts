@@ -23,7 +23,69 @@ import {
   selectedOption,
   visibleFields,
 } from '@formai/shared';
-import type { FormField, PageBox, RepeatingRowValue, SubmissionValue } from '@formai/shared';
+import type {
+  FormField,
+  GlyphKind,
+  PageBox,
+  RepeatingRowValue,
+  SubmissionValue,
+} from '@formai/shared';
+
+/**
+ * What the exporter can actually draw.
+ *
+ * Deliberately SMALLER than `GlyphKind`. The builder lets an author choose from
+ * twelve styles because the design prototype offered twelve; this names the
+ * five the export really produces, and everything else resolves to the field
+ * type's own default rather than being silently dropped. A mark that never
+ * prints is indistinguishable, on a competency record, from an assessment
+ * nobody made — so the honest failure is to draw the default, and the
+ * inspector says which styles reach the page.
+ */
+export type DrawnGlyph = 'tick' | 'cross' | 'ring' | 'text' | 'signature';
+
+/**
+ * Authored glyph → what the exporter draws for it.
+ *
+ * `tick_hand` and `tick_block` both resolve to the one vector tick this file
+ * draws: the export honours the CATEGORY, not the stylistic variant, and
+ * pretending otherwise would put a difference on screen that never reaches the
+ * paper. `stamp_date` is text because a date stamp is a date, drawn through the
+ * same scalar path.
+ *
+ * A glyph absent from this table is authorable and previewable but NOT drawn —
+ * `MARK_STYLES_DRAWN` in `builder.ts` is the list the inspector shows, and the
+ * two are kept in step by the test that walks it.
+ */
+const DRAWN_BY_GLYPH: Partial<Record<GlyphKind, DrawnGlyph>> = {
+  tick_hand: 'tick',
+  tick_block: 'tick',
+  cross_hand: 'cross',
+  ring: 'ring',
+  typed: 'text',
+  stamp_date: 'text',
+  signature: 'signature',
+};
+
+/**
+ * Which glyph a segment draws — the authored one, or the caller's default.
+ *
+ * ABSENT IS THE DEFAULT AND THE DEFAULT IS TODAY'S BEHAVIOUR. Every placement
+ * authored before mark styles existed carries no `markStyle`, and this returns
+ * the fallback unchanged for all of them, so their exports are byte-identical.
+ * That property is what makes this seam safe to add to a file that draws
+ * competency records, and it is pinned by a characterization test rather than
+ * asserted here.
+ *
+ * A glyph this exporter does not draw ALSO returns the fallback. The author is
+ * told in the inspector; the page gets the field's own mark rather than
+ * nothing, because a blank cell on this document class reads as unassessed.
+ */
+export function resolveMarkStyle(segment: PageBox | undefined, fallback: DrawnGlyph): DrawnGlyph {
+  const glyph = segment?.markStyle?.glyph;
+  if (!glyph) return fallback;
+  return DRAWN_BY_GLYPH[glyph] ?? fallback;
+}
 
 const INK = rgb(0.094, 0.106, 0.098); // #181b19
 
@@ -321,8 +383,22 @@ export async function roundTripExport({
     if (SELF_ANSWERING.has(field.type)) {
       const verdict = verdictOf(value);
       if (verdict === undefined) continue;
+      /*
+        The VERDICT decides the default; an authored style may override which
+        glyph carries it. A ring is the one alternative that says the same
+        thing — "this is the cell I mean" — without asserting a different
+        finding, so tick/cross/ring are honoured here and anything else falls
+        back to the verdict's own mark. Drawing a date stamp or a signature in
+        a pass/fail cell would state something the assessment never recorded.
+      */
+      const fallback: DrawnGlyph = verdict ? 'tick' : 'cross';
+      const glyph = resolveMarkStyle(pos, fallback);
+      if (glyph === 'ring') {
+        drawRing(page, pos, verdict ? CORRECT_INK : INCORRECT_INK);
+        continue;
+      }
       const { x, y, size } = boxMarkPlacement(pos);
-      drawMark(page, verdict ? 'tick' : 'cross', x, y, size);
+      drawMark(page, glyph === 'cross' ? 'cross' : glyph === 'tick' ? 'tick' : fallback, x, y, size);
       continue;
     }
 
