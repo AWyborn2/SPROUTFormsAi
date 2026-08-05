@@ -21,6 +21,7 @@ import { passwordResetRouter } from './routes/password-reset.js';
 import { orgRouter } from './routes/org.js';
 import { importDraftsRouter } from './routes/import-drafts.js';
 import { builderDraftsRouter } from './routes/builder-drafts.js';
+import { answerGuidesRouter } from './routes/answer-guides.js';
 import { pdfRouter } from './routes/pdf.js';
 import { submissionsRouter } from './routes/submissions.js';
 import { taxonomyRouter } from './routes/taxonomy.js';
@@ -75,6 +76,13 @@ export function createApp(): Express {
     the workflow. Same registration-order reason, same scoped limit.
   */
   app.use('/assessment-tool-drafts', express.json({ limit: '40mb' }), builderDraftsRouter);
+
+  /*
+    An answer guide is a PDF and arrives as base64, so it needs the same raised
+    limit the other document routes get. Registered before the default json
+    body parser for the same reason they are.
+  */
+  app.use('/answer-guides', express.json({ limit: '40mb' }), answerGuidesRouter);
 
   app.use(express.json({ limit: '2mb' }));
 
