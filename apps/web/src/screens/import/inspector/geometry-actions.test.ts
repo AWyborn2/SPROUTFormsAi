@@ -45,6 +45,13 @@ import {
   splitRowBand,
   subdivideBox,
   unsupportedReason,
+  moveSegment,
+  keyMove,
+  isDeleteKey,
+  removeSegment,
+  NUDGE_POINTS_COARSE,
+  clampDelta,
+  nudgeStep,
 } from './geometry-actions.js';
 
 const A4 = { width: 595, height: 842 };
@@ -1452,5 +1459,163 @@ describe('moveBand / moveBoundary (U6, R7/R8) — pure core of import-session.ts
 
   it('ignores a boundary between bands that do not exist — matches adjustGeometryBoundary("f1", "column", "tick", "nope", 505)', () => {
     expect(moveBoundary(SEGMENT, 'column', 'tick', 'nope', 505)).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Whole-box movement
+ * ------------------------------------------------------------------ */
+
+describe('moveSegment', () => {
+  function box(over: Partial<PageBox> = {}): PageBox {
+    return {
+      page: 0,
+      x: 100,
+      y: 200,
+      width: 60,
+      height: 40,
+      pageWidth: 595,
+      pageHeight: 842,
+      ...over,
+    };
+  }
+
+  it('MOVES THE BANDS WITH THE BOX', () => {
+    /*
+      THE FAILURE THIS EXISTS FOR. GeometryBand.start/end are absolute PDF
+      points in the same space as PageBox.x/y — `markPlacement` reads
+      columnBand.start directly as the mark's x. Moving the outline without the
+      bands leaves every mark where it was: the box lands where the author put
+      it and the export draws ticks in the old cells.
+    */
+    const moved = moveSegment(
+      box({
+        columnBands: [{ key: 'a', start: 100, end: 130 }],
+        rowBands: [{ key: 'r1', start: 200, end: 220 }],
+      }),
+      10,
+      -5,
+    );
+
+    expect(moved.x).toBe(110);
+    expect(moved.y).toBe(195);
+    expect(moved.columnBands).toEqual([{ key: 'a', start: 110, end: 140 }]);
+    expect(moved.rowBands).toEqual([{ key: 'r1', start: 195, end: 215 }]);
+  });
+
+  it('moves column bands on x only and row bands on y only', () => {
+    const moved = moveSegment(
+      box({
+        columnBands: [{ key: 'a', start: 100, end: 130 }],
+        rowBands: [{ key: 'r1', start: 200, end: 220 }],
+      }),
+      10,
+      0,
+    );
+    expect(moved.columnBands![0]!.start).toBe(110);
+    expect(moved.rowBands![0]!.start).toBe(200);
+  });
+
+  it('keeps a scalar box with no bands intact', () => {
+    const moved = moveSegment(box(), 5, 5);
+    expect(moved.columnBands).toBeUndefined();
+    expect(moved.rowBands).toBeUndefined();
+    expect([moved.x, moved.y]).toEqual([105, 205]);
+  });
+
+  it('will not let a box leave the page', () => {
+    // A mark outside the media box does not appear on the printed page at all,
+    // which on a competency record reads as a mark nobody made.
+    const atLeft = moveSegment(box({ x: 4 }), -50, 0);
+    expect(atLeft.x).toBe(0);
+
+    const atRight = moveSegment(box({ x: 500 }), 200, 0);
+    expect(atRight.x).toBe(595 - 60);
+
+    const atBottom = moveSegment(box({ y: 3 }), 0, -50);
+    expect(atBottom.y).toBe(0);
+
+    const atTop = moveSegment(box({ y: 800 }), 0, 200);
+    expect(atTop.y).toBe(842 - 40);
+  });
+
+  it('slides along an edge rather than stopping dead', () => {
+    // Clamping the DELTA rather than the result means the axis with room keeps
+    // moving — a drag along the page edge still tracks the pointer.
+    const moved = moveSegment(box({ x: 0, y: 400 }), -20, 30);
+    expect(moved.x).toBe(0);
+    expect(moved.y).toBe(430);
+  });
+
+  it('returns the SAME segment when the clamped delta is zero', () => {
+    // A drag held against the edge produces no re-render, and a nudge at the
+    // boundary is a no-op rather than a churn of identical states.
+    const at = box({ x: 0, y: 0 });
+    expect(moveSegment(at, -10, -10)).toBe(at);
+    expect(moveSegment(at, 0, 0)).toBe(at);
+  });
+});
+
+describe('keyMove', () => {
+  it('steps 1pt, and 10pt with the coarse modifier', () => {
+    expect(keyMove('ArrowRight', false)).toEqual({ dx: 1, dy: 0 });
+    expect(keyMove('ArrowRight', true)).toEqual({ dx: 10, dy: 0 });
+  });
+
+  it('sends ArrowUp UP THE PRINTED PAGE', () => {
+    // PDF y grows upward and the screen's grows downward. Getting this
+    // backwards sends every box the wrong way and reads as a broken control.
+    expect(keyMove('ArrowUp', false)!.dy).toBe(1);
+    expect(keyMove('ArrowDown', false)!.dy).toBe(-1);
+  });
+
+  it('makes ten fine steps land where one coarse step does', () => {
+    // A coarse step that is not a multiple of the fine one makes the two
+    // disagree about where a box ends up.
+    expect(NUDGE_POINTS_COARSE).toBe(NUDGE_POINTS * 10);
+  });
+
+  it('returns null for a key it does not own', () => {
+    // So a caller can leave the event unhandled — swallowing every keystroke
+    // would stop an author typing in the filter box.
+    expect(keyMove('a', false)).toBeNull();
+    expect(keyMove('Enter', false)).toBeNull();
+  });
+});
+
+describe('isDeleteKey', () => {
+  it('accepts both keys a reviewer will reach for', () => {
+    expect(isDeleteKey('Delete')).toBe(true);
+    expect(isDeleteKey('Backspace')).toBe(true);
+    expect(isDeleteKey('x')).toBe(false);
+  });
+});
+
+describe('removeSegment', () => {
+  const a: PageBox = { page: 0, x: 1, y: 1, width: 1, height: 1, pageWidth: 595, pageHeight: 842 };
+  const b: PageBox = { ...a, page: 1 };
+
+  it('drops the named page’s box', () => {
+    expect(removeSegment([a, b], 0)).toEqual([b]);
+  });
+
+  it('drops one option’s box without touching its siblings', () => {
+    // A multi-option field carries one segment per option; deleting the box for
+    // "b" must not take "a" with it.
+    const oa = { ...a, optionKey: 'a' };
+    const ob = { ...a, optionKey: 'b' };
+    expect(removeSegment([oa, ob], 0, 'b')).toEqual([oa]);
+  });
+
+  it('returns undefined when the last segment goes', () => {
+    // geometry.ts treats an absent footprint as "not placed"; a geometry with
+    // zero segments is a third state nothing reads — it passes a "has geometry"
+    // check and then draws nothing.
+    expect(removeSegment([a], 0)).toBeUndefined();
+  });
+
+  it('returns the SAME array when nothing matched', () => {
+    const segments = [a, b];
+    expect(removeSegment(segments, 7)).toBe(segments);
   });
 });

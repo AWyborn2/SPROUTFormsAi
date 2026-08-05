@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
 import { geometrySegments, isChoiceField, type FormField, type PageBox } from '@formai/shared';
@@ -12,6 +12,10 @@ import {
   deriveAcrossPages,
   deriveOptionCellsAcrossPages,
   handleAdjustment,
+  isDeleteKey,
+  keyMove,
+  moveSegment,
+  removeSegment,
   moveBand,
   moveBoundary,
   snapTargets,
@@ -146,6 +150,90 @@ export function GeometryEditorScreen() {
         geometry: { segments: segments.map((s) => ((s.optionKey ?? null) === optionKey ? next : s)) },
       };
     });
+  }
+
+  /**
+   * Move the box currently shown in the editor, whole.
+   *
+   * ROUTED THROUGH THE SAME OVERLAY AND THE SAME `mutate` AS A BAND EDGE, so
+   * there is still ONE movement path: `bandOverlay` decides which box is being
+   * worked on and where a change to it lands, exactly as `onBandEdge` does. A
+   * second path would be a second place for the preview/placed distinction to
+   * be got wrong — and getting it wrong writes a parked proposal into the
+   * confirmed set, which is the gate `geometry.ts` documents.
+   *
+   * `moveSegment` moves the bands with the box, because they are absolute
+   * coordinates in the same space and `markPlacement` reads them directly.
+   */
+  function moveOverlayBox(dx: number, dy: number) {
+    if (!overlay) return;
+    const next = moveSegment(overlay.box, dx, dy);
+    // Clamped to nothing — the box is already against the page edge.
+    if (next === overlay.box) return;
+
+    if (overlay.source.kind === 'preview') {
+      const { fieldId } = overlay.source;
+      setProposalPreviews((prev) =>
+        prev.map((p) =>
+          p.fieldId === fieldId && 'segment' in p.proposal
+            ? { ...p, proposal: { ...p.proposal, segment: next } }
+            : p,
+        ),
+      );
+      return;
+    }
+
+    const { fieldId, optionKey } = overlay.source;
+    mutate(fieldId, (f) => {
+      const segments = f.geometry?.segments ?? [];
+      if (!segments.some((sg) => (sg.optionKey ?? null) === optionKey)) return f;
+      return {
+        ...f,
+        geometry: { segments: segments.map((sg) => ((sg.optionKey ?? null) === optionKey ? next : sg)) },
+      };
+    });
+  }
+
+  /**
+   * Delete the box currently shown in the editor.
+   *
+   * Only a PLACED box. A parked proposal is not a placement — it has never been
+   * confirmed — and "deleting" one would silently discard a suggestion the
+   * reviewer can simply decline instead, with no way back to it.
+   */
+  function deleteOverlayBox() {
+    if (!overlay || overlay.source.kind !== 'segment') return;
+    const { fieldId, optionKey } = overlay.source;
+    mutate(fieldId, (f) => {
+      const next = removeSegment(f.geometry?.segments ?? [], overlay.box.page, optionKey ?? undefined);
+      if (next === f.geometry?.segments) return f;
+      return next ? { ...f, geometry: { segments: next } } : stripGeometry(f);
+    });
+  }
+
+  /**
+   * Arrow keys nudge the shown box; Delete removes it.
+   *
+   * Ignores a key press coming from a text input, so typing in the field filter
+   * does not walk a box across the page — and returns without preventing the
+   * default for any key it does not own, so every other shortcut on the screen
+   * still works.
+   */
+  function onEditorKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+    if (!overlay) return;
+
+    if (isDeleteKey(e.key)) {
+      e.preventDefault();
+      deleteOverlayBox();
+      return;
+    }
+
+    const move = keyMove(e.key, e.shiftKey);
+    if (!move) return;
+    e.preventDefault();
+    moveOverlayBox(move.dx, move.dy);
   }
 
   /**
@@ -549,7 +637,21 @@ export function GeometryEditorScreen() {
           ))}
         </aside>
 
-        <div className="min-w-0 flex-1">
+        {/*
+          The keyboard target for whole-box movement.
+
+          `tabIndex={-1}` makes the column focusable programmatically and by
+          click without putting it in the tab order — an author tabbing through
+          the screen should reach the controls, not a page canvas. The handler
+          itself ignores key presses originating in a text input, so the field
+          filter still types.
+        */}
+        <div
+          className="min-w-0 flex-1 outline-none"
+          tabIndex={-1}
+          onKeyDown={onEditorKeyDown}
+          aria-label="Placement canvas — arrow keys nudge the selected box, Delete removes it"
+        >
           <PdfViewer
             assetId={version.sourcePdfAssetId}
             selectedFieldId={selectedId}
