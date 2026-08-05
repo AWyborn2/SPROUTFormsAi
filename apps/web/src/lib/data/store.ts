@@ -39,6 +39,7 @@ import type {
   AuditCategory,
   AuditEntry,
   CreatedApiKey,
+  BrandEditProposal,
   BrandPdfScan,
   BrandScanProposal,
   Competency,
@@ -639,6 +640,16 @@ export const store = {
    */
   scanBrandFromPdf(input: { assetId?: string; pdfBase64?: string }): Promise<BrandPdfScan> {
     return apiClient.post<BrandPdfScan>('/form-brands/scan', input);
+  },
+
+  /**
+   * Change a brand by describing the change. Returns a PROPOSAL over its
+   * current kit — nothing is stored until the author saves.
+   */
+  editFormBrandByChat(input: { id: string; instruction: string }): Promise<BrandEditProposal> {
+    return apiClient.post<BrandEditProposal>(`/form-brands/${input.id}/edit`, {
+      instruction: input.instruction,
+    });
   },
 
   deleteFormBrand(id: string): Promise<void> {

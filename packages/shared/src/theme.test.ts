@@ -9,7 +9,12 @@
  * rendering in our colours, which looks like a working page.
  */
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_THEME, resolveTheme, type ThemeTokens } from './theme.js';
+import {
+  DEFAULT_THEME,
+  resolveTheme,
+  sanitizeThemeValues,
+  type ThemeTokens,
+} from './theme.js';
 
 describe('resolveTheme', () => {
   it('returns the product defaults when no layer sets anything', () => {
@@ -87,5 +92,69 @@ describe('resolveTheme', () => {
       ...DEFAULT_THEME,
       radius: 20,
     });
+  });
+});
+
+describe('sanitizeThemeValues', () => {
+  /*
+    `sanitize` drops unknown KEYS but keeps whatever value a known key carries,
+    which is fine for the theme editor — every control there is a select or a
+    bounded number input, so the UI is the guard. It is not fine for a patch
+    authored anywhere else, and a theme value ends up in a CSS custom property.
+  */
+  it('keeps a legal value', () => {
+    expect(sanitizeThemeValues({ radius: 20, density: 'compact' }).theme).toEqual({
+      radius: 20,
+      density: 'compact',
+    });
+  });
+
+  it('DROPS a value out of range rather than clamping it', () => {
+    /*
+      Clamping turns "make the corners 400px round" into a silent 40 and leaves
+      the author believing the instruction was understood. Dropping it says so,
+      and they ask again.
+    */
+    const { theme, rejected } = sanitizeThemeValues({ radius: 400 });
+    expect(theme.radius).toBeUndefined();
+    expect(rejected).toEqual(['radius: 400']);
+  });
+
+  it('refuses a value outside an enum', () => {
+    expect(sanitizeThemeValues({ layout: 'spiral' as never }).theme.layout).toBeUndefined();
+  });
+
+  it('refuses a font weight the loader cannot request', () => {
+    // A css2 request fails ENTIRELY when it asks for a weight the family does
+    // not publish, so an out-of-set weight breaks the whole stylesheet.
+    expect(sanitizeThemeValues({ headingWeight: 350 as never }).theme.headingWeight).toBeUndefined();
+    expect(sanitizeThemeValues({ headingWeight: 700 }).theme.headingWeight).toBe(700);
+  });
+
+  it('REFUSES A COLOUR THAT IS NOT A HEX VALUE', () => {
+    // These reach CSS custom properties. Anything that is not six hex digits is
+    // not a colour and has no business being emitted.
+    const { theme, rejected } = sanitizeThemeValues({
+      headingColor: 'url(https://evil.example/x)' as never,
+    });
+    expect(theme.headingColor).toBeUndefined();
+    expect(rejected).toHaveLength(1);
+  });
+
+  it('keeps the empty string on a colour role', () => {
+    // `''` means "use the product default", which is a real choice not a blank.
+    expect(sanitizeThemeValues({ headingColor: '' }).theme.headingColor).toBe('');
+  });
+
+  it('normalises hex case, so two spellings of one colour compare equal', () => {
+    expect(sanitizeThemeValues({ headingColor: '#0044CC' }).theme.headingColor).toBe('#0044cc');
+  });
+
+  it('drops unknown keys without reporting them as rejected values', () => {
+    // An unknown key is not a value the author asked for — it is noise, and
+    // naming it would put junk in front of somebody who cannot act on it.
+    const { theme, rejected } = sanitizeThemeValues({ evil: 'red' } as never);
+    expect(theme).toEqual({});
+    expect(rejected).toEqual([]);
   });
 });

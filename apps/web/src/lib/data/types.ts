@@ -7,6 +7,7 @@
  */
 import type {
   BrandingKit,
+  FormBrandKit,
   CompetencyStatus,
   DisplayIdentifier,
   ExtractionResult,
@@ -529,5 +530,20 @@ export interface BrandPdfScan {
     height: number;
   }>;
   /** Why the result is thin: a monochrome document, a page cap, an unreadable file. */
+  notes: string[];
+}
+
+/**
+ * What `POST /form-brands/:id/edit` proposed from a described change.
+ *
+ * A PROPOSAL over the brand's CURRENT kit — nothing is stored, and the author
+ * sees it in the live preview before saving. `notes` carries what the model
+ * could not do and every value that was refused: a refused value is dropped
+ * rather than corrected, so saying so is what makes the author ask again.
+ */
+export interface BrandEditProposal {
+  patch: FormBrandKit;
+  /** One short sentence, in plain words rather than token names. */
+  summary: string;
   notes: string[];
 }
