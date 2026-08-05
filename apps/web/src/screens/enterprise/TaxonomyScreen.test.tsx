@@ -14,6 +14,11 @@ const updateDepartment = vi.fn();
 const createRole = vi.fn();
 const updateRole = vi.fn();
 const updateSettings = vi.fn();
+const setRequirements = vi.fn();
+const tools: { data: Array<{ id: string; name: string }> } = { data: [] };
+const roleRequirements: { data: { configured: boolean; toolIds: string[] } | undefined } = {
+  data: undefined,
+};
 
 vi.mock('../../lib/data/hooks.js', () => ({
   useTaxonomy: () => taxonomy,
@@ -24,6 +29,9 @@ vi.mock('../../lib/data/hooks.js', () => ({
   useCreateRole: () => ({ mutate: createRole }),
   useUpdateRole: () => ({ mutate: updateRole }),
   useUpdateTaxonomySettings: () => ({ mutate: updateSettings }),
+  useAssessmentTools: () => tools,
+  useRoleRequiredAssessments: () => roleRequirements,
+  useSetRoleRequiredAssessments: () => ({ mutate: setRequirements, isPending: false }),
 }));
 
 const toast = vi.fn();
@@ -50,6 +58,24 @@ afterEach(() => {
   vi.clearAllMocks();
   taxonomy.data = undefined;
   taxonomy.isLoading = false;
+  tools.data = [];
+  roleRequirements.data = undefined;
+});
+
+const withOneRole = (roleOver: Record<string, unknown> = {}): Taxonomy => ({
+  ...base(),
+  departments: [
+    {
+      id: 'dep-1',
+      name: 'Operations',
+      allowsMultipleRoles: true,
+      status: 'active',
+      createdAt: '',
+      roles: [
+        { id: 'role-1', departmentId: 'dep-1', name: 'Dozer Operator', status: 'active', createdAt: '', ...roleOver },
+      ],
+    },
+  ],
 });
 
 describe('TaxonomyScreen', () => {
@@ -130,5 +156,50 @@ describe('TaxonomyScreen', () => {
     const panel = screen.getByText('Locations').closest('div')!;
     fireEvent.click(within(panel).getByRole('button', { name: 'Add' }));
     expect(createLocation).toHaveBeenCalledWith('Raw Materials', expect.anything());
+  });
+});
+
+describe('TaxonomyScreen — a Role’s required assessments (U10)', () => {
+  const openEditor = () =>
+    fireEvent.click(screen.getByLabelText('Required assessments for Dozer Operator'));
+
+  it('shows "not set up" apart from "requires nothing" (R50)', () => {
+    taxonomy.data = withOneRole();
+
+    roleRequirements.data = { configured: false, toolIds: [] };
+    const { rerender } = render(<TaxonomyScreen />);
+    expect(screen.getByText(/not set up/)).toBeDefined();
+
+    roleRequirements.data = { configured: true, toolIds: [] };
+    rerender(<TaxonomyScreen />);
+    expect(screen.getByText(/requires nothing/)).toBeDefined();
+  });
+
+  it('saves the tools an Admin selects for the Role (R43)', () => {
+    taxonomy.data = withOneRole();
+    tools.data = [
+      { id: 'tool-a', name: 'Track Dozer' },
+      { id: 'tool-b', name: 'Excavator' },
+    ];
+    roleRequirements.data = { configured: false, toolIds: [] };
+    render(<TaxonomyScreen />);
+    openEditor();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Track Dozer' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save requirements' }));
+
+    expect(setRequirements).toHaveBeenCalledWith(['tool-a'], expect.anything());
+  });
+
+  it('reads only for a retired Role — no toggles, no save (R121)', () => {
+    taxonomy.data = withOneRole({ status: 'retired' });
+    tools.data = [{ id: 'tool-a', name: 'Track Dozer' }];
+    roleRequirements.data = { configured: true, toolIds: ['tool-a'] };
+    render(<TaxonomyScreen />);
+    openEditor();
+
+    expect(screen.getByText(/no new requirements/)).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Save requirements' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Track Dozer' })).toHaveProperty('disabled', true);
   });
 });

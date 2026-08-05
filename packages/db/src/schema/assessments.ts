@@ -19,7 +19,7 @@ import {
 } from './enums.ts';
 import { organizations, users } from './organizations.ts';
 import { formTemplates, formTemplateVersions } from './forms.ts';
-import { locations } from './taxonomy.ts';
+import { departments, jobRoles, locations } from './taxonomy.ts';
 
 /**
  * An assessment tool — the part structure laid over a form template.
@@ -40,6 +40,19 @@ export const assessmentTools = pgTable(
       .notNull()
       .references(() => formTemplates.id, { onDelete: 'cascade' }),
     name: text().notNull(),
+    /*
+      The Department that classifies this tool (R9), or null for UNCLASSIFIED
+      (R10). Null is not "every Department" — it is "no Department yet", and R11
+      makes an unclassified tool appear in every Department filter so it cannot be
+      silently missed. At most one: a tool carries one Department or none.
+
+      `set null` rather than `restrict`: a Department is retired, not deleted, so
+      this never fires in normal use, but if one were force-removed the tool
+      falling back to unclassified beats blocking the Department operation. A
+      RETIRED Department stays on the tool (R117's precondition) — the pointer is
+      by id and does not read status.
+    */
+    departmentId: uuid('department_id').references(() => departments.id, { onDelete: 'set null' }),
     /** Ordered parts, their kinds, pathways and start fields. */
     manifest: jsonb().$type<AssessmentToolManifest>().notNull(),
     /** Competency ids a CANDIDATE must hold. Warned on, never blocking. */
@@ -124,6 +137,45 @@ export const assessmentTools = pgTable(
     /** One tool per template — the manifest describes that template's parts. */
     uniqueIndex('assessment_tools_template_uq').on(t.templateId),
     index('assessment_tools_org_idx').on(t.orgId),
+    index('assessment_tools_department_idx').on(t.departmentId),
+  ],
+);
+
+/**
+ * The assessments a Role requires (U10, R43) — the minimum for anyone holding it.
+ *
+ * A real join table rather than a jsonb list on the Role, because the competency
+ * lists on the tool (jsonb, no FK) answer a different question: those degrade
+ * gracefully when a competency is tidied up, while a Role's requirement is the
+ * blast radius R82 has to count and a Role's own deletion is already restricted
+ * by the placements that reference it. Rows here are the thing an assignment run
+ * reads, so they are queryable by Role and by tool.
+ *
+ * The DISTINCTION R50 needs — a Role never configured versus one configured
+ * empty — is the presence or absence of rows, which the API reports as a
+ * `configured` boolean rather than leaving a caller to infer it from `[]`.
+ */
+export const roleRequiredAssessments = pgTable(
+  'role_required_assessments',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    roleId: uuid('role_id')
+      .notNull()
+      .references(() => jobRoles.id, { onDelete: 'cascade' }),
+    toolId: uuid('tool_id')
+      .notNull()
+      .references(() => assessmentTools.id, { onDelete: 'cascade' }),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // A Role requires a tool once.
+    uniqueIndex('role_required_assessments_uq').on(t.roleId, t.toolId),
+    index('role_required_assessments_org_idx').on(t.orgId),
+    index('role_required_assessments_role_idx').on(t.roleId),
+    index('role_required_assessments_tool_idx').on(t.toolId),
   ],
 );
 
@@ -300,7 +352,27 @@ export const assessmentToolsRelations = relations(assessmentTools, ({ one, many 
     fields: [assessmentTools.templateId],
     references: [formTemplates.id],
   }),
+  department: one(departments, {
+    fields: [assessmentTools.departmentId],
+    references: [departments.id],
+  }),
   cases: many(assessmentCases),
+  requiredByRoles: many(roleRequiredAssessments),
+}));
+
+export const roleRequiredAssessmentsRelations = relations(roleRequiredAssessments, ({ one }) => ({
+  org: one(organizations, {
+    fields: [roleRequiredAssessments.orgId],
+    references: [organizations.id],
+  }),
+  role: one(jobRoles, {
+    fields: [roleRequiredAssessments.roleId],
+    references: [jobRoles.id],
+  }),
+  tool: one(assessmentTools, {
+    fields: [roleRequiredAssessments.toolId],
+    references: [assessmentTools.id],
+  }),
 }));
 
 export const assessmentCasesRelations = relations(assessmentCases, ({ one, many }) => ({

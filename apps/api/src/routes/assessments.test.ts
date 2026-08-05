@@ -31,6 +31,9 @@ const VERSION = '00000000-0000-4000-8000-000000000002';
 const MINING = '00000000-0000-4000-8000-0000000000a1';
 const RAW_MATERIALS = '00000000-0000-4000-8000-0000000000a2';
 const OFFICE = '00000000-0000-4000-8000-0000000000a3';
+// Departments that classify a tool (U10).
+const DEPT_OPS = '00000000-0000-4000-8000-0000000000d1';
+const DEPT_MAINT = '00000000-0000-4000-8000-0000000000d2';
 
 const admin = { userId: ADMIN, orgId: ORG, role: 'admin' as const };
 const candidate = { userId: CANDIDATE, orgId: ORG, role: 'candidate' as const };
@@ -269,7 +272,14 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
       { id: RAW_MATERIALS, orgId: ORG, name: 'Raw Materials', status: 'active' },
       { id: OFFICE, orgId: ORG, name: 'Head Office', status: 'active' },
     ],
+    // Departments that classify tools (U10). MAINT is retired, to test that a
+    // classification cannot be set to a retired Department.
+    departments: [
+      { id: DEPT_OPS, orgId: ORG, name: 'Operations', status: 'active' },
+      { id: DEPT_MAINT, orgId: ORG, name: 'Maintenance', status: 'retired' },
+    ],
     assessmentTools: [],
+    roleRequiredAssessments: [],
     assessmentCases: [],
     assessmentPartAttempts: [],
     competencies: [{ id: COMPETENCY, orgId: ORG, name: 'Track Dozer Operator', code: 'TD-OP', holders: 0 }],
@@ -926,6 +936,125 @@ describe('PATCH /assessment-tools/:id/location-parts', () => {
       const res = await setRule(base, tool.id, { [MINING]: ['p1', 'ghost'] });
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toBe('unknown_part');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ── tool classification and the Department filter (U10) ─────────────────────
+
+describe('PATCH /assessment-tools/:id/classification and the filter', () => {
+  async function makeTool(base: string) {
+    const res = await fetch(`${base}/assessment-tools`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST }),
+    });
+    return (await res.json()) as { id: string };
+  }
+  function classify(base: string, id: string, departmentId: string | null, session: Session = admin) {
+    return fetch(`${base}/assessment-tools/${id}/classification`, {
+      method: 'PATCH',
+      headers: auth(session),
+      body: JSON.stringify({ departmentId }),
+    });
+  }
+  async function toolDept(base: string, id: string) {
+    const got = (await (await fetch(`${base}/assessment-tools/${id}`, { headers: auth() })).json()) as {
+      departmentId: string | null;
+    };
+    return got.departmentId;
+  }
+
+  it('classifies a tool as an Admin and reads it back (R9)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      expect((await classify(base, tool.id, DEPT_OPS)).status).toBe(200);
+      expect(await toolDept(base, tool.id)).toBe(DEPT_OPS);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses classification by a non-admin (R73 sibling)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      const res = await classify(base, tool.id, DEPT_OPS, { userId: ADMIN, orgId: ORG, role: 'builder' });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a retired Department (R10, R16)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      const res = await classify(base, tool.id, DEPT_MAINT);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('department_not_found');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('carries at most one Department — a second classification replaces the first (R9)', async () => {
+    const { db, store } = makeDb();
+    const DEPT_RAIL = '00000000-0000-4000-8000-0000000000d3';
+    rows(store, 'departments').push({ id: DEPT_RAIL, orgId: ORG, name: 'Rail', status: 'active' });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      expect((await classify(base, tool.id, DEPT_OPS)).status).toBe(200);
+      expect((await classify(base, tool.id, DEPT_RAIL)).status).toBe(200);
+      expect(await toolDept(base, tool.id)).toBe(DEPT_RAIL);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('clears the classification to unclassified with null (R10)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      await classify(base, tool.id, DEPT_OPS);
+      expect((await classify(base, tool.id, null)).status).toBe(200);
+      expect(await toolDept(base, tool.id)).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('filters by Department, and an unclassified tool appears in every filter (R9, R10, R11)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const classified = await makeTool(base);
+      await classify(base, classified.id, DEPT_OPS);
+      const unclassified = await makeTool(base);
+
+      const ops = (await (
+        await fetch(`${base}/assessment-tools?departmentId=${DEPT_OPS}`, { headers: auth() })
+      ).json()) as Array<{ id: string }>;
+      const opsIds = ops.map((t) => t.id);
+      expect(opsIds).toContain(classified.id); // carries this Department
+      expect(opsIds).toContain(unclassified.id); // and the unclassified appears everywhere (R11)
+
+      // Filtering by a different Department drops the classified tool, keeps the unclassified.
+      const other = (await (
+        await fetch(`${base}/assessment-tools?departmentId=${DEPT_MAINT}`, { headers: auth() })
+      ).json()) as Array<{ id: string }>;
+      const otherIds = other.map((t) => t.id);
+      expect(otherIds).not.toContain(classified.id);
+      expect(otherIds).toContain(unclassified.id);
     } finally {
       server.close();
     }

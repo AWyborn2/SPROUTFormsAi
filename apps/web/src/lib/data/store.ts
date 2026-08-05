@@ -888,6 +888,15 @@ export const store = {
   updateRole(id: string, patch: { name?: string; status?: TaxonomyStatus }): Promise<TaxRole> {
     return apiClient.patch<TaxRole>(`/taxonomy/roles/${id}`, patch);
   },
+  getRoleRequiredAssessments(roleId: string): Promise<{ configured: boolean; toolIds: string[] }> {
+    return apiClient.get(`/taxonomy/roles/${roleId}/required-assessments`);
+  },
+  setRoleRequiredAssessments(
+    roleId: string,
+    toolIds: string[],
+  ): Promise<{ configured: boolean; toolIds: string[] }> {
+    return apiClient.put(`/taxonomy/roles/${roleId}/required-assessments`, { toolIds });
+  },
   updateTaxonomySettings(patch: Partial<TaxonomySettings>): Promise<TaxonomySettings> {
     return apiClient.patch<TaxonomySettings>('/taxonomy/settings', patch);
   },
