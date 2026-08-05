@@ -22,6 +22,7 @@ import { apiClient, ApiError } from '../../../lib/data/api-client.js';
 import { fileToBase64, IMPORT_REQUEST_TIMEOUT_MS } from '../../../lib/data/import-session.js';
 import { retypeField } from '../../../lib/field-editor/reducer.js';
 import * as Structure from './builder-structure.js';
+import { addField, deleteField, mergeIntoDescription } from './builder-fields.js';
 import {
   buildManifest,
   derivePartsFromStructure,
@@ -139,8 +140,19 @@ export interface BuilderDraftState {
   structureOps: StructureOps;
   /** Answer-key edits. */
   keyOps: KeyOps;
+  /** Adding, deleting and folding away fields the extraction got wrong. */
+  fieldOps: FieldOps;
   /** Unit / part edits. */
   partOps: PartOps;
+}
+
+export interface FieldOps {
+  /** Add a field the extraction missed, after `afterFieldId` (null = first). */
+  add: (sectionKey: string, afterFieldId: string | null, type: FormFieldType, label: string) => void;
+  /** Delete a field the extraction invented, and every reference to it. */
+  remove: (fieldId: string) => void;
+  /** Fold a field into another's description — a printed instruction, not a box. */
+  foldInto: (fieldId: string, targetFieldId: string) => void;
 }
 
 export interface PartOps {
@@ -537,6 +549,43 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     [],
   );
 
+  /*
+    ONE ATOMIC APPLY, because a field id is referenced from four pieces of state.
+
+    Each operation is computed once from the CURRENT values and then written to
+    all four. Four independent functional updates would each see the others
+    stale — and a delete that removed the field but not its answer key produces a
+    manifest that fails at publish, naming a field the author can no longer see.
+    `builder-fields.ts` makes the half-done version unexpressible; this keeps it
+    that way through React state.
+  */
+  const applyFieldEdit = useCallback(
+    (edit: (state: {
+      fields: FormField[];
+      structure: BuilderStructure;
+      keys: DraftAnswerKey[];
+      excluded: Set<string>;
+    }) => ReturnType<typeof deleteField>) => {
+      const next = edit({ fields, structure, keys, excluded });
+      setFields(next.fields);
+      setStructure(next.structure);
+      setKeys(next.keys);
+      setExcluded(next.excluded);
+    },
+    [fields, structure, keys, excluded],
+  );
+
+  const fieldOps = useMemo<FieldOps>(
+    () => ({
+      add: (sectionKey, afterFieldId, type, label) =>
+        applyFieldEdit((st) => addField(st, sectionKey, afterFieldId, type, label)),
+      remove: (fieldId) => applyFieldEdit((st) => deleteField(st, fieldId)),
+      foldInto: (fieldId, targetFieldId) =>
+        applyFieldEdit((st) => mergeIntoDescription(st, fieldId, targetFieldId)),
+    }),
+    [applyFieldEdit],
+  );
+
   const parts = useMemo(() => {
     const base = derivePartsFromStructure({ structure, fields, setup, keys, excluded });
     const withEdits = base.map((p) => ({ ...p, ...(partOverrides[p.key] ?? {}) }));
@@ -643,6 +692,7 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     reset,
     structureOps,
     keyOps,
+    fieldOps,
     partOps,
   };
 }

@@ -43,6 +43,9 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
         onMoveSection={draft.structureOps.moveSection}
         onRenameSection={draft.structureOps.renameSection}
         onSetColumns={draft.structureOps.setColumns}
+        onAddField={draft.fieldOps.add}
+        onDeleteField={draft.fieldOps.remove}
+        onFoldField={draft.fieldOps.foldInto}
         onToggleOwnPage={draft.structureOps.toggleOwnPage}
         onMoveField={draft.structureOps.moveField}
         onCycleSpan={draft.structureOps.cycleSpan}

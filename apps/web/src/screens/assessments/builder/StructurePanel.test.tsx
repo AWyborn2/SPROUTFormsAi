@@ -52,6 +52,9 @@ function setup(over: Partial<StructurePanelProps> = {}) {
     onCycleSpan: vi.fn(),
     onSetFieldType: vi.fn(),
     onGroup: vi.fn(),
+    onAddField: vi.fn(),
+    onDeleteField: vi.fn(),
+    onFoldField: vi.fn(),
     ...over,
   };
   return { props, ...render(<StructurePanel {...props} />) };
@@ -294,5 +297,54 @@ describe('StructurePanel', () => {
 
     const row = screen.getByText('ghost');
     expect(within(row.closest('[draggable]')!).getByText('ghost')).toBeTruthy();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Correcting the extraction: add, delete, fold
+ * ------------------------------------------------------------------ */
+
+describe('StructurePanel — correcting what the extraction got wrong', () => {
+  it('adds a field AFTER the one it was invoked from', () => {
+    // A missed box is missed from somewhere. Appending and making the author
+    // drag it into place is half a feature.
+    const { props } = setup();
+    expand('Candidate declaration');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add a field after Employee ID' }));
+
+    expect(props.onAddField).toHaveBeenCalledWith('s1', 'b', 'text', 'New field');
+  });
+
+  it('deletes a field', () => {
+    const { props } = setup();
+    expand('Candidate declaration');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Candidate name' }));
+
+    expect(props.onDeleteField).toHaveBeenCalledWith('a');
+  });
+
+  it('folds a field into the one ABOVE it', () => {
+    // A printed instruction read as a text box qualifies the field it follows.
+    const { props } = setup();
+    expand('Candidate declaration');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Fold Employee ID into the field above' }));
+
+    expect(props.onFoldField).toHaveBeenCalledWith('b', 'a');
+  });
+
+  it('offers no fold on the FIRST field of a section', () => {
+    /*
+      There is nothing above it to fold into. An instruction printed first is a
+      heading, which the type palette already handles — offering a control that
+      cannot work is worse than not offering it.
+    */
+    setup();
+    expand('Candidate declaration');
+
+    expect(screen.queryByRole('button', { name: /Fold Candidate name/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /Fold Employee ID/ })).toBeTruthy();
   });
 });
