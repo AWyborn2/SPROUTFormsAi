@@ -90,6 +90,8 @@ const keys = {
    */
   competencyHolders: (id: string) => ['competencies', id, 'holders'] as const,
   assessmentTools: ['assessmentTools'] as const,
+  /** A Role's required-assessment list (U10). Keyed by role so each editor caches apart. */
+  roleRequiredAssessments: (roleId: string) => ['roleRequiredAssessments', roleId] as const,
   assessmentCases: ['assessmentCases'] as const,
   /**
    * Deliberately NOT `['assessmentCases', 'progress']`: that shape is
@@ -1091,6 +1093,39 @@ export function useUpdateTaxonomySettings() {
   return useTaxonomyMutation((patch: Partial<TaxonomySettings>) =>
     store.updateTaxonomySettings(patch),
   );
+}
+
+/** A Role's required assessments (U10). `configured` distinguishes never-set from emptied. */
+export function useRoleRequiredAssessments(roleId: string | undefined) {
+  return useQuery({
+    queryKey: keys.roleRequiredAssessments(roleId ?? ''),
+    queryFn: () => store.getRoleRequiredAssessments(roleId!),
+    enabled: Boolean(roleId),
+  });
+}
+
+/** Project a proposed change's blast radius without committing it (U12). */
+export function usePreviewRoleRequiredAssessments(roleId: string) {
+  return useMutation({
+    mutationFn: (toolIds: string[]) => store.previewRoleRequiredAssessments(roleId, toolIds),
+  });
+}
+
+export function useSetRoleRequiredAssessments(roleId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (toolIds: string[]) => store.setRoleRequiredAssessments(roleId, toolIds),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.roleRequiredAssessments(roleId) });
+      // The taxonomy read carries each Role's configured flag; a new case can
+      // reach the case list AND the progress dashboard (a deliberate sibling key,
+      // so it must be swept explicitly); the audit feed logs the change.
+      void qc.invalidateQueries({ queryKey: keys.taxonomy });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
 }
 
 export function useMemberPlacement(membershipId: string | undefined) {

@@ -46,9 +46,26 @@ function fakeDb(opts: {
   nameClashRows?: unknown[];
   inserted?: unknown;
   updated?: unknown;
+  /*
+    Reads the requirement-change compute (U12) makes. Defaulting them all to
+    empty makes the change a no-op — zero holders, so all effect counters are 0 —
+    which is all the endpoint-wiring tests here need; the counting itself is unit
+    tested in requirement-change.test.ts. A single-holder apply test overrides a
+    few of these to prove a case is inserted.
+  */
+  currentRequirements?: unknown[];
+  holders?: unknown[];
+  memberships?: unknown[];
+  tools?: unknown[];
+  templates?: unknown[];
+  heldLocations?: unknown[];
+  openCases?: unknown[];
+  competencyHolders?: unknown[];
+  competencies?: unknown[];
 }) {
   const insertValues = vi.fn();
   const updateSet = vi.fn();
+  const deleteWhere = vi.fn();
   const db = {
     query: {
       organizations: {
@@ -69,6 +86,19 @@ function fakeDb(opts: {
         findMany: vi.fn().mockResolvedValue([]),
       },
       users: { findFirst: vi.fn().mockResolvedValue({ name: 'Ada' }) },
+      // The requirement-change compute (U11/U12) reads these. Empty by default.
+      membershipRoles: { findMany: vi.fn().mockResolvedValue(opts.holders ?? []) },
+      roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue(opts.currentRequirements ?? []) },
+      memberships: {
+        findFirst: vi.fn(async () => (opts.memberships ?? [])[0]),
+        findMany: vi.fn().mockResolvedValue(opts.memberships ?? []),
+      },
+      assessmentTools: { findMany: vi.fn().mockResolvedValue(opts.tools ?? []) },
+      formTemplates: { findMany: vi.fn().mockResolvedValue(opts.templates ?? []) },
+      membershipLocations: { findMany: vi.fn().mockResolvedValue(opts.heldLocations ?? []) },
+      assessmentCases: { findMany: vi.fn().mockResolvedValue(opts.openCases ?? []) },
+      competencyHolders: { findMany: vi.fn().mockResolvedValue(opts.competencyHolders ?? []) },
+      competencies: { findMany: vi.fn().mockResolvedValue(opts.competencies ?? []) },
     },
     select: vi.fn(() => ({
       from: () => ({ where: () => Promise.resolve(opts.nameClashRows ?? []) }),
@@ -85,8 +115,17 @@ function fakeDb(opts: {
         return { where: () => returningResult([opts.updated]) };
       },
     })),
+    delete: vi.fn((table: unknown) => ({
+      where: (w: unknown) => {
+        deleteWhere(table, w);
+        return Promise.resolve(undefined);
+      },
+    })),
+    // The U12 apply writes inside a transaction; run the callback against the
+    // same spies so the assertions see its delete/insert/update.
+    transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(db)),
   } as unknown as Db;
-  return { db, insertValues, updateSet };
+  return { db, insertValues, updateSet, deleteWhere };
 }
 
 afterEach(() => {
@@ -220,6 +259,280 @@ describe('POST /taxonomy/departments/:departmentId/roles', () => {
     });
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ error: 'department_not_found' });
+    server.close();
+  });
+});
+
+describe('Role required assessments (U10)', () => {
+  // Tool ids are validated as UUIDs in the PUT body.
+  const TOOL_A = '00000000-0000-4000-8000-0000000000a1';
+  const TOOL_B = '00000000-0000-4000-8000-0000000000a2';
+  const TOOL_X = '00000000-0000-4000-8000-0000000000a3';
+  const activeRole = (over: Record<string, unknown> = {}) => ({
+    id: 'role-1',
+    orgId: 'org-1',
+    name: 'Dozer Operator',
+    status: 'active',
+    requirementsConfigured: false,
+    ...over,
+  });
+
+  it('reads a configured Role back with its tools (R43)', async () => {
+    const { db } = fakeDb({
+      jobRolesFindFirst: activeRole({ requirementsConfigured: true }),
+      nameClashRows: [{ toolId: TOOL_A }, { toolId: TOOL_B }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/roles/role-1/required-assessments`, {
+      headers: authHeader(admin),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ configured: true, toolIds: [TOOL_A, TOOL_B] });
+    server.close();
+  });
+
+  it('reads unconfigured as distinct from configured-then-emptied (R49, R50)', async () => {
+    // Never configured — no flag, no rows.
+    const a = fakeDb({ jobRolesFindFirst: activeRole({ requirementsConfigured: false }), nameClashRows: [] });
+    mockDbValue = a.db;
+    let app = startApp();
+    let res = await fetch(`${app.base}/taxonomy/roles/role-1/required-assessments`, {
+      headers: authHeader(admin),
+    });
+    expect(await res.json()).toEqual({ configured: false, toolIds: [] });
+    app.server.close();
+
+    // Configured then emptied — the flag stands even with no rows.
+    const b = fakeDb({ jobRolesFindFirst: activeRole({ requirementsConfigured: true }), nameClashRows: [] });
+    mockDbValue = b.db;
+    app = startApp();
+    res = await fetch(`${app.base}/taxonomy/roles/role-1/required-assessments`, {
+      headers: authHeader(admin),
+    });
+    expect(await res.json()).toEqual({ configured: true, toolIds: [] });
+    app.server.close();
+  });
+
+  it('sets the list, replaces existing rows, and flags the Role configured (R43)', async () => {
+    const { db, insertValues, deleteWhere, updateSet } = fakeDb({
+      jobRolesFindFirst: activeRole({ requirementsConfigured: false }),
+      nameClashRows: [{ id: TOOL_A }, { id: TOOL_B }], // both tools belong to the org
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/roles/role-1/required-assessments`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ toolIds: [TOOL_A, TOOL_B] }),
+    });
+    expect(res.status).toBe(200);
+    // The apply response now nests U12's effects alongside the U10 base shape.
+    expect(await res.json()).toMatchObject({ configured: true, toolIds: [TOOL_A, TOOL_B] });
+    expect(deleteWhere).toHaveBeenCalledWith(schema.roleRequiredAssessments, expect.anything());
+    expect(insertValues).toHaveBeenCalledWith(
+      schema.roleRequiredAssessments,
+      expect.arrayContaining([expect.objectContaining({ roleId: 'role-1', toolId: TOOL_A })]),
+    );
+    expect(updateSet).toHaveBeenCalledWith(
+      schema.jobRoles,
+      expect.objectContaining({ requirementsConfigured: true }),
+    );
+    server.close();
+  });
+
+  it('refuses editing a retired Role (R121)', async () => {
+    const { db } = fakeDb({ jobRolesFindFirst: activeRole({ status: 'retired', requirementsConfigured: true }) });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/roles/role-1/required-assessments`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ toolIds: [TOOL_A] }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: 'role_retired' });
+    server.close();
+  });
+
+  it('refuses a Builder (R12)', async () => {
+    const { db } = fakeDb({ jobRolesFindFirst: activeRole() });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/roles/role-1/required-assessments`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(builder) },
+      body: JSON.stringify({ toolIds: [] }),
+    });
+    expect(res.status).toBe(403);
+    server.close();
+  });
+
+  it('refuses a tool that is not the organisation’s (400)', async () => {
+    const { db } = fakeDb({
+      jobRolesFindFirst: activeRole(),
+      nameClashRows: [], // the requested tool is not found in the org
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/roles/role-1/required-assessments`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ toolIds: [TOOL_X] }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'tool_not_found' });
+    server.close();
+  });
+});
+
+describe('Requirement change preview & apply (U12)', () => {
+  const TOOL_A = '00000000-0000-4000-8000-0000000000a1';
+  const TOOL_B = '00000000-0000-4000-8000-0000000000a2';
+  const activeRole = (over: Record<string, unknown> = {}) => ({
+    id: 'role-1',
+    orgId: 'org-1',
+    name: 'Dozer Operator',
+    status: 'active',
+    requirementsConfigured: true,
+    ...over,
+  });
+  const previewReq = (
+    base: string,
+    toolIds: string[],
+    session: { userId: string; orgId: string; role: string } = admin,
+  ) =>
+    fetch(`${base}/taxonomy/roles/role-1/required-assessments/preview`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(session) },
+      body: JSON.stringify({ toolIds }),
+    });
+
+  it('previews the effects shape and writes nothing (R84, R86)', async () => {
+    const { db, insertValues, updateSet, deleteWhere } = fakeDb({
+      jobRolesFindFirst: activeRole(),
+      nameClashRows: [{ id: TOOL_A }], // TOOL_A validates as the org's
+      currentRequirements: [], // adding TOOL_A
+      holders: [], // no holders → all counters 0, but the six fields are present
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await previewReq(base, [TOOL_A]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { effects: Record<string, unknown> };
+    expect(body.effects).toEqual({
+      addedToolIds: [TOOL_A],
+      removedToolIds: [],
+      affected: 0,
+      created: 0,
+      inFlightContinuing: 0,
+      competenciesDemoting: 0,
+    });
+    // A preview is a read — nothing is written (R86: abandon changes nothing).
+    expect(insertValues).not.toHaveBeenCalled();
+    expect(updateSet).not.toHaveBeenCalled();
+    expect(deleteWhere).not.toHaveBeenCalled();
+    server.close();
+  });
+
+  it('refuses a preview by a Builder, on a retired Role, and for a foreign tool', async () => {
+    // Builder → 403 (before any load).
+    let f = fakeDb({ jobRolesFindFirst: activeRole() });
+    mockDbValue = f.db;
+    let app = startApp();
+    expect((await previewReq(app.base, [TOOL_A], builder)).status).toBe(403);
+    app.server.close();
+
+    // Retired Role → 409 (a preview an apply would refuse must refuse too).
+    f = fakeDb({ jobRolesFindFirst: activeRole({ status: 'retired' }) });
+    mockDbValue = f.db;
+    app = startApp();
+    expect((await previewReq(app.base, [TOOL_A]).then((r) => r.status))).toBe(409);
+    app.server.close();
+
+    // A tool not in the org → 400.
+    f = fakeDb({ jobRolesFindFirst: activeRole(), nameClashRows: [] });
+    mockDbValue = f.db;
+    app = startApp();
+    const res = await previewReq(app.base, [TOOL_A]);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'tool_not_found' });
+    app.server.close();
+  });
+
+  it('applies an addition: writes the requirement, inserts the holder’s case, returns effects (R82, R83, R87)', async () => {
+    const { db, insertValues } = fakeDb({
+      jobRolesFindFirst: activeRole(),
+      nameClashRows: [{ id: TOOL_A }],
+      currentRequirements: [], // adding TOOL_A
+      holders: [{ membershipId: 'm1', roleId: 'role-1', withdrawnAt: null }],
+      memberships: [{ id: 'm1', orgId: 'org-1', userId: 'u1' }],
+      tools: [
+        {
+          id: TOOL_A,
+          orgId: 'org-1',
+          templateId: 'tpl-1',
+          awardedCompetencyIds: ['cX'],
+          manifest: { parts: [{ key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'] }] },
+          locationPartKeys: {},
+          assessorStreamCompetencyIds: {},
+        },
+      ],
+      templates: [{ id: 'tpl-1', orgId: 'org-1', currentVersionId: 'v1' }],
+      heldLocations: [{ membershipId: 'm1', locationId: 'loc1', position: 0 }],
+      openCases: [],
+      competencyHolders: [], // holds nothing → the one holder is left unmet
+      competencies: [],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/roles/role-1/required-assessments`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ toolIds: [TOOL_A] }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { effects: { affected: number; created: number } };
+    expect(body.effects.affected).toBe(1);
+    expect(body.effects.created).toBe(1);
+    // The requirement row AND the holder's case are both written.
+    expect(insertValues).toHaveBeenCalledWith(schema.roleRequiredAssessments, expect.anything());
+    expect(insertValues).toHaveBeenCalledWith(schema.assessmentCases, expect.objectContaining({ toolId: TOOL_A }));
+    server.close();
+  });
+
+  it('applies a removal without cancelling in-flight cases (R55)', async () => {
+    const { db, insertValues, updateSet, deleteWhere } = fakeDb({
+      jobRolesFindFirst: activeRole(),
+      nameClashRows: [{ id: TOOL_A }], // desired {A}; current {A,B} → drop B
+      currentRequirements: [
+        { orgId: 'org-1', roleId: 'role-1', toolId: TOOL_A },
+        { orgId: 'org-1', roleId: 'role-1', toolId: TOOL_B },
+      ],
+      holders: [{ membershipId: 'm1', roleId: 'role-1', withdrawnAt: null }],
+      memberships: [{ id: 'm1', orgId: 'org-1', userId: 'u1' }],
+      openCases: [], // no in-flight to count in this wiring test
+      competencyHolders: [],
+      competencies: [],
+      tools: [],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/roles/role-1/required-assessments`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ toolIds: [TOOL_A] }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { effects: { removedToolIds: string[]; created: number } };
+    expect(body.effects.removedToolIds).toEqual([TOOL_B]);
+    expect(body.effects.created).toBe(0);
+    // The requirement list is rewritten, but NO assessment case is created,
+    // deleted or updated — a removal never touches a case (R55).
+    expect(deleteWhere).toHaveBeenCalledWith(schema.roleRequiredAssessments, expect.anything());
+    expect(insertValues).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());
+    expect(deleteWhere).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());
+    expect(updateSet).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());
     server.close();
   });
 });

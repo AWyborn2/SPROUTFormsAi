@@ -103,6 +103,15 @@ export const jobRoles = pgTable(
       .notNull()
       .references(() => departments.id, { onDelete: 'restrict' }),
     name: text().notNull(),
+    /*
+      Whether this Role's required-assessment list has ever been set (R50). A
+      Role with no requirement rows is ambiguous — never configured, or
+      configured and then emptied — and the two read differently: the first is
+      "nobody has set this up", the second is "this Role deliberately requires
+      nothing". Row count cannot tell them apart, so the fact is stored, flipped
+      true the first time the list is written. Both still assign nothing (R49).
+    */
+    requirementsConfigured: boolean('requirements_configured').notNull().default(false),
     status: taxonomyStatusEnum().notNull().default('active'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },

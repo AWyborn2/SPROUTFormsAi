@@ -1,10 +1,18 @@
 import { useState } from 'react';
 import { Badge, Button, Card, Icon, Input, Select, Switch, useToast } from '@formai/ui';
-import { DISPLAY_IDENTIFIER_LABELS, type DisplayIdentifier } from '@formai/shared';
 import {
+  DISPLAY_IDENTIFIER_LABELS,
+  type DisplayIdentifier,
+  type RequiredAssessmentsChangeEffects,
+} from '@formai/shared';
+import {
+  useAssessmentTools,
   useCreateDepartment,
   useCreateLocation,
   useCreateRole,
+  usePreviewRoleRequiredAssessments,
+  useRoleRequiredAssessments,
+  useSetRoleRequiredAssessments,
   useTaxonomy,
   useUpdateDepartment,
   useUpdateLocation,
@@ -267,19 +275,21 @@ function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unk
           <p className="text-[12px] text-text-tertiary">No Roles offered yet.</p>
         )}
         {dep.roles.map((role: TaxRole) => (
-          <ValueRow
-            key={role.id}
-            name={role.name}
-            status={role.status}
-            dense
-            onRename={(next) => updateRole.mutate({ id: role.id, name: next }, { onError })}
-            onToggleStatus={() =>
-              updateRole.mutate(
-                { id: role.id, status: role.status === 'active' ? 'retired' : 'active' },
-                { onError },
-              )
-            }
-          />
+          <div key={role.id}>
+            <ValueRow
+              name={role.name}
+              status={role.status}
+              dense
+              onRename={(next) => updateRole.mutate({ id: role.id, name: next }, { onError })}
+              onToggleStatus={() =>
+                updateRole.mutate(
+                  { id: role.id, status: role.status === 'active' ? 'retired' : 'active' },
+                  { onError },
+                )
+              }
+            />
+            <RoleRequirements role={role} onError={onError} />
+          </div>
         ))}
       </div>
 
@@ -295,6 +305,178 @@ function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unk
           Add Role
         </Button>
       </div>
+    </div>
+  );
+}
+
+// ── A Role's required assessments (U10) ───────────────────────────────────────
+
+/**
+ * The assessments a Role requires (R43). Collapsed by default — a Department can
+ * offer many Roles and each carries its own list. `configured` is read straight
+ * from the server so "nobody has set this up" and "set up, requires nothing" read
+ * apart (R50); both still oblige nobody until a tool is added. A retired Role is
+ * shown read-only, because it takes on no new requirements (R121) — the server
+ * enforces the same, this just does not offer the action.
+ */
+function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unknown) => void }) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const { data: tools } = useAssessmentTools();
+  const { data: current } = useRoleRequiredAssessments(open ? role.id : undefined);
+  const preview = usePreviewRoleRequiredAssessments(role.id);
+  const save = useSetRoleRequiredAssessments(role.id);
+  const [draft, setDraft] = useState<Set<string> | null>(null);
+  // The blast radius of the pending change, once previewed — the confirmation
+  // gate (U12, R84–R86). Null means nothing is awaiting confirmation.
+  const [pending, setPending] = useState<RequiredAssessmentsChangeEffects | null>(null);
+
+  const selected = draft ?? new Set(current?.toolIds ?? []);
+  const dirty = draft !== null;
+  const retired = role.status === 'retired';
+
+  function toggle(toolId: string) {
+    // Changing the selection abandons any preview shown for the old selection.
+    setPending(null);
+    setDraft((prev) => {
+      const next = new Set(prev ?? current?.toolIds ?? []);
+      if (next.has(toolId)) next.delete(toolId);
+      else next.add(toolId);
+      return next;
+    });
+  }
+
+  function onReview() {
+    // Show the blast radius before committing (R84, R85); the change is not
+    // written until confirmed.
+    preview.mutate([...selected], { onSuccess: (r) => setPending(r.effects), onError });
+  }
+
+  function onConfirm() {
+    save.mutate([...selected], {
+      onSuccess: () => {
+        setDraft(null);
+        setPending(null);
+        toast({ variant: 'success', message: 'Requirements updated.' });
+      },
+      onError,
+    });
+  }
+
+  const summary = !current
+    ? ''
+    : !current.configured
+      ? 'not set up'
+      : current.toolIds.length === 0
+        ? 'requires nothing'
+        : `${current.toolIds.length} required`;
+
+  return (
+    <div className="pl-3">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-label={`Required assessments for ${role.name}`}
+        className="flex items-center gap-1.5 py-0.5 text-[11.5px] text-text-tertiary hover:text-text-secondary"
+      >
+        <Icon name={open ? 'chevron-down' : 'chevron-right'} size={11} />
+        Required assessments{summary ? ` · ${summary}` : ''}
+      </button>
+
+      {open && (
+        <div className="mb-1 mt-1 rounded-md border border-border bg-surface-sunken p-2.5">
+          {retired && (
+            <p className="mb-1.5 text-[11px] text-text-tertiary">
+              A retired Role takes on no new requirements.
+            </p>
+          )}
+          {(tools ?? []).length === 0 ? (
+            <p className="text-[11.5px] text-text-tertiary">No assessment tools to require yet.</p>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {(tools ?? []).map((tool) => {
+                const on = selected.has(tool.id);
+                return (
+                  <button
+                    key={tool.id}
+                    type="button"
+                    aria-pressed={on}
+                    disabled={retired}
+                    onClick={() => toggle(tool.id)}
+                    className={`rounded-sm border px-2 py-1 text-[11px] font-medium transition-colors ${
+                      on
+                        ? 'border-success bg-success-soft text-success-text'
+                        : 'border-border bg-surface-card text-text-tertiary'
+                    } ${retired ? 'cursor-default opacity-60' : 'cursor-pointer'}`}
+                  >
+                    {tool.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {!retired && (
+            <div className="mt-2 flex flex-col gap-2">
+              {pending ? (
+                <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[9px_11px] text-[11.5px] text-text-secondary">
+                  <EffectsSummary effects={pending} />
+                  <div className="mt-2 flex justify-end gap-2">
+                    <Button size="sm" variant="ghost" onClick={() => setPending(null)} disabled={save.isPending}>
+                      Cancel
+                    </Button>
+                    <Button size="sm" onClick={onConfirm} disabled={save.isPending}>
+                      Confirm change
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex justify-end">
+                  <Button size="sm" onClick={onReview} disabled={!dirty || preview.isPending}>
+                    {dirty ? 'Review change' : 'Saved'}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The blast radius of a pending requirement change, in words (U12). An addition
+ * says who it affects and how many cases it creates (R84); a removal says who it
+ * affects, how many cases already in progress will run to completion, and how
+ * many competencies become optional (R85) — never a creation count. A save that
+ * both adds and removes shows both.
+ */
+function EffectsSummary({ effects }: { effects: RequiredAssessmentsChangeEffects }) {
+  const people = (n: number) => `${n} ${n === 1 ? 'person' : 'people'}`;
+  const cases = (n: number) => `${n} ${n === 1 ? 'case' : 'cases'}`;
+  const lines: string[] = [];
+  if (effects.addedToolIds.length > 0) {
+    const n = effects.addedToolIds.length;
+    lines.push(
+      `Adds ${n} assessment${n === 1 ? '' : 's'}: affects ${people(effects.affected)}, creating ${cases(effects.created)}.`,
+    );
+  }
+  if (effects.removedToolIds.length > 0) {
+    const n = effects.removedToolIds.length;
+    const demoting = effects.competenciesDemoting;
+    lines.push(
+      `Removes ${n} assessment${n === 1 ? '' : 's'}: affects ${people(effects.affected)}. ` +
+        `${cases(effects.inFlightContinuing)} already in progress will run to completion, and ` +
+        `${demoting} competency standing${demoting === 1 ? '' : 's'} become optional.`,
+    );
+  }
+  if (lines.length === 0) lines.push('This changes nothing.');
+  return (
+    <div className="flex flex-col gap-1">
+      {lines.map((line) => (
+        <p key={line}>{line}</p>
+      ))}
     </div>
   );
 }

@@ -19,6 +19,7 @@ import { sendInviteEmail } from '../email/resend.js';
 import { env } from '../env.js';
 import { checkSeatAvailability, lockOrgForSeats, poolFor, seatLimitError } from '../lib/seats.js';
 import { readPlacement, writePlacement } from '../lib/membership-placement.js';
+import { assignForMembership } from '../lib/assignment.js';
 import { db } from '../db.js';
 
 export const teamRouter: Router = Router();
@@ -385,6 +386,10 @@ teamRouter.put(
       category: 'team',
       icon: 'map-pin',
     });
+    // Placement is one of the four triggers that assign (U11, R47, R51):
+    // changing the Roles a person holds gives them their new Roles' required
+    // assessments, and the run is idempotent so no case is duplicated.
+    await assignForMembership(db, tenant.orgId, membership.id);
     res.json(await readPlacement(db, membership.id));
   }),
 );

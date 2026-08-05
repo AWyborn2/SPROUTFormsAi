@@ -67,7 +67,11 @@ import type {
   TaxonomySettings,
   TemplateStatus,
 } from './types.js';
-import type { AssessmentToolManifest, TaxonomyStatus } from '@formai/shared';
+import type {
+  AssessmentToolManifest,
+  RequiredAssessmentsChangeEffects,
+  TaxonomyStatus,
+} from '@formai/shared';
 
 /** Shape returned by `PATCH /org` (see apps/api routes/org.ts). */
 export interface OrgSettingsDto {
@@ -887,6 +891,22 @@ export const store = {
   },
   updateRole(id: string, patch: { name?: string; status?: TaxonomyStatus }): Promise<TaxRole> {
     return apiClient.patch<TaxRole>(`/taxonomy/roles/${id}`, patch);
+  },
+  getRoleRequiredAssessments(roleId: string): Promise<{ configured: boolean; toolIds: string[] }> {
+    return apiClient.get(`/taxonomy/roles/${roleId}/required-assessments`);
+  },
+  /** The blast radius of a proposed change, computed without committing (U12). */
+  previewRoleRequiredAssessments(
+    roleId: string,
+    toolIds: string[],
+  ): Promise<{ effects: RequiredAssessmentsChangeEffects }> {
+    return apiClient.post(`/taxonomy/roles/${roleId}/required-assessments/preview`, { toolIds });
+  },
+  setRoleRequiredAssessments(
+    roleId: string,
+    toolIds: string[],
+  ): Promise<{ configured: boolean; toolIds: string[]; effects: RequiredAssessmentsChangeEffects }> {
+    return apiClient.put(`/taxonomy/roles/${roleId}/required-assessments`, { toolIds });
   },
   updateTaxonomySettings(patch: Partial<TaxonomySettings>): Promise<TaxonomySettings> {
     return apiClient.patch<TaxonomySettings>('/taxonomy/settings', patch);

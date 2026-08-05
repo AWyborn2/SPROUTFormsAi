@@ -468,8 +468,11 @@ assessmentToolsRouter.post(
         assessorCompetencyIds: parsed.data.assessorCompetencyIds ?? [],
         assessorStreamCompetencyIds: parsed.data.assessorStreamCompetencyIds ?? {},
         awardedCompetencyIds: parsed.data.awardedCompetencyIds ?? [],
-        // The parts rule is declared later, behind the Admin gate (U9, R73).
+        // The parts rule and the Department classification are declared later,
+        // both behind the Admin gate (U9/U10, R73/R9) — never at create, which
+        // runs on the authoring permission.
         locationPartKeys: {},
+        departmentId: null,
       })
       .returning();
     if (!row) throw new Error('tool_create_failed: insert returned no row');
@@ -501,11 +504,26 @@ assessmentToolsRouter.get(
         orderBy: (l, { asc }) => [asc(l.name)],
       }),
     ]);
+
+    /*
+      Filter by Department (R9), if asked. An UNCLASSIFIED tool (department_id
+      null) appears in EVERY Department filter (R10, R11) so it cannot be
+      silently missed — that is `dept === asked || dept === null`, the null
+      standing for "no Department yet", not "every Department". Applied here
+      rather than in the query so the null-appears-everywhere rule reads in one
+      place; the per-org tool list is small.
+    */
+    const filterDept = typeof req.query.departmentId === 'string' ? req.query.departmentId : null;
+    const visible = filterDept
+      ? rows.filter((t) => t.departmentId === filterDept || t.departmentId === null)
+      : rows;
+
     res.json(
-      rows.map((t) => ({
+      visible.map((t) => ({
         id: t.id,
         name: t.name,
         templateId: t.templateId,
+        departmentId: t.departmentId,
         parts: orderedParts(t.manifest).map((p) => ({ key: p.key, label: p.label, kind: p.kind })),
         /*
           The organisation's Locations, offered on the new-case form so a case is
@@ -569,6 +587,8 @@ assessmentToolsRouter.get(
       id: tool.id,
       name: tool.name,
       templateId: tool.templateId,
+      /** The Department that classifies this tool, or null for unclassified (R9, R10). */
+      departmentId: tool.departmentId,
       manifest: tool.manifest,
       workflow,
       /*
@@ -752,6 +772,74 @@ assessmentToolsRouter.patch(
     });
 
     res.json({ id: tool.id, locationPartKeys: parsed.data.locationPartKeys });
+  }),
+);
+
+/** Classify a tool with a Department, or clear it (U10, R9, R10). Null unclassifies. */
+const classificationBody = z.object({ departmentId: z.string().uuid().nullable() });
+
+/**
+ * Set (or clear) which Department classifies a tool (U10, R9).
+ *
+ * ADMIN, like the parts rule and for the same reason (R73's sibling): it reads
+ * the Department taxonomy R12 gates. A tool carries at most one Department, so
+ * this replaces rather than adds. Only an ACTIVE Department can be assigned
+ * (R10/R16 admit only active values); null clears it to unclassified, which is
+ * not "every Department" but "no Department yet" (R10) and shows in every filter
+ * (R11). A Department already on the tool and since retired is left alone because
+ * this endpoint is only reached to CHANGE the classification (R117's precondition).
+ */
+assessmentToolsRouter.patch(
+  '/:id/classification',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = classificationBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tool = await loadTool(db, req.params.id!, tenant.orgId);
+    if (!tool) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    if (parsed.data.departmentId) {
+      const dept = await db.query.departments.findFirst({
+        where: and(
+          eq(schema.departments.id, parsed.data.departmentId),
+          eq(schema.departments.orgId, tenant.orgId),
+          eq(schema.departments.status, 'active'),
+        ),
+      });
+      if (!dept) {
+        res.status(400).json({ error: 'department_not_found' });
+        return;
+      }
+    }
+
+    await db
+      .update(schema.assessmentTools)
+      .set({ departmentId: parsed.data.departmentId })
+      .where(eq(schema.assessmentTools.id, tool.id));
+
+    await recordAudit(db, tenant, {
+      action: parsed.data.departmentId ? 'Classified assessment tool' : 'Unclassified assessment tool',
+      target: tool.name,
+      category: 'settings',
+      icon: 'clipboard-check',
+    });
+
+    res.json({ id: tool.id, departmentId: parsed.data.departmentId });
   }),
 );
 
