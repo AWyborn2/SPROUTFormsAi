@@ -41,6 +41,7 @@ import {
   type FormField,
   type RepeatingRowValue,
   type SubmissionValue,
+  THEORY_RENDERINGS,
 } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
@@ -377,6 +378,12 @@ const toolBody = z.object({
       would quietly fall back to the derived default.
     */
     workflow: workflowSchema.optional(),
+    /*
+      Named here for the third time for the same reason: a manifest property
+      this schema does not list is silently STRIPPED, so a builder that appeared
+      to save a one-question-per-screen tool would publish a stacked one.
+    */
+    theoryRendering: z.enum(THEORY_RENDERINGS).optional(),
     signOff: z
       .object({
         assessorNameFieldId: z.string().optional(),
@@ -1517,6 +1524,15 @@ assessmentCasesRouter.get(
       partKey: attempt.partKey,
       partLabel: part.label,
       partKind: part.kind,
+      /*
+        How this part's theory questions should be presented (U21).
+
+        Read off the tool's manifest rather than decided by the renderer,
+        because the choice was made once by the author in the builder and has to
+        survive to every candidate who opens the assessment. Absent means
+        `stacked`, which is what every theory part rendered as before.
+      */
+      theoryRendering: manifest.theoryRendering ?? null,
       attemptNumber: attempt.attemptNumber,
       outcome: attempt.outcome,
       submittedAt: attempt.submittedAt,

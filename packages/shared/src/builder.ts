@@ -25,7 +25,7 @@
  *    into anybody's data.
  */
 
-import type { AssessmentPathway, AssessmentToolManifest } from './assessment.js';
+import type { AssessmentPathway, AssessmentToolManifest, TheoryRendering } from './assessment.js';
 import type { ExtractionResult } from './extraction.js';
 import type { FormField, GlyphKind } from './form-field.js';
 import type { AssessmentWorkflow } from './workflow.js';
@@ -93,9 +93,15 @@ export function stepIndex(step: BuilderStep): number {
 export const PASS_RULES = ['mandatory_all_correct', 'overall_percentage'] as const;
 export type PassRule = (typeof PASS_RULES)[number];
 
-/** How theory questions are presented to a candidate. */
-export const THEORY_RENDERINGS = ['one_per_screen', 'stacked'] as const;
-export type TheoryRendering = (typeof THEORY_RENDERINGS)[number];
+/*
+  THEORY_RENDERINGS lives in `assessment.ts`, with the tool it ends up on.
+
+  It was declared here first, which meant the builder could ask the question and
+  had nowhere to put the answer: `SetupAnswers` is draft state, and a draft is
+  gone by the time a candidate opens the assessment. Re-exported so nothing that
+  imported it from here breaks.
+*/
+export { THEORY_RENDERINGS, type TheoryRendering } from './assessment.js';
 
 /**
  * What a logbook's minimum hours DO when they are reached.

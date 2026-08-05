@@ -12,6 +12,7 @@
  * had ever been sent the rest.
  */
 import type {
+  TheoryRendering,
   AssessmentPathway,
   AssessmentToolManifest,
   AssessmentWorkflow,
@@ -143,6 +144,15 @@ export interface AttemptFillView {
   partKey: string;
   partLabel: string;
   partKind: PartKind;
+  /**
+   * How this part's theory questions should be presented (U21).
+   *
+   * Read off the tool's manifest by the server, not decided here: the choice
+   * was made once by the author in the builder and has to reach every candidate
+   * who opens the assessment. Null means `stacked`, which is what every theory
+   * part rendered as before this existed.
+   */
+  theoryRendering?: TheoryRendering | null;
   attemptNumber: number;
   outcome: PartOutcome | null;
   /** Null until the candidate hands it in. */

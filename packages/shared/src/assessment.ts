@@ -49,6 +49,17 @@ export type AssessmentPathway = (typeof ASSESSMENT_PATHWAYS)[number];
 export const PART_KINDS = ['theory', 'practical', 'logbook'] as const;
 export type PartKind = (typeof PART_KINDS)[number];
 
+/**
+ * How a theory part's questions are PRESENTED to a candidate.
+ *
+ * Lives here rather than with the builder's own setup answers because it
+ * outlives the draft: the fill surface reads it off the published tool, long
+ * after the builder session that chose it is gone. A tool that names none gets
+ * `stacked`, which is what every theory part has always rendered as.
+ */
+export const THEORY_RENDERINGS = ['one_per_screen', 'stacked'] as const;
+export type TheoryRendering = (typeof THEORY_RENDERINGS)[number];
+
 /** The two outcomes the printed paper offers. There is no third. */
 export const PART_OUTCOMES = ['satisfactory', 'not_satisfactory'] as const;
 export type PartOutcome = (typeof PART_OUTCOMES)[number];
@@ -209,6 +220,13 @@ export interface AssessmentToolManifest {
    * configures it.
    */
   workflow?: AssessmentWorkflow;
+  /**
+   * How a theory part's questions are presented — see `THEORY_RENDERINGS`.
+   *
+   * Absent means `stacked`, which is what every theory part rendered as before
+   * this existed, so no stored tool changes meaning by gaining the property.
+   */
+  theoryRendering?: TheoryRendering;
   /**
    * The front page's certification block.
    *
