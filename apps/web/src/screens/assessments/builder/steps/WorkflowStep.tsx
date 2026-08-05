@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Icon } from '@formai/ui';
 import {
   useCreateAssessmentTool,
@@ -38,7 +39,7 @@ export interface WorkflowStepProps {
 
 export function WorkflowStep({ draft }: WorkflowStepProps) {
   const { fields, keys, manifest, formId, versionId, title } = draft;
-  const [done, setDone] = useState<string | null>(null);
+  const [done, setDone] = useState<{ toolId: string } | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
 
   const saveFields = useSaveVersionFields(formId ?? '', versionId ?? '');
@@ -62,12 +63,12 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
       */
       await saveFields.mutateAsync(check.fields);
       await publishVersion.mutateAsync({ formId, versionId });
-      await createTool.mutateAsync({
+      const tool = await createTool.mutateAsync({
         templateId: formId,
         name: title || 'Assessment',
         manifest,
       });
-      setDone(formId);
+      setDone({ toolId: tool.id });
     } catch (err) {
       /*
         Named plainly, and the step stays where it is. Some of the sequence may
@@ -93,6 +94,28 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
           {summary.boxesPlaced} box{summary.boxesPlaced === 1 ? '' : 'es'} placed. The tool is
           enrollable from Assessments.
         </p>
+        {/*
+          WHO FILLS WHAT IS CONFIGURED ON THE PUBLISHED TOOL, not before it.
+
+          The workflow editor edits a tool that exists — it reads the server's
+          own `problems`, `warnings` and `workflowIsDefault`, none of which can
+          be computed for a tool that has not been created yet. A tool with no
+          workflow is not broken: `workflowOf` synthesises one section per
+          printed part and every role able to fill everything, which is exactly
+          what every tool did before workflows existed. So this is a next step,
+          offered, rather than a gate that was skipped.
+        */}
+        <p className="mt-2 text-[12.5px] text-success-text">
+          Nobody has set up <strong>who fills what</strong> yet — until you do, every role can fill
+          every part, which is the default this product has always used.
+        </p>
+        <Link
+          to={`/app/assessments/tools/${done.toolId}/workflow`}
+          className="mt-2 inline-flex h-[30px] items-center gap-1.5 rounded-lg border border-success px-3 text-[11.5px] font-semibold text-success-text"
+        >
+          <Icon name="workflow" size={13} />
+          Configure the workflow
+        </Link>
       </div>
     );
   }
