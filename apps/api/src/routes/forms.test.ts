@@ -74,6 +74,7 @@ function fakeDb(opts: {
   formTemplateVersionsFindMany?: unknown[];
   usersFindMany?: unknown[];
   usersFindFirst?: unknown;
+  formBrandsFindFirst?: unknown;
   rolePermissionsFindFirst?: unknown;
   insertedTemplate?: unknown;
   insertedVersion?: unknown;
@@ -113,6 +114,9 @@ function fakeDb(opts: {
     users: {
       findMany: vi.fn().mockResolvedValue(opts.usersFindMany ?? []),
       findFirst: vi.fn().mockResolvedValue(opts.usersFindFirst),
+    },
+    formBrands: {
+      findFirst: vi.fn().mockResolvedValue(opts.formBrandsFindFirst),
     },
     rolePermissions: {
       findFirst: vi.fn().mockResolvedValue(opts.rolePermissionsFindFirst),
@@ -1269,6 +1273,138 @@ describe('PATCH /forms/:id/versions/:versionId', () => {
     try {
       expect((await patch(base, 'v3', {})).status).toBe(400);
       expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * PATCH /forms/:id/brand — which client's brand a form is presented in.
+ *
+ * The whole reason this is a route rather than another key on the theme body
+ * is the org check on the brand id: it is a foreign key the caller supplies,
+ * and `on delete set null` makes the column forgiving without making it open.
+ */
+describe('PATCH /forms/:id/brand', () => {
+  const TEMPLATE = { id: 'f1', orgId: 'org-1', name: 'Track Dozer', currentVersionId: 'v2' };
+
+  async function patchBrand(base: string, body: unknown) {
+    return fetch(`${base}/forms/f1/brand`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', ...authHeader() },
+      body: JSON.stringify(body),
+    });
+  }
+
+  const BRAND_ID = '22222222-2222-4222-8222-222222222222';
+
+  it('assigns a brand that belongs to the org', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      formBrandsFindFirst: { id: BRAND_ID, name: 'BBM' },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchBrand(base, { brandId: BRAND_ID });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ id: 'f1', brandId: BRAND_ID });
+      expect(updateSet.mock.calls.find(([t]) => t === schema.formTemplates)?.[1]).toMatchObject({
+        brandId: BRAND_ID,
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('REFUSES A BRAND FROM ANOTHER ORG, and writes nothing', async () => {
+    /*
+      THE TEST THIS ROUTE EXISTS FOR. The brand lookup is org-scoped, so another
+      org's id finds no row. Without this check a caller could point their own
+      form at someone else's brand and read that company's client colours and
+      logo straight off their own fill page.
+
+      It answers 404, the same as an id that never existed — a distinct status
+      would confirm that some other company uses the product.
+    */
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      formBrandsFindFirst: undefined,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchBrand(base, { brandId: '11111111-1111-4111-8111-111111111111' });
+      expect(res.status).toBe(404);
+      expect(await res.json()).toMatchObject({ error: 'brand_not_found' });
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('clears the brand on null, without looking one up', async () => {
+    // Unassigned returns the form to the org's theme. That is the fallback for
+    // a form nobody has assigned, not a claim that the form is ours.
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await patchBrand(base, { brandId: null });
+      expect(res.status).toBe(200);
+      expect(updateSet.mock.calls.find(([t]) => t === schema.formTemplates)?.[1]).toMatchObject({
+        brandId: null,
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for a form belonging to another org', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: undefined,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      expect((await patchBrand(base, { brandId: null })).status).toBe(404);
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a Viewer', async () => {
+    const { db, updateSet } = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      rolePermissionsFindFirst: VIEWER_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      expect((await patchBrand(base, { brandId: null })).status).toBe(403);
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects a brandId that is not a uuid', async () => {
+    const { db } = fakeDb({
+      formTemplatesFindFirst: TEMPLATE,
+      rolePermissionsFindFirst: EDITOR_PERMS,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      expect((await patchBrand(base, { brandId: 'not-a-uuid' })).status).toBe(400);
     } finally {
       server.close();
     }

@@ -17,6 +17,7 @@ import type {
   AssessmentToolManifest,
   AssessmentWorkflow,
   BrandingKit,
+  FormBrandInput,
   FormContainer,
   FormField,
   SessionInfo,
@@ -109,6 +110,7 @@ const keys = {
   invite: (token: string) => ['invite', token] as const,
   apiKeys: ['apiKeys'] as const,
   taxonomy: ['taxonomy'] as const,
+  formBrands: ['formBrands'] as const,
   memberPlacement: (id: string) => ['members', id, 'placement'] as const,
 };
 
@@ -365,6 +367,73 @@ export function useSetFormVoiceInput() {
   return useMutation({
     mutationFn: (input: { formId: string; voiceInput: boolean | null }) =>
       store.setFormVoiceInput(input),
+    onSuccess: (_void, input) => {
+      qc.invalidateQueries({ queryKey: keys.form(input.formId) });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/**
+ * The brands a form can be presented in — usually clients', not the org's own.
+ *
+ * A workspace-wide list rather than per-form: a subcontractor holds a handful
+ * of brands and dozens of forms, so this is fetched once and every picker
+ * reads the same cache entry.
+ */
+export function useFormBrands() {
+  return useQuery({ queryKey: keys.formBrands, queryFn: () => store.listFormBrands() });
+}
+
+export function useCreateFormBrand() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: FormBrandInput) => store.createFormBrand(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.formBrands });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+export function useUpdateFormBrand() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { id: string } & Partial<FormBrandInput>) => store.updateFormBrand(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.formBrands });
+      /*
+        Every form that uses the brand renders differently now, and neither this
+        hook nor the cache knows which ones those are — so the whole form list
+        and every open form detail go stale together. Editing a brand is a rare
+        act; a targeted invalidation would trade a real risk of a stale colour
+        for a refetch nobody notices.
+      */
+      qc.invalidateQueries({ queryKey: keys.forms });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+export function useDeleteFormBrand() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => store.deleteFormBrand(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.formBrands });
+      // Forms that used it are NOT deleted — they fall back to the org's
+      // theme, so they need refetching for the same reason as an edit.
+      qc.invalidateQueries({ queryKey: keys.forms });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** Point a form at a brand, or clear it back to the org's own theme. */
+export function useSetFormBrand() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { formId: string; brandId: string | null }) => store.setFormBrand(input),
     onSuccess: (_void, input) => {
       qc.invalidateQueries({ queryKey: keys.form(input.formId) });
       qc.invalidateQueries({ queryKey: keys.auditLog });
@@ -661,8 +730,11 @@ export function useTogglePermission() {
  */
 export function useUploadOrgLogo() {
   return useMutation({
-    mutationFn: async (input: { imageBase64: string; mimeType: string }) =>
-      store.uploadOrgLogo(input),
+    mutationFn: async (input: {
+      imageBase64: string;
+      mimeType: string;
+      usage?: 'org' | 'brand';
+    }) => store.uploadOrgLogo(input),
   });
 }
 

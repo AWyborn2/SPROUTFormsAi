@@ -24,6 +24,7 @@ import { TaxonomyScreen } from './screens/enterprise/TaxonomyScreen.js';
 import { RolesScreen } from './screens/enterprise/RolesScreen.js';
 import { AuditScreen } from './screens/enterprise/AuditScreen.js';
 import { BillingScreen } from './screens/enterprise/BillingScreen.js';
+import { ClientBrandsScreen } from './screens/enterprise/ClientBrandsScreen.js';
 import { WhiteLabelScreen } from './screens/enterprise/WhiteLabelScreen.js';
 import { CompetencyScreen } from './screens/enterprise/CompetencyScreen.js';
 import { AssessmentCasesScreen } from './screens/assessments/AssessmentCasesScreen.js';
@@ -59,6 +60,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   audit: <AuditScreen />,
   billing: <BillingScreen />,
   whitelabel: <WhiteLabelScreen />,
+  'client-brands': <ClientBrandsScreen />,
   competency: <CompetencyScreen />,
   assessments: <AssessmentCasesScreen />,
   'assessment-progress': <AssessmentDashboard />,

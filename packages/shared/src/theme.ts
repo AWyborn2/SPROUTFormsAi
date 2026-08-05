@@ -157,20 +157,28 @@ function sanitize(patch: ThemeTokens | null | undefined): ThemeTokens {
 }
 
 /**
- * Resolve the theme a surface should render: defaults, then the org's theme,
- * then the form's override — each layer filling only the keys it actually sets.
+ * Resolve the theme a surface should render: defaults, then each layer in turn,
+ * each filling only the keys it actually sets. Later layers win.
  *
  * This is the single precedence rule in the system. Every surface resolves
  * through here and no surface reads a raw theme object, so "absent means
  * inherit" is true by construction rather than by convention.
+ *
+ * VARIADIC RATHER THAN FIXED, so a layer can be added between two existing ones
+ * without every caller changing. The order today is:
+ *
+ *   DEFAULT_THEME → the org's theme → the form's BRAND → the form's override
+ *
+ * The brand sits above the org because a subcontractor's forms mostly carry a
+ * CLIENT's brand, not their own — the org's theme is the fallback for a form
+ * nobody has assigned, not the baseline everything deviates from. The per-form
+ * override stays last so a genuine one-off still beats its brand.
+ *
+ * Existing two-argument calls keep their exact meaning: org, then override.
  */
-export function resolveTheme(
-  orgTheme?: ThemeTokens | null,
-  formOverride?: ThemeTokens | null,
-): Required<ThemeTokens> {
-  return {
-    ...DEFAULT_THEME,
-    ...sanitize(orgTheme),
-    ...sanitize(formOverride),
-  };
+export function resolveTheme(...layers: (ThemeTokens | null | undefined)[]): Required<ThemeTokens> {
+  return layers.reduce<Required<ThemeTokens>>(
+    (out, layer) => ({ ...out, ...sanitize(layer) }),
+    DEFAULT_THEME,
+  );
 }

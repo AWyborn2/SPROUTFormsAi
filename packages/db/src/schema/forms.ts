@@ -3,6 +3,7 @@ import { boolean, index, jsonb, pgTable, text, timestamp, uuid } from 'drizzle-o
 import type { FormContainer, FormField, ThemeTokens } from '@formai/shared';
 import { formSourceTypeEnum, templateStatusEnum, versionStateEnum } from './enums.ts';
 import { organizations, users } from './organizations.ts';
+import { formBrands } from './form-brands.ts';
 
 /**
  * DB-level default for the container column. Mirrors `DEFAULT_CONTAINER` in
@@ -44,6 +45,20 @@ export const formTemplates = pgTable(
      * there would mint a new form version on every colour tweak and leave live
      * forms stale until someone republished them.
      */
+    /**
+     * The BRAND this form is presented in — usually a client's, not the org's.
+     *
+     * Null falls back to the org's own theme, which is right for a form nobody
+     * has assigned. It is deliberately NOT a default-to-our-brand: a
+     * subcontractor's forms mostly carry somebody else's, so "unassigned" and
+     * "ours" are different statements and collapsing them would silently put
+     * our colours on a client's document.
+     *
+     * `set null` on delete rather than cascade: deleting a brand must not
+     * delete the forms that used it. They fall back to the org's theme, which
+     * is visible and recoverable.
+     */
+    brandId: uuid('brand_id').references(() => formBrands.id, { onDelete: 'set null' }),
     themeOverride: jsonb('theme_override').$type<ThemeTokens>(),
     /**
      * Per-form voice-input override, three-state by design: NULL inherits the

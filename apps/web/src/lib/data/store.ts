@@ -19,6 +19,8 @@
 import type { ImportSnapshot } from './import-draft-store.js';
 import type {
   BrandingKit,
+  FormBrand,
+  FormBrandInput,
   FormContainer,
   FormField,
   PermissionCategory,
@@ -100,6 +102,8 @@ interface FormDetailDto extends FormSummaryDto {
   container: FormContainer;
   /** Per-form voice override; null (or absent on older payloads) = inherit. */
   voiceInput?: boolean | null;
+  /** The brand the form is presented in; null/absent = the org's own theme. */
+  brandId?: string | null;
   versions: Array<{
     id: string;
     label: string;
@@ -168,6 +172,7 @@ function toFormDetail(dto: FormDetailDto): FormDetail {
     fields: dto.fields,
     container: dto.container,
     voiceInput: dto.voiceInput ?? null,
+    brandId: dto.brandId ?? null,
     versions: dto.versions.map((v) => ({
       id: v.id,
       label: v.label,
@@ -605,6 +610,32 @@ export const store = {
       .then(() => undefined);
   },
 
+  /** Which client's brand a form is presented in. Null returns it to the org's. */
+  setFormBrand(input: { formId: string; brandId: string | null }): Promise<void> {
+    return apiClient
+      .patch<{ id: string; brandId: string | null }>(`/forms/${input.formId}/brand`, {
+        brandId: input.brandId,
+      })
+      .then(() => undefined);
+  },
+
+  listFormBrands(): Promise<FormBrand[]> {
+    return apiClient.get<FormBrand[]>('/form-brands');
+  },
+
+  createFormBrand(input: FormBrandInput): Promise<FormBrand> {
+    return apiClient.post<FormBrand>('/form-brands', input);
+  },
+
+  updateFormBrand(input: { id: string } & Partial<FormBrandInput>): Promise<FormBrand> {
+    const { id, ...body } = input;
+    return apiClient.patch<FormBrand>(`/form-brands/${id}`, body);
+  },
+
+  deleteFormBrand(id: string): Promise<void> {
+    return apiClient.delete<void>(`/form-brands/${id}`).then(() => undefined);
+  },
+
   archiveForm(id: string): Promise<FormSummary> {
     return apiClient.post<FormSummaryDto>(`/forms/${id}/archive`, {}).then(toFormSummary);
   },
@@ -850,7 +881,12 @@ export const store = {
    * on a public fill page. Callers rasterise SVG to PNG first — the API only
    * accepts PNG/JPEG/WebP, verified by magic bytes server-side.
    */
-  uploadOrgLogo(input: { imageBase64: string; mimeType: string }): Promise<{ url: string }> {
+  uploadOrgLogo(input: {
+    imageBase64: string;
+    mimeType: string;
+    /** What the logo is for — drives the audit wording, nothing else. */
+    usage?: 'org' | 'brand';
+  }): Promise<{ url: string }> {
     return apiClient.post<{ url: string }>('/org/logo', input);
   },
 

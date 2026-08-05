@@ -15,6 +15,8 @@ import { useForkDraftVersion,
   useRestoreForm,
   useRevokeFillLink,
   useSetFormVoiceInput,
+  useFormBrands,
+  useSetFormBrand,
 } from '../lib/data/hooks.js';
 import { FORM_ICON_STYLE } from '../lib/data/fixtures.js';
 import { fillLinkUrl } from '../lib/fill-link-url.js';
@@ -72,6 +74,8 @@ export function TemplatesScreen() {
   const publishVersion = usePublishFormVersion();
   const publishFields = usePublishVersion();
   const setVoiceInput = useSetFormVoiceInput();
+  const setFormBrand = useSetFormBrand();
+  const { data: brands } = useFormBrands();
   const publishTarget = selected?.versions.find((v) => v.id === publishTargetId);
 
   /**
@@ -180,6 +184,32 @@ export function TemplatesScreen() {
             toast({ variant: 'warning', message: "You don't have permission to change form settings." });
           } else {
             toast({ variant: 'danger', message: 'Could not update voice input — try again.' });
+          }
+        },
+      },
+    );
+  }
+
+  /** '' → null (the org's own theme), otherwise the chosen brand's id. */
+  function onSetBrand(value: string) {
+    if (!selected) return;
+    const brandId = value === '' ? null : value;
+    const name = brands?.find((br) => br.id === brandId)?.name;
+    setFormBrand.mutate(
+      { formId: selected.id, brandId },
+      {
+        onSuccess: () =>
+          toast({
+            variant: 'success',
+            message: name
+              ? `This form now looks like a ${name} form — live links updated.`
+              : 'This form uses your own branding again — live links updated.',
+          }),
+        onError: (err) => {
+          if (err instanceof ApiError && err.status === 403) {
+            toast({ variant: 'warning', message: "You don't have permission to change form settings." });
+          } else {
+            toast({ variant: 'danger', message: 'Could not change the brand — try again.' });
           }
         },
       },
@@ -498,6 +528,38 @@ export function TemplatesScreen() {
                     <option value="inherit">Workspace default</option>
                     <option value="true">On</option>
                     <option value="false">Off</option>
+                  </select>
+                </div>
+              )}
+              {/* Which client this form belongs to. Hidden entirely until at
+                  least one brand exists, so an org that only uses its own
+                  branding never sees a control with one option. */}
+              {selected && (brands?.length ?? 0) > 0 && (
+                <div className="flex items-center justify-between gap-2 rounded-md border border-border-subtle bg-surface-sunken p-[8px_10px]">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-[12.5px] font-semibold">
+                      <Icon name="palette" size={13} className="flex-none text-text-tertiary" />
+                      Brand
+                    </div>
+                    <div className="text-[11px] text-text-tertiary">
+                      Whose form this looks like online
+                    </div>
+                  </div>
+                  {/* "Your own branding", not "None": a form with no brand is
+                      not unbranded, it renders in the org's own theme. */}
+                  <select
+                    value={selected.brandId ?? ''}
+                    disabled={setFormBrand.isPending}
+                    aria-label="Brand for this form"
+                    onChange={(e) => onSetBrand(e.target.value)}
+                    className="h-8 max-w-[150px] flex-none cursor-pointer truncate rounded-md border border-border-strong bg-surface-card px-2 font-ui text-[12.5px] font-semibold text-text-primary focus:outline-none focus-visible:border-border-accent focus-visible:shadow-focus disabled:opacity-60"
+                  >
+                    <option value="">Your own branding</option>
+                    {brands!.map((brand) => (
+                      <option key={brand.id} value={brand.id}>
+                        {brand.name}
+                      </option>
+                    ))}
                   </select>
                 </div>
               )}

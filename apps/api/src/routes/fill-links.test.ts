@@ -90,6 +90,7 @@ function fakeDb(opts: {
   fillLinksFindFirst?: unknown;
   fillLinksFindMany?: unknown[];
   organizationsFindFirst?: unknown;
+  formBrandsFindFirst?: unknown;
   rolePermissionsFindFirst?: unknown;
   usersFindFirst?: unknown;
   /** Table whose insert `.values(...)` rejects — simulates a mid-write DB failure. */
@@ -142,6 +143,7 @@ function fakeDb(opts: {
       findMany: vi.fn().mockResolvedValue(opts.fillLinksFindMany ?? []),
     },
     organizations: { findFirst: vi.fn().mockResolvedValue(opts.organizationsFindFirst) },
+    formBrands: { findFirst: vi.fn().mockResolvedValue(opts.formBrandsFindFirst) },
     rolePermissions: { findFirst: vi.fn().mockResolvedValue(opts.rolePermissionsFindFirst) },
     users: { findFirst: vi.fn().mockResolvedValue(opts.usersFindFirst) },
   };
@@ -691,6 +693,156 @@ describe('GET /fill/:token (public, no auth)', () => {
       };
       expect(body.orgBranding.theme.radius).toBe(20); // form wins
       expect(body.orgBranding.theme.density).toBe('compact'); // inherited from org
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * The brand layer. A subcontractor's form mostly carries a CLIENT's brand,
+   * so this sits between the org and the per-form override — see the layering
+   * note in `resolveTheme`.
+   */
+  it('lets the form’s brand win over the org theme', async () => {
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: { ...PUBLISHED_TEMPLATE, brandId: 'b-1' },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Charles Hull',
+        branding: { ...BRANDING, theme: { radius: 4, density: 'compact' } },
+      },
+      formBrandsFindFirst: { id: 'b-1', branding: { theme: { radius: 20 } } },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as { orgBranding: { theme: Record<string, unknown> } };
+      expect(body.orgBranding.theme.radius).toBe(20); // brand wins
+      expect(body.orgBranding.theme.density).toBe('compact'); // inherited from org
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still lets a per-form override beat the brand', async () => {
+    // A one-off inside a client's brand is a real thing; the override is the
+    // narrower statement and stays last.
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: {
+        ...PUBLISHED_TEMPLATE,
+        brandId: 'b-1',
+        themeOverride: { radius: 0 },
+      },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: { id: 'org-1', name: 'Charles Hull', branding: BRANDING },
+      formBrandsFindFirst: { id: 'b-1', branding: { theme: { radius: 20 } } },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as { orgBranding: { theme: Record<string, unknown> } };
+      expect(body.orgBranding.theme.radius).toBe(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('SHOWS THE BRAND’S LOGO INSTEAD OF THE ORG’S', async () => {
+    /*
+      The one a respondent would notice first. A client's form carrying OUR
+      logo is the exact confusion this feature exists to remove — the person
+      filling it in is looking at what they believe is their own company's
+      document.
+    */
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: { ...PUBLISHED_TEMPLATE, brandId: 'b-1' },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Charles Hull',
+        branding: { ...BRANDING, logoAssetUrl: '/api/assets/logo/org-1/logo-ours.png' },
+      },
+      formBrandsFindFirst: {
+        id: 'b-1',
+        branding: { logoAssetUrl: '/api/assets/logo/org-1/logo-client.png' },
+      },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as { orgBranding: { logoAssetUrl: string } };
+      expect(body.orgBranding.logoAssetUrl).toBe('/api/assets/logo/org-1/logo-client.png');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('keeps the org’s logo for a brand that does not mention one', async () => {
+    /*
+      A brand is allowed to be colours only, and an ABSENT logo inherits. An
+      explicit `null` is the separate statement "this brand shows no logo" —
+      collapsing the two would either strand the org's logo on a client's form
+      or make "no logo" unsayable.
+    */
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: { ...PUBLISHED_TEMPLATE, brandId: 'b-1' },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Charles Hull',
+        branding: { ...BRANDING, logoAssetUrl: '/api/assets/logo/org-1/logo-ours.png' },
+      },
+      formBrandsFindFirst: { id: 'b-1', branding: { theme: { radius: 20 } } },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as { orgBranding: { logoAssetUrl: string } };
+      expect(body.orgBranding.logoAssetUrl).toBe('/api/assets/logo/org-1/logo-ours.png');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('applies the brand’s own colours and font, not just its theme tokens', async () => {
+    // A client's identity is their primary colour as much as their border
+    // radius, and those live on the kit rather than in ThemeTokens.
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: { ...PUBLISHED_TEMPLATE, brandId: 'b-1' },
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: { id: 'org-1', name: 'Charles Hull', branding: BRANDING },
+      formBrandsFindFirst: { id: 'b-1', branding: { primaryColor: '#0044cc' } },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      const body = (await res.json()) as { orgBranding: { primaryColor: string } };
+      expect(body.orgBranding.primaryColor).toBe('#0044cc');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not look a brand up at all for a form that has none', async () => {
+    // The public fill route is the most-hit anonymous path in the product;
+    // an unconditional extra query on it would be a real cost for nothing.
+    const { db, query } = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: PUBLISHED_V1,
+      organizationsFindFirst: { id: 'org-1', name: 'Charles Hull', branding: BRANDING },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      expect(query.formBrands.findFirst).not.toHaveBeenCalled();
     } finally {
       server.close();
     }

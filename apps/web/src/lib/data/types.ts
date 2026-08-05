@@ -63,6 +63,12 @@ export interface FormDetail extends FormSummary {
    * true/false pins this form. Edited from the form library rail.
    */
   voiceInput: boolean | null;
+  /**
+   * The brand this form is presented in — usually a client's, not the org's.
+   * Null means the org's own theme, which is the fallback for a form nobody
+   * has assigned rather than a claim that the form is ours.
+   */
+  brandId: string | null;
 }
 
 /** A submissions-table row. */
