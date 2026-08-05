@@ -9,6 +9,7 @@ import {
 } from '@formai/shared';
 import { BuilderMiniSteps, BuilderStepper } from './BuilderStepper.js';
 import { UploadStep } from './steps/UploadStep.js';
+import { GenerateStep } from './steps/GenerateStep.js';
 import { StepPlaceholder } from './steps/StepPlaceholder.js';
 import { useBuilderDraftState } from './use-builder-draft.js';
 
@@ -71,6 +72,8 @@ export function BuilderScreen() {
     switch (step) {
       case 'upload':
         return <UploadStep draft={draft} />;
+      case 'generate':
+        return <GenerateStep draft={draft} />;
       default:
         return <StepPlaceholder step={step} />;
     }

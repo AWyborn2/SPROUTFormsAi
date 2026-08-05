@@ -179,6 +179,16 @@ export interface StructureSection {
   label: string;
   cols: SectionColumns;
   /**
+   * The extracted `section_header` field this section came from, where it came
+   * from one.
+   *
+   * Kept so publishing REUSES that field rather than minting a replacement:
+   * a header is a real field with a real id, and `AssessmentPart.startFieldId`
+   * may already anchor to it. A section an author created by grouping has none,
+   * and gets a synthesised header at publish.
+   */
+  headerFieldId?: string;
+  /**
    * Render this section as a page of its own in the preview and the fill
    * surface, rather than continuing the one before it.
    */

@@ -136,8 +136,13 @@ export function typeOptionsFor(type: FormFieldType): Array<{ label: string; valu
  * already accepted, now attached to a table whose columns were cleared from
  * under it. Clearing on the way out makes a retype reversible without being
  * resurrective.
+ *
+ * Exported for the same reason `typeOptionsFor` is: a third editor — the
+ * assessment builder's structure panel — retypes fields too, and a second
+ * implementation of this reconciliation would drift from this one exactly the
+ * way the type dropdowns already did once.
  */
-function retypeField(f: FormField, type: FormFieldType): FormField {
+export function retypeField(f: FormField, type: FormFieldType): FormField {
   const nf: FormField = { ...f, type };
 
   if (isChoiceField(type)) {

@@ -4,12 +4,18 @@ import {
   hasAnyMatchSide,
   hasBothMatchSides,
   isChoiceField,
+  type BuilderStructure,
   type ExtractionResult,
   type FormField,
+  type FormFieldType,
+  type SectionColumns,
   type SetupAnswers,
 } from '@formai/shared';
 import { apiClient, ApiError } from '../../../lib/data/api-client.js';
 import { fileToBase64, IMPORT_REQUEST_TIMEOUT_MS } from '../../../lib/data/import-session.js';
+import { retypeField } from '../../../lib/field-editor/reducer.js';
+import * as Structure from './builder-structure.js';
+import { structureFromExtraction } from './builder-structure.js';
 
 /**
  * The builder's working state for one tool.
@@ -85,12 +91,32 @@ export interface BuilderDraftState {
   stats: ExtractionStats | null;
   setup: SetupAnswers;
   excluded: Set<string>;
+  structure: BuilderStructure;
   hasDocument: boolean;
   title: string | null;
   pageCount: number;
   ingest: (file: File) => Promise<void>;
   setSetup: (patch: Partial<SetupAnswers>) => void;
   toggleExcluded: (fieldId: string) => void;
+  reset: () => void;
+  /** Structure edits. Each delegates to a pure operation in builder-structure.ts. */
+  structureOps: StructureOps;
+}
+
+export interface StructureOps {
+  moveSection: (key: string, delta: number) => void;
+  renameSection: (key: string, label: string) => void;
+  setColumns: (key: string, cols: SectionColumns) => void;
+  toggleOwnPage: (key: string) => void;
+  moveField: (
+    fieldId: string,
+    toSectionKey: string,
+    beforeFieldId: string | null,
+    after: boolean,
+  ) => void;
+  cycleSpan: (sectionKey: string, fieldId: string) => void;
+  group: (fieldIds: string[]) => void;
+  setFieldType: (fieldId: string, type: FormFieldType) => void;
   reset: () => void;
 }
 
@@ -153,6 +179,9 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
   const [fileName, setFileName] = useState<string | null>(null);
   const [extraction, setExtraction] = useState<ExtractionResult | null>(null);
   const [fields, setFields] = useState<FormField[]>([]);
+  const [structure, setStructure] = useState<BuilderStructure>([]);
+  /** Monotonic, so a grouped section's key cannot collide with an earlier one. */
+  const [groupCount, setGroupCount] = useState(1);
   const [setup, setSetupState] = useState<SetupAnswers>(() => ({
     ...DEFAULT_SETUP_ANSWERS,
     pathways: [...DEFAULT_SETUP_ANSWERS.pathways],
@@ -187,7 +216,9 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
 
       setExtraction(result);
       setFields(seedFields(result));
+      setStructure(structureFromExtraction(result));
       setExcluded(new Set());
+      setGroupCount(1);
       setPhase('ready');
     } catch (err) {
       setError(messageForError(err));
@@ -214,8 +245,57 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     setFileName(null);
     setExtraction(null);
     setFields([]);
+    setStructure([]);
     setExcluded(new Set());
   }, []);
+
+  /*
+    Every structure edit is a pure function applied to current state.
+
+    Each operation returns the SAME array when it changes nothing, so a
+    `dragOver` firing continuously over one row produces one re-render rather
+    than dozens — the guard lives in the operation, not in a piece of state
+    this component would have to keep in sync.
+  */
+  const structureOps = useMemo<StructureOps>(
+    () => ({
+      moveSection: (key, delta) => setStructure((s) => Structure.moveSection(s, key, delta)),
+      renameSection: (key, label) => setStructure((s) => Structure.renameSection(s, key, label)),
+      setColumns: (key, cols) => setStructure((s) => Structure.setSectionColumns(s, key, cols)),
+      toggleOwnPage: (key) =>
+        setStructure((s) => {
+          const section = s.find((x) => x.key === key);
+          return section ? Structure.setOwnPage(s, key, !section.ownPage) : s;
+        }),
+      moveField: (fieldId, toSectionKey, beforeFieldId, after) =>
+        setStructure((s) => Structure.moveField(s, fieldId, toSectionKey, beforeFieldId, after)),
+      cycleSpan: (sectionKey, fieldId) =>
+        setStructure((s) => Structure.cycleFieldSpan(s, sectionKey, fieldId)),
+      group: (fieldIds) =>
+        setStructure((s) => {
+          const n = groupCount;
+          const next = Structure.groupIntoSection(s, fieldIds, `New section ${n}`, `secnew${n}`);
+          if (next !== s) setGroupCount(n + 1);
+          return next;
+        }),
+      /*
+        Retyping goes through the SHARED reconciliation, not a local copy.
+
+        `retypeField` seeds options for a type that answers from them and strips
+        the payload only the old type could own. Doing it here by hand is how
+        the import review screen once let a reviewer turn a Date into an
+        optionless checkbox group that blocked every submit — the failure
+        `typeOptionsFor`'s own comment records. A third editor with a third
+        implementation would drift the same way.
+      */
+      setFieldType: (fieldId, type) =>
+        setFields((fs) =>
+          fs.map((f) => (f.id !== fieldId || f.type === type ? f : retypeField(f, type))),
+        ),
+      reset: () => setStructure(extraction ? structureFromExtraction(extraction) : []),
+    }),
+    [extraction, groupCount],
+  );
 
   const stats = useMemo(() => (extraction ? statsFor(extraction) : null), [extraction]);
 
@@ -228,6 +308,7 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     stats,
     setup,
     excluded,
+    structure,
     hasDocument: phase === 'ready' && extraction !== null,
     title: extraction ? extraction.fileName.replace(/\.pdf$/i, '') : null,
     pageCount: extraction?.pageCount ?? 0,
@@ -235,5 +316,6 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     setSetup,
     toggleExcluded,
     reset,
+    structureOps,
   };
 }
