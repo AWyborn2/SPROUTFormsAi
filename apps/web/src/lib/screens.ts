@@ -4,6 +4,8 @@
  * array. Each entry maps a route path to its display metadata.
  */
 
+import type { Role } from '@formai/shared';
+
 export type ShellKind = 'none' | 'app' | 'external' | 'mobile';
 
 export interface ScreenDef {
@@ -16,7 +18,28 @@ export interface ScreenDef {
   shell: ShellKind;
   /** Show in the left app nav. */
   inNav?: boolean;
+  /**
+   * Minimum access level a member needs to see this screen in the nav. Absent
+   * means every level sees it. 'admin' also admits an owner. Filtering the nav
+   * this way keeps an Admin-only surface off every other level's sidebar rather
+   * than showing an entry that 403s on click.
+   */
+  minAccessLevel?: Role;
 }
+
+/**
+ * Access-level ordering for nav gating. Owner holds everything Admin holds, so
+ * an 'admin' minimum admits both. Levels below can never satisfy an Admin gate.
+ */
+const ACCESS_RANK: Record<string, number> = {
+  owner: 100,
+  admin: 90,
+  builder: 50,
+  reviewer: 40,
+  assessor: 30,
+  viewer: 20,
+  candidate: 0,
+};
 
 export const SCREENS: ScreenDef[] = [
   // Onboarding & account
@@ -52,6 +75,7 @@ export const SCREENS: ScreenDef[] = [
 
   // Enterprise & org
   { key: 'team', path: '/app/team', group: 'Enterprise & org', label: 'Team management', icon: 'users', shell: 'app', inNav: true },
+  { key: 'taxonomy', path: '/app/taxonomy', group: 'Enterprise & org', label: 'Locations & roles', icon: 'map-pin', shell: 'app', inNav: true, minAccessLevel: 'admin' },
   { key: 'roles', path: '/app/roles', group: 'Enterprise & org', label: 'Roles & permissions', icon: 'shield', shell: 'app', inNav: true },
   { key: 'audit', path: '/app/audit', group: 'Enterprise & org', label: 'Audit log', icon: 'scroll-text', shell: 'app', inNav: true },
   { key: 'billing', path: '/app/billing', group: 'Enterprise & org', label: 'Billing', icon: 'credit-card', shell: 'app', inNav: true },
@@ -86,6 +110,19 @@ export const SCREENS: ScreenDef[] = [
 ];
 
 export const NAV_SCREENS = SCREENS.filter((s) => s.inNav);
+
+/**
+ * The nav screens a member of the given access level may see. A screen with no
+ * `minAccessLevel` is visible to everyone; one that sets it is hidden from
+ * levels that do not rank high enough (an Admin-only screen never appears on a
+ * viewer's or candidate's sidebar).
+ */
+export function navScreensFor(role: string | undefined): ScreenDef[] {
+  const rank = ACCESS_RANK[role ?? ''] ?? 0;
+  return NAV_SCREENS.filter(
+    (s) => !s.minAccessLevel || rank >= (ACCESS_RANK[s.minAccessLevel] ?? Number.POSITIVE_INFINITY),
+  );
+}
 
 export function screenByPath(pathname: string): ScreenDef | undefined {
   return SCREENS.find((s) => s.path === pathname);

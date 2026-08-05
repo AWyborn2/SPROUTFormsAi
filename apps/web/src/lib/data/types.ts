@@ -8,11 +8,13 @@
 import type {
   BrandingKit,
   CompetencyStatus,
+  DisplayIdentifier,
   ExtractionResult,
   FormContainer,
   FormField,
   SubmissionStatus,
   SubmissionValue,
+  TaxonomyStatus,
 } from '@formai/shared';
 
 export type TemplateStatus = 'draft' | 'published' | 'archived';
@@ -430,4 +432,47 @@ export interface FormVersionDetail {
   fields: FormField[];
   container: FormContainer;
   sourcePdfAssetId: string | null;
+}
+
+/* ── Taxonomy (Locations, Departments, Roles) ─────────────────────────────── */
+
+/** A managed Location the organisation assesses at. */
+export interface TaxLocation {
+  id: string;
+  name: string;
+  status: TaxonomyStatus;
+  createdAt: string;
+}
+
+/** A job Role offered within a Department. */
+export interface TaxRole {
+  id: string;
+  departmentId: string;
+  name: string;
+  status: TaxonomyStatus;
+  createdAt: string;
+}
+
+/** A Department, carrying the Roles it offers and its one-or-several rule (R5). */
+export interface TaxDepartment {
+  id: string;
+  name: string;
+  allowsMultipleRoles: boolean;
+  status: TaxonomyStatus;
+  createdAt: string;
+  roles: TaxRole[];
+}
+
+/** The three organisation settings that govern how far a person may spread (R24, R25, R40). */
+export interface TaxonomySettings {
+  allowMultipleLocations: boolean;
+  allowMultipleDepartments: boolean;
+  displayIdentifier: DisplayIdentifier;
+}
+
+/** The whole taxonomy in one read, for the settings screen. */
+export interface Taxonomy {
+  locations: TaxLocation[];
+  departments: TaxDepartment[];
+  settings: TaxonomySettings;
 }

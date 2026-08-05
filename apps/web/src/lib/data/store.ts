@@ -59,8 +59,14 @@ import type {
   RoleName,
   SubmissionDetail,
   SubmissionRow,
+  Taxonomy,
+  TaxDepartment,
+  TaxLocation,
+  TaxRole,
+  TaxonomySettings,
   TemplateStatus,
 } from './types.js';
+import type { TaxonomyStatus } from '@formai/shared';
 
 /** Shape returned by `PATCH /org` (see apps/api routes/org.ts). */
 export interface OrgSettingsDto {
@@ -807,6 +813,36 @@ export const store = {
    */
   scanBrandFromWebsite(input: { url: string }): Promise<BrandScanProposal> {
     return apiClient.post<BrandScanProposal>('/org/brand-scan', input);
+  },
+
+  /* ── Taxonomy (Locations, Departments, Roles) ──────────────────────────── */
+
+  getTaxonomy(): Promise<Taxonomy> {
+    return apiClient.get<Taxonomy>('/taxonomy');
+  },
+  createLocation(name: string): Promise<TaxLocation> {
+    return apiClient.post<TaxLocation>('/taxonomy/locations', { name });
+  },
+  updateLocation(id: string, patch: { name?: string; status?: TaxonomyStatus }): Promise<TaxLocation> {
+    return apiClient.patch<TaxLocation>(`/taxonomy/locations/${id}`, patch);
+  },
+  createDepartment(input: { name: string; allowsMultipleRoles?: boolean }): Promise<TaxDepartment> {
+    return apiClient.post<TaxDepartment>('/taxonomy/departments', input);
+  },
+  updateDepartment(
+    id: string,
+    patch: { name?: string; allowsMultipleRoles?: boolean; status?: TaxonomyStatus },
+  ): Promise<TaxDepartment> {
+    return apiClient.patch<TaxDepartment>(`/taxonomy/departments/${id}`, patch);
+  },
+  createRole(departmentId: string, name: string): Promise<TaxRole> {
+    return apiClient.post<TaxRole>(`/taxonomy/departments/${departmentId}/roles`, { name });
+  },
+  updateRole(id: string, patch: { name?: string; status?: TaxonomyStatus }): Promise<TaxRole> {
+    return apiClient.patch<TaxRole>(`/taxonomy/roles/${id}`, patch);
+  },
+  updateTaxonomySettings(patch: Partial<TaxonomySettings>): Promise<TaxonomySettings> {
+    return apiClient.patch<TaxonomySettings>('/taxonomy/settings', patch);
   },
 
   /* ── Competency gating ─────────────────────────────────────────────────── */

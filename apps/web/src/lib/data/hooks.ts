@@ -39,7 +39,9 @@ import type {
   RoleName,
   SubmissionDetail,
   SubmissionRow,
+  TaxonomySettings,
 } from './types.js';
+import type { TaxonomyStatus } from '@formai/shared';
 
 /**
  * A 401 from any request means the `fai_session` cookie has expired or gone
@@ -103,6 +105,7 @@ const keys = {
   fillLinks: (formId: string) => ['fillLinks', formId] as const,
   invite: (token: string) => ['invite', token] as const,
   apiKeys: ['apiKeys'] as const,
+  taxonomy: ['taxonomy'] as const,
 };
 
 /**
@@ -985,4 +988,61 @@ export function useChangePathway(caseId: string) {
       void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
+}
+
+/* ── Taxonomy (Locations, Departments, Roles) ─────────────────────────────── */
+
+export function useTaxonomy() {
+  return useQuery({ queryKey: keys.taxonomy, queryFn: () => store.getTaxonomy() });
+}
+
+/** Every taxonomy mutation re-reads the whole taxonomy and refreshes the audit feed. */
+function useTaxonomyMutation<TArgs>(fn: (args: TArgs) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.taxonomy });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+export function useCreateLocation() {
+  return useTaxonomyMutation((name: string) => store.createLocation(name));
+}
+export function useUpdateLocation() {
+  return useTaxonomyMutation((input: { id: string; name?: string; status?: TaxonomyStatus }) =>
+    store.updateLocation(input.id, { name: input.name, status: input.status }),
+  );
+}
+export function useCreateDepartment() {
+  return useTaxonomyMutation((input: { name: string; allowsMultipleRoles?: boolean }) =>
+    store.createDepartment(input),
+  );
+}
+export function useUpdateDepartment() {
+  return useTaxonomyMutation(
+    (input: { id: string; name?: string; allowsMultipleRoles?: boolean; status?: TaxonomyStatus }) =>
+      store.updateDepartment(input.id, {
+        name: input.name,
+        allowsMultipleRoles: input.allowsMultipleRoles,
+        status: input.status,
+      }),
+  );
+}
+export function useCreateRole() {
+  return useTaxonomyMutation((input: { departmentId: string; name: string }) =>
+    store.createRole(input.departmentId, input.name),
+  );
+}
+export function useUpdateRole() {
+  return useTaxonomyMutation((input: { id: string; name?: string; status?: TaxonomyStatus }) =>
+    store.updateRole(input.id, { name: input.name, status: input.status }),
+  );
+}
+export function useUpdateTaxonomySettings() {
+  return useTaxonomyMutation((patch: Partial<TaxonomySettings>) =>
+    store.updateTaxonomySettings(patch),
+  );
 }
