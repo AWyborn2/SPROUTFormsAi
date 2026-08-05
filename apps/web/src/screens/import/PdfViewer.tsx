@@ -213,6 +213,14 @@ interface PdfViewerProps {
   /** A band edge was dragged to `value` (PDF points). Omit to draw read-only. */
   onBandEdge?: (handle: BandHandle, value: number) => void;
   /**
+   * The whole overlay box was dragged, by a delta in PDF points (U14).
+   *
+   * Omit to leave the box undraggable, which is what a caller that only
+   * PREVIEWS geometry wants — the same read-only posture `onBandEdge`'s absence
+   * gives the edges.
+   */
+  onMoveBox?: (dx: number, dy: number) => void;
+  /**
    * Whether draw mode is armed (U1/KTD5). While armed, a pointer-down + drag on
    * a page rubber-bands a rectangle instead of panning; on release the two
    * corners are snapped to the text layer and reported via `onDrawBox`.
@@ -244,6 +252,7 @@ function BandGrid({
   snapTargets = [],
   snapTargetsY = [],
   onBandEdge,
+  onMoveBox,
 }: {
   segment: PageBox;
   pageWidth: number;
@@ -253,6 +262,8 @@ function BandGrid({
   /** Printed row baselines this page offers a dragged ROW edge (U3). */
   snapTargetsY?: readonly number[];
   onBandEdge?: (handle: BandHandle, value: number) => void;
+  /** Move the WHOLE box by a delta in PDF points (U14). */
+  onMoveBox?: (dx: number, dy: number) => void;
 }) {
   const surface = useRef<HTMLDivElement>(null);
   const scaleX = pageWidth / segment.pageWidth;
@@ -326,6 +337,53 @@ function BandGrid({
   // exporter draws with (U3). Empty when the grid has no rows or no columns, so
   // this renders nothing rather than guessing. Display-only and never a recorded
   // answer — see the guide styling and caption below (R4/R6).
+  /**
+   * Drag the WHOLE box, as opposed to one of its edges.
+   *
+   * INCREMENTAL DELTAS, not an absolute position. Each move reports the
+   * distance since the last one and the screen applies it to the box's current
+   * position, so `moveSegment`'s page clamp composes naturally: once the box is
+   * against an edge, further deltas in that direction resolve to no-ops and the
+   * box slides along rather than the drag accumulating an offset it will snap
+   * back through when the pointer returns.
+   *
+   * NO SNAPPING HERE, deliberately. A drawn box snaps because it is being
+   * traced onto printed geometry for the first time; a box being MOVED has
+   * already been placed against that geometry and is being corrected by a point
+   * or two. Re-snapping a nudge-sized correction would pull it straight back to
+   * where it was and read as the box refusing to move.
+   */
+  function startMove(e: React.PointerEvent) {
+    if (e.button !== 0 || !onMoveBox) return;
+    e.preventDefault();
+    // Keep the scroll-viewport pan gesture from also firing, as the draw
+    // surface does.
+    e.stopPropagation();
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+
+    let lastX = e.clientX;
+    let lastY = e.clientY;
+
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - lastX) / scaleX;
+      // Screen y grows DOWN and PDF y grows UP, so the sign flips here. The
+      // same flip the keyboard path makes in `ARROW_DELTAS`.
+      const dy = -(ev.clientY - lastY) / scaleY;
+      lastX = ev.clientX;
+      lastY = ev.clientY;
+      if (dx !== 0 || dy !== 0) onMoveBox(dx, dy);
+    };
+    const finish = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', finish);
+      el.removeEventListener('pointercancel', finish);
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', finish);
+    el.addEventListener('pointercancel', finish);
+  }
+
   const marks = previewMarks(segment);
 
   return (
@@ -341,6 +399,22 @@ function BandGrid({
           backgroundColor: 'color-mix(in srgb, var(--accent) 6%, transparent)',
         }}
       />
+      {/*
+        The whole-box drag target.
+
+        Rendered BEFORE the band grips so those later siblings paint on top and
+        receive an edge drag first — the edges stay reachable, and the interior
+        moves the box. Without this a placement was one-shot: it snapped where
+        it landed and the only correction was to delete it and draw it again.
+      */}
+      {onMoveBox && (
+        <div
+          onPointerDown={startMove}
+          aria-label="Drag to move this box"
+          className="pointer-events-auto absolute cursor-move rounded-[2px]"
+          style={{ left, top, width, height }}
+        />
+      )}
       {(segment.columnBands ?? []).map((band) => (
         <div
           key={`c-${band.key}`}
@@ -592,6 +666,7 @@ export function PdfViewer({
   bandSnapTargets,
   bandSnapTargetsY,
   onBandEdge,
+  onMoveBox,
   drawArmed = false,
   onDrawBox,
   className = '',
@@ -970,6 +1045,7 @@ export function PdfViewer({
                     snapTargets={bandSnapTargets}
                     snapTargetsY={bandSnapTargetsY}
                     onBandEdge={onBandEdge}
+                    onMoveBox={onMoveBox}
                     pageWidth={pageWidth}
                     pageHeight={pageHeight}
                   />
