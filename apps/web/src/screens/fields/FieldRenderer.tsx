@@ -328,7 +328,7 @@ export function FieldInput({
                     selected
                       ? v.on
                         ? 'border-border-accent bg-success-soft text-success-text'
-                        : 'border-danger-border bg-danger-soft text-danger-text'
+                        : 'border-danger bg-danger-soft text-danger-text'
                       : 'border-border bg-surface-card text-text-secondary'
                   }`}
                 >

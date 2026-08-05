@@ -123,7 +123,7 @@ export function UploadStep({ draft }: { draft: BuilderDraftState }) {
         {draft.error && (
           <div
             role="alert"
-            className="mb-3.5 flex items-start gap-2 rounded-lg border border-danger-border bg-danger-soft p-[10px_14px] text-[12.5px] text-danger-text"
+            className="mb-3.5 flex items-start gap-2 rounded-lg border border-danger bg-danger-soft p-[10px_14px] text-[12.5px] text-danger-text"
           >
             <Icon name="alert-triangle" size={14} className="mt-0.5 flex-none" />
             {draft.error}
@@ -234,7 +234,7 @@ export function UploadStep({ draft }: { draft: BuilderDraftState }) {
         carry.
       */}
       {(stats?.matchesIncomplete ?? 0) > 0 && (
-        <div className="mb-3 flex items-start gap-2.5 rounded-lg border border-warning-border bg-warning-soft p-[10px_14px] text-[12.5px] leading-relaxed text-warning-text">
+        <div className="mb-3 flex items-start gap-2.5 rounded-lg border border-warning bg-warning-soft p-[10px_14px] text-[12.5px] leading-relaxed text-warning-text">
           <Icon name="git-compare-arrows" size={15} className="mt-0.5 flex-none" />
           <span>
             {stats?.matchesIncomplete} matching question
@@ -245,7 +245,7 @@ export function UploadStep({ draft }: { draft: BuilderDraftState }) {
         </div>
       )}
       {stats?.prerequisites === 0 && (
-        <div className="mb-3 flex items-start gap-2.5 rounded-lg border border-warning-border bg-warning-soft p-[10px_14px] text-[12.5px] leading-relaxed text-warning-text">
+        <div className="mb-3 flex items-start gap-2.5 rounded-lg border border-warning bg-warning-soft p-[10px_14px] text-[12.5px] leading-relaxed text-warning-text">
           <Icon name="alert-triangle" size={15} className="mt-0.5 flex-none" />
           <span>
             No prerequisite rows were found on the cover page. If this assessment requires a licence,

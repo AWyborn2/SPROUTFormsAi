@@ -66,7 +66,7 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
         {orphanIds.length > 0 && (
           <div
             role="alert"
-            className="mb-3 flex items-start gap-2.5 rounded-lg border border-warning-border bg-warning-soft p-[10px_14px] text-[12.5px] leading-relaxed text-warning-text"
+            className="mb-3 flex items-start gap-2.5 rounded-lg border border-warning bg-warning-soft p-[10px_14px] text-[12.5px] leading-relaxed text-warning-text"
           >
             <Icon name="alert-triangle" size={15} className="mt-0.5 flex-none" />
             <span>
