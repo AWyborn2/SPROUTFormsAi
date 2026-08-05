@@ -85,6 +85,15 @@ export function createApp(): Express {
   */
   app.use('/answer-guides', express.json({ limit: '40mb' }), answerGuidesRouter);
 
+  /*
+    Same registration-order reason as the routes above, for one path only: a
+    brand scan carries a client's whole PDF. The rest of /form-brands keeps the
+    tighter global limit, since a brand itself is a name and a few colours —
+    this mounts the PARSER only, and the route stays with its siblings in
+    routes/form-brands.ts.
+  */
+  app.use('/form-brands/scan', express.json({ limit: '40mb' }));
+
   app.use(express.json({ limit: '2mb' }));
 
   app.use('/health', healthRouter);

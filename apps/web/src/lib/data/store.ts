@@ -39,6 +39,7 @@ import type {
   AuditCategory,
   AuditEntry,
   CreatedApiKey,
+  BrandPdfScan,
   BrandScanProposal,
   Competency,
   CompetencyHolder,
@@ -630,6 +631,14 @@ export const store = {
   updateFormBrand(input: { id: string } & Partial<FormBrandInput>): Promise<FormBrand> {
     const { id, ...body } = input;
     return apiClient.patch<FormBrand>(`/form-brands/${id}`, body);
+  },
+
+  /**
+   * Read a client's colours and logo off their PDF. Returns a PROPOSAL —
+   * nothing is stored, and no brand is created or changed.
+   */
+  scanBrandFromPdf(input: { assetId?: string; pdfBase64?: string }): Promise<BrandPdfScan> {
+    return apiClient.post<BrandPdfScan>('/form-brands/scan', input);
   },
 
   deleteFormBrand(id: string): Promise<void> {

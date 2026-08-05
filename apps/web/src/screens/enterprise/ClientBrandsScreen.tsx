@@ -3,6 +3,7 @@ import { Button, Dialog, Icon, Input, useToast } from '@formai/ui';
 import type { FormBrand, FormBrandKit } from '@formai/shared';
 import { resolveBrandKit } from '@formai/shared';
 import { BrandColorFields } from '../../components/branding/BrandColorFields.js';
+import { BrandPdfScanPanel } from '../../components/branding/BrandPdfScanPanel.js';
 import { BrandedFormPreview } from '../../components/branding/BrandedFormPreview.js';
 import { FontPicker } from '../../components/branding/FontPicker.js';
 import { LogoUploadControl } from '../../components/branding/LogoUploadControl.js';
@@ -222,6 +223,12 @@ export function ClientBrandsScreen() {
                 onChange={(e) => setName(e.target.value)}
                 leadingIcon="tag"
               />
+
+              {/* Fastest path to on-brand, and the one the author actually
+                  has: they are holding the client's own document. */}
+              <div className="mt-[22px]">
+                <BrandPdfScanPanel onApply={patch} />
+              </div>
 
               <div className="mb-[9px] mt-[22px] text-[13px] font-semibold">Style preset</div>
               <div className="mb-[22px]">

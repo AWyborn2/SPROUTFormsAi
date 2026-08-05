@@ -511,3 +511,23 @@ export interface MemberPlacement {
   departmentIds: string[];
   roleIds: string[];
 }
+
+/**
+ * What `POST /form-brands/scan` read off a client's document.
+ *
+ * A PROPOSAL. Colours are ordered by how often the document sets them, which
+ * is not the same as how prominent they are — a table-border colour can lead
+ * the list. Logos arrive as base64 rather than uploaded URLs so declining one
+ * leaves nothing behind; the chosen one goes through the ordinary upload door.
+ */
+export interface BrandPdfScan {
+  colors: string[];
+  logos: Array<{
+    imageBase64: string;
+    mimeType: 'image/png' | 'image/jpeg';
+    width: number;
+    height: number;
+  }>;
+  /** Why the result is thin: a monochrome document, a page cap, an unreadable file. */
+  notes: string[];
+}
