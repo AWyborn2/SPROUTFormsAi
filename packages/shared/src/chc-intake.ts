@@ -339,6 +339,90 @@ export const CHC_ROLE_FIELD_BY_DEPARTMENT: Readonly<Record<string, string>> = {
 };
 
 /**
+ * The option list that identifies each choice question, independent of its id.
+ *
+ * The ids above are what a template SEEDED from `chcIntakeFields()` carries,
+ * and they are not reserved: this form ships as an ordinary editable template
+ * (see `BuilderScreen`'s PRESETS), so an administrator who adds a question, or
+ * deletes and re-creates one, gets a builder-generated id like `b7` instead.
+ * Reading answers by preset id alone therefore reported those as blank — which
+ * is indistinguishable from a question the starter skipped, and was silently
+ * wrong about the question added most recently, Ethnicity.
+ *
+ * An option list is the honest way to recognise the question again, because it
+ * is the part an administrator reproducing a question copies exactly while the
+ * id is assigned for them. Every list here is distinct from the others, so a
+ * match names one question and not another.
+ */
+const CHC_QUESTION_OPTIONS: Readonly<Record<string, readonly string[]>> = {
+  [CHC_FIELD_IDS.gender]: CHC_GENDERS,
+  [CHC_FIELD_IDS.ethnicity]: CHC_ETHNICITIES,
+  [CHC_FIELD_IDS.starterType]: CHC_STARTER_TYPES,
+  [CHC_FIELD_IDS.department]: CHC_DEPARTMENT_NAMES,
+  [CHC_FIELD_IDS.licenceClass]: CHC_LICENCE_CLASSES,
+  [CHC_FIELD_IDS.roleOperations]: CHC_DEPARTMENTS.Operations!.roles,
+  [CHC_FIELD_IDS.roleMaintenance]: CHC_DEPARTMENTS.Maintenance!.roles,
+  [CHC_FIELD_IDS.roleAdmin]: CHC_DEPARTMENTS.Admin!.roles,
+  [CHC_FIELD_IDS.roleOffSiteSupport]: CHC_DEPARTMENTS['Off Site Support']!.roles,
+};
+
+/** Order-insensitive set equality — an administrator may reorder an option list. */
+function sameOptions(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const seen = new Set(a);
+  return seen.size === a.length && b.every((o) => seen.has(o));
+}
+
+/**
+ * Maps each canonical intake question to the id actually carrying it in this
+ * template version.
+ *
+ * The preset id always wins: an unedited template resolves to itself, and the
+ * option-list fallback below can never override a question that is right there
+ * under the name it was authored with.
+ *
+ * The fallback is deliberately strict, and refuses rather than guesses:
+ *
+ *  - only choice questions participate. A renamed "Mobile" text box is not
+ *    recognisable from its answer shape, and matching those on label would put
+ *    a starter's phone number wherever the nearest wording happened to sit.
+ *  - the option list must match EXACTLY, so an administrator who changed the
+ *    ethnicity vocabulary is treated as asking a different question — which is
+ *    the truth, and it is reported as uncollected rather than mapped onto
+ *    BISTrainer's list.
+ *  - two fields carrying the same options resolve to NEITHER. There is no way
+ *    to tell which one the answer belongs to, and inventing a fact about a
+ *    person is worse than reporting the gap.
+ *
+ * A question this returns no entry for was not asked by this version at all,
+ * which is a different thing from a blank answer — see `StarterProfile`.
+ */
+export function resolveChcIntakeFields(fields: readonly FormField[]): Map<string, string> {
+  const present = new Set(fields.map((f) => f.id));
+  const resolved = new Map<string, string>();
+
+  for (const [canonical, options] of Object.entries(CHC_QUESTION_OPTIONS)) {
+    if (present.has(canonical)) {
+      resolved.set(canonical, canonical);
+      continue;
+    }
+    const matches = fields.filter(
+      // A field standing in for another canonical question is not a candidate:
+      // it already answers to a name of its own.
+      (f) => !CHC_QUESTION_OPTIONS[f.id] && f.options && sameOptions(f.options, options),
+    );
+    if (matches.length === 1) resolved.set(canonical, matches[0]!.id);
+  }
+
+  // Everything else answers to its authored id or not at all.
+  for (const id of Object.values(CHC_FIELD_IDS)) {
+    if (!resolved.has(id) && present.has(id)) resolved.set(id, id);
+  }
+
+  return resolved;
+}
+
+/**
  * The intake form as native template fields.
  *
  * Two encodings are worth calling out, because they are how a form with real

@@ -203,6 +203,92 @@ describe('GET /inductions/candidates', () => {
     }
   });
 
+  /**
+   * The intake is an EDITABLE template, so an administrator who adds or
+   * re-creates a question in the builder gets a generated id rather than the
+   * preset's. Reading answers by preset id alone reported those as blank, and
+   * nothing between here and the MCP could tell that from an unanswered
+   * question — which is how a supplied Ethnicity stopped reaching registrations.
+   */
+  describe('a question carrying a builder-assigned id', () => {
+    /** The intake with Ethnicity re-created in the builder: same options, id `b7`. */
+    const EDITED_FIELDS = INTAKE_FIELDS.map((f) =>
+      f.id === CHC_FIELD_IDS.ethnicity ? { ...f, id: 'b7' } : f,
+    );
+
+    it('still reaches the payload', async () => {
+      mockDbValue = fakeDb({
+        submissions: [submission('sub-1', starterValues({ b7: 'Aboriginal' }))],
+        versions: [{ id: 'ver-intake', templateId: 'tpl-intake', fields: EDITED_FIELDS }],
+      });
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/inductions/candidates`, { headers: authHeader(OWNER) });
+        const candidate = (await jsonBody(res)).candidates[0];
+        expect(candidate.starter.ethnicity).toBe('Aboriginal');
+        expect(candidate.starter.indigenous).toBe(true);
+        expect(candidate.starter.notCollected).toEqual([]);
+        expect(candidate.warnings).not.toContain('intake_incomplete');
+      } finally {
+        server.close();
+      }
+    });
+
+    it('does not drop the whole starter when it is one the reader detects on', async () => {
+      // Worse than a blank answer: an unrecognised `department` made
+      // readStarterProfile return null, and this route skips nulls silently —
+      // so the starter vanished from every induction surface with nothing said.
+      mockDbValue = fakeDb({
+        submissions: [
+          submission('sub-1', starterValues({ [CHC_FIELD_IDS.department]: '', b9: 'Operations' })),
+        ],
+        versions: [
+          {
+            id: 'ver-intake',
+            templateId: 'tpl-intake',
+            fields: INTAKE_FIELDS.map((f) =>
+              f.id === CHC_FIELD_IDS.department ? { ...f, id: 'b9' } : f,
+            ),
+          },
+        ],
+      });
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/inductions/candidates`, { headers: authHeader(OWNER) });
+        const body = await jsonBody(res);
+        expect(body.candidates).toHaveLength(1);
+        expect(body.candidates[0].starter.department).toBe('Operations');
+        expect(body.candidates[0].starter.roles).toEqual(['Dozer Operator']);
+      } finally {
+        server.close();
+      }
+    });
+  });
+
+  it('says when the form version never asked a question, rather than reporting a blank', async () => {
+    mockDbValue = fakeDb({
+      submissions: [submission('sub-1', starterValues())],
+      versions: [
+        {
+          id: 'ver-intake',
+          templateId: 'tpl-intake',
+          fields: INTAKE_FIELDS.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity),
+        },
+      ],
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/inductions/candidates`, { headers: authHeader(OWNER) });
+      const candidate = (await jsonBody(res)).candidates[0];
+      expect(candidate.starter.notCollected).toContain(CHC_FIELD_IDS.ethnicity);
+      expect(candidate.warnings).toContain('intake_incomplete');
+      // A seat is still bookable — the gap stops a REGISTRATION, not a booking.
+      expect(candidate.readiness).toBe('ready');
+    } finally {
+      server.close();
+    }
+  });
+
   it('names who lodged the intake, separately from who it is about', async () => {
     // The requester and the starter are different people, and the booking
     // confirmation is owed to both. Before this field the payload carried only

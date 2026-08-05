@@ -5,6 +5,9 @@ import type { SubmissionValue } from './submission.js';
 import {
   assessInductionReadiness,
   buildInductionCohorts,
+  intakeTemplateDrift,
+  isIntakeTemplate,
+  mergeIntakeQuestions,
   readStarterProfile,
   type AssessedStarter,
 } from './induction.js';
@@ -163,6 +166,108 @@ describe('readStarterProfile', () => {
     ];
     expect(readStarterProfile(otherFields, { q1: 'hello' })).toBeNull();
   });
+
+  /**
+   * The intake ships as an EDITABLE template, so its ids are not reserved: a
+   * question an administrator adds in the builder gets a generated id (`b7`),
+   * and one they delete and re-create loses the preset's id for good. Reading
+   * by preset id alone reported those answers as blank — indistinguishable from
+   * a question the starter skipped, and silently wrong on exactly the question
+   * added most recently.
+   */
+  describe('a template edited in the builder', () => {
+    /** The same form with one question re-created — same label and options, builder id. */
+    function reIded(canonical: string, actual: string): FormField[] {
+      return chcIntakeFields().map((f) => (f.id === canonical ? { ...f, id: actual } : f));
+    }
+
+    it('reads a choice question that carries a builder id', () => {
+      const profile = readStarterProfile(
+        reIded(CHC_FIELD_IDS.ethnicity, 'b7'),
+        fullValues({ [CHC_FIELD_IDS.ethnicity]: '', b7: 'Aboriginal' }),
+      )!;
+      expect(profile.ethnicity).toBe('Aboriginal');
+      expect(profile.indigenous).toBe(true);
+      expect(profile.notCollected).not.toContain(CHC_FIELD_IDS.ethnicity);
+    });
+
+    it('resolves the department and its role list the same way', () => {
+      const profile = readStarterProfile(
+        reIded(CHC_FIELD_IDS.department, 'b9'),
+        fullValues({ [CHC_FIELD_IDS.department]: '', b9: 'Operations' }),
+      )!;
+      expect(profile.department).toBe('Operations');
+      expect(profile.roles).toEqual(['Dozer Operator', 'Grader Operator']);
+    });
+
+    it('still recognises the submission as an intake', () => {
+      expect(
+        readStarterProfile(
+          reIded(CHC_FIELD_IDS.department, 'b9'),
+          fullValues({ [CHC_FIELD_IDS.department]: '', b9: 'Operations' }),
+        ),
+      ).not.toBeNull();
+    });
+
+    /**
+     * `ChcIntakeScreen` hard-codes `CHC_FIELD_IDS` and writes them whatever the
+     * stored template calls its fields, so the answer can sit under the
+     * CANONICAL id while the template's question carries a builder one.
+     * Resolving and then reading only the resolved id loses exactly those
+     * answers — the regression that made this fix worse than the bug it fixed.
+     */
+    it('reads an answer the bespoke screen wrote under the canonical id', () => {
+      const profile = readStarterProfile(
+        reIded(CHC_FIELD_IDS.ethnicity, 'b7'),
+        fullValues({ [CHC_FIELD_IDS.ethnicity]: 'Aboriginal' }),
+      )!;
+      expect(profile.ethnicity).toBe('Aboriginal');
+      expect(profile.indigenous).toBe(true);
+    });
+
+    it('prefers the question the form actually asked when both carry a value', () => {
+      const profile = readStarterProfile(
+        reIded(CHC_FIELD_IDS.ethnicity, 'b7'),
+        fullValues({ [CHC_FIELD_IDS.ethnicity]: 'Caucasian', b7: 'Aboriginal' }),
+      )!;
+      expect(profile.ethnicity).toBe('Aboriginal');
+    });
+
+    it('refuses to guess when two questions carry the same options', () => {
+      const renamed = reIded(CHC_FIELD_IDS.ethnicity, 'b7');
+      const ethnicity = renamed.find((f) => f.id === 'b7')!;
+      const ambiguous = [...renamed, { ...ethnicity, id: 'b8' }];
+
+      const profile = readStarterProfile(
+        ambiguous,
+        fullValues({ [CHC_FIELD_IDS.ethnicity]: '', b7: 'Aboriginal', b8: 'Caucasian' }),
+      )!;
+      // Two candidates and no way to tell them apart: report it as uncollected
+      // rather than pick one and be silently wrong about a person.
+      expect(profile.ethnicity).toBe('');
+      expect(profile.notCollected).toContain(CHC_FIELD_IDS.ethnicity);
+    });
+  });
+
+  /**
+   * A question the pinned version never carried is NOT the same as one the
+   * starter left blank, and only the first is unfixable by asking them again.
+   * Reporting both as an empty string is what let an absent Ethnicity answer
+   * reach a registration as though it had been collected.
+   */
+  it('names the questions this template version never asked', () => {
+    const withoutEthnicity = chcIntakeFields().filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    const profile = readStarterProfile(
+      withoutEthnicity,
+      fullValues({ [CHC_FIELD_IDS.ethnicity]: '' }),
+    )!;
+    expect(profile.notCollected).toContain(CHC_FIELD_IDS.ethnicity);
+    expect(profile.notCollected).not.toContain(CHC_FIELD_IDS.mobile);
+  });
+
+  it('reports nothing missing for the current form', () => {
+    expect(readStarterProfile(fields, fullValues())!.notCollected).toEqual([]);
+  });
 });
 
 describe('assessInductionReadiness', () => {
@@ -223,6 +328,32 @@ describe('assessInductionReadiness', () => {
     const verdict = assess(fullValues({ [CHC_FIELD_IDS.inductionDate]: BEYOND_HOLIDAY_LIST }));
     expect(verdict.readiness).toBe('ready');
     expect(verdict.warnings).toContain('holiday_list_expired');
+  });
+
+  it('warns when the form never asked something the profile reports', () => {
+    // A seat can still be booked without an ethnicity — a REGISTRATION cannot,
+    // and the difference is invisible if the answer arrives as an empty string.
+    const withoutEthnicity = chcIntakeFields().filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    const profile = readStarterProfile(
+      withoutEthnicity,
+      fullValues({ [CHC_FIELD_IDS.ethnicity]: '' }),
+    )!;
+    const verdict = assessInductionReadiness(profile, { today: TUESDAY });
+    expect(verdict.readiness).toBe('ready');
+    expect(verdict.warnings).toContain('intake_incomplete');
+  });
+
+  it('stays quiet when the answer arrived even though the version lacks the field', () => {
+    // The bespoke intake screen asks in code and writes the canonical id, so it
+    // collects answers a stale template never declared. Those are answers, not
+    // gaps — reporting them would send someone chasing what they already have.
+    const withoutEthnicity = chcIntakeFields().filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    const profile = readStarterProfile(withoutEthnicity, fullValues())!;
+    expect(profile.ethnicity).toBe('Caucasian');
+    expect(profile.notCollected).not.toContain(CHC_FIELD_IDS.ethnicity);
+    expect(assessInductionReadiness(profile, { today: TUESDAY }).warnings).not.toContain(
+      'intake_incomplete',
+    );
   });
 
   it('blocks a starter already covered by a booking', () => {
@@ -314,5 +445,97 @@ describe('buildInductionCohorts', () => {
     ]);
     expect(cohorts).toHaveLength(1);
     expect(cohorts[0]!.starters.map((s) => s.submissionId)).toEqual(['dated']);
+  });
+});
+
+/**
+ * A stored version is a snapshot taken when the form was created, and nothing
+ * republishes it when `chcIntakeFields()` gains a question. The bespoke screen
+ * renders its own questions from code, so the form on screen still looks
+ * complete — the gap is invisible until it costs someone a registration.
+ */
+describe('intakeTemplateDrift', () => {
+  const CURRENT = chcIntakeFields();
+
+  it('reports nothing for a version in step with the code', () => {
+    expect(intakeTemplateDrift(CURRENT)).toEqual([]);
+  });
+
+  it('names a question the version never carried', () => {
+    const stale = CURRENT.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    expect(intakeTemplateDrift(stale).map((f) => f.id)).toEqual([CHC_FIELD_IDS.ethnicity]);
+  });
+
+  it('ignores a question re-created under a builder id', () => {
+    // It IS being asked, just under another name, and the reader resolves it.
+    // Reporting drift here would push an operator into adding a duplicate.
+    const edited = CURRENT.map((f) =>
+      f.id === CHC_FIELD_IDS.ethnicity ? { ...f, id: 'b7' } : f,
+    );
+    expect(intakeTemplateDrift(edited)).toEqual([]);
+  });
+
+  it('says nothing about a form that is not an intake', () => {
+    const other: FormField[] = [
+      { id: 'q1', type: 'text', label: 'Anything', required: false, source: 'built' },
+    ];
+    expect(isIntakeTemplate(other)).toBe(false);
+    expect(intakeTemplateDrift(other)).toEqual([]);
+  });
+
+  it('does not treat an edited option list as a missing question', () => {
+    // An administrator who changed the vocabulary meant to. Offering to add the
+    // canonical question back would put two ethnicity questions on the form.
+    const edited = CURRENT.map((f) =>
+      f.id === CHC_FIELD_IDS.ethnicity ? { ...f, options: ['Aboriginal', 'Other'] } : f,
+    );
+    expect(intakeTemplateDrift(edited)).toEqual([]);
+  });
+});
+
+describe('mergeIntakeQuestions', () => {
+  const CURRENT = chcIntakeFields();
+
+  it('puts the question back where it was authored, not at the end', () => {
+    const stale = CURRENT.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    const merged = mergeIntakeQuestions(stale).map((f) => f.id);
+    expect(merged.indexOf(CHC_FIELD_IDS.ethnicity)).toBe(
+      merged.indexOf(CHC_FIELD_IDS.gender) + 1,
+    );
+    expect(merged[merged.length - 1]).toBe(CHC_FIELD_IDS.driversLicence);
+  });
+
+  it('adds only what was missing and changes nothing else', () => {
+    const stale = CURRENT.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    const merged = mergeIntakeQuestions(stale);
+    expect(merged).toHaveLength(stale.length + 1);
+    // Every pre-existing field survives byte-identical, in its original order.
+    expect(merged.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity)).toEqual(stale);
+  });
+
+  it('keeps an administrator’s edits to the fields it leaves alone', () => {
+    const stale = CURRENT.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity).map((f) =>
+      f.id === CHC_FIELD_IDS.mobile ? { ...f, label: 'Mobile number', required: false } : f,
+    );
+    const merged = mergeIntakeQuestions(stale);
+    const mobile = merged.find((f) => f.id === CHC_FIELD_IDS.mobile)!;
+    expect(mobile.label).toBe('Mobile number');
+    expect(mobile.required).toBe(false);
+  });
+
+  it('is a no-op when nothing is missing', () => {
+    expect(mergeIntakeQuestions(CURRENT)).toEqual(CURRENT);
+  });
+
+  it('restores a template stripped back to the questions the reader detects on', () => {
+    const bare = CURRENT.filter((f) =>
+      [
+        CHC_FIELD_IDS.firstName,
+        CHC_FIELD_IDS.lastName,
+        CHC_FIELD_IDS.inductionDate,
+        CHC_FIELD_IDS.department,
+      ].includes(f.id as never),
+    );
+    expect(intakeTemplateDrift(mergeIntakeQuestions(bare))).toEqual([]);
   });
 });

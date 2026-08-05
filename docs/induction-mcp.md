@@ -218,6 +218,38 @@ that is not a Monday, or is a public holiday, stays blocked no matter what
 flag you pass: those are days on which no induction runs, and no authority
 makes one appear.
 
+## When the form never asked
+
+The intake ships as an ordinary editable template, so an administrator can add,
+rename or re-create its questions in the builder. Two consequences reach this
+server, and both are now reported rather than silent:
+
+- **A re-created question keeps working.** The builder assigns its own id to a
+  question you add or delete-and-recreate, so the preset's id is gone. Choice
+  questions are recognised by their option list instead, which is the part you
+  reproduce exactly when you rebuild one. This is what stops a re-created
+  **Ethnicity** dropdown reading as blank, and a re-created **Department**
+  dropping the starter from these tools altogether.
+
+- **A question the version does not ask is named, not blanked.** Anything the
+  starter's form version never carried is listed in `starter.notCollected`, and
+  the candidate carries an `intake_incomplete` warning. Those fields come back
+  empty because nobody was asked — not because the starter skipped them.
+
+The distinction matters at registration time. An empty ethnicity that was never
+asked must not be carried into BISTrainer as `Unknown` or anything else: that
+records a fact about a person that nobody stated. Add the question to the intake
+form and have the starter answer it.
+
+The warning never blocks a booking. A seat needs a name, a mobile and an email;
+it is the profile built afterwards that needs the rest.
+
+Two edits the fallback deliberately does **not** absorb, because guessing would
+be worse than reporting the gap: changing a question's option list (it is then a
+different question, and its answers are not BISTrainer's vocabulary), and having
+two questions with identical options (nothing says which one the answer belongs
+to). Both surface as `notCollected`.
+
 ## Known limitation: the public-holiday list
 
 The notice rule skips WA public holidays from a stored list that currently ends
