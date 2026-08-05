@@ -2,12 +2,15 @@ import { Router } from 'express';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema } from '@formai/db';
-import { FORM_BRAND_KIT_KEYS, type FormBrandKit } from '@formai/shared';
+import { FORM_BRAND_KIT_KEYS, MAX_LOGO_BYTES, type FormBrandKit } from '@formai/shared';
 import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
 import { hasPermission } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
+import { getStorageClient } from '../storage/index.js';
+import { readBrandColors } from '../pdf/brand-colors.js';
+import { readLogoCandidates } from '../pdf/brand-logo.js';
 
 /**
  * Form brands — the client a form is presented as.
@@ -96,6 +99,101 @@ function mergeKit(stored: FormBrandKit, patch: FormBrandKit): FormBrandKit {
 function isDuplicateName(err: unknown): boolean {
   return err instanceof Error && /form_brands_org_name_uq/.test(err.message);
 }
+
+/**
+ * POST /form-brands/scan — read a client's colours and logo off their document.
+ *
+ * SEEDS A BRAND, DECIDES NOTHING. What comes back is a proposal the author
+ * confirms, which is the same posture every other thing this product reads off
+ * a page takes: a document's most-used colour may be its table borders rather
+ * than its letterhead, and its images are its logo, its hazard pictograms and
+ * its site photographs alike. Nothing is stored, and no brand is created or
+ * changed — the author picks, then saves through the ordinary edit path.
+ *
+ * NO MODEL IS INVOLVED. Colours are operators in the content stream and logos
+ * are image XObjects, so both are read by exact parsing. A client's document is
+ * a file somebody else authored; the less of it that reaches a model, the
+ * smaller the surface.
+ *
+ * Logos come back as BASE64 rather than uploaded URLs. Uploading every
+ * candidate would leave an orphaned object for each one the author declined,
+ * and the existing upload door already takes exactly this shape — so the one
+ * they choose goes through it and the rest are simply dropped.
+ */
+const scanBody = z
+  .object({
+    /** An org-scoped storage id — a form's own source PDF. */
+    assetId: z.string().min(1).optional(),
+    pdfBase64: z.string().min(1).optional(),
+  })
+  .refine((v) => !!v.assetId !== !!v.pdfBase64, {
+    message: 'Provide exactly one of assetId or pdfBase64.',
+  });
+
+/** Candidates returned inline. Past this the response is a download. */
+const MAX_INLINE_LOGOS = 4;
+
+formBrandsRouter.post(
+  '/scan',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    const tenant = req.tenant!;
+    // Gated as an edit: this is the first step of authoring a brand, and it
+    // reads a document out of the org's own storage.
+    if (!(await hasPermission(tenant, 'forms', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = scanBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+
+    let bytes: Buffer;
+    if (parsed.data.assetId) {
+      /*
+        The org id comes from the SESSION, not the body, and the storage client
+        scopes the download by it — so an asset id belonging to another org
+        resolves to nothing rather than to their document. This is the same
+        contract `/pdf/extract` and `/answer-guides/match` already use.
+      */
+      const client = getStorageClient();
+      if (!client) {
+        res.status(503).json({ error: 'storage_unavailable' });
+        return;
+      }
+      const downloaded = await client.download(tenant.orgId, parsed.data.assetId);
+      if (!downloaded) {
+        res.status(404).json({ error: 'asset_not_found' });
+        return;
+      }
+      bytes = downloaded;
+    } else {
+      bytes = Buffer.from(parsed.data.pdfBase64!, 'base64');
+    }
+
+    const { colors, notes } = await readBrandColors(bytes);
+    const candidates = await readLogoCandidates(bytes);
+    const logos = candidates
+      .filter((c) => c.bytes.length <= MAX_LOGO_BYTES)
+      .slice(0, MAX_INLINE_LOGOS)
+      .map((c) => ({
+        imageBase64: c.bytes.toString('base64'),
+        mimeType: c.mimeType,
+        width: c.width,
+        height: c.height,
+      }));
+
+    if (candidates.length > 0 && logos.length === 0) {
+      // Distinguished from "no images at all" on purpose: "we found one and it
+      // was too big" is a different thing for the author to know.
+      notes.push('The images in this document are too large to use as a logo.');
+    }
+
+    res.json({ colors, logos, notes });
+  }),
+);
 
 formBrandsRouter.get(
   '/',

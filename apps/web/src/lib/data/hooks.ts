@@ -415,6 +415,16 @@ export function useUpdateFormBrand() {
   });
 }
 
+/**
+ * Propose a brand from a client's document. Read-only on the server — the
+ * result is a draft the author confirms, so there is nothing to invalidate.
+ */
+export function useScanBrandFromPdf() {
+  return useMutation({
+    mutationFn: (input: { assetId?: string; pdfBase64?: string }) => store.scanBrandFromPdf(input),
+  });
+}
+
 export function useDeleteFormBrand() {
   const qc = useQueryClient();
   return useMutation({

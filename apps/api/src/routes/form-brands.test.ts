@@ -28,6 +28,11 @@ vi.mock('../db.js', () => ({
   getDbStatus: () => 'unconfigured',
 }));
 
+let mockStorage: { download: (orgId: string, key: string) => Promise<Buffer | null> } | null = null;
+vi.mock('../storage/index.js', () => ({
+  getStorageClient: () => mockStorage,
+}));
+
 const { createApp } = await import('../app.js');
 const { sealSession } = await import('../auth/workos.js');
 
@@ -116,6 +121,7 @@ function fakeDb(opts: {
 
 afterEach(() => {
   mockDbValue = null;
+  mockStorage = null;
   vi.restoreAllMocks();
 });
 
@@ -422,6 +428,195 @@ describe('DELETE /form-brands/:id', () => {
         headers: authHeader(admin),
       });
       expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * POST /form-brands/scan — reading a client's colours and logo off their PDF.
+ *
+ * A PROPOSAL, NEVER A DECISION: nothing is stored and no brand is created or
+ * changed, which is what makes it safe to run against a document somebody else
+ * authored. The tests below pin that, and pin the org scoping on the asset
+ * path — the id is a key into storage, and it must never be the caller's word
+ * for which org's document to read.
+ */
+describe('POST /form-brands/scan', () => {
+  /** A one-page PDF drawing a rectangle in the given colour. */
+  async function colouredPdf(): Promise<Buffer> {
+    const { PDFDocument, rgb } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    doc.addPage([600, 800]).drawRectangle({
+      x: 20,
+      y: 700,
+      width: 200,
+      height: 40,
+      color: rgb(0, 0.266, 0.8),
+    });
+    return Buffer.from(await doc.save());
+  }
+
+  async function scan(
+    base: string,
+    body: unknown,
+    t: { userId: string; orgId: string; role: string } = admin,
+  ) {
+    return fetch(`${base}/form-brands/scan`, {
+      method: 'POST',
+      headers: authHeader(t),
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('proposes the colours a document draws with', async () => {
+    mockDbValue = fakeDb().db;
+    const pdf = await colouredPdf();
+    const { server, base } = startApp();
+    try {
+      const res = await scan(base, { pdfBase64: pdf.toString('base64') });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { colors: string[] }).colors).toContain('#0044cc');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('CHANGES NOTHING — no brand is created or written', async () => {
+    /*
+      The whole reason this is safe to point at a client's document. A scan that
+      wrote its guesses would put a table-border colour on a brand and the author
+      would have to undo it.
+    */
+    const { db, updateSet } = fakeDb();
+    mockDbValue = db;
+    const pdf = await colouredPdf();
+    const { server, base } = startApp();
+    try {
+      await scan(base, { pdfBase64: pdf.toString('base64') });
+      expect(db.insert).not.toHaveBeenCalled();
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('READS THE ASSET UNDER THE SESSION’S ORG, not one named in the body', async () => {
+    // The id is a key into storage. If the org came from the request, a caller
+    // could read another org's document by supplying their id alongside it.
+    const seen: string[] = [];
+    mockStorage = {
+      download: async (orgId, key) => {
+        seen.push(`${orgId}/${key}`);
+        return colouredPdf();
+      },
+    };
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await scan(base, { assetId: 'some-doc.pdf', orgId: 'org-2' });
+      expect(res.status).toBe(200);
+      expect(seen).toEqual(['org-1/some-doc.pdf']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for an asset that is not in the org’s storage', async () => {
+    mockStorage = { download: async () => null };
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      expect((await scan(base, { assetId: 'missing.pdf' })).status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a body carrying both an assetId and inline bytes', async () => {
+    // Two sources means one is ignored, and which one is not visible to the
+    // caller — the same refusal /answer-guides/match makes.
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await scan(base, { assetId: 'a.pdf', pdfBase64: 'eA==' });
+      expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports a monochrome document rather than inventing a colour', async () => {
+    // A black-and-white form is a normal outcome. Making one up would be worse
+    // than saying so.
+    const { PDFDocument } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    doc.addPage([600, 800]);
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const body = (await (
+        await scan(base, { pdfBase64: Buffer.from(await doc.save()).toString('base64') })
+      ).json()) as { colors: string[]; notes: string[] };
+      expect(body.colors).toEqual([]);
+      expect(body.notes.join(' ')).toMatch(/black and white/i);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns logo candidates as base64 the upload door already accepts', async () => {
+    /*
+      Base64 rather than uploaded URLs on purpose: uploading every candidate
+      would leave an orphaned object for each one the author declined. The
+      chosen one goes through the existing POST /org/logo, which is why the
+      shape here matches what that route takes.
+    */
+    const { PDFDocument } = await import('pdf-lib');
+    const { encodePng } = await import('../pdf/brand-logo.js');
+    const samples = Buffer.alloc(120 * 60 * 3, 0x44);
+    const doc = await PDFDocument.create();
+    const img = await doc.embedPng(encodePng(samples, 120, 60, 3));
+    doc.addPage([600, 800]).drawImage(img, { x: 20, y: 700, width: 120, height: 60 });
+
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const body = (await (
+        await scan(base, { pdfBase64: Buffer.from(await doc.save()).toString('base64') })
+      ).json()) as { logos: { imageBase64: string; mimeType: string; width: number }[] };
+      expect(body.logos).toHaveLength(1);
+      expect(body.logos[0]).toMatchObject({ mimeType: 'image/png', width: 120, height: 60 });
+      // PNG magic, so the upload door's own magic-bytes check will pass.
+      expect([...Buffer.from(body.logos[0]!.imageBase64, 'base64').subarray(0, 4)]).toEqual([
+        0x89, 0x50, 0x4e, 0x47,
+      ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a Viewer', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      expect((await scan(base, { pdfBase64: 'eA==' }, viewer)).status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses an unauthenticated caller', async () => {
+    mockDbValue = fakeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/form-brands/scan`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pdfBase64: 'eA==' }),
+      });
+      expect(res.status).toBe(401);
     } finally {
       server.close();
     }
