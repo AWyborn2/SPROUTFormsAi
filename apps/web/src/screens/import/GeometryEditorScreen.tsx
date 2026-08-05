@@ -4,6 +4,13 @@ import { Button, Icon, useToast } from '@formai/ui';
 import { geometrySegments, isChoiceField, type FormField, type PageBox } from '@formai/shared';
 import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../../lib/data/hooks.js';
 import type { FieldProposal, TableProposal, TextPage } from '../../lib/pdf-geometry.js';
+import {
+  groupFields,
+  outcomeFieldIds,
+  overallCounts,
+  pairsFor,
+  type PlacementPair,
+} from './placement-list.js';
 import { markSentence } from '../../lib/mark-description.js';
 import { PdfViewer } from './PdfViewer.js';
 import {
@@ -516,8 +523,42 @@ export function GeometryEditorScreen() {
     }),
   ];
 
-  const placedCount = fields.filter((f) => geometrySegments(f).length > 0).length;
-  const placeable = fields.filter((f) => f.type !== 'section_header');
+  /*
+    THE LIST IS GROUPED, COUNTED AND FILTERABLE (U15).
+
+    The Track Dozer paper produces roughly three hundred boxes, and this list
+    was a flat run of them — the two-hour manual session the runbook describes
+    is mostly navigating it. Grouping by the printed heading turns "where am I"
+    into a glance; the per-group counts turn "am I finished" into a number.
+  */
+  const [filter, setFilter] = useState('');
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+
+  const groups = useMemo(() => groupFields(fields, expectedBoxes, filter), [fields, filter]);
+  const counts = useMemo(() => overallCounts(fields, expectedBoxes), [fields]);
+
+  /*
+    A question and its outcome box are ONE row, with two chips.
+
+    Both are geometry — the response on the question field, the outcome on the
+    field its `outcomeTarget` names — but they are one unit of authoring work.
+    Shown as two unrelated rows among three hundred, one of them is how the
+    other ends up unplaced, and the export then draws a candidate's answer with
+    no verdict beside it.
+  */
+  const pairByQuestion = useMemo(() => {
+    const map = new Map<string, PlacementPair>();
+    for (const pair of pairsFor(fields)) map.set(pair.question.id, pair);
+    return map;
+  }, [fields]);
+
+  /*
+    An outcome box does not ALSO get a row of its own — it is reachable through
+    its question's chip. A second row for it is exactly the split this unit
+    exists to close.
+  */
+  const pairedOutcomeIds = useMemo(() => outcomeFieldIds(fields), [fields]);
+
 
   return (
     <div className="fai-rise flex h-[calc(100vh-56px)] flex-col">
@@ -525,7 +566,7 @@ export function GeometryEditorScreen() {
         <div className="min-w-0">
           <h1 className="truncate font-heading text-[16px] font-bold">Placement · {version.label}</h1>
           <p className="text-[12.5px] text-text-secondary">
-            {placedCount} of {placeable.length} answerable fields placed
+            {counts.placed} of {counts.total} answerable fields placed
             {dirty && <span className="ml-2 text-warning-text">· unsaved changes</span>}
           </p>
         </div>
@@ -632,9 +673,71 @@ export function GeometryEditorScreen() {
               </div>
             </div>
           )}
-          {placeable.map((f) => (
-            <FieldRow key={f.id} field={f} selected={f.id === selectedId} onSelect={() => selectField(f)} />
-          ))}
+          <div className="border-b border-border p-[10px_14px]">
+            <input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter by label or question text…"
+              aria-label="Filter fields"
+              className="h-[30px] w-full rounded-lg border border-border bg-surface-page px-2.5 text-[12px]"
+            />
+          </div>
+
+          {groups.map((group) => {
+            const isCollapsed = !!collapsedGroups[group.key];
+            return (
+              <div key={group.key}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCollapsedGroups((prev) => ({ ...prev, [group.key]: !prev[group.key] }))
+                  }
+                  aria-expanded={!isCollapsed}
+                  className="flex w-full items-center gap-2 border-b border-border-subtle bg-surface-sunken px-[14px] py-2 text-left hover:bg-surface-hover"
+                >
+                  <Icon name={isCollapsed ? 'chevron-right' : 'chevron-down'} size={13} className="flex-none text-text-tertiary" />
+                  <span className="min-w-0 flex-1 truncate text-[12px] font-semibold">{group.label}</span>
+                  {/*
+                    The counts describe the WHOLE group, never what the filter
+                    left — "2 of 2" beside a filtered list with thirty unplaced
+                    fields behind it reads as finished.
+                  */}
+                  <span className="flex-none text-[11px] text-text-tertiary">
+                    {group.placed}/{group.total}
+                  </span>
+                </button>
+
+                {!isCollapsed &&
+                  group.fields
+                    .filter((f) => !pairedOutcomeIds.has(f.id))
+                    .map((f) => {
+                      const pair = pairByQuestion.get(f.id);
+                      return pair ? (
+                        <PairRow
+                          key={f.id}
+                          pair={pair}
+                          selectedId={selectedId}
+                          onSelect={selectField}
+                          fields={fields}
+                        />
+                      ) : (
+                        <FieldRow
+                          key={f.id}
+                          field={f}
+                          selected={f.id === selectedId}
+                          onSelect={() => selectField(f)}
+                        />
+                      );
+                    })}
+              </div>
+            );
+          })}
+
+          {groups.length === 0 && (
+            <p className="px-[14px] py-3 text-[11.5px] text-text-tertiary">
+              No fields match “{filter}”.
+            </p>
+          )}
         </aside>
 
         {/*
@@ -878,6 +981,111 @@ function FieldRow({
           {field.type} · {placed}/{wanted} placed
         </span>
       </span>
+    </button>
+  );
+}
+
+/**
+ * A marked question and its outcome box, as ONE row with two chips.
+ *
+ * KD5: the paper gives a marked question two printed places — where the
+ * candidate's ANSWER appears, and where the assessor's VERDICT appears. The
+ * response is geometry on the question field; the outcome is geometry on the
+ * field its `outcomeTarget` names. Both have to be placed, and a list that
+ * showed them as two unrelated rows among three hundred is how one of them ends
+ * up missing.
+ *
+ * The question text sits under the row because that is what an author is
+ * checking against the page — the label on this document class is routinely
+ * "Question 7".
+ */
+function PairRow({
+  pair,
+  selectedId,
+  onSelect,
+  fields,
+}: {
+  pair: PlacementPair;
+  selectedId: string | null;
+  onSelect: (field: FormField) => void;
+  fields: readonly FormField[];
+}) {
+  const { question, outcome, responsePlaced, outcomePlaced, unresolvedOutcomeId } = pair;
+  const questionText = question.description ?? '';
+
+  return (
+    <div
+      className={`border-b border-border-subtle px-[14px] py-2 ${
+        selectedId === question.id || (outcome && selectedId === outcome.id)
+          ? 'bg-[var(--accent-soft)]'
+          : ''
+      }`}
+    >
+      <span className="block truncate text-[12.5px] font-semibold">
+        {question.label || question.id}
+      </span>
+      {questionText && (
+        <span className="mt-0.5 block text-[11px] leading-snug text-text-tertiary">
+          {questionText}
+        </span>
+      )}
+
+      <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+        <Chip
+          label="Response"
+          placed={responsePlaced}
+          active={selectedId === question.id}
+          onClick={() => onSelect(question)}
+        />
+        {outcome ? (
+          <Chip
+            label="Outcome"
+            placed={outcomePlaced}
+            active={selectedId === outcome.id}
+            onClick={() => onSelect(outcome)}
+          />
+        ) : (
+          /*
+            NOT a chip. An unresolved target places nothing, and offering a
+            control that does nothing is worse than saying why it is missing —
+            the manifest was authored against a different version, or the
+            printed reference never resolved.
+          */
+          <span className="rounded-lg border border-warning bg-warning-soft px-2 py-1 text-[10.5px] text-warning-text">
+            Outcome box “{unresolvedOutcomeId}” is not in this version
+          </span>
+        )}
+      </span>
+    </div>
+  );
+}
+
+function Chip({
+  label,
+  placed,
+  active,
+  onClick,
+}: {
+  label: string;
+  placed: boolean;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[10.5px] font-semibold ${
+        active
+          ? 'border-accent bg-accent text-accent-contrast'
+          : placed
+            ? 'border-success bg-success-soft text-success-text'
+            : 'border-border text-text-secondary hover:bg-surface-hover'
+      }`}
+    >
+      <Icon name={placed ? 'circle-check' : 'square-dashed'} size={11} />
+      {label}
     </button>
   );
 }
