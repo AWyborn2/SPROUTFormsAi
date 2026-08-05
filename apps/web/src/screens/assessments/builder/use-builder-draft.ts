@@ -4,10 +4,14 @@ import {
   hasAnyMatchSide,
   hasBothMatchSides,
   isChoiceField,
+  type BuiltMatchingQuestion,
   type BuilderStructure,
+  type DraftAnswerKey,
   type ExtractionResult,
   type FormField,
   type FormFieldType,
+  type KeySource,
+  type MatchPresentation,
   type SectionColumns,
   type SetupAnswers,
 } from '@formai/shared';
@@ -95,12 +99,38 @@ export interface BuilderDraftState {
   hasDocument: boolean;
   title: string | null;
   pageCount: number;
+  keys: DraftAnswerKey[];
   ingest: (file: File) => Promise<void>;
   setSetup: (patch: Partial<SetupAnswers>) => void;
   toggleExcluded: (fieldId: string) => void;
   reset: () => void;
   /** Structure edits. Each delegates to a pure operation in builder-structure.ts. */
   structureOps: StructureOps;
+  /** Answer-key edits. */
+  keyOps: KeyOps;
+}
+
+export interface KeyOps {
+  /**
+   * Set one question's key outright.
+   *
+   * Setting an EMPTY key removes the entry rather than storing a key of zero
+   * options. `markTheory` skips a field whose `answerKey` is absent or empty
+   * and treats it as not-auto-marked — so an empty entry and no entry mean the
+   * same thing to marking, and keeping both would let the UI report a question
+   * as keyed that contributes no mark.
+   */
+  setKey: (fieldId: string, answerKey: string[], source?: KeySource) => void;
+  /** Toggle one option in a key, for a question that takes a set. */
+  toggleOption: (fieldId: string, option: string, multiple: boolean) => void;
+  /** Record or withdraw the attestation, with who made it. */
+  setVerified: (fieldId: string, verified: boolean, actor: string) => void;
+  /** Save a matching question: options onto the field, key into the draft. */
+  saveMatching: (
+    fieldId: string,
+    built: BuiltMatchingQuestion,
+    presentation: MatchPresentation,
+  ) => void;
 }
 
 export interface StructureOps {
@@ -187,6 +217,7 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     pathways: [...DEFAULT_SETUP_ANSWERS.pathways],
   }));
   const [excluded, setExcluded] = useState<Set<string>>(() => new Set());
+  const [keys, setKeys] = useState<DraftAnswerKey[]>([]);
 
   const ingest = useCallback(async (file: File) => {
     setError(null);
@@ -218,6 +249,7 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
       setFields(seedFields(result));
       setStructure(structureFromExtraction(result));
       setExcluded(new Set());
+      setKeys([]);
       setGroupCount(1);
       setPhase('ready');
     } catch (err) {
@@ -247,6 +279,21 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     setFields([]);
     setStructure([]);
     setExcluded(new Set());
+    setKeys([]);
+  }, []);
+
+  /*
+    Retyping a question CLEARS its key.
+
+    An answer key is a list of OPTION VALUES, and `retypeField` reseeds or
+    strips options when a field's type changes. A key kept across that change
+    names options the question no longer offers, which marks every candidate
+    wrong on a question they answered correctly — and does it silently, because
+    a stale key looks exactly like a current one.
+  */
+  const setFieldTypeAndClearKey = useCallback((fieldId: string, type: FormFieldType) => {
+    setFields((fs) => fs.map((f) => (f.id !== fieldId || f.type === type ? f : retypeField(f, type))));
+    setKeys((prev) => prev.filter((k) => k.fieldId !== fieldId));
   }, []);
 
   /*
@@ -288,13 +335,104 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
         `typeOptionsFor`'s own comment records. A third editor with a third
         implementation would drift the same way.
       */
-      setFieldType: (fieldId, type) =>
-        setFields((fs) =>
-          fs.map((f) => (f.id !== fieldId || f.type === type ? f : retypeField(f, type))),
-        ),
+      setFieldType: setFieldTypeAndClearKey,
       reset: () => setStructure(extraction ? structureFromExtraction(extraction) : []),
     }),
-    [extraction, groupCount],
+    [extraction, groupCount, setFieldTypeAndClearKey],
+  );
+
+  const keyOps = useMemo<KeyOps>(
+    () => ({
+      setKey: (fieldId, answerKey, source = 'manual') =>
+        setKeys((prev) => {
+          const rest = prev.filter((k) => k.fieldId !== fieldId);
+          if (answerKey.length === 0) return rest;
+          const existing = prev.find((k) => k.fieldId === fieldId);
+          /*
+            A CHANGED KEY LOSES ITS VERIFICATION.
+
+            The attestation is "the training authority confirmed THESE answers";
+            carrying it onto a different set would let a key nobody has checked
+            report itself as verified on a safety-critical assessment.
+          */
+          const same =
+            existing !== undefined &&
+            existing.answerKey.length === answerKey.length &&
+            existing.answerKey.every((o) => answerKey.includes(o));
+          return [
+            ...rest,
+            {
+              fieldId,
+              answerKey,
+              source,
+              ...(same && existing.verifiedBy ? { verifiedBy: existing.verifiedBy } : {}),
+              ...(same && existing.verifiedAt ? { verifiedAt: existing.verifiedAt } : {}),
+            },
+          ];
+        }),
+
+      toggleOption: (fieldId, option, multiple) =>
+        setKeys((prev) => {
+          const existing = prev.find((k) => k.fieldId === fieldId);
+          const current = existing?.answerKey ?? [];
+          // A single-answer question REPLACES; a set question accumulates.
+          // Exact-set marking makes the difference decisive rather than
+          // cosmetic: an extra option on a single-answer question fails
+          // everyone who answers it correctly.
+          const next = multiple
+            ? current.includes(option)
+              ? current.filter((o) => o !== option)
+              : [...current, option]
+            : current.length === 1 && current[0] === option
+              ? []
+              : [option];
+          const rest = prev.filter((k) => k.fieldId !== fieldId);
+          if (next.length === 0) return rest;
+          return [...rest, { fieldId, answerKey: next, source: 'manual' as const }];
+        }),
+
+      setVerified: (fieldId, verified, actor) =>
+        setKeys((prev) =>
+          prev.map((k) =>
+            k.fieldId !== fieldId
+              ? k
+              : verified
+                ? { ...k, verifiedBy: actor, verifiedAt: new Date().toISOString() }
+                : // Withdrawing drops both halves: a `verifiedAt` with nobody
+                  // attached is a timestamp nobody stands behind.
+                  { fieldId: k.fieldId, answerKey: k.answerKey, source: k.source },
+          ),
+        ),
+
+      saveMatching: (fieldId, built, presentation) => {
+        /*
+          The OPTIONS go on the field and the KEY goes in the draft.
+
+          A matching question's options ARE its two sides, so they are part of
+          the question rather than part of the marking — they have to reach the
+          published field either way. The key travels with every other key so
+          there is one place a reviewer looks to see what has been decided.
+        */
+        setFields((fs) =>
+          fs.map((f) =>
+            f.id !== fieldId
+              ? f
+              : {
+                  ...f,
+                  type: 'checkbox_group' as const,
+                  selectionType: 'multiple' as const,
+                  options: [...built.options],
+                  matchPresentation: presentation,
+                },
+          ),
+        );
+        setKeys((prev) => [
+          ...prev.filter((k) => k.fieldId !== fieldId),
+          { fieldId, answerKey: [...built.answerKey], source: 'manual' as const },
+        ]);
+      },
+    }),
+    [],
   );
 
   const stats = useMemo(() => (extraction ? statsFor(extraction) : null), [extraction]);
@@ -314,8 +452,10 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     pageCount: extraction?.pageCount ?? 0,
     ingest,
     setSetup,
+    keys,
     toggleExcluded,
     reset,
     structureOps,
+    keyOps,
   };
 }
