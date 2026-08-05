@@ -776,3 +776,111 @@ describe('extractForm — assessment field properties survive normalization', ()
     expect(field?.matchRight).toBeUndefined();
   });
 });
+
+/**
+ * The page range every field came from.
+ *
+ * STAMPED, NOT ASKED FOR. A long paper is extracted a few pages at a time and
+ * the splitter knows exactly which pages went into each call — so this is a
+ * fact the pipeline already holds. Asking the model for it would put a
+ * hallucinable number on the one thing that tells three character-identical
+ * practical parts apart.
+ *
+ * The prompt says the range too, because the profile's rules lean on "guess
+ * nothing you cannot see" and that instruction needs a reference point.
+ */
+describe('extractForm — page range stamping', () => {
+  function toolResponseFor(labels: string[]): AnthropicMessage {
+    return {
+      content: [
+        {
+          type: 'tool_use',
+          name: EXTRACT_TOOL_NAME,
+          input: {
+            fields: labels.map((label) => ({ label, type: 'text', confidence: 0.9 })),
+            designNotes: [],
+          },
+        },
+      ],
+    };
+  }
+
+  it('stamps each field with the pages its own batch was given', async () => {
+    // Six pages at two per batch: three calls, and each call's fields carry
+    // that call's range rather than the document's.
+    const pdf = await makeMultiPageFlatPdf(6);
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce(toolResponseFor(['a']))
+      .mockResolvedValueOnce(toolResponseFor(['b']))
+      .mockResolvedValueOnce(toolResponseFor(['c']));
+
+    const result = await extractForm(pdf, {
+      fileName: 'long.pdf',
+      documentType: 'assessment',
+      pageBatchSize: 2,
+      anthropic: { messages: { create } },
+    });
+
+    expect(result.fields.map((f) => f.sourcePages)).toEqual([
+      { from: 1, to: 2 },
+      { from: 3, to: 4 },
+      { from: 5, to: 6 },
+    ]);
+  });
+
+  it('stamps the final short batch with the real last page, not the batch width', async () => {
+    // Five pages at two per batch ends on a batch of one; a range of 5-6 on a
+    // five-page document is a page that does not exist.
+    const pdf = await makeMultiPageFlatPdf(5);
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce(toolResponseFor(['a']))
+      .mockResolvedValueOnce(toolResponseFor(['b']))
+      .mockResolvedValueOnce(toolResponseFor(['c']));
+
+    const result = await extractForm(pdf, {
+      fileName: 'long.pdf',
+      pageBatchSize: 2,
+      anthropic: { messages: { create } },
+    });
+
+    expect(result.fields.at(-1)?.sourcePages).toEqual({ from: 5, to: 5 });
+  });
+
+  it('tells the model which pages it is holding', async () => {
+    // "Guess nothing you cannot see" needs a reference point, and the running
+    // footer is the only in-document clue.
+    const pdf = await makeMultiPageFlatPdf(6);
+    const create = vi.fn().mockResolvedValue(toolResponseFor(['a']));
+
+    await extractForm(pdf, {
+      fileName: 'long.pdf',
+      documentType: 'assessment',
+      pageBatchSize: 2,
+      anthropic: { messages: { create } },
+    });
+
+    const texts = create.mock.calls.map((c) => {
+      const params = c[0] as { messages: { content: { type: string; text?: string }[] }[] };
+      return params.messages[0]!.content.find((b) => b.type === 'text')?.text ?? '';
+    });
+    expect(texts[0]).toContain('pages 1-2 of a 6-page document');
+    expect(texts[2]).toContain('pages 5-6 of a 6-page document');
+  });
+
+  it('leaves an unbatched document unstamped rather than claiming a range', async () => {
+    // A short document goes through in one call with no split, so there is no
+    // batch range to report — and a stamp of 1-N would be a fact nothing
+    // established.
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(toolResponseFor(['a']));
+
+    const result = await extractForm(pdf, {
+      fileName: 'short.pdf',
+      anthropic: { messages: { create } },
+    });
+
+    expect(result.fields[0]?.sourcePages).toBeUndefined();
+  });
+});

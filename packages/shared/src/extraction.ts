@@ -157,6 +157,23 @@ export interface ExtractedField {
   matchLeft?: string[];
   /** A matching question's ANSWER side, verbatim, in printed order. */
   matchRight?: string[];
+  /**
+   * The printed page range the extraction pass that produced this field was
+   * looking at.
+   *
+   * STAMPED IN CODE, NEVER ASKED FOR. A long document is extracted a few pages
+   * at a time, and the splitter knows exactly which pages went into each call —
+   * so this is a fact the pipeline already has and the model can only guess at.
+   * Asking for it would put a hallucinable number on the one thing that
+   * disambiguates three character-identical practical parts.
+   *
+   * NOT `sourcePosition`, which needs the full x/y/width/height geometry the AI
+   * path cannot produce. This says which pages a field came from, not where on
+   * one it sits.
+   *
+   * 1-based and inclusive, matching the page numbers printed in a footer.
+   */
+  sourcePages?: { from: number; to: number };
   sourcePosition?: SourcePosition;
   /** Reviewer-facing note, e.g. "detected as text — likely a signature field". */
   note?: string;

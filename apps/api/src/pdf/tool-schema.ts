@@ -36,7 +36,8 @@ export const extractFormFieldsTool = {
             required: { type: 'boolean' },
             description: {
               type: 'string',
-              description: 'Disambiguation for terse or ambiguous labels (e.g. "BAC", "VOC").',
+              description:
+                'Disambiguation for terse or ambiguous labels (e.g. "BAC", "VOC"). Also the place to record a logbook table’s printed minimum-hours sentence verbatim. A definitions table may be printed on pages you cannot see: where you cannot resolve an abbreviation this field uses, say so here rather than expanding it from your own knowledge.',
             },
             options: {
               type: 'array',
@@ -89,7 +90,7 @@ export const extractFormFieldsTool = {
               type: 'array',
               items: { type: 'string' },
               description:
-                'For repeating_group only — the pre-printed item labels of a fixed-item checklist table. Omit for tables with genuinely blank entry rows. When present, the item/label column must still appear as the FIRST columns entry (type text). For a single-column checklist, list the items top-to-bottom. For a checklist printed as several side-by-side column groups, list them COLUMN-MAJOR: the whole leftmost printed column top-to-bottom, then the next column, and so on.',
+                'For repeating_group only — the pre-printed item labels of a fixed-item checklist table. Omit for tables with genuinely blank entry rows. When present, the item/label column must still appear as the FIRST columns entry (type text). For a single-column checklist, list the items top-to-bottom. For a checklist printed as several side-by-side column groups, list them COLUMN-MAJOR: the whole leftmost printed column top-to-bottom, then the next column, and so on. An item that WRAPS onto a second printed line is ONE entry. Indented bullets beneath an item elaborate it and belong to that item’s entry — they are not entries of their own, unless a bullet prints its own tick box.',
             },
             columnGroups: {
               type: 'integer',
@@ -100,13 +101,13 @@ export const extractFormFieldsTool = {
             questionRef: {
               type: 'string',
               description:
-                'The question reference exactly as printed ("Q1", "BBM Q3", "7"). Set it on a question AND on that question’s tick/cross outcome box; the matching string is what links the two. Omit on anything that is neither.',
+                'A reference that identifies exactly ONE question in the pages you were given. Numbering restarts in every question set, so a bare printed number is not a reference on its own: build it from the set heading plus the printed number where that heading is in view ("General Q7", "BBM Q3", "RM Q10"), and prefix with the printed page number where it is not ("p.5 Q7"). Set the SAME string on the question and on its tick/cross outcome box — that string is what links the two, so the pair must match character for character. Omit on anything that is neither.',
             },
             coverSection: {
               type: 'string',
               enum: [...COVER_SECTIONS],
               description:
-                'For a field on the cover / summary page only — which of its three sections the field belongs to. "candidate_declaration": the candidate identity boxes and the candidate declaration signature. "pathway_prerequisites": every prerequisite row (licence, permit, ticket, qualification), every pathway statement, and every assessment-method tracking row. "assessor_declaration": coaching yes/no, further-action and mandatory comment boxes, competent / not-yet-competent, and the assessor name, signature and date. Omit on anything not printed on the cover page.',
+                'For a field printed on the document’s FIRST page only — which of its three sections it belongs to. "candidate_declaration": the candidate identity boxes and the candidate declaration signature. "pathway_prerequisites": every prerequisite row, the pathway choice and the assessment-method table. "assessor_declaration": coaching yes/no, further-action and mandatory comment boxes, competent / not-yet-competent, and the assessor name, signature and date. Omit on every field NOT printed on the first page: a per-part sign-off later in the document prints the same performance statement, the same not-yet-Competent / Competent pair and the same Name / Signature / Date row, and carries none.',
             },
             matchLeft: {
               type: 'array',
@@ -131,7 +132,8 @@ export const extractFormFieldsTool = {
       designNotes: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Free-text observations that do not belong to any single field.',
+        description:
+          'Free-text observations that do not belong to any single field — including the printed page range you were given, any part or question-set heading you had to resolve from a margin label or page number rather than read, the pathway-to-part mapping with its part numbers verbatim, qualifications the ASSESSOR must hold, abbreviation definitions, and anything deliberately skipped as page furniture, publisher matter or back matter.',
       },
     },
     required: ['fields'],

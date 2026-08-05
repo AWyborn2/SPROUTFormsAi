@@ -486,6 +486,7 @@ async function extractBatch(
   pdfBytes: Uint8Array,
   anthropic: AnthropicLike,
   opts: ExtractOptions,
+  pages?: { from: number; to: number; total: number },
 ): Promise<BatchResult> {
   const base64 = Buffer.from(pdfBytes).toString('base64');
   const message = await anthropic.messages.create({
@@ -501,7 +502,21 @@ async function extractBatch(
             type: 'document',
             source: { type: 'base64', media_type: 'application/pdf', data: base64 },
           },
-          { type: 'text', text: promptFor(opts.documentType) },
+          {
+            type: 'text',
+            /*
+              THE MODEL IS TOLD WHICH PAGES IT HOLDS, because it cannot work it
+              out. A long paper is extracted a few pages at a time and the
+              running footer is the only in-document clue — which the profile's
+              own rules then lean on for a part it cannot see the heading of.
+              Stating the range costs one line and turns "guess nothing you
+              cannot see" into an instruction with a reference point.
+            */
+            text: pages
+              ? `You are reading pages ${pages.from}-${pages.to} of a ${pages.total}-page document. ` +
+                `Anything printed outside that range is not yours to describe.\n\n${promptFor(opts.documentType)}`
+              : promptFor(opts.documentType),
+          },
         ],
       },
     ],
@@ -509,7 +524,17 @@ async function extractBatch(
 
   const parsed = parseExtractionResponse(message);
   const rawFields = Array.isArray(parsed.fields) ? parsed.fields : [];
-  const fields = rawFields.map(normalizeField);
+  /*
+    The page range is STAMPED, not asked for. The splitter knows which pages
+    went into this call, so this is a fact the pipeline already holds — and on a
+    document whose practical parts are printed three times character for
+    character, it is the one disambiguator that cannot be argued with. Asking
+    the model for it would put a hallucinable number in its place.
+  */
+  const fields = rawFields.map((raw, i) => {
+    const field = normalizeField(raw, i);
+    return pages ? { ...field, sourcePages: { from: pages.from, to: pages.to } } : field;
+  });
   const modelNotes = Array.isArray(parsed.designNotes) ? parsed.designNotes.map(String) : [];
   return { fields, modelNotes };
 }
@@ -591,12 +616,12 @@ async function extractWithAI(
       batches,
       EXTRACTION_BATCH_CONCURRENCY,
       async (bytes, i) => {
+        const from = i * batchSize + 1;
+        const to = Math.min((i + 1) * batchSize, pageCount);
         try {
-          const out = await extractBatch(bytes, anthropic, opts);
+          const out = await extractBatch(bytes, anthropic, opts, { from, to, total: pageCount });
           return { ok: true as const, ...out };
         } catch (err) {
-          const from = i * batchSize + 1;
-          const to = Math.min((i + 1) * batchSize, pageCount);
           return {
             ok: false as const,
             note: `Pages ${from}–${to} could not be extracted and were skipped — re-run the import or add those fields by hand.`,

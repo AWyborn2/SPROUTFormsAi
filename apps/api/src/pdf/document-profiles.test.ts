@@ -95,21 +95,172 @@ describe('the assessment profile', () => {
     expect(p).toContain('assessor_declaration');
   });
 
+  it('bounds coverSection to the first page, so a part sign-off cannot claim it', () => {
+    /*
+      The real paper prints each part's sign-off in the SAME words as the
+      cover's assessor block — the same performance statement, the same
+      competent pair, the same Name / Signature / Date row. Rule 8 opens by
+      insisting the cover always splits into three, which biases toward filling
+      them, and the page bound existed only in the tool schema.
+    */
+    expect(p).toContain('PROPERTY OF THE COVER PAGE, NOT OF A SHAPE');
+    expect(p).toContain('FIRST page');
+  });
+
   it('refuses to let a prerequisite row be read as a heading', () => {
-    // The Track Dozer paper's driver's-licence prerequisite reads like a
-    // sentence, so a generic read drops it — and then nothing downstream can
-    // tell it was ever printed.
     expect(p).toContain('NEVER OMIT A PREREQUISITE ROW');
     expect(p).toContain('check_cross');
     expect(p.toLowerCase()).toContain('licence');
   });
 
+  it('refuses to let an assessor’s own ticket become a candidate prerequisite', () => {
+    /*
+      Page 2 of the real paper lists three qualifications the ASSESSOR must
+      hold, in the identical shape as the candidate's licence prerequisite — a
+      code and a title. Rule 9 shouts NEVER OMIT, so the pressure runs toward
+      including them, and a false prerequisite gates enrolment on something the
+      candidate never needed.
+    */
+    expect(p).toContain('NEVER PROMOTE AN ASSESSOR');
+    expect(p).toContain('READ THE SENTENCE THAT INTRODUCES THE LIST FIRST');
+  });
+
   it('demands both sides of a matching question, and no guessed options', () => {
-    // One side is not enough to build the pairings, and a guessed option list
-    // is a different question from the one printed.
     expect(p).toContain('BOTH ITS SIDES');
     expect(p).toContain('matchLeft');
     expect(p).toContain('matchRight');
     expect(p).toContain('Never emit a matching question with only one');
+  });
+
+  it('bounds the matching rule to pages that print two lists', () => {
+    // Unbounded, a stem containing the word "match" over ordinary lettered
+    // choices triggers the rule, which then orders `options` emptied — leaving
+    // a question nobody can answer in a section that must be passed.
+    expect(p).toContain('ONLY WHERE THE PAGE PRINTS');
+    expect(p).toContain('TWO LISTS');
+    expect(p).toContain('NEVER EMPTY THE OPTIONS OF A QUESTION THAT PRINTED THEM');
+  });
+
+  it('says a legend printed once heads every question beneath it', () => {
+    /*
+      THE FAILURE THIS EXISTS FOR. On the real paper the ✓ / ✗ is printed
+      exactly once, above the first run of theory questions; the two later sets
+      print none, and their per-question cells are blank. Read conservatively —
+      "a question with no printed box gets no outcome field" — that yields no
+      outcome box for 22 of 31 questions, which is the unmarkable-question
+      failure `outcome-links.ts` exists to prevent.
+    */
+    expect(p).toContain('A LEGEND PRINTED ONCE HEADS EVERY ROW AND EVERY QUESTION BENEATH IT');
+    expect(p).toContain('blank cell under such a legend IS a printed box');
+    expect(p).toContain('belongs to the PART');
+  });
+
+  it('tells the model it is reading a page range and must not guess past it', () => {
+    // Batched extraction means three of five calls on the real paper open
+    // mid-part with no PART heading in view. A guessed part number anchors a
+    // whole checklist to the wrong stage and nothing downstream can tell.
+    expect(p).toContain('YOU ARE READING A PAGE RANGE');
+    expect(p).toContain('GUESS NOTHING YOU CANNOT SEE');
+  });
+
+  it('reads a sideways margin label as the heading of the block beside it', () => {
+    // The gutter labels print AFTER the block they name, so attaching one to
+    // what follows names the next part wrongly.
+    expect(p).toContain('ROTATED TEXT IN THE PAGE MARGIN');
+    expect(p).toContain('never attach it to whatever follows it');
+  });
+
+  it('part-prefixes labels so identical copies can be told apart', () => {
+    /*
+      Parts 2, 4 and 6 of the real paper are character-identical, and 4 and 6
+      share their heading text. Without a prefix the copies come back
+      indistinguishable and one gets anchored to the wrong stage — certifying a
+      demonstration nobody watched.
+    */
+    expect(p).toContain('ONLY THE PART TELLS THE COPIES APART');
+    expect(p).toContain('PREFIX the `label`');
+  });
+
+  it('prefixes the label only, so verbatim content stays comparable', () => {
+    // fixedRows and options are compared across copies and keyed against; a
+    // prefix there would change the text everything downstream matches on.
+    expect(p).toContain('Prefix the field’s own `label` ONLY');
+    expect(p).toContain('`fixedRows`, `options`, `questionRef`');
+  });
+
+  it('never invents a sign-off box a part does not print', () => {
+    // "Once per part" fabricated assessor name, signature and date on three of
+    // six parts: Part 1 prints only a Satisfactory line, and the two logbook
+    // parts print nothing at all.
+    expect(p).toContain('SIGN-OFF BLOCKS ARE TRANSCRIBED, NEVER COMPLETED');
+    expect(p).toContain('NEVER ADD an assessor');
+  });
+
+  it('keeps both printed outcome wordings rather than normalising one into the other', () => {
+    expect(p).toContain('Satisfactory');
+    expect(p).toContain('Candidate not yet Competent');
+    expect(p).toContain('neither normalised into the other');
+  });
+
+  it('excludes publisher matter by who fills it, not by what shape it is', () => {
+    /*
+      The DOCUMENT CONTROL block is already completed with real approver names,
+      ticks and dates, and has exactly the shape of a fixed-item checklist —
+      so a shape test does not exclude it. Read as one it manufactures approval
+      sign-offs on a compliance record.
+    */
+    expect(p).toContain('WHAT THE PUBLISHER ALREADY FILLED IN IS NOT A FIELD');
+    expect(p).toContain('THE TEST IS WHO FILLS IT');
+    expect(p).toContain('DOCUMENT CONTROL');
+  });
+
+  it('keeps a genuinely empty cell a field, so the exclusion cannot overreach', () => {
+    expect(p).toContain('left EMPTY for a candidate or assessor to complete is still a field');
+  });
+
+  it('captures a logbook’s minimum hours without adding a heading that hides its table', () => {
+    // `fieldsInSection` stops at the first section_header after a part's
+    // anchor, so a heading between the anchor and the table hides the table
+    // from the part that totals its hours.
+    expect(p).toContain('NOT as a `section_header`');
+    expect(p).toContain('duration');
+  });
+
+  it('captures the pathway lines verbatim, because their part numbers are the mapping', () => {
+    // `AssessmentPart.pathways` is mandatory and validateManifest hard-errors
+    // on a part belonging to no pathway; the printed lines are the only
+    // statement of which parts each route requires.
+    expect(p).toContain('THE PATHWAY LINES ARE ONE EXCLUSIVE CHOICE');
+    expect(p).toContain('part numbers included');
+  });
+
+  it('keeps the assessment-method list one addressable table', () => {
+    // coverSection is one value per field, and a part marks its own method row
+    // when it passes — which needs the rows to be cells of one table.
+    expect(p).toContain('ONE TABLE, NOT ONE FIELD PER METHOD');
+  });
+
+  it('tests a practical checklist by its tick column, not its bullet style', () => {
+    // A sibling paper lettering its criteria a)/b)/c) would otherwise have its
+    // whole observation checklist converted into radio questions — rule 1's
+    // mistake run backwards, leaving the assessor's tick nowhere to go.
+    expect(p).toContain('THE TEST IS THE COLUMN, NOT THE BULLET STYLE');
+  });
+
+  it('folds an item’s sub-bullets into its row rather than inventing criteria', () => {
+    expect(p).toContain('ONE PRINTED TICK IS ONE ROW');
+    expect(p).toContain('WRAPS onto a second printed line is ONE');
+  });
+
+  it('names no employer, site or ticket code as a requirement', () => {
+    /*
+      Every example in this profile is illustrative of a printed SHAPE. A rule
+      that required "BBM" or a specific qualification code would misfire on the
+      next customer's document — the product promise is a paper it has never
+      seen.
+    */
+    for (const shouted of ['MUST BE BBM', 'always Q50001782', 'Worsley']) {
+      expect(p).not.toContain(shouted);
+    }
   });
 });
