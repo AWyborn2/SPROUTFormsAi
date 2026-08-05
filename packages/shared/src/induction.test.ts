@@ -5,6 +5,9 @@ import type { SubmissionValue } from './submission.js';
 import {
   assessInductionReadiness,
   buildInductionCohorts,
+  intakeTemplateDrift,
+  isIntakeTemplate,
+  mergeIntakeQuestions,
   readStarterProfile,
   type AssessedStarter,
 } from './induction.js';
@@ -442,5 +445,97 @@ describe('buildInductionCohorts', () => {
     ]);
     expect(cohorts).toHaveLength(1);
     expect(cohorts[0]!.starters.map((s) => s.submissionId)).toEqual(['dated']);
+  });
+});
+
+/**
+ * A stored version is a snapshot taken when the form was created, and nothing
+ * republishes it when `chcIntakeFields()` gains a question. The bespoke screen
+ * renders its own questions from code, so the form on screen still looks
+ * complete — the gap is invisible until it costs someone a registration.
+ */
+describe('intakeTemplateDrift', () => {
+  const CURRENT = chcIntakeFields();
+
+  it('reports nothing for a version in step with the code', () => {
+    expect(intakeTemplateDrift(CURRENT)).toEqual([]);
+  });
+
+  it('names a question the version never carried', () => {
+    const stale = CURRENT.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    expect(intakeTemplateDrift(stale).map((f) => f.id)).toEqual([CHC_FIELD_IDS.ethnicity]);
+  });
+
+  it('ignores a question re-created under a builder id', () => {
+    // It IS being asked, just under another name, and the reader resolves it.
+    // Reporting drift here would push an operator into adding a duplicate.
+    const edited = CURRENT.map((f) =>
+      f.id === CHC_FIELD_IDS.ethnicity ? { ...f, id: 'b7' } : f,
+    );
+    expect(intakeTemplateDrift(edited)).toEqual([]);
+  });
+
+  it('says nothing about a form that is not an intake', () => {
+    const other: FormField[] = [
+      { id: 'q1', type: 'text', label: 'Anything', required: false, source: 'built' },
+    ];
+    expect(isIntakeTemplate(other)).toBe(false);
+    expect(intakeTemplateDrift(other)).toEqual([]);
+  });
+
+  it('does not treat an edited option list as a missing question', () => {
+    // An administrator who changed the vocabulary meant to. Offering to add the
+    // canonical question back would put two ethnicity questions on the form.
+    const edited = CURRENT.map((f) =>
+      f.id === CHC_FIELD_IDS.ethnicity ? { ...f, options: ['Aboriginal', 'Other'] } : f,
+    );
+    expect(intakeTemplateDrift(edited)).toEqual([]);
+  });
+});
+
+describe('mergeIntakeQuestions', () => {
+  const CURRENT = chcIntakeFields();
+
+  it('puts the question back where it was authored, not at the end', () => {
+    const stale = CURRENT.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    const merged = mergeIntakeQuestions(stale).map((f) => f.id);
+    expect(merged.indexOf(CHC_FIELD_IDS.ethnicity)).toBe(
+      merged.indexOf(CHC_FIELD_IDS.gender) + 1,
+    );
+    expect(merged[merged.length - 1]).toBe(CHC_FIELD_IDS.driversLicence);
+  });
+
+  it('adds only what was missing and changes nothing else', () => {
+    const stale = CURRENT.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    const merged = mergeIntakeQuestions(stale);
+    expect(merged).toHaveLength(stale.length + 1);
+    // Every pre-existing field survives byte-identical, in its original order.
+    expect(merged.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity)).toEqual(stale);
+  });
+
+  it('keeps an administrator’s edits to the fields it leaves alone', () => {
+    const stale = CURRENT.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity).map((f) =>
+      f.id === CHC_FIELD_IDS.mobile ? { ...f, label: 'Mobile number', required: false } : f,
+    );
+    const merged = mergeIntakeQuestions(stale);
+    const mobile = merged.find((f) => f.id === CHC_FIELD_IDS.mobile)!;
+    expect(mobile.label).toBe('Mobile number');
+    expect(mobile.required).toBe(false);
+  });
+
+  it('is a no-op when nothing is missing', () => {
+    expect(mergeIntakeQuestions(CURRENT)).toEqual(CURRENT);
+  });
+
+  it('restores a template stripped back to the questions the reader detects on', () => {
+    const bare = CURRENT.filter((f) =>
+      [
+        CHC_FIELD_IDS.firstName,
+        CHC_FIELD_IDS.lastName,
+        CHC_FIELD_IDS.inductionDate,
+        CHC_FIELD_IDS.department,
+      ].includes(f.id as never),
+    );
+    expect(intakeTemplateDrift(mergeIntakeQuestions(bare))).toEqual([]);
   });
 });

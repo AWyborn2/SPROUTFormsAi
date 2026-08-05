@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Button, Dialog, Icon, useToast, type BadgeVariant } from '@formai/ui';
+import { intakeTemplateDrift, mergeIntakeQuestions } from '@formai/shared';
 import { ApiError } from '../lib/data/api-client.js';
 import { useForkDraftVersion,
   useArchiveForm,
@@ -10,6 +11,7 @@ import { useForkDraftVersion,
   useForm,
   useForms,
   usePublishFormVersion,
+  usePublishVersion,
   useRestoreForm,
   useRevokeFillLink,
   useSetFormVoiceInput,
@@ -50,6 +52,7 @@ export function TemplatesScreen() {
   const [showArchived, setShowArchived] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | undefined>(undefined);
+  const [driftOpen, setDriftOpen] = useState(false);
   const [publishTargetId, setPublishTargetId] = useState<string | undefined>(undefined);
   const archivedCount = forms.filter((f) => f.status === 'archived').length;
   // Archived forms leave the active list by default; the toggle brings them back.
@@ -67,8 +70,59 @@ export function TemplatesScreen() {
   const restoreForm = useRestoreForm();
   const deleteForm = useDeleteForm();
   const publishVersion = usePublishFormVersion();
+  const publishFields = usePublishVersion();
   const setVoiceInput = useSetFormVoiceInput();
   const publishTarget = selected?.versions.find((v) => v.id === publishTargetId);
+
+  /**
+   * Questions the induction intake asks that this published version does not.
+   *
+   * Worth surfacing here because it is invisible everywhere else: the bespoke
+   * intake screen renders its own questions from code, so a version that has
+   * fallen behind still produces a form that looks complete and submits
+   * cleanly. The only symptom is an answer missing from a starter's record
+   * later — see `intakeTemplateDrift`.
+   *
+   * PUBLISHED forms only. A draft serves nobody yet and an archived one is out
+   * of circulation, so neither is collecting the answers this is about — and
+   * offering the fix there would be worse than saying nothing, since publishing
+   * a version also un-archives the form it belongs to.
+   */
+  const drift = useMemo(
+    () => (selected?.status === 'published' ? intakeTemplateDrift(selected.fields) : []),
+    [selected],
+  );
+  const driftLabel = drift.map((f) => f.label).join(', ');
+
+  function onAddMissingQuestions() {
+    if (!selected) return;
+    publishFields.mutate(
+      {
+        formId: selected.id,
+        fields: mergeIntakeQuestions(selected.fields),
+        container: selected.container,
+      },
+      {
+        onSuccess: () => {
+          setDriftOpen(false);
+          toast({
+            variant: 'success',
+            message: `Published a new version — ${driftLabel} added. Live fill links serve it now.`,
+          });
+        },
+        onError: (err) => {
+          setDriftOpen(false);
+          toast({
+            variant: 'danger',
+            message:
+              err instanceof ApiError && err.status === 403
+                ? 'You don’t have permission to publish a new version of this form.'
+                : 'Could not publish the updated version. Nothing was changed.',
+          });
+        },
+      },
+    );
+  }
 
   // Newest active link (the API lists active only, newest first).
   const activeLink = fillLinks[0];
@@ -325,6 +379,29 @@ export function TemplatesScreen() {
             <div className="mt-px text-[12.5px] text-text-tertiary">
               {selected?.dept} · {selected?.version}
             </div>
+
+            {drift.length > 0 && (
+              <div className="mt-[14px] rounded-md border border-border bg-warning-soft p-[11px_13px]">
+                <div className="mb-1 flex items-center gap-1.5 text-[12.5px] font-semibold text-warning-text">
+                  <Icon name="alert-triangle" size={13} className="flex-none" />
+                  {drift.length === 1 ? 'A question is missing' : `${drift.length} questions are missing`}
+                </div>
+                <p className="text-[12px] leading-snug text-warning-text">
+                  The induction intake asks{' '}
+                  <span className="font-semibold">{driftLabel}</span>, but this published version does
+                  not. Answers to {drift.length === 1 ? 'it' : 'them'} may not reach a starter’s record.
+                </p>
+                <button
+                  type="button"
+                  disabled={publishFields.isPending}
+                  onClick={() => setDriftOpen(true)}
+                  className="mt-1.5 text-[11.5px] font-semibold text-warning-text underline hover:no-underline disabled:opacity-60"
+                >
+                  {publishFields.isPending ? 'Publishing…' : 'Add and publish'}
+                </button>
+              </div>
+            )}
+
             <div className="mt-[14px] flex flex-col gap-2">
               <Button
                 size="sm"
@@ -515,6 +592,39 @@ export function TemplatesScreen() {
           </div>
         </div>
       </div>
+
+      <Dialog
+        open={driftOpen}
+        onClose={() => !publishFields.isPending && setDriftOpen(false)}
+        title={drift.length === 1 ? `Add “${driftLabel}” to this form?` : 'Add the missing questions?'}
+        description={
+          `${driftLabel} will be added in ${drift.length === 1 ? 'its' : 'their'} usual place and published as a new version. ` +
+          'Nothing already on the form is changed — every existing question keeps its wording, order and settings, ' +
+          'including any you have edited. Live fill links serve the new version immediately; fills already in progress ' +
+          'still submit under the version they were opened with.'
+        }
+        size="sm"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={publishFields.isPending}
+              onClick={() => setDriftOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              leadingIcon="rocket"
+              disabled={publishFields.isPending}
+              onClick={onAddMissingQuestions}
+            >
+              {publishFields.isPending ? 'Publishing…' : 'Add & publish'}
+            </Button>
+          </>
+        }
+      />
 
       <Dialog
         open={deleteOpen}

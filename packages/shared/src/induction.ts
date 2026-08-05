@@ -399,6 +399,81 @@ export function assessInductionReadiness(
   return { readiness: blockers.length === 0 ? 'ready' : 'blocked', blockers, warnings };
 }
 
+/* ── Template drift ──────────────────────────────────────────────────────── */
+
+/**
+ * Whether this template version is the CHC intake, by the same shape test
+ * `readStarterProfile` detects a submission on. Name is deliberately not
+ * consulted: a renamed form still collects the same answers.
+ */
+export function isIntakeTemplate(fields: readonly FormField[]): boolean {
+  const at = resolveChcIntakeFields(fields);
+  return REQUIRED_SHAPE.every((id) => at.has(id));
+}
+
+/**
+ * Canonical intake questions this template version does not ask at all.
+ *
+ * A stored version is a SNAPSHOT taken when someone created the form; nothing
+ * republishes it when `chcIntakeFields()` changes. So a workspace can serve an
+ * intake that predates a question the product now knows about — and, because
+ * `ChcIntakeScreen` renders its own questions from code, the form on screen
+ * still looks complete. Nobody can see the gap from the form; it shows up
+ * downstream as an answer missing from someone's registration.
+ *
+ * Resolution-aware, so a question re-created in the builder under a generated
+ * id is NOT reported: it is being asked, just under another name, and the
+ * reader handles that. Only a genuinely absent question counts.
+ *
+ * Returns the canonical field definitions themselves, so a caller can both name
+ * what is missing and add it. An empty array means the version is in step.
+ */
+export function intakeTemplateDrift(fields: readonly FormField[]): FormField[] {
+  if (!isIntakeTemplate(fields)) return [];
+  const at = resolveChcIntakeFields(fields);
+  return chcIntakeFields().filter((f) => f.type !== 'section_header' && !at.has(f.id));
+}
+
+/**
+ * `fields` with every missing canonical question added back, in its authored
+ * position.
+ *
+ * ADDITIVE ONLY. Nothing existing is removed, reordered, retyped, or
+ * relabelled — this form ships as an editable template on purpose, and an
+ * administrator's edits are the whole reason it does. Bringing a version back
+ * into step must never be the thing that undoes their work.
+ *
+ * Each question lands after whichever canonical field precedes it and is
+ * actually present, so Ethnicity rejoins Personal Details under Gender rather
+ * than washing up after the licence upload. A question whose neighbours are all
+ * absent goes to the end, which is the honest fallback: there is no position to
+ * infer.
+ */
+export function mergeIntakeQuestions(fields: readonly FormField[]): FormField[] {
+  const missing = intakeTemplateDrift(fields);
+  if (missing.length === 0) return [...fields];
+
+  const canonical = chcIntakeFields();
+  const merged = [...fields];
+
+  for (const field of missing) {
+    const canonicalIndex = canonical.findIndex((f) => f.id === field.id);
+    // Walk back through the authored order for the nearest field this template
+    // actually has, and sit behind it.
+    let at = merged.length;
+    for (let i = canonicalIndex - 1; i >= 0; i--) {
+      const anchor = merged.findIndex((f) => f.id === canonical[i]!.id);
+      if (anchor >= 0) {
+        at = anchor + 1;
+        break;
+      }
+    }
+    merged.splice(at, 0, field);
+  }
+
+  return merged;
+}
+
 /**
  * Groups assessed starters into one cohort per induction date.
  *
