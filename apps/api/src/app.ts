@@ -20,6 +20,7 @@ import { invitesRouter, publicInvitesRouter } from './routes/invites.js';
 import { passwordResetRouter } from './routes/password-reset.js';
 import { orgRouter } from './routes/org.js';
 import { importDraftsRouter } from './routes/import-drafts.js';
+import { builderDraftsRouter } from './routes/builder-drafts.js';
 import { pdfRouter } from './routes/pdf.js';
 import { submissionsRouter } from './routes/submissions.js';
 import { taxonomyRouter } from './routes/taxonomy.js';
@@ -67,6 +68,13 @@ export function createApp(): Express {
     so everything else keeps the tighter limit.
   */
   app.use('/import-drafts', express.json({ limit: '40mb' }), importDraftsRouter);
+
+  /*
+    Once more, and for MORE than the import draft carries: a builder draft holds
+    everything an import draft does plus the part manifest, every answer key and
+    the workflow. Same registration-order reason, same scoped limit.
+  */
+  app.use('/assessment-tool-drafts', express.json({ limit: '40mb' }), builderDraftsRouter);
 
   app.use(express.json({ limit: '2mb' }));
 

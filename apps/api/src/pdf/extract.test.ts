@@ -634,3 +634,253 @@ describe('extractForm — recorded page index', () => {
     expect(supplier?.sourcePosition?.pageWidth).toBe(600);
   });
 });
+
+/**
+ * `questionRef`, `coverSection` and the two matching sides all reach the model
+ * as schema properties and all have to survive `normalizeField` to mean
+ * anything. `questionRef` did not: it was asked for, documented at length in
+ * the assessment profile, rendered by the review UI and resolved by
+ * `linkOutcomeTargets` — and dropped at the one point every AI-extracted field
+ * passes through, so no field could ever carry one. These pin all four, because
+ * the failure is invisible from either end: the model returns the value and the
+ * consumer finds nothing, with no error in between.
+ */
+describe('extractForm — assessment field properties survive normalization', () => {
+  function fieldsResponse(fields: Record<string, unknown>[]): AnthropicMessage {
+    return {
+      content: [
+        { type: 'tool_use', name: EXTRACT_TOOL_NAME, input: { fields, designNotes: [] } },
+      ],
+    };
+  }
+
+  async function extractOne(field: Record<string, unknown>) {
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(fieldsResponse([field]));
+    const result = await extractForm(pdf, {
+      fileName: 'flat.pdf',
+      documentType: 'assessment',
+      anthropic: { messages: { create } },
+    });
+    return result.fields[0];
+  }
+
+  it('carries questionRef through, so a question can be paired with its outcome box', async () => {
+    const field = await extractOne({
+      label: 'Q1. Three points of contact must be maintained?',
+      type: 'radio',
+      confidence: 0.95,
+      options: ['True', 'False'],
+      questionRef: 'Q1',
+    });
+
+    expect(field?.questionRef).toBe('Q1');
+  });
+
+  it('trims a padded questionRef, because the pairing matches character for character', async () => {
+    const field = await extractOne({
+      label: 'Outcome',
+      type: 'check_cross',
+      confidence: 0.9,
+      questionRef: '  BBM Q3  ',
+    });
+
+    expect(field?.questionRef).toBe('BBM Q3');
+  });
+
+  it('drops a blank questionRef rather than carrying an empty pairing key', async () => {
+    // An empty string would pair with every other empty string.
+    const field = await extractOne({
+      label: 'Outcome',
+      type: 'check_cross',
+      confidence: 0.9,
+      questionRef: '   ',
+    });
+
+    expect(field?.questionRef).toBeUndefined();
+  });
+
+  it('carries a declared coverSection through', async () => {
+    const field = await extractOne({
+      label: 'Q50001782 Driver’s Licence C or higher class',
+      type: 'check_cross',
+      confidence: 0.9,
+      coverSection: 'pathway_prerequisites',
+    });
+
+    expect(field?.coverSection).toBe('pathway_prerequisites');
+  });
+
+  it('drops an undeclared coverSection rather than inventing a fourth section', async () => {
+    const field = await extractOne({
+      label: 'Something',
+      type: 'text',
+      confidence: 0.9,
+      coverSection: 'front_matter',
+    });
+
+    expect(field?.coverSection).toBeUndefined();
+  });
+
+  it('carries both matching sides through, in printed order', async () => {
+    const field = await extractOne({
+      label: 'Match the statement with the appropriate signage.',
+      type: 'checkbox_group',
+      selectionType: 'multiple',
+      confidence: 0.8,
+      matchLeft: ['Access is restricted', 'Contact the person on the sign', 'Hazard ahead'],
+      matchRight: ['Sign photo — red pyramid', 'Sign photo — yellow cone', 'Sign photo — blue pyramid'],
+    });
+
+    expect(field?.matchLeft).toEqual([
+      'Access is restricted',
+      'Contact the person on the sign',
+      'Hazard ahead',
+    ]);
+    expect(field?.matchRight).toHaveLength(3);
+  });
+
+  it('keeps a one-sided matching question one-sided, so the gap stays visible', async () => {
+    // Seeding the missing side would make an unauthorable question look
+    // authorable — the pair builder needs to know which case it is in.
+    const field = await extractOne({
+      label: 'Match the correct response with the horn signals.',
+      type: 'checkbox_group',
+      confidence: 0.7,
+      matchLeft: ['3 horn blasts', '2 horn blasts', '1 horn blast'],
+    });
+
+    expect(field?.matchLeft).toHaveLength(3);
+    expect(field?.matchRight).toBeUndefined();
+  });
+
+  it('drops blank entries and empty sides rather than carrying holes', async () => {
+    const field = await extractOne({
+      label: 'Match',
+      type: 'checkbox_group',
+      confidence: 0.7,
+      matchLeft: ['One', '   ', 'Two'],
+      matchRight: [],
+    });
+
+    expect(field?.matchLeft).toEqual(['One', 'Two']);
+    expect(field?.matchRight).toBeUndefined();
+  });
+
+  it('leaves an ordinary field carrying none of them', async () => {
+    const field = await extractOne({ label: 'Site name', type: 'text', confidence: 0.98 });
+
+    expect(field?.questionRef).toBeUndefined();
+    expect(field?.coverSection).toBeUndefined();
+    expect(field?.matchLeft).toBeUndefined();
+    expect(field?.matchRight).toBeUndefined();
+  });
+});
+
+/**
+ * The page range every field came from.
+ *
+ * STAMPED, NOT ASKED FOR. A long paper is extracted a few pages at a time and
+ * the splitter knows exactly which pages went into each call — so this is a
+ * fact the pipeline already holds. Asking the model for it would put a
+ * hallucinable number on the one thing that tells three character-identical
+ * practical parts apart.
+ *
+ * The prompt says the range too, because the profile's rules lean on "guess
+ * nothing you cannot see" and that instruction needs a reference point.
+ */
+describe('extractForm — page range stamping', () => {
+  function toolResponseFor(labels: string[]): AnthropicMessage {
+    return {
+      content: [
+        {
+          type: 'tool_use',
+          name: EXTRACT_TOOL_NAME,
+          input: {
+            fields: labels.map((label) => ({ label, type: 'text', confidence: 0.9 })),
+            designNotes: [],
+          },
+        },
+      ],
+    };
+  }
+
+  it('stamps each field with the pages its own batch was given', async () => {
+    // Six pages at two per batch: three calls, and each call's fields carry
+    // that call's range rather than the document's.
+    const pdf = await makeMultiPageFlatPdf(6);
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce(toolResponseFor(['a']))
+      .mockResolvedValueOnce(toolResponseFor(['b']))
+      .mockResolvedValueOnce(toolResponseFor(['c']));
+
+    const result = await extractForm(pdf, {
+      fileName: 'long.pdf',
+      documentType: 'assessment',
+      pageBatchSize: 2,
+      anthropic: { messages: { create } },
+    });
+
+    expect(result.fields.map((f) => f.sourcePages)).toEqual([
+      { from: 1, to: 2 },
+      { from: 3, to: 4 },
+      { from: 5, to: 6 },
+    ]);
+  });
+
+  it('stamps the final short batch with the real last page, not the batch width', async () => {
+    // Five pages at two per batch ends on a batch of one; a range of 5-6 on a
+    // five-page document is a page that does not exist.
+    const pdf = await makeMultiPageFlatPdf(5);
+    const create = vi
+      .fn()
+      .mockResolvedValueOnce(toolResponseFor(['a']))
+      .mockResolvedValueOnce(toolResponseFor(['b']))
+      .mockResolvedValueOnce(toolResponseFor(['c']));
+
+    const result = await extractForm(pdf, {
+      fileName: 'long.pdf',
+      pageBatchSize: 2,
+      anthropic: { messages: { create } },
+    });
+
+    expect(result.fields.at(-1)?.sourcePages).toEqual({ from: 5, to: 5 });
+  });
+
+  it('tells the model which pages it is holding', async () => {
+    // "Guess nothing you cannot see" needs a reference point, and the running
+    // footer is the only in-document clue.
+    const pdf = await makeMultiPageFlatPdf(6);
+    const create = vi.fn().mockResolvedValue(toolResponseFor(['a']));
+
+    await extractForm(pdf, {
+      fileName: 'long.pdf',
+      documentType: 'assessment',
+      pageBatchSize: 2,
+      anthropic: { messages: { create } },
+    });
+
+    const texts = create.mock.calls.map((c) => {
+      const params = c[0] as { messages: { content: { type: string; text?: string }[] }[] };
+      return params.messages[0]!.content.find((b) => b.type === 'text')?.text ?? '';
+    });
+    expect(texts[0]).toContain('pages 1-2 of a 6-page document');
+    expect(texts[2]).toContain('pages 5-6 of a 6-page document');
+  });
+
+  it('leaves an unbatched document unstamped rather than claiming a range', async () => {
+    // A short document goes through in one call with no split, so there is no
+    // batch range to report — and a stamp of 1-N would be a fact nothing
+    // established.
+    const pdf = await makeFlatPdf();
+    const create = vi.fn().mockResolvedValue(toolResponseFor(['a']));
+
+    const result = await extractForm(pdf, {
+      fileName: 'short.pdf',
+      anthropic: { messages: { create } },
+    });
+
+    expect(result.fields[0]?.sourcePages).toBeUndefined();
+  });
+});

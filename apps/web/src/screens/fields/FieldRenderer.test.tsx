@@ -163,3 +163,95 @@ describe('canDictateField', () => {
     expect(canDictateField(plainGroup())).toBe(true);
   });
 });
+
+/**
+ * Outcome boxes.
+ *
+ * `check_cross` had no case in the renderer at all, so it drew a grey chip
+ * printing the literal string "check_cross". That is the type of every theory
+ * question's outcome box and of every part's satisfactory / not-yet-competent
+ * pair, so on a competency assessment the placeholder was most of the screen an
+ * assessor works in.
+ *
+ * The three-state rule is what these pin. A cross is a finding — "I checked
+ * this and it failed" — and only null means nobody assessed it, which is the
+ * distinction the exported evidence draws when it prints a tick, a cross, or
+ * nothing at all.
+ */
+function outcomeField(extra: Partial<FormField> = {}): FormField {
+  return {
+    id: 'q1_outcome',
+    type: 'check_cross',
+    label: 'Q1 outcome',
+    required: false,
+    source: 'imported',
+    ...extra,
+  };
+}
+
+describe('FieldInput — check_cross outcome boxes', () => {
+  it('draws a real control rather than the unsupported-type placeholder', () => {
+    render(<FieldInput field={outcomeField()} value={null} onChange={vi.fn()} />);
+
+    expect(screen.getByRole('button', { name: 'Satisfactory' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Not satisfactory' })).toBeTruthy();
+    expect(screen.queryByText('check_cross')).toBeNull();
+  });
+
+  it('records a tick as true and a cross as an explicit false', () => {
+    // Not "false is unticked": both are recorded verdicts, and the exporter
+    // draws a different mark for each.
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <FieldInput field={outcomeField()} value={null} onChange={onChange} />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Satisfactory' }));
+    expect(onChange).toHaveBeenLastCalledWith(true);
+
+    rerender(<FieldInput field={outcomeField()} value={null} onChange={onChange} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Not satisfactory' }));
+    expect(onChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('shows which verdict is recorded', () => {
+    const { rerender } = render(
+      <FieldInput field={outcomeField()} value={true} onChange={vi.fn()} />,
+    );
+    expect(screen.getByRole('button', { name: 'Satisfactory' }).getAttribute('aria-pressed')).toBe(
+      'true',
+    );
+    expect(
+      screen.getByRole('button', { name: 'Not satisfactory' }).getAttribute('aria-pressed'),
+    ).toBe('false');
+
+    rerender(<FieldInput field={outcomeField()} value={false} onChange={vi.fn()} />);
+    expect(
+      screen.getByRole('button', { name: 'Not satisfactory' }).getAttribute('aria-pressed'),
+    ).toBe('true');
+  });
+
+  it('lets a mis-click go back to unassessed, which a radio group could not', () => {
+    // Null is the only state meaning nobody assessed this. Without a way back,
+    // one wrong click permanently asserts a verdict on a competency record.
+    const onChange = vi.fn();
+    render(<FieldInput field={outcomeField()} value={true} onChange={onChange} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Satisfactory' }));
+
+    expect(onChange).toHaveBeenCalledWith(null);
+  });
+
+  it('honours disabled', () => {
+    const onChange = vi.fn();
+    render(<FieldInput field={outcomeField()} value={null} onChange={onChange} disabled />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Satisfactory' }));
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('is never dictatable — a verdict is pressed, not transcribed', () => {
+    expect(canDictateField(outcomeField())).toBe(false);
+  });
+});

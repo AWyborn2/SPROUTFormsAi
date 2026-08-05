@@ -120,6 +120,89 @@ export interface PageBox {
    * Absent on a scalar or table segment, which targets the field as a whole.
    */
   optionKey?: string;
+  /**
+   * What this box draws, when an author has said.
+   *
+   * ABSENT IS THE DEFAULT AND THE DEFAULT IS TODAY'S BEHAVIOUR: the exporter
+   * derives the mark from the field's type, exactly as it always has. That is
+   * what keeps every placement authored before this existed byte-identical on
+   * export — a stored geometry segment does not change meaning by gaining an
+   * optional property nobody set.
+   */
+  markStyle?: MarkStyle;
+}
+
+/**
+ * What a placed box draws, when an author overrides the type default.
+ *
+ * The vocabulary lives HERE, beside the geometry it hangs off, because this
+ * file holds the shapes and imports nothing; `builder.ts` holds the authoring
+ * layer and `geometry.ts` the resolvers, which is the same split `AnswerSet`
+ * and `VisibilityCondition` already follow.
+ *
+ * NOT EVERY GLYPH DRAWS YET — `MARK_STYLES_DRAWN` in `builder.ts` is the honest
+ * list, and the placement inspector says so beside the ones that do not. A
+ * style the exporter silently ignored would be a mark an author believes is on
+ * a competency record and is not.
+ */
+export const GLYPH_KINDS = [
+  'tick_hand',
+  'tick_block',
+  'cross_hand',
+  'ring',
+  'typed',
+  'signature',
+  'stamp_pass',
+  'stamp_na',
+  'stamp_date',
+  'initials',
+  'highlight',
+  'match_line',
+] as const;
+export type GlyphKind = (typeof GLYPH_KINDS)[number];
+
+/** Ink a mark is drawn in. Three, because a competency record is not a palette. */
+export const MARK_INKS = ['default', 'assessor_blue', 'ink_black'] as const;
+export type MarkInk = (typeof MARK_INKS)[number];
+
+export const MARK_SIZES = ['s', 'm', 'l'] as const;
+export type MarkSize = (typeof MARK_SIZES)[number];
+
+/** Every property optional; an absent `MarkStyle` is the field type's default. */
+export interface MarkStyle {
+  glyph?: GlyphKind;
+  ink?: MarkInk;
+  size?: MarkSize;
+}
+
+/**
+ * How a matching question is PRESENTED. Never how it is marked.
+ *
+ * A matching question is stored as a choice field whose options are the
+ * pairings (`matching.ts`), and `markTheory` reads `answerKey` and nothing
+ * else. This decides only what the candidate manipulates on screen: dots and
+ * connecting lines, or a tray of answers dragged into slots.
+ *
+ * Separate from the field's data for one reason: if presentation could reach
+ * marking, there would be two places a question's verdict comes from.
+ */
+export const MATCH_MODES = ['line', 'drag'] as const;
+export type MatchMode = (typeof MATCH_MODES)[number];
+
+export interface MatchPresentation {
+  mode: MatchMode;
+  /** Render the prompt side as pictures. */
+  leftImages?: boolean;
+  /** Render the answer side as pictures. */
+  rightImages?: boolean;
+  /**
+   * Uploaded picture per entry, by side and printed index — `l0`, `r2`.
+   *
+   * Asset ids, not data URLs. A data URL here would put a few hundred kilobytes
+   * of base64 into every copy of the field, including the one served to a fill
+   * surface and the one an export reads.
+   */
+  images?: Record<string, string>;
 }
 
 /**
@@ -306,6 +389,16 @@ export interface FormField {
    * unanswered question rather than a marked one.
    */
   outcomeTarget?: OutcomeTarget;
+
+  /**
+   * For a matching question — how it is drawn on a fill surface.
+   *
+   * Render-only. Marking reads `answerKey`, the exporter reads the geometry,
+   * and neither looks at this. Absent means the grouped pairing list that
+   * `FieldRenderer` already renders, which stays the correct fallback for a
+   * question nobody has chosen a presentation for.
+   */
+  matchPresentation?: MatchPresentation;
 }
 
 /**
