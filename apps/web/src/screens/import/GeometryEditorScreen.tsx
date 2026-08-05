@@ -49,8 +49,36 @@ import {
  * APPLIED, and the draft has to be SAVED. A proposal a reviewer never looked at
  * would otherwise put marks on a competency record against boxes nobody checked.
  */
-export function GeometryEditorScreen() {
-  const { id: formId, versionId } = useParams<{ id: string; versionId: string }>();
+/**
+ * Where this screen gets the version it edits (KTD7).
+ *
+ * ONE COMPONENT, TWO MOUNTS. The standalone route reads the ids off the URL;
+ * the builder's placement step passes them in, because there the version is one
+ * artifact of a draft rather than the thing being navigated to. Everything else
+ * — the proposals, the confirm gate, the geometry writes — is identical, which
+ * is the point: a second placement UI is a second place for "only confirmed
+ * geometry is published" to be got wrong.
+ */
+export interface GeometryEditorScreenProps {
+  formId?: string;
+  versionId?: string;
+  /** Hide the screen's own header, for a host that already has one. */
+  embedded?: boolean;
+  /** Where Back goes. Defaults to the form's own page. */
+  onDone?: () => void;
+}
+
+export function GeometryEditorScreen({
+  formId: formIdProp,
+  versionId: versionIdProp,
+  embedded = false,
+  onDone,
+}: GeometryEditorScreenProps = {}) {
+  const params = useParams<{ id: string; versionId: string }>();
+  // Props win where given; the route is the fallback, so the standalone screen
+  // is unchanged and needs no call-site edit.
+  const formId = formIdProp ?? params.id;
+  const versionId = versionIdProp ?? params.versionId;
   const navigate = useNavigate();
   const { toast } = useToast();
   const { data: version, isLoading } = useFormVersion(formId, versionId);
@@ -469,7 +497,11 @@ export function GeometryEditorScreen() {
           place geometry on that instead; publishing it keeps every field id, so any assessment tool
           built on this form stays valid.
         </p>
-        <Button variant="outline" className="mt-4" onClick={() => navigate(`/app/forms`)}>
+        <Button
+          variant="outline"
+          className="mt-4"
+          onClick={() => (onDone ? onDone() : navigate(`/app/forms`))}
+        >
           Back to forms
         </Button>
       </div>
@@ -562,6 +594,7 @@ export function GeometryEditorScreen() {
 
   return (
     <div className="fai-rise flex h-[calc(100vh-56px)] flex-col">
+      {!embedded && (
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-[22px] py-3">
         <div className="min-w-0">
           <h1 className="truncate font-heading text-[16px] font-bold">Placement · {version.label}</h1>
@@ -617,6 +650,7 @@ export function GeometryEditorScreen() {
           </Button>
         </div>
       </header>
+      )}
 
       <div className="flex min-h-0 flex-1">
         <aside className="w-[340px] shrink-0 overflow-y-auto border-r border-border">

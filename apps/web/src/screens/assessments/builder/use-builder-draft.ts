@@ -111,6 +111,16 @@ export interface BuilderDraftState {
   title: string | null;
   pageCount: number;
   keys: DraftAnswerKey[];
+  /**
+   * The form version this draft places against, once one exists.
+   *
+   * Geometry is stored on a VERSION's fields — that is where the exporter reads
+   * it — so the placement step needs one before a box can be saved anywhere.
+   * Absent until the builder materialises it; `BuilderDraft` has carried these
+   * two ids since Phase A for exactly this.
+   */
+  formId?: string;
+  versionId?: string;
   /** Parts as the units step shows them: derived from structure, then edited. */
   parts: DerivedPart[];
   /** The manifest those parts assemble into, ready for validateManifest. */
@@ -255,6 +265,11 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
   }));
   const [excluded, setExcluded] = useState<Set<string>>(() => new Set());
   const [keys, setKeys] = useState<DraftAnswerKey[]>([]);
+  // Set when the builder materialises a draft version to place against. No
+  // setter is exposed yet — creating it is the open question the plan records,
+  // and a half-wired creation path would produce a version nothing publishes.
+  const [formId] = useState<string | undefined>(undefined);
+  const [versionId] = useState<string | undefined>(undefined);
   /*
     PARTS ARE DERIVED, WITH THE AUTHOR'S EDITS LAYERED ON TOP.
 
@@ -578,6 +593,8 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     ingest,
     setSetup,
     keys,
+    ...(formId ? { formId } : {}),
+    ...(versionId ? { versionId } : {}),
     parts,
     manifest,
     manifestProblems,

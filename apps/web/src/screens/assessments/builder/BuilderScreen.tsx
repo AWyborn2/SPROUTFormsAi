@@ -12,6 +12,7 @@ import { UploadStep } from './steps/UploadStep.js';
 import { GenerateStep } from './steps/GenerateStep.js';
 import { UnitsStep } from './steps/UnitsStep.js';
 import { AnswerKeyStep } from './steps/AnswerKeyStep.js';
+import { PlacementStep } from './steps/PlacementStep.js';
 import { StepPlaceholder } from './steps/StepPlaceholder.js';
 import { useBuilderDraftState } from './use-builder-draft.js';
 
@@ -78,6 +79,8 @@ export function BuilderScreen() {
         return <GenerateStep draft={draft} />;
       case 'units':
         return <UnitsStep draft={draft} />;
+      case 'placement':
+        return <PlacementStep draft={draft} />;
       case 'answer_key':
         return <AnswerKeyStep draft={draft} />;
       default:
