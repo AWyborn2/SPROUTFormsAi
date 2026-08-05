@@ -1,11 +1,16 @@
 import { useState } from 'react';
 import { Badge, Button, Card, Icon, Input, Select, Switch, useToast } from '@formai/ui';
-import { DISPLAY_IDENTIFIER_LABELS, type DisplayIdentifier } from '@formai/shared';
+import {
+  DISPLAY_IDENTIFIER_LABELS,
+  type DisplayIdentifier,
+  type RequiredAssessmentsChangeEffects,
+} from '@formai/shared';
 import {
   useAssessmentTools,
   useCreateDepartment,
   useCreateLocation,
   useCreateRole,
+  usePreviewRoleRequiredAssessments,
   useRoleRequiredAssessments,
   useSetRoleRequiredAssessments,
   useTaxonomy,
@@ -315,17 +320,24 @@ function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unk
  * enforces the same, this just does not offer the action.
  */
 function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unknown) => void }) {
+  const { toast } = useToast();
   const [open, setOpen] = useState(false);
   const { data: tools } = useAssessmentTools();
   const { data: current } = useRoleRequiredAssessments(open ? role.id : undefined);
+  const preview = usePreviewRoleRequiredAssessments(role.id);
   const save = useSetRoleRequiredAssessments(role.id);
   const [draft, setDraft] = useState<Set<string> | null>(null);
+  // The blast radius of the pending change, once previewed — the confirmation
+  // gate (U12, R84–R86). Null means nothing is awaiting confirmation.
+  const [pending, setPending] = useState<RequiredAssessmentsChangeEffects | null>(null);
 
   const selected = draft ?? new Set(current?.toolIds ?? []);
   const dirty = draft !== null;
   const retired = role.status === 'retired';
 
   function toggle(toolId: string) {
+    // Changing the selection abandons any preview shown for the old selection.
+    setPending(null);
     setDraft((prev) => {
       const next = new Set(prev ?? current?.toolIds ?? []);
       if (next.has(toolId)) next.delete(toolId);
@@ -334,8 +346,21 @@ function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unkno
     });
   }
 
-  function onSave() {
-    save.mutate([...selected], { onSuccess: () => setDraft(null), onError });
+  function onReview() {
+    // Show the blast radius before committing (R84, R85); the change is not
+    // written until confirmed.
+    preview.mutate([...selected], { onSuccess: (r) => setPending(r.effects), onError });
+  }
+
+  function onConfirm() {
+    save.mutate([...selected], {
+      onSuccess: () => {
+        setDraft(null);
+        setPending(null);
+        toast({ variant: 'success', message: 'Requirements updated.' });
+      },
+      onError,
+    });
   }
 
   const summary = !current
@@ -392,14 +417,66 @@ function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unkno
             </div>
           )}
           {!retired && (
-            <div className="mt-2 flex justify-end">
-              <Button size="sm" onClick={onSave} disabled={!dirty || save.isPending}>
-                {dirty ? 'Save requirements' : 'Saved'}
-              </Button>
+            <div className="mt-2 flex flex-col gap-2">
+              {pending ? (
+                <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[9px_11px] text-[11.5px] text-text-secondary">
+                  <EffectsSummary effects={pending} />
+                  <div className="mt-2 flex justify-end gap-2">
+                    <Button size="sm" variant="ghost" onClick={() => setPending(null)} disabled={save.isPending}>
+                      Cancel
+                    </Button>
+                    <Button size="sm" onClick={onConfirm} disabled={save.isPending}>
+                      Confirm change
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex justify-end">
+                  <Button size="sm" onClick={onReview} disabled={!dirty || preview.isPending}>
+                    {dirty ? 'Review change' : 'Saved'}
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The blast radius of a pending requirement change, in words (U12). An addition
+ * says who it affects and how many cases it creates (R84); a removal says who it
+ * affects, how many cases already in progress will run to completion, and how
+ * many competencies become optional (R85) — never a creation count. A save that
+ * both adds and removes shows both.
+ */
+function EffectsSummary({ effects }: { effects: RequiredAssessmentsChangeEffects }) {
+  const people = (n: number) => `${n} ${n === 1 ? 'person' : 'people'}`;
+  const cases = (n: number) => `${n} ${n === 1 ? 'case' : 'cases'}`;
+  const lines: string[] = [];
+  if (effects.addedToolIds.length > 0) {
+    const n = effects.addedToolIds.length;
+    lines.push(
+      `Adds ${n} assessment${n === 1 ? '' : 's'}: affects ${people(effects.affected)}, creating ${cases(effects.created)}.`,
+    );
+  }
+  if (effects.removedToolIds.length > 0) {
+    const n = effects.removedToolIds.length;
+    const demoting = effects.competenciesDemoting;
+    lines.push(
+      `Removes ${n} assessment${n === 1 ? '' : 's'}: affects ${people(effects.affected)}. ` +
+        `${cases(effects.inFlightContinuing)} already in progress will run to completion, and ` +
+        `${demoting} competency standing${demoting === 1 ? '' : 's'} become optional.`,
+    );
+  }
+  if (lines.length === 0) lines.push('This changes nothing.');
+  return (
+    <div className="flex flex-col gap-1">
+      {lines.map((line) => (
+        <p key={line}>{line}</p>
+      ))}
     </div>
   );
 }

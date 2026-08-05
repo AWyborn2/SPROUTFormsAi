@@ -1,4 +1,4 @@
-import { Router, type Response } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@formai/db';
@@ -6,8 +6,11 @@ import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
-import { assignForRole } from '../lib/assignment.js';
+import { assignmentCaseValues } from '../lib/assignment.js';
+import { computeRequiredAssessmentsChange } from '../lib/requirement-change.js';
 import { db } from '../db.js';
+
+type Database = NonNullable<typeof db>;
 
 /**
  * The organisation's taxonomy — Locations, Departments and the Roles each
@@ -387,54 +390,141 @@ taxonomyRouter.get(
   }),
 );
 
+/**
+ * The guard both the preview and the apply share (U12), so they cannot drift on
+ * who may change a Role's requirements or which tools are valid: Admin (R73/R12),
+ * the Role is the organisation's and active (R121), and every proposed tool
+ * belongs to the organisation. Sends the error response and returns null on any
+ * failure; returns the loaded Role and the deduplicated desired set otherwise.
+ */
+async function loadRequirementChange(
+  database: Database,
+  req: Request,
+  res: Response,
+): Promise<{ role: typeof schema.jobRoles.$inferSelect; toolIds: string[] } | null> {
+  const tenant = req.tenant!;
+  if (!isAdmin(tenant.role)) {
+    reply(res, 403, { error: 'forbidden' });
+    return null;
+  }
+  const parsed = requiredAssessmentsBody.safeParse(req.body);
+  if (!parsed.success) {
+    reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+    return null;
+  }
+  const role = await database.query.jobRoles.findFirst({
+    where: and(eq(schema.jobRoles.id, req.params.id!), eq(schema.jobRoles.orgId, tenant.orgId)),
+  });
+  if (!role) {
+    reply(res, 404, { error: 'not_found' });
+    return null;
+  }
+  // R121: a retired Role is frozen — a preview an apply would 409 must 409 too.
+  if (role.status !== 'active') {
+    reply(res, 409, { error: 'role_retired' });
+    return null;
+  }
+  const toolIds = [...new Set(parsed.data.toolIds)];
+  if (toolIds.length > 0) {
+    const found = await database
+      .select({ id: schema.assessmentTools.id })
+      .from(schema.assessmentTools)
+      .where(
+        and(
+          eq(schema.assessmentTools.orgId, tenant.orgId),
+          inArray(schema.assessmentTools.id, toolIds),
+        ),
+      );
+    if (found.length !== toolIds.length) {
+      reply(res, 400, { error: 'tool_not_found' });
+      return null;
+    }
+  }
+  return { role, toolIds };
+}
+
+/**
+ * The blast radius of a proposed change, BEFORE it commits (U12, R84–R86).
+ * Computes the same effects the apply will, and writes nothing — the Admin sees
+ * how many people are affected and what the change does, and may abandon it.
+ */
+taxonomyRouter.post(
+  '/roles/:id/required-assessments/preview',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    const change = await loadRequirementChange(db, req, res);
+    if (!change) return;
+    const { effects } = await computeRequiredAssessmentsChange(
+      db,
+      tenant.orgId,
+      change.role,
+      change.toolIds,
+      new Date(),
+    );
+    res.json({ effects });
+  }),
+);
+
 taxonomyRouter.put(
   '/roles/:id/required-assessments',
   ...TAXONOMY_GATE,
   withErrorHandling(async (req, res) => {
     if (!db) return reply(res, 503, { error: 'db_unavailable' });
     const tenant = req.tenant!;
-    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
-    const parsed = requiredAssessmentsBody.safeParse(req.body);
-    if (!parsed.success)
-      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
-    const role = await db.query.jobRoles.findFirst({
-      where: and(eq(schema.jobRoles.id, req.params.id!), eq(schema.jobRoles.orgId, tenant.orgId)),
+    const change = await loadRequirementChange(db, req, res);
+    if (!change) return;
+    const { role, toolIds } = change;
+
+    // ONE code path (KTD10): the apply runs the SAME computation the preview did,
+    // so `effects.created` is exactly the number of cases it inserts. Its reads
+    // are of the PRE-change state, so running it before the write is correct.
+    const now = new Date();
+    const { effects, casesToInsert } = await computeRequiredAssessmentsChange(
+      db,
+      tenant.orgId,
+      role,
+      toolIds,
+      now,
+    );
+
+    /*
+      Apply atomically. `compute` derived the additions as a diff against the
+      current requirements, so if the requirement rows committed but a case
+      insert then failed, a retry would see the new rows as current, compute an
+      empty diff, and never create the missing case — the holder would be left
+      permanently uncovered. A transaction makes a partial failure roll the
+      requirement replacement back with it, so a retry re-plans and re-inserts.
+
+      Replace the whole set rather than diff it (a full replace cannot leave a
+      stale requirement behind); removing a tool leaves its in-flight cases
+      untouched (R55) — nothing here cancels a case.
+    */
+    await db.transaction(async (tx) => {
+      await tx
+        .delete(schema.roleRequiredAssessments)
+        .where(eq(schema.roleRequiredAssessments.roleId, role.id));
+      if (toolIds.length > 0) {
+        await tx
+          .insert(schema.roleRequiredAssessments)
+          .values(toolIds.map((toolId) => ({ orgId: tenant.orgId, roleId: role.id, toolId })));
+      }
+      if (!role.requirementsConfigured) {
+        await tx
+          .update(schema.jobRoles)
+          .set({ requirementsConfigured: true })
+          .where(eq(schema.jobRoles.id, role.id));
+      }
+      // The additions' cases, applied with no per-person action (R82, R83, R87).
+      // Exactly the plan `compute` counted, so the rows written equal
+      // `effects.created`.
+      for (const c of casesToInsert) {
+        await tx
+          .insert(schema.assessmentCases)
+          .values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
+      }
     });
-    if (!role) return reply(res, 404, { error: 'not_found' });
-    // R121: a retired Role is frozen — it takes on no new obligations for the
-    // people on their way off it.
-    if (role.status !== 'active') return reply(res, 409, { error: 'role_retired' });
-
-    const toolIds = [...new Set(parsed.data.toolIds)];
-    if (toolIds.length > 0) {
-      const found = await db
-        .select({ id: schema.assessmentTools.id })
-        .from(schema.assessmentTools)
-        .where(
-          and(
-            eq(schema.assessmentTools.orgId, tenant.orgId),
-            inArray(schema.assessmentTools.id, toolIds),
-          ),
-        );
-      if (found.length !== toolIds.length) return reply(res, 400, { error: 'tool_not_found' });
-    }
-
-    // Replace the whole set rather than diff it: the list is short, and a full
-    // replace cannot leave a stale requirement behind.
-    await db
-      .delete(schema.roleRequiredAssessments)
-      .where(eq(schema.roleRequiredAssessments.roleId, role.id));
-    if (toolIds.length > 0) {
-      await db
-        .insert(schema.roleRequiredAssessments)
-        .values(toolIds.map((toolId) => ({ orgId: tenant.orgId, roleId: role.id, toolId })));
-    }
-    if (!role.requirementsConfigured) {
-      await db
-        .update(schema.jobRoles)
-        .set({ requirementsConfigured: true })
-        .where(eq(schema.jobRoles.id, role.id));
-    }
 
     await recordAudit(db, tenant, {
       action: 'Set role required assessments',
@@ -442,13 +532,7 @@ taxonomyRouter.put(
       category: 'settings',
       icon: 'briefcase',
     });
-    // Assign on requirement change (U11, R47): everyone holding this Role today
-    // gets a case for any new requirement they cannot yet meet. The same skip
-    // rule as placement change, so the two agree, and idempotent so re-saving an
-    // unchanged list creates nothing. U12 layers the preview and confirmation on
-    // top of this apply.
-    await assignForRole(db, tenant.orgId, role.id);
-    res.json({ configured: true, toolIds });
+    res.json({ configured: true, toolIds, effects });
   }),
 );
 

@@ -1104,14 +1104,25 @@ export function useRoleRequiredAssessments(roleId: string | undefined) {
   });
 }
 
+/** Project a proposed change's blast radius without committing it (U12). */
+export function usePreviewRoleRequiredAssessments(roleId: string) {
+  return useMutation({
+    mutationFn: (toolIds: string[]) => store.previewRoleRequiredAssessments(roleId, toolIds),
+  });
+}
+
 export function useSetRoleRequiredAssessments(roleId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (toolIds: string[]) => store.setRoleRequiredAssessments(roleId, toolIds),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.roleRequiredAssessments(roleId) });
-      // The taxonomy read carries each Role's configured flag; the audit feed logs the change.
+      // The taxonomy read carries each Role's configured flag; a new case can
+      // reach the case list AND the progress dashboard (a deliberate sibling key,
+      // so it must be swept explicitly); the audit feed logs the change.
       void qc.invalidateQueries({ queryKey: keys.taxonomy });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
       void qc.invalidateQueries({ queryKey: keys.auditLog });
     },
   });

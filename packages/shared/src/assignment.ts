@@ -76,6 +76,45 @@ export interface AssignmentDecision {
 }
 
 /**
+ * The projected effects of a retrospective change to a Role's required
+ * assessments (U12). ONE function computes these and the write plan (KTD10): the
+ * preview returns them and discards the plan, the apply returns them and
+ * executes it, so `created` here equals the cases the apply inserts on unchanged
+ * data.
+ *
+ * Union-by-presence, not a discriminated add/remove — the apply body is the full
+ * desired set, so a single save can add one tool and drop another at once, and
+ * `created` can be non-zero alongside the removal counters. The side that does
+ * not apply reads 0/[].
+ */
+export interface RequiredAssessmentsChangeEffects {
+  /** Tools the change ADDS (desired minus current). Empty on a pure removal. */
+  addedToolIds: string[];
+  /** Tools the change REMOVES (current minus desired). Empty on a pure addition. */
+  removedToolIds: string[];
+  /** Distinct current holders of the Role — a headcount, whichever way it changes (R82, R84, R85). */
+  affected: number;
+  /**
+   * Assessment CASES the addition creates (R83, R84). Already past the skip rule,
+   * so it is the holders left with an unmet requirement, not the headcount — and
+   * on a multi-tool add it can exceed `affected`. Zero on a pure removal, and
+   * never used to describe a removal (R85).
+   */
+  created: number;
+  /**
+   * Cases already in flight for a removed tool that run to completion rather than
+   * being cancelled (R55). Counts cases, not people. Zero on a pure addition.
+   */
+  inFlightContinuing: number;
+  /**
+   * (holder, competency) standings that drop from required to optional (R56) —
+   * a competency a removed tool awards that no Role the holder still carries
+   * requires. Counts pairs, not competencies. Zero on a pure addition.
+   */
+  competenciesDemoting: number;
+}
+
+/**
  * The Location a case records, by the three-step fall-through R58–R60.
  *
  *   R58 — the Location contributing the MOST required parts.
