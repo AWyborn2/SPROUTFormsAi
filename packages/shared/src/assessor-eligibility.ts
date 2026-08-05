@@ -28,13 +28,16 @@
 
 /** What a tool declares its assessors must hold. */
 export interface AssessorRequirements {
-  /** Required in every stream. */
+  /** Required at every Location. */
   always: readonly string[];
   /**
-   * Extra requirements per location stream, keyed by the stream name. Matched
-   * case-insensitively and trimmed: the case's stream is free text a human
-   * types, so "Raw Materials", "raw materials" and " Raw Materials " are one
-   * place, and treating them as three would silently skip the check.
+   * Extra requirements per Location, keyed by the LOCATION ID (U8). A case
+   * records a `location_id` chosen from the organisation's managed list, and
+   * the rule is keyed by the same ids, so a rule and a case cannot name the
+   * same site two ways — an id is an exact match or it is absent (R79). Before
+   * U8 these keys were free-text stream names matched by normalisation; now
+   * that a value is chosen from a list rather than typed, a near-miss is
+   * impossible and the match is a plain lookup.
    */
   byStream?: Readonly<Record<string, readonly string[]>>;
 }
@@ -42,20 +45,19 @@ export interface AssessorRequirements {
 /**
  * How much of the requirement it was possible to check.
  *
- * Three outcomes rather than a boolean, because the two ways of failing need
- * different words: a case with no stream needs one setting, and a case naming a
- * stream nobody declared needs someone to work out whether it is a typo or a
- * site the rule has not been written for.
+ * `unrecognised` is gone (U8): a Location id is either present or absent, never
+ * a near-miss spelling, so a case that records a Location the tool has no rule
+ * for is `matched` with the always-required half — a tool with no
+ * location-specific requirement there, not a value that failed to resolve. The
+ * only remaining partial check is a case that records no Location at all.
  */
 export type StreamCheck =
-  /** This tool's requirement does not depend on location. Nothing to check. */
+  /** This tool's requirement does not depend on Location. Nothing to check. */
   | 'not_applicable'
-  /** Recognised; the location-specific requirements are included. */
+  /** The location-specific half was resolved (whether or not the tool has a rule at this Location). */
   | 'matched'
-  /** The tool varies by location and the case records none. */
-  | 'missing'
-  /** The tool varies by location and does not know the one this case names. */
-  | 'unrecognised';
+  /** The tool varies by Location and the case records none. */
+  | 'missing';
 
 /** What the requirements resolve to for one case. */
 export interface ResolvedAssessorRequirements {
@@ -69,96 +71,64 @@ export interface ResolvedAssessorRequirements {
    * could not be verified.
    */
   streamCheck: StreamCheck;
-  /** The stream names this tool knows about, for offering as choices. */
-  knownStreams: string[];
-}
-
-/** Free text as typed → the form used for comparison. */
-function normalise(stream: string): string {
-  return stream.trim().toLowerCase();
+  /** The Location ids this tool declares a rule for, for offering as choices. */
+  knownLocationIds: string[];
 }
 
 /**
- * Resolve a tool's assessor requirements against one case's location stream.
+ * Resolve a tool's assessor requirements against one case's Location id.
  *
- * AN UNRECOGNISED STREAM IS FLAGGED, NOT TREATED AS AN UNREGULATED SITE.
- *
- * An earlier version of this reasoned that "the tool has said which locations
- * carry extra requirements, so a stream outside that list is a location with
- * none", and returned a clean result. That is the dangerous reading. This value
- * is free text, and it is also the answer to the document's own stream
- * question, so it is not owned by the eligibility rule — which means a value
- * outside `byStream` is far more likely to be a near-miss spelling of a
- * location the rule DOES cover than a genuinely unregulated site. "Mine"
- * against a tool keyed "Mining" reduced `Q34666893 AND (Q50071833 OR
- * Q50073293)` to `Q34666893` and reported it as fully checked, which is exactly
- * the cross-site pass this function exists to prevent.
- *
- * The costs are not symmetric. Flagging a genuine third site produces a warning
- * somebody reads and dismisses; not flagging a typo signs off a mining
- * assessment by an assessor authorised only for raw materials, and nothing ever
- * says so. Nothing here blocks, so a warning costs attention and silence costs
- * correctness.
+ * A Location id chosen from the organisation's list cannot be a near-miss, so a
+ * value outside the rule's keys is a Location the tool simply has no extra
+ * requirement for — the always-required half applies and nothing is skipped
+ * silently. The only thing that leaves the location-specific half unchecked is
+ * a case that records no Location at all, which is what `missing` reports.
  */
 export function resolveAssessorRequirements(
   requirements: AssessorRequirements,
-  locationStream: string | null | undefined,
+  locationId: string | null | undefined,
 ): ResolvedAssessorRequirements {
   const byStream = requirements.byStream ?? {};
-  const knownStreams = Object.keys(byStream);
+  const knownLocationIds = Object.keys(byStream);
   const always = [...requirements.always];
 
-  if (knownStreams.length === 0) {
-    // Every tool that predates this. A missing stream is not a gap when nothing
-    // depended on it, and saying otherwise would warn on every case.
-    return { required: always, streamCheck: 'not_applicable', knownStreams };
+  if (knownLocationIds.length === 0) {
+    // Every tool that predates this. A missing Location is not a gap when
+    // nothing depended on it, and saying otherwise would warn on every case.
+    return { required: always, streamCheck: 'not_applicable', knownLocationIds };
   }
 
-  if (!locationStream || !locationStream.trim()) {
-    return { required: always, streamCheck: 'missing', knownStreams };
+  if (!locationId) {
+    return { required: always, streamCheck: 'missing', knownLocationIds };
   }
 
-  const wanted = normalise(locationStream);
-  const match = knownStreams.find((key) => normalise(key) === wanted);
-  if (!match) {
-    return { required: always, streamCheck: 'unrecognised', knownStreams };
-  }
-
+  const extra = byStream[locationId];
   return {
     // Deduplicated: a tool may list the same competency in both halves, and a
-    // caller that reported it twice would warn about one gap twice.
-    required: [...new Set([...always, ...(byStream[match] ?? [])])],
+    // caller that reported it twice would warn about one gap twice. A Location
+    // the tool has no rule for contributes nothing — that is `matched` with the
+    // always-required half, not a near-miss.
+    required: [...new Set([...always, ...(extra ?? [])])],
     streamCheck: 'matched',
-    knownStreams,
+    knownLocationIds,
   };
 }
 
 /**
  * Wording for a case whose assessor requirements could not be fully checked, or
- * null when they could.
- *
- * Names the streams the tool knows about in both failing cases, because the fix
- * is to set one of them and nobody can guess the spelling a tool expects.
+ * null when they could. Only a case with no Location leaves the location half
+ * unchecked now. `knownLocationNames` names the sites the tool has a rule for,
+ * so an admin can set one — the ids the rule is keyed by are not human-readable.
  */
 export function streamCheckWarning(
-  resolved: Pick<ResolvedAssessorRequirements, 'streamCheck' | 'knownStreams'>,
-  locationStream: string | null | undefined,
+  resolved: Pick<ResolvedAssessorRequirements, 'streamCheck'>,
+  knownLocationNames: readonly string[] = [],
 ): string | null {
-  const known = resolved.knownStreams.join(', ');
-  switch (resolved.streamCheck) {
-    case 'missing':
-      return (
-        'assessor eligibility only partly checked — this assessment has ' +
-        `location-specific requirements (${known}) and this case records no ` +
-        'location stream'
-      );
-    case 'unrecognised':
-      return (
-        'assessor eligibility only partly checked — this case\'s location stream ' +
-        `"${locationStream}" is not one this assessment has requirements for ` +
-        `(${known}), so the location-specific half was skipped`
-      );
-    default:
-      return null;
-  }
+  if (resolved.streamCheck !== 'missing') return null;
+  const known = knownLocationNames.filter(Boolean).join(', ');
+  return (
+    'assessor eligibility only partly checked — this assessment has ' +
+    `location-specific requirements${known ? ` (${known})` : ''} and this case ` +
+    'records no location'
+  );
 }

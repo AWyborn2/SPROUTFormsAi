@@ -18,6 +18,7 @@ import {
   moreCoachingRequired,
   orderedParts,
   requiredParts,
+  resolveLocationParts,
   totalLoggedHours,
   validateAnswerKeys,
   validateManifest,
@@ -99,6 +100,76 @@ describe('requiredParts', () => {
 
     expect(keys).toEqual(['theory', 'prac-1']);
     expect(keys).not.toContain('log-1');
+  });
+});
+
+describe('resolveLocationParts', () => {
+  // Three theory sections; the location rule picks which apply where (U9).
+  const ALL = ['t1', 't2', 't3'];
+  const MINING = 'loc-mining';
+  const RAW = 'loc-raw';
+  const OFFICE = 'loc-office';
+
+  it('requires exactly the parts a Location selects', () => {
+    const rule = { [MINING]: ['t1', 't2'], [RAW]: ['t2', 't3'] };
+
+    expect(resolveLocationParts(ALL, rule, [MINING])).toEqual(['t1', 't2']);
+    expect(resolveLocationParts(ALL, rule, [RAW])).toEqual(['t2', 't3']);
+  });
+
+  it('requires every part at a Location the rule does not mention (R75)', () => {
+    const rule = { [MINING]: ['t1'] };
+
+    expect(resolveLocationParts(ALL, rule, [OFFICE])).toEqual(ALL);
+  });
+
+  it('requires every part at every Location when there is no rule at all (R75)', () => {
+    expect(resolveLocationParts(ALL, {}, [MINING])).toEqual(ALL);
+  });
+
+  it('requires every part at a Location added after the tool was written (R75)', () => {
+    // OFFICE postdates a rule that only ever mentioned MINING — same absence.
+    const rule = { [MINING]: ['t1', 't2'] };
+
+    expect(resolveLocationParts(ALL, rule, [OFFICE])).toEqual(ALL);
+  });
+
+  it('takes the union across Locations whose rules differ (R80)', () => {
+    const rule = { [MINING]: ['t1', 't2'], [RAW]: ['t2', 't3'] };
+
+    expect(resolveLocationParts(ALL, rule, [MINING, RAW])).toEqual(['t1', 't2', 't3']);
+  });
+
+  it('returns one set for a person at several Locations, not one per site (R81)', () => {
+    const rule = { [MINING]: ['t1', 't2'], [RAW]: ['t1', 't2'] };
+
+    // The two overlap entirely — the union is that set once, never doubled.
+    expect(resolveLocationParts(ALL, rule, [MINING, RAW])).toEqual(['t1', 't2']);
+  });
+
+  it('widens to every part if any held Location has no rule', () => {
+    // MINING narrows, OFFICE does not — the union with "everything" is everything.
+    const rule = { [MINING]: ['t1'] };
+
+    expect(resolveLocationParts(ALL, rule, [MINING, OFFICE])).toEqual(ALL);
+  });
+
+  it('requires every part for a person placed at no Location', () => {
+    const rule = { [MINING]: ['t1'] };
+
+    expect(resolveLocationParts(ALL, rule, [])).toEqual(ALL);
+  });
+
+  it('returns the union in document order, not the order Locations were listed', () => {
+    const rule = { [MINING]: ['t3'], [RAW]: ['t1'] };
+
+    expect(resolveLocationParts(ALL, rule, [MINING, RAW])).toEqual(['t1', 't3']);
+  });
+
+  it('drops a listed key the manifest no longer declares', () => {
+    const rule = { [MINING]: ['t1', 'gone'] };
+
+    expect(resolveLocationParts(ALL, rule, [MINING])).toEqual(['t1']);
   });
 });
 

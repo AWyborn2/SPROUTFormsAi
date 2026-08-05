@@ -24,6 +24,8 @@ const toolResult: { data: AssessmentToolDetail | undefined; isLoading: boolean; 
   isError: false,
 };
 const saveMutate = vi.fn();
+const setLocationPartsMutate = vi.fn();
+const sessionResult: { data: { role: string } | undefined } = { data: { role: 'admin' } };
 
 vi.mock('react-router-dom', () => ({
   useParams: () => ({ toolId: 'tool-1' }),
@@ -33,6 +35,8 @@ vi.mock('react-router-dom', () => ({
 vi.mock('../../lib/data/hooks.js', () => ({
   useAssessmentTool: () => toolResult,
   useSaveWorkflow: () => ({ mutate: saveMutate, isPending: false }),
+  useSetLocationParts: () => ({ mutate: setLocationPartsMutate, isPending: false }),
+  useSession: () => sessionResult,
 }));
 
 const toast = vi.fn();
@@ -82,6 +86,8 @@ function tool(over: Partial<AssessmentToolDetail> = {}): AssessmentToolDetail {
       { id: 'h2', type: 'section_header', label: 'Plan & Prepare', required: false, source: 'imported' },
       { id: 'crit1', type: 'check_cross', label: 'Wears correct PPE', required: false, source: 'imported' },
     ],
+    locations: [],
+    locationPartKeys: {},
     problems: [],
     warnings: [],
     ...over,
@@ -93,6 +99,7 @@ afterEach(() => {
   toolResult.data = undefined;
   toolResult.isLoading = false;
   toolResult.isError = false;
+  sessionResult.data = { role: 'admin' };
 });
 
 describe('WorkflowBuilderScreen', () => {
@@ -226,5 +233,86 @@ describe('WorkflowBuilderScreen', () => {
     render(<WorkflowBuilderScreen />);
 
     expect(screen.getByText(/Could not load/)).toBeDefined();
+  });
+});
+
+describe('WorkflowBuilderScreen — where each part applies (U9)', () => {
+  const withLocations = () =>
+    tool({
+      locations: [
+        { id: 'loc-m', name: 'Mining' },
+        { id: 'loc-r', name: 'Raw Materials' },
+      ],
+    });
+
+  const openPanel = () => fireEvent.click(screen.getByText('Where each part applies'));
+
+  function card(name: string) {
+    const el = screen.getByText(name).closest('.rounded-md');
+    if (!el) throw new Error(`no card for ${name}`);
+    return el as HTMLElement;
+  }
+
+  it('stores only the exceptions — a narrowed Location, nothing for an untouched one', () => {
+    toolResult.data = withLocations();
+    render(<WorkflowBuilderScreen />);
+    openPanel();
+
+    // Mining drops its practical part; Raw Materials is left at the default.
+    fireEvent.click(within(card('Mining')).getByRole('button', { name: 'Part 2 — Practical' }));
+    fireEvent.click(screen.getByText('Save parts rule'));
+
+    expect(setLocationPartsMutate).toHaveBeenCalledTimes(1);
+    const saved = setLocationPartsMutate.mock.calls[0]![0] as Record<string, string[]>;
+    expect(saved).toEqual({ 'loc-m': ['p1'] });
+  });
+
+  it('drops the entry when every part is turned back on — the default IS every part', () => {
+    toolResult.data = tool({
+      locations: [{ id: 'loc-m', name: 'Mining' }],
+      locationPartKeys: { 'loc-m': ['p1'] },
+    });
+    render(<WorkflowBuilderScreen />);
+    openPanel();
+
+    // Turning the practical part back on restores the full set → no explicit entry.
+    fireEvent.click(within(card('Mining')).getByRole('button', { name: 'Part 2 — Practical' }));
+    fireEvent.click(screen.getByText('Save parts rule'));
+
+    const saved = setLocationPartsMutate.mock.calls[0]![0] as Record<string, string[]>;
+    expect(saved).toEqual({});
+  });
+
+  it('reads only for a non-admin — no toggles, no save (R73)', () => {
+    sessionResult.data = { role: 'builder' };
+    toolResult.data = withLocations();
+    render(<WorkflowBuilderScreen />);
+    openPanel();
+
+    expect(screen.getByText(/Only an admin can change/)).toBeDefined();
+    expect(screen.queryByText('Save parts rule')).toBeNull();
+    expect(
+      within(card('Mining')).getByRole('button', { name: 'Part 1 — Theory' }),
+    ).toHaveProperty('disabled', true);
+  });
+
+  it('says a rule for a retired Location is kept (R118)', () => {
+    toolResult.data = tool({
+      locations: [{ id: 'loc-m', name: 'Mining' }],
+      locationPartKeys: { 'loc-m': ['p1'], 'loc-gone': ['p2'] },
+    });
+    render(<WorkflowBuilderScreen />);
+    openPanel();
+
+    expect(screen.getByText(/retired Location/)).toBeDefined();
+  });
+
+  it('offers nowhere to vary parts when the org has no Locations', () => {
+    toolResult.data = tool({ locations: [] });
+    render(<WorkflowBuilderScreen />);
+    openPanel();
+
+    expect(screen.getByText(/no Locations yet/)).toBeDefined();
+    expect(screen.queryByText('Save parts rule')).toBeNull();
   });
 });

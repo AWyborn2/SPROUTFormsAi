@@ -864,6 +864,19 @@ export function useSaveWorkflow(toolId: string) {
   });
 }
 
+/** Declare which parts apply at each Location (U9). Admin-gated server-side. */
+export function useSetLocationParts(toolId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (locationPartKeys: Record<string, string[]>) =>
+      assessmentsApi.setLocationParts(toolId, locationPartKeys),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.assessmentTools });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
 export function useAssessmentCases() {
   return useQuery({ queryKey: keys.assessmentCases, queryFn: () => assessmentsApi.listCases() });
 }

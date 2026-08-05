@@ -6,6 +6,7 @@ import {
   VALUE_SOURCES,
   effectiveAccess,
   fieldsInPart,
+  orderedParts,
   orderedSections,
   valueSource,
   type AccessLevel,
@@ -16,7 +17,13 @@ import {
   type WorkflowRole,
   type WorkflowSection,
 } from '@formai/shared';
-import { useAssessmentTool, useSaveWorkflow } from '../../lib/data/hooks.js';
+import {
+  useAssessmentTool,
+  useSaveWorkflow,
+  useSetLocationParts,
+  useSession,
+} from '../../lib/data/hooks.js';
+import type { AssessmentToolDetail } from '../../lib/data/assessments.js';
 import { groupFieldsByHeading, totalFields } from './workflow-groups.js';
 
 /**
@@ -100,7 +107,11 @@ export function WorkflowBuilderScreen() {
   const { toolId = '' } = useParams();
   const { toast } = useToast();
   const { data: tool, isLoading, isError } = useAssessmentTool(toolId);
+  const { data: session } = useSession();
   const save = useSaveWorkflow(toolId);
+
+  // The parts rule is an Admin act (R73). Reads for everyone, edits for admins.
+  const canEditParts = session?.role === 'admin' || session?.role === 'owner';
 
   /**
    * The workflow being edited, or null while it is still the server's.
@@ -243,6 +254,8 @@ export function WorkflowBuilderScreen() {
           </ul>
         </div>
       )}
+
+      <LocationPartsEditor tool={tool} canEdit={canEditParts} />
 
       <div className="flex flex-col gap-2.5">
         {sections.map((section, index) => {
@@ -402,6 +415,169 @@ export function WorkflowBuilderScreen() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Which of a tool's parts apply at each Location (U9).
+ *
+ * The map holds only the EXCEPTIONS: a Location left out requires every part
+ * (R75), so a row where every chip is on is stored as no entry at all, and a
+ * person at several Locations is assessed once against the union (R80, R81). A
+ * rule already declared for a Location since retired is not shown here but rides
+ * through a save untouched (R118), because the draft is seeded from the stored
+ * map and only the active rows are ever edited.
+ *
+ * Declaring the rule is an Admin act (R73); for anyone else this reads.
+ */
+function LocationPartsEditor({ tool, canEdit }: { tool: AssessmentToolDetail; canEdit: boolean }) {
+  const { toast } = useToast();
+  const save = useSetLocationParts(tool.id);
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<Record<string, string[]> | null>(null);
+
+  const allKeys = useMemo(() => orderedParts(tool.manifest).map((p) => p.key), [tool.manifest]);
+  const partLabel = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of orderedParts(tool.manifest)) map.set(p.key, p.label);
+    return (key: string) => map.get(key) ?? key;
+  }, [tool.manifest]);
+
+  const rule = draft ?? tool.locationPartKeys;
+  const dirty = draft !== null;
+
+  // Undefined entry means the default — every part applies here (R75).
+  const selectionFor = (locationId: string) => rule[locationId] ?? allKeys;
+  const isDefault = (locationId: string) => rule[locationId] === undefined;
+
+  const retiredRuleCount = useMemo(() => {
+    const active = new Set(tool.locations.map((l) => l.id));
+    return Object.keys(tool.locationPartKeys).filter((id) => !active.has(id)).length;
+  }, [tool.locations, tool.locationPartKeys]);
+
+  function toggle(locationId: string, key: string) {
+    if (!canEdit) return;
+    setDraft((prev) => {
+      const base: Record<string, string[]> = { ...(prev ?? tool.locationPartKeys) };
+      const current = new Set(base[locationId] ?? allKeys);
+      if (current.has(key)) current.delete(key);
+      else current.add(key);
+      const next = allKeys.filter((k) => current.has(k));
+      // A full selection is the default — store it as absence, not a copy of
+      // every key, so "no rule means every part" stays literally true.
+      if (next.length === allKeys.length) delete base[locationId];
+      else base[locationId] = next;
+      return base;
+    });
+  }
+
+  function onSave() {
+    if (!draft) return;
+    save.mutate(draft, {
+      onSuccess: () => {
+        setDraft(null);
+        toast({ variant: 'success', message: 'Saved where each part applies.' });
+      },
+      onError: (err) => {
+        toast({
+          variant: 'warning',
+          message: err instanceof Error ? err.message : 'Could not save the parts rule.',
+        });
+      },
+    });
+  }
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-surface-card shadow-xs">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-3 px-[18px] py-[13px] text-left"
+      >
+        <div className="min-w-0 flex-1">
+          <span className="text-[14px] font-semibold">Where each part applies</span>
+          <span className="mt-0.5 block text-[11.5px] text-text-tertiary">
+            Pick which parts each Location requires. A Location you leave untouched requires every
+            part.
+          </span>
+        </div>
+        <Icon name={open ? 'chevron-up' : 'chevron-down'} size={14} className="flex-none text-text-tertiary" />
+      </button>
+
+      {open && (
+        <div className="border-t border-border-subtle bg-surface-sunken px-[18px] py-3.5">
+          {tool.locations.length === 0 ? (
+            <p className="text-[12px] text-text-tertiary">
+              This organisation has no Locations yet. Add them in settings to vary which parts apply
+              by site.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2.5">
+              {!canEdit && (
+                <p className="rounded-md border border-border bg-surface-card p-[9px_11px] text-[11.5px] text-text-tertiary">
+                  Only an admin can change where parts apply.
+                </p>
+              )}
+              {tool.locations.map((location) => {
+                const selected = new Set(selectionFor(location.id));
+                return (
+                  <div
+                    key={location.id}
+                    className="rounded-md border border-border bg-surface-card p-[11px_13px]"
+                  >
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="text-[12.5px] font-medium">{location.name}</span>
+                      {isDefault(location.id) && (
+                        <span className="rounded-sm bg-surface-sunken px-1.5 py-px font-mono text-[9px] uppercase tracking-wide text-text-tertiary">
+                          Every part
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {allKeys.map((key) => {
+                        const on = selected.has(key);
+                        return (
+                          <button
+                            key={key}
+                            type="button"
+                            aria-pressed={on}
+                            disabled={!canEdit}
+                            onClick={() => toggle(location.id, key)}
+                            className={`rounded-sm border px-2 py-1 text-[11px] font-medium transition-colors ${
+                              on
+                                ? 'border-success bg-success-soft text-success-text'
+                                : 'border-border bg-surface-card text-text-tertiary'
+                            } ${canEdit ? 'cursor-pointer' : 'cursor-default'}`}
+                          >
+                            {partLabel(key)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {retiredRuleCount > 0 && (
+                <p className="text-[11px] text-text-tertiary">
+                  {retiredRuleCount} rule{retiredRuleCount === 1 ? '' : 's'} for a retired Location
+                  {retiredRuleCount === 1 ? ' is' : ' are'} kept and left unchanged.
+                </p>
+              )}
+
+              {canEdit && (
+                <div className="flex justify-end">
+                  <Button onClick={onSave} disabled={!dirty || save.isPending}>
+                    {dirty ? 'Save parts rule' : 'Saved'}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

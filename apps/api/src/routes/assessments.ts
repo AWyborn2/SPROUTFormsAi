@@ -82,6 +82,16 @@ const GATE = [requireTenant, requirePlanFeature('assessments')] as const;
 
 type Database = NonNullable<typeof db>;
 
+/*
+  The Admin access level (R73). Declaring the parts rule reads the organisation's
+  Location taxonomy and decides which sections a candidate must complete to be
+  certified, so it sits on the same gate R12 puts on managing that taxonomy —
+  not on the permission that authors a document's wording.
+*/
+function isAdmin(role: string): boolean {
+  return role === 'admin' || role === 'owner';
+}
+
 async function loadTool(database: Database, toolId: string, orgId: string) {
   return (
     (await database.query.assessmentTools.findFirst({
@@ -451,6 +461,8 @@ assessmentToolsRouter.post(
         assessorCompetencyIds: parsed.data.assessorCompetencyIds ?? [],
         assessorStreamCompetencyIds: parsed.data.assessorStreamCompetencyIds ?? {},
         awardedCompetencyIds: parsed.data.awardedCompetencyIds ?? [],
+        // The parts rule is declared later, behind the Admin gate (U9, R73).
+        locationPartKeys: {},
       })
       .returning();
     if (!row) throw new Error('tool_create_failed: insert returned no row');
@@ -475,9 +487,13 @@ assessmentToolsRouter.get(
       return;
     }
     const tenant = req.tenant!;
-    const rows = await db.query.assessmentTools.findMany({
-      where: eq(schema.assessmentTools.orgId, tenant.orgId),
-    });
+    const [rows, orgLocations] = await Promise.all([
+      db.query.assessmentTools.findMany({ where: eq(schema.assessmentTools.orgId, tenant.orgId) }),
+      db.query.locations.findMany({
+        where: and(eq(schema.locations.orgId, tenant.orgId), eq(schema.locations.status, 'active')),
+        orderBy: (l, { asc }) => [asc(l.name)],
+      }),
+    ]);
     res.json(
       rows.map((t) => ({
         id: t.id,
@@ -485,17 +501,13 @@ assessmentToolsRouter.get(
         templateId: t.templateId,
         parts: orderedParts(t.manifest).map((p) => ({ key: p.key, label: p.label, kind: p.kind })),
         /*
-          The location streams this tool's assessor rule distinguishes, so the
-          new-case form can offer them instead of leaving somebody to guess the
-          spelling. Matching is case-insensitive, but "Raw Mats" is not "Raw
-          Materials" under any normalisation, and a stream the tool does not
-          recognise silently contributes no requirement.
-
-          Names only, never the competency ids behind them: which qualification
-          authorises which site is not something the case form needs, and this
-          list is served to anyone who may open a case.
+          The organisation's Locations, offered on the new-case form so a case is
+          placed by choosing from the managed list rather than typing a stream
+          name (R77). The assessor rule adds requirements only at the Locations
+          it keys, but a case may be assessed at any of the organisation's sites,
+          so the whole active list is offered.
         */
-        locationStreams: Object.keys(t.assessorStreamCompetencyIds ?? {}),
+        locations: orgLocations.map((l) => ({ id: l.id, name: l.name })),
       })),
     );
   }),
@@ -528,12 +540,17 @@ assessmentToolsRouter.get(
       return;
     }
 
-    const template = await db.query.formTemplates.findFirst({
-      where: and(
-        eq(schema.formTemplates.id, tool.templateId),
-        eq(schema.formTemplates.orgId, tenant.orgId),
-      ),
-    });
+    const [template, orgLocations] = await Promise.all([
+      db.query.formTemplates.findFirst({
+        where: and(
+          eq(schema.formTemplates.id, tool.templateId),
+          eq(schema.formTemplates.orgId, tenant.orgId),
+        ),
+      }),
+      db.query.locations.findMany({
+        where: and(eq(schema.locations.orgId, tenant.orgId), eq(schema.locations.status, 'active')),
+      }),
+    ]);
     const fields = template?.currentVersionId
       ? await fieldsForVersion(db, template.currentVersionId)
       : [];
@@ -547,6 +564,14 @@ assessmentToolsRouter.get(
       templateId: tool.templateId,
       manifest: tool.manifest,
       workflow,
+      /*
+        The active Locations the parts rule may distinguish (R76), and the rule
+        as stored (U9). A rule may still name a Location since retired (R118), so
+        the editor merges those keys with this list rather than assuming every
+        key appears here.
+      */
+      locations: orgLocations.map((l) => ({ id: l.id, name: l.name })),
+      locationPartKeys: tool.locationPartKeys ?? {},
       /*
         Whether the stored workflow is real or synthesised. The builder needs to
         say "this is the default, nobody has configured it" rather than implying
@@ -642,14 +667,114 @@ assessmentToolsRouter.patch(
   }),
 );
 
+/** A parts rule: Location id → the manifest part keys required at that Location. */
+const locationPartsBody = z.object({
+  locationPartKeys: z.record(z.string().uuid(), z.array(z.string().min(1))),
+});
+
+/**
+ * Declare which of a tool's parts apply at each Location (U9, R71–R75).
+ *
+ * ADMIN, not the authoring permission (R73): the rule decides which sections a
+ * candidate must complete to be certified — a statement about the standard the
+ * organisation holds people to — so it sits on the same gate R12 puts on the
+ * Location taxonomy it reads, which is why this is its own route rather than a
+ * field on the tool PATCH above.
+ *
+ * A Location ABSENT from the map requires every part (R75), so the map is only
+ * the exceptions. A NEW entry must name an active Location (R118), but an entry
+ * already stored for a Location since retired is preserved rather than rejected
+ * — a rule stays with the Location it names.
+ */
+assessmentToolsRouter.patch(
+  '/:id/location-parts',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = locationPartsBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tool = await loadTool(db, req.params.id!, tenant.orgId);
+    if (!tool) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const partKeys = new Set(orderedParts(tool.manifest).map((p) => p.key));
+    const alreadyDeclared = new Set(Object.keys(tool.locationPartKeys ?? {}));
+    const activeLocations = await db.query.locations.findMany({
+      where: and(eq(schema.locations.orgId, tenant.orgId), eq(schema.locations.status, 'active')),
+    });
+    const activeIds = new Set(activeLocations.map((l) => l.id));
+
+    for (const [locationId, keys] of Object.entries(parsed.data.locationPartKeys)) {
+      // R118 / R16: a rule can only be ADDED for an active Location. One already
+      // declared for a since-retired Location is allowed through so re-saving the
+      // map does not strip it.
+      if (!activeIds.has(locationId) && !alreadyDeclared.has(locationId)) {
+        res.status(400).json({ error: 'location_not_found', locationId });
+        return;
+      }
+      const unknown = keys.find((k) => !partKeys.has(k));
+      if (unknown) {
+        res.status(400).json({ error: 'unknown_part', partKey: unknown });
+        return;
+      }
+    }
+
+    await db
+      .update(schema.assessmentTools)
+      .set({ locationPartKeys: parsed.data.locationPartKeys })
+      .where(eq(schema.assessmentTools.id, tool.id));
+
+    await recordAudit(db, tenant, {
+      action: 'Set assessment location parts rule',
+      target: tool.name,
+      category: 'settings',
+      icon: 'clipboard-check',
+    });
+
+    res.json({ id: tool.id, locationPartKeys: parsed.data.locationPartKeys });
+  }),
+);
+
 // ── cases ───────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve Location ids to their current names — for the assessor warning, for
+ * display, and for the answer the assessment document reads for its own stream
+ * question (R78). Read live so a rename reaches everywhere at once (R136).
+ */
+async function locationNamesByIdFor(
+  database: NonNullable<typeof db>,
+  orgId: string,
+  ids: readonly (string | null | undefined)[],
+): Promise<Map<string, string>> {
+  const unique = [...new Set(ids.filter((x): x is string => Boolean(x)))];
+  if (unique.length === 0) return new Map();
+  const rows = await database.query.locations.findMany({
+    where: and(eq(schema.locations.orgId, orgId), inArray(schema.locations.id, unique)),
+  });
+  return new Map(rows.map((r) => [r.id, r.name]));
+}
 
 const createCaseBody = z.object({
   toolId: z.string().uuid(),
   candidateUserId: z.string().uuid(),
   assessorUserId: z.string().uuid().optional(),
   pathway: z.enum(ASSESSMENT_PATHWAYS),
-  locationStream: z.string().optional(),
+  // A managed Location id chosen from the organisation's list, never typed (R77).
+  locationId: z.string().uuid().optional(),
   rplJustification: z.string().min(1).optional(),
 });
 
@@ -671,7 +796,7 @@ assessmentCasesRouter.post(
       res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
       return;
     }
-    const { toolId, candidateUserId, pathway, locationStream, rplJustification } = parsed.data;
+    const { toolId, candidateUserId, pathway, locationId, rplJustification } = parsed.data;
     const assessorUserId = parsed.data.assessorUserId ?? tenant.userId;
 
     // RPL waives the logged-hours parts, so the reason it was granted is the
@@ -686,6 +811,22 @@ assessmentCasesRouter.post(
     if (!tool) {
       res.status(404).json({ error: 'tool_not_found' });
       return;
+    }
+
+    // A Location, if given, must be one of the organisation's active values
+    // (R16, R77). A value chosen from a list cannot be a near-miss.
+    if (locationId) {
+      const loc = await db.query.locations.findFirst({
+        where: and(
+          eq(schema.locations.id, locationId),
+          eq(schema.locations.orgId, tenant.orgId),
+          eq(schema.locations.status, 'active'),
+        ),
+      });
+      if (!loc) {
+        res.status(400).json({ error: 'location_not_found' });
+        return;
+      }
     }
 
     const template = await db.query.formTemplates.findFirst({
@@ -721,15 +862,21 @@ assessmentCasesRouter.post(
     */
     const assessorNeeds = resolveAssessorRequirements(
       { always: tool.assessorCompetencyIds, byStream: tool.assessorStreamCompetencyIds },
-      locationStream,
+      locationId,
     );
 
-    const [candidateGaps, assessorGaps] = await Promise.all([
+    const [candidateGaps, assessorGaps, ruleLocationNames] = await Promise.all([
       unmetPrerequisites(db, tenant.orgId, candidateUserId, tool.candidatePrerequisiteIds),
       unmetPrerequisites(db, tenant.orgId, assessorUserId, assessorNeeds.required),
+      locationNamesByIdFor(db, tenant.orgId, assessorNeeds.knownLocationIds),
     ]);
-    // A partial check reported as a complete one is worse than saying so.
-    const streamWarning = streamCheckWarning(assessorNeeds, locationStream);
+    // A partial check reported as a complete one is worse than saying so. The
+    // warning names the Locations the tool has a rule for, so an admin can set
+    // one — the ids the rule is keyed by are not human-readable.
+    const streamWarning = streamCheckWarning(
+      assessorNeeds,
+      assessorNeeds.knownLocationIds.map((id) => ruleLocationNames.get(id) ?? id),
+    );
     const warnings = [
       ...candidateGaps.map((gap) => describeGap('candidate', gap)),
       ...assessorGaps.map((gap) => describeGap('assessor', gap)),
@@ -744,7 +891,7 @@ assessmentCasesRouter.post(
         candidateUserId,
         assessorUserId,
         pathway,
-        locationStream: locationStream ?? null,
+        locationId: locationId ?? null,
         currentVersionId: template.currentVersionId,
         rplJustification: rplJustification ?? null,
         prerequisiteWarnings: warnings,
@@ -1069,6 +1216,9 @@ assessmentCasesRouter.get(
     const candidate = await db.query.users.findFirst({
       where: eq(schema.users.id, row.candidateUserId),
     });
+    const locationName = row.locationId
+      ? ((await locationNamesByIdFor(db, tenant.orgId, [row.locationId])).get(row.locationId) ?? null)
+      : null;
 
     res.json({
       id: row.id,
@@ -1079,7 +1229,8 @@ assessmentCasesRouter.get(
       candidateName: candidate?.name ?? '',
       assessorUserId: row.assessorUserId,
       pathway: row.pathway,
-      locationStream: row.locationStream,
+      locationId: row.locationId,
+      locationName,
       state: row.state,
       currentVersionId: row.currentVersionId,
       prerequisiteWarnings: row.prerequisiteWarnings,
@@ -1355,6 +1506,12 @@ assessmentCasesRouter.get(
     const hidden = new Set(hiddenFieldIds(section, partFields, party));
     const visibleFields = partFields.filter((f) => !hidden.has(f.id));
 
+    // The document's own stream question is answered with the Location's NAME
+    // (R78), resolved live from the case's pointer.
+    const locationName = row.locationId
+      ? ((await locationNamesByIdFor(db, tenant.orgId, [row.locationId])).get(row.locationId) ?? null)
+      : null;
+
     res.json({
       id: attempt.id,
       partKey: attempt.partKey,
@@ -1373,7 +1530,7 @@ assessmentCasesRouter.get(
        * none, because hiding content nobody chose to hide would silently shorten
        * the assessment.
        */
-      locationStream: row.locationStream,
+      locationStream: locationName,
       locationStreamFieldId: manifest.locationStreamFieldId ?? null,
       /**
        * The stream question itself, sent as a lookup source because it often
@@ -1774,6 +1931,13 @@ assessmentCasesRouter.post(
     const candidate = await db.query.users.findFirst({
       where: eq(schema.users.id, row.candidateUserId),
     });
+    // A settled case prints the Location NAME it was signed with (R138); an open
+    // one resolves the current name live from its pointer (R78).
+    const exportLocationName =
+      row.signedOffLocationName ||
+      (row.locationId
+        ? ((await locationNamesByIdFor(db, tenant.orgId, [row.locationId])).get(row.locationId) ?? null)
+        : null);
 
     try {
       const out = await exportCasePdf({
@@ -1781,7 +1945,7 @@ assessmentCasesRouter.post(
         fields: (version.fields ?? []) as FormField[],
         manifest: tool.manifest,
         pathway: row.pathway as AssessmentPathway,
-        locationStream: row.locationStream,
+        locationStream: exportLocationName,
         candidateName: candidate?.name ?? '',
         attempts: attempts.map((a) => ({
           partKey: a.partKey,
@@ -1909,7 +2073,7 @@ assessmentCasesRouter.post(
         candidateUserId: disputed.candidateUserId,
         assessorUserId: parsed.data.assessorUserId,
         pathway: disputed.pathway,
-        locationStream: disputed.locationStream,
+        locationId: disputed.locationId,
         currentVersionId: template.currentVersionId,
         appealOfCaseId: disputed.id,
         appealReason: parsed.data.reason,
@@ -2266,15 +2430,16 @@ assessmentCasesRouter.post(
     */
     const assessorNeeds = resolveAssessorRequirements(
       { always: tool.assessorCompetencyIds, byStream: tool.assessorStreamCompetencyIds },
-      row.locationStream,
+      row.locationId,
     );
-    const assessorGaps = await unmetPrerequisites(
-      db,
-      tenant.orgId,
-      tenant.userId,
-      assessorNeeds.required,
+    const [assessorGaps, ruleLocationNames] = await Promise.all([
+      unmetPrerequisites(db, tenant.orgId, tenant.userId, assessorNeeds.required),
+      locationNamesByIdFor(db, tenant.orgId, [...assessorNeeds.knownLocationIds, row.locationId]),
+    ]);
+    const signOffStreamWarning = streamCheckWarning(
+      assessorNeeds,
+      assessorNeeds.knownLocationIds.map((id) => ruleLocationNames.get(id) ?? id),
     );
-    const signOffStreamWarning = streamCheckWarning(assessorNeeds, row.locationStream);
 
     const signedOffAt = new Date();
     await db
@@ -2283,6 +2448,9 @@ assessmentCasesRouter.post(
         signedOffAt,
         signedOffByUserId: tenant.userId,
         signedOffName: parsed.data.assessorName,
+        // Capture the Location's name as signed (R138), so a later rename does
+        // not change what this settled certificate reads.
+        signedOffLocationName: row.locationId ? (ruleLocationNames.get(row.locationId) ?? '') : '',
         signedOffSignature: parsed.data.signature,
         state: 'competent',
         closedAt: signedOffAt,

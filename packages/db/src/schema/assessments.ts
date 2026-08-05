@@ -19,6 +19,7 @@ import {
 } from './enums.ts';
 import { organizations, users } from './organizations.ts';
 import { formTemplates, formTemplateVersions } from './forms.ts';
+import { locations } from './taxonomy.ts';
 
 /**
  * An assessment tool — the part structure laid over a form template.
@@ -82,6 +83,25 @@ export const assessmentTools = pgTable(
       .notNull()
       .default({}),
     /*
+      WHICH PARTS APPLY WHERE (U9). A map from Location id to the part keys that
+      Location requires, sitting beside the assessor rule above because both
+      answer a per-location question about this one tool, and a location-centric
+      home would force every Location to know about every tool.
+
+      Keyed by Location id, not name, for the same reason R79 keys the assessor
+      rule by id: a rule keyed by a name whose Location was later renamed would
+      silently stop applying. A Location ABSENT from this map requires every part
+      the manifest declares — whether no rule was ever set or the Location
+      postdates the tool (R75) — so the safe direction is the default and the
+      worst case of a missing rule is a longer assessment, never a skipped part.
+
+      Empty on every tool that does not vary its parts by location.
+    */
+    locationPartKeys: jsonb('location_part_keys')
+      .$type<Record<string, string[]>>()
+      .notNull()
+      .default({}),
+    /*
       Competency ids this tool AWARDS on sign-off. The tool declared what a
       candidate must bring and what an assessor must hold, but never what
       passing it confers — so a competent case updated its own state and the
@@ -130,8 +150,19 @@ export const assessmentCases = pgTable(
       .references(() => users.id, { onDelete: 'restrict' }),
     assessorUserId: uuid().references(() => users.id, { onDelete: 'set null' }),
     pathway: assessmentPathwayEnum().notNull(),
-    /** Which location-specific content applies, e.g. 'mining'. */
-    locationStream: text('location_stream'),
+    /**
+     * Where this case is assessed — a pointer at the organisation's managed
+     * Location list (R77, R78), replacing the free-text location stream (U8).
+     * One value serves three jobs: it is where the case is assessed, it is what
+     * the per-Location assessor rule is matched against (by id now, R79), and
+     * its name is the answer the assessment document reads for its own stream
+     * question. Null when the tool has no location-specific content.
+     *
+     * `set null` rather than `restrict`: a Location is retired, never deleted,
+     * so this never fires — but if one were force-removed, a case losing its
+     * pointer beats a Location operation being blocked.
+     */
+    locationId: uuid('location_id').references(() => locations.id, { onDelete: 'set null' }),
     state: assessmentCaseStateEnum().notNull().default('open'),
     currentVersionId: uuid('current_version_id')
       .notNull()
@@ -172,6 +203,13 @@ export const assessmentCases = pgTable(
     }),
     /** The assessor's printed name, as they signed it. */
     signedOffName: text('signed_off_name').notNull().default(''),
+    /**
+     * The Location's name captured at sign-off (R138). A settled case asserts
+     * what was true when it was signed, so a later rename of the Location does
+     * not change what the certificate reads — the one place the location pointer
+     * is captured as words rather than followed, mirroring `signedOffName`.
+     */
+    signedOffLocationName: text('signed_off_location_name').notNull().default(''),
     /** PNG data URL, as SignaturePad emits. One per case; 5-40KB. */
     signedOffSignature: text('signed_off_signature').notNull().default(''),
   },
