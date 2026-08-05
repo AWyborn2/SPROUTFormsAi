@@ -130,9 +130,95 @@ export interface ExtractedField {
    * section — so it is resolved locally. See `linkOutcomeTargets`.
    */
   questionRef?: string;
+  /**
+   * Which of the cover page's three sections this field belongs to.
+   *
+   * A competency paper's front page is three documents on one sheet — who the
+   * candidate is, what they must already hold and which route they take, and
+   * what the assessor concluded — and the split is ALWAYS those three. Naming
+   * the section on the field is what lets the parts be anchored without
+   * depending on the model having emitted a heading in the right place.
+   *
+   * Absent on every field that is not on the cover page, and on any extraction
+   * that predates the rule.
+   */
+  coverSection?: CoverSection;
+  /**
+   * A matching question's PROMPT side, verbatim, in printed order.
+   *
+   * Present together with `matchRight` or not at all. Carried as two lists
+   * rather than as pre-built options because the pairing options and the answer
+   * key are DERIVED from them (`buildMatchingQuestion`), and a model asked for
+   * the derived form guesses at pairings nobody printed.
+   *
+   * Where the prompts are pictures, each entry describes its image ("Sign photo
+   * — red pyramid"); the picture itself is supplied during authoring.
+   */
+  matchLeft?: string[];
+  /** A matching question's ANSWER side, verbatim, in printed order. */
+  matchRight?: string[];
+  /**
+   * The printed page range the extraction pass that produced this field was
+   * looking at.
+   *
+   * STAMPED IN CODE, NEVER ASKED FOR. A long document is extracted a few pages
+   * at a time, and the splitter knows exactly which pages went into each call —
+   * so this is a fact the pipeline already has and the model can only guess at.
+   * Asking for it would put a hallucinable number on the one thing that
+   * disambiguates three character-identical practical parts.
+   *
+   * NOT `sourcePosition`, which needs the full x/y/width/height geometry the AI
+   * path cannot produce. This says which pages a field came from, not where on
+   * one it sits.
+   *
+   * 1-based and inclusive, matching the page numbers printed in a footer.
+   */
+  sourcePages?: { from: number; to: number };
   sourcePosition?: SourcePosition;
   /** Reviewer-facing note, e.g. "detected as text — likely a signature field". */
   note?: string;
+}
+
+/**
+ * The three sections a competency paper's cover page always splits into.
+ *
+ * Fixed rather than free text, and fixed at THREE, because the split is a
+ * property of the document class rather than of any one paper: identity,
+ * eligibility, verdict. A free-text section name would let two extractions of
+ * the same page disagree about which boxes gate enrolment.
+ */
+export const COVER_SECTIONS = [
+  'candidate_declaration',
+  'pathway_prerequisites',
+  'assessor_declaration',
+] as const;
+export type CoverSection = (typeof COVER_SECTIONS)[number];
+
+/** Human labels, in printed order. */
+export const COVER_SECTION_LABELS: Record<CoverSection, string> = {
+  candidate_declaration: 'Candidate declaration',
+  pathway_prerequisites: 'Pathway & prerequisites',
+  assessor_declaration: 'Assessor feedback & declaration',
+};
+
+/**
+ * A matching question the extraction read both sides of.
+ *
+ * `isAuthorableMatch` is the question the authoring UI actually asks: can the
+ * pair builder open pre-filled, or does it start blank? One side is worth
+ * seeding from and is NOT enough to build a question — see `matching.ts`.
+ */
+export function hasBothMatchSides(
+  field: Pick<ExtractedField, 'matchLeft' | 'matchRight'>,
+): boolean {
+  return (field.matchLeft?.length ?? 0) > 0 && (field.matchRight?.length ?? 0) > 0;
+}
+
+/** Whether the extraction saw anything of a matching question's two sides. */
+export function hasAnyMatchSide(
+  field: Pick<ExtractedField, 'matchLeft' | 'matchRight'>,
+): boolean {
+  return (field.matchLeft?.length ?? 0) > 0 || (field.matchRight?.length ?? 0) > 0;
 }
 
 /** The full result of an extraction run. */

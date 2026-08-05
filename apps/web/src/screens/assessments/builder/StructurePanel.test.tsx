@@ -1,0 +1,298 @@
+// @vitest-environment jsdom
+/**
+ * The structure editor.
+ *
+ * The arrangement logic is tested without a DOM in `builder-structure.test.ts`;
+ * what is left for this file is the things only the component decides — which
+ * controls exist, what they are called, and which of them are reachable.
+ *
+ * The load-bearing one is the type palette. `typeOptionsFor` exists because two
+ * editors once disagreed about what a field may become, and a reviewer could
+ * turn a Date into an optionless checkbox group that blocked every submit. This
+ * is the third editor; the test pins that it asks the shared guard rather than
+ * listing types itself.
+ */
+import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, within } from '@testing-library/react';
+import type { BuilderStructure, FormField } from '@formai/shared';
+import { StructurePanel, type StructurePanelProps } from './StructurePanel.js';
+
+vi.mock('@formai/ui', () => ({
+  Icon: ({ name }: { name: string }) => <span data-icon={name} />,
+}));
+
+function field(over: Partial<FormField> & { id: string }): FormField {
+  return { label: over.id, type: 'text', required: false, source: 'imported', ...over };
+}
+
+const FIELDS: FormField[] = [
+  field({ id: 'a', label: 'Candidate name' }),
+  field({ id: 'b', label: 'Employee ID' }),
+  field({ id: 'c', label: 'Assessor signature', type: 'signature' }),
+  field({ id: 'tbl', label: 'Pre-start checks', type: 'repeating_group', fixedRows: ['Oil'] }),
+];
+
+const STRUCTURE: BuilderStructure = [
+  { key: 's1', label: 'Candidate declaration', cols: 1, cover: true, fields: [{ id: 'a' }, { id: 'b' }] },
+  { key: 's2', label: 'Part 2 — Practical', cols: 1, fields: [{ id: 'c' }, { id: 'tbl' }] },
+];
+
+function setup(over: Partial<StructurePanelProps> = {}) {
+  const props: StructurePanelProps = {
+    structure: STRUCTURE,
+    fields: FIELDS,
+    collapsed: false,
+    onToggleCollapsed: vi.fn(),
+    onReset: vi.fn(),
+    onMoveSection: vi.fn(),
+    onRenameSection: vi.fn(),
+    onSetColumns: vi.fn(),
+    onToggleOwnPage: vi.fn(),
+    onMoveField: vi.fn(),
+    onCycleSpan: vi.fn(),
+    onSetFieldType: vi.fn(),
+    onGroup: vi.fn(),
+    ...over,
+  };
+  return { props, ...render(<StructurePanel {...props} />) };
+}
+
+/** Open a section's disclosure so its fields and controls render. */
+function expand(label: string) {
+  fireEvent.click(screen.getByText(label));
+}
+
+describe('StructurePanel', () => {
+  it('lists every section with its field count', () => {
+    setup();
+
+    expect(screen.getByText('Candidate declaration')).toBeTruthy();
+    expect(screen.getByText('Part 2 — Practical')).toBeTruthy();
+    expect(screen.getAllByText(/2 fields/)).toHaveLength(2);
+  });
+
+  it('collapses to a rail that reopens it', () => {
+    const onToggleCollapsed = vi.fn();
+    setup({ collapsed: true, onToggleCollapsed });
+
+    // Nothing but the rail — the arrangement is not rendered at all.
+    expect(screen.queryByText('Candidate declaration')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show structure' }));
+    expect(onToggleCollapsed).toHaveBeenCalled();
+  });
+
+  it('shows a section’s fields only once it is expanded', () => {
+    setup();
+    expect(screen.queryByText('Candidate name')).toBeNull();
+
+    expand('Candidate declaration');
+    expect(screen.getByText('Candidate name')).toBeTruthy();
+  });
+
+  it('disables the reorder arrows at the ends rather than wrapping', () => {
+    setup();
+
+    expect(
+      screen.getByRole('button', { name: 'Move Candidate declaration earlier' }).hasAttribute('disabled'),
+    ).toBe(true);
+    expect(
+      screen.getByRole('button', { name: 'Move Candidate declaration later' }).hasAttribute('disabled'),
+    ).toBe(false);
+    expect(
+      screen.getByRole('button', { name: 'Move Part 2 — Practical later' }).hasAttribute('disabled'),
+    ).toBe(true);
+  });
+
+  it('moves a section', () => {
+    const onMoveSection = vi.fn();
+    setup({ onMoveSection });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move Candidate declaration later' }));
+
+    expect(onMoveSection).toHaveBeenCalledWith('s1', 1);
+  });
+
+  it('offers 1, 2 and 3 columns, and reports the choice', () => {
+    const onSetColumns = vi.fn();
+    setup({ onSetColumns });
+    expand('Candidate declaration');
+
+    fireEvent.click(screen.getByRole('button', { name: '3 col' }));
+
+    expect(onSetColumns).toHaveBeenCalledWith('s1', 3);
+  });
+
+  it('hides the span control in a single-column section, where it has one value', () => {
+    setup();
+    expand('Candidate declaration');
+
+    expect(screen.queryByRole('button', { name: /Column span/ })).toBeNull();
+  });
+
+  it('shows the span control once a section has more than one column', () => {
+    const onCycleSpan = vi.fn();
+    setup({
+      structure: [{ ...STRUCTURE[0]!, cols: 2 }],
+      onCycleSpan,
+    });
+    expand('Candidate declaration');
+
+    const span = screen.getByRole('button', { name: 'Column span for Candidate name' });
+    expect(span.textContent).toBe('1/2');
+
+    fireEvent.click(span);
+    expect(onCycleSpan).toHaveBeenCalledWith('s1', 'a');
+  });
+
+  it('groups the ticked fields and clears the selection', () => {
+    const onGroup = vi.fn();
+    setup({ onGroup });
+    expand('Candidate declaration');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select Candidate name' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select Employee ID' }));
+    expect(screen.getByText('2 fields selected')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Group into section/ }));
+
+    expect(onGroup).toHaveBeenCalledWith(['a', 'b']);
+    expect(screen.queryByText('2 fields selected')).toBeNull();
+  });
+
+  it('shows no selection bar until something is ticked', () => {
+    setup();
+    expect(screen.queryByText(/selected/)).toBeNull();
+  });
+
+  describe('the type palette', () => {
+    it('offers what the shared guard allows, not a list of its own', () => {
+      // `typeOptionsFor` on a scalar returns the authorable types only —
+      // no repeating_group, checkbox_group, boolean_yes_no or check_cross,
+      // each of which needs payload only extraction can supply.
+      setup();
+      expand('Candidate declaration');
+      fireEvent.click(screen.getByRole('button', { name: 'Change type of Candidate name' }));
+
+      expect(screen.getByRole('button', { name: /Date/ })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /Paragraph/ })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: /Repeating table/ })).toBeNull();
+      expect(screen.queryByRole('button', { name: /Checkbox group/ })).toBeNull();
+    });
+
+    it('keeps a structural field’s own type in its list, so it can be seen', () => {
+      // An imported table must be recognisable as one without a scalar being
+      // convertible into one.
+      setup();
+      expand('Part 2 — Practical');
+      fireEvent.click(screen.getByRole('button', { name: 'Change type of Pre-start checks' }));
+
+      expect(screen.getByRole('button', { name: /Repeating table/ })).toBeTruthy();
+    });
+
+    it('reports the chosen type and closes', () => {
+      const onSetFieldType = vi.fn();
+      setup({ onSetFieldType });
+      expand('Candidate declaration');
+      fireEvent.click(screen.getByRole('button', { name: 'Change type of Candidate name' }));
+      fireEvent.click(screen.getByRole('button', { name: /Date/ }));
+
+      expect(onSetFieldType).toHaveBeenCalledWith('a', 'date');
+      expect(screen.queryByRole('button', { name: /Paragraph/ })).toBeNull();
+    });
+  });
+
+  describe('dragging', () => {
+    it('reports the dragged field, its target section and the row it is over', () => {
+      /*
+        The ABOVE-OR-BELOW half of this is not asserted here, deliberately.
+        jsdom gives every element a zero rect and does not forward `clientY`
+        through a synthetic drag event, so a test that pinned it here would be
+        measuring the harness rather than the component. The midpoint rule is a
+        property of `moveField`, and `builder-structure.test.ts` covers both
+        directions against real numbers.
+      */
+      const onMoveField = vi.fn();
+      setup({ onMoveField });
+      expand('Candidate declaration');
+
+      const row = screen.getByText('Candidate name').closest('[draggable]')!;
+      const target = screen.getByText('Employee ID').closest('[draggable]')!;
+      fireEvent.dragStart(row, { dataTransfer: { setData: vi.fn(), effectAllowed: '' } });
+      fireEvent.dragOver(target, { dataTransfer: { dropEffect: '' } });
+
+      expect(onMoveField).toHaveBeenCalledWith('a', 's1', 'b', expect.any(Boolean));
+    });
+
+    it('does not report a move before a drag has started', () => {
+      // Without a held drag source there is nothing to move, and acting on a
+      // dragover from elsewhere on the page would move a random field.
+      const onMoveField = vi.fn();
+      setup({ onMoveField });
+      expand('Candidate declaration');
+
+      const target = screen.getByText('Employee ID').closest('[draggable]')!;
+      fireEvent.dragOver(target, { clientY: 10, dataTransfer: { dropEffect: '' } });
+
+      expect(onMoveField).not.toHaveBeenCalled();
+    });
+
+    it('stops reporting once the drag ends', () => {
+      const onMoveField = vi.fn();
+      setup({ onMoveField });
+      expand('Candidate declaration');
+
+      const row = screen.getByText('Candidate name').closest('[draggable]')!;
+      const target = screen.getByText('Employee ID').closest('[draggable]')!;
+      fireEvent.dragStart(row, { dataTransfer: { setData: vi.fn(), effectAllowed: '' } });
+      fireEvent.dragEnd(row);
+      onMoveField.mockClear();
+
+      fireEvent.dragOver(target, { clientY: 10, dataTransfer: { dropEffect: '' } });
+
+      expect(onMoveField).not.toHaveBeenCalled();
+    });
+  });
+
+  it('says so when a section is empty, rather than showing nothing', () => {
+    setup({ structure: [{ key: 's1', label: 'Empty', cols: 1, fields: [] }] });
+    expand('Empty');
+
+    expect(screen.getByText('Empty — drag a field here')).toBeTruthy();
+  });
+
+  it('marks an own-page section', () => {
+    setup({ structure: [{ ...STRUCTURE[0]!, ownPage: true }] });
+
+    expect(screen.getByText('Own page')).toBeTruthy();
+  });
+
+  it('renames a section', () => {
+    const onRenameSection = vi.fn();
+    setup({ onRenameSection });
+    expand('Candidate declaration');
+
+    fireEvent.change(screen.getByLabelText('Rename Candidate declaration'), {
+      target: { value: 'Identity' },
+    });
+
+    expect(onRenameSection).toHaveBeenCalledWith('s1', 'Identity');
+  });
+
+  it('offers a reset back to the extracted order', () => {
+    const onReset = vi.fn();
+    setup({ onReset });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to the extracted order' }));
+
+    expect(onReset).toHaveBeenCalled();
+  });
+
+  it('falls back to the field id when a field is missing from the list', () => {
+    // The arrangement can outlive a field; showing the id beats showing blank.
+    setup({ structure: [{ key: 's1', label: 'S', cols: 1, fields: [{ id: 'ghost' }] }] });
+    expand('S');
+
+    const row = screen.getByText('ghost');
+    expect(within(row.closest('[draggable]')!).getByText('ghost')).toBeTruthy();
+  });
+});

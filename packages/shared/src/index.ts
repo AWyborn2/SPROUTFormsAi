@@ -26,6 +26,7 @@ export * from './assessment.js';
 export * from './marking.js';
 export * from './outcome-links.js';
 export * from './matching.js';
+export * from './builder.js';
 export * from './audit.js';
 export * from './voice.js';
 export * from './chc-intake.js';

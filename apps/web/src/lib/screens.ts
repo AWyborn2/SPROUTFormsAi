@@ -69,6 +69,11 @@ export const SCREENS: ScreenDef[] = [
   // /tools/ segment rather than another parameter on /assessments/:id, which
   // would be read as a case id — the same reason `progress` is declared above.
   { key: 'workflow-builder', path: '/app/assessments/tools/:toolId/workflow', group: 'Assessments', label: 'Assessment workflow', icon: 'workflow', shell: 'app' },
+  // Building an assessment tool from a printed PDF. Declared BEFORE
+  // `assessment-case` for the same reason `progress` is: `/app/assessments/builder`
+  // would otherwise match `/app/assessments/:id` and be read as a case id.
+  { key: 'assessment-builder', path: '/app/assessments/builder', group: 'Assessments', label: 'Assessment builder', icon: 'sparkles', shell: 'app' },
+  { key: 'assessment-builder-draft', path: '/app/assessments/builder/:draftId', group: 'Assessments', label: 'Assessment builder', icon: 'sparkles', shell: 'app' },
   { key: 'assessment-case', path: '/app/assessments/:id', group: 'Assessments', label: 'Assessment case', icon: 'clipboard-list', shell: 'app' },
   // Filling one part of a case. Addressed by ATTEMPT id, not part key: a retry
   // is a distinct attempt row, and the URL has to say which one is being
