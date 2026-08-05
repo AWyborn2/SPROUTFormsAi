@@ -31,10 +31,12 @@
 import {
   CHC_FIELD_IDS,
   CHC_ROLE_FIELD_BY_DEPARTMENT,
+  chcIntakeFields,
   isIndigenousEthnicity,
   bookingCutoffFor,
   holidaysCoverThrough,
   isInductionDay,
+  resolveChcIntakeFields,
   withinBookingWindow,
 } from './chc-intake.js';
 import type { FormField } from './form-field.js';
@@ -100,6 +102,17 @@ export interface StarterProfile {
   photo: StarterDocument;
   driversLicence: StarterDocument;
   sensitive: StarterSensitiveDetail;
+  /**
+   * Canonical field ids for questions this submission's template version does
+   * not ask at all, so an empty answer above can be read for what it is.
+   *
+   * "The form never asked" and "the starter left it blank" are different facts
+   * with different remedies — the second can be chased up, the first cannot —
+   * and an empty string tells them apart for nobody. A registration built from
+   * a blank that was never collected records something about a person that was
+   * never stated, which is the failure this list exists to prevent.
+   */
+  notCollected: string[];
 }
 
 /** Why a starter cannot be registered as they stand. */
@@ -111,7 +124,7 @@ export type InductionBlocker =
   | 'already_booked';
 
 /** Something a human should know that does not stop the booking. */
-export type InductionWarning = 'holiday_list_expired' | 'notice_overridden';
+export type InductionWarning = 'holiday_list_expired' | 'notice_overridden' | 'intake_incomplete';
 
 export interface InductionVerdict {
   readiness: 'ready' | 'blocked';
@@ -146,6 +159,11 @@ export interface InductionCohort {
  * disappeared from the MCP with nothing logged anywhere. `department` replaces
  * it: mandatory on the form, and specific enough alongside an induction date
  * that no unrelated template matches by accident.
+ *
+ * Membership is tested against `resolveChcIntakeFields`, not raw ids, so a
+ * `department` question re-created in the builder still satisfies the shape.
+ * Same failure as `in_beakon`, reached from the other direction — and the same
+ * reason it must not be able to happen quietly.
  */
 const REQUIRED_SHAPE = [
   CHC_FIELD_IDS.firstName,
@@ -167,15 +185,15 @@ export function isIsoDate(value: string): boolean {
   return ISO_DATE_PATTERN.test(value);
 }
 
-function text(values: Record<string, SubmissionValue>, id: string): string {
-  const value = values[id];
+function text(values: Record<string, SubmissionValue>, id: string | undefined): string {
+  const value = id === undefined ? undefined : values[id];
   if (typeof value === 'string') return value.trim();
   if (typeof value === 'number') return String(value);
   return '';
 }
 
-function tribool(values: Record<string, SubmissionValue>, id: string): boolean | null {
-  const value = values[id];
+function tribool(values: Record<string, SubmissionValue>, id: string | undefined): boolean | null {
+  const value = id === undefined ? undefined : values[id];
   if (typeof value === 'boolean') return value;
   // `boolean_yes_no` normalises to the strings 'true'/'false' on some surfaces
   // (see `scalarAnswer` in visibility.ts), so both encodings arrive here.
@@ -184,13 +202,33 @@ function tribool(values: Record<string, SubmissionValue>, id: string): boolean |
   return null;
 }
 
-function document(values: Record<string, SubmissionValue>, id: string): StarterDocument {
-  const value = values[id];
+function document(values: Record<string, SubmissionValue>, id: string | undefined): StarterDocument {
+  const value = id === undefined ? undefined : values[id];
   if (!isFileRef(value)) return { present: false };
   // The storage key is deliberately not carried through: it is only useful to
   // an authenticated fetch, and this profile is built to be handed onward.
   return { present: true, fileName: value.fileName, contentType: value.contentType };
 }
+
+/**
+ * The questions whose absence from a template version is worth reporting.
+ *
+ * Read off the form definition rather than hand-listed, so a question added to
+ * the intake is covered the day it lands. A second list here would be one more
+ * place to forget, and forgetting is what this whole list exists to catch.
+ *
+ * Two exclusions. Section headers carry no answer. Role fields are conditional
+ * — three of the four are absent by design on any given submission — so the one
+ * that applies is added back below, once the department says which that is.
+ *
+ * The retired pair (`indigenous`, `in_beakon`) is absent for free: the current
+ * form does not ask them, so they are not in `chcIntakeFields()` to begin with.
+ * Listing them would put a permanent complaint on every submission since.
+ */
+const ROLE_QUESTIONS = new Set(Object.values(CHC_ROLE_FIELD_BY_DEPARTMENT));
+const REPORTED_QUESTIONS: readonly string[] = chcIntakeFields()
+  .filter((f) => f.type !== 'section_header' && !ROLE_QUESTIONS.has(f.id))
+  .map((f) => f.id);
 
 /**
  * Reads a CHC intake submission into a starter profile, or null when the
@@ -200,16 +238,25 @@ function document(values: Record<string, SubmissionValue>, id: string): StarterD
  * optional answer may legitimately be absent, but the field ids the form is
  * built from are always there. A non-intake form returns null so the caller can
  * skip the row rather than assemble a profile out of unrelated answers.
+ *
+ * Every id goes through `resolveChcIntakeFields` rather than being read
+ * straight off `values`. The intake is an EDITABLE template, so a question an
+ * administrator re-created in the builder carries a generated id, and reading
+ * by preset id alone reported its answer as blank. `department` is the sharpest
+ * case, being both resolvable and part of REQUIRED_SHAPE: re-created, it used
+ * to fail detection outright, and the routes skip an undetected submission
+ * SILENTLY — so the starter left every induction surface without a word.
  */
 export function readStarterProfile(
   fields: FormField[],
   values: Record<string, SubmissionValue>,
 ): StarterProfile | null {
-  const ids = new Set(fields.map((f) => f.id));
-  if (!REQUIRED_SHAPE.every((id) => ids.has(id))) return null;
+  const at = resolveChcIntakeFields(fields);
+  if (!REQUIRED_SHAPE.every((id) => at.has(id))) return null;
 
-  const department = text(values, CHC_FIELD_IDS.department);
-  const roleFieldId = CHC_ROLE_FIELD_BY_DEPARTMENT[department];
+  const department = text(values, at.get(CHC_FIELD_IDS.department));
+  const roleQuestion = CHC_ROLE_FIELD_BY_DEPARTMENT[department];
+  const roleFieldId = roleQuestion ? at.get(roleQuestion) : undefined;
   const roleValue = roleFieldId ? values[roleFieldId] : undefined;
   const roles = Array.isArray(roleValue)
     ? roleValue.filter((r): r is string => typeof r === 'string')
@@ -217,38 +264,54 @@ export function readStarterProfile(
       ? [roleValue]
       : [];
 
-  const firstName = text(values, CHC_FIELD_IDS.firstName);
-  const lastName = text(values, CHC_FIELD_IDS.lastName);
-  const ethnicity = text(values, CHC_FIELD_IDS.ethnicity);
+  const firstName = text(values, at.get(CHC_FIELD_IDS.firstName));
+  const lastName = text(values, at.get(CHC_FIELD_IDS.lastName));
+  const ethnicity = text(values, at.get(CHC_FIELD_IDS.ethnicity));
+
+  // The role question counts only once a department has named which one applies
+  // — before that, "no role field" is the form working as designed.
+  const expected = department
+    ? [...REPORTED_QUESTIONS, CHC_ROLE_FIELD_BY_DEPARTMENT[department]].filter(
+        (id): id is string => !!id,
+      )
+    : REPORTED_QUESTIONS;
 
   return {
     firstName,
-    middleName: text(values, CHC_FIELD_IDS.middleName),
+    middleName: text(values, at.get(CHC_FIELD_IDS.middleName)),
     lastName,
     fullName: [firstName, lastName].filter(Boolean).join(' '),
-    gender: text(values, CHC_FIELD_IDS.gender),
+    gender: text(values, at.get(CHC_FIELD_IDS.gender)),
     ethnicity,
-    indigenous: ethnicity ? isIndigenousEthnicity(ethnicity) : tribool(values, CHC_FIELD_IDS.indigenous),
-    starterType: text(values, CHC_FIELD_IDS.starterType),
-    inductionDate: text(values, CHC_FIELD_IDS.inductionDate),
+    // The two RETIRED questions read straight off `values`, never through the
+    // resolver. No current template declares them, so resolving would find
+    // nothing and report every pre-#80 submission as unanswered — which is the
+    // fallback's whole purpose defeated. Their ids were never reassigned, so
+    // the raw key is unambiguous.
+    indigenous: ethnicity
+      ? isIndigenousEthnicity(ethnicity)
+      : tribool(values, CHC_FIELD_IDS.indigenous),
+    starterType: text(values, at.get(CHC_FIELD_IDS.starterType)),
+    inductionDate: text(values, at.get(CHC_FIELD_IDS.inductionDate)),
     department,
     roles,
     inBeakon: tribool(values, CHC_FIELD_IDS.inBeakon),
-    mobile: text(values, CHC_FIELD_IDS.mobile),
-    email: text(values, CHC_FIELD_IDS.email),
-    photo: document(values, CHC_FIELD_IDS.photo),
-    driversLicence: document(values, CHC_FIELD_IDS.driversLicence),
+    mobile: text(values, at.get(CHC_FIELD_IDS.mobile)),
+    email: text(values, at.get(CHC_FIELD_IDS.email)),
+    photo: document(values, at.get(CHC_FIELD_IDS.photo)),
+    driversLicence: document(values, at.get(CHC_FIELD_IDS.driversLicence)),
     sensitive: {
-      dob: text(values, CHC_FIELD_IDS.dob),
-      addressStreet: text(values, CHC_FIELD_IDS.addressStreet),
-      suburb: text(values, CHC_FIELD_IDS.suburb),
-      postcode: text(values, CHC_FIELD_IDS.postcode),
-      emergencyContactName: text(values, CHC_FIELD_IDS.emergencyContactName),
-      emergencyContactPhone: text(values, CHC_FIELD_IDS.emergencyContactPhone),
-      licenceClass: text(values, CHC_FIELD_IDS.licenceClass),
-      licenceExpiry: text(values, CHC_FIELD_IDS.licenceExpiry),
-      licenceNumber: text(values, CHC_FIELD_IDS.licenceNumber),
+      dob: text(values, at.get(CHC_FIELD_IDS.dob)),
+      addressStreet: text(values, at.get(CHC_FIELD_IDS.addressStreet)),
+      suburb: text(values, at.get(CHC_FIELD_IDS.suburb)),
+      postcode: text(values, at.get(CHC_FIELD_IDS.postcode)),
+      emergencyContactName: text(values, at.get(CHC_FIELD_IDS.emergencyContactName)),
+      emergencyContactPhone: text(values, at.get(CHC_FIELD_IDS.emergencyContactPhone)),
+      licenceClass: text(values, at.get(CHC_FIELD_IDS.licenceClass)),
+      licenceExpiry: text(values, at.get(CHC_FIELD_IDS.licenceExpiry)),
+      licenceNumber: text(values, at.get(CHC_FIELD_IDS.licenceNumber)),
     },
+    notCollected: expected.filter((id) => !at.has(id)),
   };
 }
 
@@ -295,6 +358,13 @@ export function assessInductionReadiness(
   // Past the last listed holiday the notice count silently treats holidays as
   // working days, so the date can only be reported as provisional.
   if (isIsoDate(iso) && iso > holidaysCoverThrough()) warnings.push('holiday_list_expired');
+
+  // A warning rather than a blocker, because the two are different jobs: a SEAT
+  // can be booked for someone whose form never asked their ethnicity, but the
+  // REGISTRATION that follows cannot be built from an answer nobody gave. What
+  // stopped this being visible is that the gap arrived as an empty string, so
+  // the profile read as complete — see `StarterProfile.notCollected`.
+  if (profile.notCollected.length > 0) warnings.push('intake_incomplete');
 
   if (options.alreadyBooked) blockers.push('already_booked');
 

@@ -163,6 +163,84 @@ describe('readStarterProfile', () => {
     ];
     expect(readStarterProfile(otherFields, { q1: 'hello' })).toBeNull();
   });
+
+  /**
+   * The intake ships as an EDITABLE template, so its ids are not reserved: a
+   * question an administrator adds in the builder gets a generated id (`b7`),
+   * and one they delete and re-create loses the preset's id for good. Reading
+   * by preset id alone reported those answers as blank — indistinguishable from
+   * a question the starter skipped, and silently wrong on exactly the question
+   * added most recently.
+   */
+  describe('a template edited in the builder', () => {
+    /** The same form with one question re-created — same label and options, builder id. */
+    function reIded(canonical: string, actual: string): FormField[] {
+      return chcIntakeFields().map((f) => (f.id === canonical ? { ...f, id: actual } : f));
+    }
+
+    it('reads a choice question that carries a builder id', () => {
+      const profile = readStarterProfile(
+        reIded(CHC_FIELD_IDS.ethnicity, 'b7'),
+        fullValues({ [CHC_FIELD_IDS.ethnicity]: '', b7: 'Aboriginal' }),
+      )!;
+      expect(profile.ethnicity).toBe('Aboriginal');
+      expect(profile.indigenous).toBe(true);
+      expect(profile.notCollected).not.toContain(CHC_FIELD_IDS.ethnicity);
+    });
+
+    it('resolves the department and its role list the same way', () => {
+      const profile = readStarterProfile(
+        reIded(CHC_FIELD_IDS.department, 'b9'),
+        fullValues({ [CHC_FIELD_IDS.department]: '', b9: 'Operations' }),
+      )!;
+      expect(profile.department).toBe('Operations');
+      expect(profile.roles).toEqual(['Dozer Operator', 'Grader Operator']);
+    });
+
+    it('still recognises the submission as an intake', () => {
+      expect(
+        readStarterProfile(
+          reIded(CHC_FIELD_IDS.department, 'b9'),
+          fullValues({ [CHC_FIELD_IDS.department]: '', b9: 'Operations' }),
+        ),
+      ).not.toBeNull();
+    });
+
+    it('refuses to guess when two questions carry the same options', () => {
+      const renamed = reIded(CHC_FIELD_IDS.ethnicity, 'b7');
+      const ethnicity = renamed.find((f) => f.id === 'b7')!;
+      const ambiguous = [...renamed, { ...ethnicity, id: 'b8' }];
+
+      const profile = readStarterProfile(
+        ambiguous,
+        fullValues({ [CHC_FIELD_IDS.ethnicity]: '', b7: 'Aboriginal', b8: 'Caucasian' }),
+      )!;
+      // Two candidates and no way to tell them apart: report it as uncollected
+      // rather than pick one and be silently wrong about a person.
+      expect(profile.ethnicity).toBe('');
+      expect(profile.notCollected).toContain(CHC_FIELD_IDS.ethnicity);
+    });
+  });
+
+  /**
+   * A question the pinned version never carried is NOT the same as one the
+   * starter left blank, and only the first is unfixable by asking them again.
+   * Reporting both as an empty string is what let an absent Ethnicity answer
+   * reach a registration as though it had been collected.
+   */
+  it('names the questions this template version never asked', () => {
+    const withoutEthnicity = chcIntakeFields().filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    const profile = readStarterProfile(
+      withoutEthnicity,
+      fullValues({ [CHC_FIELD_IDS.ethnicity]: '' }),
+    )!;
+    expect(profile.notCollected).toContain(CHC_FIELD_IDS.ethnicity);
+    expect(profile.notCollected).not.toContain(CHC_FIELD_IDS.mobile);
+  });
+
+  it('reports nothing missing for the current form', () => {
+    expect(readStarterProfile(fields, fullValues())!.notCollected).toEqual([]);
+  });
 });
 
 describe('assessInductionReadiness', () => {
@@ -223,6 +301,16 @@ describe('assessInductionReadiness', () => {
     const verdict = assess(fullValues({ [CHC_FIELD_IDS.inductionDate]: BEYOND_HOLIDAY_LIST }));
     expect(verdict.readiness).toBe('ready');
     expect(verdict.warnings).toContain('holiday_list_expired');
+  });
+
+  it('warns when the form never asked something the profile reports', () => {
+    // A seat can still be booked without an ethnicity — a REGISTRATION cannot,
+    // and the difference is invisible if the answer arrives as an empty string.
+    const withoutEthnicity = chcIntakeFields().filter((f) => f.id !== CHC_FIELD_IDS.ethnicity);
+    const profile = readStarterProfile(withoutEthnicity, fullValues())!;
+    const verdict = assessInductionReadiness(profile, { today: TUESDAY });
+    expect(verdict.readiness).toBe('ready');
+    expect(verdict.warnings).toContain('intake_incomplete');
   });
 
   it('blocks a starter already covered by a booking', () => {
