@@ -43,6 +43,10 @@ vi.mock('../lib/data/hooks.js', () => ({
   usePublishFormVersion: () => ({ mutate: vi.fn(), isPending: false }),
   usePublishVersion: () => ({ mutate: publishFieldsMutate, isPending: false }),
   useSetFormVoiceInput: () => ({ mutate: vi.fn(), isPending: false }),
+  // An org with no client brands — the picker hides itself entirely, which is
+  // the state every assertion in this file was written against.
+  useFormBrands: () => ({ data: [] }),
+  useSetFormBrand: () => ({ mutate: vi.fn(), isPending: false }),
   useForkDraftVersion: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
@@ -62,6 +66,7 @@ function formDetail(fields = chcIntakeFields()): FormDetail {
     container: DEFAULT_CONTAINER,
     versions: [],
     voiceInput: null,
+    brandId: null,
   };
 }
 

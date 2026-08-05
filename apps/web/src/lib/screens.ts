@@ -109,6 +109,10 @@ export const SCREENS: ScreenDef[] = [
   { key: 'assessment-part-fill', path: '/app/assessments/:id/attempts/:attemptId', group: 'Assessments', label: 'Complete assessment part', icon: 'pen-line', shell: 'app' },
   { key: 'api-keys', path: '/app/settings/api-keys', group: 'Enterprise & org', label: 'API keys', icon: 'key', shell: 'app', inNav: true },
   { key: 'whitelabel', path: '/app/settings/branding', group: 'Enterprise & org', label: 'Branding', icon: 'sliders-horizontal', shell: 'app', inNav: true },
+  // The identities this org's forms are presented in — usually clients', not
+  // its own. Declared AFTER `whitelabel` so the more specific static path is
+  // matched on its own terms rather than by the branding route.
+  { key: 'client-brands', path: '/app/settings/client-brands', group: 'Enterprise & org', label: 'Client brands', icon: 'palette', shell: 'app', inNav: true },
 
   // Mobile (responsive web)
   { key: 'mobile', path: '/m', group: 'Mobile app', label: 'Mobile field app', icon: 'smartphone', shell: 'mobile' },

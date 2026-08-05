@@ -12,6 +12,7 @@ import { authRouter } from './routes/auth.js';
 import { competenciesRouter, competencyRulesRouter } from './routes/competencies.js';
 import { dashboardRouter } from './routes/dashboard.js';
 import { formFillLinksRouter, publicFillRouter } from './routes/fill-links.js';
+import { formBrandsRouter } from './routes/form-brands.js';
 import { formsRouter } from './routes/forms.js';
 import { healthRouter } from './routes/health.js';
 import { inductionMcpRouter } from '@formai/mcp-inductions/express';
@@ -91,6 +92,10 @@ export function createApp(): Express {
   app.use('/account', accountRouter);
   app.use('/org', orgRouter);
   app.use('/forms', formsRouter);
+  // The brands a form can be presented in — usually clients', not the org's
+  // own. Mounted beside /forms rather than under it because a brand outlives
+  // and is shared by many forms; see routes/form-brands.ts.
+  app.use('/form-brands', formBrandsRouter);
   app.use('/assessment-tools', assessmentToolsRouter);
   app.use('/assessment-cases', assessmentCasesRouter);
   // Authed fill-link management (/forms/:id/fill-links…) — separate router
