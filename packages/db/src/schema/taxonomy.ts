@@ -1,7 +1,16 @@
 import { relations, sql } from 'drizzle-orm';
-import { boolean, index, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
-import { displayIdentifierEnum, taxonomyStatusEnum } from './enums.ts';
-import { organizations } from './organizations.ts';
+import {
+  boolean,
+  index,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core';
+import { taxonomyStatusEnum } from './enums.ts';
+import { memberships, organizations } from './organizations.ts';
 
 /**
  * The organisation's own taxonomy: Locations, Departments, and the Roles each
@@ -117,10 +126,131 @@ export const departmentsRelations = relations(departments, ({ one, many }) => ({
   roles: many(jobRoles),
 }));
 
-export const jobRolesRelations = relations(jobRoles, ({ one }) => ({
+export const jobRolesRelations = relations(jobRoles, ({ one, many }) => ({
   org: one(organizations, { fields: [jobRoles.orgId], references: [organizations.id] }),
   department: one(departments, {
     fields: [jobRoles.departmentId],
     references: [departments.id],
+  }),
+  holders: many(membershipRoles),
+}));
+
+/**
+ * Where a person is placed — the Locations, Departments and Roles on their
+ * membership of one organisation (R21). Each axis is its own join table so a
+ * person may hold several of the first two (R24). Every row carries a
+ * `position` assigned on insert, which is what R60 reads when both case-Location
+ * tie-breaks are exhausted ("the first Location on the membership"); it is
+ * stored rather than derived because insertion order is not a stable read in
+ * Postgres.
+ *
+ * The value side is `restrict`: a taxonomy value carrying placements is not
+ * deletable (retirement, not deletion, is how it is withdrawn). The membership
+ * side is `cascade`: deleting a membership removes its placements.
+ */
+export const membershipLocations = pgTable(
+  'membership_locations',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    membershipId: uuid('membership_id')
+      .notNull()
+      .references(() => memberships.id, { onDelete: 'cascade' }),
+    locationId: uuid('location_id')
+      .notNull()
+      .references(() => locations.id, { onDelete: 'restrict' }),
+    /** Order on the membership; R60 reads the first. */
+    position: integer().notNull().default(0),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('membership_locations_uq').on(t.membershipId, t.locationId),
+    index('membership_locations_membership_idx').on(t.membershipId),
+    index('membership_locations_location_idx').on(t.locationId),
+  ],
+);
+
+export const membershipDepartments = pgTable(
+  'membership_departments',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    membershipId: uuid('membership_id')
+      .notNull()
+      .references(() => memberships.id, { onDelete: 'cascade' }),
+    departmentId: uuid('department_id')
+      .notNull()
+      .references(() => departments.id, { onDelete: 'restrict' }),
+    position: integer().notNull().default(0),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('membership_departments_uq').on(t.membershipId, t.departmentId),
+    index('membership_departments_membership_idx').on(t.membershipId),
+    index('membership_departments_department_idx').on(t.departmentId),
+  ],
+);
+
+/**
+ * A Role a person holds. `withdrawnAt` (KTD7) is the whole of how a Role stops
+ * being held (R52): it stays on the record, marked, and stops counting. Every
+ * read of "the Roles this person holds" filters `withdrawnAt IS NULL`, mirroring
+ * the `revokedAt IS NULL` discipline the competency register already keeps. The
+ * column lands here, where the table is created, so that discipline holds from
+ * the first read (U11 onward) rather than being retrofitted when U17 adds the
+ * withdrawal triggers.
+ */
+export const membershipRoles = pgTable(
+  'membership_roles',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    membershipId: uuid('membership_id')
+      .notNull()
+      .references(() => memberships.id, { onDelete: 'cascade' }),
+    roleId: uuid('role_id')
+      .notNull()
+      .references(() => jobRoles.id, { onDelete: 'restrict' }),
+    position: integer().notNull().default(0),
+    /** Non-null once withdrawn (R52). A held Role has this null. */
+    withdrawnAt: timestamp('withdrawn_at', { withTimezone: true }),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // A person holds a Role once; reinstating flips `withdrawnAt` back to null
+    // on the same row rather than inserting a second.
+    uniqueIndex('membership_roles_uq').on(t.membershipId, t.roleId),
+    index('membership_roles_membership_idx').on(t.membershipId),
+    index('membership_roles_role_idx').on(t.roleId),
+  ],
+);
+
+export const membershipLocationsRelations = relations(membershipLocations, ({ one }) => ({
+  membership: one(memberships, {
+    fields: [membershipLocations.membershipId],
+    references: [memberships.id],
+  }),
+  location: one(locations, {
+    fields: [membershipLocations.locationId],
+    references: [locations.id],
+  }),
+}));
+
+export const membershipDepartmentsRelations = relations(membershipDepartments, ({ one }) => ({
+  membership: one(memberships, {
+    fields: [membershipDepartments.membershipId],
+    references: [memberships.id],
+  }),
+  department: one(departments, {
+    fields: [membershipDepartments.departmentId],
+    references: [departments.id],
+  }),
+}));
+
+export const membershipRolesRelations = relations(membershipRoles, ({ one }) => ({
+  membership: one(memberships, {
+    fields: [membershipRoles.membershipId],
+    references: [memberships.id],
+  }),
+  role: one(jobRoles, {
+    fields: [membershipRoles.roleId],
+    references: [jobRoles.id],
   }),
 }));

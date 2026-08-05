@@ -476,3 +476,10 @@ export interface Taxonomy {
   departments: TaxDepartment[];
   settings: TaxonomySettings;
 }
+
+/** Where a member is placed — the ids on their membership (R21). */
+export interface MemberPlacement {
+  locationIds: string[];
+  departmentIds: string[];
+  roleIds: string[];
+}

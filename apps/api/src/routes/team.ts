@@ -12,9 +12,12 @@ import { recordAudit } from '../audit/record.js';
 import { sendInviteEmail } from '../email/resend.js';
 import { env } from '../env.js';
 import { checkSeatAvailability, lockOrgForSeats, poolFor, seatLimitError } from '../lib/seats.js';
+import { readPlacement, writePlacement } from '../lib/membership-placement.js';
 import { db } from '../db.js';
 
 export const teamRouter: Router = Router();
+
+const canViewTeam = (tenant: { orgId: string; role: string }) => hasPermission(tenant, 'team', 'view');
 
 const permissionActions = ['view', 'create', 'edit', 'delete', 'export', 'invite', 'manage'] as const;
 
@@ -298,6 +301,78 @@ teamRouter.post(
 
 /** Long enough to hand a printed code over on site, short enough to expire. */
 const PASSWORD_RESET_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// ── Placement (R21, R22) — the same act for every member, whatever level ─────
+
+const placementBody = z.object({
+  locationIds: z.array(z.string().uuid()),
+  departmentIds: z.array(z.string().uuid()),
+  roleIds: z.array(z.string().uuid()),
+});
+
+teamRouter.get(
+  '/members/:id/placement',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await canViewTeam(tenant))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const membership = await db.query.memberships.findFirst({
+      where: and(eq(schema.memberships.id, req.params.id!), eq(schema.memberships.orgId, tenant.orgId)),
+    });
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    res.json(await readPlacement(db, membership.id));
+  }),
+);
+
+teamRouter.put(
+  '/members/:id/placement',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await canManageTeam(tenant))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = placementBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const membership = await db.query.memberships.findFirst({
+      where: and(eq(schema.memberships.id, req.params.id!), eq(schema.memberships.orgId, tenant.orgId)),
+    });
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const result = await writePlacement(db, tenant.orgId, membership.id, parsed.data);
+    if (!result.ok) {
+      res.status(400).json({ error: 'invalid_placement', code: result.error.code, subjectId: result.error.subjectId });
+      return;
+    }
+    await recordAudit(db, tenant, {
+      action: 'Placed member',
+      target: membership.id,
+      category: 'team',
+      icon: 'map-pin',
+    });
+    res.json(await readPlacement(db, membership.id));
+  }),
+);
 
 const patchMemberBody = z.object({ role: z.enum(ROLES) });
 

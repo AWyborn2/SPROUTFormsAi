@@ -106,6 +106,7 @@ const keys = {
   invite: (token: string) => ['invite', token] as const,
   apiKeys: ['apiKeys'] as const,
   taxonomy: ['taxonomy'] as const,
+  memberPlacement: (id: string) => ['members', id, 'placement'] as const,
 };
 
 /**
@@ -1045,4 +1046,33 @@ export function useUpdateTaxonomySettings() {
   return useTaxonomyMutation((patch: Partial<TaxonomySettings>) =>
     store.updateTaxonomySettings(patch),
   );
+}
+
+export function useMemberPlacement(membershipId: string | undefined) {
+  return useQuery({
+    queryKey: keys.memberPlacement(membershipId ?? ''),
+    queryFn: () => store.getMemberPlacement(membershipId!),
+    enabled: !!membershipId,
+  });
+}
+
+export function useSetMemberPlacement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      membershipId: string;
+      locationIds: string[];
+      departmentIds: string[];
+      roleIds: string[];
+    }) =>
+      store.setMemberPlacement(input.membershipId, {
+        locationIds: input.locationIds,
+        departmentIds: input.departmentIds,
+        roleIds: input.roleIds,
+      }),
+    onSuccess: (_data, input) => {
+      void qc.invalidateQueries({ queryKey: keys.memberPlacement(input.membershipId) });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
 }

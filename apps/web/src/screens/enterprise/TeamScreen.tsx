@@ -11,6 +11,7 @@ import {
 } from '../../lib/data/hooks.js';
 import { INVITABLE_ROLES, ROLE_NAMES, type Member, type RoleName } from '../../lib/data/types.js';
 import { EMAIL_RE } from '../../lib/validation.js';
+import { PlacementDialog } from './PlacementDialog.js';
 
 /** Team management — member list, seat header, and the invite dialog. */
 export function TeamScreen() {
@@ -37,6 +38,8 @@ export function TeamScreen() {
   const [created, setCreated] = useState<{ name: string; url: string; emailSent: boolean } | null>(null);
   /** A freshly issued password-reset link, awaiting handover. */
   const [resetLink, setResetLink] = useState<{ name: string; url: string } | null>(null);
+  /** The member whose placement is open in the dialog. */
+  const [placing, setPlacing] = useState<{ id: string; name: string } | null>(null);
 
   const active = members.filter((m) => m.status === 'active').length;
   const invited = members.filter((m) => m.status === 'invited').length;
@@ -162,6 +165,7 @@ export function TeamScreen() {
               )
             }
             onRemove={() => remove.mutate(m.id)}
+            onPlace={m.status === 'active' ? () => setPlacing({ id: m.id, name: m.name }) : undefined}
             onResetPassword={
               // Only for accepted members: someone still holding an unaccepted
               // invite has no account yet, so there is nothing to reset.
@@ -177,6 +181,15 @@ export function TeamScreen() {
           />
         ))}
       </div>
+
+      {placing && (
+        <PlacementDialog
+          membershipId={placing.id}
+          memberName={placing.name}
+          open
+          onClose={() => setPlacing(null)}
+        />
+      )}
 
       {/* Invite dialog */}
       <Dialog
@@ -315,11 +328,14 @@ function MemberRow({
   member,
   onRole,
   onRemove,
+  onPlace,
   onResetPassword,
 }: {
   member: Member;
   onRole: (role: RoleName) => void;
   onRemove: () => void;
+  /** Absent for a member with no membership yet (a pending invite). */
+  onPlace?: () => void;
   /** Absent for a member with no account yet — nothing to reset. */
   onResetPassword?: () => void;
 }) {
@@ -359,7 +375,17 @@ function MemberRow({
           </Badge>
         )}
       </span>
-      <span className="flex w-[68px] justify-end gap-0.5">
+      <span className="flex w-[98px] justify-end gap-0.5">
+        {onPlace && (
+          <button
+            onClick={onPlace}
+            aria-label={`Place ${member.name}`}
+            title="Set Locations, Departments and Roles"
+            className="fai-chip-btn grid h-[30px] w-[30px] place-items-center rounded-sm text-text-tertiary hover:bg-surface-hover"
+          >
+            <Icon name="map-pin" size={15} />
+          </button>
+        )}
         {onResetPassword && (
           <button
             onClick={onResetPassword}

@@ -59,6 +59,7 @@ import type {
   RoleName,
   SubmissionDetail,
   SubmissionRow,
+  MemberPlacement,
   Taxonomy,
   TaxDepartment,
   TaxLocation,
@@ -843,6 +844,12 @@ export const store = {
   },
   updateTaxonomySettings(patch: Partial<TaxonomySettings>): Promise<TaxonomySettings> {
     return apiClient.patch<TaxonomySettings>('/taxonomy/settings', patch);
+  },
+  getMemberPlacement(membershipId: string): Promise<MemberPlacement> {
+    return apiClient.get<MemberPlacement>(`/team/members/${membershipId}/placement`);
+  },
+  setMemberPlacement(membershipId: string, input: MemberPlacement): Promise<MemberPlacement> {
+    return apiClient.put<MemberPlacement>(`/team/members/${membershipId}/placement`, input);
   },
 
   /* ── Competency gating ─────────────────────────────────────────────────── */
