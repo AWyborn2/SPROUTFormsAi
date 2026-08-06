@@ -246,6 +246,13 @@
       "when": 1785978417766,
       "tag": "0034_daily_dazzler",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1785985578070,
+      "tag": "0035_lyrical_zuras",
+      "breakpoints": true
     }
   ]
 }

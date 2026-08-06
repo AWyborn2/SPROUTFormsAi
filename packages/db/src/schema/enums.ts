@@ -24,6 +24,17 @@ export const membershipStatusEnum = pgEnum('membership_status', [
 export const taxonomyStatusEnum = pgEnum('taxonomy_status', ['active', 'retired']);
 
 /**
+ * A voluntary training request's lifecycle (U22). A person asks for an
+ * assessment no Role obliges them to hold; it waits `pending` on the working
+ * list until an Admin `approved` it (which assigns) or `declined` it.
+ */
+export const trainingRequestStateEnum = pgEnum('training_request_state', [
+  'pending',
+  'approved',
+  'declined',
+]);
+
+/**
  * Which of the two workforce numbers the organisation shows beside a person's
  * name (R40). The numbers themselves live on the profile; this is only the
  * organisation's choice of which one identifies its people on screen.

@@ -97,6 +97,10 @@ const keys = {
   tighteningReview: (departmentId: string) => ['tighteningReview', departmentId] as const,
   /** The people still holding any retired value (U18). */
   retirementReview: ['retirementReview'] as const,
+  /** The org's pending voluntary training requests (U22). */
+  trainingRequests: ['trainingRequests'] as const,
+  /** Everything waiting on an Admin, from all sources (U19). */
+  workingList: ['workingList'] as const,
   assessmentCases: ['assessmentCases'] as const,
   /**
    * The shared assessor queue (U13). A SIBLING of assessmentCases — it shares no
@@ -1290,6 +1294,48 @@ export function useTransferRole() {
   return useTransferMutation((input: { roleId: string; replacementRoleId: string }) =>
     store.transferRole(input.roleId, input.replacementRoleId),
   );
+}
+
+/** Request voluntary training for a tool — own-scope (U22, R37). */
+export function useRequestTraining() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (toolId: string) => store.requestTraining(toolId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.trainingRequests });
+      void qc.invalidateQueries({ queryKey: keys.workingList });
+    },
+  });
+}
+
+/** The org's pending training requests, for the Admin approval surface (U22). */
+export function useTrainingRequests() {
+  return useQuery({ queryKey: keys.trainingRequests, queryFn: () => store.listTrainingRequests() });
+}
+
+/** Shared invalidation after deciding a request — it leaves the pending list and the working list. */
+function useDecideTrainingRequest(fn: (id: string) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.trainingRequests });
+      void qc.invalidateQueries({ queryKey: keys.workingList });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** Approve a request — assigns the tool through the ordinary path (U22, R94). */
+export function useApproveTrainingRequest() {
+  return useDecideTrainingRequest((id: string) => store.approveTrainingRequest(id));
+}
+
+/** Decline a request — nothing assigned (U22). */
+export function useDeclineTrainingRequest() {
+  return useDecideTrainingRequest((id: string) => store.declineTrainingRequest(id));
 }
 export function useUpdateTaxonomySettings() {
   return useTaxonomyMutation((patch: Partial<TaxonomySettings>) =>

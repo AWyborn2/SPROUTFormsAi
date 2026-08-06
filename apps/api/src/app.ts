@@ -27,6 +27,7 @@ import { pdfRouter } from './routes/pdf.js';
 import { submissionsRouter } from './routes/submissions.js';
 import { taxonomyRouter } from './routes/taxonomy.js';
 import { teamRouter } from './routes/team.js';
+import { trainingRequestsRouter } from './routes/training-requests.js';
 import { uploadsRouter } from './routes/uploads.js';
 import { voiceRouter } from './routes/voice.js';
 
@@ -171,6 +172,7 @@ export function createApp(): Express {
   app.use('/competencies', competenciesRouter);
   app.use('/competency-rules', competencyRulesRouter);
   app.use('/taxonomy', taxonomyRouter);
+  app.use('/training-requests', trainingRequestsRouter);
   // Smart Fill for authed surfaces. The public respondent's door is
   // POST /fill/:token/smart-fill, mounted with the rest of publicFillRouter.
   app.use('/voice', voiceRouter);

@@ -317,6 +317,27 @@ export async function assignForRole(
 }
 
 /**
+ * Assign ONE tool to a membership — the path a voluntary training request takes
+ * once an Admin approves it (U22, R94). The requested tool is treated exactly as
+ * a Role requirement of one: a case is created only where the person does not
+ * already hold every competency it awards, current, and has no open case for it
+ * (R45, KTD16) — so approving something the person already holds creates nothing,
+ * and a retried approval never duplicates.
+ */
+export async function assignToolToMembership(
+  database: Database,
+  orgId: string,
+  membershipId: string,
+  toolId: string,
+  now: Date = new Date(),
+): Promise<AssignmentResult> {
+  const ctx = await loadMembershipContext(database, orgId, membershipId, [toolId], now);
+  if (!ctx) return { createdCaseIds: [] };
+  const planned = planFromContext(ctx, [[toolId]]);
+  return { createdCaseIds: await insertPlannedCases(database, orgId, ctx.userId, planned) };
+}
+
+/**
  * The cases a specific set of tools WOULD create for each current holder of a
  * Role, without writing anything (the U12 addition preview). The requirement is
  * INJECTED rather than read from the database, so a preview projects the effect

@@ -517,6 +517,15 @@ export interface TighteningReviewItem {
   heldRoles: Array<{ id: string; name: string }>;
 }
 
+/** A voluntary training request (U22). Pending ones wait on the working list. */
+export interface TrainingRequest {
+  id: string;
+  userId: string;
+  toolId: string;
+  state: 'pending' | 'approved' | 'declined';
+  createdAt: string;
+}
+
 /** One active person still holding a retired value (U18, R116). */
 export interface ReviewHolder {
   membershipId: string;
