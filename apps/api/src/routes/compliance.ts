@@ -57,8 +57,10 @@ complianceRouter.get(
     if (memberships.length === 0) {
       // Unreachable is empty until the candidate-profile artifact's "address
       // marked unreachable" mark exists — a person is reachable while they hold a
-      // login or an email nobody has flagged (R99).
-      res.json({ expired: [], neverHeld: [], unreachable: [] });
+      // login or an email nobody has flagged (R99). Return the FULL shape (all
+      // four keys) so this path never differs from the normal one — the web type
+      // has no optional keys and reads `optionalLapses.length` unconditionally.
+      res.json({ expired: [], neverHeld: [], optionalLapses: [], unreachable: [] });
       return;
     }
     const userIds = [...new Set(memberships.map((m) => m.userId))];
@@ -108,7 +110,13 @@ complianceRouter.get(
       // REQUIRED gaps — a required competency not currently held (R101).
       for (const competencyId of required) {
         const competency = competencyById.get(competencyId);
-        if (!competency) continue;
+        if (!competency) {
+          // The org no longer defines this required competency, so nobody can
+          // hold it current — the assignment engine treats that as unmet and
+          // would assign, so the report must show it as never held too (R103).
+          neverHeld.push(gapOf(membership.userId, competencyId, 'Unknown competency'));
+          continue;
+        }
         const currencies = (grantsByKey.get(`${membership.userId}|${competencyId}`) ?? []).map((g) =>
           competencyCurrency(g, competency, now, 'assessor'),
         );

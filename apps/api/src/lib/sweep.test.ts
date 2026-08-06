@@ -45,7 +45,10 @@ function makeDb(opts: DbOpts) {
     values: (v: Record<string, unknown>) => {
       if (table === schema.sentNotices) notices.push(v);
       else if (table === schema.assessmentCases) cases.push(v);
-      return { returning: async () => [{ id: `row-${notices.length + cases.length}` }] };
+      return {
+        returning: async () => [{ id: `row-${notices.length + cases.length}` }],
+        onConflictDoNothing: async () => undefined,
+      };
     },
   }));
   const db = {

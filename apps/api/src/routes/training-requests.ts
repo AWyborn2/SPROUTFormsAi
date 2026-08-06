@@ -163,25 +163,38 @@ trainingRequestsRouter.post(
     }
     const { request } = loaded;
 
-    // Resolve the subject's membership — the assignment path works on it.
+    // Claim the request FIRST, guarded on it still being pending — so two Admins
+    // racing cannot both approve (and cannot double-assign). A zero-row update
+    // means someone else already decided it.
+    const [row] = await db
+      .update(schema.trainingRequests)
+      .set({ state: 'approved', decidedByUserId: tenant.userId, decidedAt: new Date() })
+      .where(
+        and(
+          eq(schema.trainingRequests.id, request.id),
+          eq(schema.trainingRequests.state, 'pending'),
+        ),
+      )
+      .returning();
+    if (!row) {
+      res.status(409).json({ error: 'already_decided' });
+      return;
+    }
+
+    // Only the winner assigns. Resolve the subject's membership — the assignment
+    // path works on it.
     const membership = await db.query.memberships.findFirst({
       where: and(
         eq(schema.memberships.userId, request.userId),
         eq(schema.memberships.orgId, tenant.orgId),
       ),
     });
-
     let createdCaseIds: string[] = [];
     if (membership) {
       const result = await assignToolToMembership(db, tenant.orgId, membership.id, request.toolId);
       createdCaseIds = result.createdCaseIds;
     }
 
-    const [row] = await db
-      .update(schema.trainingRequests)
-      .set({ state: 'approved', decidedByUserId: tenant.userId, decidedAt: new Date() })
-      .where(eq(schema.trainingRequests.id, request.id))
-      .returning();
     await recordAudit(db, tenant, {
       action: 'Approved training request',
       target: request.toolId,
@@ -210,8 +223,17 @@ trainingRequestsRouter.post(
     const [row] = await db
       .update(schema.trainingRequests)
       .set({ state: 'declined', decidedByUserId: tenant.userId, decidedAt: new Date() })
-      .where(eq(schema.trainingRequests.id, loaded.request.id))
+      .where(
+        and(
+          eq(schema.trainingRequests.id, loaded.request.id),
+          eq(schema.trainingRequests.state, 'pending'),
+        ),
+      )
       .returning();
-    res.json({ ...requestDto(row ?? loaded.request), state: 'declined' });
+    if (!row) {
+      res.status(409).json({ error: 'already_decided' });
+      return;
+    }
+    res.json({ ...requestDto(row), state: 'declined' });
   }),
 );

@@ -146,12 +146,16 @@ async function loadMembershipContext(
   });
   const locationIds = locRows.map((l) => l.locationId);
 
-  // Open cases for this candidate — the idempotence guard (KTD16).
+  // In-flight cases for this candidate — the idempotence guard (KTD16). BOTH
+  // non-terminal states count: a case `awaiting_sign_off` has passed every part
+  // but not yet been signed, so its competency is not granted until sign-off —
+  // filtering `open` alone would let the sweep (or a re-run of any trigger)
+  // create a SECOND case for a requirement that is one signature from done.
   const openCases = await database.query.assessmentCases.findMany({
     where: and(
       eq(schema.assessmentCases.orgId, orgId),
       eq(schema.assessmentCases.candidateUserId, membership.userId),
-      eq(schema.assessmentCases.state, 'open'),
+      inArray(schema.assessmentCases.state, ['open', 'awaiting_sign_off']),
     ),
   });
   const openCaseToolIds = [...new Set(openCases.map((c) => c.toolId))];

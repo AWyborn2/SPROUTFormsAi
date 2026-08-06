@@ -149,7 +149,7 @@ describe('GET /compliance (U20)', () => {
     mockDbValue = fakeDb({ memberships: [] });
     const { server, base } = startApp();
     const res = await fetch(`${base}/compliance`, { headers: authHeader(admin) });
-    expect(await res.json()).toEqual({ expired: [], neverHeld: [], unreachable: [] });
+    expect(await res.json()).toEqual({ expired: [], neverHeld: [], optionalLapses: [], unreachable: [] });
     server.close();
   });
 

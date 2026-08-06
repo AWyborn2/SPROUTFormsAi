@@ -103,13 +103,20 @@ export async function sweepOrganization(
       await sendExpiryNoticeEmail({ to: user.email, competencyName: competency.name, expiresOn });
     }
     // The record IS the login route AND the idempotence guard, so it is written
-    // whether or not the email went out.
-    await database.insert(schema.sentNotices).values({
-      orgId: org.id,
-      userId: holder.userId,
-      competencyId: holder.competencyId,
-      expiresOn,
-    });
+    // whether or not the email went out. `onConflictDoNothing` on the (user,
+    // competency, window) unique index makes a lost check-then-insert race — two
+    // sweeps overlapping — a no-op rather than an error that would abort the rest
+    // of this organisation's pass.
+    await database
+      .insert(schema.sentNotices)
+      .values({ orgId: org.id, userId: holder.userId, competencyId: holder.competencyId, expiresOn })
+      .onConflictDoNothing({
+        target: [
+          schema.sentNotices.userId,
+          schema.sentNotices.competencyId,
+          schema.sentNotices.expiresOn,
+        ],
+      });
     noticesSent++;
   }
 

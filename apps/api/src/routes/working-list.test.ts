@@ -33,6 +33,10 @@ interface Opts {
   tools?: unknown[];
   retiredLocations?: unknown[];
   locHolders?: unknown[];
+  retiredDepartments?: unknown[];
+  deptHolders?: unknown[];
+  retiredRoles?: unknown[];
+  roleHolders?: unknown[];
   memberships?: unknown[];
   pooledCases?: unknown[];
   overdueDays?: number;
@@ -48,11 +52,11 @@ function fakeDb(opts: Opts) {
       trainingRequests: { findMany: vi.fn().mockResolvedValue(opts.requests ?? []) },
       assessmentTools: { findMany: vi.fn().mockResolvedValue(opts.tools ?? []) },
       locations: { findMany: vi.fn().mockResolvedValue(opts.retiredLocations ?? []) },
-      departments: { findMany: vi.fn().mockResolvedValue([]) },
-      jobRoles: { findMany: vi.fn().mockResolvedValue([]) },
+      departments: { findMany: vi.fn().mockResolvedValue(opts.retiredDepartments ?? []) },
+      jobRoles: { findMany: vi.fn().mockResolvedValue(opts.retiredRoles ?? []) },
       membershipLocations: { findMany: vi.fn().mockResolvedValue(opts.locHolders ?? []) },
-      membershipDepartments: { findMany: vi.fn().mockResolvedValue([]) },
-      membershipRoles: { findMany: vi.fn().mockResolvedValue([]) },
+      membershipDepartments: { findMany: vi.fn().mockResolvedValue(opts.deptHolders ?? []) },
+      membershipRoles: { findMany: vi.fn().mockResolvedValue(opts.roleHolders ?? []) },
       memberships: { findMany: vi.fn().mockResolvedValue(opts.memberships ?? []) },
       assessmentCases: { findMany: vi.fn().mockResolvedValue(opts.pooledCases ?? []) },
     },
@@ -90,6 +94,47 @@ describe('GET /working-list (U19, R95)', () => {
     const res = await fetch(`${base}/working-list`, { headers: authHeader(admin) });
     const body = (await res.json()) as Array<{ kind: string; subject: string }>;
     expect(body.some((i) => i.kind === 'retirement_review')).toBe(true);
+    server.close();
+  });
+
+  it('surfaces a retirement review for a retired Department still held', async () => {
+    mockDbValue = fakeDb({
+      retiredDepartments: [{ id: 'dep-x', orgId: 'org-1', name: 'Old Dept', status: 'retired' }],
+      deptHolders: [{ membershipId: 'm1', departmentId: 'dep-x' }],
+      memberships: [{ id: 'm1', userId: 'u1', orgId: 'org-1', status: 'active' }],
+    });
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/working-list`, { headers: authHeader(admin) });
+    const body = (await res.json()) as Array<{ kind: string; subject: string }>;
+    expect(body.some((i) => i.kind === 'retirement_review' && /Department/.test(i.subject))).toBe(true);
+    server.close();
+  });
+
+  it('surfaces a retirement review for a retired Role still held', async () => {
+    mockDbValue = fakeDb({
+      retiredRoles: [{ id: 'role-x', orgId: 'org-1', name: 'Old Role', status: 'retired' }],
+      roleHolders: [{ membershipId: 'm1', roleId: 'role-x', withdrawnAt: null }],
+      memberships: [{ id: 'm1', userId: 'u1', orgId: 'org-1', status: 'active' }],
+    });
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/working-list`, { headers: authHeader(admin) });
+    const body = (await res.json()) as Array<{ kind: string; subject: string }>;
+    expect(body.some((i) => i.kind === 'retirement_review' && /Role/.test(i.subject))).toBe(true);
+    server.close();
+  });
+
+  it('excludes a retired value held only by a non-active member', async () => {
+    // The member holding the retired Location is not active, so nobody active
+    // still holds it → no review item.
+    mockDbValue = fakeDb({
+      retiredLocations: [{ id: 'loc-x', orgId: 'org-1', name: 'Old Site', status: 'retired' }],
+      locHolders: [{ membershipId: 'm1', locationId: 'loc-x' }],
+      memberships: [], // the active-membership load returns nobody
+    });
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/working-list`, { headers: authHeader(admin) });
+    const body = (await res.json()) as Array<{ kind: string }>;
+    expect(body.some((i) => i.kind === 'retirement_review')).toBe(false);
     server.close();
   });
 
