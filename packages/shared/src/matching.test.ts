@@ -18,6 +18,10 @@ import {
   buildMatchingQuestion,
   groupPairingOptions,
   isMatchingQuestion,
+  matchAnchorKey,
+  matchAnchors,
+  matchAnchorsFor,
+  matchSides,
   pairingOption,
   parsePairingOption,
 } from './matching.js';
@@ -198,5 +202,112 @@ describe('isMatchingQuestion', () => {
   it('rejects an ordinary choice question', () => {
     expect(isMatchingQuestion(['True', 'False'])).toBe(false);
     expect(isMatchingQuestion(undefined)).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Where a matching question is DRAWN
+ * ------------------------------------------------------------------ */
+
+/**
+ * n + m ANCHORS, NOT n × m BOXES.
+ *
+ * Placement used to offer one box per PAIRING, because that is what the field
+ * stores. A three-by-three question therefore asked the author for nine boxes
+ * and a five-by-five for twenty-five — and eight of those nine describe a
+ * correspondence the page never printed anywhere, so there was nothing on the
+ * paper to place them against.
+ *
+ * The printed entries are the things that exist: three statements and three
+ * signs. Anchoring those is linear, every anchor sits on something visible, and
+ * each pairing's connector is derived from the two it runs between.
+ */
+describe('matchSides', () => {
+  const OPTIONS = buildMatchingQuestion({
+    lefts: ['Restricted area', 'Permission to pass', 'Wash-down required'],
+    rights: ['Biosecurity sign', 'Traffic hazard sign', 'Wash bay sign'],
+    correct: [{ left: 'Restricted area', right: 'Biosecurity sign' }],
+  }).options;
+
+  it('recovers both printed sides from the pairings', () => {
+    expect(matchSides(OPTIONS)).toEqual({
+      lefts: ['Restricted area', 'Permission to pass', 'Wash-down required'],
+      rights: ['Biosecurity sign', 'Traffic hazard sign', 'Wash bay sign'],
+    });
+  });
+
+  it('keeps printed order rather than first-seen-alphabetical', () => {
+    // The order is what `l0`/`r2` index into, so an anchor placed against the
+    // third printed statement has to stay the third.
+    expect(matchSides(OPTIONS).lefts[2]).toBe('Wash-down required');
+  });
+
+  it('deduplicates, because each side is listed once however often it pairs', () => {
+    expect(matchSides(OPTIONS).rights).toHaveLength(3);
+    expect(OPTIONS).toHaveLength(9);
+  });
+
+  it('skips anything that is not a pairing rather than inventing a side for it', () => {
+    // The same refusal `groupPairingOptions` makes: a field carrying a mix is
+    // malformed, and giving the stray option a side would hide that.
+    expect(matchSides(['a -> b', 'stray'])).toEqual({ lefts: ['a'], rights: ['b'] });
+  });
+
+  it('is empty for a question with no options at all', () => {
+    expect(matchSides([])).toEqual({ lefts: [], rights: [] });
+  });
+});
+
+describe('matchAnchors', () => {
+  const OPTIONS = buildMatchingQuestion({
+    lefts: ['One', 'Two', 'Three'],
+    rights: ['A', 'B', 'C'],
+    correct: [{ left: 'One', right: 'A' }],
+  }).options;
+
+  it('ASKS FOR SIX ANCHORS WHERE THE OLD MODEL ASKED FOR NINE BOXES', () => {
+    expect(OPTIONS).toHaveLength(9);
+    expect(matchAnchors(OPTIONS)).toHaveLength(6);
+  });
+
+  it('carries each anchor’s key, side, index and printed text', () => {
+    const anchors = matchAnchors(OPTIONS);
+
+    expect(anchors[0]).toEqual({ key: 'l0', side: 'l', index: 0, text: 'One' });
+    expect(anchors[3]).toEqual({ key: 'r0', side: 'r', index: 0, text: 'A' });
+  });
+
+  it('lists the prompts before the answers, as they print', () => {
+    expect(matchAnchors(OPTIONS).map((a) => a.key)).toEqual(['l0', 'l1', 'l2', 'r0', 'r1', 'r2']);
+  });
+
+  it('uses the key scheme MatchPresentation.images ALREADY uses', () => {
+    // A picture and a placement both address "the third prompt". Two schemes
+    // for one concept is two things to keep in step for no gain.
+    expect(matchAnchorKey('l', 0)).toBe('l0');
+    expect(matchAnchorKey('r', 2)).toBe('r2');
+  });
+});
+
+describe('matchAnchorsFor', () => {
+  const SIDES = { lefts: ['One', 'Two'], rights: ['A', 'B'] };
+
+  it('resolves a pairing to the two anchors its connector runs between', () => {
+    expect(matchAnchorsFor('Two -> B', SIDES)).toEqual({ left: 'l1', right: 'r1' });
+  });
+
+  it('REFUSES A PAIRING NAMING SOMETHING NO LONGER PRINTED', () => {
+    /*
+      A stored value can outlive an edit to the question. Returning null draws
+      nothing, which is the point: a connector to a statement that is no longer
+      on the page would be a line across a competency record asserting a
+      correspondence nobody can check.
+    */
+    expect(matchAnchorsFor('Three -> A', SIDES)).toBeNull();
+    expect(matchAnchorsFor('One -> C', SIDES)).toBeNull();
+  });
+
+  it('refuses a value that is not a pairing at all', () => {
+    expect(matchAnchorsFor('One', SIDES)).toBeNull();
   });
 });
