@@ -37,3 +37,4 @@ export * from './chc-intake.js';
 export * from './induction.js';
 export * from './taxonomy.js';
 export * from './placement.js';
+export * from './profile.js';
