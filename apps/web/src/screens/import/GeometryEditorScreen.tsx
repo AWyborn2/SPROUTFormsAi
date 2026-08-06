@@ -62,10 +62,24 @@ import {
 export interface GeometryEditorScreenProps {
   formId?: string;
   versionId?: string;
-  /** Hide the screen's own header, for a host that already has one. */
+  /**
+   * Hide the screen's own PAGE CHROME — its title and its Publish button — for
+   * a host that supplies both. Deliberately not "hide the toolbar": Auto-place
+   * and Save are this screen's work, not the host's, and a host that hides them
+   * has a placement step nothing can be saved from.
+   */
   embedded?: boolean;
   /** Where Back goes. Defaults to the form's own page. */
   onDone?: () => void;
+  /**
+   * The saved field list, handed back after every successful save.
+   *
+   * For a host that keeps its own copy of the fields and publishes THAT — the
+   * assessment builder does. Without it the geometry reaches the version and is
+   * then overwritten by the host's copy at publish, with nothing on screen to
+   * say so.
+   */
+  onSaved?: (fields: FormField[]) => void;
 }
 
 export function GeometryEditorScreen({
@@ -73,6 +87,7 @@ export function GeometryEditorScreen({
   versionId: versionIdProp,
   embedded = false,
   onDone,
+  onSaved,
 }: GeometryEditorScreenProps = {}) {
   const params = useParams<{ id: string; versionId: string }>();
   // Props win where given; the route is the fallback, so the standalone screen
@@ -599,10 +614,25 @@ export function GeometryEditorScreen({
 
   return (
     <div className="fai-rise flex h-[calc(100vh-56px)] flex-col">
-      {!embedded && (
+      {/*
+        THE HEADER'S TWO HALVES ARE GATED SEPARATELY.
+
+        `embedded` means "the host already has a page title", NOT "the host has
+        its own tools" — the builder has neither an auto-place nor a save of its
+        own. Hiding the whole header took Auto-place, Save and the placed/total
+        counter with it, which left the builder's PDF-mapping step able to draw
+        boxes and unable to keep any of them.
+
+        Only the TITLE and Publish are host chrome: the builder's stepper names
+        the step, and it publishes at the end of its own flow rather than here.
+      */}
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-[22px] py-3">
         <div className="min-w-0">
-          <h1 className="truncate font-heading text-[16px] font-bold">Placement · {version.label}</h1>
+          {!embedded && (
+            <h1 className="truncate font-heading text-[16px] font-bold">
+              Placement · {version.label}
+            </h1>
+          )}
           <p className="text-[12.5px] text-text-secondary">
             {counts.placed} of {counts.total} answerable fields placed
             {dirty && <span className="ml-2 text-warning-text">· unsaved changes</span>}
@@ -625,37 +655,43 @@ export function GeometryEditorScreen({
               save.mutate(fields, {
                 onSuccess: () => {
                   setDirty(false);
+                  // The host gets the saved fields too. Writing them only to the
+                  // version leaves a host that publishes its own copy — the
+                  // builder does — overwriting every box at publish.
+                  onSaved?.(fields);
                   toast({ variant: 'success', message: 'Placement saved to the draft.' });
                 },
                 onError: () => toast({ variant: 'danger', message: "Couldn't save — try again." }),
               })
             }
           >
-            {save.isPending ? 'Saving…' : 'Save draft'}
+            {save.isPending ? 'Saving…' : 'Save placement'}
           </Button>
-          <Button
-            leadingIcon="upload"
-            disabled={dirty || publish.isPending}
-            title={dirty ? 'Save the draft first' : undefined}
-            onClick={() => {
-              if (!formId || !versionId) return;
-              publish.mutate(
-                { formId, versionId },
-                {
-                  onSuccess: () => {
-                    toast({ variant: 'success', message: `${version.label} published.` });
-                    navigate('/app/forms');
+          {!embedded && (
+            <Button
+              leadingIcon="upload"
+              disabled={dirty || publish.isPending}
+              title={dirty ? 'Save the draft first' : undefined}
+              onClick={() => {
+                if (!formId || !versionId) return;
+                publish.mutate(
+                  { formId, versionId },
+                  {
+                    onSuccess: () => {
+                      toast({ variant: 'success', message: `${version.label} published.` });
+                      navigate('/app/forms');
+                    },
+                    onError: () =>
+                      toast({ variant: 'danger', message: "Couldn't publish — try again." }),
                   },
-                  onError: () => toast({ variant: 'danger', message: "Couldn't publish — try again." }),
-                },
-              );
-            }}
-          >
-            Publish version
-          </Button>
+                );
+              }}
+            >
+              Publish version
+            </Button>
+          )}
         </div>
       </header>
-      )}
 
       <div className="flex min-h-0 flex-1">
         <aside className="w-[340px] shrink-0 overflow-y-auto border-r border-border">

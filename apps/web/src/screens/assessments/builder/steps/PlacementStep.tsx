@@ -30,7 +30,8 @@ export interface PlacementStepProps {
 }
 
 export function PlacementStep({ draft }: PlacementStepProps) {
-  const { formId, versionId, setVersionIds, fields, excluded, assetId, title } = draft;
+  const { formId, versionId, setVersionIds, setPlacedFields, fields, excluded, assetId, title } =
+    draft;
   const createDraftForm = useCreateDraftForm();
   /*
     ONE CREATION, EVER. `useEffect` re-runs on every dependency change and
@@ -95,7 +96,18 @@ export function PlacementStep({ draft }: PlacementStepProps) {
         Embedded: the builder's own stepper is the chrome, and the screen's
         header would read as a second page title stacked on the first.
       */}
-      <GeometryEditorScreen formId={formId} versionId={versionId} embedded />
+      {/*
+        `onSaved` takes the geometry BACK INTO THE DRAFT. The publish step
+        validates and writes the draft's own field list, so geometry saved only
+        onto the version is overwritten there — the boxes are on screen the
+        whole time, which is what makes that failure invisible.
+      */}
+      <GeometryEditorScreen
+        formId={formId}
+        versionId={versionId}
+        embedded
+        onSaved={setPlacedFields}
+      />
     </div>
   );
 }

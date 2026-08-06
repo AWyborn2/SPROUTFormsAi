@@ -757,3 +757,110 @@ describe('GeometryEditorScreen — hooks are stable across the loading transitio
     expect(screen.getByText(/No original PDF/i)).toBeTruthy();
   });
 });
+
+/**
+ * The EMBEDDED mount — how the assessment builder's PDF-mapping step uses this.
+ *
+ * `embedded` means "the host supplies the page title", not "the host supplies
+ * the tools". Hiding the whole header took Auto-place, Save and the
+ * placed/total counter with it, which left that step able to draw boxes and
+ * unable to keep a single one: the geometry lived in this component's local
+ * state and went with it when the author moved to the next step.
+ *
+ * The `onSaved` callback exists for the second half of the same failure. The
+ * builder keeps its own copy of the field list and publishes THAT, so geometry
+ * written only onto the version is overwritten at publish — with the boxes on
+ * screen the whole time, which is what made it invisible.
+ */
+describe('GeometryEditorScreen — embedded in the assessment builder', () => {
+  function renderEmbedded(props: { onSaved?: (fields: FormField[]) => void } = {}) {
+    version.data = {
+      id: 'v1',
+      templateId: 'form1',
+      label: 'Draft v1',
+      state: 'draft',
+      isCurrent: false,
+      fields: [choiceField('q1', 'Question one', ['Yes', 'No'])],
+      container: DEFAULT_CONTAINER,
+      sourcePdfAssetId: 'asset-1',
+    };
+    render(<GeometryEditorScreen embedded {...props} />);
+  }
+
+  it('KEEPS AUTO-PLACE, which is the whole point of the step', () => {
+    renderEmbedded();
+    expect(screen.getByText('Auto-place remaining fields')).toBeTruthy();
+  });
+
+  it('KEEPS SAVE — without it nothing placed here can be kept', () => {
+    renderEmbedded();
+    expect(screen.getByText('Save placement')).toBeTruthy();
+  });
+
+  it('keeps the placed/total counter, the only answer to “am I finished”', () => {
+    renderEmbedded();
+    expect(screen.getByText(/answerable fields placed/)).toBeTruthy();
+  });
+
+  it('drops the page title, which the host already shows', () => {
+    renderEmbedded();
+    expect(screen.queryByText(/^Placement · /)).toBeNull();
+  });
+
+  it('drops Publish, because the host publishes at the end of its own flow', () => {
+    // Publishing from here would publish the form version mid-builder, before
+    // the answer keys and the tool manifest exist.
+    renderEmbedded();
+    expect(screen.queryByText('Publish version')).toBeNull();
+  });
+
+  it('HANDS THE SAVED FIELDS BACK to the host', () => {
+    /*
+      The builder validates and writes its OWN field list at publish. Geometry
+      that reached the version but not the host's copy is overwritten there, so
+      handing it back is what makes a placement survive the rest of the wizard.
+    */
+    const onSaved = vi.fn();
+    saveMutate.mockImplementation((_fields: FormField[], opts: { onSuccess: () => void }) =>
+      opts.onSuccess(),
+    );
+    renderEmbedded({ onSaved });
+    // Save is disabled until something is dirty, so place a box first —
+    // selecting a field auto-applies the confident default proposal.
+    fireEvent.click(screen.getByText('Question one'));
+    fireEvent.click(screen.getByText('Save placement'));
+
+    const saved = onSaved.mock.calls[0]![0] as FormField[];
+    expect(saved.find((f) => f.id === 'q1')?.geometry?.segments.length).toBeGreaterThan(0);
+  });
+
+  it('does not call back when the save failed', () => {
+    // Telling the host a placement landed when it did not is worse than the
+    // bug this callback fixes — the author would then publish believing it had.
+    const onSaved = vi.fn();
+    saveMutate.mockImplementation((_fields: FormField[], opts: { onError: () => void }) =>
+      opts.onError(),
+    );
+    renderEmbedded({ onSaved });
+    fireEvent.click(screen.getByText('Question one'));
+    fireEvent.click(screen.getByText('Save placement'));
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it('still shows the title and Publish on the standalone route', () => {
+    // The embedded split must not have quietly changed the screen it came from.
+    version.data = {
+      id: 'v1',
+      templateId: 'form1',
+      label: 'Draft v1',
+      state: 'draft',
+      isCurrent: false,
+      fields: [choiceField('q1', 'Question one', ['Yes', 'No'])],
+      container: DEFAULT_CONTAINER,
+      sourcePdfAssetId: 'asset-1',
+    };
+    render(<GeometryEditorScreen />);
+    expect(screen.getByText(/^Placement · /)).toBeTruthy();
+    expect(screen.getByText('Publish version')).toBeTruthy();
+  });
+});

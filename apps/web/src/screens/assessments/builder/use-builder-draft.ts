@@ -126,6 +126,20 @@ export interface BuilderDraftState {
   assetId?: string;
   /** Record the draft version the placement step created. */
   setVersionIds: (formId: string, versionId: string) => void;
+  /**
+   * Take the geometry back from the placement step.
+   *
+   * THE DRAFT'S FIELD LIST IS WHAT PUBLISHES. `WorkflowStep` validates
+   * `checkPublish(fields, …)` and writes the result to the version, so anything
+   * the placement editor saved onto the version but not back into here is
+   * OVERWRITTEN at publish — silently, because the boxes were on screen the
+   * whole time. That is what this closes.
+   *
+   * Merged by id rather than replacing the list: the placement editor is given
+   * the fields minus the ones the author excluded, so its list is a subset, and
+   * taking it wholesale would delete every excluded question from the draft.
+   */
+  setPlacedFields: (placed: FormField[]) => void;
   /** Parts as the units step shows them: derived from structure, then edited. */
   parts: DerivedPart[];
   /** The manifest those parts assemble into, ready for validateManifest. */
@@ -297,12 +311,17 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     to put a box until one exists, and the placement step sits before publish in
     the author's order.
 
-    From the moment it exists THE VERSION OWNS THE FIELDS. The builder draft owns
-    what sits on top of them — the structure arrangement, the answer keys, the
-    part manifest — all of which reference field IDS, and ids are preserved
-    across every version write. One copy of the field list, and it is the copy
-    the exporter reads: two that can disagree is the failure refused everywhere
-    else in this work.
+    THE DRAFT OWNS THE FIELDS; the version is where they are written. Every
+    consumer in the builder already assumed this — `checkPublish`,
+    `publishSummary` and the manifest validator all read `fields` from here —
+    and the placement step now hands its geometry back through
+    `setPlacedFields` so the one list carries it.
+
+    This comment used to say the version owned them. It never did: nothing in
+    the builder read a version back, so geometry saved onto the version and not
+    into this list was silently overwritten by the publish step. Two copies that
+    can disagree is the failure refused everywhere else in this work, and it was
+    live here.
   */
   const [formId, setFormId] = useState<string | undefined>(undefined);
   const [versionId, setVersionId] = useState<string | undefined>(undefined);
@@ -663,6 +682,17 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     setVersionId(nextVersionId);
   }, []);
 
+  /*
+    Geometry comes back from the placement step by ID, not by replacing the
+    list. The editor is handed the fields minus the excluded ones, so what it
+    returns is a SUBSET — assigning it wholesale would delete every question the
+    author turned off, and the manifest still references those ids.
+  */
+  const setPlacedFields = useCallback((placed: FormField[]) => {
+    const byId = new Map(placed.map((f) => [f.id, f]));
+    setFields((prev) => prev.map((f) => byId.get(f.id) ?? f));
+  }, []);
+
   const stats = useMemo(() => (extraction ? statsFor(extraction) : null), [extraction]);
 
   return {
@@ -685,6 +715,7 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     ...(versionId ? { versionId } : {}),
     ...(assetId ? { assetId } : {}),
     setVersionIds,
+    setPlacedFields,
     parts,
     manifest,
     manifestProblems,
