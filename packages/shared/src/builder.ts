@@ -44,7 +44,6 @@ import type { AssessmentWorkflow } from './workflow.js';
 export const BUILDER_STEPS = [
   'upload',
   'generate',
-  'design',
   'units',
   'answer_key',
   'placement',
@@ -55,7 +54,6 @@ export type BuilderStep = (typeof BUILDER_STEPS)[number];
 export const BUILDER_STEP_LABELS: Record<BuilderStep, string> = {
   upload: 'Upload',
   generate: 'Generate',
-  design: 'Design chat',
   units: 'Units & gating',
   answer_key: 'Answer key',
   placement: 'PDF mapping',
@@ -65,8 +63,7 @@ export const BUILDER_STEP_LABELS: Record<BuilderStep, string> = {
 /** What the primary action says on each step. */
 export const BUILDER_NEXT_LABELS: Record<BuilderStep, string> = {
   upload: 'Generate form artifact',
-  generate: 'Open design chat',
-  design: 'Wrap into units',
+  generate: 'Wrap into units',
   units: 'Set the answer key',
   answer_key: 'Map to the PDF',
   placement: 'Configure workflow',
@@ -75,6 +72,34 @@ export const BUILDER_NEXT_LABELS: Record<BuilderStep, string> = {
 
 export function stepIndex(step: BuilderStep): number {
   return BUILDER_STEPS.indexOf(step);
+}
+
+/**
+ * Steps that once existed and no longer do, and where a draft parked on one
+ * should resume.
+ *
+ * `design` was a conversational pass over the generated artifact. Its two jobs
+ * both landed elsewhere and it never had a screen: correcting what extraction
+ * got wrong — adding a field, deleting one, folding an instruction into a
+ * description — is GENERATE's work now, and colours, styles and the logo are
+ * authored per client brand in settings, where they are shared by every form
+ * that client owns rather than re-chosen per document.
+ *
+ * KEPT AS A MAPPING RATHER THAN DELETED. `step` is validated against
+ * `BUILDER_STEPS` on the way into the database, so a saved draft sitting on a
+ * retired step would fail that enum and take its whole save with it — the
+ * author's afternoon of work rejected at the boundary because a step was
+ * renamed. This resolves it to the step that absorbed it instead.
+ */
+export const RETIRED_BUILDER_STEPS: Record<string, BuilderStep> = {
+  design: 'generate',
+};
+
+/** The step a stored value should open, or `upload` when it names nothing. */
+export function resolveBuilderStep(step: string | null | undefined): BuilderStep {
+  if (!step) return 'upload';
+  if ((BUILDER_STEPS as readonly string[]).includes(step)) return step as BuilderStep;
+  return RETIRED_BUILDER_STEPS[step] ?? 'upload';
 }
 
 /* ------------------------------------------------------------------ *
