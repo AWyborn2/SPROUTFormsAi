@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { DEFAULT_ROLE_PERMISSIONS, PLAN_CONFIG, schema, type Db } from '@formai/db';
 import type { Role, TenantContext } from '@formai/shared';
 import { isUniqueViolation } from '../lib/db-errors.js';
+import { insertUserWithUsername } from '../lib/username.js';
 import type { UserProfile } from './replit-auth.js';
 
 async function findOrCreateUser(
@@ -14,10 +15,12 @@ async function findOrCreateUser(
   if (existing) return existing;
 
   try {
-    const [created] = await db
-      .insert(schema.users)
-      .values({ name: profile.name, email: profile.email })
-      .returning();
+    /*
+      One of the three places a person is born, so one of the three that issues
+      a username (R21, KTD21). Wiring only the backfill would leave everybody
+      arriving after this shipped unable to sign in by one.
+    */
+    const created = await insertUserWithUsername(db, { name: profile.name, email: profile.email });
     if (!created) throw new Error('tenant_provisioning_failed: user insert returned no row');
     return created;
   } catch (err) {

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Router } from 'express';
-import { eq } from 'drizzle-orm';
+import { eq, or } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { schema } from '@formai/db';
@@ -10,6 +10,7 @@ import { sealSession, unsealSession } from '../auth/replit-auth.js';
 import { provisionTenant } from '../auth/tenant-provisioning.js';
 import { SESSION_COOKIE_NAME } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
+import { insertUserWithUsername } from '../lib/username.js';
 
 export const SESSION_COOKIE_OPTIONS = {
   httpOnly: true,
@@ -49,10 +50,25 @@ const signupSchema = z.object({
   accountKind: z.enum(['individual', 'team']).default('team'),
 });
 
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-});
+/**
+ * R22: a person signs in with their username OR their email address, so the
+ * field is an IDENTIFIER and cannot be validated as an email — a `.email()`
+ * rule here would reject every generated username before the lookup ran.
+ *
+ * `identifier` also accepts the legacy `email` key, so a client that has not
+ * been updated keeps working; the web form sends the new name.
+ */
+const loginSchema = z
+  .object({
+    identifier: z.string().min(1).optional(),
+    email: z.string().min(1).optional(),
+    password: z.string().min(1),
+  })
+  .transform((v) => ({ identifier: (v.identifier ?? v.email ?? '').trim(), password: v.password }))
+  .refine((v) => v.identifier.length > 0, {
+    message: 'A username or email address is required',
+    path: ['identifier'],
+  });
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -102,7 +118,8 @@ authRouter.post(
     }
 
     const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
-    await db.insert(schema.users).values({ name, email, passwordHash });
+    // Self-signup is one of the three places a person is born (R21, KTD21).
+    await insertUserWithUsername(db, { name, email, passwordHash });
 
     const tenant = await provisionTenant(db, { name, email, orgName, accountKind });
 
@@ -123,23 +140,37 @@ authRouter.post(
       res.status(400).json({ error: 'validation_error', issues: parsed.error.issues });
       return;
     }
-    const { email, password } = parsed.data;
+    const { identifier, password } = parsed.data;
 
     if (!db) {
       res.status(503).json({ error: 'db_unavailable' });
       return;
     }
 
+    /*
+      R22: either credential reaches the same account. The lookup is ONE query
+      over both columns rather than an email query followed by a username one —
+      two sequential reads would make an unknown email measurably slower than an
+      unknown username, rebuilding on the new identifier exactly the enumeration
+      oracle the dummy-hash comparison below exists to close.
+
+      Both are compared case-sensitively, matching how the email lookup has
+      always behaved. Usernames are case-folded at generation (see
+      `lib/username.ts`), so a generated one always matches what was issued.
+    */
     const user = await db.query.users.findFirst({
-      where: eq(schema.users.email, email),
+      where: or(eq(schema.users.email, identifier), eq(schema.users.username, identifier)),
     });
 
-    // Constant-time path even when user is not found — prevents email enumeration via timing
+    // Constant-time path even when no user is found — prevents enumeration via
+    // timing, on either credential.
     const hashToVerify = user?.passwordHash ?? DUMMY_HASH;
     const valid = await bcrypt.compare(password, hashToVerify);
 
     if (!user || !valid) {
-      res.status(401).json({ error: 'invalid_credentials', message: 'Invalid email or password.' });
+      res
+        .status(401)
+        .json({ error: 'invalid_credentials', message: 'Invalid username or password.' });
       return;
     }
 

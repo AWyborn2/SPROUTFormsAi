@@ -9,6 +9,7 @@ import { recordAudit } from '../audit/record.js';
 import { sealSession } from '../auth/replit-auth.js';
 import { BCRYPT_COST, SESSION_COOKIE_OPTIONS } from './auth.js';
 import { checkSeatAvailability, lockOrgForSeats, seatLimitError } from '../lib/seats.js';
+import { insertUserWithUsername } from '../lib/username.js';
 import { db } from '../db.js';
 
 export const publicInvitesRouter: Router = Router();
@@ -253,10 +254,12 @@ publicInvitesRouter.post(
         }
       }
 
-      const [user] = await tx
-        .insert(schema.users)
-        .values({ name: parsed.data.name, email, passwordHash })
-        .returning();
+      /*
+        Issued in the SAME transaction as the row it belongs to (R21, KTD21), so
+        no `users` row can land without one — the acceptance path is where most
+        candidates are actually born.
+      */
+      const user = await insertUserWithUsername(tx, { name: parsed.data.name, email, passwordHash });
       if (!user) throw new Error('invite_signup_failed: user insert returned no row');
 
       const [claimed] = await tx
