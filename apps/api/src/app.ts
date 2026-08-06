@@ -141,6 +141,12 @@ export function createApp(): Express {
   // loopback with the caller's own key — see the router's docstring for why
   // that hop is deliberate.
   const mcpApiUrl = `http://127.0.0.1:${env.API_PORT}`;
+  // Links the tools hand BACK to a caller must not be composed from the
+  // loopback base above — a document link pointing at 127.0.0.1 is fetchable
+  // by nobody but this host. The web origin proxies `/api` through to this
+  // process, so this is the address the caller can actually reach (the same
+  // base invite emails are composed from).
+  const mcpPublicApiUrl = `${env.WEB_ORIGIN}/api`;
   // URL-credentialed door, mounted BEFORE the header one so the more specific
   // path wins (`app.use('/mcp', …)` would otherwise swallow it). It exists
   // because Claude's custom-connector dialog takes a URL and OAuth fields with
@@ -149,9 +155,17 @@ export function createApp(): Express {
   app.use(
     '/mcp/key/:key',
     requireMachineKeyFromPath('key'),
-    inductionMcpRouter({ apiUrl: mcpApiUrl, apiKeyFor: (req) => req.machineApiKey ?? null }),
+    inductionMcpRouter({
+      apiUrl: mcpApiUrl,
+      publicApiUrl: mcpPublicApiUrl,
+      apiKeyFor: (req) => req.machineApiKey ?? null,
+    }),
   );
-  app.use('/mcp', requireMachineOrTenant, inductionMcpRouter({ apiUrl: mcpApiUrl }));
+  app.use(
+    '/mcp',
+    requireMachineOrTenant,
+    inductionMcpRouter({ apiUrl: mcpApiUrl, publicApiUrl: mcpPublicApiUrl }),
+  );
   app.use('/audit', auditRouter);
   app.use('/dashboard', dashboardRouter);
   app.use('/competencies', competenciesRouter);

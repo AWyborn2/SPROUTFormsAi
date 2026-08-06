@@ -134,8 +134,10 @@ export class InductionsClient {
    * A short-lived link to one stored identity document.
    *
    * The API answers with a PATH, because it sits behind a proxy that adds a
-   * prefix it knows nothing about. The absolute URL is composed here, from the
-   * base this client was configured with — the one address known to work.
+   * prefix it knows nothing about. The absolute URL is composed here — from
+   * `publicApiUrl` when this client serves a remote caller (the HTTP mount,
+   * whose `apiUrl` is a loopback address the caller cannot reach), otherwise
+   * from the base this client was configured with.
    */
   async documentLink(submissionId: string, kind: 'photo' | 'driversLicence') {
     const body = await this.request<{
@@ -145,7 +147,7 @@ export class InductionsClient {
       contentType: string;
       size: number;
     }>(`/inductions/candidates/${encodeURIComponent(submissionId)}/documents/${kind}`);
-    return { ...body, url: `${this.config.apiUrl}${body.path}` };
+    return { ...body, url: `${this.config.publicApiUrl ?? this.config.apiUrl}${body.path}` };
   }
 
   nextDates(count?: number) {
