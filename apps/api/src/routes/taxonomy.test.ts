@@ -720,6 +720,8 @@ describe('Department tightening (U17, R110–R113)', () => {
     const { db, updateSet, deleteWhere } = fakeDb({
       departmentsFindFirst: { id: DEPT, orgId: 'org-1', name: 'Ops', allowsMultipleRoles: false },
       jobRolesFindMany: deptRoles,
+      // An active member of this org — the target must be one (R128).
+      memberships: [{ id: MEMBERSHIP, orgId: 'org-1', status: 'active' }],
       // The chosen Role is re-checked as still held before anything is withdrawn.
       membershipRolesFindFirst: { id: 'mr-a', membershipId: MEMBERSHIP, roleId: ROLE_A, withdrawnAt: null },
     });
@@ -765,6 +767,7 @@ describe('Department tightening (U17, R110–R113)', () => {
     const { db, updateSet } = fakeDb({
       departmentsFindFirst: { id: DEPT, orgId: 'org-1', name: 'Ops', allowsMultipleRoles: false },
       jobRolesFindMany: deptRoles,
+      memberships: [{ id: MEMBERSHIP, orgId: 'org-1', status: 'active' }],
       membershipRolesFindFirst: undefined, // not held
     });
     mockDbValue = db;
@@ -777,6 +780,46 @@ describe('Department tightening (U17, R110–R113)', () => {
     expect(res.status).toBe(409);
     // Nothing withdrawn when the choice is refused.
     expect(updateSet).not.toHaveBeenCalled();
+    server.close();
+  });
+
+  it('refuses to resolve a membership that is not an active member of the org (404, R128)', async () => {
+    const { db, updateSet } = fakeDb({
+      departmentsFindFirst: { id: DEPT, orgId: 'org-1', name: 'Ops', allowsMultipleRoles: false },
+      jobRolesFindMany: deptRoles,
+      memberships: [], // deactivated / foreign → not an active target
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/departments/${DEPT}/tightening/resolve`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ membershipId: MEMBERSHIP, survivingRoleId: ROLE_A }),
+    });
+    expect(res.status).toBe(404);
+    expect(updateSet).not.toHaveBeenCalled();
+    server.close();
+  });
+
+  it('excludes an over-holder whose membership is not active from the review (R128)', async () => {
+    // Two held Roles, but the active-membership load returns nobody (they were
+    // deactivated), so the review drops them rather than surfacing dead work.
+    const { db } = fakeDb({
+      departmentsFindFirst: { id: DEPT, orgId: 'org-1', name: 'Ops', allowsMultipleRoles: false },
+      jobRolesFindMany: deptRoles,
+      holders: [
+        { membershipId: MEMBERSHIP, roleId: ROLE_A, withdrawnAt: null },
+        { membershipId: MEMBERSHIP, roleId: ROLE_B, withdrawnAt: null },
+      ],
+      memberships: [], // active-membership load returns nobody
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/departments/${DEPT}/tightening-review`, {
+      headers: authHeader(admin),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
     server.close();
   });
 
@@ -829,6 +872,50 @@ describe('GET /taxonomy/retirement-review (U18, R116, R123, R128)', () => {
     expect(body.locations[0]!.id).toBe(LOC_X);
     expect(body.locations[0]!.holders.map((h) => h.name)).toEqual(['Bo Holder']);
     expect(body.roles).toEqual([]);
+    server.close();
+  });
+
+  it('lists a retired Role still held, carrying its Department (R116)', async () => {
+    const { db } = fakeDb({
+      jobRolesFindMany: [
+        { id: ROLE_X, orgId: 'org-1', name: 'Old Role', departmentId: 'dep-9', status: 'retired' },
+      ],
+      holders: [{ membershipId: M1, roleId: ROLE_X, withdrawnAt: null }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+      usersFindMany: [{ id: U1, name: 'Ada Role' }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/retirement-review`, { headers: authHeader(admin) });
+    const body = (await res.json()) as {
+      locations: unknown[];
+      roles: Array<{ id: string; departmentId: string; holders: Array<{ name: string }> }>;
+    };
+    expect(body.locations).toEqual([]);
+    expect(body.roles).toHaveLength(1);
+    expect(body.roles[0]!.id).toBe(ROLE_X);
+    expect(body.roles[0]!.departmentId).toBe('dep-9');
+    expect(body.roles[0]!.holders.map((h) => h.name)).toEqual(['Ada Role']);
+    server.close();
+  });
+
+  it('lists a retired Department still held (R116)', async () => {
+    const DEP_X = '00000000-0000-4000-8000-00000000b001';
+    const { db } = fakeDb({
+      departmentsFindMany: [{ id: DEP_X, orgId: 'org-1', name: 'Old Dept', status: 'retired' }],
+      heldDepartments: [{ membershipId: M1, departmentId: DEP_X }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+      usersFindMany: [{ id: U1, name: 'Ada Dept' }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/retirement-review`, { headers: authHeader(admin) });
+    const body = (await res.json()) as {
+      departments: Array<{ id: string; holders: Array<{ name: string }> }>;
+    };
+    expect(body.departments).toHaveLength(1);
+    expect(body.departments[0]!.id).toBe(DEP_X);
+    expect(body.departments[0]!.holders.map((h) => h.name)).toEqual(['Ada Dept']);
     server.close();
   });
 

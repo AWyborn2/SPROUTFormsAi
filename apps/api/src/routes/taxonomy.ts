@@ -334,32 +334,42 @@ taxonomyRouter.get(
     const affected = [...rolesByMembership.entries()].filter(([, roleIds]) => roleIds.length > 1);
     if (affected.length === 0) return reply(res, 200, []);
 
+    // ACTIVE memberships of THIS org only — the same scope every sibling review
+    // applies (R128). A deactivated person keeps their held Roles (deactivation
+    // withdraws none), so without the status filter they would surface here as
+    // still to resolve, which is remediation the review is meant to exclude. The
+    // org term is defence-in-depth; scope is already transitive via the roleIds.
     const memberships = await db.query.memberships.findMany({
-      where: inArray(
-        schema.memberships.id,
-        affected.map(([membershipId]) => membershipId),
+      where: and(
+        eq(schema.memberships.orgId, tenant.orgId),
+        inArray(schema.memberships.id, affected.map(([membershipId]) => membershipId)),
+        eq(schema.memberships.status, 'active'),
       ),
     });
     const userIdByMembership = new Map(memberships.map((m) => [m.id, m.userId]));
+    const activeMembershipIds = new Set(memberships.map((m) => m.id));
     const users = await db.query.users.findMany({
       where: inArray(schema.users.id, memberships.map((m) => m.userId)),
     });
     const nameByUser = new Map(users.map((u) => [u.id, u.name]));
 
     res.json(
-      affected.map(([membershipId, roleIds]) => {
-        const userId = userIdByMembership.get(membershipId) ?? null;
-        return {
-          membershipId,
-          userId,
-          name: userId ? (nameByUser.get(userId) ?? 'Unknown user') : 'Unknown user',
-          // The Roles to choose ONE of — this Department's, in a stable order.
-          heldRoles: roleIds
-            .map((roleId) => loaded.roleById.get(roleId))
-            .filter((r): r is typeof schema.jobRoles.$inferSelect => Boolean(r))
-            .map((r) => ({ id: r.id, name: r.name })),
-        };
-      }),
+      affected
+        // Drop anyone no longer active — they are not in the review (R128).
+        .filter(([membershipId]) => activeMembershipIds.has(membershipId))
+        .map(([membershipId, roleIds]) => {
+          const userId = userIdByMembership.get(membershipId)!;
+          return {
+            membershipId,
+            userId,
+            name: nameByUser.get(userId) ?? 'Unknown user',
+            // The Roles to choose ONE of — this Department's, in a stable order.
+            heldRoles: roleIds
+              .map((roleId) => loaded.roleById.get(roleId))
+              .filter((r): r is typeof schema.jobRoles.$inferSelect => Boolean(r))
+              .map((r) => ({ id: r.id, name: r.name })),
+          };
+        }),
     );
   }),
 );
@@ -398,6 +408,16 @@ taxonomyRouter.post(
     // the last Role out from under a concurrent resolve.
     if (!loaded.roleById.has(survivingRoleId))
       return reply(res, 400, { error: 'role_not_in_department' });
+    // The target must be an ACTIVE member of this org — the same scope the review
+    // applies (R128), so a deactivated or cross-org membershipId cannot be resolved.
+    const membership = await db.query.memberships.findFirst({
+      where: and(
+        eq(schema.memberships.id, membershipId),
+        eq(schema.memberships.orgId, tenant.orgId),
+        eq(schema.memberships.status, 'active'),
+      ),
+    });
+    if (!membership) return reply(res, 404, { error: 'not_found' });
     const surviving = await db.query.membershipRoles.findFirst({
       where: and(
         eq(schema.membershipRoles.membershipId, membershipId),
