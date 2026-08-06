@@ -133,6 +133,23 @@ export const competencyHolders = pgTable(
       either lie about the grant date or lose the real expiry.
     */
     expiresAt: timestamp('expires_at', { withTimezone: true }),
+    /*
+      WHETHER THIS GRANT ARRIVED IN A BULK IMPORT RUN (R19).
+
+      R19 waives the certificate against the competencies a migration run loads
+      — a customer bringing in a decade of tickets has no scans of them — while
+      holding a competency recorded on the same person AFTERWARDS to the
+      ordinary rule, so the concession never becomes the standard. Nothing on
+      the record tells those two apart without this.
+
+      A plain nullable timestamp rather than a reference to the run: the import
+      run table belongs to the Organisation Settings artifact, and a foreign key
+      to it would make this schema depend on a table that plan has not created
+      yet. The owed-file list reads only whether it is set.
+
+      Null on every grant the product itself made, which is the existing case.
+    */
+    importedAt: timestamp('imported_at', { withTimezone: true }),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [

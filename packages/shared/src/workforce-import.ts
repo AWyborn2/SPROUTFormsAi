@@ -164,7 +164,18 @@ export type ImportRejectionReason =
   | 'role_not_offered'
   | 'too_many_roles'
   | 'unknown_competency'
-  | 'bad_grant_date';
+  | 'bad_grant_date'
+  /*
+    R7: both workforce numbers are unique WITHIN the organisation, which is what
+    lets either tell two people of the same name apart. A duplicate is a
+    rejection rather than a merge — unlike a known email address, which R149
+    makes a merge, because an address identifies a person while an identifier
+    that names two people identifies nobody. Both reasons cover a clash against
+    a number already issued in the organisation AND a repeat within one file:
+    the second is the more likely mistake and the validator sees the whole file.
+  */
+  | 'duplicate_employee_number'
+  | 'duplicate_swipe_card_number';
 
 export interface RejectedRow {
   rowNumber: number;
@@ -217,6 +228,17 @@ export interface ImportContext {
   placement: PlacementContext;
   /** Whether this tier carries candidate seats — a Candidate row is rejected otherwise (R167). */
   candidateSeatsAllowed: boolean;
+  /**
+   * Workforce numbers ALREADY issued in this organisation, lowercased (R7).
+   *
+   * Scoped per organisation because the same person may carry different numbers
+   * for two customers, and lowercased to match the case-folded partial unique
+   * indexes on the profile — a validator that compared case-sensitively would
+   * pass a row the insert then rejects, which is the worst place to find out.
+   * Omit or leave empty on an organisation that has issued none.
+   */
+  heldEmployeeNumbers?: ReadonlySet<string>;
+  heldSwipeCardNumbers?: ReadonlySet<string>;
 }
 
 /** Access-level label (any case) → the Role it names, e.g. "Assessor" → 'assessor'. */
@@ -244,6 +266,15 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
   const rejected: RejectedRow[] = [];
   // Emails that resolved to a valid profile — a competency line must name one.
   const validEmails = new Set<string>();
+  /*
+    Numbers claimed so far: those already issued in the organisation, plus every
+    one an earlier row in THIS file took. Accumulating as we go is what catches
+    the same swipe card twice in one file — the likelier mistake than a clash
+    with a number already on record, and one the database would only surface
+    part-way through a run.
+  */
+  const claimedEmployee = new Set(ctx.heldEmployeeNumbers ?? []);
+  const claimedSwipe = new Set(ctx.heldSwipeCardNumbers ?? []);
 
   for (const row of parsed.profiles) {
     const subject = row.name || row.email || `row ${row.rowNumber}`;
@@ -335,6 +366,24 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
       else reject('too_many_roles', placementResult.error.subjectId);
       continue;
     }
+
+    /*
+      R7's uniqueness, checked before the row is accepted. An absent number is
+      not a clash — R12 leaves both optional indefinitely and R24 falls back
+      rather than failing, so a file of people holding neither is ordinary.
+    */
+    const employee = row.employeeNumber.trim().toLowerCase();
+    if (employee && claimedEmployee.has(employee)) {
+      reject('duplicate_employee_number', row.employeeNumber.trim());
+      continue;
+    }
+    const swipe = row.swipeCardNumber.trim().toLowerCase();
+    if (swipe && claimedSwipe.has(swipe)) {
+      reject('duplicate_swipe_card_number', row.swipeCardNumber.trim());
+      continue;
+    }
+    if (employee) claimedEmployee.add(employee);
+    if (swipe) claimedSwipe.add(swipe);
 
     validEmails.add(row.email.toLowerCase());
     validProfiles.push({

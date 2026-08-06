@@ -38,3 +38,4 @@ export * from './induction.js';
 export * from './taxonomy.js';
 export * from './placement.js';
 export * from './profile.js';
+export * from './seat-blocks.js';
