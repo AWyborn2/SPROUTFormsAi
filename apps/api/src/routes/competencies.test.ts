@@ -558,6 +558,103 @@ describe('competency holders', () => {
     }
   });
 
+  it('records a licence as a competency, carrying its class, number and expiry (R33, R34)', async () => {
+    /*
+      F3: the licence goes on the GRANT, not on the profile. Recorded here it
+      inherits expiry dates, grace periods, revocation and a place in every
+      prerequisite and compliance check for free (R35, R36) — recorded as three
+      flat fields on a form answer, which is where it lives today, it inherits
+      none of that and expires silently.
+    */
+    const f = fakeDb({
+      competenciesFindFirst: { ...competency, name: 'Driver Licence' },
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+      competencyHoldersFindFirst: undefined,
+      holderCount: 1,
+    });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({
+          userId: HOLDER_ID,
+          licenceClass: 'HR',
+          licenceNumber: 'WA1234567',
+          expiresAt: '2028-06-30T00:00:00.000Z',
+        }),
+      });
+      expect(res.status).toBe(201);
+      expect(f.insertValues).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({
+          licenceClass: 'HR',
+          licenceNumber: 'WA1234567',
+          expiresAt: new Date('2028-06-30T00:00:00.000Z'),
+        }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('leaves the licence columns null on an ordinary competency', async () => {
+    const f = fakeDb({
+      competenciesFindFirst: competency,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+      competencyHoldersFindFirst: undefined,
+      holderCount: 1,
+    });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+      expect(f.insertValues).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ licenceClass: null, licenceNumber: null }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('carries the licence class and number forward on a re-grant (R34)', async () => {
+    // Renewing a ticket rarely changes either; supplying neither must not blank
+    // them, the way a stale explicit expiry deliberately IS cleared.
+    const f = fakeDb({
+      competenciesFindFirst: competency,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+      competencyHoldersFindFirst: {
+        id: 'h1',
+        competencyId: 'c1',
+        userId: HOLDER_ID,
+        licenceClass: 'HR',
+        licenceNumber: 'WA1234567',
+      },
+      holderCount: 1,
+    });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+      expect(f.updateSet).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ licenceClass: 'HR', licenceNumber: 'WA1234567' }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
   it('is idempotent — re-granting inserts nothing and still reports the count', async () => {
     const f = fakeDb({
       competenciesFindFirst: competency,

@@ -150,6 +150,21 @@ export const competencyHolders = pgTable(
       Null on every grant the product itself made, which is the existing case.
     */
     importedAt: timestamp('imported_at', { withTimezone: true }),
+    /*
+      A LICENCE IS A COMPETENCY, NOT A PROFILE FIELD (R33, R34).
+
+      Class, number, expiry and document have the exact shape this table already
+      handles. Recorded here, a licence inherits expiry dates, grace periods,
+      revocation and a place in every prerequisite and compliance check for free
+      (R35, R36); recorded as three flat fields on a form answer — which is where
+      it lives today — it inherits none of that and expires silently.
+
+      Two columns rather than four: the expiry is `expiresAt` above, used exactly
+      as an imported record uses it, and the document is a `competency_documents`
+      row. Nullable because most competencies are not licences.
+    */
+    licenceClass: text('licence_class'),
+    licenceNumber: text('licence_number'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [

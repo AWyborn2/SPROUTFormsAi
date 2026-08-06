@@ -263,6 +263,20 @@ describe('the display identity', () => {
   });
 });
 
+describe('a licence is a competency, not a profile field (R33)', () => {
+  it('carries no licence class, number, expiry or document in the field inventory', () => {
+    /*
+      The inventory table in the contract states this explicitly: licence class,
+      number, expiry and document are NOT in it — they are a competency record.
+      Recorded there a licence inherits expiry dates, grace periods, revocation
+      and a place in every prerequisite check for free (R35, R36); recorded as
+      flat profile fields it inherits none of that and expires silently.
+    */
+    const keys = PROFILE_FIELDS.map((f) => f.key.toLowerCase());
+    expect(keys.some((k) => k.includes('licence') || k.includes('license'))).toBe(false);
+  });
+});
+
 describe('one list rather than two', () => {
   it('shares its demographic value sets with the intake form', () => {
     // The intake reads these same lists, so a value valid on the form is valid
