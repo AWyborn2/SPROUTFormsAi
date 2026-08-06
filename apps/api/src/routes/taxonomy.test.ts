@@ -41,9 +41,12 @@ function fakeDb(opts: {
   locationsFindFirst?: unknown;
   locationsFindMany?: unknown[];
   departmentsFindFirst?: unknown;
+  departmentsFindMany?: unknown[];
   jobRolesFindFirst?: unknown;
   /** The Department's Roles, for the tightening surface (U17). */
   jobRolesFindMany?: unknown[];
+  /** Retirement review holder rows by axis (U18). */
+  heldDepartments?: unknown[];
   /** The membership_roles row the tightening resolve re-checks as still held (U17). */
   membershipRolesFindFirst?: unknown;
   /** Rows the case-insensitive active-name clash SELECT returns. */
@@ -85,7 +88,7 @@ function fakeDb(opts: {
       },
       departments: {
         findFirst: vi.fn().mockResolvedValue(opts.departmentsFindFirst),
-        findMany: vi.fn().mockResolvedValue([]),
+        findMany: vi.fn().mockResolvedValue(opts.departmentsFindMany ?? []),
       },
       jobRoles: {
         findFirst: vi.fn().mockResolvedValue(opts.jobRolesFindFirst),
@@ -108,6 +111,7 @@ function fakeDb(opts: {
       assessmentTools: { findMany: vi.fn().mockResolvedValue(opts.tools ?? []) },
       formTemplates: { findMany: vi.fn().mockResolvedValue(opts.templates ?? []) },
       membershipLocations: { findMany: vi.fn().mockResolvedValue(opts.heldLocations ?? []) },
+      membershipDepartments: { findMany: vi.fn().mockResolvedValue(opts.heldDepartments ?? []) },
       assessmentCases: { findMany: vi.fn().mockResolvedValue(opts.openCases ?? []) },
       competencyHolders: { findMany: vi.fn().mockResolvedValue(opts.competencyHolders ?? []) },
       competencies: { findMany: vi.fn().mockResolvedValue(opts.competencies ?? []) },
@@ -793,6 +797,182 @@ describe('Department tightening (U17, R110–R113)', () => {
       body: JSON.stringify({ membershipId: MEMBERSHIP, survivingRoleId: ROLE_A }),
     });
     expect(resolve.status).toBe(403);
+    server.close();
+  });
+});
+
+// ── U18: Retirement review and remediation ───────────────────────────────────
+
+describe('GET /taxonomy/retirement-review (U18, R116, R123, R128)', () => {
+  const LOC_X = '00000000-0000-4000-8000-00000000c001';
+  const ROLE_X = '00000000-0000-4000-8000-00000000d001';
+  const M1 = '00000000-0000-4000-8000-00000000e001';
+  const U1 = '00000000-0000-4000-8000-00000000f001';
+
+  it('lists the active people still holding a retired value (R116)', async () => {
+    const { db } = fakeDb({
+      locationsFindMany: [{ id: LOC_X, orgId: 'org-1', name: 'Old Site', status: 'retired' }],
+      heldLocations: [{ membershipId: M1, locationId: LOC_X }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+      usersFindMany: [{ id: U1, name: 'Bo Holder' }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/retirement-review`, { headers: authHeader(admin) });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      locations: Array<{ id: string; name: string; holders: Array<{ name: string }> }>;
+      departments: unknown[];
+      roles: unknown[];
+    };
+    expect(body.locations).toHaveLength(1);
+    expect(body.locations[0]!.id).toBe(LOC_X);
+    expect(body.locations[0]!.holders.map((h) => h.name)).toEqual(['Bo Holder']);
+    expect(body.roles).toEqual([]);
+    server.close();
+  });
+
+  it('omits a retired value nobody holds — the review is empty then (R123)', async () => {
+    const { db } = fakeDb({
+      locationsFindMany: [{ id: LOC_X, orgId: 'org-1', name: 'Old Site', status: 'retired' }],
+      jobRolesFindMany: [{ id: ROLE_X, orgId: 'org-1', name: 'Old Role', status: 'retired' }],
+      heldLocations: [],
+      holders: [],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/retirement-review`, { headers: authHeader(admin) });
+    const body = (await res.json()) as { locations: unknown[]; roles: unknown[] };
+    expect(body.locations).toEqual([]);
+    expect(body.roles).toEqual([]);
+    server.close();
+  });
+
+  it('refuses a Builder (R12)', async () => {
+    const { db } = fakeDb({});
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/retirement-review`, { headers: authHeader(builder) });
+    expect(res.status).toBe(403);
+    server.close();
+  });
+});
+
+describe('Location transfer (U18, R132-R134)', () => {
+  const LOC_X = '00000000-0000-4000-8000-00000000c001';
+  const LOC_Y = '00000000-0000-4000-8000-00000000c002';
+  const M1 = '00000000-0000-4000-8000-00000000e001';
+  const U1 = '00000000-0000-4000-8000-00000000f001';
+  const CASE1 = '00000000-0000-4000-8000-000000009001';
+  const setup = () => ({
+    locationsFindFirst: { id: LOC_X, orgId: 'org-1', name: 'Old Site', status: 'retired' },
+    heldLocations: [{ membershipId: M1, locationId: LOC_X }],
+    memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+    openCases: [{ id: CASE1, orgId: 'org-1', candidateUserId: U1, locationId: LOC_X, state: 'open' }],
+  });
+
+  it('previews the people moved and the in-flight cases touched (R132)', async () => {
+    const { db } = fakeDb(setup());
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/locations/${LOC_X}/transfer/preview`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementLocationId: LOC_Y }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ peopleMoved: 1, inFlightCases: 1 });
+    server.close();
+  });
+
+  it('carry leaves every in-flight case on its original Location (R133, R134)', async () => {
+    const { db, updateSet } = fakeDb(setup());
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/locations/${LOC_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementLocationId: LOC_Y, caseOutcome: 'carry' }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ peopleMoved: 1, casesCarried: 1, casesRewritten: 0 });
+    expect(updateSet).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());
+    server.close();
+  });
+
+  it('rewrite moves every in-flight case to the replacement Location (R133, R134)', async () => {
+    const { db, updateSet } = fakeDb(setup());
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/locations/${LOC_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementLocationId: LOC_Y, caseOutcome: 'rewrite' }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ peopleMoved: 1, casesRewritten: 1 });
+    expect(updateSet).toHaveBeenCalledWith(schema.assessmentCases, { locationId: LOC_Y });
+    server.close();
+  });
+
+  it('refuses transferring a Location to itself', async () => {
+    const { db } = fakeDb(setup());
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/locations/${LOC_X}/transfer/preview`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementLocationId: LOC_X }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'same_location' });
+    server.close();
+  });
+});
+
+describe('Role transfer (U18, R135)', () => {
+  const ROLE_X = '00000000-0000-4000-8000-00000000d001';
+  const ROLE_Y = '00000000-0000-4000-8000-00000000d002';
+  const M1 = '00000000-0000-4000-8000-00000000e001';
+  const U1 = '00000000-0000-4000-8000-00000000f001';
+
+  it('withdraws the retired Role, gives the replacement, and touches no case (R135)', async () => {
+    const { db, updateSet, insertValues } = fakeDb({
+      jobRolesFindFirst: { id: ROLE_X, orgId: 'org-1', name: 'Old Role', departmentId: 'dep-1', status: 'retired', createdAt: new Date() },
+      holders: [{ id: 'mr-x', membershipId: M1, roleId: ROLE_X, withdrawnAt: null }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/roles/${ROLE_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementRoleId: ROLE_Y }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ peopleMoved: 1 });
+    expect(updateSet).toHaveBeenCalledWith(
+      schema.membershipRoles,
+      expect.objectContaining({ withdrawnAt: expect.any(Date) }),
+    );
+    expect(updateSet).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());
+    expect(insertValues).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());
+    server.close();
+  });
+
+  it('refuses transferring a Role to itself', async () => {
+    const { db } = fakeDb({
+      jobRolesFindFirst: { id: ROLE_X, orgId: 'org-1', name: 'Old Role', departmentId: 'dep-1', status: 'retired', createdAt: new Date() },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/roles/${ROLE_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementRoleId: ROLE_X }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'same_role' });
     server.close();
   });
 });

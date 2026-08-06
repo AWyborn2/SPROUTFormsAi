@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
-import type { Taxonomy, TighteningReviewItem } from '../../lib/data/types.js';
+import type { RetirementReview, Taxonomy, TighteningReviewItem } from '../../lib/data/types.js';
 
 const taxonomy: { data: Taxonomy | undefined; isLoading: boolean } = {
   data: undefined,
@@ -15,10 +15,15 @@ const createRole = vi.fn();
 const updateRole = vi.fn();
 const stopOffering = vi.fn();
 const resolveTightening = vi.fn();
+const previewLocationTransfer = vi.fn();
+const transferLocation = vi.fn();
+const transferRole = vi.fn();
 const updateSettings = vi.fn();
 const setRequirements = vi.fn();
 /** The tightening-review query result (U17); empty by default so no review shows. */
 const tighteningReview: { data: TighteningReviewItem[] | undefined } = { data: undefined };
+/** The retirement-review query result (U18); empty by default so no panel shows. */
+const retirementReview: { data: RetirementReview | undefined } = { data: undefined };
 const tools: { data: Array<{ id: string; name: string }> } = { data: [] };
 const roleRequirements: { data: { configured: boolean; toolIds: string[] } | undefined } = {
   data: undefined,
@@ -50,6 +55,10 @@ vi.mock('../../lib/data/hooks.js', () => ({
   useStopOfferingRole: () => ({ mutate: stopOffering }),
   useTighteningReview: () => tighteningReview,
   useResolveTightening: () => ({ mutate: resolveTightening, isPending: false }),
+  useRetirementReview: () => retirementReview,
+  usePreviewLocationTransfer: () => ({ mutate: previewLocationTransfer, isPending: false }),
+  useTransferLocation: () => ({ mutate: transferLocation, isPending: false }),
+  useTransferRole: () => ({ mutate: transferRole, isPending: false }),
   useUpdateTaxonomySettings: () => ({ mutate: updateSettings }),
   useAssessmentTools: () => tools,
   useRoleRequiredAssessments: () => roleRequirements,
@@ -85,6 +94,7 @@ afterEach(() => {
   tools.data = [];
   roleRequirements.data = undefined;
   tighteningReview.data = undefined;
+  retirementReview.data = undefined;
   previewEffects.value = {
     addedToolIds: ['tool-a'],
     removedToolIds: [],
@@ -345,6 +355,42 @@ describe('TaxonomyScreen — Role withdrawal and tightening (U17)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Keep' }));
     expect(resolveTightening).toHaveBeenCalledWith(
       { membershipId: 'm1', survivingRoleId: 'role-1' },
+      expect.anything(),
+    );
+  });
+});
+
+describe('TaxonomyScreen — retirement review (U18)', () => {
+  it('shows no review panel when nothing retired is still held (R123)', () => {
+    taxonomy.data = base();
+    retirementReview.data = { locations: [], departments: [], roles: [] };
+    render(<TaxonomyScreen />);
+    expect(screen.queryByText('Retired values still held')).toBeNull();
+  });
+
+  it('lists a retired Location still held and transfers people off it (R116, R133)', () => {
+    taxonomy.data = {
+      ...base(),
+      locations: [
+        { id: 'loc-new', name: 'New Site', status: 'active', createdAt: '' },
+        { id: 'loc-old', name: 'Old Site', status: 'retired', createdAt: '' },
+      ],
+    };
+    retirementReview.data = {
+      locations: [
+        { id: 'loc-old', name: 'Old Site', holders: [{ membershipId: 'm1', userId: 'u1', name: 'Bo Holder' }] },
+      ],
+      departments: [],
+      roles: [],
+    };
+    render(<TaxonomyScreen />);
+
+    expect(screen.getByText('Retired values still held')).toBeDefined();
+    expect(screen.getByText(/Bo Holder/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Transfer' }));
+    expect(transferLocation).toHaveBeenCalledWith(
+      { locationId: 'loc-old', replacementLocationId: 'loc-new', caseOutcome: 'carry' },
       expect.anything(),
     );
   });

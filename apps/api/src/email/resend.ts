@@ -54,3 +54,40 @@ export async function sendInviteEmail(input: InviteEmailInput): Promise<boolean>
     return false;
   }
 }
+
+export interface PooledCaseNoticeInput {
+  to: string;
+  /** The tool whose case has been invalidated and returned to the shared queue. */
+  toolName: string;
+  /** Whose case it was — named so an assessor recognises the work. */
+  candidateName: string;
+}
+
+/**
+ * Notify an eligible assessor that a pooled case has been invalidated and is
+ * back in the shared queue (U18, R130). Best-effort, exactly like the invite
+ * email: a missing key or a failed send returns `false` and never throws, so a
+ * deactivation's remediation is never blocked by email infrastructure. This is
+ * the higher-volume of the product's transactional emails — it fans out to every
+ * eligible assessor at a Location rather than to one recipient.
+ */
+export async function sendPooledCaseNoticeEmail(input: PooledCaseNoticeInput): Promise<boolean> {
+  const resend = getResend();
+  if (!resend) return false;
+  try {
+    const { error } = await resend.emails.send({
+      from: env.RESEND_FROM_EMAIL,
+      to: input.to,
+      subject: `A ${input.toolName} case is back in the shared queue`,
+      text: [
+        `A ${input.toolName} assessment for ${input.candidateName} has been`,
+        `invalidated and returned to the shared queue for your Location.`,
+        '',
+        `You are eligible to pick it up. Open FormAI to take it on when you can.`,
+      ].join('\n'),
+    });
+    return !error;
+  } catch {
+    return false;
+  }
+}

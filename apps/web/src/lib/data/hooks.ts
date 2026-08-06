@@ -95,6 +95,8 @@ const keys = {
   roleRequiredAssessments: (roleId: string) => ['roleRequiredAssessments', roleId] as const,
   /** The people a Department tightening still has to resolve (U17). Keyed by department. */
   tighteningReview: (departmentId: string) => ['tighteningReview', departmentId] as const,
+  /** The people still holding any retired value (U18). */
+  retirementReview: ['retirementReview'] as const,
   assessmentCases: ['assessmentCases'] as const,
   /**
    * The shared assessor queue (U13). A SIBLING of assessmentCases — it shares no
@@ -1242,6 +1244,52 @@ export function useResolveTightening(departmentId: string) {
       void qc.invalidateQueries({ queryKey: keys.auditLog });
     },
   });
+}
+
+/** The people still holding any retired value (U18). */
+export function useRetirementReview() {
+  return useQuery({
+    queryKey: keys.retirementReview,
+    queryFn: () => store.getRetirementReview(),
+  });
+}
+
+/** What a Location transfer would move, before committing (U18, R132). */
+export function usePreviewLocationTransfer() {
+  return useMutation({
+    mutationFn: (input: { locationId: string; replacementLocationId: string }) =>
+      store.previewLocationTransfer(input.locationId, input.replacementLocationId),
+  });
+}
+
+/** Shared invalidation after a retirement transfer — the review shrinks and standing may shift. */
+function useTransferMutation<TArgs>(fn: (args: TArgs) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.retirementReview });
+      void qc.invalidateQueries({ queryKey: keys.taxonomy });
+      void qc.invalidateQueries({ queryKey: keys.competencies });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** Move everyone off a retired Location, carrying or rewriting their cases (U18, R133). */
+export function useTransferLocation() {
+  return useTransferMutation(
+    (input: { locationId: string; replacementLocationId: string; caseOutcome: 'carry' | 'rewrite' }) =>
+      store.transferLocation(input.locationId, input.replacementLocationId, input.caseOutcome),
+  );
+}
+
+/** Move everyone off a retired Role to a replacement; cases untouched (U18, R135). */
+export function useTransferRole() {
+  return useTransferMutation((input: { roleId: string; replacementRoleId: string }) =>
+    store.transferRole(input.roleId, input.replacementRoleId),
+  );
 }
 export function useUpdateTaxonomySettings() {
   return useTaxonomyMutation((patch: Partial<TaxonomySettings>) =>

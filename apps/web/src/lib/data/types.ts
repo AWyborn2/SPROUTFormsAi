@@ -517,6 +517,31 @@ export interface TighteningReviewItem {
   heldRoles: Array<{ id: string; name: string }>;
 }
 
+/** One active person still holding a retired value (U18, R116). */
+export interface ReviewHolder {
+  membershipId: string;
+  userId: string;
+  name: string;
+}
+
+/** A retired value and the active people still holding it (U18). */
+export interface RetiredValueReview {
+  id: string;
+  name: string;
+  holders: ReviewHolder[];
+}
+
+/**
+ * The people still holding a retired value, by axis (U18, KTD8). A pure read: a
+ * value returned to active drops out because nobody holds "something retired"
+ * any more (R123).
+ */
+export interface RetirementReview {
+  locations: RetiredValueReview[];
+  departments: RetiredValueReview[];
+  roles: Array<RetiredValueReview & { departmentId: string }>;
+}
+
 /** The three organisation settings that govern how far a person may spread (R24, R25, R40). */
 export interface TaxonomySettings {
   allowMultipleLocations: boolean;

@@ -65,6 +65,7 @@ import type {
   SubmissionRow,
   MemberPlacement,
   Taxonomy,
+  RetirementReview,
   TaxDepartment,
   TaxLocation,
   TaxRole,
@@ -969,6 +970,34 @@ export const store = {
       membershipId,
       survivingRoleId,
     });
+  },
+  /** The people still holding a retired value, by axis (U18). */
+  getRetirementReview(): Promise<RetirementReview> {
+    return apiClient.get<RetirementReview>('/taxonomy/retirement-review');
+  },
+  /** What a Location transfer would move, before committing (U18, R132). */
+  previewLocationTransfer(
+    locationId: string,
+    replacementLocationId: string,
+  ): Promise<{ peopleMoved: number; inFlightCases: number }> {
+    return apiClient.post(`/taxonomy/locations/${locationId}/transfer/preview`, {
+      replacementLocationId,
+    });
+  },
+  /** Move everyone off a retired Location, carrying or rewriting their in-flight cases (U18, R133). */
+  transferLocation(
+    locationId: string,
+    replacementLocationId: string,
+    caseOutcome: 'carry' | 'rewrite',
+  ): Promise<{ peopleMoved: number; casesRewritten: number; casesCarried: number }> {
+    return apiClient.post(`/taxonomy/locations/${locationId}/transfer`, {
+      replacementLocationId,
+      caseOutcome,
+    });
+  },
+  /** Move everyone off a retired Role to a replacement; cases untouched (U18, R135). */
+  transferRole(roleId: string, replacementRoleId: string): Promise<{ peopleMoved: number }> {
+    return apiClient.post(`/taxonomy/roles/${roleId}/transfer`, { replacementRoleId });
   },
   getRoleRequiredAssessments(roleId: string): Promise<{ configured: boolean; toolIds: string[] }> {
     return apiClient.get(`/taxonomy/roles/${roleId}/required-assessments`);
