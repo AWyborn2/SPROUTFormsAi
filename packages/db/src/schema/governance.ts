@@ -319,6 +319,27 @@ export const inductionBookingStarters = pgTable(
       .notNull()
       .references(() => submissions.id, { onDelete: 'restrict' }),
     starterName: text('starter_name').notNull(),
+    /*
+      CONFIRMATION lives here, per starter, not on the booking. A booking is
+      tentative until the Thursday gate check says the starter is ready and the
+      seat stands — and that check is per person, so a cohort booking can be
+      partially confirmed. The booking reads as confirmed only when every
+      starter row is.
+
+      Null means unconfirmed, which is accurate for every row that predates the
+      column: no backfill, no destructive change. The actor pair mirrors
+      `bookedByUserId`/`bookedByApiKeyId` on the booking, for the same reason —
+      a machine confirmation stays distinguishable from a human one.
+    */
+    confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+    /** The acting user. For a machine call this is the API key's issuer. */
+    confirmedByUserId: uuid('confirmed_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    /** Set when an agent confirmed it, so machine and human confirmations stay distinguishable. */
+    confirmedByApiKeyId: uuid('confirmed_by_api_key_id').references(() => apiKeys.id, {
+      onDelete: 'set null',
+    }),
   },
   (t) => [
     uniqueIndex('induction_booking_starters_uq').on(t.bookingId, t.submissionId),

@@ -239,6 +239,13 @@
       "when": 1785976009357,
       "tag": "0033_bright_falcon",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1785978417766,
+      "tag": "0034_daily_dazzler",
+      "breakpoints": true
     }
   ]
 }
