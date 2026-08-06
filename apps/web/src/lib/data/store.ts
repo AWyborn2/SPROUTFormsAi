@@ -68,6 +68,7 @@ import type {
   TaxDepartment,
   TaxLocation,
   TaxRole,
+  TighteningReviewItem,
   TaxonomySettings,
   TemplateStatus,
 } from './types.js';
@@ -947,6 +948,27 @@ export const store = {
   },
   updateRole(id: string, patch: { name?: string; status?: TaxonomyStatus }): Promise<TaxRole> {
     return apiClient.patch<TaxRole>(`/taxonomy/roles/${id}`, patch);
+  },
+  /** Stop offering a Role (U17, R52): retire it AND withdraw it from every holder. */
+  stopOfferingRole(id: string): Promise<TaxRole> {
+    return apiClient.post<TaxRole>(`/taxonomy/roles/${id}/stop-offering`, {});
+  },
+  /** The people a Department tightening still has to resolve (U17, R112). */
+  getTighteningReview(departmentId: string): Promise<TighteningReviewItem[]> {
+    return apiClient.get<TighteningReviewItem[]>(
+      `/taxonomy/departments/${departmentId}/tightening-review`,
+    );
+  },
+  /** Apply one person's tightening choice: keep one Role, withdraw the rest (U17, R113). */
+  resolveTightening(
+    departmentId: string,
+    membershipId: string,
+    survivingRoleId: string,
+  ): Promise<{ ok: true }> {
+    return apiClient.post(`/taxonomy/departments/${departmentId}/tightening/resolve`, {
+      membershipId,
+      survivingRoleId,
+    });
   },
   getRoleRequiredAssessments(roleId: string): Promise<{ configured: boolean; toolIds: string[] }> {
     return apiClient.get(`/taxonomy/roles/${roleId}/required-assessments`);

@@ -11,15 +11,18 @@ import {
   useCreateLocation,
   useCreateRole,
   usePreviewRoleRequiredAssessments,
+  useResolveTightening,
   useRoleRequiredAssessments,
   useSetRoleRequiredAssessments,
+  useStopOfferingRole,
   useTaxonomy,
+  useTighteningReview,
   useUpdateDepartment,
   useUpdateLocation,
   useUpdateRole,
   useUpdateTaxonomySettings,
 } from '../../lib/data/hooks.js';
-import type { TaxDepartment, TaxLocation, TaxRole } from '../../lib/data/types.js';
+import type { TaxDepartment, TaxLocation, TaxRole, TighteningReviewItem } from '../../lib/data/types.js';
 import { ApiError } from '../../lib/data/api-client.js';
 
 /**
@@ -263,6 +266,7 @@ function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unk
   const updateDep = useUpdateDepartment();
   const createRole = useCreateRole();
   const updateRole = useUpdateRole();
+  const stopOffering = useStopOfferingRole();
   const [roleName, setRoleName] = useState('');
 
   function addRole() {
@@ -316,11 +320,23 @@ function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unk
                   { onError },
                 )
               }
+              // Stop offering is a HARDER act than retire: it withdraws the Role
+              // from everyone who holds it, no choice (R52), where retire leaves
+              // them holding it. Distinct action, distinct label.
+              extraAction={{
+                label: 'Stop offering',
+                onClick: () => stopOffering.mutate(role.id, { onError }),
+              }}
             />
             <RoleRequirements role={role} onError={onError} />
           </div>
         ))}
       </div>
+
+      {/* Tightening a Department to one Role leaves people holding several — a
+          resumable per-person choice (R112). Shown only while the Department is
+          set to a single Role. */}
+      {!dep.allowsMultipleRoles && <TighteningReview dep={dep} onError={onError} />}
 
       <div className="mt-2 flex gap-2 pl-3">
         <Input
@@ -335,6 +351,79 @@ function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unk
         </Button>
       </div>
     </div>
+  );
+}
+
+/**
+ * The people a tightening still has to resolve (U17, R112). A LIVE list: each
+ * person drops off the moment their choice is applied, and an Admin can leave
+ * and come back — nothing is a half-finished wizard. Rendered only while the
+ * Department offers a single Role and someone still holds several of its Roles.
+ */
+function TighteningReview({ dep, onError }: { dep: TaxDepartment; onError: (e: unknown) => void }) {
+  const { data: affected } = useTighteningReview(dep.id);
+
+  if (!affected || affected.length === 0) return null;
+
+  return (
+    <div className="mt-3 rounded-md border border-border bg-surface-sunken p-3">
+      <div className="flex items-center gap-1.5 text-[12px] font-semibold text-warning-text">
+        <Icon name="shield-alert" size={13} />
+        {affected.length} {affected.length === 1 ? 'person holds' : 'people hold'} several Roles here
+      </div>
+      <p className="mt-1 text-[11px] text-text-tertiary">
+        {dep.name} now offers a single Role. Choose the Role each person keeps — the rest are
+        withdrawn from them. You can come back to this later.
+      </p>
+      <ul className="mt-2 flex flex-col gap-1.5">
+        {affected.map((person) => (
+          <TighteningRow key={person.membershipId} dep={dep} person={person} onError={onError} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** One person in a tightening review: pick the Role they keep, apply the choice (R113). */
+function TighteningRow({
+  dep,
+  person,
+  onError,
+}: {
+  dep: TaxDepartment;
+  person: TighteningReviewItem;
+  onError: (e: unknown) => void;
+}) {
+  const resolve = useResolveTightening(dep.id);
+  const { toast } = useToast();
+  const [survivingRoleId, setSurvivingRoleId] = useState(person.heldRoles[0]?.id ?? '');
+
+  return (
+    <li className="flex items-center gap-2">
+      <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">{person.name}</span>
+      <Select
+        aria-label={`Role ${person.name} keeps`}
+        value={survivingRoleId}
+        onChange={(e) => setSurvivingRoleId(e.target.value)}
+        options={person.heldRoles.map((role) => ({ label: role.name, value: role.id }))}
+      />
+      <Button
+        size="sm"
+        disabled={!survivingRoleId || resolve.isPending}
+        onClick={() =>
+          resolve.mutate(
+            { membershipId: person.membershipId, survivingRoleId },
+            {
+              onSuccess: () =>
+                toast({ variant: 'success', message: `${person.name}’s Roles resolved.` }),
+              onError,
+            },
+          )
+        }
+      >
+        Keep
+      </Button>
+    </li>
   );
 }
 
@@ -518,12 +607,15 @@ function ValueRow({
   dense,
   onRename,
   onToggleStatus,
+  extraAction,
 }: {
   name: string;
   status: 'active' | 'retired';
   dense?: boolean;
   onRename: (next: string) => void;
   onToggleStatus: () => void;
+  /** An extra action shown only while the value is active — e.g. a Role's "Stop offering" (U17). */
+  extraAction?: { label: string; onClick: () => void };
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
@@ -574,6 +666,11 @@ function ValueRow({
           >
             <Icon name="pencil" size={13} />
           </button>
+          {extraAction && !retired && (
+            <Button size="sm" variant="ghost" onClick={extraAction.onClick}>
+              {extraAction.label}
+            </Button>
+          )}
           <StatusButton status={status} onClick={onToggleStatus} />
         </div>
       )}

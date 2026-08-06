@@ -504,6 +504,19 @@ export interface TaxDepartment {
   roles: TaxRole[];
 }
 
+/**
+ * One person a Department tightening still has to resolve (U17, R112): they hold
+ * more than one of the Department's Roles, and an Admin picks which survives. A
+ * LIVE list — a person drops off it the moment they are resolved.
+ */
+export interface TighteningReviewItem {
+  membershipId: string;
+  userId: string | null;
+  name: string;
+  /** This Department's Roles the person holds — the Admin keeps exactly one. */
+  heldRoles: Array<{ id: string; name: string }>;
+}
+
 /** The three organisation settings that govern how far a person may spread (R24, R25, R40). */
 export interface TaxonomySettings {
   allowMultipleLocations: boolean;

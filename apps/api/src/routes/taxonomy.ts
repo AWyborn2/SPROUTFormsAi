@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
@@ -8,6 +8,7 @@ import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
 import { assignmentCaseValues } from '../lib/assignment.js';
 import { computeRequiredAssessmentsChange } from '../lib/requirement-change.js';
+import { withdrawRoleFromAllHolders } from '../lib/membership-placement.js';
 import { db } from '../db.js';
 
 type Database = NonNullable<typeof db>;
@@ -270,6 +271,165 @@ taxonomyRouter.patch(
   }),
 );
 
+// ── Department tightening (U17 — R110, R111, R112, R113) ──────────────────────
+
+/** The active roles of a Department, plus which memberships hold each — the shape both tightening routes read. */
+async function loadDepartmentForTightening(
+  database: Database,
+  orgId: string,
+  departmentId: string,
+): Promise<{ department: typeof schema.departments.$inferSelect; roleIds: string[]; roleById: Map<string, typeof schema.jobRoles.$inferSelect> } | null> {
+  const department = await database.query.departments.findFirst({
+    where: and(eq(schema.departments.id, departmentId), eq(schema.departments.orgId, orgId)),
+  });
+  if (!department) return null;
+  // Every Role the Department carries, ANY status — a retired-but-held Role still
+  // counts toward the held total the one-or-several rule governs (R119), so a
+  // person over the count because of one is still surfaced and still chooses.
+  const roles = await database.query.jobRoles.findMany({
+    where: and(
+      eq(schema.jobRoles.orgId, orgId),
+      eq(schema.jobRoles.departmentId, departmentId),
+    ),
+  });
+  return {
+    department,
+    roleIds: roles.map((r) => r.id),
+    roleById: new Map(roles.map((r) => [r.id, r])),
+  };
+}
+
+/**
+ * The people a tightening still has to resolve (U17, R112) — a LIVE query, no
+ * stored queue: every membership placed in this Department that still holds MORE
+ * THAN ONE of its Roles (`withdrawnAt IS NULL`). Because "affected" is derived
+ * from the held rows, the list is correct after any interruption and the whole
+ * remediation is resumable for free (R110, R111). Scoped to this Department's
+ * Roles, so a person's Roles in other Departments never enter the count (R6).
+ */
+taxonomyRouter.get(
+  '/departments/:id/tightening-review',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const loaded = await loadDepartmentForTightening(db, tenant.orgId, req.params.id!);
+    if (!loaded) return reply(res, 404, { error: 'not_found' });
+    if (loaded.roleIds.length === 0) return reply(res, 200, []);
+
+    const held = await db.query.membershipRoles.findMany({
+      where: and(
+        inArray(schema.membershipRoles.roleId, loaded.roleIds),
+        isNull(schema.membershipRoles.withdrawnAt),
+      ),
+    });
+    // Group held D-Roles per membership; only those over the one-Role count.
+    const rolesByMembership = new Map<string, string[]>();
+    for (const row of held) {
+      const list = rolesByMembership.get(row.membershipId) ?? [];
+      list.push(row.roleId);
+      rolesByMembership.set(row.membershipId, list);
+    }
+    const affected = [...rolesByMembership.entries()].filter(([, roleIds]) => roleIds.length > 1);
+    if (affected.length === 0) return reply(res, 200, []);
+
+    const memberships = await db.query.memberships.findMany({
+      where: inArray(
+        schema.memberships.id,
+        affected.map(([membershipId]) => membershipId),
+      ),
+    });
+    const userIdByMembership = new Map(memberships.map((m) => [m.id, m.userId]));
+    const users = await db.query.users.findMany({
+      where: inArray(schema.users.id, memberships.map((m) => m.userId)),
+    });
+    const nameByUser = new Map(users.map((u) => [u.id, u.name]));
+
+    res.json(
+      affected.map(([membershipId, roleIds]) => {
+        const userId = userIdByMembership.get(membershipId) ?? null;
+        return {
+          membershipId,
+          userId,
+          name: userId ? (nameByUser.get(userId) ?? 'Unknown user') : 'Unknown user',
+          // The Roles to choose ONE of — this Department's, in a stable order.
+          heldRoles: roleIds
+            .map((roleId) => loaded.roleById.get(roleId))
+            .filter((r): r is typeof schema.jobRoles.$inferSelect => Boolean(r))
+            .map((r) => ({ id: r.id, name: r.name })),
+        };
+      }),
+    );
+  }),
+);
+
+const tighteningResolveBody = z.object({
+  membershipId: z.string().uuid(),
+  survivingRoleId: z.string().uuid(),
+});
+
+/**
+ * Apply one person's tightening choice (U17, R112, R113): keep the Role the Admin
+ * chose and withdraw every OTHER Role this person holds OF THIS DEPARTMENT. Only
+ * this Department's Roles are touched (R6) — a Role in another Department is left
+ * alone. The unchosen Roles are withdrawn, not deleted (R113), so they stay on
+ * the record marked withdrawn and a competency one alone required demotes to
+ * optional through the derivation. No case is touched (R135). Idempotent and
+ * safe under two Admins racing: the surviving Role is re-checked as still held,
+ * and only `withdrawnAt IS NULL` rows are written.
+ */
+taxonomyRouter.post(
+  '/departments/:id/tightening/resolve',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const parsed = tighteningResolveBody.safeParse(req.body);
+    if (!parsed.success)
+      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+    const loaded = await loadDepartmentForTightening(db, tenant.orgId, req.params.id!);
+    if (!loaded) return reply(res, 404, { error: 'not_found' });
+
+    const { membershipId, survivingRoleId } = parsed.data;
+    // The chosen Role must belong to this Department and be one this person still
+    // holds — refusing a stale or cross-Department choice, and never withdrawing
+    // the last Role out from under a concurrent resolve.
+    if (!loaded.roleById.has(survivingRoleId))
+      return reply(res, 400, { error: 'role_not_in_department' });
+    const surviving = await db.query.membershipRoles.findFirst({
+      where: and(
+        eq(schema.membershipRoles.membershipId, membershipId),
+        eq(schema.membershipRoles.roleId, survivingRoleId),
+        isNull(schema.membershipRoles.withdrawnAt),
+      ),
+    });
+    if (!surviving) return reply(res, 409, { error: 'role_not_held' });
+
+    const toWithdraw = loaded.roleIds.filter((roleId) => roleId !== survivingRoleId);
+    if (toWithdraw.length > 0) {
+      await db
+        .update(schema.membershipRoles)
+        .set({ withdrawnAt: new Date() })
+        .where(
+          and(
+            eq(schema.membershipRoles.membershipId, membershipId),
+            isNull(schema.membershipRoles.withdrawnAt),
+            inArray(schema.membershipRoles.roleId, toWithdraw),
+          ),
+        );
+    }
+    await recordAudit(db, tenant, {
+      action: 'Resolved role tightening',
+      target: loaded.roleById.get(survivingRoleId)?.name ?? survivingRoleId,
+      category: 'settings',
+      icon: 'briefcase',
+    });
+    res.json({ ok: true, membershipId, survivingRoleId });
+  }),
+);
+
 // ── Roles (created WITHIN a Department — KTD2) ────────────────────────────────
 
 taxonomyRouter.post(
@@ -362,6 +522,54 @@ taxonomyRouter.patch(
       icon: 'briefcase',
     });
     res.json(roleDto(row ?? existing));
+  }),
+);
+
+/**
+ * Stop offering a Role (U17, R52) — the Department drops it from its offer.
+ *
+ * This is a DIFFERENT act from retiring (`PATCH /roles/:id status=retired`, R119),
+ * which leaves every holder still holding it. Stopping the offer means the Role
+ * is no longer available to anyone in the Department, so there is nothing to put
+ * to an Admin: in one transaction it retires the Role (so it can no longer be
+ * newly placed) AND withdraws it from every current holder. It touches no
+ * assessment case — a case in flight for its requirement runs to completion
+ * (R54). A competency the Role alone required demotes to optional through the
+ * standing derivation on the next read (R109), with nothing written or revoked.
+ * Reversal is `PATCH /roles/:id status=active` (resume the offer), which returns
+ * the Role to nobody it was withdrawn from (R53).
+ */
+taxonomyRouter.post(
+  '/roles/:id/stop-offering',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const role = await db.query.jobRoles.findFirst({
+      where: and(eq(schema.jobRoles.id, req.params.id!), eq(schema.jobRoles.orgId, tenant.orgId)),
+    });
+    if (!role) return reply(res, 404, { error: 'not_found' });
+
+    const now = new Date();
+    const [row] = await db.transaction(async (tx) => {
+      const updated = await tx
+        .update(schema.jobRoles)
+        .set({ status: 'retired' })
+        .where(eq(schema.jobRoles.id, role.id))
+        .returning();
+      // Every current holder loses it, on that ground alone (R52). Cases in
+      // flight are left to run (R54) — this writes no assessment case.
+      await withdrawRoleFromAllHolders(tx, role.id, now);
+      return updated;
+    });
+    await recordAudit(db, tenant, {
+      action: 'Stopped offering role',
+      target: row?.name ?? role.name,
+      category: 'settings',
+      icon: 'briefcase',
+    });
+    res.json(roleDto(row ?? { ...role, status: 'retired' }));
   }),
 );
 
