@@ -14,7 +14,7 @@ import {
 } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
-import { membershipForProfile, resolveProfileAccess } from '../lib/profile-access.js';
+import { membershipForProfile, resolveProfileAccess, tierCarriesProfiles } from '../lib/profile-access.js';
 import { isUniqueViolation } from '../lib/db-errors.js';
 import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
@@ -379,6 +379,20 @@ profilesRouter.put(
       res.status(403).json({ error: 'forbidden' });
       return;
     }
+    /*
+      The TIER gate.  applies it for every read and write
+      of the record, but this route does not go through it — an Admin act needs
+      no matrix resolution — so it applies the same rule directly. An
+      organisation below the tier that carries assessments holds no profiles at
+      all, and neither of these routes may be its way in.
+    */
+    const org = await db.query.organizations.findFirst({
+      where: eq(schema.organizations.id, tenant.orgId),
+    });
+    if (!org || !tierCarriesProfiles(org.planTier)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const membership = await membershipForProfile(db, tenant.orgId, req.params.membershipId!);
     if (!membership) {
       res.status(404).json({ error: 'not_found' });
@@ -469,17 +483,30 @@ profilesRouter.get(
       res.status(403).json({ error: 'forbidden' });
       return;
     }
+    /*
+      The TIER gate.  applies it for every read and write
+      of the record, but this route does not go through it — an Admin act needs
+      no matrix resolution — so it applies the same rule directly. An
+      organisation below the tier that carries assessments holds no profiles at
+      all, and neither of these routes may be its way in.
+    */
+    const org = await db.query.organizations.findFirst({
+      where: eq(schema.organizations.id, tenant.orgId),
+    });
+    if (!org || !tierCarriesProfiles(org.planTier)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const membership = await membershipForProfile(db, tenant.orgId, req.params.membershipId!);
     if (!membership) {
       res.status(404).json({ error: 'not_found' });
       return;
     }
 
-    const [profile, org, user] = await Promise.all([
+    const [profile, user] = await Promise.all([
       db.query.memberProfiles.findFirst({
         where: eq(schema.memberProfiles.membershipId, membership.id),
       }),
-      db.query.organizations.findFirst({ where: eq(schema.organizations.id, tenant.orgId) }),
       db.query.users.findFirst({ where: eq(schema.users.id, membership.userId) }),
     ]);
     if (!profile) {

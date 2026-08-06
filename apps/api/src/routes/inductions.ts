@@ -21,6 +21,7 @@ import {
 import { requireMachineOrTenant } from '../middleware/machine.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
+import { tierCarriesProfiles } from '../lib/profile-access.js';
 import { recordAudit } from '../audit/record.js';
 import { sealSession, unsealSession } from '../auth/replit-auth.js';
 import { getStorageClient } from '../storage/index.js';
@@ -374,6 +375,19 @@ inductionsRouter.get('/candidates/:id/profile-seed', requireMachineOrTenant, wit
   const tenant = req.tenant!;
   // Seeding a record is an Admin act — it is the entry point to creating one.
   if (!(await hasPermission(tenant, 'profiles', 'edit'))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  /*
+    And the TIER gate every other profile surface applies: an organisation below
+    the tier that carries assessments holds no profiles at all, so this route
+    must not be its way in. The permission check above reads the matrix, which
+    knows nothing about the plan.
+  */
+  const seedOrg = await db.query.organizations.findFirst({
+    where: eq(schema.organizations.id, tenant.orgId),
+  });
+  if (!seedOrg || !tierCarriesProfiles(seedOrg.planTier)) {
     res.status(403).json({ error: 'forbidden' });
     return;
   }

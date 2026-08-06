@@ -609,3 +609,57 @@ describe('GET /profiles/:membershipId/export (U39, R54)', () => {
     }
   });
 });
+
+describe('the tier gate reaches every profile surface', () => {
+  /*
+    `resolveProfileAccess` applies it for the record's own reads and writes, but
+    the unreachable mark and the export are Admin acts that need no matrix
+    resolution and so do not pass through it. An organisation below the tier
+    that carries assessments holds no profiles at all — neither route may be its
+    way in, and a passing suite does not prove a gate exists unless something
+    asserts it.
+  */
+  const belowTier = { planTier: 'individual' as const, matrix: DEFAULT_ROLE_PERMISSIONS.admin };
+
+  it('refuses the unreachable mark below the tier', async () => {
+    const { updates } = fakeDb(belowTier);
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/profiles/${SUBJECT_MEMBERSHIP}/unreachable`, {
+        method: 'PUT',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify({ unreachable: true }),
+      });
+      expect(res.status).toBe(403);
+      expect(updates).toHaveLength(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses the export below the tier, and records nothing', async () => {
+    const { audits } = fakeDb(belowTier);
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/profiles/${SUBJECT_MEMBERSHIP}/export`, {
+        headers: authHeader(admin),
+      });
+      expect(res.status).toBe(403);
+      expect(audits.some((a) => a.action === 'Exported member record')).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('admits both on a tier that carries assessments', async () => {
+    // The other half of the assertion: the gate refuses the right tier rather
+    // than refusing everything.
+    fakeDb({ planTier: 'business', matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    const { server, base } = startApp();
+    try {
+      expect((await fetch(`${base}/profiles/${SUBJECT_MEMBERSHIP}/export`, { headers: authHeader(admin) })).status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+});

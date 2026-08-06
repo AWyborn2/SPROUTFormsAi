@@ -76,6 +76,8 @@ function fakeDb(
     departments?: unknown[];
     jobRoles?: unknown[];
     submission?: unknown;
+    /** The organisation row the tier gate reads. Defaults to a tier that carries profiles. */
+    org?: unknown;
   } = {},
 ) {
   const db = {
@@ -98,6 +100,9 @@ function fakeDb(
           .mockResolvedValue({ id: 'ver-intake', fields: opts.fields ?? INTAKE_FIELDS }),
       },
       rolePermissions: { findFirst: vi.fn().mockResolvedValue(undefined) },
+      organizations: {
+        findFirst: vi.fn().mockResolvedValue(opts.org ?? { id: 'org-1', planTier: 'business' }),
+      },
       users: { findFirst: vi.fn().mockResolvedValue(opts.user) },
       memberships: { findFirst: vi.fn().mockResolvedValue(opts.membership) },
       departments: {
@@ -235,6 +240,22 @@ describe('GET /inductions/candidates/:id/profile-seed (U40)', () => {
     try {
       const body = (await (await seedFor(base, OWNER)).json()) as { seed: { unmatched: unknown[] } };
       expect(body.seed.unmatched).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses below the tier that carries assessments', async () => {
+    /*
+      The permission check reads the MATRIX, which knows nothing about the plan.
+      An organisation below the assessments tier holds no profiles at all, so
+      this route must not be its way in — and a seed is the entry point to
+      creating one.
+    */
+    fakeDb({ org: { id: 'org-1', planTier: 'individual' } });
+    const { server, base } = startApp();
+    try {
+      expect((await seedFor(base, OWNER)).status).toBe(403);
     } finally {
       server.close();
     }
