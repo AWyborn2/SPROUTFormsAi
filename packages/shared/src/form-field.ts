@@ -383,6 +383,33 @@ export interface FormField {
   answerKey?: string[];
 
   /**
+   * A choice the ASSESSOR makes, recording a judgement — not a question with a
+   * right answer.
+   *
+   * An assessment paper is full of these: "Assessment Result — Candidate
+   * Competent / Candidate not yet Competent", "More coaching required? Yes /
+   * No", "The Candidate's responses were: Satisfactory / Not Satisfactory".
+   * Extraction reads each as an ordinary choice question, because on the page
+   * that is exactly what it looks like — a prompt with two printed options.
+   *
+   * WITHOUT THIS THEY SIT IN THE ANSWER-KEY LIST FOREVER. There is no correct
+   * answer to key, so the author cannot clear them, the "N of M keyed" counter
+   * can never complete, and a genuinely unkeyed question is hidden among a
+   * dozen that were never keyable.
+   *
+   * NOT A TYPE CHANGE, deliberately. Retyping to `check_cross` would drop the
+   * printed option labels and put a bare ✓/✗ where the paper says "Candidate
+   * Competent" — the online form would stop matching the document at exactly
+   * the cell an auditor reads first. The field stays what it is; this says how
+   * it is JUDGED.
+   *
+   * A verdict field never carries an `answerKey`: `markTheory` skips a field
+   * without one, so marking already does the right thing, and the authoring
+   * layer clears any key when the flag is set rather than storing both.
+   */
+  assessorVerdict?: boolean;
+
+  /**
    * Where this question's derived ✓/✗ is written. Required whenever
    * `answerKey` is set — a key with nowhere to land would compute a mark that
    * never reaches the page, which on an evidence document reads as an

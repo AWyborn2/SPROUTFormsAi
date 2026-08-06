@@ -101,8 +101,19 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
   );
 
   const keyById = useMemo(() => new Map(keys.map((k) => [k.fieldId, k])), [keys]);
-  const keyed = questions.filter((q) => keyById.has(q.id)).length;
-  const verified = questions.filter((q) => keyById.get(q.id)?.verifiedAt).length;
+  /*
+    A VERDICT IS NOT PART OF THE DENOMINATOR.
+
+    "Assessment Result", "More coaching required?", "The Candidate's responses
+    were:" — an assessment paper is full of choices the ASSESSOR makes, and
+    extraction reads each as an ordinary question because on the page that is
+    what it looks like. Counting them means "N of 33 keyed" can never complete
+    and a genuinely unkeyed question hides among a dozen that were never
+    keyable.
+  */
+  const keyable = questions.filter((q) => !q.assessorVerdict);
+  const keyed = keyable.filter((q) => keyById.has(q.id)).length;
+  const verified = keyable.filter((q) => keyById.get(q.id)?.verifiedAt).length;
 
   if (questions.length === 0) {
     return (
@@ -120,7 +131,7 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
         <span className="min-w-0 flex-1">
           <span className="block text-[14.5px] font-semibold">Answer key</span>
           <span className="mt-0.5 block text-[11.5px] text-text-tertiary">
-            {keyed} of {questions.length} keyed · {verified} verified · marking is an exact set —
+            {keyed} of {keyable.length} keyed · {verified} verified · marking is an exact set —
             the candidate must select every listed answer and nothing else
           </span>
         </span>
@@ -129,7 +140,7 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
           role="progressbar"
           aria-valuenow={keyed}
           aria-valuemin={0}
-          aria-valuemax={questions.length}
+          aria-valuemax={keyable.length}
           aria-label="Questions keyed"
         >
           <span
@@ -182,7 +193,24 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                 </span>
               </span>
 
+              {/*
+                THE ESCAPE HATCH FOR A MIS-READ FIELD. An assessor's verdict
+                looks exactly like a question on the page, so extraction cannot
+                tell them apart — the author can, in one click, and until they
+                could these sat in the list unkeyable and uncleared.
+              */}
               {!matching && (
+                <label className="flex flex-none items-center gap-1.5 text-[11px] text-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={!!question.assessorVerdict}
+                    aria-label={`${question.label} is an assessor verdict`}
+                    onChange={(e) => keyOps.setAssessorVerdict(question.id, e.target.checked)}
+                  />
+                  Assessor verdict
+                </label>
+              )}
+              {!matching && !question.assessorVerdict && (
                 <select
                   aria-label={`Question type for ${question.label}`}
                   value={question.type}
@@ -197,6 +225,7 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                 </select>
               )}
 
+              {!question.assessorVerdict && (
               <button
                 type="button"
                 onClick={() => setPairingFor(open ? null : question.id)}
@@ -217,6 +246,7 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                       ? 'Build pairs'
                       : 'Edit pairs'}
               </button>
+              )}
             </div>
 
             {open ? (
@@ -238,6 +268,25 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                   }}
                   onCancel={() => setPairingFor(null)}
                 />
+              </div>
+            ) : question.assessorVerdict ? (
+              /*
+                Shown, but not asked for a key. The printed options stay visible
+                because they are what the assessor picks on the day — this says
+                nothing is gradeable here, not that the field is unimportant.
+              */
+              <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                {(question.options ?? []).map((option) => (
+                  <span
+                    key={option}
+                    className="rounded-lg border border-border-subtle bg-surface-sunken px-2.5 py-1 text-[11.5px] text-text-tertiary"
+                  >
+                    {option}
+                  </span>
+                ))}
+                <span className="text-[11.5px] text-text-tertiary">
+                  — the assessor chooses on the day. Nothing to key.
+                </span>
               </div>
             ) : matching && (question.options?.length ?? 0) === 0 ? (
               /*

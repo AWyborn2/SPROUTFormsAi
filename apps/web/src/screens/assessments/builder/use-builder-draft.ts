@@ -193,6 +193,15 @@ export interface KeyOps {
   toggleOption: (fieldId: string, option: string, multiple: boolean) => void;
   /** Record or withdraw the attestation, with who made it. */
   setVerified: (fieldId: string, verified: boolean, actor: string) => void;
+  /**
+   * Mark a question as the ASSESSOR'S VERDICT rather than a keyable question.
+   *
+   * Clears any key it already had, in the same operation. A verdict with an
+   * answer key is a contradiction the rest of the system would have to keep
+   * choosing between — and `markTheory` reads the key, so leaving one would
+   * quietly grade a judgement.
+   */
+  setAssessorVerdict: (fieldId: string, verdict: boolean) => void;
   /** Save a matching question: options onto the field, key into the draft. */
   saveMatching: (
     fieldId: string,
@@ -468,8 +477,26 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     [extraction, groupCount, setFieldTypeAndClearKey],
   );
 
+  const setAssessorVerdict = useCallback((fieldId: string, verdict: boolean) => {
+    setFields((prev) =>
+      prev.map((f) => {
+        if (f.id !== fieldId) return f;
+        if (!verdict) {
+          const { assessorVerdict: _drop, ...rest } = f;
+          return rest;
+        }
+        // The key goes with the flag. A verdict field that kept one would be
+        // graded by `markTheory`, which reads the key and nothing else.
+        const { answerKey: _key, ...rest } = f;
+        return { ...rest, assessorVerdict: true };
+      }),
+    );
+    if (verdict) setKeys((prev) => prev.filter((k) => k.fieldId !== fieldId));
+  }, []);
+
   const keyOps = useMemo<KeyOps>(
     () => ({
+      setAssessorVerdict,
       setKey: (fieldId, answerKey, source = 'manual') =>
         setKeys((prev) => {
           const rest = prev.filter((k) => k.fieldId !== fieldId);
@@ -565,7 +592,7 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
         ]);
       },
     }),
-    [],
+    [setAssessorVerdict],
   );
 
   /*

@@ -344,3 +344,108 @@ describe('AnswerKeyStep — matching questions the extraction found', () => {
     expect(screen.queryByText('Match each sign to its meaning')).toBeNull();
   });
 });
+
+/**
+ * An assessor's VERDICT is not a question.
+ *
+ * "Assessment Result — Candidate Competent / Candidate not yet Competent",
+ * "More coaching required? Yes / No", "The Candidate's responses were:
+ * Satisfactory / Not Satisfactory". An assessment paper is full of these, and
+ * extraction reads each as an ordinary choice question because on the page that
+ * is exactly what it is: a prompt with two printed options.
+ *
+ * Without a way to say so they sit in this list forever. There is no correct
+ * answer to key, so the author cannot clear them, "N of 33 keyed" can never
+ * complete, and a genuinely unkeyed question hides among a dozen that were
+ * never keyable.
+ */
+describe('AnswerKeyStep — assessor verdicts', () => {
+  const VERDICT = field({
+    id: 'result',
+    label: 'Assessment Result',
+    options: ['Candidate not yet Competent', 'Candidate Competent'],
+  });
+  const QUESTION = field({ id: 'q1', label: 'A real question' });
+
+  it('offers the escape hatch on every ordinary question', async () => {
+    // Extraction cannot tell a verdict from a question — they look identical on
+    // the page. The author can, in one click.
+    const result = await draftOf([VERDICT, QUESTION]);
+    renderStep(result);
+    expect(screen.getByLabelText('Assessment Result is an assessor verdict')).toBeTruthy();
+  });
+
+  it('TAKES A VERDICT OUT OF THE KEYED DENOMINATOR', async () => {
+    // The counter is the author's answer to "am I finished". Counting a field
+    // that can never be keyed makes it permanently wrong.
+    // Rendered twice rather than asserting a live update: the hook lives in
+    // its own `renderHook` root, so the step does not re-render when the draft
+    // changes underneath it. Two renders is what this harness can honestly show.
+    const result = await draftOf([VERDICT, QUESTION]);
+    const first = renderStep(result);
+    expect(screen.getByText(/0 of 2 keyed/)).toBeTruthy();
+    first.unmount();
+
+    act(() => result.current.keyOps.setAssessorVerdict('result', true));
+    renderStep(result);
+    expect(screen.getByText(/0 of 1 keyed/)).toBeTruthy();
+  });
+
+  it('KEEPS THE PRINTED LABELS, which is why this is not a type change', async () => {
+    /*
+      Retyping to `check_cross` would drop these and put a bare ✓/✗ where the
+      paper says "Candidate Competent" — the online form would stop matching the
+      document at the cell an auditor reads first.
+    */
+    const result = await draftOf([VERDICT]);
+    act(() => result.current.keyOps.setAssessorVerdict('result', true));
+    renderStep(result);
+    expect(screen.getByText('Candidate Competent')).toBeTruthy();
+    expect(screen.getByText('Candidate not yet Competent')).toBeTruthy();
+  });
+
+  it('says plainly that there is nothing to key', async () => {
+    const result = await draftOf([VERDICT]);
+    act(() => result.current.keyOps.setAssessorVerdict('result', true));
+    renderStep(result);
+    expect(screen.getByText(/the assessor chooses on the day/i)).toBeTruthy();
+  });
+
+  it('CLEARS A KEY THE FIELD ALREADY HAD', async () => {
+    /*
+      A verdict carrying an answer key is a contradiction, and `markTheory`
+      reads the key and nothing else — so a leftover one would quietly GRADE a
+      judgement, marking an assessor wrong for their own verdict.
+    */
+    const result = await draftOf([VERDICT]);
+    act(() => result.current.keyOps.setKey('result', ['Candidate Competent']));
+    expect(result.current.keys).toHaveLength(1);
+
+    act(() => result.current.keyOps.setAssessorVerdict('result', true));
+    expect(result.current.keys).toHaveLength(0);
+    expect(result.current.fields.find((f) => f.id === 'result')?.answerKey).toBeUndefined();
+  });
+
+  it('offers no type dropdown and no matching button on a verdict', async () => {
+    // Neither expresses anything about a judgement, and both invite an edit
+    // that would turn it back into a question.
+    const result = await draftOf([VERDICT]);
+    act(() => result.current.keyOps.setAssessorVerdict('result', true));
+    renderStep(result);
+    expect(screen.queryByLabelText('Question type for Assessment Result')).toBeNull();
+    expect(screen.queryByText('Make matching')).toBeNull();
+  });
+
+  it('turns back into a keyable question when unticked', async () => {
+    // A mis-click has to be reversible, and the flag is removed rather than
+    // stored as false — absent is what every field authored before this carries.
+    const result = await draftOf([VERDICT]);
+    act(() => result.current.keyOps.setAssessorVerdict('result', true));
+    act(() => result.current.keyOps.setAssessorVerdict('result', false));
+    expect(result.current.fields.find((f) => f.id === 'result')).not.toHaveProperty(
+      'assessorVerdict',
+    );
+    renderStep(result);
+    expect(screen.getByLabelText('Question type for Assessment Result')).toBeTruthy();
+  });
+});
