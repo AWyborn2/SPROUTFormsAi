@@ -113,6 +113,13 @@ export const PROFILE_FIELDS: readonly ProfileFieldSpec[] = [
   */
   { key: 'emergencyContactName', label: 'Emergency contact name', storedOn: 'profile', presence: 'required', sensitive: false, editableBy: ADMIN_AND_CANDIDATE },
   { key: 'emergencyContactPhone', label: 'Emergency contact phone', storedOn: 'profile', presence: 'required', sensitive: false, editableBy: ADMIN_AND_CANDIDATE },
+  /*
+    The organisation's to issue and to correct, so never the candidate's to
+    write (R53). Optional indefinitely rather than owed, because R24 falls back
+    rather than failing when one or both are absent (R12).
+  */
+  { key: 'employeeNumber', label: 'Employee number', storedOn: 'profile', presence: 'optional', sensitive: false, editableBy: ADMIN },
+  { key: 'swipeCardNumber', label: 'Swipe card number', storedOn: 'profile', presence: 'optional', sensitive: false, editableBy: ADMIN },
   { key: 'starterType', label: 'Starter type', storedOn: 'profile', presence: 'required', sensitive: false, editableBy: ADMIN, options: PROFILE_STARTER_TYPES },
   { key: 'department', label: 'Department', storedOn: 'membership', presence: 'required', sensitive: false, editableBy: ADMIN },
   { key: 'roles', label: 'Roles', storedOn: 'membership', presence: 'required', sensitive: false, editableBy: ADMIN },
@@ -172,6 +179,86 @@ export function indigenousStatusOf(ethnicity: string | null | undefined): Indige
   const derived = isIndigenousEthnicity(ethnicity ?? '');
   if (derived === null) return 'not_stated';
   return derived ? 'indigenous' : 'not_indigenous';
+}
+
+// ── Display identity (R7, R24) ──────────────────────────────────────────────
+
+/** Which of the two workforce numbers the organisation shows beside a name. */
+export type DisplayIdentifierChoice = 'employee_number' | 'swipe_card_number';
+
+export interface DisplayIdentity {
+  /** First and last name (R3). */
+  displayName: string;
+  /** The number shown beside it, or null where the member holds neither. */
+  identifier: string | null;
+  /**
+   * Which number `identifier` actually is. Not always the organisation's
+   * choice: a member holding only the other one is shown by that one.
+   */
+  identifierKind: DisplayIdentifierChoice | null;
+  /** True where the organisation's chosen number was absent and the other stood in. */
+  fellBack: boolean;
+}
+
+const blankToNull = (v: string | null | undefined): string | null => {
+  const trimmed = (v ?? '').trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+/**
+ * How a member is identified on screen (R24).
+ *
+ * A name alone is not an identification — two workers share one often enough
+ * that R7 makes both numbers unique so either can tell them apart. Which one is
+ * shown is the organisation's own setting, and because R12 leaves both optional
+ * the display FALLS BACK rather than failing:
+ *
+ *  - holding the chosen number, it is shown;
+ *  - holding only the other, that one is shown rather than nothing;
+ *  - holding neither, the name stands alone until one is issued.
+ *
+ * The last two are not incomplete records and reach no follow-up list (R12).
+ *
+ * Read LIVE wherever it is displayed and never captured onto a case or an
+ * attempt (R61) — which is the deliberate difference from the name, where a
+ * signed attempt keeps the words it was signed under (R60). A corrected number
+ * therefore corrects itself everywhere it appears.
+ */
+export function displayIdentityOf(
+  profile: {
+    firstName: string;
+    lastName: string;
+    employeeNumber?: string | null;
+    swipeCardNumber?: string | null;
+  },
+  choice: DisplayIdentifierChoice,
+): DisplayIdentity {
+  const displayName = displayNameOf(profile);
+  const employee = blankToNull(profile.employeeNumber);
+  const swipe = blankToNull(profile.swipeCardNumber);
+
+  const chosen = choice === 'employee_number' ? employee : swipe;
+  if (chosen !== null) {
+    return { displayName, identifier: chosen, identifierKind: choice, fellBack: false };
+  }
+
+  const other = choice === 'employee_number' ? swipe : employee;
+  if (other !== null) {
+    const otherKind: DisplayIdentifierChoice =
+      choice === 'employee_number' ? 'swipe_card_number' : 'employee_number';
+    return { displayName, identifier: other, identifierKind: otherKind, fellBack: true };
+  }
+
+  return { displayName, identifier: null, identifierKind: null, fellBack: false };
+}
+
+/** The one-line rendering of `displayIdentityOf`, for a list or a case header. */
+export function displayLabelOf(
+  profile: Parameters<typeof displayIdentityOf>[0],
+  choice: DisplayIdentifierChoice,
+): string {
+  const identity = displayIdentityOf(profile, choice);
+  return identity.identifier ? `${identity.displayName} (${identity.identifier})` : identity.displayName;
 }
 
 // ── Creation validation (R12, R13, R14) ─────────────────────────────────────

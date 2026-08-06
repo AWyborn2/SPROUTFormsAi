@@ -1290,6 +1290,8 @@ Gender, Ethnicity and Starter type are stored as text validated against the shar
 - `packages/shared/src/profile.test.ts` — modify.
 - `apps/api/src/routes/team.ts` — modify. The member list returns the resolved display identity.
 - `apps/api/src/routes/team.test.ts` — modify.
+- `apps/api/src/lib/display-identity.ts` — create. The one live resolution every surface that names a person calls.
+- `apps/api/src/lib/display-identity.test.ts` — create.
 - `apps/api/src/routes/assessments.ts` — modify. A case and an attempt read the identifier live rather than carrying a copy.
 - `apps/api/src/routes/assessments.test.ts` — modify.
 

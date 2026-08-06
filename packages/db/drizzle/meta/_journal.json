@@ -267,6 +267,13 @@
       "when": 1785999227170,
       "tag": "0037_wealthy_killraven",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1785999980703,
+      "tag": "0038_certain_mentallo",
+      "breakpoints": true
     }
   ]
 }

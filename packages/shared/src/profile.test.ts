@@ -6,6 +6,8 @@ import {
   PROFILE_STARTER_TYPES,
   candidateEditableFieldKeys,
   canEditProfileField,
+  displayIdentityOf,
+  displayLabelOf,
   displayNameOf,
   emptyOptionalProfileFields,
   indigenousStatusOf,
@@ -180,6 +182,84 @@ describe('one record for every member', () => {
     const keys = PROFILE_FIELDS.map((f) => f.key);
     expect(new Set(keys).size).toBe(keys.length);
     expect(PROFILE_FIELDS.every((f) => f.editableBy.every((e) => e === 'admin' || e === 'candidate'))).toBe(true);
+  });
+});
+
+describe('the display identity', () => {
+  const CHRIS = { firstName: 'Chris', lastName: 'Taylor' };
+
+  it('shows the name and the number the organisation chose', () => {
+    const identity = displayIdentityOf({ ...CHRIS, employeeNumber: 'E100', swipeCardNumber: 'S900' }, 'employee_number');
+    expect(identity).toEqual({
+      displayName: 'Chris Taylor',
+      identifier: 'E100',
+      identifierKind: 'employee_number',
+      fellBack: false,
+    });
+  });
+
+  it('falls back to the number the member does hold rather than showing nothing', () => {
+    // AE22: three members share a name; one holds only the swipe card number.
+    const identity = displayIdentityOf({ ...CHRIS, employeeNumber: null, swipeCardNumber: 'S900' }, 'employee_number');
+    expect(identity.identifier).toBe('S900');
+    expect(identity.identifierKind).toBe('swipe_card_number');
+    expect(identity.fellBack).toBe(true);
+  });
+
+  it('shows the name alone where the member holds neither', () => {
+    const identity = displayIdentityOf({ ...CHRIS, employeeNumber: null, swipeCardNumber: null }, 'employee_number');
+    expect(identity).toEqual({
+      displayName: 'Chris Taylor',
+      identifier: null,
+      identifierKind: null,
+      fellBack: false,
+    });
+  });
+
+  it('treats a blank string as absent, not as an identifier', () => {
+    const identity = displayIdentityOf({ ...CHRIS, employeeNumber: '   ', swipeCardNumber: 'S900' }, 'employee_number');
+    expect(identity.identifier).toBe('S900');
+  });
+
+  it('follows the organisation setting when it names the swipe card number', () => {
+    // AE23: the same member, shown by swipe card rather than employee number.
+    const identity = displayIdentityOf({ ...CHRIS, employeeNumber: 'E100', swipeCardNumber: 'S900' }, 'swipe_card_number');
+    expect(identity.identifier).toBe('S900');
+    expect(identity.fellBack).toBe(false);
+  });
+
+  it('changes what a member is shown by when the setting changes, with no write to the profile', () => {
+    const profile = { ...CHRIS, employeeNumber: 'E100', swipeCardNumber: 'S900' };
+    expect(displayIdentityOf(profile, 'employee_number').identifier).toBe('E100');
+    expect(displayIdentityOf(profile, 'swipe_card_number').identifier).toBe('S900');
+    expect(profile).toEqual({ ...CHRIS, employeeNumber: 'E100', swipeCardNumber: 'S900' });
+  });
+
+  it('never puts the middle name on the display', () => {
+    const identity = displayIdentityOf(
+      { firstName: 'Chris', middleName: 'Alexandra', lastName: 'Taylor', employeeNumber: 'E100' } as never,
+      'employee_number',
+    );
+    expect(identity.displayName).toBe('Chris Taylor');
+  });
+
+  it('renders a one-line label with and without an identifier', () => {
+    expect(displayLabelOf({ ...CHRIS, employeeNumber: 'E100' }, 'employee_number')).toBe('Chris Taylor (E100)');
+    expect(displayLabelOf(CHRIS, 'employee_number')).toBe('Chris Taylor');
+  });
+
+  it('leaves both identifiers optional, so neither absence is an outstanding field', () => {
+    // R12/R24: a member holding neither is not on a follow-up list for it.
+    expect(requiredProfileFieldKeys()).not.toContain('employeeNumber');
+    expect(requiredProfileFieldKeys()).not.toContain('swipeCardNumber');
+    expect(validateProfileFields(completeProfile())).toEqual({ ok: true });
+  });
+
+  it('keeps both identifiers out of the candidate writable set', () => {
+    // AE2 / R53: the organisation issues and corrects them.
+    expect(canEditProfileField('employeeNumber', 'candidate')).toBe(false);
+    expect(canEditProfileField('swipeCardNumber', 'candidate')).toBe(false);
+    expect(canEditProfileField('employeeNumber', 'admin')).toBe(true);
   });
 });
 

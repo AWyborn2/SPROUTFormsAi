@@ -1,4 +1,4 @@
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import { index, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import { memberships, organizations } from './organizations.ts';
 
@@ -102,6 +102,24 @@ export const memberProfiles = pgTable(
     emergencyContactName: text('emergency_contact_name').notNull(),
     emergencyContactPhone: text('emergency_contact_phone').notNull(),
 
+    // ── Organisation-assigned identifiers (R7) ──────────────────────────────
+    /*
+      How the operation identifies a person on site. Both NULLABLE and both
+      unique within the organisation, which is not a contradiction: the
+      uniqueness indexes below are PARTIAL, over non-null values only, so two
+      members holding neither is not a collision while a second issue of a
+      number already held is refused. A plain unique index would make the
+      ordinary case — a workforce where most people have no swipe card yet —
+      impossible.
+
+      Optional indefinitely rather than owed (R12): they genuinely arrive after
+      the person does, and R24 falls back rather than failing when one or both
+      are absent. Never the candidate's to write (R53) — the organisation issues
+      and corrects them.
+    */
+    employeeNumber: text('employee_number'),
+    swipeCardNumber: text('swipe_card_number'),
+
     // ── Employment ──────────────────────────────────────────────────────────
     starterType: text('starter_type').notNull(),
     /*
@@ -118,6 +136,21 @@ export const memberProfiles = pgTable(
     /** One profile per membership — the R1 invariant, enforced rather than assumed. */
     uniqueIndex('member_profiles_membership_uq').on(t.membershipId),
     index('member_profiles_org_idx').on(t.orgId),
+    /*
+      R7: unique within the ORGANISATION, over non-null values only.
+
+      Scoped per org because the same person may carry different numbers for two
+      customers, and case-folded because "EMP001" and "emp001" being two
+      different people is exactly the near-miss R7's uniqueness exists to
+      prevent — the same reasoning the taxonomy's active-name indexes already
+      apply.
+    */
+    uniqueIndex('member_profiles_org_employee_number_uq')
+      .on(t.orgId, sql`lower(${t.employeeNumber})`)
+      .where(sql`${t.employeeNumber} IS NOT NULL`),
+    uniqueIndex('member_profiles_org_swipe_card_number_uq')
+      .on(t.orgId, sql`lower(${t.swipeCardNumber})`)
+      .where(sql`${t.swipeCardNumber} IS NOT NULL`),
   ],
 );
 

@@ -20,6 +20,7 @@ import { env } from '../env.js';
 import { checkSeatAvailability, lockOrgForSeats, poolFor, seatLimitError } from '../lib/seats.js';
 import { readPlacement, writePlacement } from '../lib/membership-placement.js';
 import { assignForMembership } from '../lib/assignment.js';
+import { identifyMember, loadDisplayIdentities } from '../lib/display-identity.js';
 import { db } from '../db.js';
 
 export const teamRouter: Router = Router();
@@ -59,10 +60,18 @@ teamRouter.get(
       ? await db.query.users.findMany({ where: inArray(schema.users.id, userIds) })
       : [];
     const userById = new Map(users.map((u) => [u.id, u]));
+    /*
+      R24: a name alone is not an identification. Resolved live from the profile
+      rather than stored on the membership, so a corrected number corrects itself
+      here without a write (R61). Members with no profile yet keep the name this
+      list already showed.
+    */
+    const identities = await loadDisplayIdentities(db, tenant.orgId, userIds);
 
     res.json([
       ...memberships.map((m) => {
         const u = userById.get(m.userId);
+        const identified = identifyMember(identities, m.userId, u?.name ?? '');
         return {
           id: m.id,
           /*
@@ -73,7 +82,9 @@ teamRouter.get(
             database by hand. A pending invite has no user yet, hence null.
           */
           userId: m.userId,
-          name: u?.name ?? '',
+          name: identified.name,
+          /** The organisation-assigned number shown beside the name; null until one is issued (R24). */
+          identifier: identified.identifier,
           email: u?.email ?? '',
           role: m.role,
           status: m.status,
@@ -88,6 +99,12 @@ teamRouter.get(
         // A QR-delivered invite has no email at all, so the recorded name is
         // the only way to tell pending rows apart.
         name: i.inviteeName || nameFromEmail(i.email ?? '') || i.email || 'Pending invite',
+        /*
+          Always null here: nobody has accepted, so there is no membership to
+          carry a profile and no number to resolve. The key is present anyway so
+          every row in this list has one shape for the caller to read.
+        */
+        identifier: null,
         email: i.email ?? '',
         role: i.role,
         status: 'invited' as const,

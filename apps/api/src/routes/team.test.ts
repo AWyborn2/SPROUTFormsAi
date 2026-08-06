@@ -53,6 +53,8 @@ function fakeDb(opts: {
   organizationsFindFirst?: unknown;
   invitesFindFirst?: unknown;
   invitesFindMany?: unknown[];
+  /** Profiles backing the live display-identifier read (R24). Default: none. */
+  memberProfilesFindMany?: unknown[];
   /** Throw from the `invites` insert — the pending-invite unique violation. */
   inviteInsertError?: unknown;
   insertedCompetency?: unknown;
@@ -92,6 +94,14 @@ function fakeDb(opts: {
     invites: {
       findFirst: vi.fn().mockResolvedValue(opts.invitesFindFirst),
       findMany: vi.fn().mockResolvedValue(opts.invitesFindMany ?? []),
+    },
+    /*
+      The member list resolves each person's display identifier live from their
+      profile (R24, R61). Defaults to none, which is the ordinary state before a
+      workforce is entered — the list then shows the name it always did.
+    */
+    memberProfiles: {
+      findMany: vi.fn().mockResolvedValue(opts.memberProfilesFindMany ?? []),
     },
   };
 
@@ -173,9 +183,52 @@ describe('GET /team/members', () => {
       const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
       expect(res.status).toBe(200);
       const body = await res.json();
+      // `identifier` is null until a profile carrying one exists (R24) — the
+      // list keeps working through the state every org is in before its
+      // workforce is entered.
       expect(body).toEqual([
-        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', email: 'ash@x.io', role: 'admin', status: 'active' },
+        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', identifier: null, email: 'ash@x.io', role: 'admin', status: 'active' },
       ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('shows each member by the identifier the organisation chose, falling back per person (R24)', async () => {
+    // AE22: three members share the name Chris Taylor. One holds an employee
+    // number, one holds only a swipe card, the third holds neither.
+    mockDbValue = fakeDb({
+      organizationsFindFirst: { id: 'org-1', displayIdentifier: 'employee_number' },
+      membershipsFindMany: [
+        { id: 'm1', userId: 'u1', role: 'candidate', status: 'active' },
+        { id: 'm2', userId: 'u2', role: 'assessor', status: 'active' },
+        { id: 'm3', userId: 'u3', role: 'admin', status: 'active' },
+      ],
+      usersFindMany: [
+        { id: 'u1', name: 'Chris Taylor', email: 'c1@x.io' },
+        { id: 'u2', name: 'Chris Taylor', email: 'c2@x.io' },
+        { id: 'u3', name: 'Chris Taylor', email: 'c3@x.io' },
+      ],
+      memberProfilesFindMany: [
+        { membershipId: 'm1', firstName: 'Chris', lastName: 'Taylor', employeeNumber: 'E100', swipeCardNumber: null },
+        { membershipId: 'm2', firstName: 'Chris', lastName: 'Taylor', employeeNumber: null, swipeCardNumber: 'S900' },
+        { membershipId: 'm3', firstName: 'Chris', lastName: 'Taylor', employeeNumber: null, swipeCardNumber: null },
+      ],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Array<{ userId: string; name: string; identifier: string | null }>;
+      // The chosen number; the other one where only it is held; the name alone
+      // where neither is — and every member, whatever access level they carry.
+      expect(body.map((r) => [r.userId, r.identifier])).toEqual([
+        ['u1', 'E100'],
+        ['u2', 'S900'],
+        ['u3', null],
+      ]);
+      expect(new Set(body.map((r) => r.name))).toEqual(new Set(['Chris Taylor']));
     } finally {
       server.close();
     }
@@ -238,8 +291,8 @@ describe('GET /team/members', () => {
       // The invitee has no user row yet — the name is derived from the address
       // the inviter typed, and `status` is what marks them as not-yet-joined.
       expect(await res.json()).toEqual([
-        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', email: 'ash@x.io', role: 'admin', status: 'active' },
-        { id: 'inv-1', userId: null, name: 'Sam Lee', email: 'sam.lee@x.io', role: 'builder', status: 'invited' },
+        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', identifier: null, email: 'ash@x.io', role: 'admin', status: 'active' },
+        { id: 'inv-1', userId: null, name: 'Sam Lee', identifier: null, email: 'sam.lee@x.io', role: 'builder', status: 'invited' },
       ]);
     } finally {
       server.close();
