@@ -83,6 +83,14 @@ interface CandidateRow {
   readiness: AssessedStarter['readiness'];
   blockers: AssessedStarter['blockers'];
   warnings: AssessedStarter['warnings'];
+  /**
+   * Whether this starter's booked seat has been confirmed — the Thursday
+   * gate-check decision, recorded per seat. Absent when the starter has no
+   * booking yet: "unconfirmed" is a state a BOOKING can be in, and reporting it
+   * on an unbooked candidate would read as a chase-this signal for a seat that
+   * does not exist.
+   */
+  bookingConfirmed?: boolean;
 }
 
 /**
@@ -106,6 +114,7 @@ function candidateDto(
     submitterEmail: string;
     submittedByUserId: string | null;
   },
+  bookingConfirmed?: boolean,
 ): CandidateRow {
   return {
     submissionId: row.id,
@@ -120,6 +129,7 @@ function candidateDto(
     readiness: starter.readiness,
     blockers: starter.blockers,
     warnings: starter.warnings,
+    ...(bookingConfirmed === undefined ? {} : { bookingConfirmed }),
   };
 }
 
@@ -145,18 +155,21 @@ async function pinnedFieldsFor(rows: SubmissionRow[]): Promise<Map<string, FormF
 }
 
 /**
- * The submissions already covered by a booking.
+ * The submissions already covered by a booking, each with its seat's
+ * confirmation state.
  *
  * Scoped by submission id rather than org because the ids handed in are always
  * already org-filtered — every caller of this reached them through a query
  * that filtered on `orgId` first.
  */
-async function bookedSubmissionIds(submissionIds: string[]): Promise<Set<string>> {
-  if (!db || submissionIds.length === 0) return new Set();
+async function bookedSeatsBySubmission(
+  submissionIds: string[],
+): Promise<Map<string, { confirmedAt: Date | null }>> {
+  if (!db || submissionIds.length === 0) return new Map();
   const rows = await db.query.inductionBookingStarters.findMany({
     where: inArray(schema.inductionBookingStarters.submissionId, submissionIds),
   });
-  return new Set(rows.map((r) => r.submissionId));
+  return new Map(rows.map((r) => [r.submissionId, { confirmedAt: r.confirmedAt ?? null }]));
 }
 
 /**
@@ -170,7 +183,7 @@ async function loadAssessedStarters(
   orgId: string,
   today: Date,
   allowLateNotice = false,
-): Promise<{ starter: AssessedStarter; row: SubmissionRow }[]> {
+): Promise<{ starter: AssessedStarter; row: SubmissionRow; bookingConfirmed?: boolean }[]> {
   if (!db) return [];
   const rows = await db.query.submissions.findMany({
     where: eq(schema.submissions.orgId, orgId),
@@ -179,14 +192,16 @@ async function loadAssessedStarters(
   if (rows.length === 0) return [];
 
   const fieldsByVersion = await pinnedFieldsFor(rows);
-  const booked = await bookedSubmissionIds(rows.map((r) => r.id));
+  const booked = await bookedSeatsBySubmission(rows.map((r) => r.id));
 
-  const assessed: { starter: AssessedStarter; row: SubmissionRow }[] = [];
+  const assessed: { starter: AssessedStarter; row: SubmissionRow; bookingConfirmed?: boolean }[] =
+    [];
   for (const row of rows) {
     const fields = fieldsByVersion.get(row.templateVersionId);
     if (!fields) continue;
     const profile = readStarterProfile(fields, row.values);
     if (!profile) continue;
+    const seat = booked.get(row.id);
     assessed.push({
       starter: {
         submissionId: row.id,
@@ -198,6 +213,7 @@ async function loadAssessedStarters(
         }),
       },
       row,
+      ...(seat ? { bookingConfirmed: seat.confirmedAt !== null } : {}),
     });
   }
   return assessed;
@@ -255,7 +271,9 @@ inductionsRouter.get('/candidates', requireMachineOrTenant, withErrorHandling(as
   });
 
   res.json({
-    candidates: matching.map(({ starter, row }) => candidateDto(starter, row)),
+    candidates: matching.map(({ starter, row, bookingConfirmed }) =>
+      candidateDto(starter, row, bookingConfirmed),
+    ),
     holidaysCoverThrough: holidaysCoverThrough(),
   });
 }));
@@ -300,7 +318,8 @@ inductionsRouter.get('/candidates/:id', requireMachineOrTenant, withErrorHandlin
     return;
   }
 
-  const booked = await bookedSubmissionIds([row.id]);
+  const booked = await bookedSeatsBySubmission([row.id]);
+  const seat = booked.get(row.id);
   const assessed: AssessedStarter = {
     submissionId: row.id,
     profile,
@@ -310,7 +329,7 @@ inductionsRouter.get('/candidates/:id', requireMachineOrTenant, withErrorHandlin
       allowLateNotice: isOn(parsed.data.allowLateNotice),
     }),
   };
-  const body = candidateDto(assessed, row);
+  const body = candidateDto(assessed, row, seat ? seat.confirmedAt !== null : undefined);
 
   if (parsed.data.includeSensitive !== 'true') {
     res.json({ ...body, sensitiveOmitted: 'not_requested' });
@@ -352,7 +371,7 @@ inductionsRouter.get('/cohorts', requireMachineOrTenant, withErrorHandling(async
     new Date(),
     isOn(parsed.data.allowLateNotice),
   );
-  const byId = new Map(assessed.map(({ starter, row }) => [starter.submissionId, row]));
+  const byId = new Map(assessed.map((entry) => [entry.starter.submissionId, entry]));
   const cohorts = buildInductionCohorts(assessed.map(({ starter }) => starter)).filter(
     (c) => !parsed.data.date || c.date === parsed.data.date,
   );
@@ -363,7 +382,10 @@ inductionsRouter.get('/cohorts', requireMachineOrTenant, withErrorHandling(async
       seats: cohort.seats,
       readyCount: cohort.readyCount,
       blockedCount: cohort.blockedCount,
-      starters: cohort.starters.map((starter) => candidateDto(starter, byId.get(starter.submissionId)!)),
+      starters: cohort.starters.map((starter) => {
+        const entry = byId.get(starter.submissionId)!;
+        return candidateDto(starter, entry.row, entry.bookingConfirmed);
+      }),
     })),
     holidaysCoverThrough: holidaysCoverThrough(),
   });
@@ -421,7 +443,7 @@ async function canBook(tenant: { orgId: string; role: string }): Promise<boolean
 
 function bookingDto(
   booking: typeof schema.inductionBookings.$inferSelect,
-  starters: { submissionId: string; starterName: string }[],
+  starters: { submissionId: string; starterName: string; confirmedAt?: Date | null }[],
 ) {
   return {
     id: booking.id,
@@ -433,7 +455,13 @@ function bookingDto(
     bookedByUserId: booking.bookedByUserId,
     bookedByApiKeyId: booking.bookedByApiKeyId,
     createdAt: booking.createdAt.toISOString(),
-    starters: starters.map((s) => ({ submissionId: s.submissionId, starterName: s.starterName })),
+    /** A booking reads as confirmed only when every seat on it is. */
+    confirmed: starters.length > 0 && starters.every((s) => s.confirmedAt != null),
+    starters: starters.map((s) => ({
+      submissionId: s.submissionId,
+      starterName: s.starterName,
+      confirmedAt: s.confirmedAt ? s.confirmedAt.toISOString() : null,
+    })),
   };
 }
 
@@ -522,10 +550,10 @@ inductionsRouter.post('/bookings', requireMachineOrTenant, withErrorHandling(asy
     return;
   }
 
-  const alreadyBooked = await bookedSubmissionIds(wanted);
+  const alreadyBooked = await bookedSeatsBySubmission(wanted);
   if (alreadyBooked.size > 0) {
     // A retried tool call must not consume a second seat for the same person.
-    res.status(409).json({ error: 'already_booked', submissionIds: [...alreadyBooked] });
+    res.status(409).json({ error: 'already_booked', submissionIds: [...alreadyBooked.keys()] });
     return;
   }
 
@@ -610,6 +638,108 @@ inductionsRouter.get('/bookings', requireMachineOrTenant, withErrorHandling(asyn
   }
 
   res.json({ bookings: bookings.map((b) => bookingDto(b, startersByBooking.get(b.id) ?? [])) });
+}));
+
+const confirmBookingBody = z.object({
+  /** Which seats to confirm. Absent means every starter on the booking. */
+  submissionIds: z.array(z.string().min(1)).min(1).max(50).optional(),
+});
+
+/**
+ * Records the Thursday gate-check decision, per seat.
+ *
+ * A booking is tentative until a human has checked the starter is ready and
+ * the seat stands; this route stores that decision and nothing else — what was
+ * checked stays the operator's own checklist, outside the product. Confirming
+ * asserts an external fact about the booking, the same class of act as
+ * recording it, so it gates on `canBook` above.
+ *
+ * Idempotent by design: a seat already confirmed keeps its first timestamp and
+ * actor, and the response separates newly-confirmed from already-confirmed, so
+ * a retried tool call reads as a no-op rather than an error.
+ */
+inductionsRouter.post('/bookings/:id/confirm', requireMachineOrTenant, withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const tenant = req.tenant!;
+  if (!(await canBook(tenant))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  const parsed = confirmBookingBody.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return;
+  }
+
+  const booking = await db.query.inductionBookings.findFirst({
+    where: and(
+      eq(schema.inductionBookings.id, req.params.id!),
+      eq(schema.inductionBookings.orgId, tenant.orgId),
+    ),
+  });
+  // A booking in another org is NOT FOUND, not FORBIDDEN — same cross-tenant
+  // reasoning as the candidate detail route.
+  if (!booking) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+
+  const starterRows = await db.query.inductionBookingStarters.findMany({
+    where: eq(schema.inductionBookingStarters.bookingId, booking.id),
+  });
+
+  const wanted = parsed.data.submissionIds ? [...new Set(parsed.data.submissionIds)] : null;
+  if (wanted) {
+    const onBooking = new Set(starterRows.map((r) => r.submissionId));
+    const strays = wanted.filter((id) => !onBooking.has(id));
+    if (strays.length > 0) {
+      res.status(400).json({ error: 'not_on_booking', submissionIds: strays });
+      return;
+    }
+  }
+
+  const targets = wanted
+    ? starterRows.filter((r) => wanted.includes(r.submissionId))
+    : starterRows;
+  const newly = targets.filter((r) => r.confirmedAt == null);
+  const already = targets.filter((r) => r.confirmedAt != null);
+
+  const confirmedAt = new Date();
+  if (newly.length > 0) {
+    await db
+      .update(schema.inductionBookingStarters)
+      .set({
+        confirmedAt,
+        confirmedByUserId: tenant.userId,
+        confirmedByApiKeyId: req.apiKeyId ?? null,
+      })
+      .where(
+        inArray(
+          schema.inductionBookingStarters.id,
+          newly.map((r) => r.id),
+        ),
+      );
+
+    await recordAudit(db, tenant, {
+      action: req.apiKeyId
+        ? 'Confirmed induction booking via API key'
+        : 'Confirmed induction booking',
+      target: `${booking.inductionDate} — ${newly.map((r) => r.starterName).join(', ')}`,
+      category: 'submissions',
+      icon: 'calendar-check',
+    });
+  }
+
+  const newlyIds = new Set(newly.map((r) => r.id));
+  const starters = starterRows.map((r) => (newlyIds.has(r.id) ? { ...r, confirmedAt } : r));
+  res.json({
+    ...bookingDto(booking, starters),
+    newlyConfirmed: newly.map((r) => r.submissionId),
+    alreadyConfirmed: already.map((r) => r.submissionId),
+  });
 }));
 
 /* ── Identity documents ──────────────────────────────────────────────────── */
