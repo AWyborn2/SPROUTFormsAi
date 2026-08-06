@@ -22,6 +22,7 @@ export * from './org.js';
 export * from './competency.js';
 export * from './competency-expiry.js';
 export * from './standing.js';
+export * from './workforce-import.js';
 export * from './assessor-eligibility.js';
 export * from './workflow.js';
 export * from './assessment.js';
