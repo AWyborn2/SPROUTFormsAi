@@ -61,6 +61,10 @@ function fakeDb(opts: {
   matrix?: PermissionMatrix;
   profile?: Record<string, unknown> | undefined;
   membershipOrg?: string;
+  /** Competency grants, their documents and the competencies they name (U39, R29). */
+  grants?: unknown[];
+  documents?: unknown[];
+  competencies?: unknown[];
 } = {}) {
   const updates: Array<Record<string, unknown>> = [];
   const audits: Array<Record<string, unknown>> = [];
@@ -91,7 +95,13 @@ function fakeDb(opts: {
       memberProfiles: {
         findFirst: vi.fn().mockResolvedValue('profile' in opts ? opts.profile : PROFILE),
       },
-      users: { findFirst: vi.fn().mockResolvedValue({ id: admin.userId, name: 'Admin' }) },
+      users: {
+        findFirst: vi.fn().mockResolvedValue({ id: admin.userId, name: 'Admin', email: 'jane@x.io' }),
+      },
+      /* The document side of an export (R29). Empty unless a case supplies them. */
+      competencyHolders: { findMany: vi.fn().mockResolvedValue(opts.grants ?? []) },
+      competencyDocuments: { findMany: vi.fn().mockResolvedValue(opts.documents ?? []) },
+      competencies: { findMany: vi.fn().mockResolvedValue(opts.competencies ?? []) },
     },
     update: () => ({
       set: (v: Record<string, unknown>) => ({
@@ -425,6 +435,175 @@ describe('PUT /profiles/:membershipId/unreachable (U36, R16)', () => {
       expect(body.profile.emailUnreachableAt).toBe(marked.toISOString());
       // The record is otherwise exactly as it was.
       expect(body.profile.suburb).toBe('Boddington');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('GET /profiles/:membershipId/export (U39, R54)', () => {
+  const GRANT = { id: 'h-1', orgId: ORG, userId: SUBJECT_USER, competencyId: 'c-1' };
+  const HELD_DOC = {
+    id: 'doc-1',
+    orgId: ORG,
+    competencyHolderId: 'h-1',
+    fileName: 'hr-licence.pdf',
+    contentType: 'application/pdf',
+    storageKey: 'org-1/doc-1.pdf',
+    state: 'held',
+  };
+  const COMPETENCY = { id: 'c-1', orgId: ORG, name: 'HR Licence' };
+
+  const exportFor = (base: string, tenant: Parameters<typeof authHeader>[0]) =>
+    fetch(`${base}/profiles/${SUBJECT_MEMBERSHIP}/export`, { headers: authHeader(tenant) });
+
+  it('lets an Admin export, and writes it to the audit naming both parties (AE25)', async () => {
+    /*
+      The unredacted files are what make the audit line necessary: a licence
+      image carries a date of birth, an address and a photograph, so a leak has
+      to be traceable. Traceable to WHOM is half the answer — "who ran an
+      export" without "whose record left" cannot answer the question asked
+      after an incident.
+    */
+    const { audits } = fakeDb({
+      matrix: DEFAULT_ROLE_PERMISSIONS.admin,
+      grants: [GRANT],
+      documents: [HELD_DOC],
+      competencies: [COMPETENCY],
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await exportFor(base, admin);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        membershipId: string;
+        fields: Record<string, string | null>;
+        documents: Array<{ fileName: string; storageKey: string; competencyName: string }>;
+        exportedAt: string;
+      };
+
+      expect(body.membershipId).toBe(SUBJECT_MEMBERSHIP);
+      expect(body.fields.firstName).toBe('Jane');
+      expect(body.fields.emergencyContactName).toBe('Chris Smith');
+      expect(body.documents).toEqual([
+        {
+          id: 'doc-1',
+          fileName: 'hr-licence.pdf',
+          contentType: 'application/pdf',
+          competencyName: 'HR Licence',
+          storageKey: 'org-1/doc-1.pdf',
+        },
+      ]);
+
+      const entry = audits.find((a) => a.action === 'Exported member record');
+      expect(entry).toMatchObject({ target: SUBJECT_MEMBERSHIP, category: 'profiles' });
+      expect(entry?.actorId).toBe(admin.userId);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('emits NOTHING redacted, because R54 admits only callers who hold every field', async () => {
+    const { audits } = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    const { server, base } = startApp();
+    try {
+      const body = (await (await exportFor(base, admin)).json()) as {
+        fields: Record<string, string | null>;
+      };
+      // The sensitive fields are present. The redaction is a pure function in
+      // shared with no caller on this route — proved there, not here.
+      expect(body.fields.dateOfBirth).toBe('1990-04-17');
+      expect(body.fields.addressStreet).toBe('12 Mill Road');
+      expect(body.fields.ethnicity).toBe('Aboriginal');
+      expect(audits.some((a) => a.action === 'Exported member record')).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses an ASSESSOR whom the defaults admit to the record in full (AE25)', async () => {
+    /*
+      The assessor default is a read of every section plus approval, so this
+      caller sees the whole record on the profile route — and still cannot
+      export it. Export is not a stronger read; it is a different act.
+    */
+    const { audits } = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.assessor });
+    const { server, base } = startApp();
+    try {
+      expect((await exportFor(base, assessor)).status).toBe(403);
+      expect(audits.some((a) => a.action === 'Exported member record')).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses the CANDIDATE reading their own record in full (R54)', async () => {
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate });
+    const { server, base } = startApp();
+    try {
+      expect((await exportFor(base, subjectCandidate)).status).toBe(403);
+      expect((await exportFor(base, otherCandidate)).status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses even where the organisation has loosened the matrix as far as it goes', async () => {
+    // No matrix setting grants export, so a fully-open `profiles` category
+    // changes nothing here. The tempting implementation is an `export` action
+    // on the category, and this is why it would be wrong.
+    fakeDb({
+      matrix: {
+        ...DEFAULT_ROLE_PERMISSIONS.assessor,
+        profiles: { view: true, edit: true, approve: true, view_documents: true, view_competencies: true },
+      } as PermissionMatrix,
+    });
+    const { server, base } = startApp();
+    try {
+      expect((await exportFor(base, assessor)).status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets an OWNER export, as the level holding everything Admin holds', async () => {
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.owner });
+    const owner = { userId: 'u-owner', orgId: ORG, role: 'owner' as const };
+    const { server, base } = startApp();
+    try {
+      expect((await exportFor(base, owner)).status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('carries only the documents the record currently stands on (R31, R32)', async () => {
+    // A superseded or removed document is RETAINED as history but is not what
+    // this person holds today, and exporting it would misrepresent them.
+    fakeDb({
+      matrix: DEFAULT_ROLE_PERMISSIONS.admin,
+      grants: [GRANT],
+      documents: [
+        HELD_DOC,
+        { ...HELD_DOC, id: 'doc-old', state: 'superseded' },
+        { ...HELD_DOC, id: 'doc-gone', state: 'removed' },
+      ],
+      competencies: [COMPETENCY],
+    });
+    const { server, base } = startApp();
+    try {
+      const body = (await (await exportFor(base, admin)).json()) as { documents: Array<{ id: string }> };
+      expect(body.documents.map((d) => d.id)).toEqual(['doc-1']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for a membership belonging to another organisation', async () => {
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin, membershipOrg: 'org-2' });
+    const { server, base } = startApp();
+    try {
+      expect((await exportFor(base, admin)).status).toBe(404);
     } finally {
       server.close();
     }

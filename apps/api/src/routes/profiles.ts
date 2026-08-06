@@ -1,13 +1,16 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import {
   PROFILE_FIELDS,
   displayIdentityOf,
   indigenousStatusOf,
+  buildProfileExport,
+  exportedProfileFieldKeys,
   profileField,
   validateProfileFields,
+  type ExportedDocument,
 } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -36,10 +39,19 @@ import { db } from '../db.js';
 export const profilesRouter: Router = Router();
 
 /*
-  The unreachable mark is Admin-only and is NOT resolved through the matrix.
-  `profiles.edit` governs the record's fields; this is a note about the world
-  beside the record, and an organisation that lets a Reviewer correct a surname
-  has not thereby said a Reviewer may declare somebody uncontactable.
+  TWO acts on this router turn on the ACCESS LEVEL rather than the matrix, and
+  both deliberately.
+
+  The unreachable mark (R16): `profiles.edit` governs the record's fields, and
+  this is a note about the world beside the record — an organisation that lets a
+  Reviewer correct a surname has not thereby said a Reviewer may declare
+  somebody uncontactable.
+
+  The export (R54): it is the one act no configuration opens up. An `export`
+  action on the category would let an organisation grant the most sensitive act
+  in the product to any access level it liked, which is what R54 refuses.
+
+  Owner is admitted as the level holding everything Admin holds.
 */
 function isAdmin(role: string): boolean {
   return role === 'admin' || role === 'owner';
@@ -420,6 +432,135 @@ profilesRouter.put(
     });
 
     res.json({ membershipId: membership.id, unreachable });
+  }),
+);
+
+// ── GET /profiles/:membershipId/export ─────────────────────────────────────
+
+/**
+ * Export a member's record (U39, R54).
+ *
+ * THE GATE IS NOT A MATRIX LOOKUP. Export is the one act no configuration opens
+ * up, so it turns on the ADMIN ACCESS LEVEL — which admits an Owner as the level
+ * holding everything Admin holds, and admits nobody else. An assessor whom the
+ * shipped defaults admit to the profile IN FULL still cannot export it, and
+ * neither can the candidate reading their own record in full.
+ *
+ * The tempting implementation is an `export` action on the `profiles` category,
+ * and that would be wrong: it would let an organisation grant the most sensitive
+ * act in the product to any access level it liked, which is precisely what R54
+ * refuses.
+ *
+ * Nothing here is redacted. R54 admits only callers who hold every field, so
+ * every caller who reaches this line is released to sensitive detail by
+ * definition — the redaction lives in shared, over the inventory, for consumers
+ * this route does not have.
+ */
+profilesRouter.get(
+  '/:membershipId/export',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const membership = await membershipForProfile(db, tenant.orgId, req.params.membershipId!);
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const [profile, org, user] = await Promise.all([
+      db.query.memberProfiles.findFirst({
+        where: eq(schema.memberProfiles.membershipId, membership.id),
+      }),
+      db.query.organizations.findFirst({ where: eq(schema.organizations.id, tenant.orgId) }),
+      db.query.users.findFirst({ where: eq(schema.users.id, membership.userId) }),
+    ]);
+    if (!profile) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const dto = {
+      ...profileDto(profile, org?.displayIdentifier ?? 'employee_number'),
+      email: user?.email ?? null,
+    } as Record<string, unknown>;
+    const fields: Record<string, string | null> = {};
+    for (const key of exportedProfileFieldKeys()) {
+      const value = dto[key];
+      fields[key] = value == null ? null : String(value);
+    }
+
+    // The documents held against this person's competencies (R29). Carried
+    // unredacted — a licence that cannot be produced is not evidence.
+    const grants = await db.query.competencyHolders.findMany({
+      where: and(
+        eq(schema.competencyHolders.orgId, tenant.orgId),
+        eq(schema.competencyHolders.userId, membership.userId),
+      ),
+    });
+    const documents: ExportedDocument[] = [];
+    if (grants.length > 0) {
+      const rows = await db.query.competencyDocuments.findMany({
+        where: and(
+          eq(schema.competencyDocuments.orgId, tenant.orgId),
+          inArray(
+            schema.competencyDocuments.competencyHolderId,
+            grants.map((g) => g.id),
+          ),
+        ),
+      });
+      const competencies = await db.query.competencies.findMany({
+        where: eq(schema.competencies.orgId, tenant.orgId),
+      });
+      const nameFor = new Map(competencies.map((c) => [c.id, c.name]));
+      const competencyForHolder = new Map(grants.map((g) => [g.id, g.competencyId]));
+      for (const d of rows) {
+        // Only what the record currently stands on. A superseded or removed
+        // document is retained as history (R31, R32) but is not what this
+        // person holds today, and exporting it would misrepresent them.
+        if (d.state !== 'held') continue;
+        documents.push({
+          id: d.id,
+          fileName: d.fileName,
+          contentType: d.contentType,
+          competencyName: nameFor.get(competencyForHolder.get(d.competencyHolderId) ?? '') ?? 'a competency',
+          storageKey: d.storageKey,
+        });
+      }
+    }
+
+    /*
+      R54's audit line, and the unredacted files are what make it necessary: a
+      licence image carries a date of birth, an address and a photograph, so a
+      leak has to be traceable.
+
+      Traceable to WHOM is half the answer. The entry names the exported member
+      as its subject alongside the actor and the moment, because "who ran an
+      export" without "whose record left" cannot answer the question asked after
+      an incident.
+    */
+    await recordAudit(db, tenant, {
+      action: 'Exported member record',
+      target: membership.id,
+      category: 'profiles',
+      icon: 'download',
+    });
+
+    res.json(
+      buildProfileExport({
+        membershipId: membership.id,
+        fields,
+        documents,
+        exportedAt: new Date(),
+      }),
+    );
   }),
 );
 
