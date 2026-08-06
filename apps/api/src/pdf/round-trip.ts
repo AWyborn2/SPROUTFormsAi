@@ -18,6 +18,7 @@ import {
   isChoiceField,
   isFileRef,
   isMatchingQuestion,
+  isSelfAnswering,
   markPlacement,
   resolveAnswerSets,
   selectedOption,
@@ -156,16 +157,14 @@ const RING_PAD = 1.6;
 /** A ring below this radius reads as a blob rather than a circle. */
 const RING_MIN_RADIUS = 4;
 
-/**
- * Field and column types whose `false` is a RECORDED answer rather than an empty
- * cell — read by both the repeating-column path and the scalar one.
- *
- * A plain `checkbox` that is false is simply unticked, and drawing anything
- * would invent an answer. A `check_cross` that is false is an assessor saying
- * "I checked this and it failed" — exporting that as blank made it identical
- * to never-assessed on the one artefact an investigation actually reads.
- */
-const SELF_ANSWERING = new Set(['check_cross', 'boolean_yes_no']);
+/*
+  WHICH TYPES SELF-ANSWER is `isSelfAnswering` in `@formai/shared`, read here by
+  both the repeating-column path and the scalar one. The list used to be written
+  out in this file and again in the web app, and the builder's outcome-box
+  picker was about to write it a third time — a picker offering a target THIS
+  file would not draw in is a mark an author believes is on a competency record
+  and is not.
+*/
 
 /**
  * Draw a tick or a cross as vector strokes.
@@ -432,7 +431,7 @@ export async function roundTripExport({
       must not draw, because a glyph there asserts an assessment that never
       happened.
     */
-    if (SELF_ANSWERING.has(field.type)) {
+    if (isSelfAnswering(field.type)) {
       const verdict = verdictOf(value);
       if (verdict === undefined) continue;
       /*
@@ -835,7 +834,7 @@ function drawRepeatingGroup(
         if (groupedKeys.has(col.key)) continue; // already handled by its answer set
         const raw = row[col.key];
 
-        if (SELF_ANSWERING.has(col.type)) {
+        if (isSelfAnswering(col.type)) {
           // Only a real boolean is an answer here; null/'' is untouched and must
           // stay blank. `false` is a recorded fail and MUST leave a mark.
           if (typeof raw !== 'boolean') continue;

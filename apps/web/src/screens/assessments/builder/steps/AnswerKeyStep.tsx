@@ -5,6 +5,7 @@ import {
   hasBothMatchSides,
   isChoiceField,
   isMatchingQuestion,
+  isSelfAnswering,
   type DraftAnswerKey,
   type FormField,
   type FormFieldType,
@@ -61,6 +62,20 @@ export interface AnswerKeyStepProps {
 export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
   const { fields, keys, excluded, keyOps, extraction } = draft;
   const [pairingFor, setPairingFor] = useState<string | null>(null);
+
+  /*
+    Every box a derived ✓/✗ could land in.
+
+    `isSelfAnswering` is the EXPORTER'S list, not one written here. A target
+    outside it passes `validateAnswerKeys` — which only checks the field exists
+    — and then draws nothing, so the mark computes, validates, publishes, and
+    never reaches the page. Offering only what the exporter marks is what makes
+    that state unreachable from this screen.
+  */
+  const outcomeBoxes = useMemo(
+    () => fields.filter((f) => isSelfAnswering(f.type) && !excluded.has(f.id)),
+    [fields, excluded],
+  );
 
   /** The extracted counterpart, which is where the matching sides live. */
   const extractedById = useMemo(
@@ -303,6 +318,42 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
               </p>
             ) : (
               <OptionKeys question={question} draftKey={key} onToggle={keyOps.toggleOption} />
+            )}
+
+            {/*
+              WHERE THE MARK LANDS, on the step that decides what the mark IS.
+
+              The automatic route pairs a question with its outcome box by the
+              printed reference both carry — right by default, and blind to a
+              box the extraction MISSED, because nothing read a reference off a
+              box nobody read. That case ends at publish as "has an answer key
+              but no outcome box to write its mark into", with no control
+              anywhere that could answer it. This is that control.
+
+              Hidden when the document has no ✓/✗ boxes at all: a select whose
+              only entry is "Automatic" asks the author to choose between one
+              thing and nothing, and the publish gate already says what is
+              actually wrong.
+            */}
+            {!question.assessorVerdict && outcomeBoxes.length > 0 && (
+              <label className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[11px] text-text-tertiary">
+                Mark lands in
+                <select
+                  aria-label={`Outcome box for ${question.label}`}
+                  value={question.outcomeTarget?.fieldId ?? ''}
+                  onChange={(e) =>
+                    draft.fieldOps.setOutcomeTarget(question.id, e.target.value || null)
+                  }
+                  className="h-[26px] max-w-[260px] rounded-lg border border-border bg-surface-page px-2 text-[11px] text-text-secondary"
+                >
+                  <option value="">Automatic — from the printed reference</option>
+                  {outcomeBoxes.map((box) => (
+                    <option key={box.id} value={box.id}>
+                      {box.label || box.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
             )}
 
             {key && (

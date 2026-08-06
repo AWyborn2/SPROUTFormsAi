@@ -53,6 +53,7 @@ function setup(over: Partial<StructurePanelProps> = {}) {
     onSetFieldType: vi.fn(),
     onGroup: vi.fn(),
     onAddField: vi.fn(),
+    onRenameField: vi.fn(),
     onDeleteField: vi.fn(),
     onFoldField: vi.fn(),
     ...over,
@@ -169,9 +170,9 @@ describe('StructurePanel', () => {
 
   describe('the type palette', () => {
     it('offers what the shared guard allows, not a list of its own', () => {
-      // `typeOptionsFor` on a scalar returns the authorable types only —
-      // no repeating_group, checkbox_group, boolean_yes_no or check_cross,
-      // each of which needs payload only extraction can supply.
+      // `typeOptionsFor` on a scalar returns the authorable types only — no
+      // repeating_group, checkbox_group or boolean_yes_no, each of which needs
+      // payload only extraction can supply.
       setup();
       expand('Candidate declaration');
       fireEvent.click(screen.getByRole('button', { name: 'Change type of Candidate name' }));
@@ -180,6 +181,25 @@ describe('StructurePanel', () => {
       expect(screen.getByRole('button', { name: /Paragraph/ })).toBeTruthy();
       expect(screen.queryByRole('button', { name: /Repeating table/ })).toBeNull();
       expect(screen.queryByRole('button', { name: /Checkbox group/ })).toBeNull();
+    });
+
+    it('OFFERS CHECK / CROSS, WHICH IS WHAT AN OUTCOME BOX IS', () => {
+      /*
+        This assertion inverts a rule this list used to carry. `check_cross`
+        was excluded as "a table CELL affordance" — true of a repeating-group
+        column, false of the field type, which is what a printed outcome box is
+        extracted as.
+
+        The cost was concrete: extraction misses outcome boxes on a dense paper,
+        and the field an author added to fix that could never BE one, because
+        the only type that draws a verdict was the one type the palette refused
+        to offer.
+      */
+      setup();
+      expand('Candidate declaration');
+      fireEvent.click(screen.getByRole('button', { name: 'Change type of Candidate name' }));
+
+      expect(screen.getByRole('button', { name: /Check \/ Cross/ })).toBeTruthy();
     });
 
     it('keeps a structural field’s own type in its list, so it can be seen', () => {
@@ -346,5 +366,84 @@ describe('StructurePanel — correcting what the extraction got wrong', () => {
 
     expect(screen.queryByRole('button', { name: /Fold Candidate name/ })).toBeNull();
     expect(screen.getByRole('button', { name: /Fold Employee ID/ })).toBeTruthy();
+  });
+
+  describe('renaming a field', () => {
+    it('reports every keystroke, so the draft holds what was typed', () => {
+      /*
+        The gap this closes sits directly beside "add a field". `addField`
+        creates "New field" because there is no printed label to copy — the box
+        was MISSED — and with no rename that string was permanent. The published
+        form said "New field" where the paper says "Assessment Result", on the
+        cell an auditor reads first.
+      */
+      const { props } = setup();
+      expand('Candidate declaration');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Rename Candidate name' }));
+      fireEvent.change(screen.getByLabelText('Field name'), {
+        target: { value: 'Assessment Result' },
+      });
+
+      expect(props.onRenameField).toHaveBeenCalledWith('a', 'Assessment Result');
+    });
+
+    it('DROPS `draggable` WHILE RENAMING', () => {
+      /*
+        Every row is draggable, and a draggable ancestor swallows the pointer
+        gestures that place a caret and select text — an input inside one is
+        typable but not editable. That is a worse affordance than no rename at
+        all, because it looks like it works.
+      */
+      setup();
+      expand('Candidate declaration');
+      const row = screen.getByText('Candidate name').closest('[draggable]')!;
+      expect(row.getAttribute('draggable')).toBe('true');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Rename Candidate name' }));
+
+      const editing = screen.getByLabelText('Field name').closest('div')!;
+      expect(editing.getAttribute('draggable')).toBe('false');
+    });
+
+    it('renames ONE field at a time', () => {
+      // The input's accessible name is fixed rather than tracking the label it
+      // edits — which only stays unique because a second row cannot open one.
+      setup();
+      expand('Candidate declaration');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Rename Candidate name' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Rename Employee ID' }));
+
+      expect(screen.getAllByLabelText('Field name')).toHaveLength(1);
+    });
+
+    it('closes on Enter and puts the label back', () => {
+      setup();
+      expand('Candidate declaration');
+      fireEvent.click(screen.getByRole('button', { name: 'Rename Candidate name' }));
+
+      fireEvent.keyDown(screen.getByLabelText('Field name'), { key: 'Enter' });
+
+      expect(screen.queryByLabelText('Field name')).toBeNull();
+      expect(screen.getByText('Candidate name')).toBeTruthy();
+    });
+
+    it('closes on Escape without reverting what was already reported', () => {
+      /*
+        Escape closes the editor; it does not undo. Every keystroke has already
+        gone to the draft, and an Escape that silently rolled back would be the
+        only place in this panel where a visible edit is not the stored one.
+      */
+      const { props } = setup();
+      expand('Candidate declaration');
+      fireEvent.click(screen.getByRole('button', { name: 'Rename Candidate name' }));
+      fireEvent.change(screen.getByLabelText('Field name'), { target: { value: 'Typed' } });
+
+      fireEvent.keyDown(screen.getByLabelText('Field name'), { key: 'Escape' });
+
+      expect(screen.queryByLabelText('Field name')).toBeNull();
+      expect(props.onRenameField).toHaveBeenCalledWith('a', 'Typed');
+    });
   });
 });
