@@ -64,7 +64,9 @@ export interface Booking {
   bookedByUserId: string | null;
   bookedByApiKeyId: string | null;
   createdAt: string;
-  starters: { submissionId: string; starterName: string }[];
+  /** True only when every seat on the booking has been confirmed. */
+  confirmed: boolean;
+  starters: { submissionId: string; starterName: string; confirmedAt: string | null }[];
 }
 
 export class InductionsClient {
@@ -175,6 +177,21 @@ export class InductionsClient {
 
   listBookings(date?: string) {
     return this.request<{ bookings: Booking[] }>('/inductions/bookings', { date });
+  }
+
+  /**
+   * Records the human's pre-induction confirmation for a booking's seats.
+   *
+   * Omitting `submissionIds` confirms every starter on the booking. Idempotent:
+   * a seat already confirmed keeps its first timestamp and actor, and comes
+   * back under `alreadyConfirmed` rather than as an error.
+   */
+  confirmBooking(bookingId: string, submissionIds?: string[]) {
+    return this.request<Booking & { newlyConfirmed: string[]; alreadyConfirmed: string[] }>(
+      `/inductions/bookings/${encodeURIComponent(bookingId)}/confirm`,
+      {},
+      { method: 'POST', body: JSON.stringify(submissionIds ? { submissionIds } : {}) },
+    );
   }
 }
 

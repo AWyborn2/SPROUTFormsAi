@@ -85,6 +85,21 @@ describe('InductionsClient', () => {
     expect(JSON.parse(init.body as string).submissionIds).toEqual(['s1', 's2']);
   });
 
+  it('posts a confirmation to the booking path, with the subset only when given', async () => {
+    const all = vi.fn(async () => respond(200, { id: 'b1', confirmed: true }));
+    const subset = vi.fn(async () => respond(200, { id: 'b1', confirmed: false }));
+    await client(all as unknown as typeof fetch).confirmBooking('b/1');
+    await client(subset as unknown as typeof fetch).confirmBooking('b1', ['s1', 's2']);
+
+    const [allUrl, allInit] = all.mock.calls[0] as unknown as [string, RequestInit];
+    expect(allUrl).toContain('/inductions/bookings/b%2F1/confirm');
+    expect(allInit.method).toBe('POST');
+    expect(JSON.parse(allInit.body as string)).toEqual({});
+
+    const [, subsetInit] = subset.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(subsetInit.body as string)).toEqual({ submissionIds: ['s1', 's2'] });
+  });
+
   it('raises the API error code rather than returning an empty result', async () => {
     const fetchImpl = vi.fn(async () => respond(401, { error: 'unauthenticated' }));
     await expect(client(fetchImpl as unknown as typeof fetch).listCandidates({})).rejects.toMatchObject({

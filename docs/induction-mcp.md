@@ -75,7 +75,7 @@ able to reach the API over the network.
 ### Hosted client (Cowork, or anything not on your machine) — HTTP
 
 A hosted client cannot spawn a local process, so stdio is not an option. The
-same six tools are served over Streamable HTTP at `/mcp` on the API itself:
+same tools are served over Streamable HTTP at `/mcp` on the API itself:
 
 ```
 https://your-formai-host/api/mcp
@@ -199,6 +199,33 @@ forgetting a permission check.
 4. `record_induction_booking` — record what was booked, with the BISTrainer
    reference. Those starters then show as `already_booked`, so a second run
    cannot book them again.
+5. `confirm_induction_booking` — after the human's pre-induction check, record
+   that the booking stands. See below.
+
+## Confirming a booking
+
+A recorded booking is **tentative**. The seat exists in BISTrainer, but whether
+the starter will actually be ready on the day is settled by a human check close
+to the induction — at CHC, the 2pm Thursday gate check before the Monday. The
+product stores the *result* of that check, never its substance: what gets
+verified is the operator's own checklist, outside this system.
+
+- Each starter seat carries `confirmedAt` (and who confirmed it, in the audit
+  log). A booking's `confirmed` flag is true only when **every** seat on it is
+  confirmed — a cohort can be partially ready, and the flag will say so.
+- `confirm_induction_booking` takes the booking id, and optionally
+  `submissionIds` to confirm a subset of seats.
+- It is **idempotent**: confirming an already-confirmed seat keeps the first
+  timestamp and reports the seat under `alreadyConfirmed`, so a retried call is
+  a no-op rather than an error.
+- Every confirmation writes an audit entry naming the booking date and the
+  starters confirmed, in the same shape as the booking-write entry.
+
+One rule matters more than the mechanics: **confirmation records a human
+decision.** An agent must never call the tool because a booking looks ready or
+to tidy a list. If no human has said "confirmed", the booking stays
+unconfirmed — and that is the accurate record, which is exactly what lets a
+watchdog chase the check before the deadline instead of after it.
 
 ## Overriding the notice rule
 
