@@ -68,6 +68,37 @@ export function CasePartFillScreen() {
     [values, attempt?.locationStream, attempt?.locationStreamFieldId, attempt?.streamField],
   );
 
+  /**
+   * The fields this candidate actually sees, after location-stream gating.
+   *
+   * A hook, and ABOVE the early returns below, because every hook in this
+   * component must run on every render — the first render of a fresh
+   * navigation always takes the `isLoading` return, so anything below it would
+   * be a hook the first render never ran. Null-safe on `attempt` for the same
+   * reason: on that first render there is no attempt yet.
+   */
+  const rendered = useMemo(
+    () => (attempt ? visibleFillFields(attempt.fields, answers, sources) : []),
+    [attempt, answers, sources],
+  );
+
+  /*
+    ONE QUESTION PER SCREEN, WHEN THE TOOL SAYS SO (U21).
+
+    Presentation only: every field still renders through the same `FieldInput`,
+    writes the same value to the same id, and is gated by the same
+    `writableFieldIds` the server decided. The paging is a WINDOW over
+    `rendered`, not a different list, so nothing about marking, storage or the
+    evidence export can tell which presentation a candidate used.
+
+    The choice comes off the tool's manifest, made once by the author in the
+    builder. Absent means stacked, which is what every theory part rendered as
+    before this existed.
+  */
+  const paged = attempt?.theoryRendering === 'one_per_screen' && attempt?.partKind === 'theory';
+  const pages = useMemo(() => (paged ? theoryPages(rendered) : []), [paged, rendered]);
+  const [pageIndex, setPageIndex] = useState(0);
+
   if (isLoading) {
     return <div className="p-[30px_28px] text-sm text-text-tertiary">Loading…</div>;
   }
@@ -98,24 +129,7 @@ export function CasePartFillScreen() {
   const marked = attempt.outcome !== null;
   const handedIn = attempt.submittedAt !== null;
   const readOnly = marked || handedIn;
-  const rendered = visibleFillFields(attempt.fields, answers, sources);
 
-  /*
-    ONE QUESTION PER SCREEN, WHEN THE TOOL SAYS SO (U21).
-
-    Presentation only: every field still renders through the same `FieldInput`,
-    writes the same value to the same id, and is gated by the same
-    `writableFieldIds` the server decided. The paging is a WINDOW over
-    `rendered`, not a different list, so nothing about marking, storage or the
-    evidence export can tell which presentation a candidate used.
-
-    The choice comes off the tool's manifest, made once by the author in the
-    builder. Absent means stacked, which is what every theory part rendered as
-    before this existed.
-  */
-  const paged = attempt.theoryRendering === 'one_per_screen' && attempt.partKind === 'theory';
-  const pages = useMemo(() => (paged ? theoryPages(rendered) : []), [paged, rendered]);
-  const [pageIndex, setPageIndex] = useState(0);
   /*
     Clamped on READ rather than reset on change: a question answered on the last
     page can make an earlier one visible or hidden, and snapping the candidate
