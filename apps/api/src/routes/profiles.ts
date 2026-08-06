@@ -138,11 +138,12 @@ profilesRouter.get(
       return;
     }
 
-    const [profile, org] = await Promise.all([
+    const [profile, org, user] = await Promise.all([
       db.query.memberProfiles.findFirst({
         where: eq(schema.memberProfiles.membershipId, membership.id),
       }),
       db.query.organizations.findFirst({ where: eq(schema.organizations.id, tenant.orgId) }),
+      db.query.users.findFirst({ where: eq(schema.users.id, membership.userId) }),
     ]);
     if (!profile) {
       res.status(404).json({ error: 'not_found' });
@@ -150,7 +151,24 @@ profilesRouter.get(
     }
 
     res.json({
-      profile: profileDto(profile, org?.displayIdentifier ?? 'employee_number'),
+      profile: {
+        ...profileDto(profile, org?.displayIdentifier ?? 'employee_number'),
+        /*
+          The inventory lists Email as a required field, but it is stored on
+          `users` — unique product-wide and the person-record lookup key (R16),
+          which is exactly why it is not on the profile row. Read from there so
+          the record renders it rather than showing the field blank; it is not
+          writable through this route, and `editableFields` already says so.
+        */
+        email: user?.email ?? null,
+      },
+      /*
+        The PERSON behind the membership. Competency grants and assessment cases
+        are recorded against the user, not the membership, so a screen showing
+        both needs this — and deriving it client-side would mean a second lookup
+        for something this call already holds.
+      */
+      userId: membership.userId,
       /*
         What this reader may do, so the screen renders the sections it is
         admitted to rather than guessing and 403ing on click.

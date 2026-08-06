@@ -130,6 +130,12 @@ const keys = {
   taxonomy: ['taxonomy'] as const,
   formBrands: ['formBrands'] as const,
   memberPlacement: (id: string) => ['members', id, 'placement'] as const,
+  /** One member's profile, keyed on the MEMBERSHIP the record belongs to (R1). */
+  profile: (membershipId: string) => ['profiles', membershipId] as const,
+  /** The caller's own membership id, for the fixed own-record read (R49). */
+  myProfileMembership: ['profiles', 'mine'] as const,
+  /** One person's held competencies, keyed on the USER the grants belong to. */
+  heldCompetencies: (userId: string) => ['competencies', 'held', userId] as const,
 };
 
 /**
@@ -1430,5 +1436,58 @@ export function useSetMemberPlacement() {
       void qc.invalidateQueries({ queryKey: keys.memberPlacement(input.membershipId) });
       void qc.invalidateQueries({ queryKey: keys.auditLog });
     },
+  });
+}
+
+/* ── Member profile (U29, U38) ────────────────────────────────────────────── */
+
+/**
+ * One member's record, with what THIS reader may do with it.
+ *
+ * The access block comes back from the same call rather than being inferred
+ * here, so the screen renders the sections it is admitted to instead of
+ * guessing and 403ing on click (R44).
+ */
+export function useProfile(membershipId: string | undefined) {
+  return useQuery({
+    queryKey: keys.profile(membershipId ?? ''),
+    queryFn: () => store.getProfile(membershipId!),
+    enabled: !!membershipId,
+    // A record the caller may not read is a settled answer, not a blip.
+    retry: false,
+  });
+}
+
+/** The caller's own membership id — the candidate's fixed own-record path (R49). */
+export function useMyProfileMembership() {
+  return useQuery({
+    queryKey: keys.myProfileMembership,
+    queryFn: () => store.getMyProfileMembership(),
+  });
+}
+
+export function useSaveProfile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { membershipId: string; values: Record<string, string>; create?: boolean }) =>
+      input.create
+        ? store.createProfile(input.membershipId, input.values)
+        : store.updateProfile(input.membershipId, input.values),
+    onSuccess: (_data, input) => {
+      void qc.invalidateQueries({ queryKey: keys.profile(input.membershipId) });
+      // A profile edit can clear an owed-file item and always writes an audit
+      // entry, so both surfaces are stale the moment this returns.
+      void qc.invalidateQueries({ queryKey: keys.workingList });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** One person's held competencies, with standing beside currency (U38, R37). */
+export function useHeldCompetencies(userId: string | undefined) {
+  return useQuery({
+    queryKey: keys.heldCompetencies(userId ?? ''),
+    queryFn: () => store.getHeldCompetencies(userId!),
+    enabled: !!userId,
   });
 }

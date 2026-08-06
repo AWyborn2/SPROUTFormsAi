@@ -64,6 +64,8 @@ import type {
   SubmissionDetail,
   SubmissionRow,
   MemberPlacement,
+  ProfileResponse,
+  HeldCompetencyRow,
   Taxonomy,
   ExpiryNotice,
   WorkingListItem,
@@ -1058,6 +1060,29 @@ export const store = {
   },
   updateTaxonomySettings(patch: Partial<TaxonomySettings>): Promise<TaxonomySettings> {
     return apiClient.patch<TaxonomySettings>('/taxonomy/settings', patch);
+  },
+  /**
+   * One person's held competencies, each with its standing and its currency
+   * (U38, R37, R104). The API resolves the currency on the CALLER's audience
+   * window, so a candidate reading their own record sees the thirty-day warning
+   * and everybody else the assessor's ninety.
+   */
+  getHeldCompetencies(userId: string): Promise<HeldCompetencyRow[]> {
+    return apiClient.get<HeldCompetencyRow[]>(`/competencies/held/${userId}`);
+  },
+  /** A member's record as this reader is admitted to it (U29, U38). */
+  getProfile(membershipId: string): Promise<ProfileResponse> {
+    return apiClient.get<ProfileResponse>(`/profiles/${membershipId}`);
+  },
+  /** The caller's own membership id, for the fixed own-record read (R49). */
+  getMyProfileMembership(): Promise<{ membershipId: string }> {
+    return apiClient.get<{ membershipId: string }>('/profiles/');
+  },
+  createProfile(membershipId: string, values: Record<string, string>): Promise<{ membershipId: string }> {
+    return apiClient.post<{ membershipId: string }>(`/profiles/${membershipId}`, values);
+  },
+  updateProfile(membershipId: string, values: Record<string, string>): Promise<{ membershipId: string }> {
+    return apiClient.patch<{ membershipId: string }>(`/profiles/${membershipId}`, values);
   },
   getMemberPlacement(membershipId: string): Promise<MemberPlacement> {
     return apiClient.get<MemberPlacement>(`/team/members/${membershipId}/placement`);
