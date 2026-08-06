@@ -19,6 +19,7 @@ import {
   useStopOfferingRole,
   useTaxonomy,
   useTighteningReview,
+  useTransferDepartment,
   useTransferLocation,
   useTransferRole,
   useUpdateDepartment,
@@ -80,9 +81,9 @@ export function TaxonomyScreen() {
 /**
  * The people still holding a retired value, and the ways out (U18). Shown only
  * when the review has anybody in it — a value returned to active empties it
- * (R123). A retired Location or Role offers a bulk transfer to a replacement; a
- * Location transfer additionally chooses what happens to in-flight cases (R133),
- * a Role transfer leaves cases untouched (R135).
+ * (R123). Every axis offers a bulk transfer to a replacement; a Location transfer
+ * additionally chooses what happens to in-flight cases (R133), while a Role or
+ * Department transfer leaves cases untouched (R135).
  */
 function RetirementReviewPanel({
   taxonomy,
@@ -98,6 +99,7 @@ function RetirementReviewPanel({
 
   const activeLocations = taxonomy.locations.filter((l) => l.status === 'active');
   const activeRoles = taxonomy.departments.flatMap((d) => d.roles.filter((r) => r.status === 'active'));
+  const activeDepartments = taxonomy.departments.filter((d) => d.status === 'active');
 
   return (
     <Card className="p-5">
@@ -131,9 +133,11 @@ function RetirementReviewPanel({
         ))}
         {review.departments.map((value) => (
           <RetiredValueRow key={`dep-${value.id}`} label="Department" value={value}>
-            <span className="text-[11px] text-text-tertiary">
-              Reassign these people to another Department on the team screen.
-            </span>
+            <DepartmentTransferControl
+              value={value}
+              options={activeDepartments.filter((d) => d.id !== value.id)}
+              onError={onError}
+            />
           </RetiredValueRow>
         ))}
       </div>
@@ -278,6 +282,57 @@ function RoleTransferControl({
         onClick={() =>
           transfer.mutate(
             { roleId: value.id, replacementRoleId: replacementId },
+            {
+              onSuccess: () => toast({ variant: 'success', message: `Moved off ${value.name}.` }),
+              onError,
+            },
+          )
+        }
+      >
+        Transfer
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * Transfer everyone off a retired Department to a replacement (R135). Each
+ * person's placement moves to the replacement and the retired Department's held
+ * Roles are withdrawn from them — they land in the new Department with no Roles,
+ * to be given its Roles on the team screen. Cases are left untouched, as with a
+ * Role transfer, so there is no case-outcome choice here.
+ */
+function DepartmentTransferControl({
+  value,
+  options,
+  onError,
+}: {
+  value: RetiredValueReview;
+  options: TaxDepartment[];
+  onError: (e: unknown) => void;
+}) {
+  const { toast } = useToast();
+  const transfer = useTransferDepartment();
+  const [replacementId, setReplacementId] = useState(options[0]?.id ?? '');
+
+  if (options.length === 0) {
+    return <span className="text-[11px] text-text-tertiary">Add an active Department to transfer to.</span>;
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <Select
+        aria-label={`Replacement Department for ${value.name}`}
+        value={replacementId}
+        onChange={(e) => setReplacementId(e.target.value)}
+        options={options.map((d) => ({ label: d.name, value: d.id }))}
+      />
+      <Button
+        size="sm"
+        disabled={!replacementId || transfer.isPending}
+        onClick={() =>
+          transfer.mutate(
+            { departmentId: value.id, replacementDepartmentId: replacementId },
             {
               onSuccess: () => toast({ variant: 'success', message: `Moved off ${value.name}.` }),
               onError,

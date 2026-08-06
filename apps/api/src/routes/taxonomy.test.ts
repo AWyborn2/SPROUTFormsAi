@@ -1063,3 +1063,97 @@ describe('Role transfer (U18, R135)', () => {
     server.close();
   });
 });
+
+describe('Department transfer (U18, R135)', () => {
+  const DEP_X = '00000000-0000-4000-8000-00000000b001';
+  const DEP_Y = '00000000-0000-4000-8000-00000000b002';
+  const ROLE_A = '00000000-0000-4000-8000-00000000d001';
+  const M1 = '00000000-0000-4000-8000-00000000e001';
+  const U1 = '00000000-0000-4000-8000-00000000f001';
+
+  it('repoints the placement, withdraws the Department’s Roles, and touches no case (R135)', async () => {
+    const { db, updateSet, insertValues } = fakeDb({
+      departmentsFindFirst: { id: DEP_X, orgId: 'org-1', name: 'Old Dept', status: 'retired', createdAt: new Date() },
+      heldDepartments: [{ id: 'md-x', membershipId: M1, departmentId: DEP_X }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+      // The retired Department's Roles — withdrawn on the way out.
+      jobRolesFindMany: [{ id: ROLE_A, orgId: 'org-1', departmentId: DEP_X, status: 'active' }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/departments/${DEP_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementDepartmentId: DEP_Y }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ peopleMoved: 1 });
+    // Placement repointed to the replacement Department.
+    expect(updateSet).toHaveBeenCalledWith(schema.membershipDepartments, { departmentId: DEP_Y });
+    // The Department's held Role withdrawn (marked, not deleted).
+    expect(updateSet).toHaveBeenCalledWith(
+      schema.membershipRoles,
+      expect.objectContaining({ withdrawnAt: expect.any(Date) }),
+    );
+    // No case is touched.
+    expect(updateSet).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());
+    expect(insertValues).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());
+    server.close();
+  });
+
+  it('drops the retired row when the person already holds the replacement Department', async () => {
+    const { db, updateSet, deleteWhere } = fakeDb({
+      departmentsFindFirst: { id: DEP_X, orgId: 'org-1', name: 'Old Dept', status: 'retired', createdAt: new Date() },
+      heldDepartments: [
+        { id: 'md-x', membershipId: M1, departmentId: DEP_X },
+        { id: 'md-y', membershipId: M1, departmentId: DEP_Y },
+      ],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/departments/${DEP_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementDepartmentId: DEP_Y }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ peopleMoved: 1 });
+    // Already holds DEP_Y → drop the DEP_X row rather than repoint into a clash.
+    expect(deleteWhere).toHaveBeenCalledWith(schema.membershipDepartments, expect.anything());
+    expect(updateSet).not.toHaveBeenCalledWith(
+      schema.membershipDepartments,
+      expect.objectContaining({ departmentId: DEP_Y }),
+    );
+    server.close();
+  });
+
+  it('refuses transferring a Department to itself', async () => {
+    const { db } = fakeDb({
+      departmentsFindFirst: { id: DEP_X, orgId: 'org-1', name: 'Old Dept', status: 'retired', createdAt: new Date() },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/departments/${DEP_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementDepartmentId: DEP_X }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'same_department' });
+    server.close();
+  });
+
+  it('refuses a Builder (R12)', async () => {
+    const { db } = fakeDb({});
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/departments/${DEP_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(builder) },
+      body: JSON.stringify({ replacementDepartmentId: DEP_Y }),
+    });
+    expect(res.status).toBe(403);
+    server.close();
+  });
+});
