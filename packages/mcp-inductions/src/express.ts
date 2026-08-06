@@ -34,6 +34,13 @@ export interface InductionMcpRouterOptions {
    */
   apiUrl: string;
   /**
+   * The public base for links handed back to the caller. The loopback
+   * `apiUrl` above is right for the tools' own calls and wrong for anything a
+   * caller will fetch: a document link composed from it points at
+   * 127.0.0.1, which only this host can reach.
+   */
+  publicApiUrl?: string;
+  /**
    * How to read the caller's API key off the request. Defaults to the
    * `Authorization` header; a mount whose credential arrives another way (the
    * URL-credentialed connector door) supplies its own reader.
@@ -56,7 +63,9 @@ export function inductionMcpRouter(options: InductionMcpRouterOptions): Router {
       return;
     }
 
-    const server = buildServer(new InductionsClient({ apiUrl: options.apiUrl, apiKey }));
+    const server = buildServer(
+      new InductionsClient({ apiUrl: options.apiUrl, publicApiUrl: options.publicApiUrl, apiKey }),
+    );
     const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 
     // A client that hangs up mid-response would otherwise leave the transport
