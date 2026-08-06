@@ -449,3 +449,97 @@ describe('AnswerKeyStep — assessor verdicts', () => {
     expect(screen.getByLabelText('Question type for Assessment Result')).toBeTruthy();
   });
 });
+
+describe('AnswerKeyStep — where a question’s mark lands', () => {
+  it('POINTS A QUESTION AT A BOX THE AUTHOR CREATED', async () => {
+    /*
+      THE CASE THIS EXISTS FOR. `linkOutcomeTargets` pairs a question with its
+      outcome box by the printed reference BOTH carry. A box the extraction
+      missed has none — nothing read a reference off a box nobody read — so the
+      field an author adds to fix the gap is invisible to the automatic route,
+      and the author meets that at publish as "has an answer key but no outcome
+      box to write its mark into", with no control anywhere that answers it.
+    */
+    const result = await draftOf([
+      field({ id: 'q1', label: 'Which sign means STOP?' }),
+      field({ id: 'o1', label: 'Assessment Result', type: 'check_cross', options: undefined }),
+    ]);
+    renderStep(result);
+
+    fireEvent.change(screen.getByLabelText('Outcome box for Which sign means STOP?'), {
+      target: { value: 'o1' },
+    });
+
+    expect(result.current.fields.find((f) => f.id === 'q1')!.outcomeTarget).toEqual({
+      fieldId: 'o1',
+    });
+  });
+
+  it('goes back to automatic when the author clears it', async () => {
+    const result = await draftOf([
+      field({ id: 'q1', label: 'Which sign means STOP?' }),
+      field({ id: 'o1', label: 'Assessment Result', type: 'check_cross', options: undefined }),
+    ]);
+    renderStep(result);
+    const select = screen.getByLabelText('Outcome box for Which sign means STOP?');
+
+    fireEvent.change(select, { target: { value: 'o1' } });
+    fireEvent.change(select, { target: { value: '' } });
+
+    expect(result.current.fields.find((f) => f.id === 'q1')!.outcomeTarget).toBeUndefined();
+  });
+
+  it('OFFERS ONLY BOXES THE EXPORTER WOULD ACTUALLY MARK', async () => {
+    /*
+      `validateAnswerKeys` only checks the target field exists, so a text box
+      would pass validation, publish, and then draw nothing — a mark that
+      computes, ships, and never reaches the page. The list is
+      `isSelfAnswering`, which is the exporter's own.
+    */
+    const result = await draftOf([
+      field({ id: 'q1', label: 'Which sign means STOP?' }),
+      field({ id: 'o1', label: 'Assessment Result', type: 'check_cross', options: undefined }),
+      field({ id: 'notes', label: 'Assessor notes', type: 'text', options: undefined }),
+    ]);
+    renderStep(result);
+
+    const options = Array.from(
+      screen
+        .getByLabelText('Outcome box for Which sign means STOP?')
+        .querySelectorAll('option'),
+    ).map((o) => o.textContent);
+
+    expect(options).toContain('Assessment Result');
+    expect(options).not.toContain('Assessor notes');
+  });
+
+  it('offers no picker at all when the document has no ✓/✗ box', async () => {
+    /*
+      A select whose only entry is "Automatic" asks the author to choose between
+      one thing and nothing. The publish gate already says what is actually
+      wrong, which is that there is no outcome box anywhere.
+    */
+    const result = await draftOf([field({ id: 'q1', label: 'Which sign means STOP?' })]);
+    renderStep(result);
+
+    expect(screen.queryByLabelText(/^Outcome box for/)).toBeNull();
+  });
+
+  it('does not ask where an assessor verdict lands, because it derives no mark', async () => {
+    const result = await draftOf([
+      field({ id: 'q1', label: 'Assessment Result' }),
+      field({ id: 'o1', label: 'Outcome', type: 'check_cross', options: undefined }),
+    ]);
+    // Rendered twice rather than asserting a live update: the hook lives in its
+    // own `renderHook` root, so the step does not re-render when the draft
+    // changes underneath it — the same reason the verdict counter test does.
+    const first = renderStep(result);
+    expect(screen.getByLabelText('Outcome box for Assessment Result')).toBeTruthy();
+    first.unmount();
+
+    act(() => result.current.keyOps.setAssessorVerdict('q1', true));
+    renderStep(result);
+
+    expect(screen.queryByLabelText('Outcome box for Assessment Result')).toBeNull();
+  });
+});

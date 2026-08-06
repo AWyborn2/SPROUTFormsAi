@@ -57,6 +57,32 @@ export function isChoiceField(type: FormFieldType): boolean {
   return CHOICE_FIELD_TYPES.includes(type);
 }
 
+/**
+ * Types whose `false` is a RECORDED finding rather than an empty cell — the
+ * only types a derived ✓/✗ can actually land in.
+ *
+ * A plain `checkbox` that is false is simply unticked, and drawing anything
+ * would invent an answer. A `check_cross` that is false is an assessor saying
+ * "I checked this and it failed" — which on the one artefact an investigation
+ * reads must not be identical to never-assessed.
+ *
+ * THIS LIST WAS ALREADY WRITTEN TWICE — once in the PDF exporter, once in the
+ * web app's mark description — and a third copy was about to be written by the
+ * outcome-box picker. The exporter's copy is the one that decides whether a
+ * mark reaches paper, so a picker offering a target the exporter would not draw
+ * in is a mark an author believes is on a competency record and is not. One
+ * list makes that divergence unexpressible.
+ *
+ * `string` rather than `FormFieldType` because repeating-group COLUMN types are
+ * checked against the same rule, and a column's type is not a `FormFieldType`.
+ */
+export const SELF_ANSWERING_TYPES: readonly string[] = ['check_cross', 'boolean_yes_no'];
+
+/** Is this type's `false` a finding in its own right? */
+export function isSelfAnswering(type: string): boolean {
+  return SELF_ANSWERING_TYPES.includes(type);
+}
+
 /** Field source — how it got into the template. */
 export type FieldSource = 'built' | 'imported';
 

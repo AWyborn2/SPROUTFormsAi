@@ -22,7 +22,13 @@ import { apiClient, ApiError } from '../../../lib/data/api-client.js';
 import { fileToBase64, IMPORT_REQUEST_TIMEOUT_MS } from '../../../lib/data/import-session.js';
 import { retypeField } from '../../../lib/field-editor/reducer.js';
 import * as Structure from './builder-structure.js';
-import { addField, deleteField, mergeIntoDescription } from './builder-fields.js';
+import {
+  addField,
+  deleteField,
+  mergeIntoDescription,
+  renameField,
+  setOutcomeTarget,
+} from './builder-fields.js';
 import {
   buildManifest,
   derivePartsFromStructure,
@@ -163,10 +169,21 @@ export interface BuilderDraftState {
 export interface FieldOps {
   /** Add a field the extraction missed, after `afterFieldId` (null = first). */
   add: (sectionKey: string, afterFieldId: string | null, type: FormFieldType, label: string) => void;
+  /** Rename a field — including one `add` created as "New field". */
+  rename: (fieldId: string, label: string) => void;
   /** Delete a field the extraction invented, and every reference to it. */
   remove: (fieldId: string) => void;
   /** Fold a field into another's description — a printed instruction, not a box. */
   foldInto: (fieldId: string, targetFieldId: string) => void;
+  /**
+   * Point a question's derived ✓/✗ at the box that records it. `null` goes back
+   * to resolving the link from the printed reference.
+   *
+   * Needed because a box the extraction MISSED carries no `questionRef` — so
+   * the automatic route cannot see it, and without this the field an author
+   * created to fix a gap could never receive a mark.
+   */
+  setOutcomeTarget: (questionId: string, outcomeFieldId: string | null) => void;
 }
 
 export interface PartOps {
@@ -625,9 +642,12 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     () => ({
       add: (sectionKey, afterFieldId, type, label) =>
         applyFieldEdit((st) => addField(st, sectionKey, afterFieldId, type, label)),
+      rename: (fieldId, label) => applyFieldEdit((st) => renameField(st, fieldId, label)),
       remove: (fieldId) => applyFieldEdit((st) => deleteField(st, fieldId)),
       foldInto: (fieldId, targetFieldId) =>
         applyFieldEdit((st) => mergeIntoDescription(st, fieldId, targetFieldId)),
+      setOutcomeTarget: (questionId, outcomeFieldId) =>
+        applyFieldEdit((st) => setOutcomeTarget(st, questionId, outcomeFieldId)),
     }),
     [applyFieldEdit],
   );

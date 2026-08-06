@@ -1,4 +1,4 @@
-import { isChoiceField, type FormField, type FormFieldType } from '@formai/shared';
+import { isChoiceField, isSelfAnswering, type FormField } from '@formai/shared';
 
 /**
  * What mark a placed box will actually draw on the exported document.
@@ -27,11 +27,11 @@ export interface MarkDescription {
   detail: string;
 }
 
-/** Types whose false is a recorded finding, so BOTH states draw something. */
-const SELF_ANSWERING: readonly FormFieldType[] = ['check_cross', 'boolean_yes_no'];
-
 export function markDescription(field: Pick<FormField, 'type' | 'options' | 'printSelectedValue'>): MarkDescription {
-  if (SELF_ANSWERING.includes(field.type)) {
+  // Types whose false is a recorded finding, so BOTH states draw something.
+  // The list is the exporter's — see `isSelfAnswering` — because this sentence
+  // is a promise about what that file will print.
+  if (isSelfAnswering(field.type)) {
     return {
       mark: 'a ✓ or a ✗',
       // Both directions are findings. Only never-assessed is blank, and saying

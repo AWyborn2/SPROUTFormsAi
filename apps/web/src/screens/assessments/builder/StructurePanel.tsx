@@ -85,6 +85,15 @@ export interface StructurePanelProps {
    * has seen" cannot leave that uncorrectable.
    */
   onAddField: (sectionKey: string, afterFieldId: string | null, type: FormFieldType, label: string) => void;
+  /**
+   * Rename a field.
+   *
+   * The gap this closes sits directly beside `onAddField`'s: a field the
+   * extraction missed arrives as "New field", and with no rename that string
+   * was permanent — the published form said "New field" where the paper says
+   * "Assessment Result", on the cell an auditor reads first.
+   */
+  onRenameField: (fieldId: string, label: string) => void;
   /** Delete a field the extraction INVENTED, and every reference to it. */
   onDeleteField: (fieldId: string) => void;
   /** Fold a field into the previous one's description — an instruction, not a box. */
@@ -106,12 +115,23 @@ export function StructurePanel({
   onSetFieldType,
   onGroup,
   onAddField,
+  onRenameField,
   onDeleteField,
   onFoldField,
 }: StructurePanelProps) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [typeMenuFor, setTypeMenuFor] = useState<string | null>(null);
+  /**
+   * The field being renamed, if any.
+   *
+   * A MODE rather than an always-live input, because every row is `draggable`
+   * and a draggable ancestor swallows the pointer gestures that place a caret
+   * and select text — an input inside one is typable but not editable, which is
+   * a worse affordance than none. Entering the mode drops `draggable` for that
+   * row, so the input behaves like an input.
+   */
+  const [renamingId, setRenamingId] = useState<string | null>(null);
   /**
    * The field being dragged, held here rather than read from the drag event.
    *
@@ -315,10 +335,11 @@ export function StructurePanel({
                       const span = resolveSpan(entry, section.cols);
                       const isSelected = !!selected[entry.id];
                       const isDragging = dragging === entry.id;
+                      const isRenaming = renamingId === entry.id;
                       return (
                         <div key={entry.id} className={`min-w-0 ${SPAN_CLASS[span]}`}>
                           <div
-                            draggable
+                            draggable={!isRenaming}
                             onDragStart={(e) => {
                               e.dataTransfer.effectAllowed = 'move';
                               e.dataTransfer.setData('text/plain', entry.id);
@@ -393,9 +414,43 @@ export function StructurePanel({
                                 size={11}
                               />
                             </button>
-                            <span className="min-w-0 flex-1 truncate text-[11px]">
-                              {field?.label ?? entry.id}
-                            </span>
+                            {isRenaming ? (
+                              <input
+                                // eslint-disable-next-line jsx-a11y/no-autofocus -- the
+                                // control exists only because the author just
+                                // asked to rename; landing anywhere else costs
+                                // a click per field on a 185-field document.
+                                autoFocus
+                                value={field?.label ?? ''}
+                                onChange={(e) => onRenameField(entry.id, e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === 'Escape') setRenamingId(null);
+                                }}
+                                onBlur={() => setRenamingId(null)}
+                                // Stable, unlike the label it edits: only one row
+                                // renames at a time, so this stays unique, and a
+                                // name that changed with every keystroke is one
+                                // nothing can hold on to mid-edit.
+                                aria-label="Field name"
+                                placeholder="Field name"
+                                className="h-[22px] min-w-0 flex-1 rounded border border-border-accent bg-surface-card px-1.5 text-[11px]"
+                              />
+                            ) : (
+                              <span className="min-w-0 flex-1 truncate text-[11px]">
+                                {field?.label ?? entry.id}
+                              </span>
+                            )}
+                            {!isRenaming && (
+                              <button
+                                type="button"
+                                onClick={() => setRenamingId(entry.id)}
+                                title="Rename this field"
+                                aria-label={`Rename ${field?.label ?? entry.id}`}
+                                className="flex-none rounded border border-border px-1 py-px text-text-tertiary hover:bg-surface-hover"
+                              >
+                                <Icon name="pencil" size={10} />
+                              </button>
+                            )}
                             {section.cols > 1 && (
                               <button
                                 type="button"

@@ -1,5 +1,6 @@
 /**
- * Adding, deleting and folding away fields the extraction got wrong.
+ * Adding, renaming, deleting, folding away and linking up fields the extraction
+ * got wrong.
  *
  * WHY THIS EXISTS. The plan's own risk table claims every step is correctable —
  * "types, sides, structure, keys and placements are all editable". Two things
@@ -20,6 +21,7 @@
  */
 
 import { retypeField } from '../../../lib/field-editor/reducer.js';
+import { isSelfAnswering } from '@formai/shared';
 import type { BuilderStructure, DraftAnswerKey, FormField, FormFieldType } from '@formai/shared';
 
 /** Everything a field edit touches. */
@@ -96,6 +98,86 @@ export function addField(
     structure: state.structure.map((s) => (s.key === sectionKey ? { ...s, fields: nextFields } : s)),
     keys: [...state.keys],
     excluded: new Set(state.excluded),
+  };
+}
+
+/**
+ * Rename a field.
+ *
+ * TRIVIAL, AND ITS ABSENCE WAS NOT. Every other correction this module offers
+ * assumed the extraction at least read the LABEL — but a field the extraction
+ * missed entirely is created by `addField` as "New field", and until now that
+ * string was permanent. The author could set its type, place its box and key
+ * against it, and the published form still said "New field" where the paper
+ * says "Assessment Result". The import review screen has had `renameField`
+ * since it was written; the assessment builder simply never got one.
+ *
+ * The label is stored VERBATIM apart from nothing at all — not trimmed, not
+ * title-cased. An author mid-keystroke has a trailing space, and a rename that
+ * fights the caret is worse than one that stores what was typed. Emptiness is
+ * the caller's to refuse, and no caller does: a blank label renders as the
+ * field's id, which is visible and recoverable, where a rejected keystroke is
+ * neither.
+ */
+export function renameField(state: FieldEditState, fieldId: string, label: string): FieldEditResult {
+  if (!state.fields.some((f) => f.id === fieldId)) return unchanged(state);
+  return {
+    ...unchanged(state),
+    fields: state.fields.map((f) => (f.id === fieldId ? { ...f, label } : f)),
+  };
+}
+
+/**
+ * Point a question's derived ✓/✗ at the box that records it.
+ *
+ * WHY THIS HAS TO BE AUTHORABLE. `linkOutcomeTargets` pairs a question with its
+ * outcome box by the printed reference BOTH carry — the `questionRef` the model
+ * read off the page. That is the right default and it is the only route there
+ * was. A box the extraction missed has no `questionRef`, because nothing read
+ * it; a box the author creates by hand has none for the same reason. So the one
+ * case `addField` exists for produced a field that could never receive a mark,
+ * and the author met that as a publish-time refusal — "has an answer key but no
+ * outcome box to write its mark into" — with no control anywhere that could fix
+ * it.
+ *
+ * `resolvePublishFields` already honours an explicit target over a resolved
+ * one ("a resolved link should not overwrite a decision"), so this needs no new
+ * publish behaviour. It is the decision that had no way in.
+ *
+ * THE TARGET MUST BE A TYPE THE EXPORTER MARKS. `isSelfAnswering` is the
+ * exporter's own list, and a target outside it passes `validateAnswerKeys`
+ * (which only checks the field exists) and then draws nothing — a mark that
+ * computes, validates, publishes, and never reaches the page. Refusing here is
+ * the only place that catches it while somebody is looking.
+ *
+ * Passing `null` clears the link back to automatic resolution.
+ */
+export function setOutcomeTarget(
+  state: FieldEditState,
+  questionId: string,
+  outcomeFieldId: string | null,
+): FieldEditResult {
+  const question = state.fields.find((f) => f.id === questionId);
+  if (!question) return unchanged(state);
+
+  if (outcomeFieldId !== null) {
+    // A question cannot record its own verdict: the mark would overwrite the
+    // answer it was derived from.
+    if (outcomeFieldId === questionId) return unchanged(state);
+    const target = state.fields.find((f) => f.id === outcomeFieldId);
+    if (!target || !isSelfAnswering(target.type)) return unchanged(state);
+  }
+
+  return {
+    ...unchanged(state),
+    fields: state.fields.map((f) => {
+      if (f.id !== questionId) return f;
+      if (outcomeFieldId === null) {
+        const { outcomeTarget: _cleared, ...rest } = f;
+        return rest;
+      }
+      return { ...f, outcomeTarget: { fieldId: outcomeFieldId } };
+    }),
   };
 }
 
