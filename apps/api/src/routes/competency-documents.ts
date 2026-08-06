@@ -237,6 +237,176 @@ competencyDocumentsRouter.get(
   }),
 );
 
+// ── POST /competency-documents/:holderId/replacement ───────────────────────
+
+/**
+ * How often one membership may submit a replacement, and how many wait at once.
+ *
+ * The least-privileged actor in the product gets a permanent write into the
+ * organisation's storage and into the queue humans work. Every rejected
+ * submission is retained by design (R52) and the only removal verb is
+ * Admin-only, reasoned and scoped to wrong-person uploads (R32) — so nothing
+ * reclaims anything, and unbounded means unbounded. One pending row per
+ * competency and a window per membership are the two bounds.
+ */
+const REPLACEMENT_WINDOW_MS = 60 * 60 * 1000;
+const REPLACEMENT_MAX_PER_WINDOW = 10;
+const replacementHits = new Map<string, number[]>();
+
+/** In-process window, on the shape `smartFillRateLimited` already establishes. */
+function replacementRateLimited(membershipId: string, now = Date.now()): boolean {
+  const recent = (replacementHits.get(membershipId) ?? []).filter((t) => now - t < REPLACEMENT_WINDOW_MS);
+  if (recent.length >= REPLACEMENT_MAX_PER_WINDOW) {
+    replacementHits.set(membershipId, recent);
+    return true;
+  }
+  recent.push(now);
+  replacementHits.set(membershipId, recent);
+  return false;
+}
+
+/**
+ * A candidate supplies a better copy of a document held on their OWN record
+ * (R52).
+ *
+ * NOTHING IN THE PRODUCT lets the subject of a record put a file into it, so
+ * this is new capability rather than a permission widened. It is expressed as a
+ * STATE rather than a new door: the upload goes through the same validator every
+ * other file goes through, and the row lands `pending` instead of `held`.
+ *
+ * That is what keeps R51 true and unwidened. A pending row is not the record's
+ * evidence, so the candidate has still written only their mobile, their address
+ * and their emergency contact — what they supplied is a submission for review,
+ * not an edit.
+ */
+competencyDocumentsRouter.post(
+  '/:holderId/replacement',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const holder = await db.query.competencyHolders.findFirst({
+      where: and(
+        eq(schema.competencyHolders.id, req.params.holderId!),
+        eq(schema.competencyHolders.orgId, tenant.orgId),
+      ),
+    });
+    if (!holder) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const subject = await subjectFor(tenant.orgId, holder.userId);
+    if (!subject) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const access = await resolveProfileAccess(db, tenant, subject);
+    // THEIR OWN record only. R52 is the subject's rule; nobody supplies a
+    // replacement on somebody else's behalf.
+    if (!access.isSubject) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    if (!attachBody.safeParse(req.body).success) {
+      res.status(400).json({ error: 'invalid_request' });
+      return;
+    }
+    if (replacementRateLimited(subject.id)) {
+      res.setHeader('Retry-After', String(Math.ceil(REPLACEMENT_WINDOW_MS / 1000)));
+      res.status(429).json({ error: 'rate_limited' });
+      return;
+    }
+
+    const stored = await storeAttachment(tenant.orgId, req.body);
+    if (!stored.ok) {
+      res.status(stored.failure.status).json(stored.failure.body);
+      return;
+    }
+
+    /*
+      At most ONE pending replacement per competency per candidate: a fresh
+      submission supersedes the previous pending row rather than stacking beside
+      it. Without this a candidate can grow the approver's queue without limit,
+      and every row in it is retained.
+    */
+    const pending = await db.query.competencyDocuments.findMany({
+      where: and(
+        eq(schema.competencyDocuments.competencyHolderId, holder.id),
+        eq(schema.competencyDocuments.state, 'pending'),
+      ),
+    });
+    for (const stale of pending.filter((p) => p.uploadedByUserId === tenant.userId)) {
+      await db
+        .update(schema.competencyDocuments)
+        .set({ state: 'superseded' })
+        .where(eq(schema.competencyDocuments.id, stale.id));
+    }
+
+    const [row] = await db
+      .insert(schema.competencyDocuments)
+      .values({
+        orgId: tenant.orgId,
+        competencyHolderId: holder.id,
+        storageKey: stored.ref.key,
+        fileName: stored.ref.fileName,
+        contentType: stored.ref.contentType,
+        // NOT the record's evidence until somebody admitted to approve accepts it.
+        state: 'pending',
+        uploadedByUserId: tenant.userId,
+      })
+      .returning();
+
+    res.status(201).json({ id: row!.id, state: 'pending' });
+  }),
+);
+
+// ── GET /competency-documents/queue ────────────────────────────────────────
+
+/**
+ * What an approver has to look at (R47, R52).
+ *
+ * TWO KINDS, deliberately labelled apart, because "rejected" means two things
+ * across these rules and confusing them would send an Admin to the wrong record:
+ *
+ *  - a PENDING replacement a candidate supplied, waiting to become evidence;
+ *  - a REJECTED HELD document, which IS the record's evidence and is what R47
+ *    flags for an Admin to resolve with the person.
+ *
+ * A rejected REPLACEMENT is in neither: it never became evidence and needs
+ * nothing, though it is retained as a record of what was submitted.
+ */
+competencyDocumentsRouter.get(
+  '/queue',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const rows = await db.query.competencyDocuments.findMany({
+      where: eq(schema.competencyDocuments.orgId, tenant.orgId),
+    });
+
+    const items = rows
+      .filter((r) => r.state === 'pending' || (r.state === 'held' && r.rejectedAt !== null))
+      .map((r) => ({
+        id: r.id,
+        competencyHolderId: r.competencyHolderId,
+        fileName: r.fileName,
+        kind: r.state === 'pending' ? ('replacement' as const) : ('rejected_evidence' as const),
+        rejectedReason: r.rejectedReason,
+        uploadedAt: r.uploadedAt.toISOString(),
+      }));
+
+    res.json(items);
+  }),
+);
+
 // ── POST /competency-documents/:id/approve ─────────────────────────────────
 
 /**
@@ -265,11 +435,51 @@ competencyDocumentsRouter.post(
       return;
     }
 
+    const now = new Date();
+
+    if (row.state === 'pending') {
+      /*
+        ACCEPTING A REPLACEMENT is one indivisible step (R31, R52): the pending
+        row becomes held and the row it replaces becomes superseded together, so
+        there is never a moment with two held documents or none. The one it
+        displaced is RETAINED as evidence of what was held and sighted at the
+        time — never deleted.
+      */
+      await db!.transaction(async (tx) => {
+        const held = await tx.query.competencyDocuments.findMany({
+          where: and(
+            eq(schema.competencyDocuments.competencyHolderId, row.competencyHolderId),
+            eq(schema.competencyDocuments.state, 'held'),
+          ),
+        });
+        for (const previous of held) {
+          await tx
+            .update(schema.competencyDocuments)
+            .set({ state: 'superseded' })
+            .where(eq(schema.competencyDocuments.id, previous.id));
+        }
+        await tx
+          .update(schema.competencyDocuments)
+          .set({
+            state: 'held',
+            approvedByUserId: tenant.userId,
+            approvedAt: now,
+            supersededDocumentId: held[0]?.id ?? null,
+          })
+          .where(eq(schema.competencyDocuments.id, row.id));
+      });
+      // R52: the candidate is told the outcome either way, through the notice
+      // route that already serves a person their own record.
+      await noticeReplacementOutcome(tenant.orgId, row, 'accepted');
+      res.status(204).end();
+      return;
+    }
+
     await db!
       .update(schema.competencyDocuments)
       .set({
         approvedByUserId: tenant.userId,
-        approvedAt: new Date(),
+        approvedAt: now,
         // A previously rejected document that is now accepted stops being
         // rejected; nothing else about it moves.
         rejectedByUserId: null,
@@ -316,9 +526,17 @@ competencyDocumentsRouter.post(
       return;
     }
 
+    /*
+      A rejected REPLACEMENT never becomes the record's evidence and the document
+      already held stays in force — the deliberate difference from rejecting a
+      held document, which acts on the evidence itself. It is not discarded
+      either: it is kept as a record of what the candidate submitted and when.
+    */
+    const wasReplacement = row.state === 'pending';
     await db!
       .update(schema.competencyDocuments)
       .set({
+        state: wasReplacement ? 'rejected' : row.state,
         rejectedByUserId: tenant.userId,
         rejectedAt: new Date(),
         rejectedReason: parsed.data.reason,
@@ -327,9 +545,42 @@ competencyDocumentsRouter.post(
       })
       .where(eq(schema.competencyDocuments.id, row.id));
 
+    if (wasReplacement) await noticeReplacementOutcome(tenant.orgId, row, 'rejected', parsed.data.reason);
+
     res.status(204).end();
   }),
 );
+
+/**
+ * Tell the candidate what happened to the replacement they supplied (R52).
+ *
+ * Written for BOTH outcomes, because R52 makes telling them fixed rather than a
+ * courtesy — and because a rejection is the one they most need, since it is the
+ * one that leaves them something to do.
+ *
+ * Fail-soft: a notice that cannot be written must not roll back a decision an
+ * approver has already made.
+ */
+async function noticeReplacementOutcome(
+  orgId: string,
+  row: { id: string; uploadedByUserId: string | null },
+  outcome: 'accepted' | 'rejected',
+  reason?: string,
+): Promise<void> {
+  if (!row.uploadedByUserId) return;
+  try {
+    await db!.insert(schema.documentNotices).values({
+      orgId,
+      userId: row.uploadedByUserId,
+      documentId: row.id,
+      outcome,
+      reason: reason ?? null,
+    });
+  } catch {
+    // The decision stands; the notice is best-effort, matching the fail-soft
+    // posture the expiry sender already takes.
+  }
+}
 
 /**
  * Shared preamble for the two decision routes: find the document, resolve the

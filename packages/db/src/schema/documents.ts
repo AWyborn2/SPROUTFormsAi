@@ -99,6 +99,45 @@ export const competencyDocuments = pgTable(
   ],
 );
 
+/**
+ * What a candidate is told about a replacement they supplied (R52).
+ *
+ * R52 makes telling them a fixed part of the protection rather than an optional
+ * courtesy: they are told the outcome whether the replacement was accepted or
+ * rejected, and nothing stops them supplying another.
+ *
+ * ITS OWN TABLE rather than a row in `sent_notices`, which is keyed
+ * (user, competency, expiry-window) as the idempotence guard for the expiry
+ * sweep. A document outcome has no expiry window, and forcing one in would
+ * either collide with a real notice or need a sentinel — distorting the guard
+ * that table exists to be.
+ *
+ * READ OWN-SCOPE, like the expiry notices beside it: the caller reads their own
+ * and the permission matrix does not gate it.
+ */
+export const documentNotices = pgTable(
+  'document_notices',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** The person told — always the candidate who supplied the replacement. */
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    documentId: uuid('document_id')
+      .notNull()
+      .references(() => competencyDocuments.id, { onDelete: 'cascade' }),
+    /** `accepted` or `rejected` — both are told (R52). */
+    outcome: text().notNull(),
+    /** The approver's reason, on a rejection, so they know what to fix. */
+    reason: text(),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('document_notices_user_idx').on(t.userId), index('document_notices_org_idx').on(t.orgId)],
+);
+
 export const competencyDocumentsRelations = relations(competencyDocuments, ({ one }) => ({
   org: one(organizations, {
     fields: [competencyDocuments.orgId],

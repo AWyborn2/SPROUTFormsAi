@@ -24,7 +24,10 @@ vi.mock('../db.js', () => ({
   getDbStatus: () => 'unconfigured',
 }));
 
-let mockStorage: { download: ReturnType<typeof vi.fn> } | null = null;
+let mockStorage: {
+  download: ReturnType<typeof vi.fn>;
+  uploadAttachment: ReturnType<typeof vi.fn>;
+} | null = null;
 vi.mock('../storage/index.js', () => ({
   getStorageClient: () => mockStorage,
 }));
@@ -96,9 +99,20 @@ function fakeDb(opts: {
         return { returning: async () => rows, then: (r: (x: unknown) => void) => r(rows) };
       },
     }),
+    /*
+      Accepting a replacement supersedes the held row and promotes the pending
+      one as ONE step (R31), so the double must run the callback rather than
+      throw — a fixture without it would make the atomicity untestable.
+    */
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
   };
   mockDbValue = db as unknown as Db;
-  mockStorage = { download: vi.fn().mockResolvedValue(BYTES) };
+  mockStorage = {
+    download: vi.fn().mockResolvedValue(BYTES),
+    // The attach and replacement paths go through the one validator, which
+    // mints the key server-side.
+    uploadAttachment: vi.fn().mockResolvedValue(KEY),
+  };
   return { db, updates, audits };
 }
 
@@ -274,6 +288,131 @@ describe('the ungated attachment route no longer serves these bytes', () => {
     try {
       const res = await fetch(`${base}/uploads/file/${KEY}`, { headers: authHeader(admin) });
       expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('the candidate’s replacement document (R52)', () => {
+  const upload = { fileBase64: BYTES.toString('base64'), mimeType: 'image/jpeg', fileName: 'clear.jpg' };
+
+  it('lands as PENDING rather than as the record’s evidence', async () => {
+    /*
+      AE15: the dark photograph stays the record's evidence until an approver
+      accepts the replacement. Expressed as a state rather than a new door,
+      which is what keeps R51 true — a pending row is a submission for review,
+      not a write, so the candidate has still written only their three fields.
+    */
+    const { audits } = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${HOLDER}/replacement`, {
+        method: 'POST',
+        headers: { ...authHeader(subject), 'content-type': 'application/json' },
+        body: JSON.stringify(upload),
+      });
+      expect(res.status).toBe(201);
+      expect(audits.some((a) => a.state === 'pending')).toBe(true);
+      expect(audits.some((a) => a.state === 'held')).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a replacement on somebody ELSE’s record', async () => {
+    // R52 is the subject's rule; nobody supplies one on another's behalf.
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${HOLDER}/replacement`, {
+        method: 'POST',
+        headers: { ...authHeader(otherCandidate), 'content-type': 'application/json' },
+        body: JSON.stringify(upload),
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses an ADMIN using the replacement path — theirs is the attach route', async () => {
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${HOLDER}/replacement`, {
+        method: 'POST',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify(upload),
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rate-limits repeated submissions from one membership', async () => {
+    /*
+      The least-privileged actor gets a permanent write into storage and into
+      the queue humans work, every rejected one is retained by design, and the
+      only removal verb is Admin-only. Unbounded means unbounded.
+    */
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate });
+    const { server, base } = startApp();
+    try {
+      const codes: number[] = [];
+      for (let i = 0; i < 14; i++) {
+        const res = await fetch(`${base}/competency-documents/${HOLDER}/replacement`, {
+          method: 'POST',
+          headers: { ...authHeader(subject), 'content-type': 'application/json' },
+          body: JSON.stringify(upload),
+        });
+        codes.push(res.status);
+      }
+      expect(codes).toContain(429);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepting one supersedes the document it replaced, in one step (R31)', async () => {
+    // AE15: once accepted the clear photograph is what is held, and the dark one
+    // is retained as evidence of what was sighted at the time. Never a moment
+    // with two held documents or none.
+    const { updates } = fakeDb({
+      matrix: DEFAULT_ROLE_PERMISSIONS.admin,
+      doc: { state: 'pending' },
+      docs: [{ id: 'd-old', state: 'held' }],
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${DOC}/approve`, {
+        method: 'POST',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(204);
+      expect(updates.some((u) => u.state === 'superseded')).toBe(true);
+      expect(updates.some((u) => u.state === 'held')).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejecting one leaves the held document in force and keeps the submission', async () => {
+    // The deliberate difference from rejecting a HELD document: this one never
+    // became evidence, so the record is exactly as it was.
+    const { updates } = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin, doc: { state: 'pending' } });
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/competency-documents/${DOC}/reject`, {
+        method: 'POST',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: 'still unreadable' }),
+      });
+      // Retained as a record of what was submitted, not discarded.
+      expect(updates[0]).toMatchObject({ state: 'rejected', rejectedReason: 'still unreadable' });
+      expect(updates.some((u) => u.state === 'superseded')).toBe(false);
     } finally {
       server.close();
     }
