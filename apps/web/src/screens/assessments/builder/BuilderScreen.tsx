@@ -70,7 +70,7 @@ export function BuilderScreen() {
     flush against the app sidebar, so the page header and the wide stepper are
     replaced by the compact rail that sits inside the artifact column.
   */
-  const compactChrome = step === 'generate' || step === 'design';
+  const compactChrome = step === 'generate';
 
   const body = (() => {
     switch (step) {

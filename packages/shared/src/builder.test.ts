@@ -19,6 +19,7 @@ import {
   MARK_STYLES_DRAWN,
   emptyDraftState,
   isGlyphDrawn,
+  resolveBuilderStep,
   resolveSpan,
   stepIndex,
   type SectionColumns,
@@ -26,11 +27,10 @@ import {
 import { GLYPH_KINDS } from './form-field.js';
 
 describe('builder steps', () => {
-  it('has the seven steps the stepper renders, in order', () => {
+  it('has the steps the stepper renders, in order', () => {
     expect(BUILDER_STEPS).toEqual([
       'upload',
       'generate',
-      'design',
       'units',
       'answer_key',
       'placement',
@@ -49,7 +49,36 @@ describe('builder steps', () => {
 
   it('indexes steps by position', () => {
     expect(stepIndex('upload')).toBe(0);
-    expect(stepIndex('workflow')).toBe(6);
+    expect(stepIndex('workflow')).toBe(BUILDER_STEPS.length - 1);
+  });
+
+  /*
+    A RETIRED STEP MUST NOT STRAND A SAVED DRAFT.
+
+    `step` is validated on the way into the database and read back to decide
+    which screen opens. `design` was retired once its two jobs landed elsewhere
+    — field correction into Generate, colours and logo into client brands — and
+    a draft parked on it would otherwise fail that validation and take an
+    author's whole saved state with it.
+  */
+  it('resumes a retired step on the one that absorbed it', () => {
+    expect(resolveBuilderStep('design')).toBe('generate');
+  });
+
+  it('passes a live step through unchanged', () => {
+    for (const step of BUILDER_STEPS) expect(resolveBuilderStep(step)).toBe(step);
+  });
+
+  it('falls back to upload for nothing, and for a step nobody has heard of', () => {
+    /*
+      Absent is a new draft. A value naming no step that ever existed is a
+      client bug — and the SAVE route refuses that outright, so this fallback is
+      the defensive read for a row already in the database rather than a licence
+      to store nonsense.
+    */
+    expect(resolveBuilderStep(undefined)).toBe('upload');
+    expect(resolveBuilderStep('')).toBe('upload');
+    expect(resolveBuilderStep('teleport')).toBe('upload');
   });
 });
 

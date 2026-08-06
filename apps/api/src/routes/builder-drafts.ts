@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, desc, eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { BUILDER_STEPS } from '@formai/shared';
+import { BUILDER_STEPS, RETIRED_BUILDER_STEPS, resolveBuilderStep } from '@formai/shared';
 import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -37,7 +37,13 @@ export const builderDraftsRouter: Router = Router();
 const draftBody = z.object({
   name: z.string().min(1).max(120),
   assetId: z.string().min(1),
-  step: z.enum(BUILDER_STEPS).optional(),
+  step: z
+    .string()
+    .refine(
+      (v) => (BUILDER_STEPS as readonly string[]).includes(v) || v in RETIRED_BUILDER_STEPS,
+      'not a builder step',
+    )
+    .optional(),
   state: z.record(z.string(), z.unknown()),
   formId: z.string().uuid().nullish(),
   versionId: z.string().uuid().nullish(),
@@ -91,7 +97,7 @@ builderDraftsRouter.post(
         orgId: tenant.orgId,
         name,
         assetId: parsed.data.assetId,
-        step: parsed.data.step ?? 'upload',
+        step: resolveBuilderStep(parsed.data.step),
         state: parsed.data.state,
         formId: parsed.data.formId ?? null,
         versionId: parsed.data.versionId ?? null,
@@ -101,7 +107,7 @@ builderDraftsRouter.post(
         target: [schema.assessmentToolDrafts.orgId, schema.assessmentToolDrafts.name],
         set: {
           assetId: parsed.data.assetId,
-          step: parsed.data.step ?? 'upload',
+          step: resolveBuilderStep(parsed.data.step),
           state: parsed.data.state,
           formId: parsed.data.formId ?? null,
           versionId: parsed.data.versionId ?? null,

@@ -12,14 +12,13 @@ import { BUILDER_STEPS, BUILDER_STEP_LABELS, stepIndex, type BuilderStep } from 
  * the form.
  *
  * Both are here rather than in two files because they are the same control and
- * have to stay in step: the same seven, the same order, the same done/current
+ * have to stay in step: the same steps, the same order, the same done/current
  * tones, and the same click-to-jump.
  */
 
 const STEP_ICONS: Record<BuilderStep, string> = {
   upload: 'upload',
   generate: 'sparkles',
-  design: 'message-square',
   units: 'blocks',
   answer_key: 'key-round',
   placement: 'square-dashed',

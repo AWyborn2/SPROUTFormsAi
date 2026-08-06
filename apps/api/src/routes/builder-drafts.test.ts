@@ -192,7 +192,37 @@ describe('POST /assessment-tool-drafts', () => {
     }
   });
 
-  it('refuses a step that is not one of the seven', async () => {
+  it('RESUMES A RETIRED STEP rather than throwing the draft away', async () => {
+    /*
+      `design` was retired once its two jobs landed elsewhere — correcting
+      extraction in Generate, colours and logo in client brands. A draft parked
+      on it is real work, and refusing it here would reject the whole body and
+      lose an author's saved state because a step was renamed underneath them.
+    */
+    const f = fakeDb();
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-tool-drafts`, {
+        method: 'POST',
+        headers: authHeader(),
+        body: JSON.stringify({
+          name: 'Track Dozer',
+          assetId: 'asset-abc',
+          step: 'design',
+          state: {},
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      // Stored as the step that absorbed it, so the next open resumes there.
+      expect(f.insertValues.mock.calls[0]?.[1]).toMatchObject({ step: 'generate' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a step that names nothing that ever existed', async () => {
     // `step` is read back to decide which screen opens; an unknown value there
     // is a blank builder rather than a resumed one, so it fails at the boundary.
     const f = fakeDb();

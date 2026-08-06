@@ -20,10 +20,6 @@ const WHAT: Record<BuilderStep, { does: string; today: string }> = {
     does: 'Arrange the form’s sections and fields, and page through a live preview of every part.',
     today: 'Field order and grouping are reviewed in the import wizard’s review step.',
   },
-  design: {
-    does: 'Adjust the generated artifact conversationally, beside a live preview.',
-    today: 'Edit fields directly in the review step.',
-  },
   units: {
     does: 'Declare the parts, their pathways, prerequisites and logbook thresholds.',
     today: 'The part manifest is authored by packages/db/scripts/author-track-dozer-tool.mjs.',

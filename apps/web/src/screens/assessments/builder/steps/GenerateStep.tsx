@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Icon } from '@formai/ui';
 import { StructurePanel } from '../StructurePanel.js';
 import { ArtifactPager } from '../ArtifactPager.js';
@@ -57,9 +58,30 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
         <div className="mb-3 flex items-start gap-2.5 text-[12px] leading-relaxed text-text-tertiary">
           <Icon name="sparkles" size={14} className="mt-0.5 flex-none text-accent" />
           <span>
-            Built from the document’s own structure. Rearrange it on the left —{' '}
+            Built from the document’s own structure. Rearrange it on the left, add what the
+            extraction missed and fold an instruction into a description —{' '}
             <strong className="text-text-primary">nothing here is final</strong>, and the preview is
             the form a candidate will actually fill in.
+          </span>
+        </div>
+
+        {/*
+          WHERE THE COLOURS WENT. This step absorbed the retired "Design chat"
+          step's field editing; its other half — colours, styles and the logo —
+          is authored per CLIENT BRAND instead, because a subcontractor's forms
+          mostly carry a client's identity and choosing it per document would
+          mean re-choosing it for every form that client owns. Said here so an
+          author looking for it on this step is not left hunting.
+        */}
+        <div className="mb-3 flex items-start gap-2.5 text-[12px] leading-relaxed text-text-tertiary">
+          <Icon name="palette" size={14} className="mt-0.5 flex-none text-text-tertiary" />
+          <span>
+            Colours, fonts and the logo are set once per client in{' '}
+            <Link to="/app/settings/client-brands" className="font-semibold text-accent hover:underline">
+              Client brands
+            </Link>
+            , then assigned to a form from the form library — so every form for that client changes
+            together.
           </span>
         </div>
 
