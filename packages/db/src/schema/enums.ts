@@ -44,6 +44,27 @@ export const displayIdentifierEnum = pgEnum('display_identifier', [
   'swipe_card_number',
 ]);
 
+/**
+ * A competency document's place in its own history (KTD24, R31, R32, R52).
+ *
+ * `held` is the record's evidence — a competency may carry several (R28).
+ * `pending` is a replacement a candidate supplied, waiting for approval; it is
+ * NOT the record's evidence until accepted (R52). `superseded` is a document an
+ * accepted replacement displaced, retained as evidence of what was sighted at
+ * the time (R31). `rejected` is a replacement that was refused, kept as a record
+ * of what was submitted and when. `removed` is the Admin-only, audited, reasoned
+ * escape hatch for a document filed against the wrong person (R32).
+ *
+ * NOTHING here is a delete. Every state is retrievable; only `held` is current.
+ */
+export const documentStateEnum = pgEnum('document_state', [
+  'held',
+  'pending',
+  'superseded',
+  'rejected',
+  'removed',
+]);
+
 export const formSourceTypeEnum = pgEnum('form_source_type', [
   'pdf_import',
   'built_from_scratch',

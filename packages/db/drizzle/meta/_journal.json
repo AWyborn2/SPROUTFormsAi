@@ -302,6 +302,13 @@
       "when": 1786001694206,
       "tag": "0042_seed_profiles_category",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1786002357751,
+      "tag": "0043_chief_golden_guardian",
+      "breakpoints": true
     }
   ]
 }
