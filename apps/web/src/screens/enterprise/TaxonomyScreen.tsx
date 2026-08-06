@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Badge, Button, Card, Icon, Input, Select, Switch, useToast } from '@formai/ui';
 import {
   DISPLAY_IDENTIFIER_LABELS,
@@ -10,16 +10,30 @@ import {
   useCreateDepartment,
   useCreateLocation,
   useCreateRole,
+  usePreviewLocationTransfer,
   usePreviewRoleRequiredAssessments,
+  useResolveTightening,
+  useRetirementReview,
   useRoleRequiredAssessments,
   useSetRoleRequiredAssessments,
+  useStopOfferingRole,
   useTaxonomy,
+  useTighteningReview,
+  useTransferLocation,
+  useTransferRole,
   useUpdateDepartment,
   useUpdateLocation,
   useUpdateRole,
   useUpdateTaxonomySettings,
 } from '../../lib/data/hooks.js';
-import type { TaxDepartment, TaxLocation, TaxRole } from '../../lib/data/types.js';
+import type {
+  RetiredValueReview,
+  Taxonomy,
+  TaxDepartment,
+  TaxLocation,
+  TaxRole,
+  TighteningReviewItem,
+} from '../../lib/data/types.js';
 import { ApiError } from '../../lib/data/api-client.js';
 
 /**
@@ -55,9 +69,224 @@ export function TaxonomyScreen() {
         </p>
       </div>
 
+      <RetirementReviewPanel taxonomy={data} onError={onError} />
       <SettingsPanel settings={data.settings} onError={onError} />
       <LocationsPanel locations={data.locations} onError={onError} />
       <DepartmentsPanel departments={data.departments} onError={onError} />
+    </div>
+  );
+}
+
+/**
+ * The people still holding a retired value, and the ways out (U18). Shown only
+ * when the review has anybody in it — a value returned to active empties it
+ * (R123). A retired Location or Role offers a bulk transfer to a replacement; a
+ * Location transfer additionally chooses what happens to in-flight cases (R133),
+ * a Role transfer leaves cases untouched (R135).
+ */
+function RetirementReviewPanel({
+  taxonomy,
+  onError,
+}: {
+  taxonomy: Taxonomy;
+  onError: (e: unknown) => void;
+}) {
+  const { data: review } = useRetirementReview();
+  if (!review) return null;
+  const total = review.locations.length + review.departments.length + review.roles.length;
+  if (total === 0) return null;
+
+  const activeLocations = taxonomy.locations.filter((l) => l.status === 'active');
+  const activeRoles = taxonomy.departments.flatMap((d) => d.roles.filter((r) => r.status === 'active'));
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-center gap-2">
+        <Icon name="shield-alert" size={16} className="text-warning-text" />
+        <h3 className="font-ui text-sm font-semibold">Retired values still held</h3>
+      </div>
+      <p className="mt-1 text-[13px] text-text-tertiary">
+        These values are retired but people still hold them. Move each person to a replacement, or
+        handle them individually on the team screen.
+      </p>
+
+      <div className="mt-3 flex flex-col gap-3">
+        {review.locations.map((value) => (
+          <RetiredValueRow key={`loc-${value.id}`} label="Location" value={value}>
+            <LocationTransferControl
+              value={value}
+              options={activeLocations}
+              onError={onError}
+            />
+          </RetiredValueRow>
+        ))}
+        {review.roles.map((value) => (
+          <RetiredValueRow key={`role-${value.id}`} label="Role" value={value}>
+            <RoleTransferControl
+              value={value}
+              options={activeRoles.filter((r) => r.id !== value.id)}
+              onError={onError}
+            />
+          </RetiredValueRow>
+        ))}
+        {review.departments.map((value) => (
+          <RetiredValueRow key={`dep-${value.id}`} label="Department" value={value}>
+            <span className="text-[11px] text-text-tertiary">
+              Reassign these people to another Department on the team screen.
+            </span>
+          </RetiredValueRow>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+/** One retired value in the review: its label, name, holder count, and a remediation control. */
+function RetiredValueRow({
+  label,
+  value,
+  children,
+}: {
+  label: string;
+  value: RetiredValueReview;
+  children: ReactNode;
+}) {
+  return (
+    <div className="rounded-md border border-border bg-surface-sunken p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <span className="text-[11px] uppercase tracking-wide text-text-tertiary">{label}</span>
+          <div className="truncate text-[13px] font-semibold">{value.name}</div>
+        </div>
+        {children}
+      </div>
+      <div className="mt-1.5 text-[11px] text-text-tertiary">
+        {value.holders.length} still holding: {value.holders.map((h) => h.name).join(', ')}
+      </div>
+    </div>
+  );
+}
+
+/** Transfer everyone off a retired Location, choosing what its in-flight cases do (R133). */
+function LocationTransferControl({
+  value,
+  options,
+  onError,
+}: {
+  value: RetiredValueReview;
+  options: TaxLocation[];
+  onError: (e: unknown) => void;
+}) {
+  const { toast } = useToast();
+  const preview = usePreviewLocationTransfer();
+  const transfer = useTransferLocation();
+  const replacements = options.filter((l) => l.id !== value.id);
+  const [replacementId, setReplacementId] = useState(replacements[0]?.id ?? '');
+  const [caseOutcome, setCaseOutcome] = useState<'carry' | 'rewrite'>('carry');
+  const [inFlight, setInFlight] = useState<number | null>(null);
+
+  if (replacements.length === 0) {
+    return <span className="text-[11px] text-text-tertiary">Add an active Location to transfer to.</span>;
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <Select
+        aria-label={`Replacement Location for ${value.name}`}
+        value={replacementId}
+        onChange={(e) => {
+          setReplacementId(e.target.value);
+          setInFlight(null);
+        }}
+        options={replacements.map((l) => ({ label: l.name, value: l.id }))}
+      />
+      <Select
+        aria-label={`In-flight cases for ${value.name}`}
+        value={caseOutcome}
+        onChange={(e) => setCaseOutcome(e.target.value as 'carry' | 'rewrite')}
+        options={[
+          { label: 'Carry cases', value: 'carry' },
+          { label: 'Rewrite cases', value: 'rewrite' },
+        ]}
+      />
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={!replacementId || preview.isPending}
+        onClick={() =>
+          preview.mutate(
+            { locationId: value.id, replacementLocationId: replacementId },
+            { onSuccess: (r) => setInFlight(r.inFlightCases), onError },
+          )
+        }
+      >
+        Preview
+      </Button>
+      {inFlight !== null && (
+        <span className="text-[11px] text-text-tertiary">
+          {value.holders.length} moved, {inFlight} in-flight
+        </span>
+      )}
+      <Button
+        size="sm"
+        disabled={!replacementId || transfer.isPending}
+        onClick={() =>
+          transfer.mutate(
+            { locationId: value.id, replacementLocationId: replacementId, caseOutcome },
+            {
+              onSuccess: () => toast({ variant: 'success', message: `Moved off ${value.name}.` }),
+              onError,
+            },
+          )
+        }
+      >
+        Transfer
+      </Button>
+    </div>
+  );
+}
+
+/** Transfer everyone off a retired Role to a replacement; cases are left untouched (R135). */
+function RoleTransferControl({
+  value,
+  options,
+  onError,
+}: {
+  value: RetiredValueReview;
+  options: TaxRole[];
+  onError: (e: unknown) => void;
+}) {
+  const { toast } = useToast();
+  const transfer = useTransferRole();
+  const [replacementId, setReplacementId] = useState(options[0]?.id ?? '');
+
+  if (options.length === 0) {
+    return <span className="text-[11px] text-text-tertiary">Add an active Role to transfer to.</span>;
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <Select
+        aria-label={`Replacement Role for ${value.name}`}
+        value={replacementId}
+        onChange={(e) => setReplacementId(e.target.value)}
+        options={options.map((r) => ({ label: r.name, value: r.id }))}
+      />
+      <Button
+        size="sm"
+        disabled={!replacementId || transfer.isPending}
+        onClick={() =>
+          transfer.mutate(
+            { roleId: value.id, replacementRoleId: replacementId },
+            {
+              onSuccess: () => toast({ variant: 'success', message: `Moved off ${value.name}.` }),
+              onError,
+            },
+          )
+        }
+      >
+        Transfer
+      </Button>
     </div>
   );
 }
@@ -263,6 +492,7 @@ function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unk
   const updateDep = useUpdateDepartment();
   const createRole = useCreateRole();
   const updateRole = useUpdateRole();
+  const stopOffering = useStopOfferingRole();
   const [roleName, setRoleName] = useState('');
 
   function addRole() {
@@ -316,11 +546,23 @@ function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unk
                   { onError },
                 )
               }
+              // Stop offering is a HARDER act than retire: it withdraws the Role
+              // from everyone who holds it, no choice (R52), where retire leaves
+              // them holding it. Distinct action, distinct label.
+              extraAction={{
+                label: 'Stop offering',
+                onClick: () => stopOffering.mutate(role.id, { onError }),
+              }}
             />
             <RoleRequirements role={role} onError={onError} />
           </div>
         ))}
       </div>
+
+      {/* Tightening a Department to one Role leaves people holding several — a
+          resumable per-person choice (R112). Shown only while the Department is
+          set to a single Role. */}
+      {!dep.allowsMultipleRoles && <TighteningReview dep={dep} onError={onError} />}
 
       <div className="mt-2 flex gap-2 pl-3">
         <Input
@@ -335,6 +577,79 @@ function DepartmentCard({ dep, onError }: { dep: TaxDepartment; onError: (e: unk
         </Button>
       </div>
     </div>
+  );
+}
+
+/**
+ * The people a tightening still has to resolve (U17, R112). A LIVE list: each
+ * person drops off the moment their choice is applied, and an Admin can leave
+ * and come back — nothing is a half-finished wizard. Rendered only while the
+ * Department offers a single Role and someone still holds several of its Roles.
+ */
+function TighteningReview({ dep, onError }: { dep: TaxDepartment; onError: (e: unknown) => void }) {
+  const { data: affected } = useTighteningReview(dep.id);
+
+  if (!affected || affected.length === 0) return null;
+
+  return (
+    <div className="mt-3 rounded-md border border-border bg-surface-sunken p-3">
+      <div className="flex items-center gap-1.5 text-[12px] font-semibold text-warning-text">
+        <Icon name="shield-alert" size={13} />
+        {affected.length} {affected.length === 1 ? 'person holds' : 'people hold'} several Roles here
+      </div>
+      <p className="mt-1 text-[11px] text-text-tertiary">
+        {dep.name} now offers a single Role. Choose the Role each person keeps — the rest are
+        withdrawn from them. You can come back to this later.
+      </p>
+      <ul className="mt-2 flex flex-col gap-1.5">
+        {affected.map((person) => (
+          <TighteningRow key={person.membershipId} dep={dep} person={person} onError={onError} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** One person in a tightening review: pick the Role they keep, apply the choice (R113). */
+function TighteningRow({
+  dep,
+  person,
+  onError,
+}: {
+  dep: TaxDepartment;
+  person: TighteningReviewItem;
+  onError: (e: unknown) => void;
+}) {
+  const resolve = useResolveTightening(dep.id);
+  const { toast } = useToast();
+  const [survivingRoleId, setSurvivingRoleId] = useState(person.heldRoles[0]?.id ?? '');
+
+  return (
+    <li className="flex items-center gap-2">
+      <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">{person.name}</span>
+      <Select
+        aria-label={`Role ${person.name} keeps`}
+        value={survivingRoleId}
+        onChange={(e) => setSurvivingRoleId(e.target.value)}
+        options={person.heldRoles.map((role) => ({ label: role.name, value: role.id }))}
+      />
+      <Button
+        size="sm"
+        disabled={!survivingRoleId || resolve.isPending}
+        onClick={() =>
+          resolve.mutate(
+            { membershipId: person.membershipId, survivingRoleId },
+            {
+              onSuccess: () =>
+                toast({ variant: 'success', message: `${person.name}’s Roles resolved.` }),
+              onError,
+            },
+          )
+        }
+      >
+        Keep
+      </Button>
+    </li>
   );
 }
 
@@ -518,12 +833,15 @@ function ValueRow({
   dense,
   onRename,
   onToggleStatus,
+  extraAction,
 }: {
   name: string;
   status: 'active' | 'retired';
   dense?: boolean;
   onRename: (next: string) => void;
   onToggleStatus: () => void;
+  /** An extra action shown only while the value is active — e.g. a Role's "Stop offering" (U17). */
+  extraAction?: { label: string; onClick: () => void };
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
@@ -574,6 +892,11 @@ function ValueRow({
           >
             <Icon name="pencil" size={13} />
           </button>
+          {extraAction && !retired && (
+            <Button size="sm" variant="ghost" onClick={extraAction.onClick}>
+              {extraAction.label}
+            </Button>
+          )}
           <StatusButton status={status} onClick={onToggleStatus} />
         </div>
       )}

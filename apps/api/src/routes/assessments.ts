@@ -7,7 +7,7 @@ import {
   ASSESSMENT_PATHWAYS,
   NS_DISPOSITIONS,
   caseProgress,
-  competencyStatus,
+  competencyCurrency,
   countsAsHeld,
   fieldsInPart,
   fieldsInSection,
@@ -275,7 +275,7 @@ async function unmetPrerequisites(
       gaps.push({ competencyId, reason: 'missing' });
       continue;
     }
-    if (!countsAsHeld(competencyStatus(grant, validity, now, 'assessor'))) {
+    if (!countsAsHeld(competencyCurrency(grant, validity, now, 'assessor'))) {
       gaps.push({ competencyId, reason: 'expired' });
     }
   }
@@ -1309,7 +1309,7 @@ assessmentCasesRouter.get(
       db.query.organizations.findFirst({ where: eq(schema.organizations.id, tenant.orgId) }),
       heldCompetencyStates(db, tenant.orgId, tenant.userId, new Date()),
     ]);
-    const heldNow = new Set(held.filter((h) => countsAsHeld(h.status)).map((h) => h.competencyId));
+    const heldNow = new Set(held.filter((h) => countsAsHeld(h)).map((h) => h.competencyId));
     const overdueDays = org?.pooledCaseOverdueDays ?? 14;
 
     const toolIds = [...new Set(pooled.map((c) => c.toolId))];

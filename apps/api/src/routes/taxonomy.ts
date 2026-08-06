@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
@@ -8,6 +8,7 @@ import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
 import { assignmentCaseValues } from '../lib/assignment.js';
 import { computeRequiredAssessmentsChange } from '../lib/requirement-change.js';
+import { withdrawRoleFromAllHolders } from '../lib/membership-placement.js';
 import { db } from '../db.js';
 
 type Database = NonNullable<typeof db>;
@@ -270,6 +271,185 @@ taxonomyRouter.patch(
   }),
 );
 
+// ── Department tightening (U17 — R110, R111, R112, R113) ──────────────────────
+
+/** The active roles of a Department, plus which memberships hold each — the shape both tightening routes read. */
+async function loadDepartmentForTightening(
+  database: Database,
+  orgId: string,
+  departmentId: string,
+): Promise<{ department: typeof schema.departments.$inferSelect; roleIds: string[]; roleById: Map<string, typeof schema.jobRoles.$inferSelect> } | null> {
+  const department = await database.query.departments.findFirst({
+    where: and(eq(schema.departments.id, departmentId), eq(schema.departments.orgId, orgId)),
+  });
+  if (!department) return null;
+  // Every Role the Department carries, ANY status — a retired-but-held Role still
+  // counts toward the held total the one-or-several rule governs (R119), so a
+  // person over the count because of one is still surfaced and still chooses.
+  const roles = await database.query.jobRoles.findMany({
+    where: and(
+      eq(schema.jobRoles.orgId, orgId),
+      eq(schema.jobRoles.departmentId, departmentId),
+    ),
+  });
+  return {
+    department,
+    roleIds: roles.map((r) => r.id),
+    roleById: new Map(roles.map((r) => [r.id, r])),
+  };
+}
+
+/**
+ * The people a tightening still has to resolve (U17, R112) — a LIVE query, no
+ * stored queue: every membership placed in this Department that still holds MORE
+ * THAN ONE of its Roles (`withdrawnAt IS NULL`). Because "affected" is derived
+ * from the held rows, the list is correct after any interruption and the whole
+ * remediation is resumable for free (R110, R111). Scoped to this Department's
+ * Roles, so a person's Roles in other Departments never enter the count (R6).
+ */
+taxonomyRouter.get(
+  '/departments/:id/tightening-review',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const loaded = await loadDepartmentForTightening(db, tenant.orgId, req.params.id!);
+    if (!loaded) return reply(res, 404, { error: 'not_found' });
+    if (loaded.roleIds.length === 0) return reply(res, 200, []);
+
+    const held = await db.query.membershipRoles.findMany({
+      where: and(
+        inArray(schema.membershipRoles.roleId, loaded.roleIds),
+        isNull(schema.membershipRoles.withdrawnAt),
+      ),
+    });
+    // Group held D-Roles per membership; only those over the one-Role count.
+    const rolesByMembership = new Map<string, string[]>();
+    for (const row of held) {
+      const list = rolesByMembership.get(row.membershipId) ?? [];
+      list.push(row.roleId);
+      rolesByMembership.set(row.membershipId, list);
+    }
+    const affected = [...rolesByMembership.entries()].filter(([, roleIds]) => roleIds.length > 1);
+    if (affected.length === 0) return reply(res, 200, []);
+
+    // ACTIVE memberships of THIS org only — the same scope every sibling review
+    // applies (R128). A deactivated person keeps their held Roles (deactivation
+    // withdraws none), so without the status filter they would surface here as
+    // still to resolve, which is remediation the review is meant to exclude. The
+    // org term is defence-in-depth; scope is already transitive via the roleIds.
+    const memberships = await db.query.memberships.findMany({
+      where: and(
+        eq(schema.memberships.orgId, tenant.orgId),
+        inArray(schema.memberships.id, affected.map(([membershipId]) => membershipId)),
+        eq(schema.memberships.status, 'active'),
+      ),
+    });
+    const userIdByMembership = new Map(memberships.map((m) => [m.id, m.userId]));
+    const activeMembershipIds = new Set(memberships.map((m) => m.id));
+    const users = await db.query.users.findMany({
+      where: inArray(schema.users.id, memberships.map((m) => m.userId)),
+    });
+    const nameByUser = new Map(users.map((u) => [u.id, u.name]));
+
+    res.json(
+      affected
+        // Drop anyone no longer active — they are not in the review (R128).
+        .filter(([membershipId]) => activeMembershipIds.has(membershipId))
+        .map(([membershipId, roleIds]) => {
+          const userId = userIdByMembership.get(membershipId)!;
+          return {
+            membershipId,
+            userId,
+            name: nameByUser.get(userId) ?? 'Unknown user',
+            // The Roles to choose ONE of — this Department's, in a stable order.
+            heldRoles: roleIds
+              .map((roleId) => loaded.roleById.get(roleId))
+              .filter((r): r is typeof schema.jobRoles.$inferSelect => Boolean(r))
+              .map((r) => ({ id: r.id, name: r.name })),
+          };
+        }),
+    );
+  }),
+);
+
+const tighteningResolveBody = z.object({
+  membershipId: z.string().uuid(),
+  survivingRoleId: z.string().uuid(),
+});
+
+/**
+ * Apply one person's tightening choice (U17, R112, R113): keep the Role the Admin
+ * chose and withdraw every OTHER Role this person holds OF THIS DEPARTMENT. Only
+ * this Department's Roles are touched (R6) — a Role in another Department is left
+ * alone. The unchosen Roles are withdrawn, not deleted (R113), so they stay on
+ * the record marked withdrawn and a competency one alone required demotes to
+ * optional through the derivation. No case is touched (R135). Idempotent and
+ * safe under two Admins racing: the surviving Role is re-checked as still held,
+ * and only `withdrawnAt IS NULL` rows are written.
+ */
+taxonomyRouter.post(
+  '/departments/:id/tightening/resolve',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const parsed = tighteningResolveBody.safeParse(req.body);
+    if (!parsed.success)
+      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+    const loaded = await loadDepartmentForTightening(db, tenant.orgId, req.params.id!);
+    if (!loaded) return reply(res, 404, { error: 'not_found' });
+
+    const { membershipId, survivingRoleId } = parsed.data;
+    // The chosen Role must belong to this Department and be one this person still
+    // holds — refusing a stale or cross-Department choice, and never withdrawing
+    // the last Role out from under a concurrent resolve.
+    if (!loaded.roleById.has(survivingRoleId))
+      return reply(res, 400, { error: 'role_not_in_department' });
+    // The target must be an ACTIVE member of this org — the same scope the review
+    // applies (R128), so a deactivated or cross-org membershipId cannot be resolved.
+    const membership = await db.query.memberships.findFirst({
+      where: and(
+        eq(schema.memberships.id, membershipId),
+        eq(schema.memberships.orgId, tenant.orgId),
+        eq(schema.memberships.status, 'active'),
+      ),
+    });
+    if (!membership) return reply(res, 404, { error: 'not_found' });
+    const surviving = await db.query.membershipRoles.findFirst({
+      where: and(
+        eq(schema.membershipRoles.membershipId, membershipId),
+        eq(schema.membershipRoles.roleId, survivingRoleId),
+        isNull(schema.membershipRoles.withdrawnAt),
+      ),
+    });
+    if (!surviving) return reply(res, 409, { error: 'role_not_held' });
+
+    const toWithdraw = loaded.roleIds.filter((roleId) => roleId !== survivingRoleId);
+    if (toWithdraw.length > 0) {
+      await db
+        .update(schema.membershipRoles)
+        .set({ withdrawnAt: new Date() })
+        .where(
+          and(
+            eq(schema.membershipRoles.membershipId, membershipId),
+            isNull(schema.membershipRoles.withdrawnAt),
+            inArray(schema.membershipRoles.roleId, toWithdraw),
+          ),
+        );
+    }
+    await recordAudit(db, tenant, {
+      action: 'Resolved role tightening',
+      target: loaded.roleById.get(survivingRoleId)?.name ?? survivingRoleId,
+      category: 'settings',
+      icon: 'briefcase',
+    });
+    res.json({ ok: true, membershipId, survivingRoleId });
+  }),
+);
+
 // ── Roles (created WITHIN a Department — KTD2) ────────────────────────────────
 
 taxonomyRouter.post(
@@ -362,6 +542,54 @@ taxonomyRouter.patch(
       icon: 'briefcase',
     });
     res.json(roleDto(row ?? existing));
+  }),
+);
+
+/**
+ * Stop offering a Role (U17, R52) — the Department drops it from its offer.
+ *
+ * This is a DIFFERENT act from retiring (`PATCH /roles/:id status=retired`, R119),
+ * which leaves every holder still holding it. Stopping the offer means the Role
+ * is no longer available to anyone in the Department, so there is nothing to put
+ * to an Admin: in one transaction it retires the Role (so it can no longer be
+ * newly placed) AND withdraws it from every current holder. It touches no
+ * assessment case — a case in flight for its requirement runs to completion
+ * (R54). A competency the Role alone required demotes to optional through the
+ * standing derivation on the next read (R109), with nothing written or revoked.
+ * Reversal is `PATCH /roles/:id status=active` (resume the offer), which returns
+ * the Role to nobody it was withdrawn from (R53).
+ */
+taxonomyRouter.post(
+  '/roles/:id/stop-offering',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const role = await db.query.jobRoles.findFirst({
+      where: and(eq(schema.jobRoles.id, req.params.id!), eq(schema.jobRoles.orgId, tenant.orgId)),
+    });
+    if (!role) return reply(res, 404, { error: 'not_found' });
+
+    const now = new Date();
+    const [row] = await db.transaction(async (tx) => {
+      const updated = await tx
+        .update(schema.jobRoles)
+        .set({ status: 'retired' })
+        .where(eq(schema.jobRoles.id, role.id))
+        .returning();
+      // Every current holder loses it, on that ground alone (R52). Cases in
+      // flight are left to run (R54) — this writes no assessment case.
+      await withdrawRoleFromAllHolders(tx, role.id, now);
+      return updated;
+    });
+    await recordAudit(db, tenant, {
+      action: 'Stopped offering role',
+      target: row?.name ?? role.name,
+      category: 'settings',
+      icon: 'briefcase',
+    });
+    res.json(roleDto(row ?? { ...role, status: 'retired' }));
   }),
 );
 
@@ -534,6 +762,403 @@ taxonomyRouter.put(
       icon: 'briefcase',
     });
     res.json({ configured: true, toolIds, effects });
+  }),
+);
+
+// ── U18: Retirement review and remediation ───────────────────────────────────
+
+/** A case is in flight while open (created, not settled) — awaiting review counts (R131). */
+const IN_FLIGHT_STATES = ['open', 'awaiting_sign_off'] as const;
+
+/** One active person still holding a retired value. */
+interface ReviewHolder {
+  membershipId: string;
+  userId: string;
+  name: string;
+}
+
+/**
+ * The people still holding a retired value (U18, KTD8, R116, R128). A PURE
+ * query: nothing is written on retirement and nothing removed on remediation, so
+ * returning a value to active clears its review simply by the query finding
+ * nobody (R123). Only ACTIVE memberships appear — a person moved off the value,
+ * or deactivated, drops out on their own (R128). Retirement itself changes no
+ * competency's standing, because the value stays on the record (R119).
+ */
+taxonomyRouter.get(
+  '/retirement-review',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const orgId = tenant.orgId;
+
+    const [locations, departments, roles] = await Promise.all([
+      db.query.locations.findMany({
+        where: and(eq(schema.locations.orgId, orgId), eq(schema.locations.status, 'retired')),
+      }),
+      db.query.departments.findMany({
+        where: and(eq(schema.departments.orgId, orgId), eq(schema.departments.status, 'retired')),
+      }),
+      db.query.jobRoles.findMany({
+        where: and(eq(schema.jobRoles.orgId, orgId), eq(schema.jobRoles.status, 'retired')),
+      }),
+    ]);
+
+    const [locHolders, deptHolders, roleHolders] = await Promise.all([
+      locations.length
+        ? db.query.membershipLocations.findMany({
+            where: inArray(schema.membershipLocations.locationId, locations.map((l) => l.id)),
+          })
+        : [],
+      departments.length
+        ? db.query.membershipDepartments.findMany({
+            where: inArray(schema.membershipDepartments.departmentId, departments.map((d) => d.id)),
+          })
+        : [],
+      roles.length
+        ? db.query.membershipRoles.findMany({
+            where: and(
+              inArray(schema.membershipRoles.roleId, roles.map((r) => r.id)),
+              isNull(schema.membershipRoles.withdrawnAt),
+            ),
+          })
+        : [],
+    ]);
+
+    const allMembershipIds = [
+      ...new Set([
+        ...locHolders.map((h) => h.membershipId),
+        ...deptHolders.map((h) => h.membershipId),
+        ...roleHolders.map((h) => h.membershipId),
+      ]),
+    ];
+    // ACTIVE memberships only — the review is who is still around and holding it.
+    const memberships = allMembershipIds.length
+      ? await db.query.memberships.findMany({
+          where: and(
+            eq(schema.memberships.orgId, orgId),
+            inArray(schema.memberships.id, allMembershipIds),
+            eq(schema.memberships.status, 'active'),
+          ),
+        })
+      : [];
+    const activeMembership = new Map(memberships.map((m) => [m.id, m]));
+    const users = memberships.length
+      ? await db.query.users.findMany({
+          where: inArray(schema.users.id, memberships.map((m) => m.userId)),
+        })
+      : [];
+    const nameByUser = new Map(users.map((u) => [u.id, u.name]));
+
+    // valueId → its ACTIVE holders, built from an axis's holder rows. `keyOf`
+    // pulls the value id (locationId / departmentId / roleId) off each row.
+    const holdersByValue = <T extends { membershipId: string }>(rows: T[], keyOf: (r: T) => string) => {
+      const map = new Map<string, ReviewHolder[]>();
+      for (const row of rows) {
+        const membership = activeMembership.get(row.membershipId);
+        if (!membership) continue; // not active → not in the review (R128)
+        const list = map.get(keyOf(row)) ?? [];
+        list.push({
+          membershipId: row.membershipId,
+          userId: membership.userId,
+          name: nameByUser.get(membership.userId) ?? 'Unknown user',
+        });
+        map.set(keyOf(row), list);
+      }
+      return map;
+    };
+
+    const byLocation = holdersByValue(locHolders, (r) => r.locationId);
+    const byDepartment = holdersByValue(deptHolders, (r) => r.departmentId);
+    const byRole = holdersByValue(roleHolders, (r) => r.roleId);
+
+    const withHolders = <T extends { id: string; name: string }>(
+      values: T[],
+      map: Map<string, ReviewHolder[]>,
+      extra?: (v: T) => Record<string, unknown>,
+    ) =>
+      values
+        .map((v) => ({ id: v.id, name: v.name, ...(extra?.(v) ?? {}), holders: map.get(v.id) ?? [] }))
+        .filter((v) => v.holders.length > 0);
+
+    res.json({
+      locations: withHolders(locations, byLocation),
+      departments: withHolders(departments, byDepartment),
+      roles: withHolders(roles, byRole, (r) => ({ departmentId: r.departmentId })),
+    });
+  }),
+);
+
+/** Shared loader for a Location transfer's preview and apply — same moved set, no drift (KTD10). */
+async function planLocationTransfer(
+  database: Database,
+  orgId: string,
+  locationId: string,
+  replacementLocationId: string,
+  membershipId: string | undefined,
+): Promise<
+  | { error: { status: number; body: unknown } }
+  | { movedMembershipIds: string[]; movedUserIds: string[]; inFlightCaseIds: string[] }
+> {
+  if (replacementLocationId === locationId)
+    return { error: { status: 400, body: { error: 'same_location' } } };
+  const [from, to] = await Promise.all([
+    database.query.locations.findFirst({
+      where: and(eq(schema.locations.id, locationId), eq(schema.locations.orgId, orgId)),
+    }),
+    database.query.locations.findFirst({
+      where: and(eq(schema.locations.id, replacementLocationId), eq(schema.locations.orgId, orgId)),
+    }),
+  ]);
+  if (!from || !to) return { error: { status: 404, body: { error: 'not_found' } } };
+
+  const holderRows = await database.query.membershipLocations.findMany({
+    where: eq(schema.membershipLocations.locationId, locationId),
+  });
+  let membershipIds = [...new Set(holderRows.map((h) => h.membershipId))];
+  // One person, or everyone — the same choice serves R126 and R132.
+  if (membershipId) membershipIds = membershipIds.filter((id) => id === membershipId);
+  if (membershipIds.length === 0)
+    return { movedMembershipIds: [], movedUserIds: [], inFlightCaseIds: [] };
+
+  const memberships = await database.query.memberships.findMany({
+    where: and(
+      eq(schema.memberships.orgId, orgId),
+      inArray(schema.memberships.id, membershipIds),
+      eq(schema.memberships.status, 'active'),
+    ),
+  });
+  const movedMembershipIds = memberships.map((m) => m.id);
+  const movedUserIds = [...new Set(memberships.map((m) => m.userId))];
+  if (movedUserIds.length === 0)
+    return { movedMembershipIds: [], movedUserIds: [], inFlightCaseIds: [] };
+
+  const inFlight = await database.query.assessmentCases.findMany({
+    where: and(
+      eq(schema.assessmentCases.orgId, orgId),
+      eq(schema.assessmentCases.locationId, locationId),
+      inArray(schema.assessmentCases.candidateUserId, movedUserIds),
+      inArray(schema.assessmentCases.state, [...IN_FLIGHT_STATES]),
+    ),
+  });
+  return { movedMembershipIds, movedUserIds, inFlightCaseIds: inFlight.map((c) => c.id) };
+}
+
+const locationTransferPreviewBody = z.object({
+  replacementLocationId: z.string().uuid(),
+  membershipId: z.string().uuid().optional(),
+});
+
+/** What a Location transfer would move, before committing (R132): people and in-flight cases. */
+taxonomyRouter.post(
+  '/locations/:id/transfer/preview',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const parsed = locationTransferPreviewBody.safeParse(req.body);
+    if (!parsed.success)
+      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+    const plan = await planLocationTransfer(
+      db,
+      tenant.orgId,
+      req.params.id!,
+      parsed.data.replacementLocationId,
+      parsed.data.membershipId,
+    );
+    if ('error' in plan) return reply(res, plan.error.status, plan.error.body);
+    res.json({ peopleMoved: plan.movedMembershipIds.length, inFlightCases: plan.inFlightCaseIds.length });
+  }),
+);
+
+const locationTransferBody = z.object({
+  replacementLocationId: z.string().uuid(),
+  membershipId: z.string().uuid().optional(),
+  // Carry the in-flight cases unchanged, or rewrite them to the replacement
+  // Location. There is no third outcome that voids a case (R133).
+  caseOutcome: z.enum(['carry', 'rewrite']),
+});
+
+/**
+ * Move people off a retired Location to a replacement (U18, R125, R126, R133,
+ * R134). Their placement moves; each in-flight case is either carried unchanged
+ * (keeps the Location it was assessed at) or rewritten to the replacement — the
+ * one choice applies to every case, with no per-case action. Nothing voids a
+ * case: stopping a part-assessed case is what deactivation does, not a transfer.
+ */
+taxonomyRouter.post(
+  '/locations/:id/transfer',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const parsed = locationTransferBody.safeParse(req.body);
+    if (!parsed.success)
+      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+    const { replacementLocationId, membershipId, caseOutcome } = parsed.data;
+    const locationId = req.params.id!;
+    const plan = await planLocationTransfer(db, tenant.orgId, locationId, replacementLocationId, membershipId);
+    if ('error' in plan) return reply(res, plan.error.status, plan.error.body);
+
+    if (plan.movedMembershipIds.length > 0) {
+      await db.transaction(async (tx) => {
+        // Move each person's placement off the retired Location. Repoint the row
+        // unless they already hold the replacement, in which case just drop the
+        // retired one (the unique (membership, location) pair forbids a repeat).
+        const existing = await tx.query.membershipLocations.findMany({
+          where: inArray(schema.membershipLocations.membershipId, plan.movedMembershipIds),
+        });
+        const holdsReplacement = new Set(
+          existing
+            .filter((row) => row.locationId === replacementLocationId)
+            .map((row) => row.membershipId),
+        );
+        for (const mId of plan.movedMembershipIds) {
+          if (holdsReplacement.has(mId)) {
+            await tx
+              .delete(schema.membershipLocations)
+              .where(
+                and(
+                  eq(schema.membershipLocations.membershipId, mId),
+                  eq(schema.membershipLocations.locationId, locationId),
+                ),
+              );
+          } else {
+            await tx
+              .update(schema.membershipLocations)
+              .set({ locationId: replacementLocationId })
+              .where(
+                and(
+                  eq(schema.membershipLocations.membershipId, mId),
+                  eq(schema.membershipLocations.locationId, locationId),
+                ),
+              );
+          }
+        }
+        // Rewrite the in-flight cases only when asked; carry leaves them be.
+        if (caseOutcome === 'rewrite' && plan.inFlightCaseIds.length > 0) {
+          await tx
+            .update(schema.assessmentCases)
+            .set({ locationId: replacementLocationId })
+            .where(inArray(schema.assessmentCases.id, plan.inFlightCaseIds));
+        }
+      });
+    }
+
+    await recordAudit(db, tenant, {
+      action: 'Transferred people off retired location',
+      target: locationId,
+      category: 'settings',
+      icon: 'map-pin',
+    });
+    res.json({
+      peopleMoved: plan.movedMembershipIds.length,
+      casesRewritten: caseOutcome === 'rewrite' ? plan.inFlightCaseIds.length : 0,
+      casesCarried: caseOutcome === 'carry' ? plan.inFlightCaseIds.length : 0,
+    });
+  }),
+);
+
+const roleTransferBody = z.object({
+  replacementRoleId: z.string().uuid(),
+  membershipId: z.string().uuid().optional(),
+});
+
+/**
+ * Move people off a retired Role to a replacement (U18, R135). A case records a
+ * Location and neither a Role nor a Department, so there is nothing on it to
+ * rewrite and no carry-or-rewrite choice arises: cases in flight are left
+ * untouched and only standing recalculates, emergently. The retired Role is
+ * withdrawn (marked, not deleted) and the replacement given in its place.
+ */
+taxonomyRouter.post(
+  '/roles/:id/transfer',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const parsed = roleTransferBody.safeParse(req.body);
+    if (!parsed.success)
+      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+    const roleId = req.params.id!;
+    const { replacementRoleId, membershipId } = parsed.data;
+    if (replacementRoleId === roleId) return reply(res, 400, { error: 'same_role' });
+
+    const [from, to] = await Promise.all([
+      db.query.jobRoles.findFirst({
+        where: and(eq(schema.jobRoles.id, roleId), eq(schema.jobRoles.orgId, tenant.orgId)),
+      }),
+      db.query.jobRoles.findFirst({
+        where: and(eq(schema.jobRoles.id, replacementRoleId), eq(schema.jobRoles.orgId, tenant.orgId)),
+      }),
+    ]);
+    if (!from || !to) return reply(res, 404, { error: 'not_found' });
+
+    let holders = await db.query.membershipRoles.findMany({
+      where: and(eq(schema.membershipRoles.roleId, roleId), isNull(schema.membershipRoles.withdrawnAt)),
+    });
+    if (membershipId) holders = holders.filter((h) => h.membershipId === membershipId);
+    if (holders.length === 0) return reply(res, 200, { peopleMoved: 0 });
+
+    const movedMembershipIds = [...new Set(holders.map((h) => h.membershipId))];
+    // Only ACTIVE memberships are moved — a deactivated one is not in the review.
+    const memberships = await db.query.memberships.findMany({
+      where: and(
+        eq(schema.memberships.orgId, tenant.orgId),
+        inArray(schema.memberships.id, movedMembershipIds),
+        eq(schema.memberships.status, 'active'),
+      ),
+    });
+    const activeIds = new Set(memberships.map((m) => m.id));
+
+    await db.transaction(async (tx) => {
+      // Whether the person already holds the replacement (withdrawn or not).
+      const existingReplacement = await tx.query.membershipRoles.findMany({
+        where: and(
+          eq(schema.membershipRoles.roleId, replacementRoleId),
+          inArray(schema.membershipRoles.membershipId, [...activeIds]),
+        ),
+      });
+      const replacementRow = new Map(existingReplacement.map((r) => [r.membershipId, r]));
+      for (const mId of activeIds) {
+        // Withdraw the retired Role (marked, not deleted).
+        await tx
+          .update(schema.membershipRoles)
+          .set({ withdrawnAt: new Date() })
+          .where(
+            and(
+              eq(schema.membershipRoles.membershipId, mId),
+              eq(schema.membershipRoles.roleId, roleId),
+              isNull(schema.membershipRoles.withdrawnAt),
+            ),
+          );
+        // Give the replacement — reinstate a withdrawn row, or insert a new one.
+        const existing = replacementRow.get(mId);
+        if (existing) {
+          await tx
+            .update(schema.membershipRoles)
+            .set({ withdrawnAt: null })
+            .where(eq(schema.membershipRoles.id, existing.id));
+        } else {
+          await tx
+            .insert(schema.membershipRoles)
+            .values({ membershipId: mId, roleId: replacementRoleId, position: 0 });
+        }
+      }
+    });
+
+    await recordAudit(db, tenant, {
+      action: 'Transferred people off retired role',
+      target: from.name,
+      category: 'settings',
+      icon: 'briefcase',
+    });
+    res.json({ peopleMoved: activeIds.size });
   }),
 );
 

@@ -198,3 +198,39 @@ export async function writePlacement(
 
   return { ok: true };
 }
+
+/**
+ * Withdraw a Role from EVERY person who currently holds it (U17, R52) — the
+ * mechanism behind a Department that stops offering a Role, where the Role is no
+ * longer available and there is nothing to put to an Admin.
+ *
+ * Marks, never deletes (R52): only rows currently held (`withdrawnAt IS NULL`)
+ * are touched, so it is idempotent and preserves the timestamp on rows already
+ * withdrawn. It touches no assessment case — a case in flight for the Role's
+ * requirement runs to completion (R54); deactivation is the only act that stops
+ * one. Demotion of any competency the Role alone required is left to the standing
+ * derivation, which reads the held set on the next call (R109) — nothing is
+ * written to a competency here.
+ *
+ * The caller MUST have verified the Role belongs to the organisation before
+ * calling; `membership_roles` carries no org column, so the org scope is the
+ * Role's. Runs against whatever handle it is given (a transaction, so the offer
+ * withdrawal and the Role's status flip commit together).
+ */
+export async function withdrawRoleFromAllHolders(
+  // A transaction or the base handle — only `.update` is used, so both satisfy
+  // it, and the caller runs this inside the same transaction as the status flip.
+  db: Pick<Db, 'update'>,
+  roleId: string,
+  now: Date,
+): Promise<void> {
+  await db
+    .update(schema.membershipRoles)
+    .set({ withdrawnAt: now })
+    .where(
+      and(
+        eq(schema.membershipRoles.roleId, roleId),
+        isNull(schema.membershipRoles.withdrawnAt),
+      ),
+    );
+}

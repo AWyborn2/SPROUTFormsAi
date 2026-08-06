@@ -13,6 +13,7 @@ import type {
   ExtractionResult,
   FormContainer,
   FormField,
+  Standing,
   SubmissionStatus,
   SubmissionValue,
   TaxonomyStatus,
@@ -425,7 +426,18 @@ export interface CompetencyHolder {
   /** ISO instant, or null when the competency has no validity period. */
   expiresAt: string | null;
   status: CompetencyStatus;
-  /** Still satisfies a requirement — held, expiring or grace. */
+  /**
+   * Revoked beats the date: a grant taken away by an appeal or an admin. Shown
+   * as a mark rather than a status badge (R104), and never `current`.
+   */
+  revoked: boolean;
+  /**
+   * Whether this person's held Roles OBLIGE them to hold this competency (R108).
+   * Answers a different question from `current`: standing is about obligation,
+   * currency is about the date.
+   */
+  standing: Standing;
+  /** Still satisfies a requirement — held, expiring or grace, and not revoked. */
   current: boolean;
   /** Wording for a status worth saying out loud; null when there is nothing. */
   note: string | null;
@@ -490,6 +502,44 @@ export interface TaxDepartment {
   status: TaxonomyStatus;
   createdAt: string;
   roles: TaxRole[];
+}
+
+/**
+ * One person a Department tightening still has to resolve (U17, R112): they hold
+ * more than one of the Department's Roles, and an Admin picks which survives. A
+ * LIVE list — a person drops off it the moment they are resolved.
+ */
+export interface TighteningReviewItem {
+  membershipId: string;
+  userId: string | null;
+  name: string;
+  /** This Department's Roles the person holds — the Admin keeps exactly one. */
+  heldRoles: Array<{ id: string; name: string }>;
+}
+
+/** One active person still holding a retired value (U18, R116). */
+export interface ReviewHolder {
+  membershipId: string;
+  userId: string;
+  name: string;
+}
+
+/** A retired value and the active people still holding it (U18). */
+export interface RetiredValueReview {
+  id: string;
+  name: string;
+  holders: ReviewHolder[];
+}
+
+/**
+ * The people still holding a retired value, by axis (U18, KTD8). A pure read: a
+ * value returned to active drops out because nobody holds "something retired"
+ * any more (R123).
+ */
+export interface RetirementReview {
+  locations: RetiredValueReview[];
+  departments: RetiredValueReview[];
+  roles: Array<RetiredValueReview & { departmentId: string }>;
 }
 
 /** The three organisation settings that govern how far a person may spread (R24, R25, R40). */

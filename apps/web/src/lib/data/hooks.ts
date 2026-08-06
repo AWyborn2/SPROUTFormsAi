@@ -93,6 +93,10 @@ const keys = {
   assessmentTools: ['assessmentTools'] as const,
   /** A Role's required-assessment list (U10). Keyed by role so each editor caches apart. */
   roleRequiredAssessments: (roleId: string) => ['roleRequiredAssessments', roleId] as const,
+  /** The people a Department tightening still has to resolve (U17). Keyed by department. */
+  tighteningReview: (departmentId: string) => ['tighteningReview', departmentId] as const,
+  /** The people still holding any retired value (U18). */
+  retirementReview: ['retirementReview'] as const,
   assessmentCases: ['assessmentCases'] as const,
   /**
    * The shared assessor queue (U13). A SIBLING of assessmentCases — it shares no
@@ -1194,6 +1198,97 @@ export function useCreateRole() {
 export function useUpdateRole() {
   return useTaxonomyMutation((input: { id: string; name?: string; status?: TaxonomyStatus }) =>
     store.updateRole(input.id, { name: input.name, status: input.status }),
+  );
+}
+
+/**
+ * Stop offering a Role (U17, R52): retire it AND withdraw it from every holder.
+ * Distinct from retiring, which leaves holders in place. Refreshes the taxonomy
+ * and audit feed; competency reads change too, since a withdrawn Role's
+ * competencies may demote to optional through the standing derivation.
+ */
+export function useStopOfferingRole() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (roleId: string) => store.stopOfferingRole(roleId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.taxonomy });
+      void qc.invalidateQueries({ queryKey: keys.competencies });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** The people a Department tightening still has to resolve (U17, R112). */
+export function useTighteningReview(departmentId: string | undefined) {
+  return useQuery({
+    queryKey: keys.tighteningReview(departmentId ?? ''),
+    queryFn: () => store.getTighteningReview(departmentId!),
+    enabled: Boolean(departmentId),
+  });
+}
+
+/**
+ * Apply one person's tightening choice (U17, R113). On success the review is
+ * re-read so the resolved person drops off it, and competency reads refresh
+ * because a withdrawn Role's competencies may demote to optional.
+ */
+export function useResolveTightening(departmentId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { membershipId: string; survivingRoleId: string }) =>
+      store.resolveTightening(departmentId, input.membershipId, input.survivingRoleId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.tighteningReview(departmentId) });
+      void qc.invalidateQueries({ queryKey: keys.competencies });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** The people still holding any retired value (U18). */
+export function useRetirementReview() {
+  return useQuery({
+    queryKey: keys.retirementReview,
+    queryFn: () => store.getRetirementReview(),
+  });
+}
+
+/** What a Location transfer would move, before committing (U18, R132). */
+export function usePreviewLocationTransfer() {
+  return useMutation({
+    mutationFn: (input: { locationId: string; replacementLocationId: string }) =>
+      store.previewLocationTransfer(input.locationId, input.replacementLocationId),
+  });
+}
+
+/** Shared invalidation after a retirement transfer — the review shrinks and standing may shift. */
+function useTransferMutation<TArgs>(fn: (args: TArgs) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.retirementReview });
+      void qc.invalidateQueries({ queryKey: keys.taxonomy });
+      void qc.invalidateQueries({ queryKey: keys.competencies });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** Move everyone off a retired Location, carrying or rewriting their cases (U18, R133). */
+export function useTransferLocation() {
+  return useTransferMutation(
+    (input: { locationId: string; replacementLocationId: string; caseOutcome: 'carry' | 'rewrite' }) =>
+      store.transferLocation(input.locationId, input.replacementLocationId, input.caseOutcome),
+  );
+}
+
+/** Move everyone off a retired Role to a replacement; cases untouched (U18, R135). */
+export function useTransferRole() {
+  return useTransferMutation((input: { roleId: string; replacementRoleId: string }) =>
+    store.transferRole(input.roleId, input.replacementRoleId),
   );
 }
 export function useUpdateTaxonomySettings() {

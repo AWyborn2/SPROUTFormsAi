@@ -35,10 +35,12 @@ export interface AssignmentTool {
   assessorStreamCompetencyIds: Readonly<Record<string, readonly string[]>>;
 }
 
-/** One competency the person holds, already resolved to its current status. */
+/** One competency the person holds, resolved to its currency (dated state + revoked). */
 export interface HeldCompetencyState {
   competencyId: string;
   status: CompetencyStatus;
+  /** Revoked beats the date: excluded from the held set regardless (R107). */
+  revoked: boolean;
 }
 
 export interface AssignmentInput {
@@ -147,10 +149,11 @@ function resolveCaseLocation(tool: AssignmentTool, locationIds: readonly string[
  */
 export function decideAssignments(input: AssignmentInput): AssignmentDecision[] {
   // Current tickets only: `expiring` and `grace` still count, `expired` and
-  // `revoked` do not — the distinction competency-expiry already draws (R45,
-  // R46, R107).
+  // revoked do not — the distinction competency-expiry already draws (R45, R46,
+  // R107). `countsAsHeld` reads the dated state AND the revoked flag off each
+  // resolved holder.
   const held = new Set(
-    input.held.filter((h) => countsAsHeld(h.status)).map((h) => h.competencyId),
+    input.held.filter((h) => countsAsHeld(h)).map((h) => h.competencyId),
   );
   const openCases = new Set(input.openCaseToolIds);
   const requiredToolIds = new Set(input.roleRequirements.flat());
