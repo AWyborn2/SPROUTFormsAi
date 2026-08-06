@@ -209,6 +209,19 @@ export const auditLogEntries = pgTable(
     action: text().notNull(),
     target: text().notNull().default(''),
     category: auditCategoryEnum().notNull().default('general'),
+    /*
+      WHICH FIELD this entry covers, as the profile inventory's key (R57, R58).
+      Null on every entry that is not about one field, which is every entry
+      written before this existed.
+
+      Structured rather than parsed out of `target`, because R58 confines
+      sensitive-field entries to Admin and a filter over free text would have to
+      pattern-match the same prose that holds the values it is trying to hide —
+      leaking a date of birth whenever the match missed, and over-hiding ordinary
+      history whenever it matched too much. A column makes the filter a
+      comparison on data.
+    */
+    field: text(),
     icon: text().notNull().default('activity'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },

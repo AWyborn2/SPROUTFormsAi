@@ -114,4 +114,14 @@ export const auditCategoryEnum = pgEnum('audit_category', [
   'settings',
   'security',
   'general',
+  /*
+    Member profile edits (R57), and the category R58's filter keys on: an entry
+    covering a field the inventory marks sensitive is readable by Admin only, so
+    a Reviewer keeps the audit read they hold today and stops seeing dates of
+    birth and home addresses within it.
+
+    Nothing backfills rows to this value, which keeps it clear of the 55P04
+    restriction on using an enum value in the transaction that added it.
+  */
+  'profiles',
 ]);
