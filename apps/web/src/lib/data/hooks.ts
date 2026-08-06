@@ -95,6 +95,12 @@ const keys = {
   roleRequiredAssessments: (roleId: string) => ['roleRequiredAssessments', roleId] as const,
   assessmentCases: ['assessmentCases'] as const,
   /**
+   * The shared assessor queue (U13). A SIBLING of assessmentCases — it shares no
+   * key prefix, so invalidating assessmentCases does NOT reach it; every
+   * case-mutating hook invalidates this key explicitly alongside.
+   */
+  assessorQueue: ['assessorQueue'] as const,
+  /**
    * Deliberately NOT `['assessmentCases', 'progress']`: that shape is
    * `assessmentCase('progress')`, so invalidating one case would sweep the
    * dashboard and vice versa. A sibling key keeps the two independent.
@@ -1007,6 +1013,11 @@ export function useAssessmentCases() {
   return useQuery({ queryKey: keys.assessmentCases, queryFn: () => assessmentsApi.listCases() });
 }
 
+/** The shared assessor queue — unowned cases the reader is eligible for (U13). */
+export function useAssessorQueue() {
+  return useQuery({ queryKey: keys.assessorQueue, queryFn: () => assessmentsApi.listQueue() });
+}
+
 /**
  * Build the evidence PDF for a case.
  *
@@ -1046,6 +1057,7 @@ export function useCreateAssessmentCase() {
     mutationFn: (input: CreateCaseInput) => assessmentsApi.createCase(input),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
       void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
@@ -1098,6 +1110,7 @@ export function useRecordOutcome(caseId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
       void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
@@ -1112,6 +1125,7 @@ export function useSignOffCase(caseId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
       void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
@@ -1125,6 +1139,7 @@ export function useChangePathway(caseId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
       void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
@@ -1214,6 +1229,7 @@ export function useSetRoleRequiredAssessments(roleId: string) {
       // so it must be swept explicitly); the audit feed logs the change.
       void qc.invalidateQueries({ queryKey: keys.taxonomy });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
       void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
       void qc.invalidateQueries({ queryKey: keys.auditLog });
     },

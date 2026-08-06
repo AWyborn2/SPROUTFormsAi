@@ -14,6 +14,7 @@ import type { AssessmentToolManifest, SubmissionValue } from '@formai/shared';
 import {
   assessmentCaseStateEnum,
   assessmentPathwayEnum,
+  attemptMarkerKindEnum,
   nsDispositionEnum,
   partOutcomeEnum,
 } from './enums.ts';
@@ -329,6 +330,29 @@ export const assessmentPartAttempts = pgTable(
     }),
     /** Printed name as signed, kept even if the user record later changes. */
     assessorName: text('assessor_name').notNull().default(''),
+    /**
+     * Who marked this attempt (U15, R70). `automatic` — an answer-key mark no
+     * person made — leaves `assessorUserId`/`assessorName` null/empty; `person`
+     * carries them. Distinct from the assessor columns so a reader can tell an
+     * automatic mark from a person's, which the bare name columns could not.
+     *
+     * `default('person')` is truthful history: every attempt that existed before
+     * this column was entered by an assessor. An unmarked attempt reads `person`
+     * too, which is harmless — its `outcome` is null, so it plainly is not marked.
+     */
+    markerKind: attemptMarkerKindEnum('marker_kind').notNull().default('person'),
+    /**
+     * Composed warnings if the PERSON who marked this attempt fell short of the
+     * tool's assessor requirements for the case's Location (U14, R65). Warn, never
+     * block — the mark still stands. Empty for an automatic mark (nobody's
+     * eligibility is at stake) and for a tool with no assessor requirement. Stored
+     * as finished prose, like the case's `prerequisiteWarnings`, so a reader never
+     * has to reconstruct it.
+     */
+    markingEligibilityWarnings: jsonb('marking_eligibility_warnings')
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     signedAt: timestamp('signed_at', { withTimezone: true }),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },

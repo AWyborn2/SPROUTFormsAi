@@ -61,6 +61,15 @@ export const assessmentPathwayEnum = pgEnum('assessment_pathway', [
 
 export const partOutcomeEnum = pgEnum('part_outcome', ['satisfactory', 'not_satisfactory']);
 
+/**
+ * WHO marked an attempt (U15, R70, KTD14). `automatic` is an answer-key mark
+ * that no person made — its `assessorUserId` and `assessorName` stay null/empty
+ * so the record never prints a submitter's name against a mark they did not
+ * make. `person` is an assessor's judgement, named and attributed. Null while
+ * the attempt is unmarked.
+ */
+export const attemptMarkerKindEnum = pgEnum('attempt_marker_kind', ['person', 'automatic']);
+
 export const nsDispositionEnum = pgEnum('ns_disposition', [
   'retry',
   'coaching_then_retry',

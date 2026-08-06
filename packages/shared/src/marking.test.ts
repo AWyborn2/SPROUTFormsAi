@@ -6,9 +6,10 @@
  * Covers AE1 (multi-answer marking) and AE2 (the 100% mandatory-section rule).
  */
 import { describe, expect, it } from 'vitest';
+import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
-import { markTheory, stripMarkingSecrets } from './marking.js';
+import { isSelfMarking, markTheory, stripMarkingSecrets } from './marking.js';
 
 const header = (id: string, over: Partial<FormField> = {}): FormField => ({
   id,
@@ -53,6 +54,64 @@ const part = { mandatoryFieldIds: ['g1', 'g2'] };
 
 const run = (fields: FormField[], values: Record<string, SubmissionValue>) =>
   markTheory({ fields, values, part });
+
+/** A checkbox_group question with no answer key — reaches an assessor. */
+const unkeyed = (id: string, over: Partial<FormField> = {}): FormField => ({
+  id,
+  type: 'checkbox_group',
+  label: id,
+  required: true,
+  source: 'imported',
+  options: ['a', 'b', 'c', 'd'],
+  ...over,
+});
+
+const signature = (id: string): FormField => ({
+  id,
+  type: 'signature',
+  label: id,
+  required: false,
+  source: 'imported',
+});
+
+describe('isSelfMarking (U15)', () => {
+  // A one-part manifest anchored at the first field, so `fieldsInPart` returns
+  // the whole array as the part's slice.
+  const selfMarks = (fields: FormField[]) => {
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        { key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'], startFieldId: fields[0]!.id },
+      ],
+    };
+    return isSelfMarking(fields, manifest, 'p1');
+  };
+
+  it('is true when every real question carries a key — the interleaved outcome cells are furniture (R66)', () => {
+    // generalFields interleaves each keyed question with its check_cross cell,
+    // exactly as the real authored tool does — the case the literal predicate fails.
+    expect(selfMarks(generalFields)).toBe(true);
+  });
+
+  it('ignores a section header and a signature box (R66)', () => {
+    expect(selfMarks([header('h'), q('g1', ['a']), outcome('g1-out'), signature('sig')])).toBe(true);
+  });
+
+  it('is false when one question of several carries no key — routes to an assessor (R67)', () => {
+    expect(selfMarks([header('h'), q('g1', ['a']), outcome('g1-out'), unkeyed('g2')])).toBe(false);
+  });
+
+  it('is false when no question carries a key, not satisfactory-with-nothing-checked (R68)', () => {
+    expect(selfMarks([header('h'), unkeyed('g1'), unkeyed('g2')])).toBe(false);
+  });
+
+  it('is false for a part carrying no real question at all (R68)', () => {
+    expect(selfMarks([header('h'), signature('sig')])).toBe(false);
+  });
+
+  it('is false for a practical demonstration — its criteria carry no key (R69)', () => {
+    expect(selfMarks([header('prac'), unkeyed('c1'), unkeyed('c2'), unkeyed('c3')])).toBe(false);
+  });
+});
 
 describe('exact set match', () => {
   it('marks an exact single-option answer correct', () => {

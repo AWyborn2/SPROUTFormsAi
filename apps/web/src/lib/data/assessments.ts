@@ -47,7 +47,23 @@ export interface AssessmentCaseRow {
   candidateUserId: string;
   pathway: AssessmentPathway;
   state: AssessmentCaseState;
+  /** Null on a pooled case — shown as unassigned (U13). */
+  assessorUserId: string | null;
   createdAt: string;
+}
+
+/** One unowned case an eligible assessor may pull from the shared queue (U13). */
+export interface AssessorQueueItem {
+  id: string;
+  toolName: string;
+  candidateUserId: string;
+  pathway: AssessmentPathway;
+  locationId: string | null;
+  locationName: string | null;
+  createdAt: string;
+  ageDays: number;
+  /** Derived from the case's age against the org threshold (R63) — never stored. */
+  overdue: boolean;
 }
 
 export interface CasePartView {
@@ -72,6 +88,10 @@ export interface CaseAttemptView {
   dispositionReason: string | null;
   templateVersionId: string;
   signedAt: string | null;
+  /** Who marked it (U15): 'automatic' was marked by nobody; null until marked. */
+  markerKind: 'person' | 'automatic' | null;
+  /** Assessor-eligibility shortfalls recorded when a person marked it (U14). */
+  markingEligibilityWarnings: string[];
 }
 
 export interface AssessmentCaseDetail {
@@ -271,6 +291,9 @@ export const assessmentsApi = {
     ),
 
   listCases: () => apiClient.get<AssessmentCaseRow[]>('/assessment-cases'),
+
+  /** The shared pool of unowned cases the reading assessor is eligible for (U13). */
+  listQueue: () => apiClient.get<AssessorQueueItem[]>('/assessment-cases/queue'),
 
   /**
    * Progress across every case the caller may see, in one request.
