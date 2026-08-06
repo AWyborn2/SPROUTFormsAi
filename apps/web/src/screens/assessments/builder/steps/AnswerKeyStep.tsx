@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { Icon } from '@formai/ui';
 import {
+  hasAnyMatchSide,
+  hasBothMatchSides,
   isChoiceField,
   isMatchingQuestion,
   type DraftAnswerKey,
@@ -60,8 +62,28 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
   const { fields, keys, excluded, keyOps, extraction } = draft;
   const [pairingFor, setPairingFor] = useState<string | null>(null);
 
+  /** The extracted counterpart, which is where the matching sides live. */
+  const extractedById = useMemo(
+    () => new Map((extraction?.fields ?? []).map((f) => [f.id, f])),
+    [extraction],
+  );
+
   /*
-    A question is anything with options that is not excluded.
+    A question is anything with options — OR a matching question the extraction
+    found, which by contract has NONE.
+
+    THE SECOND HALF IS NOT AN EXTRA CASE, IT IS THE FEATURE. The extraction tool
+    schema tells the model, for a matching question, to "leave options empty:
+    the pairings are derived from the two sides" — so `matchLeft`/`matchRight`
+    arrive and `options` does not. Filtering on options alone therefore dropped
+    every matching question from the only step that can configure one: step 1
+    counted them (`matchesComplete` / `matchesIncomplete`) and step 5 offered
+    nowhere to open a single one. The pair builder — and the picture upload
+    inside it — was reachable only from ordinary multiple-choice questions,
+    which is to say from every question except the ones it exists for.
+
+    EITHER side is enough. A one-sided read is exactly what the author is here
+    to finish, and it is what step 1 already counts as `matchesIncomplete`.
 
     Excluded questions are deliberately absent rather than shown greyed: the
     author already said this one is off the digital form, and a key for a
@@ -69,27 +91,25 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
   */
   const questions = useMemo(
     () =>
-      fields.filter(
-        (f) => isChoiceField(f.type) && (f.options?.length ?? 0) > 0 && !excluded.has(f.id),
-      ),
-    [fields, excluded],
+      fields.filter((f) => {
+        if (excluded.has(f.id)) return false;
+        if (isChoiceField(f.type) && (f.options?.length ?? 0) > 0) return true;
+        const extracted = extractedById.get(f.id);
+        return !!extracted && hasAnyMatchSide(extracted);
+      }),
+    [fields, excluded, extractedById],
   );
 
   const keyById = useMemo(() => new Map(keys.map((k) => [k.fieldId, k])), [keys]);
   const keyed = questions.filter((q) => keyById.has(q.id)).length;
   const verified = questions.filter((q) => keyById.get(q.id)?.verifiedAt).length;
 
-  /** The extracted counterpart, which is where the matching sides live. */
-  const extractedById = useMemo(
-    () => new Map((extraction?.fields ?? []).map((f) => [f.id, f])),
-    [extraction],
-  );
-
   if (questions.length === 0) {
     return (
       <p className="rounded-[14px] border border-border bg-surface-card p-4 text-[12.5px] text-text-secondary">
-        No keyable questions were found. A question needs printed options before it can be keyed —
-        correct a field&rsquo;s type in <strong>Generate</strong> if one was read as something else.
+        No keyable questions were found. A question needs printed options, or a matching
+        question&rsquo;s two printed sides, before it can be keyed — correct a field&rsquo;s type
+        in <strong>Generate</strong> if one was read as something else.
       </p>
     );
   }
@@ -128,7 +148,15 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
 
       {questions.map((question, i) => {
         const key = keyById.get(question.id);
-        const matching = isMatchingQuestion(question.options);
+        const extracted = extractedById.get(question.id);
+        /*
+          Matching by EITHER route: pairings already built into options by a
+          previous save, or the two printed sides the extraction read. Reading
+          only the first left a freshly-extracted matching question labelled as
+          a one-answer question and offered a type dropdown that cannot express
+          it.
+        */
+        const matching = isMatchingQuestion(question.options) || (!!extracted && hasAnyMatchSide(extracted));
         const open = pairingFor === question.id;
 
         return (
@@ -175,7 +203,19 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                 className="inline-flex h-[28px] flex-none items-center gap-1.5 rounded-lg border border-border px-2.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-hover"
               >
                 <Icon name="git-compare" size={12} />
-                {open ? 'Close pairs' : matching ? 'Edit pairs' : 'Make matching'}
+                {/*
+                  Three states, not two. A matching question the extraction just
+                  read HAS no pairs yet, and "Edit pairs" invites the author to
+                  look for something that is not there — on the button that is
+                  the only way into the pair builder.
+                */}
+                {open
+                  ? 'Close pairs'
+                  : !matching
+                    ? 'Make matching'
+                    : (question.options?.length ?? 0) === 0
+                      ? 'Build pairs'
+                      : 'Edit pairs'}
               </button>
             </div>
 
@@ -199,6 +239,19 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                   onCancel={() => setPairingFor(null)}
                 />
               </div>
+            ) : matching && (question.options?.length ?? 0) === 0 ? (
+              /*
+                A matching question the extraction read but nobody has paired
+                yet has no options to show, and an empty chip row reads as "this
+                question has no answers" rather than "the pairs are not built".
+                Say which sides were found, so the author knows whether they are
+                finishing a one-sided read or confirming a complete one.
+              */
+              <p className="mt-2.5 text-[11.5px] text-text-tertiary">
+                {extracted && hasBothMatchSides(extracted)
+                  ? `Both sides were read — ${extracted.matchLeft?.length ?? 0} prompts and ${extracted.matchRight?.length ?? 0} answers. Open the pairs to set which goes with which.`
+                  : 'Only one side of this matching question was read. Open the pairs to type the other.'}
+              </p>
             ) : (
               <OptionKeys question={question} draftKey={key} onToggle={keyOps.toggleOption} />
             )}

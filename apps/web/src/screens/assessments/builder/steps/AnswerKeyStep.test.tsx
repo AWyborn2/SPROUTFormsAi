@@ -241,3 +241,106 @@ describe('AnswerKeyStep', () => {
     expect(screen.getByText(/No keyable questions were found/)).toBeTruthy();
   });
 });
+
+/**
+ * Matching questions reaching the step that configures them.
+ *
+ * The extraction tool schema tells the model, for a matching question, to
+ * "leave options empty: the pairings are derived from the two sides". Filtering
+ * this step's list on `options.length > 0` therefore dropped every matching
+ * question the extractor actually found — so step 1 counted them and step 5
+ * offered nowhere to open one. The pair builder, and the picture upload inside
+ * it, were reachable only from ordinary multiple-choice questions: from every
+ * question except the ones the feature exists for.
+ */
+describe('AnswerKeyStep — matching questions the extraction found', () => {
+  /** As the extractor emits one: two printed sides, and NO options. */
+  function matchingField(over: Partial<ExtractedField> = {}) {
+    return field({
+      id: 'm1',
+      label: 'Match each sign to its meaning',
+      type: 'text',
+      options: undefined,
+      matchLeft: ['Red triangle', 'Blue circle'],
+      matchRight: ['Give way', 'Mandatory instruction'],
+      ...over,
+    });
+  }
+
+  it('LISTS A MATCHING QUESTION THAT HAS NO OPTIONS', async () => {
+    // The whole defect in one assertion: by contract it has no options, and
+    // options were the only way onto this screen.
+    const result = await draftOf([matchingField()]);
+    renderStep(result);
+    expect(screen.getByText('Match each sign to its meaning')).toBeTruthy();
+  });
+
+  it('offers the pair builder for it', async () => {
+    // "Build pairs", not "Edit pairs": nothing has been paired yet, and
+    // inviting the author to edit what is not there is how a step reads as
+    // broken.
+    const result = await draftOf([matchingField()]);
+    renderStep(result);
+    expect(screen.getByText('Build pairs')).toBeTruthy();
+  });
+
+  it('opens the pair builder, which is where pictures are uploaded', async () => {
+    // `ImageSlot` lives inside `PairBuilder`. No route to the builder is no
+    // route to the upload, which is why "can't configure it" and "can't upload
+    // images" were one bug.
+    const result = await draftOf([matchingField()]);
+    renderStep(result);
+    fireEvent.click(screen.getByText('Build pairs'));
+    expect(screen.getByText('Close pairs')).toBeTruthy();
+  });
+
+  it('calls it Matching, not “One answer”', async () => {
+    // Reading only `isMatchingQuestion(options)` left a freshly-extracted
+    // matching question labelled as a one-answer question.
+    const result = await draftOf([matchingField()]);
+    renderStep(result);
+    expect(screen.getByText(/Matching/)).toBeTruthy();
+  });
+
+  it('does not offer a type dropdown that cannot express it', async () => {
+    const result = await draftOf([matchingField()]);
+    renderStep(result);
+    expect(screen.queryByLabelText(/^Question type for/)).toBeNull();
+  });
+
+  it('INCLUDES A ONE-SIDED READ, which is what the author is there to finish', async () => {
+    // Step 1 already counts these as `matchesIncomplete`. Requiring both sides
+    // would hide exactly the questions that need a person.
+    const result = await draftOf([matchingField({ matchRight: undefined })]);
+    renderStep(result);
+    expect(screen.getByText('Build pairs')).toBeTruthy();
+    expect(screen.getByText(/Only one side/)).toBeTruthy();
+  });
+
+  it('says both sides were read, rather than showing an empty answer row', async () => {
+    // An empty chip row reads as "this question has no answers", which is a
+    // different statement from "the pairs are not built yet".
+    const result = await draftOf([matchingField()]);
+    renderStep(result);
+    expect(screen.getByText(/Both sides were read — 2 prompts and 2 answers/)).toBeTruthy();
+  });
+
+  it('still leaves an ordinary question alone', async () => {
+    // The widened filter must not change what was already correct.
+    const result = await draftOf([field({ id: 'q1', label: 'Ordinary question' })]);
+    renderStep(result);
+    expect(screen.getByText('Ordinary question')).toBeTruthy();
+    expect(screen.getByLabelText('Question type for Ordinary question')).toBeTruthy();
+    // Still offered the conversion, which is the state this button had before.
+    expect(screen.getByText('Make matching')).toBeTruthy();
+  });
+
+  it('still hides a matching question the author excluded', async () => {
+    // Excluded means off the digital form, for a matching question as much as
+    // for any other.
+    const result = await draftOf([matchingField()]);
+    act(() => result.current.toggleExcluded('m1'));
+    renderStep(result);
+    expect(screen.queryByText('Match each sign to its meaning')).toBeNull();
+  });
+});
