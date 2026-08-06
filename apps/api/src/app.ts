@@ -27,6 +27,11 @@ import { pdfRouter } from './routes/pdf.js';
 import { submissionsRouter } from './routes/submissions.js';
 import { taxonomyRouter } from './routes/taxonomy.js';
 import { teamRouter } from './routes/team.js';
+import { trainingRequestsRouter } from './routes/training-requests.js';
+import { internalRouter } from './routes/internal.js';
+import { noticesRouter } from './routes/notices.js';
+import { workingListRouter } from './routes/working-list.js';
+import { complianceRouter } from './routes/compliance.js';
 import { uploadsRouter } from './routes/uploads.js';
 import { voiceRouter } from './routes/voice.js';
 
@@ -171,6 +176,12 @@ export function createApp(): Express {
   app.use('/competencies', competenciesRouter);
   app.use('/competency-rules', competencyRulesRouter);
   app.use('/taxonomy', taxonomyRouter);
+  app.use('/training-requests', trainingRequestsRouter);
+  app.use('/notices', noticesRouter);
+  app.use('/working-list', workingListRouter);
+  app.use('/compliance', complianceRouter);
+  // The only routes not behind a session or API key — guarded by a shared secret.
+  app.use('/internal', internalRouter);
   // Smart Fill for authed surfaces. The public respondent's door is
   // POST /fill/:token/smart-fill, mounted with the rest of publicFillRouter.
   app.use('/voice', voiceRouter);

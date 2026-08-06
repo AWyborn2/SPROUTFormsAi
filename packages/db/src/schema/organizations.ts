@@ -85,6 +85,13 @@ export const organizations = pgTable('organizations', {
    * no per-case write. Default fourteen.
    */
   pooledCaseOverdueDays: integer('pooled_case_overdue_days').notNull().default(14),
+  /**
+   * How many days AHEAD of an expiry the sweep notifies a competency's holder
+   * (U21, KTD12). Read on every sweep, never stamped — changing it notifies a
+   * different set on the next run with no per-record write. Default thirty, the
+   * candidate-facing warning window `EXPIRY_WARNING_DAYS` already ships.
+   */
+  notificationLeadDays: integer('notification_lead_days').notNull().default(30),
 });
 
 export const users = pgTable('users', {

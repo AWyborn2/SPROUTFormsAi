@@ -83,6 +83,7 @@ function base(): Taxonomy {
       allowMultipleDepartments: false,
       displayIdentifier: 'employee_number',
       pooledCaseOverdueDays: 14,
+      notificationLeadDays: 30,
     },
   };
 }

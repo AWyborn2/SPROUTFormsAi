@@ -65,11 +65,15 @@ import type {
   SubmissionRow,
   MemberPlacement,
   Taxonomy,
+  ExpiryNotice,
+  WorkingListItem,
+  ComplianceReport,
   RetirementReview,
   TaxDepartment,
   TaxLocation,
   TaxRole,
   TighteningReviewItem,
+  TrainingRequest,
   TaxonomySettings,
   TemplateStatus,
 } from './types.js';
@@ -998,6 +1002,34 @@ export const store = {
   /** Move everyone off a retired Role to a replacement; cases untouched (U18, R135). */
   transferRole(roleId: string, replacementRoleId: string): Promise<{ peopleMoved: number }> {
     return apiClient.post(`/taxonomy/roles/${roleId}/transfer`, { replacementRoleId });
+  },
+  /** Everything waiting on an Admin, from all sources, on one list (U19). */
+  getWorkingList(): Promise<WorkingListItem[]> {
+    return apiClient.get<WorkingListItem[]>('/working-list');
+  },
+  /** How the workforce stands — expired, never-held, unreachable (U20). */
+  getComplianceReport(): Promise<ComplianceReport> {
+    return apiClient.get<ComplianceReport>('/compliance');
+  },
+  /** The caller's own expiry notices — a login delivery route (U21, R98). */
+  listMyNotices(): Promise<ExpiryNotice[]> {
+    return apiClient.get<ExpiryNotice[]>('/notices');
+  },
+  /** Request voluntary training for a tool — own-scope (U22, R37). */
+  requestTraining(toolId: string): Promise<TrainingRequest> {
+    return apiClient.post<TrainingRequest>('/training-requests', { toolId });
+  },
+  /** The org's pending training requests, for the Admin to work through (U22). */
+  listTrainingRequests(): Promise<TrainingRequest[]> {
+    return apiClient.get<TrainingRequest[]>('/training-requests');
+  },
+  /** Approve a request — assigns the tool through the ordinary path (U22, R94). */
+  approveTrainingRequest(id: string): Promise<{ state: 'approved'; createdCaseIds: string[] }> {
+    return apiClient.post(`/training-requests/${id}/approve`, {});
+  },
+  /** Decline a request — nothing assigned (U22). */
+  declineTrainingRequest(id: string): Promise<{ state: 'declined' }> {
+    return apiClient.post(`/training-requests/${id}/decline`, {});
   },
   getRoleRequiredAssessments(roleId: string): Promise<{ configured: boolean; toolIds: string[] }> {
     return apiClient.get(`/taxonomy/roles/${roleId}/required-assessments`);

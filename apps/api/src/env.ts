@@ -27,6 +27,16 @@ const schema = z.object({
   STRIPE_SECRET_KEY: z.string().optional(),
   SESSION_SECRET: z.string().default('dev-only-insecure-secret'),
 
+  /**
+   * The shared secret guarding the expiry-sweep trigger (U21) — the product's
+   * only route authenticated by neither a session nor an API key. Optional here
+   * so the app boots without it, but the route FAILS CLOSED: with this unset or
+   * empty it returns 503 and admits nobody, because comparing an unset header to
+   * an unset variable is `undefined === undefined` and would open the only
+   * unauthenticated write endpoint to everyone.
+   */
+  SWEEP_SECRET: z.string().optional(),
+
   STORAGE_PROVIDER: z.enum(['replit', 'supabase']).default('replit'),
   SUPABASE_STORAGE_BUCKET_PDFS: z.string().default('pdfs'),
 });
