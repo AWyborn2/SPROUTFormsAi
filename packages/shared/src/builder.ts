@@ -27,7 +27,7 @@
 
 import type { AssessmentPathway, AssessmentToolManifest, TheoryRendering } from './assessment.js';
 import type { ExtractionResult } from './extraction.js';
-import type { FormField, GlyphKind } from './form-field.js';
+import { GLYPH_KINDS, type FormField, type GlyphKind } from './form-field.js';
 import type { AssessmentWorkflow } from './workflow.js';
 
 /* ------------------------------------------------------------------ *
@@ -278,22 +278,21 @@ export const GLYPH_LABELS: Record<GlyphKind, string> = {
 };
 
 /**
- * The styles the exporter actually draws today.
+ * The styles the exporter actually draws today — now ALL of them.
  *
- * Everything here maps onto a mark `round-trip.ts` already produces — vector
- * ticks and crosses, the verdict ring, scalar text, an embedded signature
- * image. The rest are authorable and previewed, and named as not-yet-drawn
- * wherever one is chosen.
+ * Everything here maps onto a mark `round-trip.ts` produces: vector ticks and
+ * crosses, the verdict ring, scalar text, an embedded signature image, the
+ * fixed-word stamps, initials reduced from the recorded value, a translucent
+ * highlight and a drawn connector. There is no longer an
+ * authorable-but-ignored tier — a style the exporter silently dropped was a
+ * mark an author believed was on a competency record and was not.
+ *
+ * KEPT AS A LIST RATHER THAN DELETED now that it equals `GLYPH_KINDS`. It is
+ * what the picker reads and what the round-trip test walks, so a glyph added
+ * without a renderer lands here as a failing test rather than as a silent
+ * omission — which is the state this list was written to catch.
  */
-export const MARK_STYLES_DRAWN: readonly GlyphKind[] = [
-  'tick_hand',
-  'tick_block',
-  'cross_hand',
-  'ring',
-  'typed',
-  'signature',
-  'stamp_date',
-];
+export const MARK_STYLES_DRAWN: readonly GlyphKind[] = [...GLYPH_KINDS];
 
 export function isGlyphDrawn(glyph: GlyphKind): boolean {
   return MARK_STYLES_DRAWN.includes(glyph);

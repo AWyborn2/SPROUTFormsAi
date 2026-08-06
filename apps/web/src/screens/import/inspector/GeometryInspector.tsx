@@ -16,7 +16,6 @@ import {
   GLYPH_KINDS,
   GLYPH_LABELS,
   isChoiceField,
-  isGlyphDrawn,
   linkOutcomeTargets,
   type GlyphKind,
 } from '@formai/shared';
@@ -535,17 +534,15 @@ export function GeometryInspector({ field, textPages, fields, activeDrawSlot = n
 /**
  * Choose what this box PRINTS, and say plainly which choices reach the page.
  *
- * THE HONESTY IS THE FEATURE. The design prototype offered eleven glyph styles;
- * the exporter draws five categories. Letting an author pick a style that never
- * prints would put a mark on a competency record that does not exist — and a
- * blank cell on this document class is indistinguishable from an assessment
- * nobody made. So every style is offered, and the ones the exporter cannot draw
- * are labelled as such and resolve to the field's own default rather than to
- * nothing.
+ * EVERY STYLE OFFERED IS A STYLE THAT PRINTS. That was not always so — the
+ * exporter used to draw seven of the twelve, and this picker labelled the rest
+ * as authorable-but-not-drawn, because letting an author pick a style that
+ * never prints would put a mark on a competency record that does not exist.
+ * All twelve are drawn now, so there is nothing left to caveat.
  *
- * `MARK_STYLES_DRAWN` is the single list this reads and `resolveMarkStyle` in
- * `round-trip.ts` is checked against it by a test, so the promise on screen and
- * the behaviour on the page cannot drift.
+ * The guard did not go with the caveat, it got stronger: `DRAWN_BY_GLYPH` in
+ * `round-trip.ts` is a total `Record<GlyphKind, DrawnGlyph>`, so a glyph added
+ * without a renderer is a compile error there rather than a label here.
  */
 function GlyphPicker({ fieldId, segment }: { fieldId: string; segment: PageBox }) {
   const current = segment.markStyle?.glyph;
@@ -574,36 +571,28 @@ function GlyphPicker({ fieldId, segment }: { fieldId: string; segment: PageBox }
         >
           Default
         </button>
-        {GLYPH_KINDS.map((glyph) => {
-          const drawn = isGlyphDrawn(glyph);
-          return (
-            <button
-              key={glyph}
-              type="button"
-              onClick={() => choose(glyph)}
-              aria-pressed={current === glyph}
-              title={drawn ? undefined : 'Not drawn on the exported PDF yet'}
-              className={`rounded-lg border px-2 py-1 text-[10.5px] ${
-                current === glyph
-                  ? 'border-accent bg-surface-accent-soft font-semibold text-text-accent'
-                  : 'border-border text-text-secondary hover:bg-surface-hover'
-              } ${drawn ? '' : 'opacity-60'}`}
-            >
-              {GLYPH_LABELS[glyph]}
-              {!drawn && ' ·'}
-            </button>
-          );
-        })}
+        {GLYPH_KINDS.map((glyph) => (
+          <button
+            key={glyph}
+            type="button"
+            onClick={() => choose(glyph)}
+            aria-pressed={current === glyph}
+            className={`rounded-lg border px-2 py-1 text-[10.5px] ${
+              current === glyph
+                ? 'border-accent bg-surface-accent-soft font-semibold text-text-accent'
+                : 'border-border text-text-secondary hover:bg-surface-hover'
+            }`}
+          >
+            {GLYPH_LABELS[glyph]}
+          </button>
+        ))}
       </div>
-      {current && !isGlyphDrawn(current) && (
-        <p className="rounded-[8px] border border-warning bg-warning-soft p-[6px_8px] text-[10.5px] text-warning-text">
-          “{GLYPH_LABELS[current]}” is not drawn on the exported PDF yet. This box will print the
-          field’s usual mark until it is.
+      {current === 'match_line' && (
+        <p className="rounded-[8px] border border-border-subtle bg-surface-sunken p-[6px_8px] text-[10.5px] text-text-secondary">
+          Draws a connector across this box, end to end. Place the box spanning the gap between the
+          two printed columns.
         </p>
       )}
-      <span className="text-[10.5px] text-text-tertiary">
-        Styles marked · are authorable but not yet drawn on the export.
-      </span>
     </div>
   );
 }
