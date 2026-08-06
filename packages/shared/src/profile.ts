@@ -118,6 +118,12 @@ export const PROFILE_FIELDS: readonly ProfileFieldSpec[] = [
     write (R53). Optional indefinitely rather than owed, because R24 falls back
     rather than failing when one or both are absent (R12).
   */
+  /*
+    MAY FOLLOW rather than optional (R18): it is owed until it arrives and lists
+    the record for follow-up, where an optional field is never reported as
+    outstanding at all. Neither blocks anything.
+  */
+  { key: 'profilePictureKey', label: 'Profile picture', storedOn: 'profile', presence: 'may_follow', sensitive: false, editableBy: ADMIN },
   { key: 'employeeNumber', label: 'Employee number', storedOn: 'profile', presence: 'optional', sensitive: false, editableBy: ADMIN },
   { key: 'swipeCardNumber', label: 'Swipe card number', storedOn: 'profile', presence: 'optional', sensitive: false, editableBy: ADMIN },
   { key: 'starterType', label: 'Starter type', storedOn: 'profile', presence: 'required', sensitive: false, editableBy: ADMIN, options: PROFILE_STARTER_TYPES },
@@ -314,10 +320,29 @@ export function validateProfileFields(values: Record<string, unknown>): ProfileV
 export function emptyOptionalProfileFields(values: Record<string, unknown>): string[] {
   return PROFILE_FIELDS.filter((f) => f.storedOn === 'profile')
     .filter((f) => f.presence === 'optional' || f.presence === 'may_follow')
-    .filter((f) => {
-      const raw = values[f.key];
-      const value = typeof raw === 'string' ? raw.trim() : raw == null ? '' : String(raw);
-      return value.length === 0;
-    })
+    .filter((f) => isBlank(values[f.key]))
+    .map((f) => f.key);
+}
+
+const isBlank = (raw: unknown): boolean => {
+  const value = typeof raw === 'string' ? raw.trim() : raw == null ? '' : String(raw);
+  return value.length === 0;
+};
+
+/**
+ * Which files a record still OWES (R18).
+ *
+ * Distinct from `emptyOptionalProfileFields` above, and the distinction is the
+ * point: an optional field left empty is never reported as outstanding — R12
+ * leaves the two workforce numbers optional indefinitely — while a may-follow
+ * file is owed until it arrives and lists the record for follow-up.
+ *
+ * Blocks nothing either way. No case, no assessment and no competency waits on
+ * a file that has not arrived; this is the warn-rather-than-block disposition an
+ * unsatisfied prerequisite already takes.
+ */
+export function owedProfileFiles(values: Record<string, unknown>): string[] {
+  return PROFILE_FIELDS.filter((f) => f.storedOn === 'profile' && f.presence === 'may_follow')
+    .filter((f) => isBlank(values[f.key]))
     .map((f) => f.key);
 }

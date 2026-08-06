@@ -102,6 +102,20 @@ export const memberProfiles = pgTable(
     emergencyContactName: text('emergency_contact_name').notNull(),
     emergencyContactPhone: text('emergency_contact_phone').notNull(),
 
+    /*
+      THE PROFILE PICTURE, as a storage key (R18).
+
+      A key rather than a row of its own because there is one of it and no
+      version history to keep — the intake this inventory is adopted from
+      carries one photograph, and the licence image it also carries is a
+      competency document rather than a second identity picture.
+
+      NULLABLE, and that is a state rather than an omission: a picture MAY
+      FOLLOW the record and stays owed until it does. Owed marks and lists, and
+      blocks nothing — no case, no assessment and no competency waits on it.
+    */
+    profilePictureKey: text('profile_picture_key'),
+
     // ── Organisation-assigned identifiers (R7) ──────────────────────────────
     /*
       How the operation identifies a person on site. Both NULLABLE and both
