@@ -32,6 +32,11 @@ function fakeDb(opts: {
   membership?: unknown;
   departments?: unknown[];
   roles?: unknown[];
+  // `admitHeldRoles` re-queries roles/departments by id AFTER the active-taxonomy
+  // load. When supplied, these are returned to that SECOND query, letting a test
+  // give the active taxonomy and the member's held taxonomy different answers.
+  heldRoleTaxonomy?: unknown[];
+  heldDeptTaxonomy?: unknown[];
   heldLocations?: unknown[];
   heldDepartments?: unknown[];
   heldRoles?: unknown[];
@@ -46,13 +51,27 @@ function fakeDb(opts: {
     update: chainUpdate,
     query: { membershipRoles: { findMany: vi.fn().mockResolvedValue([]) } },
   };
+  // Order is deterministic: `loadPlacementContext` fires the active query first,
+  // then `admitHeldRoles` fires the by-id query second.
+  const departmentsFindMany = vi.fn().mockResolvedValue(opts.departments ?? []);
+  if (opts.heldDeptTaxonomy) {
+    departmentsFindMany
+      .mockResolvedValueOnce(opts.departments ?? [])
+      .mockResolvedValueOnce(opts.heldDeptTaxonomy);
+  }
+  const jobRolesFindMany = vi.fn().mockResolvedValue(opts.roles ?? []);
+  if (opts.heldRoleTaxonomy) {
+    jobRolesFindMany
+      .mockResolvedValueOnce(opts.roles ?? [])
+      .mockResolvedValueOnce(opts.heldRoleTaxonomy);
+  }
   return {
     query: {
       organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: 'business' }) },
       rolePermissions: { findFirst: vi.fn().mockResolvedValue(ADMIN_PERMS) },
       memberships: { findFirst: vi.fn().mockResolvedValue(opts.membership) },
-      departments: { findMany: vi.fn().mockResolvedValue(opts.departments ?? []) },
-      jobRoles: { findMany: vi.fn().mockResolvedValue(opts.roles ?? []) },
+      departments: { findMany: departmentsFindMany },
+      jobRoles: { findMany: jobRolesFindMany },
       membershipLocations: { findMany: vi.fn().mockResolvedValue(opts.heldLocations ?? []) },
       membershipDepartments: { findMany: vi.fn().mockResolvedValue(opts.heldDepartments ?? []) },
       membershipRoles: { findMany: vi.fn().mockResolvedValue(opts.heldRoles ?? []) },
@@ -132,6 +151,41 @@ describe('PUT /team/members/:id/placement', () => {
       departmentIds: ['a0000000-0000-0000-0000-000000000001'],
       roleIds: ['b0000000-0000-0000-0000-000000000001'],
     });
+    server.close();
+  });
+
+  it('keeps a retired-but-held Role when an Admin edits the placement (R119)', async () => {
+    // The member holds a Role (and its Department) that has since been retired.
+    // Retirement withdraws nobody (R119): the Role stays on the record, barred
+    // only for NEW placements. So the active taxonomy no longer offers either,
+    // yet an edit that re-lists them must validate against active taxonomy
+    // WIDENED with what the member still holds — not be rejected as unknown_role.
+    const RETIRED_DEPT = { id: 'a0000000-0000-0000-0000-0000000000ff', orgId: 'org-1', allowsMultipleRoles: false, status: 'retired' };
+    const RETIRED_ROLE = { id: 'b0000000-0000-0000-0000-0000000000ff', orgId: 'org-1', departmentId: RETIRED_DEPT.id, status: 'retired' };
+    mockDbValue = fakeDb({
+      membership: { id: 'm-1', orgId: 'org-1' },
+      departments: [], // active taxonomy no longer offers the Department...
+      roles: [], // ...nor the Role
+      heldDeptTaxonomy: [RETIRED_DEPT], // but the member still holds them
+      heldRoleTaxonomy: [RETIRED_ROLE],
+      heldLocations: [{ locationId: 'c0000000-0000-0000-0000-000000000001' }],
+      heldDepartments: [{ departmentId: RETIRED_DEPT.id }],
+      heldRoles: [{ roleId: RETIRED_ROLE.id }],
+    });
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/team/members/m-1/placement`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      // The Admin adds a second Location; the held retired Role/Department ride along.
+      body: JSON.stringify({
+        locationIds: ['c0000000-0000-0000-0000-000000000001', 'c0000000-0000-0000-0000-000000000002'],
+        departmentIds: [RETIRED_DEPT.id],
+        roleIds: [RETIRED_ROLE.id],
+      }),
+    });
+    expect(res.status).toBe(200);
+    // Listed in the write, so reconciled (reinstated/kept) — never withdrawn.
+    expect(await res.json()).toMatchObject({ roleIds: [RETIRED_ROLE.id] });
     server.close();
   });
 
