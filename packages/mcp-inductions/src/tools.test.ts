@@ -4,7 +4,7 @@ import type { ToolResult } from './tools/host.js';
 import { documentLinkInput, listCandidatesInput, registerCandidateTools } from './tools/candidates.js';
 import { cohortInput, registerCohortTools } from './tools/cohorts.js';
 import { datesInput, registerDateTools } from './tools/dates.js';
-import { recordBookingInput, registerBookingTools } from './tools/bookings.js';
+import { confirmBookingInput, recordBookingInput, registerBookingTools } from './tools/bookings.js';
 
 interface Registered {
   config: { title: string; description: string };
@@ -38,9 +38,10 @@ function payload(result: ToolResult): unknown {
 }
 
 describe('tool registration', () => {
-  it('exposes the six induction tools with usable descriptions', () => {
+  it('exposes the eight induction tools with usable descriptions', () => {
     const tools = setup({});
     expect([...tools.keys()].sort()).toEqual([
+      'confirm_induction_booking',
       'get_induction_candidate',
       'get_induction_document_link',
       'list_induction_bookings',
@@ -78,6 +79,20 @@ describe('tool registration', () => {
     const tools = setup({});
     expect(tools.get('record_induction_booking')!.config.description).toContain('AFTER');
   });
+
+  it('tells the agent that confirmation records a human decision, never its own', () => {
+    // The confirm tool stores the outcome of the human's pre-induction check.
+    // These strings are the only guard against an agent "helpfully" confirming
+    // a booking that merely looks ready, so the constraint must survive in
+    // every description that mentions confirmation.
+    const tools = setup({});
+    const confirm = tools.get('confirm_induction_booking')!.config.description;
+    expect(confirm).toContain('HUMAN');
+    expect(confirm).toContain('NEVER');
+    expect(confirm).toMatch(/idempotent/i);
+    expect(tools.get('list_induction_bookings')!.config.description).toMatch(/tentative/i);
+    expect(tools.get('get_induction_candidate')!.config.description).toContain('bookingConfirmed');
+  });
 });
 
 describe('tool handlers', () => {
@@ -109,6 +124,36 @@ describe('tool handlers', () => {
     // Three starters, one seat — the client must not "correct" this by counting.
     expect(body.cohorts[0]!.seats).toBe(1);
     expect(body.cohorts[0]!.blockedCount).toBe(2);
+  });
+
+  it('passes the booking id and seat subset through to the confirm endpoint', async () => {
+    const confirmBooking = vi.fn(async () => ({
+      id: 'b1',
+      confirmed: false,
+      newlyConfirmed: ['s1'],
+      alreadyConfirmed: [],
+      starters: [],
+    }));
+    const tools = setup({ confirmBooking } as unknown as Partial<InductionsClient>);
+
+    const result = await tools.get('confirm_induction_booking')!.call({
+      bookingId: 'b1',
+      submissionIds: ['s1'],
+    });
+    expect(confirmBooking).toHaveBeenCalledWith('b1', ['s1']);
+    expect((payload(result) as { newlyConfirmed: string[] }).newlyConfirmed).toEqual(['s1']);
+  });
+
+  it('surfaces a confirm rejection as a named tool error, not an empty result', async () => {
+    const confirmBooking = vi.fn(async () => {
+      throw new ApiError(400, 'not_on_booking', { submissionIds: ['s-stray'] });
+    });
+    const tools = setup({ confirmBooking } as unknown as Partial<InductionsClient>);
+
+    const result = await tools.get('confirm_induction_booking')!.call({ bookingId: 'b1', submissionIds: ['s-stray'] });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain('not_on_booking');
+    expect(result.content[0]!.text).toContain('s-stray');
   });
 
   it('surfaces an API error as a tool error carrying the code', async () => {
@@ -194,6 +239,13 @@ describe('input schemas', () => {
   it('requires at least one starter on a booking', () => {
     expect(recordBookingInput.safeParse({ date: '2026-03-16', submissionIds: [] }).success).toBe(false);
     expect(recordBookingInput.safeParse({ date: '2026-03-16', submissionIds: ['s1'] }).success).toBe(true);
+  });
+
+  it('lets a confirmation name a seat subset or omit it, but never an empty list', () => {
+    expect(confirmBookingInput.safeParse({ bookingId: 'b1' }).success).toBe(true);
+    expect(confirmBookingInput.safeParse({ bookingId: 'b1', submissionIds: ['s1'] }).success).toBe(true);
+    expect(confirmBookingInput.safeParse({ bookingId: 'b1', submissionIds: [] }).success).toBe(false);
+    expect(confirmBookingInput.safeParse({}).success).toBe(false);
   });
 
   it('bounds the number of dates requested', () => {

@@ -77,7 +77,11 @@ export function registerCandidateTools(host: ToolHost, client: InductionsClient)
         'well as the person being inducted. starter.notCollected lists the fields the ' +
         'starter\'s form version never asked; those arrive empty because there was no ' +
         'question, not because the answer was skipped, so treat them as unknown and ask a ' +
-        'human rather than filling a default into whatever system this feeds.',
+        'human rather than filling a default into whatever system this feeds. ' +
+        'bookingConfirmed appears once the starter holds a booked seat: true when a human ' +
+        'has confirmed the seat after their pre-induction check, false while the booking is ' +
+        'still tentative. It records a human decision — never mark a booking confirmed ' +
+        'unless a human has said so.',
       inputSchema: getCandidateInput,
     },
     async (args) =>
