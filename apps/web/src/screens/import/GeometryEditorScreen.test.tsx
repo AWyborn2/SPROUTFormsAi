@@ -965,3 +965,113 @@ describe('GeometryEditorScreen — what a placed box prints', () => {
     expect(screen.queryByText('What this box prints')).toBeNull();
   });
 });
+
+/*
+  A MATCHING QUESTION IS PLACED AS ANCHORS, NOT AS ONE BOX PER PAIRING.
+
+  It is stored as a choice field whose options are every left × every right, so
+  the per-option path claimed it and asked for nine boxes on a three-by-three
+  question — twenty-five on a five-by-five. Eight of those nine name a
+  correspondence the page never printed anywhere, so an author following the
+  panel honestly could not place them.
+
+  An anchor sits on something that IS printed: the statement, or the sign. Six
+  describe the same question, and the exporter draws each chosen pairing as a
+  line between the two anchors it names.
+*/
+describe('GeometryEditorScreen — matching anchors', () => {
+  const PAIRINGS = [
+    'Restricted area -> Biosecurity sign',
+    'Restricted area -> Traffic hazard sign',
+    'Permission to pass -> Biosecurity sign',
+    'Permission to pass -> Traffic hazard sign',
+  ];
+
+  const matchingField = (geometry?: FormField['geometry']) =>
+    choiceField('q7', 'Match the statement to the signage', PAIRINGS, geometry);
+
+  it('LISTS THE PRINTED SIDES, NOT THE PAIRINGS', () => {
+    renderWithField(matchingField());
+
+    fireEvent.click(screen.getByText('Match the statement to the signage'));
+
+    expect(screen.getByText('Prompts')).toBeDefined();
+    expect(screen.getByText('Answers')).toBeDefined();
+    expect(screen.getByText('Restricted area')).toBeDefined();
+    expect(screen.getByText('Biosecurity sign')).toBeDefined();
+    // The pairing itself is never offered as a thing to place.
+    expect(screen.queryByText('Restricted area -> Biosecurity sign')).toBeNull();
+  });
+
+  it('counts the ANCHORS, so the header can actually reach complete', () => {
+    /*
+      This used to count the pairings. The header read "0/4" for a question with
+      four placeable things on it, and could never reach complete however
+      carefully the author worked.
+    */
+    renderWithField(matchingField());
+
+    fireEvent.click(screen.getByText('Match the statement to the signage'));
+
+    expect(screen.getByText(/0\/4 placed/)).toBeDefined();
+  });
+
+  it('reports how many anchors are down, and why a half-anchored pairing draws nothing', () => {
+    renderWithField(
+      matchingField({
+        segments: [
+          { page: 0, x: 40, y: 700, width: 8, height: 8, pageWidth: 595, pageHeight: 842, optionKey: 'l0' },
+        ],
+      }),
+    );
+
+    fireEvent.click(screen.getByText('Match the statement to the signage'));
+
+    expect(screen.getByText(/1 of 4 anchored/)).toBeDefined();
+  });
+
+  it('DERIVES NO PROPOSAL FOR A MATCHING QUESTION', () => {
+    /*
+      `deriveOptionCellsAcrossPages` matches a field's label row and then its
+      options within it. A matching question's "options" are pairings that
+      appear nowhere on the page, so any hit would be a coincidence placing a
+      box against text that does not mean what the key says it means.
+
+      Anchors are drawn by hand for now. Six by hand beats nine guessed.
+    */
+    renderWithField(matchingField());
+
+    fireEvent.click(screen.getByText('Match the statement to the signage'));
+
+    expect(deriveOptionCellsAcrossPagesMock).not.toHaveBeenCalled();
+    expect(screen.queryByText(/^Place all /)).toBeNull();
+  });
+
+  it('offers no glyph picker on an anchor, which prints no mark of its own', () => {
+    /*
+      An anchor is one END of a connector. A tick or a stamp chosen for it would
+      be a choice on screen that reaches the page as nothing.
+    */
+    renderWithField(
+      matchingField({
+        segments: [
+          { page: 0, x: 40, y: 700, width: 8, height: 8, pageWidth: 595, pageHeight: 842, optionKey: 'l0' },
+        ],
+      }),
+    );
+
+    fireEvent.click(screen.getByText('Match the statement to the signage'));
+
+    expect(screen.queryByText('What this box prints')).toBeNull();
+  });
+
+  it('leaves an ordinary choice field on the per-option path', () => {
+    // The split keys on the OPTIONS being pairings, not on the type.
+    renderWithField(choiceField('f1', 'Ordinary group', ['Yes', 'No', 'Maybe']));
+
+    fireEvent.click(screen.getByText('Ordinary group'));
+
+    expect(screen.queryByText('Prompts')).toBeNull();
+    expect(screen.getByText(/3\/3 placed/)).toBeDefined();
+  });
+});

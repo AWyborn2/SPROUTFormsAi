@@ -212,3 +212,113 @@ export function isMatchingQuestion(options: readonly string[] | undefined): bool
   if (!options || options.length < 2) return false;
   return options.every((o) => parsePairingOption(o) !== null);
 }
+
+/* ------------------------------------------------------------------ *
+ * Where a matching question is DRAWN on the page
+ * ------------------------------------------------------------------ */
+
+/**
+ * A matching question's anchor key — `l0`, `r2`.
+ *
+ * THE SAME VOCABULARY `MatchPresentation.images` ALREADY USES. A picture and a
+ * placement both address "the third prompt", and two key schemes for one
+ * concept is two things to keep in step for no gain. This is that scheme, moved
+ * out of the pair builder so the exporter can speak it too.
+ */
+export function matchAnchorKey(side: 'l' | 'r', index: number): string {
+  return `${side}${index}`;
+}
+
+/** The two printed sides of a matching question, in printed order. */
+export interface MatchSides {
+  lefts: string[];
+  rights: string[];
+}
+
+/**
+ * Recover both sides from a built matching question's options.
+ *
+ * DERIVED, NEVER STORED. `buildMatchingQuestion` writes every left × every
+ * right as a flat list of pairings, and `matching-authoring.ts` already reads
+ * the sides back out of it for exactly this reason: a second stored copy is a
+ * second thing that can disagree with the first, and the disagreement would
+ * surface as a connector drawn to the wrong statement on a competency record.
+ *
+ * Order-preserving and deduplicated, matching how the options were generated —
+ * the outer loop is the prompts, the inner one the answers.
+ */
+export function matchSides(options: readonly string[]): MatchSides {
+  const lefts: string[] = [];
+  const rights: string[] = [];
+  const seenLeft = new Set<string>();
+  const seenRight = new Set<string>();
+
+  for (const option of options) {
+    const parsed = parsePairingOption(option);
+    // A stray non-pairing is skipped rather than guessed at, for the same
+    // reason `groupPairingOptions` skips it: a field carrying a mix is
+    // malformed, and inventing a side for it would hide that.
+    if (!parsed) continue;
+    if (!seenLeft.has(parsed.left)) {
+      seenLeft.add(parsed.left);
+      lefts.push(parsed.left);
+    }
+    if (!seenRight.has(parsed.right)) {
+      seenRight.add(parsed.right);
+      rights.push(parsed.right);
+    }
+  }
+
+  return { lefts, rights };
+}
+
+/**
+ * Every anchor a matching question needs placed, in the order they print.
+ *
+ * n + m, NOT n × m, AND THAT IS THE WHOLE POINT. Placement used to offer one
+ * box per PAIRING, so a three-by-three question asked the author for nine boxes
+ * and a five-by-five for twenty-five — quadratic work for a question that has
+ * ten printed things on it. Worse, eight of those nine boxes describe a
+ * correspondence the page never printed anywhere, so there was nothing to place
+ * them against.
+ *
+ * Anchoring the printed ENTRIES instead is linear, and every anchor corresponds
+ * to something visible: the statement, and the sign. Each pairing's connector is
+ * then derived from the two anchors it runs between.
+ */
+export interface MatchAnchor {
+  key: string;
+  side: 'l' | 'r';
+  index: number;
+  /** The printed text this anchor sits on. */
+  text: string;
+}
+
+export function matchAnchors(options: readonly string[]): MatchAnchor[] {
+  const { lefts, rights } = matchSides(options);
+  return [
+    ...lefts.map((text, index) => ({ key: matchAnchorKey('l', index), side: 'l' as const, index, text })),
+    ...rights.map((text, index) => ({ key: matchAnchorKey('r', index), side: 'r' as const, index, text })),
+  ];
+}
+
+/**
+ * The two anchors a pairing's connector runs between.
+ *
+ * Null when either half names something the sides do not contain, which cannot
+ * happen for an option `buildMatchingQuestion` produced and can happen for a
+ * stored value that outlived an edit to the question. Returning null draws
+ * nothing: a connector to a statement that is no longer printed would be a line
+ * across the page asserting a correspondence nobody can check.
+ */
+export function matchAnchorsFor(
+  option: string,
+  sides: MatchSides,
+): { left: string; right: string } | null {
+  const parsed = parsePairingOption(option);
+  if (!parsed) return null;
+  const l = sides.lefts.indexOf(parsed.left);
+  const r = sides.rights.indexOf(parsed.right);
+  if (l < 0 || r < 0) return null;
+  return { left: matchAnchorKey('l', l), right: matchAnchorKey('r', r) };
+}

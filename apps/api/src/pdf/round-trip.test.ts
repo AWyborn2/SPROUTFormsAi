@@ -1628,6 +1628,198 @@ describe('roundTripExport — matching questions', () => {
   });
 });
 
+/*
+  A MATCHING ANSWER IS A LINE BETWEEN TWO PRINTED THINGS.
+
+  A person doing this question with a pen draws a line from the statement to the
+  sign. The evidence export has to show the same thing, or the exported page and
+  the filled page are different documents.
+
+  The geometry names the printed ENTRIES — `l0`, `r2` — so a three-by-three
+  question needs six anchors rather than nine boxes. Placement used to ask for
+  one box per PAIRING, and eight of those nine named a correspondence the page
+  never printed anywhere, so there was nothing on the paper to place them on.
+*/
+describe('roundTripExport — matching connectors', () => {
+  const PAIRS = [
+    'Restricted area -> Biosecurity sign',
+    'Restricted area -> Traffic hazard sign',
+    'Permission to pass -> Biosecurity sign',
+    'Permission to pass -> Traffic hazard sign',
+  ];
+
+  /** An anchor box on a printed entry. */
+  const at = (optionKey: string, x: number, y: number): PageBox => ({
+    page: 0,
+    x,
+    y,
+    width: 8,
+    height: 8,
+    pageWidth: 600,
+    pageHeight: 800,
+    optionKey,
+  });
+
+  /*
+    Prompts down the left at x=40, answers down the right at x=400 — the shape
+    every matching question on this document class is printed in.
+  */
+  const ANCHORS: PageBox[] = [
+    at('l0', 40, 700),
+    at('l1', 40, 660),
+    at('r0', 400, 700),
+    at('r1', 400, 660),
+  ];
+
+  const anchored = (extra: Partial<FormField> = {}): FormField => ({
+    id: 'q7',
+    type: 'checkbox_group',
+    label: 'Match the statement with the appropriate signage.',
+    required: true,
+    source: 'imported',
+    options: PAIRS,
+    geometry: { segments: ANCHORS },
+    ...extra,
+  });
+
+  /** Only the strokes that run between the two anchor columns. */
+  function connectors(bytes: Uint8Array) {
+    return strokes(bytes).filter((s) => Math.abs(s.x2 - s.x1) > 100);
+  }
+
+  it('draws ONE line per chosen pairing, between the two anchors it names', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored()],
+      values: { q7: ['Restricted area -> Traffic hazard sign'] },
+    });
+
+    const drawn = connectors(output);
+    expect(drawn).toHaveLength(1);
+    // Prompt 0's RIGHT edge to answer 1's LEFT edge, each at mid-height.
+    expect(drawn[0]!.x1).toBeCloseTo(48, 1);
+    expect(drawn[0]!.y1).toBeCloseTo(704, 1);
+    expect(drawn[0]!.x2).toBeCloseTo(400, 1);
+    expect(drawn[0]!.y2).toBeCloseTo(664, 1);
+  });
+
+  it('DRAWS A WRONG PAIRING TOO, in red', async () => {
+    /*
+      Drawing only the correct ones would leave a candidate who paired badly
+      with a blank matching question on their record — indistinguishable from
+      one nobody assessed, which is the failure this whole file is arranged
+      against.
+    */
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [
+        anchored({ answerKey: ['Restricted area -> Biosecurity sign'] }),
+      ],
+      values: { q7: ['Restricted area -> Traffic hazard sign'] },
+    });
+
+    expect(connectors(output)).toHaveLength(1);
+    expect(strokeColors(output)).toContain('0.7 0.1 0.1');
+  });
+
+  it('draws a correct pairing in green', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored({ answerKey: ['Restricted area -> Biosecurity sign'] })],
+      values: { q7: ['Restricted area -> Biosecurity sign'] },
+    });
+
+    expect(connectors(output)).toHaveLength(1);
+    expect(strokeColors(output)).toContain('0.05 0.42 0.16');
+  });
+
+  it('draws each of several chosen pairings', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored()],
+      values: {
+        q7: ['Restricted area -> Biosecurity sign', 'Permission to pass -> Traffic hazard sign'],
+      },
+    });
+
+    expect(connectors(output)).toHaveLength(2);
+  });
+
+  it('DRAWS NOTHING FOR A PAIRING WITH EITHER END UNPLACED', async () => {
+    /*
+      The same refusal `drawRepeatingGroup` makes for a cell it cannot place
+      from real geometry. An invented endpoint is a line across a competency
+      record asserting a correspondence nobody can check — so a half-anchored
+      question is visibly incomplete instead, which someone notices and fixes.
+    */
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored({ geometry: { segments: [at('l0', 40, 700), at('r0', 400, 700)] } })],
+      // Names r1, which has no anchor.
+      values: { q7: ['Restricted area -> Traffic hazard sign'] },
+    });
+
+    expect(connectors(output)).toHaveLength(0);
+  });
+
+  it('rings nothing — an anchor is a line end, not a marked answer', async () => {
+    /*
+      A keyed choice field RINGS the answer chosen. An anchor is not an answer;
+      it is one end of a connector, and a circle round an individual statement
+      says something the candidate never did.
+
+      What actually keeps the checkbox path off this field is the ORDER of the
+      two branches — matching geometry carries `optionKey`s too, so it has to be
+      recognised first. That ordering is pinned by the tests above, which would
+      find no connectors at all if the checkbox path claimed the field. This
+      pins the other half: exactly two end dots, and nothing else curved.
+    */
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored({ answerKey: ['Restricted area -> Biosecurity sign'] })],
+      values: { q7: ['Restricted area -> Biosecurity sign'] },
+    });
+
+    // Two end dots are ellipses; a ring would add a third.
+    expect(curveCount(output)).toBe(8);
+  });
+
+  it('attaches to the facing edges when the ANSWERS are printed first', async () => {
+    /*
+      A paper that prints the signs down the left and the statements down the
+      right is the same question. Assuming the prompt column is always left
+      would run each line back through the text it starts from.
+    */
+    const flipped = [
+      at('l0', 400, 700),
+      at('l1', 400, 660),
+      at('r0', 40, 700),
+      at('r1', 40, 660),
+    ];
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored({ geometry: { segments: flipped } })],
+      values: { q7: ['Restricted area -> Biosecurity sign'] },
+    });
+
+    const drawn = connectors(output);
+    expect(drawn).toHaveLength(1);
+    // The prompt is on the RIGHT now, so the line leaves its left edge.
+    expect(drawn[0]!.x1).toBeCloseTo(400, 1);
+    expect(drawn[0]!.x2).toBeCloseTo(48, 1);
+  });
+
+  it('draws nothing when the question was never answered', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored()],
+      values: {},
+    });
+
+    expect(connectors(output)).toHaveLength(0);
+  });
+});
+
 /* ------------------------------------------------------------------ *
  * Authored mark styles (U16)
  * ------------------------------------------------------------------ */

@@ -20,6 +20,8 @@ import {
   isMatchingQuestion,
   isSelfAnswering,
   markPlacement,
+  matchAnchorsFor,
+  matchSides,
   resolveAnswerSets,
   selectedOption,
   visibleFields,
@@ -386,28 +388,37 @@ export async function roundTripExport({
     // geometry also falls through (a legacy single box, or none).
     if (isChoiceField(field.type) && !field.printSelectedValue) {
       const optionSegments = segments.filter((s) => s.optionKey !== undefined);
+
+      /*
+        A MATCHING QUESTION IS DRAWN AS LINES, NOT AS MARKS IN BOXES, and it has
+        to be checked BEFORE the per-option path — its geometry also carries
+        `optionKey`s, so `drawCheckboxOptions` would happily ring the anchors
+        and produce a page full of circles round individual statements instead
+        of the connectors a person draws with a pen.
+
+        The anchors name the printed ENTRIES (`l0`, `r2`), so a three-by-three
+        question needs six of them rather than nine boxes — and each of those
+        nine described a correspondence the page never printed anywhere.
+      */
+      if (isMatchingQuestion(field.options)) {
+        /*
+          A MATCHING ANSWER IS NEVER SCALAR TEXT, so this continues either way.
+
+          Its value is a SET of pairings, and `scalarText` joins them — falling
+          through would draw roughly 230 characters into whatever single box the
+          field happens to carry. `drawText` bounds the width but NOT the
+          height, so the wrapped remainder runs downward across whatever is
+          printed beneath it, on a certified competency record, with nothing
+          raised.
+        */
+        if (optionSegments.length > 0) drawMatchConnectors(pages, field, value, optionSegments);
+        continue;
+      }
+
       if (optionSegments.length > 0) {
         drawCheckboxOptions(pages, value, optionSegments, field.answerKey);
         continue;
       }
-
-      /*
-        A MATCHING ANSWER IS NEVER SCALAR TEXT.
-
-        Its value is a SET of pairings — nine options for a three-by-three
-        question — and `scalarText` joins them, so falling through here draws
-        roughly 230 characters into whatever single box the field happens to
-        carry. `drawText` below bounds the width but NOT the height, so the
-        wrapped remainder runs downward across whatever is printed beneath it,
-        on a certified competency record, with nothing raised.
-
-        And it would say nothing worth saying even if it fitted: the printed
-        page already carries the statements and the signs, and the verdict
-        reaches the margin through the separate outcome box. A matching field
-        should carry no geometry at all — this is the guard for when one
-        arrives anyway, which is a mis-authored field rather than a rare one.
-      */
-      if (isMatchingQuestion(field.options)) continue;
     }
 
     // A scalar field occupies one box; if geometry ever gives it several, the
@@ -626,14 +637,17 @@ function drawHighlight(
 }
 
 /**
- * A connector drawn across the box, for a matching question.
+ * A connector drawn across one box.
  *
- * THE BOX IS THE CONNECTOR'S EXTENT. A `PageBox` carries one rectangle and no
- * second endpoint, so there is no way to derive "from this prompt to that
- * answer" from the geometry model — the author places a box spanning the gap
- * between the two printed columns and this draws the line through it, left edge
- * to right edge at the vertical centre. That is a real instruction an author can
- * follow, where a line to an endpoint nothing records would be a guess.
+ * THE BOX IS THE CONNECTOR'S EXTENT here, and that is the fallback rather than
+ * the model. It is what an author gets when they choose the `match_line` glyph
+ * for an ordinary box: a line through it, left edge to right edge at the
+ * vertical centre. Every placement authored before matching anchors existed
+ * draws exactly this, unchanged.
+ *
+ * A real matching question does NOT come through here — `drawMatchConnectors`
+ * runs between two anchors and knows both endpoints. This one cannot: a single
+ * `PageBox` has one rectangle and no far end.
  *
  * The end dots are what make it read as a drawn connector rather than a rule or
  * a strikethrough — the same two marks a person makes with a pen.
@@ -654,6 +668,87 @@ function drawMatchLine(
   const dot = Math.max(1.2, thickness * 1.4);
   for (const x of [box.x, box.x + box.width]) {
     page.drawEllipse({ x, y: midY, xScale: dot, yScale: dot, color });
+  }
+}
+
+/** The point on an anchor a connector attaches to — its facing edge, mid-height. */
+function anchorPoint(box: PageBox, facing: 'right' | 'left'): { x: number; y: number } {
+  return {
+    x: facing === 'right' ? box.x + box.width : box.x,
+    y: box.y + box.height / 2,
+  };
+}
+
+/**
+ * Draw one line per pairing the candidate chose, between the two printed things
+ * it names.
+ *
+ * THIS IS WHAT A MATCHING ANSWER LOOKS LIKE ON PAPER. A person doing this
+ * question with a pen draws a line from the statement to the sign; the evidence
+ * export has to show the same thing, or the exported page and the filled page
+ * are different documents.
+ *
+ * ANCHORS, NOT PAIRINGS. The geometry names the printed ENTRIES — `l0`, `r2` —
+ * so a three-by-three question needs six anchors rather than nine boxes, and a
+ * five-by-five needs ten rather than twenty-five. That is not only less work:
+ * eight of those nine boxes described a correspondence the page never printed
+ * anywhere, so there was nothing on the paper to place them against.
+ *
+ * EVERY CHOSEN PAIRING IS DRAWN, RIGHT OR WRONG. Green for a pairing in the
+ * key, red for one that is not, and plain ink where the question carries no key
+ * at all. Drawing only the correct ones would leave a candidate who paired
+ * badly with a blank matching question on their record — indistinguishable from
+ * one nobody assessed, which is the failure this whole file is arranged
+ * against.
+ *
+ * A pairing whose anchors are not both placed draws NOTHING. It is the same
+ * refusal `drawRepeatingGroup` makes for a cell it cannot place from real
+ * geometry: an invented endpoint is a line across a competency record asserting
+ * a correspondence nobody can check.
+ */
+function drawMatchConnectors(
+  pages: import('pdf-lib').PDFPage[],
+  field: FormField,
+  value: SubmissionValue | undefined,
+  segments: PageBox[],
+): void {
+  const chosen = Array.isArray(value) ? (value as unknown[]).map(String) : [];
+  if (chosen.length === 0) return;
+
+  const byKey = new Map(segments.filter((s) => s.optionKey !== undefined).map((s) => [s.optionKey!, s]));
+  const sides = matchSides(field.options ?? []);
+  const key = field.answerKey;
+  const marked = key !== undefined && key.length > 0;
+
+  for (const option of chosen) {
+    const anchors = matchAnchorsFor(option, sides);
+    if (!anchors) continue;
+    const from = byKey.get(anchors.left);
+    const to = byKey.get(anchors.right);
+    // Both ends, on one page. A connector spanning a page break has no
+    // meaningful line to draw, and a matching question printed across two
+    // sheets is not a shape this document class uses.
+    if (!from || !to || from.page !== to.page) continue;
+    const page = pages[from.page];
+    if (!page) continue;
+
+    const color = marked ? (key.includes(option) ? CORRECT_INK : INCORRECT_INK) : INK;
+    /*
+      Which edges face each other is read off the geometry, not assumed. The
+      prompt column is usually left of the answer column — but a paper that
+      prints the signs first is the same question, and attaching to the wrong
+      edges would run each line back through the text it starts from.
+    */
+    const leftIsFirst = from.x + from.width / 2 <= to.x + to.width / 2;
+    const start = anchorPoint(from, leftIsFirst ? 'right' : 'left');
+    const end = anchorPoint(to, leftIsFirst ? 'left' : 'right');
+
+    const thickness = Math.max(0.9, Math.min(1.8, Math.min(from.height, to.height) / 8));
+    page.drawLine({ start, end, thickness, color });
+    const dot = Math.max(1.2, thickness * 1.4);
+    for (const point of [start, end]) {
+      page.drawEllipse({ x: point.x, y: point.y, xScale: dot, yScale: dot, color });
+    }
   }
 }
 

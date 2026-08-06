@@ -4,10 +4,13 @@ import { Button, Icon, useToast } from '@formai/ui';
 import {
   geometrySegments,
   isChoiceField,
+  isMatchingQuestion,
+  matchAnchors,
   GLYPH_KINDS,
   GLYPH_LABELS,
   type FormField,
   type GlyphKind,
+  type MatchAnchor,
   type PageBox,
 } from '@formai/shared';
 import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../../lib/data/hooks.js';
@@ -914,9 +917,23 @@ function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
  * Whether a field gets one box per option (a ticking checkbox/radio group)
  * rather than a single scalar box — the same test `PlacementPanel` uses to
  * choose `deriveOptionCellsAcrossPages` over the table/scalar paths.
+ *
+ * A MATCHING QUESTION IS EXCLUDED, and that exclusion is the fix. It is stored
+ * as a choice field whose options are every left × every right, so this
+ * returned true and the panel asked for one box per PAIRING — nine for a
+ * three-by-three question, twenty-five for a five-by-five. Eight of those nine
+ * describe a correspondence the page never printed anywhere, so there was
+ * nothing on the paper to place them against. Matching places ANCHORS instead:
+ * one per printed entry, n + m rather than n × m.
  */
 function isPerOptionField(field: FormField): boolean {
+  if (isMatchingQuestion(field.options)) return false;
   return isChoiceField(field.type) && !field.printSelectedValue && (field.options?.length ?? 0) > 0;
+}
+
+/** Whether this field is placed as matching anchors — see `isPerOptionField`. */
+function isMatchAnchorField(field: FormField): boolean {
+  return isChoiceField(field.type) && !field.printSelectedValue && isMatchingQuestion(field.options);
 }
 
 /**
@@ -1173,8 +1190,17 @@ function Chip({
   );
 }
 
-/** How many boxes this field needs: one per option for a ticking choice field. */
+/**
+ * How many boxes this field needs: one per option for a ticking choice field,
+ * one per printed ENTRY for a matching question, one otherwise.
+ *
+ * The matching case used to fall through `isPerOptionField` and count the
+ * PAIRINGS — nine for a three-by-three question — so the header read "0/9" for
+ * a question with six placeable things on it and could never reach complete
+ * however carefully the author worked.
+ */
 function expectedBoxes(field: FormField): number {
+  if (isMatchAnchorField(field)) return matchAnchors(field.options ?? []).length;
   return isPerOptionField(field) ? field.options!.length : 1;
 }
 
@@ -1194,6 +1220,18 @@ function PlacementPanel({
   onSetScalarBox: (box: PageBox | null) => void;
 }) {
   const perOption = isPerOptionField(field);
+  const matchAnchorField = isMatchAnchorField(field);
+
+  /**
+   * The anchors a matching question needs — one per printed entry.
+   *
+   * Derived from the options rather than stored: the options ARE both sides,
+   * and a second copy is a second thing that can disagree with the first.
+   */
+  const anchors = useMemo<MatchAnchor[]>(
+    () => (matchAnchorField ? matchAnchors(field.options ?? []) : []),
+    [field.options, matchAnchorField],
+  );
 
   /**
    * The automatic proposal, if the page settles one.
@@ -1264,7 +1302,15 @@ function PlacementPanel({
         </div>
       )}
 
-      {perOption ? (
+      {matchAnchorField ? (
+        <MatchAnchorRows
+          field={field}
+          anchors={anchors}
+          drawTarget={drawTarget}
+          onToggleDraw={onToggleDraw}
+          onSetOptionBox={onSetOptionBox}
+        />
+      ) : perOption ? (
         <div className="flex flex-col gap-1.5">
           {field.options!.map((option) => {
             const target: DrawTarget = { fieldId: field.id, optionKey: option };
@@ -1299,6 +1345,87 @@ function PlacementPanel({
         A field with no box exports as recorded data instead of a mark on the page — visibly
         incomplete, which is the safe way to be wrong.
       </p>
+    </div>
+  );
+}
+
+/**
+ * The two printed sides of a matching question, each entry an anchor to place.
+ *
+ * WHAT THIS REPLACES. This panel used to list one row per PAIRING, because a
+ * matching question is stored as a choice field whose options are every left ×
+ * every right — so a three-by-three question asked the author for nine boxes and
+ * a five-by-five for twenty-five. Eight of those nine name a correspondence the
+ * page never printed anywhere, so there was nothing on the paper to put them on;
+ * an author following the panel honestly could not.
+ *
+ * An ANCHOR is a small box on something that IS printed: the statement, or the
+ * sign. Six of them describe the same three-by-three question, and the exporter
+ * draws each chosen pairing as a line between the two anchors it names — which
+ * is what a person with a pen draws, and therefore what the evidence document
+ * has to show.
+ *
+ * The glyph picker is deliberately absent from these rows. An anchor does not
+ * print a mark of its own; it is one end of a connector, and offering a tick or
+ * a stamp for it would put a choice on screen that reaches the page as nothing.
+ */
+function MatchAnchorRows({
+  field,
+  anchors,
+  drawTarget,
+  onToggleDraw,
+  onSetOptionBox,
+}: {
+  field: FormField;
+  anchors: readonly MatchAnchor[];
+  drawTarget: DrawTarget | null;
+  onToggleDraw: (target: DrawTarget) => void;
+  onSetOptionBox: (optionKey: string, box: PageBox | null) => void;
+}) {
+  const segments = field.geometry?.segments ?? [];
+  const placed = anchors.filter((a) => segments.some((s) => s.optionKey === a.key)).length;
+
+  const side = (which: 'l' | 'r', heading: string) => {
+    const rows = anchors.filter((a) => a.side === which);
+    if (rows.length === 0) return null;
+    return (
+      <div className="flex flex-col gap-1.5">
+        <span className="text-[10.5px] font-semibold uppercase tracking-wide text-text-tertiary">
+          {heading}
+        </span>
+        {rows.map((anchor) => {
+          const target: DrawTarget = { fieldId: field.id, optionKey: anchor.key };
+          return (
+            <BoxRow
+              key={anchor.key}
+              label={anchor.text}
+              box={segments.find((s) => s.optionKey === anchor.key)}
+              armed={sameTarget(drawTarget, target)}
+              onToggleDraw={() => onToggleDraw(target)}
+              onClear={() => onSetOptionBox(anchor.key, null)}
+            />
+          );
+        })}
+      </div>
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="rounded-sm border border-border-subtle bg-surface-sunken p-[9px_10px] text-[11.5px] leading-snug text-text-secondary">
+        Put a small box on each printed statement and each printed answer —{' '}
+        <strong>{anchors.length} in all</strong>, where one box per pairing would have been{' '}
+        {field.options?.length ?? 0}. You don&rsquo;t draw the lines: the export draws one between
+        the two boxes for every pairing the candidate joined, green where it is in the key and red
+        where it is not.
+      </p>
+      <p className="text-[11px] text-text-tertiary">
+        {placed} of {anchors.length} anchored
+        {placed < anchors.length &&
+          ' · a pairing with either end unplaced draws nothing rather than guessing an endpoint'}
+      </p>
+      {side('l', 'Prompts')}
+      {side('r', 'Answers')}
     </div>
   );
 }
@@ -1384,7 +1511,12 @@ function BoxRow({
   armed: boolean;
   onToggleDraw: () => void;
   onClear: () => void;
-  onRestyle: (next: PageBox) => void;
+  /**
+   * Absent where the box prints no mark of its own — a matching ANCHOR is one
+   * end of a connector, and a tick or a stamp chosen for it would reach the
+   * page as nothing.
+   */
+  onRestyle?: (next: PageBox) => void;
 }) {
   return (
     <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
@@ -1411,7 +1543,7 @@ function BoxRow({
       </div>
       {/* Only once there is a box: a style with nowhere to print is a choice
           about nothing, and it would be lost the moment the box is drawn. */}
-      {box && <GlyphRow box={box} onChange={onRestyle} />}
+      {box && onRestyle && <GlyphRow box={box} onChange={onRestyle} />}
     </div>
   );
 }
