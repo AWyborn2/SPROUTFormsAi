@@ -55,6 +55,8 @@ function fakeDb(opts: {
   invitesFindMany?: unknown[];
   /** Profiles backing the live display-identifier read (R24). Default: none. */
   memberProfilesFindMany?: unknown[];
+  /** Cases in flight that deactivation invalidates (R71). */
+  openCases?: unknown[];
   /** Throw from the `invites` insert — the pending-invite unique violation. */
   inviteInsertError?: unknown;
   insertedCompetency?: unknown;
@@ -81,7 +83,22 @@ function fakeDb(opts: {
       findMany: vi.fn().mockResolvedValue(opts.rolePermissionsFindMany ?? []),
     },
     memberships: {
-      findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst),
+      /*
+        TWO different lookups reach this, and they ask about different people.
+        `requireTenant` revalidates the CALLER's own membership before the route
+        runs (R65); the route then looks up the member being acted ON. This
+        fixture carries only the latter, so the caller's lookup is modelled as a
+        miss — which is what a predicate-honouring database would return, and
+        which the middleware treats as "nothing known, carry on".
+
+        Without this the middleware would read the target's row as if it were the
+        caller's, and a test acting on a suspended member would 401 the admin
+        doing the acting.
+      */
+      findFirst: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValue(opts.membershipsFindFirst),
       findMany: vi.fn().mockResolvedValue(opts.membershipsFindMany ?? []),
     },
     users: {
@@ -102,6 +119,14 @@ function fakeDb(opts: {
     */
     memberProfiles: {
       findMany: vi.fn().mockResolvedValue(opts.memberProfilesFindMany ?? []),
+    },
+    /*
+      Deactivation closes an outstanding invitation (R65) and invalidates a case
+      in flight (R71). Both default to none, which is the ordinary case for a
+      member who accepted long ago and holds no open assessment.
+    */
+    assessmentCases: {
+      findMany: vi.fn().mockResolvedValue(opts.openCases ?? []),
     },
   };
 
@@ -1055,8 +1080,15 @@ describe('DELETE /team/members/:id', () => {
     }
   });
 
-  it('removes a non-owner member and records an audit entry', async () => {
-    const { db, deleteWhere, insertValues } = fakeDb({
+  it('DEACTIVATES a non-owner member rather than deleting them (R62, R63)', async () => {
+    /*
+      This route used to `DELETE` the membership row, which took the person's
+      placement with it on cascade and left the competency evidence that
+      certified them pointing at a membership that no longer existed. R62 makes
+      leaving a deactivation and R63 retains every record indefinitely — which
+      is the whole reason a returning worker keeps competencies still in date.
+    */
+    const { db, deleteWhere, updateSet, insertValues } = fakeDb({
       rolePermissionsFindFirst: ADMIN_PERMS,
       membershipsFindFirst: { id: 'm2', userId: 'u2', orgId: 'org-1', role: 'viewer', status: 'active' },
       usersFindFirst: { id: 'u2', name: 'Tom Reyes', email: 'tom@x.io' },
@@ -1066,12 +1098,69 @@ describe('DELETE /team/members/:id', () => {
     const { server, base } = startApp();
     try {
       const res = await fetch(`${base}/team/members/m2`, { method: 'DELETE', headers: authHeader(adminTenant) });
-      expect(res.status).toBe(204);
-      expect(deleteWhere).toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ seatReleased: 'staff' });
+      // The membership moves to suspended; nothing is deleted.
+      expect(updateSet).toHaveBeenCalledWith(schema.memberships, { status: 'suspended' });
+      expect(deleteWhere).not.toHaveBeenCalled();
       const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
-      expect(auditInsert?.[1]).toMatchObject({ action: 'Removed member', target: 'tom@x.io' });
+      expect(auditInsert?.[1]).toMatchObject({ action: 'Deactivated member' });
     } finally {
       server.close();
+    }
+  });
+
+  it('releases the CANDIDATE seat where the membership carried that level (R77)', async () => {
+    const { db } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm2', userId: 'u2', orgId: 'org-1', role: 'candidate', status: 'active' },
+      usersFindFirst: { id: 'u2', name: 'Dale Rivers', email: 'dale@x.io' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members/m2`, { method: 'DELETE', headers: authHeader(adminTenant) });
+      expect(await res.json()).toMatchObject({ seatReleased: 'candidate' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reactivates a returner, and is idempotent on somebody already active (R68)', async () => {
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm2', userId: 'u2', orgId: 'org-1', role: 'candidate', status: 'suspended' },
+      usersFindFirst: { id: 'u2', name: 'Dale Rivers', email: 'dale@x.io', passwordHash: 'x' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members/m2/reactivate`, {
+        method: 'POST',
+        headers: authHeader(adminTenant),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ seatConsumed: 'candidate', needsFreshInvitation: false });
+      expect(updateSet).toHaveBeenCalledWith(schema.memberships, { status: 'active' });
+    } finally {
+      server.close();
+    }
+
+    const already = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm2', userId: 'u2', orgId: 'org-1', role: 'viewer', status: 'active' },
+    });
+    mockDbValue = already.db;
+    const two = startApp();
+    try {
+      // A retried click is not a mistake.
+      const res = await fetch(`${two.base}/team/members/m2/reactivate`, {
+        method: 'POST',
+        headers: authHeader(adminTenant),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      two.server.close();
     }
   });
 

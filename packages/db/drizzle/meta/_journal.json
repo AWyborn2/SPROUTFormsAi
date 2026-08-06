@@ -330,6 +330,13 @@
       "when": 1786003703196,
       "tag": "0046_greedy_lady_vermin",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1786004557782,
+      "tag": "0047_shallow_ulik",
+      "breakpoints": true
     }
   ]
 }

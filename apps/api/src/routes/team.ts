@@ -21,6 +21,7 @@ import { checkSeatAvailability, lockOrgForSeats, poolFor, seatLimitError } from 
 import { readPlacement, writePlacement } from '../lib/membership-placement.js';
 import { assignForMembership } from '../lib/assignment.js';
 import { identifyMember, loadDisplayIdentities } from '../lib/display-identity.js';
+import { deactivateMember, reactivateMember } from '../lib/deactivation.js';
 import { db } from '../db.js';
 
 export const teamRouter: Router = Router();
@@ -583,18 +584,22 @@ teamRouter.delete(
         return;
       }
     }
-    const user = await db.query.users.findFirst({ where: eq(schema.users.id, membership.userId) });
+    /*
+      DEACTIVATION, NOT DELETION (R62, R63).
 
-    await db.delete(schema.memberships).where(eq(schema.memberships.id, membership.id));
+      This route used to `DELETE` the membership row, which took the person's
+      placement with it on cascade and left the competency evidence that
+      certified them pointing at a membership that no longer existed. R62 makes
+      leaving a deactivation and R63 retains every record indefinitely and with
+      no expiry — which is the whole reason a returning worker keeps
+      competencies that are still in date (R69).
 
-    await recordAudit(db, tenant, {
-      action: 'Removed member',
-      target: user?.email ?? '',
-      category: 'team',
-      icon: 'user-minus',
-    });
+      What it ends instead is REACH: the live session, the front door, and an
+      invitation they never accepted. See `lib/deactivation.ts`.
+    */
+    const outcome = await deactivateMember(db, tenant, membership);
 
-    res.status(204).end();
+    res.status(200).json(outcome);
   }),
 );
 
@@ -704,5 +709,46 @@ teamRouter.patch(
     const result: Partial<Record<Role, PermissionMatrix>> = {};
     for (const r of rows) result[r.role] = r.matrix;
     res.json(result);
+  }),
+);
+
+/**
+ * Bring a returner back (R68).
+ *
+ * Separate from the role PATCH because it is a different act: that one changes
+ * what somebody may do, this one changes whether they are here at all. It
+ * consumes a seat from the pool their access level draws on (R78) and proceeds
+ * even where none is free — refusing a returning worker at the allocation
+ * boundary would stop work on a site to settle a billing question, which is what
+ * U37's automatic expansion exists to prevent.
+ */
+teamRouter.post(
+  '/members/:id/reactivate',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await canManageTeam(tenant))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const membership = await db.query.memberships.findFirst({
+      where: and(eq(schema.memberships.id, req.params.id!), eq(schema.memberships.orgId, tenant.orgId)),
+    });
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (membership.status === 'active') {
+      // Idempotent rather than an error: a retried click is not a mistake.
+      res.status(200).json({ needsFreshInvitation: false, seatConsumed: membership.role === 'candidate' ? 'candidate' : 'staff' });
+      return;
+    }
+
+    const outcome = await reactivateMember(db, tenant, membership);
+    res.status(200).json(outcome);
   }),
 );

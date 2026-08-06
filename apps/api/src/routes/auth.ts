@@ -7,7 +7,7 @@ import { schema } from '@formai/db';
 import type { SessionInfo, TenantContext } from '@formai/shared';
 import { db } from '../db.js';
 import { sealSession, unsealSession } from '../auth/replit-auth.js';
-import { provisionTenant } from '../auth/tenant-provisioning.js';
+import { DeactivatedMemberError, provisionTenant } from '../auth/tenant-provisioning.js';
 import { SESSION_COOKIE_NAME } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { insertUserWithUsername } from '../lib/username.js';
@@ -174,7 +174,24 @@ authRouter.post(
       return;
     }
 
-    const tenant = await provisionTenant(db, { name: user.name, email: user.email });
+    let tenant;
+    try {
+      tenant = await provisionTenant(db, { name: user.name, email: user.email });
+    } catch (err) {
+      if (err instanceof DeactivatedMemberError) {
+        /*
+          R64: a deactivated member cannot sign in. Refused with the SAME body a
+          wrong password gets — whether an account has been deactivated is not
+          something an unauthenticated caller should be able to discover, and a
+          distinct message here would turn the login form into a way to ask.
+        */
+        res
+          .status(401)
+          .json({ error: 'invalid_credentials', message: 'Invalid username or password.' });
+        return;
+      }
+      throw err;
+    }
 
     res.cookie(SESSION_COOKIE_NAME, sealSession(tenant), SESSION_COOKIE_OPTIONS);
 

@@ -126,6 +126,21 @@ export const assessmentCaseStateEnum = pgEnum('assessment_case_state', [
   'awaiting_sign_off',
   'competent',
   'closed',
+  /*
+    Abandoned because the candidate was deactivated (R71), and RETAINED as
+    history along with anything already signed on it (R72) — whether or not the
+    person ever returns.
+
+    TERMINAL, like `closed` and `competent` — nobody will work it again and
+    `closedAt` dates the abandonment. It is a separate value rather than
+    `closed` because `closed` reads as a case that finished, and a reactivated
+    candidate begins that assessment as a NEW case rather than resuming this one
+    (R74): the two must stay distinguishable in the history.
+
+    Nothing backfills rows to this value, which keeps it clear of the 55P04
+    restriction on using an enum value in the transaction that added it.
+  */
+  'invalidated',
 ]);
 
 export const auditCategoryEnum = pgEnum('audit_category', [

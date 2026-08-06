@@ -27,7 +27,20 @@ function makeDb(rows: Rows) {
       assessmentTools: table('assessmentTools'),
       formTemplates: table('formTemplates'),
       membershipLocations: table('membershipLocations'),
-      assessmentCases: table('assessmentCases'),
+      /*
+        The ONE read here that must honour its predicate. The loader asks for
+        cases in flight — `open` and `awaiting_sign_off` — and the skip rule is
+        built on the answer, so a double returning every case regardless would
+        report a finished or invalidated one as blocking and let the idempotence
+        assertions pass against a query that had lost its filter.
+      */
+      assessmentCases: {
+        findMany: async () =>
+          (rows.assessmentCases ?? []).filter(
+            (c) => c.state === 'open' || c.state === 'awaiting_sign_off',
+          ),
+        findFirst: async () => (rows.assessmentCases ?? [])[0],
+      },
       competencyHolders: table('competencyHolders'),
       competencies: table('competencies'),
     },
@@ -99,6 +112,41 @@ describe('assignForMembership', () => {
 
     expect(result.createdCaseIds).toEqual([]);
     expect(created).toHaveLength(0);
+  });
+
+  it('assigns nothing to a DEACTIVATED member (R64)', async () => {
+    /*
+      Four callers reach the engine and only a direct assign has somebody on the
+      other end to be told. A leaver whose old Role gains a requirement would
+      otherwise be handed an assessment they cannot sign in to take — which then
+      reads as outstanding on the compliance report for as long as R63 retains
+      the record, which is forever.
+    */
+    const { db, created } = makeDb(
+      baseRows({ memberships: [{ id: 'm1', orgId: ORG, userId: USER, status: 'suspended' }] }),
+    );
+    const result = await assignForMembership(db, ORG, 'm1', NOW);
+
+    expect(result.createdCaseIds).toEqual([]);
+    expect(created).toHaveLength(0);
+  });
+
+  it('starts a FRESH case where the previous one was invalidated by a deactivation (R74)', async () => {
+    // The returner's abandoned case is history, not work in progress. It must
+    // not block the new one, and the new one must not resume it.
+    const { db, created } = makeDb(
+      baseRows({
+        assessmentCases: [
+          { id: 'c-dead', orgId: ORG, candidateUserId: USER, toolId: 't1', state: 'invalidated' },
+        ],
+      }),
+    );
+    const result = await assignForMembership(db, ORG, 'm1', NOW);
+
+    expect(result.createdCaseIds).toHaveLength(1);
+    expect(created[0]).toMatchObject({ toolId: 't1', candidateUserId: USER });
+    // A new row, not the abandoned one revived.
+    expect(created[0]?.id).not.toBe('c-dead');
   });
 
   it('creates nothing when the person already holds the awarded competency, current (R45)', async () => {

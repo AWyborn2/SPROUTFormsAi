@@ -38,7 +38,13 @@ export interface RequiredAssessmentsChangePlan {
   casesToInsert: CaseToInsert[];
 }
 
-/** In flight = every case state that is not terminal (open, awaiting_sign_off). */
+/**
+ * In flight = every case state that is not terminal (open, awaiting_sign_off).
+ *
+ * Derived rather than listed, so a state added later cannot be swept by
+ * omission — which is exactly what `invalidated` would have been: a case
+ * abandoned when its candidate left, re-created here as live work.
+ */
 const NON_TERMINAL_STATES = CASE_STATES.filter((s) => !isTerminalCaseState(s));
 
 /**
