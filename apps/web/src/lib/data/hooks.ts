@@ -134,6 +134,8 @@ const keys = {
   profile: (membershipId: string) => ['profiles', membershipId] as const,
   /** The caller's own membership id, for the fixed own-record read (R49). */
   myProfileMembership: ['profiles', 'mine'] as const,
+  /** What an induction submission would seed onto a profile (U40). */
+  profileSeed: (submissionId: string) => ['profiles', 'seed', submissionId] as const,
   /** One person's held competencies, keyed on the USER the grants belong to. */
   heldCompetencies: (userId: string) => ['competencies', 'held', userId] as const,
 };
@@ -1489,5 +1491,15 @@ export function useHeldCompetencies(userId: string | undefined) {
     queryKey: keys.heldCompetencies(userId ?? ''),
     queryFn: () => store.getHeldCompetencies(userId!),
     enabled: !!userId,
+  });
+}
+
+/** What an induction submission would seed, and whether it may (U40, R89). */
+export function useProfileSeed(submissionId: string | undefined) {
+  return useQuery({
+    queryKey: keys.profileSeed(submissionId ?? ''),
+    queryFn: () => store.getProfileSeed(submissionId!),
+    enabled: !!submissionId,
+    retry: false,
   });
 }

@@ -65,6 +65,7 @@ import type {
   SubmissionRow,
   MemberPlacement,
   ProfileResponse,
+  ProfileSeedResponse,
   HeldCompetencyRow,
   Taxonomy,
   ExpiryNotice,
@@ -1069,6 +1070,14 @@ export const store = {
    */
   getHeldCompetencies(userId: string): Promise<HeldCompetencyRow[]> {
     return apiClient.get<HeldCompetencyRow[]>(`/competencies/held/${userId}`);
+  },
+  /**
+   * What an induction submission would seed onto a profile, and whether it may
+   * (U40, R89). A READ — the creating goes through the profile route, so there
+   * is one create path rather than two that could drift.
+   */
+  getProfileSeed(submissionId: string): Promise<ProfileSeedResponse> {
+    return apiClient.get<ProfileSeedResponse>(`/inductions/candidates/${submissionId}/profile-seed`);
   },
   /** A member's record as this reader is admitted to it (U29, U38). */
   getProfile(membershipId: string): Promise<ProfileResponse> {

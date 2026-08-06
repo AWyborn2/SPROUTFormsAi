@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { Badge, Button, Card, Icon } from '@formai/ui';
 import { PROFILE_FIELDS, profileField, type ProfileFieldSpec } from '@formai/shared';
 import {
@@ -7,6 +7,7 @@ import {
   useMemberPlacement,
   useMyProfileMembership,
   useProfile,
+  useProfileSeed,
   useSaveProfile,
   useTaxonomy,
 } from '../../lib/data/hooks.js';
@@ -42,6 +43,14 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
   const targetId = membershipId ?? params.id ?? mine.data?.membershipId;
 
   const { data, isLoading, isError, error } = useProfile(targetId);
+  /*
+    U40's entry point: `?seedFrom=<submissionId>` prefills this form from an
+    induction submission instead of an Admin typing it again. It reuses THIS
+    form rather than introducing a second one — a separate seeded-create screen
+    would need its own validation and its own option lists, and would drift.
+  */
+  const seedFrom = useSearchParams()[0].get('seedFrom') ?? undefined;
+  const seed = useProfileSeed(seedFrom);
   const [editing, setEditing] = useState(false);
 
   if (isLoading || (!membershipId && mine.isLoading)) {
@@ -99,11 +108,14 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
         </Card>
       )}
 
+      {seedFrom && <SeedBanner submissionId={seedFrom} />}
+
       {editing && targetId ? (
         <ProfileForm
           membershipId={targetId}
           profile={profile}
           access={access}
+          seeded={seed.data?.disposition === 'create' ? seed.data.seed.fields : undefined}
           onDone={() => setEditing(false)}
         />
       ) : (
@@ -124,6 +136,57 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
         <WithheldCard title="Documents" />
       )}
     </Frame>
+  );
+}
+
+/**
+ * What the induction submission says, and whether it may seed anything (U40).
+ *
+ * A REPEAT CREATES NOTHING (R89). Two records for one person is unrecoverable
+ * without a merge, so a submission from somebody who already holds a record
+ * tells an Admin and stops — and where they were deactivated, asks, because
+ * reactivation takes a seat and may buy a block (R78, R86).
+ */
+function SeedBanner({ submissionId }: { submissionId: string }) {
+  const { data } = useProfileSeed(submissionId);
+  if (!data) return null;
+
+  if (data.disposition !== 'create') {
+    return (
+      <Card className="flex items-start gap-2 border-warning-border bg-warning-surface p-4">
+        <Icon name="user-check" size={16} className="mt-0.5 text-warning-text" />
+        <p className="text-[12.5px] text-warning-text">
+          {data.disposition === 'deactivated'
+            ? 'This person already has a record and has been deactivated. Reactivate them rather than creating a second record — it takes a seat.'
+            : 'This person already has a record. Nothing was seeded; open their record instead of creating a second one.'}
+        </p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="p-4">
+      <p className="text-[12.5px] text-text-tertiary">
+        Prefilled from an induction submission. No document came across &mdash; the file was never
+        kept &mdash; and the employee and swipe card numbers are yours to enter.
+      </p>
+      {data.seed.unmatched.length > 0 && (
+        <div className="mt-2">
+          <p className="text-[12px] font-medium">These answers are no longer offered:</p>
+          <ul className="mt-1 flex flex-wrap gap-1.5">
+            {data.seed.unmatched.map((u) => (
+              <li key={`${u.key}-${u.value}`}>
+                <Badge variant="warning">
+                  {u.key}: {u.value}
+                </Badge>
+              </li>
+            ))}
+          </ul>
+          {/* A suggestion, not a value — an Admin picks from the current lists (R94). */}
+          <p className="mt-1 text-[11.5px] text-text-tertiary">Pick a current value for each.</p>
+        </div>
+      )}
+    </Card>
   );
 }
 
@@ -209,11 +272,14 @@ function ProfileForm({
   membershipId,
   profile,
   access,
+  seeded,
   onDone,
 }: {
   membershipId: string;
   profile: MemberProfile;
   access: ProfileAccess;
+  /** Values an induction submission supplied (U40). Undefined on an ordinary edit. */
+  seeded?: Record<string, string>;
   onDone: () => void;
 }) {
   const save = useSaveProfile();
@@ -222,7 +288,12 @@ function ProfileForm({
     [access.editableFields],
   );
   const [values, setValues] = useState<Record<string, string>>(() =>
-    Object.fromEntries(fields.map((f) => [f.key, displayValue(profile, f)])),
+    Object.fromEntries(
+      // A seeded value only fills a field the record has NOT already answered:
+      // a submission is older than any correction an Admin has since made, so
+      // letting it overwrite would undo their work.
+      fields.map((f) => [f.key, displayValue(profile, f) || (seeded?.[f.key] ?? '')]),
+    ),
   );
   const [missing, setMissing] = useState<string[]>([]);
 

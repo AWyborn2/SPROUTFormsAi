@@ -7,6 +7,7 @@ import type {
   MemberProfile,
   ProfileAccess,
   ProfileResponse,
+  ProfileSeedResponse,
 } from '../../lib/data/types.js';
 
 /*
@@ -19,13 +20,24 @@ const state: {
   profile: { data: ProfileResponse | undefined; isLoading: boolean; isError: boolean; error?: unknown };
   held: HeldCompetencyRow[];
   saved: Array<{ membershipId: string; values: Record<string, string> }>;
+  seed: ProfileSeedResponse | undefined;
 } = {
   profile: { data: undefined, isLoading: false, isError: false },
   held: [],
   saved: [],
+  seed: undefined,
 };
 
-vi.mock('react-router-dom', () => ({ useParams: () => ({}) }));
+/*
+  No route params and no query string by default, so the screen takes its
+  membership from the prop and seeds nothing. The seeded-create cases set
+  `searchParams` and get the U40 entry point.
+*/
+let searchParams = new URLSearchParams();
+vi.mock('react-router-dom', () => ({
+  useParams: () => ({}),
+  useSearchParams: () => [searchParams, vi.fn()] as const,
+}));
 
 vi.mock('../../lib/data/hooks.js', () => ({
   useProfile: () => state.profile,
@@ -53,6 +65,7 @@ vi.mock('../../lib/data/hooks.js', () => ({
       settings: {},
     },
   }),
+  useProfileSeed: () => ({ data: state.seed }),
   useSaveProfile: () => ({
     mutate: (
       input: { membershipId: string; values: Record<string, string> },
@@ -119,6 +132,8 @@ afterEach(() => {
   state.profile = { data: undefined, isLoading: false, isError: false };
   state.held = [];
   state.saved = [];
+  state.seed = undefined;
+  searchParams = new URLSearchParams();
 });
 
 describe('ProfileScreen — the record (U38)', () => {
@@ -333,5 +348,91 @@ describe('ProfileScreen — the candidate on their own record (R49, R51)', () =>
   it('offers no edit at all to a reader with no editable fields', () => {
     show({ editableFields: [] });
     expect(screen.queryByText('Edit record')).toBeNull();
+  });
+});
+
+describe('ProfileScreen — seeded from an induction submission (U40)', () => {
+  const ADMIN_FIELDS = PROFILE_FIELDS.filter(
+    (f) => f.storedOn === 'profile' && f.editableBy.includes('admin'),
+  ).map((f) => f.key);
+
+  const seedResponse = (over: Partial<ProfileSeedResponse> = {}): ProfileSeedResponse => ({
+    submissionId: 'sub-1',
+    disposition: 'create',
+    seed: {
+      fields: { firstName: 'Marlee', lastName: 'Okonkwo', mobile: '0412 345 678' },
+      department: 'Operations',
+      roles: ['Dozer Operator'],
+      email: 'marlee@example.com',
+      indigenousStatus: 'indigenous',
+      unmatched: [],
+    },
+    membershipId: null,
+    ...over,
+  });
+
+  function seeded(response: ProfileSeedResponse, profile: Partial<MemberProfile> = {}) {
+    state.seed = response;
+    searchParams = new URLSearchParams({ seedFrom: 'sub-1' });
+    return show({ editableFields: ADMIN_FIELDS }, profile);
+  }
+
+  it('prefills the form from the submission rather than making an Admin retype it', () => {
+    seeded(seedResponse(), { firstName: null, lastName: null, mobile: null });
+    fireEvent.click(screen.getByText('Edit record'));
+    expect((screen.getByLabelText('First name') as HTMLInputElement).value).toBe('Marlee');
+    expect((screen.getByLabelText('Mobile') as HTMLInputElement).value).toBe('0412 345 678');
+  });
+
+  it('does NOT overwrite a value the record already carries', () => {
+    /*
+      A submission is older than any correction an Admin has since made to the
+      record. Letting it overwrite would silently undo their work — so a seeded
+      value fills a gap and never replaces an answer.
+    */
+    seeded(seedResponse(), { firstName: 'Jane' });
+    fireEvent.click(screen.getByText('Edit record'));
+    expect((screen.getByLabelText('First name') as HTMLInputElement).value).toBe('Jane');
+  });
+
+  it('says what did not come across', () => {
+    seeded(seedResponse(), { firstName: null });
+    expect(screen.getByText(/No document came across/)).toBeDefined();
+    expect(screen.getByText(/employee and swipe card numbers are yours to enter/)).toBeDefined();
+  });
+
+  it('SEEDS NOTHING for somebody who already holds a record (R89)', () => {
+    // Two records for one person is unrecoverable without a merge, which is why
+    // the repeat stops here rather than prefilling a second one.
+    seeded(seedResponse({ disposition: 'existing_record', membershipId: 'm-9' }), {
+      firstName: null,
+      lastName: null,
+    });
+    expect(screen.getByText(/already has a record/)).toBeDefined();
+
+    fireEvent.click(screen.getByText('Edit record'));
+    expect((screen.getByLabelText('First name') as HTMLInputElement).value).toBe('');
+  });
+
+  it('asks about reactivation for a deactivated person rather than doing it (R90)', () => {
+    // Reactivation takes a seat and may buy a block (R78, R86).
+    seeded(seedResponse({ disposition: 'deactivated', membershipId: 'm-9' }));
+    expect(screen.getByText(/Reactivate them rather than creating a second record/)).toBeDefined();
+  });
+
+  it('reports an answer the current lists no longer offer as a suggestion (R94)', () => {
+    seeded(
+      seedResponse({
+        seed: { ...seedResponse().seed, unmatched: [{ key: 'department', value: 'Smelting' }] },
+      }),
+    );
+    expect(screen.getByText(/These answers are no longer offered/)).toBeDefined();
+    expect(screen.getByText('department: Smelting')).toBeDefined();
+    expect(screen.getByText('Pick a current value for each.')).toBeDefined();
+  });
+
+  it('shows no seed banner at all without the query parameter', () => {
+    show({ editableFields: ADMIN_FIELDS });
+    expect(screen.queryByText(/Prefilled from an induction submission/)).toBeNull();
   });
 });

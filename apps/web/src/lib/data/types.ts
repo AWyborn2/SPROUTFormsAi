@@ -709,6 +709,28 @@ export interface HeldCompetencyRow {
   note: string | null;
 }
 
+/**
+ * What an induction submission would put on a profile (U40, R87-R94).
+ *
+ * `disposition` is the whole point: a submission for somebody who already holds
+ * a record creates NOTHING and goes to an Admin instead (R89, R90).
+ */
+export interface ProfileSeedResponse {
+  submissionId: string;
+  disposition: 'create' | 'existing_record' | 'deactivated';
+  seed: {
+    fields: Record<string, string>;
+    department: string;
+    roles: string[];
+    email: string;
+    indigenousStatus: 'indigenous' | 'not_indigenous' | 'not_stated';
+    /** Answers the organisation's CURRENT lists no longer offer (R94). */
+    unmatched: Array<{ key: string; value: string }>;
+  };
+  /** Set on a repeat, so an Admin can open the record rather than retype it. */
+  membershipId: string | null;
+}
+
 export interface ProfileResponse {
   profile: MemberProfile;
   /**
