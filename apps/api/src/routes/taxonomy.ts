@@ -101,6 +101,7 @@ taxonomyRouter.get(
         allowMultipleDepartments: org?.allowMultipleDepartments ?? false,
         displayIdentifier: org?.displayIdentifier ?? 'employee_number',
         pooledCaseOverdueDays: org?.pooledCaseOverdueDays ?? 14,
+        notificationLeadDays: org?.notificationLeadDays ?? 30,
       },
     });
   }),
@@ -1171,6 +1172,8 @@ const settingsBody = z.object({
   // At least a day, so a zero/negative threshold cannot mark every fresh pooled
   // case overdue (U13, R63).
   pooledCaseOverdueDays: z.number().int().min(1).max(365).optional(),
+  // How far ahead of an expiry the sweep notifies (U21, KTD12).
+  notificationLeadDays: z.number().int().min(1).max(365).optional(),
 });
 
 taxonomyRouter.patch(
@@ -1196,6 +1199,9 @@ taxonomyRouter.patch(
         ...(parsed.data.pooledCaseOverdueDays !== undefined
           ? { pooledCaseOverdueDays: parsed.data.pooledCaseOverdueDays }
           : {}),
+        ...(parsed.data.notificationLeadDays !== undefined
+          ? { notificationLeadDays: parsed.data.notificationLeadDays }
+          : {}),
       })
       .where(eq(schema.organizations.id, tenant.orgId))
       .returning();
@@ -1210,6 +1216,7 @@ taxonomyRouter.patch(
       allowMultipleDepartments: row?.allowMultipleDepartments ?? false,
       displayIdentifier: row?.displayIdentifier ?? 'employee_number',
       pooledCaseOverdueDays: row?.pooledCaseOverdueDays ?? 14,
+      notificationLeadDays: row?.notificationLeadDays ?? 30,
     });
   }),
 );

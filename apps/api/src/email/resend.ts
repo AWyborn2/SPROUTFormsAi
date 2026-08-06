@@ -91,3 +91,38 @@ export async function sendPooledCaseNoticeEmail(input: PooledCaseNoticeInput): P
     return false;
   }
 }
+
+export interface ExpiryNoticeInput {
+  to: string;
+  /** The competency about to lapse, named so the reader knows what to renew. */
+  competencyName: string;
+  /** `YYYY-MM-DD` — when it expires. */
+  expiresOn: string;
+}
+
+/**
+ * Notify a person ahead of a competency's expiry (U21, R97, R98). Best-effort,
+ * exactly like the invite email: a missing key or a failed send returns `false`
+ * and never throws, so the sweep's assignment pass keeps running when email is
+ * unconfigured or down. The login-served notice record is the other delivery
+ * route and is written regardless of this send's outcome.
+ */
+export async function sendExpiryNoticeEmail(input: ExpiryNoticeInput): Promise<boolean> {
+  const resend = getResend();
+  if (!resend) return false;
+  try {
+    const { error } = await resend.emails.send({
+      from: env.RESEND_FROM_EMAIL,
+      to: input.to,
+      subject: `${input.competencyName} expires on ${input.expiresOn}`,
+      text: [
+        `Your ${input.competencyName} is due to expire on ${input.expiresOn}.`,
+        '',
+        `Renew it before then to stay qualified. Open FormAI to see what to do.`,
+      ].join('\n'),
+    });
+    return !error;
+  } catch {
+    return false;
+  }
+}

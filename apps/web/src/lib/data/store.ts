@@ -65,6 +65,7 @@ import type {
   SubmissionRow,
   MemberPlacement,
   Taxonomy,
+  ExpiryNotice,
   RetirementReview,
   TaxDepartment,
   TaxLocation,
@@ -999,6 +1000,10 @@ export const store = {
   /** Move everyone off a retired Role to a replacement; cases untouched (U18, R135). */
   transferRole(roleId: string, replacementRoleId: string): Promise<{ peopleMoved: number }> {
     return apiClient.post(`/taxonomy/roles/${roleId}/transfer`, { replacementRoleId });
+  },
+  /** The caller's own expiry notices — a login delivery route (U21, R98). */
+  listMyNotices(): Promise<ExpiryNotice[]> {
+    return apiClient.get<ExpiryNotice[]>('/notices');
   },
   /** Request voluntary training for a tool — own-scope (U22, R37). */
   requestTraining(toolId: string): Promise<TrainingRequest> {

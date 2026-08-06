@@ -302,6 +302,7 @@ function SettingsPanel({
     allowMultipleDepartments: boolean;
     displayIdentifier: DisplayIdentifier;
     pooledCaseOverdueDays: number;
+    notificationLeadDays: number;
   };
   onError: (e: unknown) => void;
 }) {
@@ -372,6 +373,30 @@ function SettingsPanel({
                 const value = Number(e.target.value);
                 if (Number.isInteger(value) && value >= 1 && value <= 365 && value !== settings.pooledCaseOverdueDays) {
                   update.mutate({ pooledCaseOverdueDays: value }, { onError });
+                }
+              }}
+            />
+            <span className="text-[12px] text-text-tertiary">days</span>
+          </div>
+        </label>
+        <label className="flex items-center justify-between gap-4">
+          <span className="text-sm">
+            Notify a person before an expiry
+            <span className="block text-[12px] text-text-tertiary">
+              Days ahead of a competency lapsing that the sweep warns its holder.
+            </span>
+          </span>
+          <div className="flex w-56 items-center gap-2">
+            <Input
+              type="number"
+              min={1}
+              max={365}
+              aria-label="Notification lead days"
+              defaultValue={settings.notificationLeadDays}
+              onBlur={(e) => {
+                const value = Number(e.target.value);
+                if (Number.isInteger(value) && value >= 1 && value <= 365 && value !== settings.notificationLeadDays) {
+                  update.mutate({ notificationLeadDays: value }, { onError });
                 }
               }}
             />

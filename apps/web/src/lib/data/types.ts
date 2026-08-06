@@ -517,6 +517,16 @@ export interface TighteningReviewItem {
   heldRoles: Array<{ id: string; name: string }>;
 }
 
+/** An expiry notice served on a person's own record — a login delivery route (U21, R98). */
+export interface ExpiryNotice {
+  id: string;
+  competencyId: string;
+  competencyName: string;
+  /** `YYYY-MM-DD` — when the competency expires. */
+  expiresOn: string;
+  sentAt: string;
+}
+
 /** A voluntary training request (U22). Pending ones wait on the working list. */
 export interface TrainingRequest {
   id: string;
@@ -558,6 +568,8 @@ export interface TaxonomySettings {
   displayIdentifier: DisplayIdentifier;
   /** Days before a pooled case reads as overdue (U13, R63). */
   pooledCaseOverdueDays: number;
+  /** Days ahead of an expiry the sweep notifies a holder (U21, KTD12). */
+  notificationLeadDays: number;
 }
 
 /** The whole taxonomy in one read, for the settings screen. */

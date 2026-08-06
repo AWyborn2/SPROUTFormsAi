@@ -99,6 +99,8 @@ const keys = {
   retirementReview: ['retirementReview'] as const,
   /** The org's pending voluntary training requests (U22). */
   trainingRequests: ['trainingRequests'] as const,
+  /** The caller's own expiry notices (U21). */
+  myNotices: ['myNotices'] as const,
   /** Everything waiting on an Admin, from all sources (U19). */
   workingList: ['workingList'] as const,
   assessmentCases: ['assessmentCases'] as const,
@@ -1294,6 +1296,11 @@ export function useTransferRole() {
   return useTransferMutation((input: { roleId: string; replacementRoleId: string }) =>
     store.transferRole(input.roleId, input.replacementRoleId),
   );
+}
+
+/** The caller's own expiry notices — the login delivery route (U21, R98). */
+export function useMyNotices() {
+  return useQuery({ queryKey: keys.myNotices, queryFn: () => store.listMyNotices() });
 }
 
 /** Request voluntary training for a tool — own-scope (U22, R37). */

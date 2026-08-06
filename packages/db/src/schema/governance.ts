@@ -389,6 +389,41 @@ export const trainingRequests = pgTable(
   ],
 );
 
+/**
+ * A notice the expiry sweep has already sent (U21, KTD11). Its existence is what
+ * makes the sweep idempotent: a competency inside its notification window is
+ * notified UNLESS a row already records it for that holder and that window, so a
+ * second sweep before the window changes sends nothing twice. The window is keyed
+ * by the EXPIRY DATE — a renewal moves the expiry, opening a fresh window that
+ * may notify again. The row is also the LOGIN delivery route (R98): served to its
+ * holder on their own record, so a person with a login but no reachable email is
+ * still reached.
+ */
+export const sentNotices = pgTable(
+  'sent_notices',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    competencyId: uuid('competency_id')
+      .notNull()
+      .references(() => competencies.id, { onDelete: 'cascade' }),
+    /** The expiry the notice was about, `YYYY-MM-DD` — the window key (R97). */
+    expiresOn: text('expires_on').notNull(),
+    sentAt: timestamp('sent_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('sent_notices_org_idx').on(t.orgId),
+    index('sent_notices_user_idx').on(t.userId),
+    // One notice per holder per competency per window — the idempotence guard.
+    uniqueIndex('sent_notices_uq').on(t.userId, t.competencyId, t.expiresOn),
+  ],
+);
+
 export const inductionBookingsRelations = relations(inductionBookings, ({ one, many }) => ({
   org: one(organizations, {
     fields: [inductionBookings.orgId],
