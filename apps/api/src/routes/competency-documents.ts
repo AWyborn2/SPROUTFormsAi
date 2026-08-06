@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
@@ -236,6 +236,136 @@ competencyDocumentsRouter.get(
     res.send(bytes);
   }),
 );
+
+// ── POST /competency-documents/:id/approve ─────────────────────────────────
+
+/**
+ * Record that a human opened the certificate and accepted it (R43).
+ *
+ * DELIBERATELY INERT everywhere else. An approval says the obligation to sight
+ * training evidence was met; it changes neither the competency's currency nor
+ * its standing nor whether it satisfies a prerequisite. R46 is the mirror: a
+ * document nobody has approved yet blocks nothing either — not checked yet is
+ * not the same as in doubt.
+ *
+ * Resolved against `approve`, which R39 keeps a verb of its own: a document is
+ * approved without being changed, so an access level admitted to VIEW one is
+ * not thereby admitted to approve it.
+ */
+competencyDocumentsRouter.post(
+  '/:id/approve',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    const found = await loadForDecision(req, res);
+    if (!found) return;
+    const { row, access, tenant } = found;
+
+    if (!access.canApprove) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+
+    await db!
+      .update(schema.competencyDocuments)
+      .set({
+        approvedByUserId: tenant.userId,
+        approvedAt: new Date(),
+        // A previously rejected document that is now accepted stops being
+        // rejected; nothing else about it moves.
+        rejectedByUserId: null,
+        rejectedAt: null,
+        rejectedReason: null,
+      })
+      .where(eq(schema.competencyDocuments.id, row.id));
+
+    res.status(204).end();
+  }),
+);
+
+// ── POST /competency-documents/:id/reject ──────────────────────────────────
+
+const rejectBody = z.object({ reason: z.string().min(1).max(500) });
+
+/**
+ * Refuse a certificate that cannot be read, and REVOKE NOTHING (R47).
+ *
+ * Revocation means the qualification was withdrawn — a judgement about
+ * competence. An illegible photograph is not that. So the competency keeps its
+ * currency and its standing exactly as R43 and R46 leave them, and the document
+ * is flagged for an Admin to resolve with the person.
+ *
+ * Where that flag SURFACES is U33's queue rather than the working list, whose
+ * contents R20 enumerates exhaustively. The plan records the alternative.
+ */
+competencyDocumentsRouter.post(
+  '/:id/reject',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    const found = await loadForDecision(req, res);
+    if (!found) return;
+    const { row, access, tenant } = found;
+
+    if (!access.canApprove) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = rejectBody.safeParse(req.body);
+    if (!parsed.success) {
+      // The reason is what an Admin resolves the document against.
+      res.status(400).json({ error: 'reason_required' });
+      return;
+    }
+
+    await db!
+      .update(schema.competencyDocuments)
+      .set({
+        rejectedByUserId: tenant.userId,
+        rejectedAt: new Date(),
+        rejectedReason: parsed.data.reason,
+        approvedByUserId: null,
+        approvedAt: null,
+      })
+      .where(eq(schema.competencyDocuments.id, row.id));
+
+    res.status(204).end();
+  }),
+);
+
+/**
+ * Shared preamble for the two decision routes: find the document, resolve the
+ * caller against its subject, and answer 404 for anything they may not reach.
+ */
+async function loadForDecision(req: Request, res: Response) {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return null;
+  }
+  const tenant = req.tenant!;
+  const row = await db.query.competencyDocuments.findFirst({
+    where: and(
+      eq(schema.competencyDocuments.id, (req.params as { id: string }).id),
+      eq(schema.competencyDocuments.orgId, tenant.orgId),
+    ),
+  });
+  if (!row) {
+    res.status(404).json({ error: 'not_found' });
+    return null;
+  }
+  const holder = await db.query.competencyHolders.findFirst({
+    where: eq(schema.competencyHolders.id, row.competencyHolderId),
+  });
+  if (!holder) {
+    res.status(404).json({ error: 'not_found' });
+    return null;
+  }
+  const subject = await subjectFor(tenant.orgId, holder.userId);
+  if (!subject) {
+    res.status(404).json({ error: 'not_found' });
+    return null;
+  }
+  const access = await resolveProfileAccess(db, tenant, subject);
+  return { row, holder, subject, access, tenant };
+}
 
 // ── DELETE /competency-documents/:id ───────────────────────────────────────
 

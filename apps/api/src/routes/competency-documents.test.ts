@@ -280,6 +280,163 @@ describe('the ungated attachment route no longer serves these bytes', () => {
   });
 });
 
+describe('approval and rejection, and what neither changes', () => {
+  it('lets an assessor approve on the shipped defaults (R42, R55)', async () => {
+    // AE1: viewing and approving a candidate's documents is the default reach.
+    const { updates } = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.assessor });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${DOC}/approve`, {
+        method: 'POST',
+        headers: { ...authHeader(assessor), 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(204);
+      expect(updates[0]).toMatchObject({ approvedByUserId: assessor.userId });
+      expect(updates[0]!.approvedAt).toBeInstanceOf(Date);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses an access level granted view but NOT approve (R39)', async () => {
+    // Approving is a verb of its own: a document is approved without being
+    // changed, so viewing one does not admit you to accept it.
+    fakeDb({
+      matrix: {
+        ...DEFAULT_ROLE_PERMISSIONS.assessor,
+        profiles: { view: true, edit: false, approve: false, view_documents: true, view_competencies: true },
+      } as PermissionMatrix,
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${DOC}/approve`, {
+        method: 'POST',
+        headers: { ...authHeader(assessor), 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('never lets the subject candidate approve their own document (R52)', async () => {
+    // Their read of it is fixed (R50); accepting it is not theirs.
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${DOC}/approve`, {
+        method: 'POST',
+        headers: { ...authHeader(subject), 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes NOTHING to the competency grant when approving (R43)', async () => {
+    /*
+      AE17: an approval changes neither currency, nor standing, nor whether the
+      competency satisfies a prerequisite. The strongest form of that assertion
+      is that the grant row is never touched at all.
+    */
+    const { updates } = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/competency-documents/${DOC}/approve`, {
+        method: 'POST',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const touched = updates.flatMap((u) => Object.keys(u));
+      expect(touched).not.toContain('revokedAt');
+      expect(touched).not.toContain('expiresAt');
+      expect(touched).not.toContain('grantedAt');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rejects with a reason and revokes no competency (R47)', async () => {
+    // AE17: revocation means the qualification was withdrawn, and an illegible
+    // photograph is not that.
+    const { updates } = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.assessor });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${DOC}/reject`, {
+        method: 'POST',
+        headers: { ...authHeader(assessor), 'content-type': 'application/json' },
+        body: JSON.stringify({ reason: 'photograph too dark to read' }),
+      });
+      expect(res.status).toBe(204);
+      expect(updates[0]).toMatchObject({ rejectedReason: 'photograph too dark to read' });
+      const touched = updates.flatMap((u) => Object.keys(u));
+      expect(touched).not.toContain('revokedAt');
+      expect(touched).not.toContain('revokedReason');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a rejection carrying no reason', async () => {
+    // The reason is what an Admin resolves the document against.
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.assessor });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${DOC}/reject`, {
+        method: 'POST',
+        headers: { ...authHeader(assessor), 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('clears an earlier rejection when the same document is later approved', async () => {
+    const { updates } = fakeDb({
+      matrix: DEFAULT_ROLE_PERMISSIONS.admin,
+      doc: { rejectedAt: new Date(), rejectedReason: 'too dark' },
+    });
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/competency-documents/${DOC}/approve`, {
+        method: 'POST',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(updates[0]).toMatchObject({ rejectedAt: null, rejectedReason: null });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('leaves an unapproved document held and listed rather than blocking (R46)', async () => {
+    /*
+      AE17: not checked yet is not the same as in doubt. Nothing about a
+      document's approval state changes what the competency is worth, which is
+      why the list returns it in `held` with a null approval and no other
+      qualification.
+    */
+    fakeDb({
+      matrix: DEFAULT_ROLE_PERMISSIONS.assessor,
+      docs: [{ id: 'd-1', fileName: 'a.jpg', contentType: 'image/jpeg', state: 'held', uploadedAt: new Date() }],
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${HOLDER}`, { headers: authHeader(assessor) });
+      const body = (await res.json()) as Array<{ state: string; approvedAt: string | null }>;
+      expect(body[0]).toMatchObject({ state: 'held', approvedAt: null });
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('DELETE /competency-documents/:id', () => {
   it('refuses an assessor and admits an Admin, recording the reason (R32)', async () => {
     // AE16: the assessor asks, the Admin removes.
