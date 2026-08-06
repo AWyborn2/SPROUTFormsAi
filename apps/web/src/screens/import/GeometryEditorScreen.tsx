@@ -118,6 +118,48 @@ export function GeometryEditorScreen({
   const fields = edited ?? version?.fields ?? [];
   const selected = fields.find((f) => f.id === selectedId) ?? null;
 
+  /*
+    THE LIST IS GROUPED, COUNTED AND FILTERABLE (U15).
+
+    The Track Dozer paper produces roughly three hundred boxes, and this list
+    was a flat run of them — the two-hour manual session the runbook describes
+    is mostly navigating it. Grouping by the printed heading turns "where am I"
+    into a glance; the per-group counts turn "am I finished" into a number.
+
+    UP HERE WITH EVERY OTHER HOOK, above the conditional early returns further
+    down — see `overlay` below for the rule. These six sat under those returns
+    and crashed the builder's PDF-mapping step outright: the version is fetched
+    fresh there, so the first render always took the `isLoading` return and the
+    second ran six hooks the first never did.
+  */
+  const [filter, setFilter] = useState('');
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+
+  const groups = useMemo(() => groupFields(fields, expectedBoxes, filter), [fields, filter]);
+  const counts = useMemo(() => overallCounts(fields, expectedBoxes), [fields]);
+
+  /*
+    A question and its outcome box are ONE row, with two chips.
+
+    Both are geometry — the response on the question field, the outcome on the
+    field its `outcomeTarget` names — but they are one unit of authoring work.
+    Shown as two unrelated rows among three hundred, one of them is how the
+    other ends up unplaced, and the export then draws a candidate's answer with
+    no verdict beside it.
+  */
+  const pairByQuestion = useMemo(() => {
+    const map = new Map<string, PlacementPair>();
+    for (const pair of pairsFor(fields)) map.set(pair.question.id, pair);
+    return map;
+  }, [fields]);
+
+  /*
+    An outcome box does not ALSO get a row of its own — it is reachable through
+    its question's chip. A second row for it is exactly the split this unit
+    exists to close.
+  */
+  const pairedOutcomeIds = useMemo(() => outcomeFieldIds(fields), [fields]);
+
   const onTextLayer = useCallback((pages: TextPage[]) => setTextPages(pages), []);
 
   /**
@@ -554,43 +596,6 @@ export function GeometryEditorScreen({
       }));
     }),
   ];
-
-  /*
-    THE LIST IS GROUPED, COUNTED AND FILTERABLE (U15).
-
-    The Track Dozer paper produces roughly three hundred boxes, and this list
-    was a flat run of them — the two-hour manual session the runbook describes
-    is mostly navigating it. Grouping by the printed heading turns "where am I"
-    into a glance; the per-group counts turn "am I finished" into a number.
-  */
-  const [filter, setFilter] = useState('');
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
-
-  const groups = useMemo(() => groupFields(fields, expectedBoxes, filter), [fields, filter]);
-  const counts = useMemo(() => overallCounts(fields, expectedBoxes), [fields]);
-
-  /*
-    A question and its outcome box are ONE row, with two chips.
-
-    Both are geometry — the response on the question field, the outcome on the
-    field its `outcomeTarget` names — but they are one unit of authoring work.
-    Shown as two unrelated rows among three hundred, one of them is how the
-    other ends up unplaced, and the export then draws a candidate's answer with
-    no verdict beside it.
-  */
-  const pairByQuestion = useMemo(() => {
-    const map = new Map<string, PlacementPair>();
-    for (const pair of pairsFor(fields)) map.set(pair.question.id, pair);
-    return map;
-  }, [fields]);
-
-  /*
-    An outcome box does not ALSO get a row of its own — it is reachable through
-    its question's chip. A second row for it is exactly the split this unit
-    exists to close.
-  */
-  const pairedOutcomeIds = useMemo(() => outcomeFieldIds(fields), [fields]);
-
 
   return (
     <div className="fai-rise flex h-[calc(100vh-56px)] flex-col">

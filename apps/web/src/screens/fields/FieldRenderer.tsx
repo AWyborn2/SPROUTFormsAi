@@ -128,6 +128,15 @@ export function FieldInput({
   dictation = false,
   uploadPath,
 }: FieldInputProps) {
+  /*
+    ABOVE THE SECTION-HEADER RETURN BELOW, because every hook must run on every
+    render. A field's type is not fixed for the life of this component: the
+    builder's preview lets an author RETYPE a field, and the row keeps its key
+    across that change — so an instance that rendered as a header and then as a
+    question (or the reverse) would change its hook count mid-life.
+  */
+  const controlId = useId();
+
   if (field.type === 'section_header') {
     return (
       <div className="border-b border-border-subtle pb-2 pt-2">
@@ -144,7 +153,6 @@ export function FieldInput({
   // element; their container gets a role + `aria-labelledby` pointing at the
   // caption instead. Everything else keeps the caption as a styled div
   // (signature and the time row already label themselves via `aria-label`).
-  const controlId = useId();
   const labelId = `${controlId}-label`;
   const labelable = LABELABLE_TYPES.has(field.type);
   const groupRole =

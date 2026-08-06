@@ -675,3 +675,85 @@ describe('GeometryEditorScreen — band overlay wiring (U6, R7/R8)', () => {
     });
   });
 });
+
+/**
+ * The loading → loaded transition, on ONE mounted component.
+ *
+ * This is the shape every other test in this file skips: they all set
+ * `isLoading: false` before the first render, so the component takes the same
+ * branch twice and its hook count never changes. The builder's PDF-mapping step
+ * cannot do that — it creates the form and version on arrival, so the version is
+ * never in cache, the first render ALWAYS takes the `isLoading` return, and the
+ * second render is the first one to reach the body.
+ *
+ * That made "rendered more hooks than during the previous render" a certainty
+ * there and a coin flip on the standalone route, where the version is usually
+ * already cached from the form page that linked to it.
+ */
+describe('GeometryEditorScreen — hooks are stable across the loading transition', () => {
+  it('does not add hooks between the loading render and the loaded one', () => {
+    version.data = undefined;
+    version.isLoading = true;
+    const { rerender } = render(<GeometryEditorScreen />);
+    expect(screen.getByText(/Loading version/i)).toBeTruthy();
+
+    version.isLoading = false;
+    version.data = {
+      id: 'v1',
+      templateId: 'form1',
+      label: 'Draft v1',
+      state: 'draft',
+      isCurrent: false,
+      fields: [choiceField('q1', 'Question one', ['Yes', 'No'])],
+      container: DEFAULT_CONTAINER,
+      sourcePdfAssetId: 'asset-1',
+    };
+
+    // Throws "Rendered more hooks than during the previous render" if any hook
+    // sits below one of the four early returns.
+    expect(() => rerender(<GeometryEditorScreen />)).not.toThrow();
+    expect(screen.getByText('Question one')).toBeTruthy();
+  });
+
+  it('survives the same transition into the published branch', () => {
+    // Each early return is its own opportunity for the bug, and a published
+    // version takes a different one.
+    version.data = undefined;
+    version.isLoading = true;
+    const { rerender } = render(<GeometryEditorScreen />);
+
+    version.isLoading = false;
+    version.data = {
+      id: 'v1',
+      templateId: 'form1',
+      label: 'Draft v1',
+      state: 'published',
+      isCurrent: true,
+      fields: [],
+      container: DEFAULT_CONTAINER,
+      sourcePdfAssetId: 'asset-1',
+    };
+    expect(() => rerender(<GeometryEditorScreen />)).not.toThrow();
+    expect(screen.getByText(/is published/i)).toBeTruthy();
+  });
+
+  it('survives the transition into a version with no source PDF', () => {
+    version.data = undefined;
+    version.isLoading = true;
+    const { rerender } = render(<GeometryEditorScreen />);
+
+    version.isLoading = false;
+    version.data = {
+      id: 'v1',
+      templateId: 'form1',
+      label: 'Draft v1',
+      state: 'draft',
+      isCurrent: false,
+      fields: [],
+      container: DEFAULT_CONTAINER,
+      sourcePdfAssetId: null,
+    };
+    expect(() => rerender(<GeometryEditorScreen />)).not.toThrow();
+    expect(screen.getByText(/No original PDF/i)).toBeTruthy();
+  });
+});
