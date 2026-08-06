@@ -148,6 +148,12 @@ export function AssessmentCaseScreen() {
               {exportPdf.isPending ? 'Building…' : 'Export evidence PDF'}
             </Button>
           )}
+          {/* A pooled case names no assessor — it sits in the shared queue (U13). */}
+          {!isCandidate && c.assessorUserId == null && c.state === 'open' && (
+            <span className="rounded-full border border-border bg-surface-sunken px-2.5 py-1 text-[11px] font-medium text-text-tertiary">
+              Unassigned — in the shared queue
+            </span>
+          )}
           <CaseStateBadge state={c.state} size="md" />
         </div>
       </div>
@@ -312,6 +318,7 @@ function PartCard({
     outcome: string | null;
     submittedAt: string | null;
     dispositionReason: string | null;
+    markerKind: 'person' | 'automatic' | null;
   }[];
   readOnly: boolean;
   onOpen: () => void;
@@ -363,6 +370,12 @@ function PartCard({
                 </Link>{' '}
                 — {a.outcome === 'satisfactory' ? 'satisfactory' : 'not satisfactory'}
                 {a.dispositionReason ? `: ${a.dispositionReason}` : ''}
+                {/* An automatic mark was made by nobody — say so distinctly (U15). */}
+                {a.markerKind === 'automatic' && (
+                  <span className="ml-1.5 rounded-sm bg-surface-sunken px-1.5 py-px font-mono text-[9px] uppercase tracking-wide text-text-tertiary">
+                    auto-marked
+                  </span>
+                )}
               </span>
             </li>
           ))}

@@ -89,6 +89,9 @@ export const SCREENS: ScreenDef[] = [
   // the literal segment is listed ahead of the parameter it would otherwise be
   // read as; the API declares its matching endpoint in the same order.
   { key: 'assessment-progress', path: '/app/assessments/progress', group: 'Assessments', label: 'Assessment progress', icon: 'gauge', shell: 'app' },
+  // Literal 'queue' segment, so it is not read as `/app/assessments/:id`; the API
+  // gate is the real access boundary, this only hides the nav entry (U13).
+  { key: 'assessment-queue', path: '/app/assessments/queue', group: 'Assessments', label: 'Assessment queue', icon: 'inbox', shell: 'app', inNav: true, minAccessLevel: 'assessor' },
   // Who fills each section of an assessment, and in what order. Under a literal
   // /tools/ segment rather than another parameter on /assessments/:id, which
   // would be read as a case id — the same reason `progress` is declared above.

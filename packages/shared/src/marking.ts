@@ -24,10 +24,69 @@
  * questions. This reuses `visibility.ts` rather than reimplementing the rule.
  */
 
-import type { AssessmentPart, PartOutcome } from './assessment.js';
-import type { FormField, OutcomeTarget } from './form-field.js';
+import { fieldsInPart } from './assessment.js';
+import type { AssessmentPart, AssessmentToolManifest, PartOutcome } from './assessment.js';
+import type { FormField, FormFieldType, OutcomeTarget } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 import { visibleFields, type VisibilityAnswers } from './visibility.js';
+
+/**
+ * Field types that are STRUCTURAL — furniture in the printed document, not
+ * questions a candidate answers. A part's automatic marking turns only on its
+ * real questions, so these are excluded from the keyed-ness test: a
+ * `section_header` (the part's own anchor) and a `signature` box can hold no
+ * answer key, and reading them into the test would stop any real part from ever
+ * self-marking.
+ */
+const STRUCTURAL_FIELD_TYPES: ReadonlySet<FormFieldType> = new Set(['section_header', 'signature']);
+
+/**
+ * Whether a part MARKS ITSELF (U15, R66–R68): it carries at least one real
+ * question and EVERY real question has both a non-empty answer key and an
+ * outcome target.
+ *
+ * Decided by keyed-ness, not by `part.kind`. The domain is stated on purpose:
+ * `fieldsInPart` returns a contiguous slice carrying the part's structural
+ * furniture, the ✓/✗ OUTCOME CELLS each question's mark is written into, any
+ * assessor-name/date boxes the part prints, and the LOCATION-STREAM question that
+ * gates which sections show — none of which holds an answer key or is a
+ * competency question. All of those are excluded and every remaining real
+ * question must be keyed.
+ * Requiring only SOME question be keyed would let a partly-keyed part mark itself
+ * against the keys it happens to hold and pass the rest unchecked — the exact
+ * failure this replaces — so a part with any unkeyed question, or no real
+ * question at all, reaches an assessor instead.
+ *
+ * Pass the FULL version field set — the slice is taken here — and unstripped, so
+ * the answer keys are visible to the test.
+ */
+export function isSelfMarking(
+  fields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+  partKey: string,
+): boolean {
+  const partFields = fieldsInPart(fields, manifest, partKey);
+  const part = manifest.parts.find((p) => p.key === partKey);
+
+  // Furniture the candidate does not answer: the part's own printed
+  // assessor-name and date boxes, and every field a question WRITES ITS MARK
+  // INTO (a check_cross box, or the repeating group a margin table addresses).
+  const furniture = new Set<string>();
+  if (part?.assessorNameFieldId) furniture.add(part.assessorNameFieldId);
+  if (part?.signedDateFieldId) furniture.add(part.signedDateFieldId);
+  // The location-stream selector gates which sections a candidate sees; it is
+  // answered but carries no answer key, so it is not a question to mark.
+  if (manifest.locationStreamFieldId) furniture.add(manifest.locationStreamFieldId);
+  for (const f of partFields) if (f.outcomeTarget) furniture.add(f.outcomeTarget.fieldId);
+
+  const questions = partFields.filter(
+    (f) => !STRUCTURAL_FIELD_TYPES.has(f.type) && !furniture.has(f.id),
+  );
+  return (
+    questions.length > 0 &&
+    questions.every((f) => (f.answerKey?.length ?? 0) > 0 && f.outcomeTarget !== undefined)
+  );
+}
 
 /** One question's verdict. */
 export interface QuestionMark {

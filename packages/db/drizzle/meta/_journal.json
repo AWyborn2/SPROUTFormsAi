@@ -232,6 +232,13 @@
       "when": 1785972323751,
       "tag": "0032_calm_jackal",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1785976009357,
+      "tag": "0033_bright_falcon",
+      "breakpoints": true
     }
   ]
 }

@@ -99,6 +99,7 @@ taxonomyRouter.get(
         allowMultipleLocations: org?.allowMultipleLocations ?? false,
         allowMultipleDepartments: org?.allowMultipleDepartments ?? false,
         displayIdentifier: org?.displayIdentifier ?? 'employee_number',
+        pooledCaseOverdueDays: org?.pooledCaseOverdueDays ?? 14,
       },
     });
   }),
@@ -542,6 +543,9 @@ const settingsBody = z.object({
   allowMultipleLocations: z.boolean().optional(),
   allowMultipleDepartments: z.boolean().optional(),
   displayIdentifier: z.enum(['employee_number', 'swipe_card_number']).optional(),
+  // At least a day, so a zero/negative threshold cannot mark every fresh pooled
+  // case overdue (U13, R63).
+  pooledCaseOverdueDays: z.number().int().min(1).max(365).optional(),
 });
 
 taxonomyRouter.patch(
@@ -564,6 +568,9 @@ taxonomyRouter.patch(
           ? { allowMultipleDepartments: parsed.data.allowMultipleDepartments }
           : {}),
         ...(parsed.data.displayIdentifier ? { displayIdentifier: parsed.data.displayIdentifier } : {}),
+        ...(parsed.data.pooledCaseOverdueDays !== undefined
+          ? { pooledCaseOverdueDays: parsed.data.pooledCaseOverdueDays }
+          : {}),
       })
       .where(eq(schema.organizations.id, tenant.orgId))
       .returning();
@@ -577,6 +584,7 @@ taxonomyRouter.patch(
       allowMultipleLocations: row?.allowMultipleLocations ?? false,
       allowMultipleDepartments: row?.allowMultipleDepartments ?? false,
       displayIdentifier: row?.displayIdentifier ?? 'employee_number',
+      pooledCaseOverdueDays: row?.pooledCaseOverdueDays ?? 14,
     });
   }),
 );

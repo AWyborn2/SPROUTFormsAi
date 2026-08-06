@@ -78,6 +78,13 @@ export const organizations = pgTable('organizations', {
    * artifact — this is only the organisation's choice between them.
    */
   displayIdentifier: displayIdentifierEnum('display_identifier').notNull().default('employee_number'),
+  /**
+   * How many days a POOLED (unowned) case may sit before it reads as overdue
+   * (U13, R63). Overdue is DERIVED — compared against a case's age on read, never
+   * stored on the case — so changing this re-dates every pooled case at once with
+   * no per-case write. Default fourteen.
+   */
+  pooledCaseOverdueDays: integer('pooled_case_overdue_days').notNull().default(14),
 });
 
 export const users = pgTable('users', {

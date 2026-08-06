@@ -13,6 +13,7 @@ import {
   fieldsInSection,
   isCaseCompetent,
   isTerminalCaseState,
+  isSelfMarking,
   moreCoachingRequired,
   type AssessmentCaseState,
   logbookRows,
@@ -47,6 +48,7 @@ import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission, permissionScope } from '../lib/permissions.js';
+import { heldCompetencyStates } from '../lib/assignment.js';
 import { recordAudit } from '../audit/record.js';
 import { grantCompetency, revokeGrantsFromCase } from '../lib/competency-grant.js';
 import { CaseExportError, exportCasePdf } from '../pdf/index.js';
@@ -892,7 +894,14 @@ assessmentCasesRouter.post(
       return;
     }
     const { toolId, candidateUserId, pathway, locationId, rplJustification } = parsed.data;
-    const assessorUserId = parsed.data.assessorUserId ?? tenant.userId;
+    /*
+      A manual create that NAMES an assessor keeps them; one that names none
+      leaves the case UNOWNED, in the shared queue (U13, R61) — it no longer
+      substitutes the creator. R61 is about not silently owning a case nobody
+      chose to own; naming an assessor is still a real choice and is honoured.
+      This matches the automatic path, which already creates unowned cases.
+    */
+    const assessorUserId = parsed.data.assessorUserId ?? null;
 
     // RPL waives the logged-hours parts, so the reason it was granted is the
     // only record of WHY they were skipped. Without it the case looks
@@ -1059,6 +1068,8 @@ assessmentCasesRouter.get(
         candidateUserId: c.candidateUserId,
         pathway: c.pathway,
         state: c.state,
+        /** Null on a pooled case — the table shows it as unassigned (U13). */
+        assessorUserId: c.assessorUserId,
         createdAt: c.createdAt,
       })),
     );
@@ -1260,6 +1271,90 @@ assessmentCasesRouter.get(
   }),
 );
 
+/**
+ * The shared pool (U13, R62–R64): OPEN cases nobody owns, at Locations the
+ * reading assessor is eligible to assess. Eligibility is the tool's assessor
+ * requirement for the case's Location, read through the same resolver creation
+ * and sign-off use — not a new rule. Working a case never claims it, so it stays
+ * here for every eligible assessor until it is signed off.
+ *
+ * Declared before `/:id` so `queue` is not read as a case id — the same reason
+ * `/progress` is declared above.
+ */
+assessmentCasesRouter.get(
+  '/queue',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    // The pool is an assessor surface. A candidate's own-scope edit resolves
+    // false, so their own cases never leak into it.
+    if (!(await hasPermission(tenant, 'assessments', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+
+    const [pooled, org, held] = await Promise.all([
+      db.query.assessmentCases.findMany({
+        where: and(
+          eq(schema.assessmentCases.orgId, tenant.orgId),
+          eq(schema.assessmentCases.state, 'open'),
+          isNull(schema.assessmentCases.assessorUserId),
+        ),
+        orderBy: (c) => [desc(c.createdAt)],
+      }),
+      db.query.organizations.findFirst({ where: eq(schema.organizations.id, tenant.orgId) }),
+      heldCompetencyStates(db, tenant.orgId, tenant.userId, new Date()),
+    ]);
+    const heldNow = new Set(held.filter((h) => countsAsHeld(h.status)).map((h) => h.competencyId));
+    const overdueDays = org?.pooledCaseOverdueDays ?? 14;
+
+    const toolIds = [...new Set(pooled.map((c) => c.toolId))];
+    const tools = toolIds.length
+      ? await db.query.assessmentTools.findMany({ where: inArray(schema.assessmentTools.id, toolIds) })
+      : [];
+    const toolById = new Map(tools.map((t) => [t.id, t]));
+    const locationIds = [
+      ...new Set(pooled.map((c) => c.locationId).filter((id): id is string => Boolean(id))),
+    ];
+    const locationNames = await locationNamesByIdFor(db, tenant.orgId, locationIds);
+
+    const now = Date.now();
+    const items = pooled.flatMap((c) => {
+      const tool = toolById.get(c.toolId);
+      if (!tool) return [];
+      const needs = resolveAssessorRequirements(
+        { always: tool.assessorCompetencyIds, byStream: tool.assessorStreamCompetencyIds },
+        c.locationId,
+      );
+      // Eligible iff the reader holds every competency the tool needs at this
+      // case's Location, current — the create/sign-off rule, read here (R64).
+      if (!needs.required.every((id) => heldNow.has(id))) return [];
+
+      // Overdue is DERIVED from age and the org threshold — nothing is stamped on
+      // the case, so a change to the threshold re-dates every pooled case (R63).
+      const ageDays = Math.floor((now - c.createdAt.getTime()) / 86_400_000);
+      return [
+        {
+          id: c.id,
+          toolName: tool.name,
+          candidateUserId: c.candidateUserId,
+          pathway: c.pathway,
+          locationId: c.locationId,
+          locationName: c.locationId ? (locationNames.get(c.locationId) ?? null) : null,
+          createdAt: c.createdAt,
+          ageDays,
+          overdue: ageDays >= overdueDays,
+        },
+      ];
+    });
+    res.json(items);
+  }),
+);
+
 assessmentCasesRouter.get(
   '/:id',
   ...GATE,
@@ -1351,6 +1446,10 @@ assessmentCasesRouter.get(
         dispositionReason: a.dispositionReason,
         templateVersionId: a.templateVersionId,
         signedAt: a.signedAt,
+        /** Who marked it (U15) — null until it is marked; 'automatic' names nobody. */
+        markerKind: a.markerKind,
+        /** Any assessor-eligibility shortfall recorded when a person marked it (U14). */
+        markingEligibilityWarnings: a.markingEligibilityWarnings,
       })),
     });
   }),
@@ -2138,17 +2237,41 @@ assessmentCasesRouter.post(
       return;
     }
 
-    // The conflict constraint, both sides of it: the initiating admin must not
-    // be the disputed assessor, and the appeal must go to a DIFFERENT assessor
-    // — "an independent Assessor" in the source document's words.
-    if (disputed.assessorUserId === tenant.userId) {
+    /*
+      INDEPENDENCE ON A CASE NOBODY OWNS (U13). A pooled case names no assessor,
+      so keying independence off `assessor_user_id` alone would let anyone
+      initiate or hear the appeal on a case they actually marked. The independent
+      set is whoever RECORDED A PART on the disputed case — every person marker on
+      its attempts, plus the named owner if it has one, which keeps a
+      conventionally-owned case behaving exactly as before. Automatic marks name
+      nobody (U15), so they add no one, correctly.
+    */
+    const disputedAttempts = await attemptsFor(db, disputed.id);
+    const recordedBy = new Set<string>(
+      disputedAttempts.map((a) => a.assessorUserId).filter((x): x is string => Boolean(x)),
+    );
+    if (disputed.assessorUserId) recordedBy.add(disputed.assessorUserId);
+    /*
+      The person who SIGNED IT OFF is the assessor of record — the one whose
+      decision the certificate carries — so they are not independent of it
+      either. On a pooled case that self-marked every part no attempt names a
+      person and the case never took an owner, so without this the signer could
+      initiate and hear the appeal of their own certification; it also covers a
+      case whose opener differs from its signer.
+    */
+    if (disputed.signedOffByUserId) recordedBy.add(disputed.signedOffByUserId);
+
+    // Both sides of the conflict: the initiator must not be someone who marked
+    // it, and the appeal must go to someone who did not — "an independent
+    // Assessor" in the source document's words.
+    if (recordedBy.has(tenant.userId)) {
       res.status(409).json({
         error: 'appeal_conflict',
         message: 'The assessor whose decision is disputed cannot initiate the appeal.',
       });
       return;
     }
-    if (parsed.data.assessorUserId === disputed.assessorUserId) {
+    if (recordedBy.has(parsed.data.assessorUserId)) {
       res.status(409).json({
         error: 'appeal_assessor_not_independent',
         message: 'An appeal must be assessed by someone other than the disputed assessor.',
@@ -2293,12 +2416,20 @@ assessmentCasesRouter.post(
     let derivedValues = attempt.values;
     /**
      * Was this verdict COMPUTED from the answer key, or JUDGED by the assessor?
-     * The distinction decides what the record has to demand below.
+     * The distinction decides what the record has to demand below, and who is
+     * recorded as having marked it.
+     *
+     * Decided by keyed-ness, not by `part.kind` (U15): a part marks itself only
+     * when EVERY real question carries a key. A part with any unkeyed question —
+     * a partly-keyed theory part, or a practical demonstration — is judged by a
+     * person, which is what stops a part self-marking against the keys it happens
+     * to hold and passing the rest unchecked.
      */
-    const computed = part.kind === 'theory';
+    const fields = await fieldsForVersion(db, attempt.templateVersionId);
+    // `fieldsForVersion` is UNSTRIPPED — the gate must see answerKey/outcomeTarget.
+    const computed = isSelfMarking(fields, tool.manifest, part.key);
 
     if (computed) {
-      const fields = await fieldsForVersion(db, attempt.templateVersionId);
       const marked = markTheory({ fields, values: attempt.values, part });
       outcome = marked.outcome;
       derivedValues = marked.derivedValues;
@@ -2342,6 +2473,35 @@ assessmentCasesRouter.post(
       }
     }
 
+    /*
+      ELIGIBILITY WARNED AT MARKING (U14, R65). Only a PERSON's mark runs the
+      check — an automatic mark has no marker whose eligibility is at stake. The
+      subject is the person recording THIS attempt, not the case's named assessor:
+      a pooled case names none, and two people may mark different parts. Warn,
+      never block — the mark stands — mirroring the create and sign-off checks. A
+      tool with no assessor requirement resolves to nothing and warns about
+      nothing, with no extra branch.
+    */
+    let markingEligibilityWarnings: string[] = [];
+    if (!computed) {
+      const assessorNeeds = resolveAssessorRequirements(
+        { always: tool.assessorCompetencyIds, byStream: tool.assessorStreamCompetencyIds },
+        row.locationId,
+      );
+      const [assessorGaps, ruleLocationNames] = await Promise.all([
+        unmetPrerequisites(db, tenant.orgId, tenant.userId, assessorNeeds.required),
+        locationNamesByIdFor(db, tenant.orgId, assessorNeeds.knownLocationIds),
+      ]);
+      const streamWarning = streamCheckWarning(
+        assessorNeeds,
+        assessorNeeds.knownLocationIds.map((id) => ruleLocationNames.get(id) ?? id),
+      );
+      markingEligibilityWarnings = [
+        ...assessorGaps.map((gap) => describeGap('assessor', gap)),
+        ...(streamWarning ? [streamWarning] : []),
+      ];
+    }
+
     await db
       .update(schema.assessmentPartAttempts)
       .set({
@@ -2350,8 +2510,17 @@ assessmentCasesRouter.post(
         disposition: outcome === 'not_satisfactory' ? disposition : null,
         dispositionReason: outcome === 'not_satisfactory' ? reason : null,
         belowThresholdReason: parsed.data.belowThresholdReason ?? null,
-        assessorUserId: tenant.userId,
-        assessorName: parsed.data.assessorName ?? '',
+        // Empty for an automatic mark (R65); the person's gaps otherwise (U14).
+        markingEligibilityWarnings,
+        /*
+          Attribution (U15, R70). A COMPUTED mark was made by no person, so it
+          names nobody — `markerKind: 'automatic'` with the user and printed-name
+          columns left null/empty, even on a case that does name an assessor. A
+          JUDGED mark carries the person and the name they marked under.
+        */
+        markerKind: computed ? 'automatic' : 'person',
+        assessorUserId: computed ? null : tenant.userId,
+        assessorName: computed ? '' : (parsed.data.assessorName ?? ''),
         signedAt: new Date(),
       })
       .where(eq(schema.assessmentPartAttempts.id, attempt.id));

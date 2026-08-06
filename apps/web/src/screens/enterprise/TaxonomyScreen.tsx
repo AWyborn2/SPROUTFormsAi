@@ -68,7 +68,12 @@ function SettingsPanel({
   settings,
   onError,
 }: {
-  settings: { allowMultipleLocations: boolean; allowMultipleDepartments: boolean; displayIdentifier: DisplayIdentifier };
+  settings: {
+    allowMultipleLocations: boolean;
+    allowMultipleDepartments: boolean;
+    displayIdentifier: DisplayIdentifier;
+    pooledCaseOverdueDays: number;
+  };
   onError: (e: unknown) => void;
 }) {
   const update = useUpdateTaxonomySettings();
@@ -118,6 +123,30 @@ function SettingsPanel({
                 )
               }
             />
+          </div>
+        </label>
+        <label className="flex items-center justify-between gap-4">
+          <span className="text-sm">
+            A pooled case is overdue after
+            <span className="block text-[12px] text-text-tertiary">
+              Days waiting in the shared queue before it is flagged.
+            </span>
+          </span>
+          <div className="flex w-56 items-center gap-2">
+            <Input
+              type="number"
+              min={1}
+              max={365}
+              aria-label="Pooled case overdue days"
+              defaultValue={settings.pooledCaseOverdueDays}
+              onBlur={(e) => {
+                const value = Number(e.target.value);
+                if (Number.isInteger(value) && value >= 1 && value <= 365 && value !== settings.pooledCaseOverdueDays) {
+                  update.mutate({ pooledCaseOverdueDays: value }, { onError });
+                }
+              }}
+            />
+            <span className="text-[12px] text-text-tertiary">days</span>
           </div>
         </label>
       </div>

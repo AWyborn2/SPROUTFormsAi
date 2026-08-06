@@ -109,9 +109,32 @@ const FIELDS: FormField[] = [
   },
   { id: 'q1-out', type: 'check_cross', label: 'Q1 outcome', required: false, source: 'imported' },
   streamSection('h-mining', 'Mining'),
-  { id: 'q-mining', type: 'text', label: 'Mining only', required: false, source: 'imported' },
+  // Location-specific theory questions. Keyed like the general ones, so the
+  // theory part is fully self-marking (U15) — a candidate sees only their
+  // stream's set, and the hidden set is never marked.
+  {
+    id: 'q-mining',
+    type: 'checkbox_group',
+    label: 'Mining only',
+    required: false,
+    source: 'imported',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: 'q-mining-out' },
+  },
+  { id: 'q-mining-out', type: 'check_cross', label: 'Mining outcome', required: false, source: 'imported' },
   streamSection('h-raw', 'Raw Materials'),
-  { id: 'q-raw', type: 'text', label: 'Raw Materials only', required: false, source: 'imported' },
+  {
+    id: 'q-raw',
+    type: 'checkbox_group',
+    label: 'Raw Materials only',
+    required: false,
+    source: 'imported',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: 'q-raw-out' },
+  },
+  { id: 'q-raw-out', type: 'check_cross', label: 'Raw Materials outcome', required: false, source: 'imported' },
   header('h-prac1'),
   header('h-log'),
   {
@@ -711,6 +734,9 @@ describe('POST /assessment-cases', () => {
       body: JSON.stringify({
         toolId: tool.id,
         candidateUserId: CANDIDATE,
+        // Name an assessor who holds nothing, so the assessor-eligibility check
+        // has a subject (a pooled create names none and warns about none — U13).
+        assessorUserId: ADMIN,
         pathway: 'experienced',
         ...(locationId ? { locationId } : {}),
       }),
@@ -1465,6 +1491,91 @@ describe('candidate scoping', () => {
  * Covers AE3 (the failed attempt survives while the passing one becomes
  * authoritative) and AE2 (theory is computed from the answer key, not entered).
  */
+describe('marker attribution (U15)', () => {
+  async function openCase(base: string) {
+    const tool = await seedTool(base);
+    const res = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+    });
+    return (await res.json()) as { id: string };
+  }
+  async function openPart(base: string, caseId: string, partKey: string) {
+    return (await (
+      await fetch(`${base}/assessment-cases/${caseId}/parts/${partKey}/attempts`, {
+        method: 'POST',
+        headers: auth(),
+      })
+    ).json()) as { id: string };
+  }
+
+  it('records an automatically marked part as marked by nobody, even given a name (R70)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await openCase(base);
+      const a = await openPart(base, c.id, 'p1'); // p1 is fully keyed → self-marking
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      const res = await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ assessorName: 'Should Be Ignored' }),
+      });
+      expect(res.status).toBe(200);
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === a.id);
+      expect(row?.outcome).toBe('satisfactory');
+      expect(row?.markerKind).toBe('automatic');
+      // Named by nobody — the submitted name is not stamped onto an automatic mark.
+      expect(row?.assessorUserId).toBeNull();
+      expect(row?.assessorName).toBe('');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records a person-judged part as marked by that person, named (R70)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await openCase(base);
+      // Pass the theory part so the practical unlocks.
+      const p1 = await openPart(base, c.id, 'p1');
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${p1.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${p1.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({}),
+      });
+
+      // p2 is a practical part carrying no key → judged by a person.
+      const p2 = await openPart(base, c.id, 'p2');
+      const res = await fetch(`${base}/assessment-cases/${c.id}/attempts/${p2.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat Assessor' }),
+      });
+      expect(res.status).toBe(200);
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === p2.id);
+      expect(row?.markerKind).toBe('person');
+      expect(row?.assessorUserId).toBe(ADMIN);
+      expect(row?.assessorName).toBe('Pat Assessor');
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('full case lifecycle', () => {
   it('drives a new candidate to competent, keeping the failed attempt', async () => {
     const { db, store } = makeDb();
@@ -1862,12 +1973,18 @@ describe('POST /assessment-cases/:id/appeal', () => {
     const { server, base } = startApp();
     try {
       const tool = await seedTool(base);
-      // The disputed case is assessed by THE ADMIN calling the appeal route.
+      // The disputed case is OWNED by the admin calling the appeal route (a
+      // manual create naming an assessor keeps them — U13).
       const c = (await (
         await fetch(`${base}/assessment-cases`, {
           method: 'POST',
           headers: auth(),
-          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
+          body: JSON.stringify({
+            toolId: tool.id,
+            candidateUserId: CANDIDATE,
+            assessorUserId: ADMIN,
+            pathway: 'experienced',
+          }),
         })
       ).json()) as { id: string };
 
@@ -3253,6 +3370,354 @@ describe('workflow ownership is enforced on an attempt', () => {
 
       const body = (await res.json()) as { fields: { id: string }[] };
       expect(body.fields.some((f) => f.id === 'q1')).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('the pooled queue and unowned cases (U13)', () => {
+  const POOL_TOOL = '00000000-0000-4000-8000-0000000000c1';
+  const POOL_CASE = '00000000-0000-4000-8000-0000000000c2';
+  const ADMIN2 = '00000000-0000-4000-8000-0000000000bc';
+  const admin2 = { userId: ADMIN2, orgId: ORG, role: 'admin' as const };
+
+  function seedPooled(store: ReturnType<typeof makeDb>['store'], over: Record<string, unknown> = {}) {
+    rows(store, 'assessmentTools').push({
+      id: POOL_TOOL,
+      orgId: ORG,
+      templateId: TEMPLATE,
+      name: 'Track Dozer',
+      manifest: MANIFEST,
+      assessorCompetencyIds: [COMPETENCY],
+      assessorStreamCompetencyIds: {},
+      candidatePrerequisiteIds: [],
+      awardedCompetencyIds: [],
+      locationPartKeys: {},
+      departmentId: null,
+    });
+    rows(store, 'assessmentCases').push({
+      id: POOL_CASE,
+      orgId: ORG,
+      toolId: POOL_TOOL,
+      candidateUserId: CANDIDATE,
+      assessorUserId: null,
+      state: 'open',
+      locationId: null,
+      pathway: 'new',
+      currentVersionId: VERSION,
+      createdAt: new Date(),
+      prerequisiteWarnings: [],
+      ...over,
+    });
+  }
+  function holdCompetency(store: ReturnType<typeof makeDb>['store'], userId: string) {
+    rows(store, 'competencyHolders').push({
+      competencyId: COMPETENCY,
+      userId,
+      orgId: ORG,
+      grantedAt: new Date('2025-01-01'),
+      expiresAt: null,
+      revokedAt: null,
+    });
+  }
+  const detail = async (base: string, id: string) =>
+    (await (await fetch(`${base}/assessment-cases/${id}`, { headers: auth() })).json()) as {
+      assessorUserId: string | null;
+    };
+  const queue = async (base: string, session = admin) =>
+    (await (await fetch(`${base}/assessment-cases/queue`, { headers: auth(session) })).json()) as Array<{
+      id: string;
+      overdue: boolean;
+    }>;
+
+  it('a manual create with no assessor lands unowned; naming one keeps it (R61)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const pooled = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+        })
+      ).json()) as { id: string };
+      const owned = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({
+            toolId: tool.id,
+            candidateUserId: OTHER_CANDIDATE,
+            assessorUserId: ADMIN,
+            pathway: 'new',
+          }),
+        })
+      ).json()) as { id: string };
+
+      expect((await detail(base, pooled.id)).assessorUserId).toBeNull();
+      expect((await detail(base, owned.id)).assessorUserId).toBe(ADMIN);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns a pooled case to an eligible assessor, and not to an ineligible one (R62, R64)', async () => {
+    const { db, store } = makeDb();
+    seedPooled(store);
+    holdCompetency(store, ADMIN); // ADMIN holds the tool's assessor competency
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // ADMIN is eligible; ADMIN2 (holds nothing) is not.
+      expect((await queue(base)).map((c) => c.id)).toContain(POOL_CASE);
+      expect(await queue(base, admin2)).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses the queue to a candidate', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-cases/queue`, { headers: auth(candidate) });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reads a pooled case older than the threshold as overdue, re-dating when it changes (R63)', async () => {
+    const { db, store } = makeDb();
+    seedPooled(store, { createdAt: new Date(Date.now() - 30 * 86_400_000) }); // 30 days old
+    holdCompetency(store, ADMIN);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // Default threshold is 14 → overdue.
+      expect((await queue(base)).find((c) => c.id === POOL_CASE)?.overdue).toBe(true);
+      // Raise the threshold past its age → no longer overdue, with no case write.
+      (rows(store, 'organizations')[0] as { pooledCaseOverdueDays?: number }).pooledCaseOverdueDays = 60;
+      expect((await queue(base)).find((c) => c.id === POOL_CASE)?.overdue).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('excludes from an appeal whoever recorded a part on the pooled case (R61, R62)', async () => {
+    const { db, store } = makeDb();
+    seedPooled(store);
+    // ADMIN recorded a part on the pooled case — so ADMIN is not independent.
+    rows(store, 'assessmentPartAttempts').push({
+      id: '00000000-0000-4000-8000-0000000000c9',
+      orgId: ORG,
+      caseId: POOL_CASE,
+      partKey: 'p1',
+      attemptNumber: 1,
+      templateVersionId: VERSION,
+      assessorUserId: ADMIN,
+      markerKind: 'person',
+      outcome: 'satisfactory',
+      values: {},
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // ADMIN cannot INITIATE (they marked a part).
+      const asInitiator = await fetch(`${base}/assessment-cases/${POOL_CASE}/appeal`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ assessorUserId: ADMIN2, reason: 'Disputed' }),
+      });
+      expect(asInitiator.status).toBe(409);
+      expect(((await asInitiator.json()) as { error: string }).error).toBe('appeal_conflict');
+
+      // Naming ADMIN (who marked) as the independent assessor is refused too.
+      const asAssessor = await fetch(`${base}/assessment-cases/${POOL_CASE}/appeal`, {
+        method: 'POST',
+        headers: auth(admin2),
+        body: JSON.stringify({ assessorUserId: ADMIN, reason: 'Disputed' }),
+      });
+      expect(asAssessor.status).toBe(409);
+      expect(((await asAssessor.json()) as { error: string }).error).toBe('appeal_assessor_not_independent');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('assessor eligibility warned at marking (U14)', () => {
+  async function toolWithAssessorReq(base: string) {
+    const res = await fetch(`${base}/assessment-tools`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({
+        templateId: TEMPLATE,
+        name: 'Track Dozer',
+        manifest: MANIFEST,
+        assessorCompetencyIds: [COMPETENCY],
+      }),
+    });
+    return (await res.json()) as { id: string };
+  }
+  async function openCaseFor(base: string, toolId: string) {
+    return (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId, candidateUserId: CANDIDATE, pathway: 'new' }),
+      })
+    ).json()) as { id: string };
+  }
+  async function openPart(base: string, caseId: string, partKey: string) {
+    return (await (
+      await fetch(`${base}/assessment-cases/${caseId}/parts/${partKey}/attempts`, {
+        method: 'POST',
+        headers: auth(),
+      })
+    ).json()) as { id: string };
+  }
+  async function passP1(base: string, caseId: string) {
+    const p1 = await openPart(base, caseId, 'p1');
+    await fetch(`${base}/assessment-cases/${caseId}/attempts/${p1.id}`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ values: { q1: ['a'] } }),
+    });
+    await fetch(`${base}/assessment-cases/${caseId}/attempts/${p1.id}/outcome`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({}),
+    });
+  }
+
+  it('records a warning naming what the marker is missing, and the mark still stands (R65)', async () => {
+    const { db, store } = makeDb(); // ADMIN holds no competency
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await toolWithAssessorReq(base);
+      const c = await openCaseFor(base, tool.id);
+      await passP1(base, c.id);
+      const p2 = await openPart(base, c.id, 'p2');
+      const res = await fetch(`${base}/assessment-cases/${c.id}/attempts/${p2.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat' }),
+      });
+      expect(res.status).toBe(200);
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === p2.id);
+      expect(row?.outcome).toBe('satisfactory'); // the mark stands
+      expect((row?.markingEligibilityWarnings as string[]).join('\n')).toContain(COMPETENCY);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records no warning when the marker holds the assessor competency', async () => {
+    const { db, store } = makeDb();
+    rows(store, 'competencyHolders').push({
+      competencyId: COMPETENCY,
+      userId: ADMIN,
+      orgId: ORG,
+      grantedAt: new Date('2025-01-01'),
+      expiresAt: null,
+      revokedAt: null,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await toolWithAssessorReq(base);
+      const c = await openCaseFor(base, tool.id);
+      await passP1(base, c.id);
+      const p2 = await openPart(base, c.id, 'p2');
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${p2.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat' }),
+      });
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === p2.id);
+      expect(row?.markingEligibilityWarnings).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records no eligibility warning on an automatically marked part (R65)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await toolWithAssessorReq(base);
+      const c = await openCaseFor(base, tool.id);
+      const p1 = await openPart(base, c.id, 'p1');
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${p1.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${p1.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({}),
+      });
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === p1.id);
+      expect(row?.markerKind).toBe('automatic');
+      expect(row?.markingEligibilityWarnings).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('appeal independence covers the sign-off assessor (U13 review fix)', () => {
+  const POOL_TOOL = '00000000-0000-4000-8000-0000000000d1';
+  const POOL_CASE = '00000000-0000-4000-8000-0000000000d2';
+  const OTHER_ADMIN = '00000000-0000-4000-8000-0000000000da';
+
+  it('refuses the assessor who signed off a self-marked pooled case as appeal initiator', async () => {
+    const { db, store } = makeDb();
+    rows(store, 'assessmentTools').push({
+      id: POOL_TOOL,
+      orgId: ORG,
+      templateId: TEMPLATE,
+      name: 'Track Dozer',
+      manifest: MANIFEST,
+      assessorCompetencyIds: [],
+      assessorStreamCompetencyIds: {},
+      candidatePrerequisiteIds: [],
+      awardedCompetencyIds: [],
+      locationPartKeys: {},
+      departmentId: null,
+    });
+    // Pooled (no named assessor), self-marked (no person attempts), but SIGNED
+    // OFF by ADMIN — who is therefore not independent of it.
+    rows(store, 'assessmentCases').push({
+      id: POOL_CASE,
+      orgId: ORG,
+      toolId: POOL_TOOL,
+      candidateUserId: CANDIDATE,
+      assessorUserId: null,
+      signedOffByUserId: ADMIN,
+      state: 'competent',
+      locationId: null,
+      pathway: 'new',
+      currentVersionId: VERSION,
+      createdAt: new Date(),
+      prerequisiteWarnings: [],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-cases/${POOL_CASE}/appeal`, {
+        method: 'POST',
+        headers: auth(), // ADMIN, who signed it off
+        body: JSON.stringify({ assessorUserId: OTHER_ADMIN, reason: 'Disputed' }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('appeal_conflict');
     } finally {
       server.close();
     }

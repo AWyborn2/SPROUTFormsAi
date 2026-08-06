@@ -497,6 +497,8 @@ export interface TaxonomySettings {
   allowMultipleLocations: boolean;
   allowMultipleDepartments: boolean;
   displayIdentifier: DisplayIdentifier;
+  /** Days before a pooled case reads as overdue (U13, R63). */
+  pooledCaseOverdueDays: number;
 }
 
 /** The whole taxonomy in one read, for the settings screen. */
