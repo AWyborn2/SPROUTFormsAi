@@ -114,6 +114,7 @@ describe('POST /mcp', () => {
       const body = await rpcResult(res);
       const names = (body.result as { tools: { name: string }[] }).tools.map((t) => t.name).sort();
       expect(names).toEqual([
+        'confirm_induction_booking',
         'get_induction_candidate',
         'get_induction_document_link',
         'list_induction_bookings',
