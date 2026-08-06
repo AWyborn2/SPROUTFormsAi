@@ -8,7 +8,8 @@ import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
 import { sealSession } from '../auth/replit-auth.js';
 import { BCRYPT_COST, SESSION_COOKIE_OPTIONS } from './auth.js';
-import { checkSeatAvailability, lockOrgForSeats, seatLimitError } from '../lib/seats.js';
+import { checkSeatAvailability, lockOrgForSeats, poolFor, seatLimitError } from '../lib/seats.js';
+import { recordExpansion, seatOrExpand, type SeatExpansion } from '../lib/seat-blocks.js';
 import { insertUserWithUsername } from '../lib/username.js';
 import { db } from '../db.js';
 
@@ -99,11 +100,24 @@ invitesRouter.post(
     // Claiming the invite moved in here too, which fixes a second window for
     // free: a membership INSERT that failed used to leave the token spent with
     // nobody joined, stranding the holder.
+    let expansion: SeatExpansion | null = null;
     const refusal = await db.transaction(async (tx): Promise<Refusal | null> => {
       const org = await lockOrgForSeats(tx, invite.orgId);
       if (org) {
         const check = await checkSeatAvailability(tx, org, invite.role);
-        if (!check.ok) return { status: 403, body: seatLimitError(check, org.planTier) };
+        /*
+          A full CANDIDATE pool expands here rather than refusing (U37, R80,
+          R86). Somebody standing at a site induction with a QR code in their
+          hand is not the person to settle a billing question with — and the
+          invitation was issued precisely so they could join.
+
+          The expansion write holds the lock this count was taken under, which is
+          what stops two acceptances arriving together buying a block each for
+          one seat. A full STAFF pool still refuses.
+        */
+        const resolved = await seatOrExpand(tx, org, check);
+        expansion = resolved.expansion;
+        if (!check.ok && !expansion) return { status: 403, body: seatLimitError(check, org.planTier) };
       }
 
       // `acceptedAt IS NULL` in the WHERE makes acceptance single-use.
@@ -137,6 +151,7 @@ invitesRouter.post(
     }
 
     const tenant = { userId, orgId: invite.orgId, role: invite.role };
+    if (expansion) await recordExpansion(db, tenant, expansion, 'invitation accepted');
     await recordAudit(db, tenant, {
       action: 'Accepted invite',
       target: invite.email ?? (invite.inviteeName || invite.id),
@@ -205,16 +220,25 @@ publicInvitesRouter.post(
       return;
     }
 
-    // Advisory seat check: refuses an obviously-full org before this route
-    // spends a deliberately-slow bcrypt hash on a request that cannot succeed.
-    // Unlocked, so it can be overtaken — the BINDING check is the locked one in
-    // the transaction below. Kept here as well as there because hashing inside
-    // the transaction would hold the org row lock for the length of a KDF,
-    // serialising every concurrent signup for the org behind it.
+    /*
+      Advisory seat check: refuses an obviously-full org before this route spends
+      a deliberately-slow bcrypt hash on a request that cannot succeed. Unlocked,
+      so it can be overtaken — the BINDING check is the locked one in the
+      transaction below. Kept here as well as there because hashing inside the
+      transaction would hold the org row lock for the length of a KDF,
+      serialising every concurrent signup for the org behind it.
+
+      IT STOPS REFUSING ON THE CANDIDATE POOL (U37), and it performs NO
+      EXPANSION. That combination is the point: writing a charged block from an
+      unlocked check is exactly the double-charge the lock exists to prevent, so
+      this one defers and lets the locked check a few statements later decide.
+      Its only remaining job is the staff pool, where a refusal here saves the
+      hash on a request the locked check will refuse anyway.
+    */
     const org = await db.query.organizations.findFirst({
       where: eq(schema.organizations.id, invite.orgId),
     });
-    if (org) {
+    if (org && poolFor(invite.role) === 'staff') {
       const check = await checkSeatAvailability(db, org, invite.role);
       if (!check.ok) {
         res.status(403).json(seatLimitError(check, org.planTier));
@@ -236,6 +260,9 @@ publicInvitesRouter.post(
     // Hashed BEFORE the transaction opens, deliberately — see above.
     const passwordHash = await bcrypt.hash(parsed.data.password, BCRYPT_COST);
 
+    /** Set inside the transaction below; audited after it commits (R86). */
+    let signupExpansion: SeatExpansion | null = null;
+
     // Same transaction as `/accept`, for the same reason: the seat count and
     // the membership INSERT it guards have to be one indivisible step or
     // concurrent acceptances both pass a count neither of them changed yet.
@@ -249,7 +276,11 @@ publicInvitesRouter.post(
       const locked = await lockOrgForSeats(tx, invite.orgId);
       if (locked) {
         const check = await checkSeatAvailability(tx, locked, invite.role);
-        if (!check.ok) {
+        // The binding check, so this is where a full candidate pool buys its
+        // block (U37, R86) — under the lock, once, for one seat.
+        const resolved = await seatOrExpand(tx, locked, check);
+        signupExpansion = resolved.expansion;
+        if (!check.ok && !resolved.expansion) {
           return { refusal: { status: 403, body: seatLimitError(check, locked.planTier) } };
         }
       }
@@ -287,6 +318,7 @@ publicInvitesRouter.post(
     }
 
     const tenant = { userId: outcome.user.id, orgId: invite.orgId, role: invite.role };
+    if (signupExpansion) await recordExpansion(db, tenant, signupExpansion, 'invitation accepted at signup');
     await recordAudit(db, tenant, {
       action: 'Created account from invite',
       target: email,

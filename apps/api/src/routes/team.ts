@@ -18,6 +18,7 @@ import { recordAudit } from '../audit/record.js';
 import { sendInviteEmail } from '../email/resend.js';
 import { env } from '../env.js';
 import { checkSeatAvailability, lockOrgForSeats, poolFor, seatLimitError } from '../lib/seats.js';
+import { recordExpansion, seatOrExpand, type SeatExpansion } from '../lib/seat-blocks.js';
 import { readPlacement, writePlacement } from '../lib/membership-placement.js';
 import { assignForMembership } from '../lib/assignment.js';
 import { identifyMember, loadDisplayIdentities } from '../lib/display-identity.js';
@@ -168,18 +169,29 @@ teamRouter.post(
     const displayName =
       name ?? (normalizedEmail ? nameFromEmail(normalizedEmail) || normalizedEmail : 'Invited');
 
-    // Seat limit check — staff and candidates draw on separate pools. The
-    // resolution rules live in lib/seats.ts alongside the acceptance-time
-    // check, so both ends of an invite cannot drift apart.
+    /*
+      NO SEAT CHECK REFUSES HERE (U37, R79, R80).
+
+      A pending invitation reserves nothing — creating one is not taking a seat,
+      and an organisation may hold far more outstanding invitations than it has
+      free seats. Refusing to ISSUE one on a full pool therefore blocked an
+      action that costs nothing, and the seat is genuinely settled at acceptance,
+      where the check holds the row lock.
+
+      For the candidate pool the refusal is gone entirely: a full pool expands at
+      acceptance rather than stranding whoever holds the link (R86). For the
+      STAFF pool the seat is still finite and acceptance will still refuse, so
+      the check is kept as a non-blocking WARNING — the dialog can say the pool
+      is full without preventing an invitation somebody may well intend to send
+      before freeing a seat.
+    */
     const org = await db.query.organizations.findFirst({
       where: eq(schema.organizations.id, tenant.orgId),
     });
-    if (org) {
+    let seatWarning: ReturnType<typeof seatLimitError> | null = null;
+    if (org && poolFor(role) === 'staff') {
       const check = await checkSeatAvailability(db, org, role);
-      if (!check.ok) {
-        res.status(403).json(seatLimitError(check, org.planTier));
-        return;
-      }
+      if (!check.ok) seatWarning = seatLimitError(check, org.planTier);
     }
 
     // Duplicate check: already a member of this org. Only possible when an
@@ -265,6 +277,13 @@ teamRouter.post(
        * why only a team manager reaches this route at all.
        */
       acceptPath: `/invite/${invite.token}`,
+      /**
+       * Present only where the STAFF pool is full (R80). The invitation was
+       * issued regardless — this tells the Admin that acceptance will be refused
+       * until a seat frees, which is a thing to know rather than a thing to be
+       * stopped by. The candidate pool never sets this: it expands instead.
+       */
+      ...(seatWarning ? { seatWarning } : {}),
     });
   }),
 );
@@ -449,25 +468,16 @@ teamRouter.patch(
       }
       const nextInviteRole = parsed.data.role;
 
-      // Same pool-crossing rule as the membership branch below, but ADVISORY:
-      // a pending invite reserves nothing, so this is the courtesy refusal the
-      // dialog shows, exactly as at invite creation. It is here because
-      // without it "create a viewer invite, then PATCH it to candidate" walks
-      // straight around the creation-time check on the candidate pool. Same-pool
-      // changes need no check — creation already cleared that pool.
-      if (poolFor(invite.role) !== poolFor(nextInviteRole)) {
-        const inviteOrg = await db.query.organizations.findFirst({
-          where: eq(schema.organizations.id, tenant.orgId),
-        });
-        if (inviteOrg) {
-          const check = await checkSeatAvailability(db, inviteOrg, nextInviteRole);
-          if (!check.ok) {
-            res.status(403).json(seatLimitError(check, inviteOrg.planTier));
-            return;
-          }
-        }
-      }
+      /*
+        NO SEAT CHECK ON A PENDING INVITATION (U37, R80).
 
+        This check existed to stop "create a viewer invite, then PATCH it to
+        candidate" walking around the creation-time check. That check is gone
+        too, and for the same reason: a pending invitation reserves nothing, so
+        neither one was guarding a seat. The seat is settled at acceptance, under
+        the row lock, where a full candidate pool expands and a full staff pool
+        refuses.
+      */
       await db.update(schema.invites).set({ role: nextInviteRole }).where(eq(schema.invites.id, invite.id));
       if (invite.role !== nextInviteRole) {
         await recordAudit(db, tenant, {
@@ -508,20 +518,40 @@ teamRouter.patch(
     // or two admins promoting two candidates at once both pass a count that
     // neither of them has changed yet. See lib/seats.ts.
     const consumesSeat = membership.status === 'active' && poolFor(previousRole) !== poolFor(nextRole);
-    const refusal = await db.transaction(async (tx) => {
+    const outcome = await db.transaction(async (tx) => {
+      let expansion: SeatExpansion | null = null;
       if (consumesSeat) {
         const org = await lockOrgForSeats(tx, tenant.orgId);
         if (org) {
           const check = await checkSeatAvailability(tx, org, nextRole);
-          if (!check.ok) return seatLimitError(check, org.planTier);
+          /*
+            THE ONE CHECK IN THIS FILE THAT STAYS (U37, R81, R86). It guards a
+            real seat: this membership is active, so the change moves a person
+            between two pools that are both being counted.
+
+            A full CANDIDATE pool now expands rather than refusing — moving
+            somebody to Candidate takes a candidate seat and releases a staff
+            one, and R81 says that goes through. A full staff pool still refuses,
+            because no rule has been written for expanding it.
+
+            The expansion happens INSIDE this transaction, holding the lock the
+            count was taken under. Outside it, two admins promoting two people at
+            once would each see a full pool and each buy a block.
+          */
+          const resolved = await seatOrExpand(tx, org, check);
+          expansion = resolved.expansion;
+          if (!check.ok && !expansion) return { refusal: seatLimitError(check, org.planTier) };
         }
       }
       await tx.update(schema.memberships).set({ role: nextRole }).where(eq(schema.memberships.id, membership.id));
-      return null;
+      return { expansion };
     });
-    if (refusal) {
-      res.status(403).json(refusal);
+    if (outcome.refusal) {
+      res.status(403).json(outcome.refusal);
       return;
+    }
+    if (outcome.expansion) {
+      await recordExpansion(db, tenant, outcome.expansion, `access level changed to ${nextRole}`);
     }
 
     if (previousRole !== nextRole) {
@@ -748,7 +778,37 @@ teamRouter.post(
       return;
     }
 
+    /*
+      R78 + R86: the returner takes a seat, and a full CANDIDATE pool buys a
+      block rather than turning them away. Locked, because the count and the
+      status write have to be one step — two reactivations arriving together
+      against one free seat must buy one block between them, not two.
+
+      A full STAFF pool still refuses: no rule has been written for expanding it,
+      and quietly overrunning a finite allocation would be worse than saying so.
+    */
+    const seat = await db.transaction(async (tx) => {
+      const org = await lockOrgForSeats(tx, tenant.orgId);
+      if (!org) return {};
+      const check = await checkSeatAvailability(tx, org, membership.role as Role);
+      const resolved = await seatOrExpand(tx, org, check);
+      // Nothing has been written when this refuses — `seatOrExpand` writes only
+      // where it expands — so returning here leaves the organisation untouched.
+      if (!check.ok && !resolved.expansion) return { refusal: seatLimitError(check, org.planTier) };
+      return { expansion: resolved.expansion };
+    });
+    if (seat.refusal) {
+      res.status(403).json(seat.refusal);
+      return;
+    }
+
     const outcome = await reactivateMember(db, tenant, membership);
-    res.status(200).json(outcome);
+    if (seat.expansion) {
+      await recordExpansion(db, tenant, seat.expansion, 'member reactivated');
+    }
+    res.status(200).json({
+      ...outcome,
+      ...(seat.expansion ? { seatsAdded: seat.expansion.seatsAdded } : {}),
+    });
   }),
 );

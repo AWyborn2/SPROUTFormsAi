@@ -160,4 +160,14 @@ export const auditCategoryEnum = pgEnum('audit_category', [
     restriction on using an enum value in the transaction that added it.
   */
   'profiles',
+  /*
+    A seat block added at the allocation boundary (R86). Its own category rather
+    than `settings` because a moved integer on the organisation row is otherwise
+    indistinguishable from an Admin editing the limit by hand, and this one costs
+    the organisation money it did not ask to spend.
+
+    Nothing backfills rows to this value, which keeps it clear of the 55P04
+    restriction on using an enum value in the transaction that added it.
+  */
+  'billing',
 ]);
