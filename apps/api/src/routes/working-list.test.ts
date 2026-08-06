@@ -326,6 +326,103 @@ describe('GET /working-list (U19, R95)', () => {
     });
   });
 
+  describe('the unreachable source (U36, R16, R20)', () => {
+    const MEMBER = { id: 'm-1', orgId: 'org-1', userId: 'u-1', status: 'active' };
+    const USERS = [{ id: 'u-1', name: 'Jane Smith' }];
+    /** A profile owing nothing, so any item on the list is the mark's doing. */
+    const settled = (over: Record<string, unknown> = {}) => ({
+      membershipId: 'm-1',
+      profilePictureKey: 'org-1/pic.jpg',
+      createdAt: daysAgo(30),
+      emailUnreachableAt: null,
+      ...over,
+    });
+
+    it('lists a marked member, and stops once the mark is cleared', async () => {
+      mockDbValue = fakeDb({
+        memberships: [MEMBER],
+        users: USERS,
+        profiles: [settled({ emailUnreachableAt: daysAgo(2) })],
+      });
+      const { server, base } = startApp();
+      let items = (await (await fetch(`${base}/working-list`, { headers: authHeader(admin) })).json()) as Array<{
+        kind: string;
+        subject: string;
+        id: string;
+      }>;
+      expect(items.filter((i) => i.kind === 'unreachable')).toHaveLength(1);
+      expect(items[0]!.subject).toContain('Jane Smith');
+      // The membership is what an Admin acts on to clear it.
+      expect(items[0]!.id).toBe('m-1');
+      server.close();
+
+      mockDbValue = fakeDb({ memberships: [MEMBER], users: USERS, profiles: [settled()] });
+      const two = startApp();
+      items = (await (await fetch(`${two.base}/working-list`, { headers: authHeader(admin) })).json()) as Array<{
+        kind: string;
+        subject: string;
+        id: string;
+      }>;
+      expect(items.filter((i) => i.kind === 'unreachable')).toHaveLength(0);
+      two.server.close();
+    });
+
+    it('lists a marked member who ALSO holds a login (R20)', async () => {
+      /*
+        The working list reads the mark alone, and compliance reporting reads
+        the mark AND no login (R99). This is the case that separates them: the
+        notice still lands on this person's own record, so the organisation has
+        discharged its obligation and they are not a compliance fact — but
+        nobody can rely on their opening it, so somebody still has to chase
+        them. Asserting it HERE is what keeps the two readings deliberate rather
+        than a drift between two routes.
+      */
+      mockDbValue = fakeDb({
+        memberships: [MEMBER],
+        users: [{ id: 'u-1', name: 'Jane Smith', passwordHash: 'hash' }],
+        profiles: [settled({ emailUnreachableAt: daysAgo(2) })],
+      });
+      const { server, base } = startApp();
+      const items = (await (await fetch(`${base}/working-list`, { headers: authHeader(admin) })).json()) as Array<{
+        kind: string;
+      }>;
+      expect(items.filter((i) => i.kind === 'unreachable')).toHaveLength(1);
+      server.close();
+    });
+
+    it('is the ONLY item where nothing else is outstanding (AE56, R20)', async () => {
+      // The overlap R16 claims is exact: this member is the single item on the
+      // working list and the single entry in compliance reporting's unreachable
+      // list. Nothing else on this list is a compliance fact.
+      mockDbValue = fakeDb({
+        memberships: [MEMBER],
+        users: USERS,
+        profiles: [settled({ emailUnreachableAt: daysAgo(2) })],
+      });
+      const { server, base } = startApp();
+      const items = (await (await fetch(`${base}/working-list`, { headers: authHeader(admin) })).json()) as Array<{
+        kind: string;
+      }>;
+      expect(items).toHaveLength(1);
+      expect(items[0]!.kind).toBe('unreachable');
+      server.close();
+    });
+
+    it('does not list a member who is no longer active', async () => {
+      mockDbValue = fakeDb({
+        memberships: [{ ...MEMBER, status: 'suspended' }],
+        users: USERS,
+        profiles: [settled({ emailUnreachableAt: daysAgo(2) })],
+      });
+      const { server, base } = startApp();
+      const items = (await (await fetch(`${base}/working-list`, { headers: authHeader(admin) })).json()) as Array<{
+        kind: string;
+      }>;
+      expect(items.filter((i) => i.kind === 'unreachable')).toHaveLength(0);
+      server.close();
+    });
+  });
+
   it('refuses a non-Admin', async () => {
     mockDbValue = fakeDb({});
     const { server, base } = startApp();

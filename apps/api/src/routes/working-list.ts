@@ -32,7 +32,9 @@ export type WorkingListKind =
   | 'retirement_review'
   | 'overdue_case'
   /** A profile picture or a competency certificate that has not arrived (R18). */
-  | 'owed_file';
+  | 'owed_file'
+  /** An address an Admin flagged as reaching nobody (R16, R20). */
+  | 'unreachable';
 
 export interface WorkingListItem {
   kind: WorkingListKind;
@@ -119,6 +121,9 @@ workingListRouter.get(
 
     // ── Source: files still owed (U34, R18) ──────────────────────────────────
     for (const item of await owedFileItems(orgId)) items.push(item);
+
+    // ── Source: an address that reaches nobody (U36, R16, R20) ───────────────
+    for (const item of await unreachableItems(orgId)) items.push(item);
 
     // Default ordering by age — oldest first; a dateless item sorts last.
     items.sort((a, b) => {
@@ -222,6 +227,53 @@ async function owedFileItems(orgId: string): Promise<WorkingListItem[]> {
   }
 
   return items;
+}
+
+/**
+ * Members whose address an Admin has flagged as reaching nobody (U36, R16, R20).
+ *
+ * THE MARK ALONE, deliberately — this is the broader of the two populations the
+ * mark feeds, and the difference from compliance reporting is the point rather
+ * than an inconsistency. An Admin flagged the address because mail bounces, so
+ * an expiry notice that would have been emailed now needs a person to chase it.
+ * That is true whether or not the member also holds a login: the notice still
+ * lands on their own record, but nobody can rely on their opening it.
+ *
+ * Compliance reporting counts the narrower population (the mark AND no login),
+ * because there "unreachable" is a claim about whether the organisation
+ * discharged its obligation, and a login discharges it. Here it is a claim about
+ * whether somebody needs chasing.
+ */
+async function unreachableItems(orgId: string): Promise<WorkingListItem[]> {
+  const database = db!;
+  const memberships = await database.query.memberships.findMany({
+    where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
+  });
+  if (memberships.length === 0) return [];
+
+  const profiles = await database.query.memberProfiles.findMany({
+    where: inArray(
+      schema.memberProfiles.membershipId,
+      memberships.map((m) => m.id),
+    ),
+  });
+  const marked = profiles.filter((p) => Boolean(p.emailUnreachableAt));
+  if (marked.length === 0) return [];
+
+  const userForMembership = new Map(memberships.map((m) => [m.id, m.userId]));
+  const users = await database.query.users.findMany({
+    where: inArray(schema.users.id, [...new Set(memberships.map((m) => m.userId))]),
+  });
+  const nameFor = new Map(users.map((u) => [u.id, u.name]));
+
+  return marked.map((profile) => ({
+    kind: 'unreachable' as const,
+    id: profile.membershipId,
+    subject: `Address unreachable: ${nameFor.get(userForMembership.get(profile.membershipId) ?? '') ?? 'A member'}`,
+    // When the flag was raised, not when the profile was created — the age that
+    // matters here is how long somebody has gone unchased.
+    createdAt: profile.emailUnreachableAt!.toISOString(),
+  }));
 }
 
 /** Retired Locations / Departments / Roles that ACTIVE people still hold (U18) → one item each. */

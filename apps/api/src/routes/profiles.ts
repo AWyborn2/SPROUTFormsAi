@@ -35,6 +35,16 @@ import { db } from '../db.js';
  */
 export const profilesRouter: Router = Router();
 
+/*
+  The unreachable mark is Admin-only and is NOT resolved through the matrix.
+  `profiles.edit` governs the record's fields; this is a note about the world
+  beside the record, and an organisation that lets a Reviewer correct a surname
+  has not thereby said a Reviewer may declare somebody uncontactable.
+*/
+function isAdmin(role: string): boolean {
+  return role === 'admin' || role === 'owner';
+}
+
 /** Every entered field, from the inventory — so the body shape cannot drift from the record. */
 const enteredKeys = PROFILE_FIELDS.filter(
   (f) => f.storedOn === 'profile' && f.editableBy.length > 0,
@@ -94,6 +104,12 @@ function profileDto(
     employeeNumber: profile.employeeNumber,
     swipeCardNumber: profile.swipeCardNumber,
     inductionDate: profile.inductionDate,
+    /*
+      The address is still here beside the mark, because R16 requires a profile
+      to carry an address rather than a working one. A reader sees both: the
+      address on file, and that mail to it bounces.
+    */
+    emailUnreachableAt: profile.emailUnreachableAt?.toISOString() ?? null,
   };
 }
 
@@ -300,6 +316,92 @@ profilesRouter.patch(
     }
 
     res.json({ membershipId: membership.id });
+  }),
+);
+
+// ── PUT /profiles/:membershipId/unreachable ────────────────────────────────
+
+const unreachableBody = z.object({ unreachable: z.boolean() });
+
+/**
+ * Mark the member's address as reaching nobody, or clear that mark (R16).
+ *
+ * Its OWN route rather than a field on the PATCH above, because it is not an
+ * edit to the record: the address is untouched, the profile stays valid and
+ * nothing goes outstanding on it. It is a note about the world beside the
+ * record — mail to this person bounces — and it is Admin-only, whereas the
+ * PATCH is open to a candidate for three of their own fields.
+ *
+ * Idempotent in both directions. An Admin who marks an already-marked address
+ * has not made a mistake, and re-stamping the date would misreport when the
+ * bouncing was discovered.
+ */
+profilesRouter.put(
+  '/:membershipId/unreachable',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const membership = await membershipForProfile(db, tenant.orgId, req.params.membershipId!);
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const parsed = unreachableBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'validation_error' });
+      return;
+    }
+
+    const existing = await db.query.memberProfiles.findFirst({
+      where: eq(schema.memberProfiles.membershipId, membership.id),
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const wasMarked = Boolean(existing.emailUnreachableAt);
+    const { unreachable } = parsed.data;
+    if (wasMarked === unreachable) {
+      // Already where the caller is asking for. Nothing written, nothing
+      // audited — an audit trail of no-ops is noise over the entries that matter.
+      res.json({ membershipId: membership.id, unreachable });
+      return;
+    }
+
+    await db
+      .update(schema.memberProfiles)
+      .set({
+        emailUnreachableAt: unreachable ? new Date() : null,
+        emailUnreachableBy: unreachable ? tenant.userId : null,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.memberProfiles.membershipId, membership.id));
+
+    await recordAudit(db, tenant, {
+      action: unreachable ? 'Marked address unreachable' : 'Cleared unreachable address',
+      target: membership.id,
+      category: 'profiles',
+      /*
+        No `field`: this is not a change to an inventory field, so R58's
+        sensitivity filter has nothing to compare it against. It also names no
+        value — the address is not repeated into the entry, which keeps the mark
+        readable by anyone who may read the audit without exposing the address
+        itself.
+      */
+      icon: 'mail-x',
+    });
+
+    res.json({ membershipId: membership.id, unreachable });
   }),
 );
 

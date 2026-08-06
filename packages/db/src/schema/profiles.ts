@@ -1,6 +1,6 @@
 import { relations, sql } from 'drizzle-orm';
 import { index, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
-import { memberships, organizations } from './organizations.ts';
+import { memberships, organizations, users } from './organizations.ts';
 
 /**
  * The organisation's workforce record for one member (R1, R2).
@@ -142,6 +142,26 @@ export const memberProfiles = pgTable(
       stop an organisation recording somebody it has already hired.
     */
     inductionDate: text('induction_date'),
+
+    /*
+      An address an Admin has flagged as reaching nobody (R16, KTD22).
+
+      HERE rather than on `users.email` for two reasons. The address is the
+      person-record lookup key and is unique product-wide, so nothing may be
+      written into it or cleared from it. And one customer's mail bouncing is
+      not a fact about another's — the same person may be perfectly reachable
+      at the organisation next door.
+
+      The address itself STAYS on the record and the profile stays valid with
+      nothing outstanding: what R16 requires is that a profile carries an
+      address, not a working one. Null means nobody has flagged it, which is
+      every profile until somebody does.
+    */
+    emailUnreachableAt: timestamp('email_unreachable_at', { withTimezone: true }),
+    /** Who flagged it — an Admin, retained for the audit trail beside the entry. */
+    emailUnreachableBy: uuid('email_unreachable_by').references(() => users.id, {
+      onDelete: 'set null',
+    }),
 
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp({ withTimezone: true }).defaultNow().notNull(),

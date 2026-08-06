@@ -314,3 +314,119 @@ describe('PATCH /profiles/:membershipId', () => {
     }
   });
 });
+
+describe('PUT /profiles/:membershipId/unreachable (U36, R16)', () => {
+  const put = (base: string, tenant: Parameters<typeof authHeader>[0], unreachable: boolean) =>
+    fetch(`${base}/profiles/${SUBJECT_MEMBERSHIP}/unreachable`, {
+      method: 'PUT',
+      headers: { ...authHeader(tenant), 'content-type': 'application/json' },
+      body: JSON.stringify({ unreachable }),
+    });
+
+  it('marks the address and leaves the record itself untouched (AE54, R16)', async () => {
+    const { updates, audits } = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    const { server, base } = startApp();
+    try {
+      const res = await put(base, admin, true);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ unreachable: true });
+
+      const written = updates.at(-1)!;
+      expect(written.emailUnreachableAt).toBeInstanceOf(Date);
+      expect(written.emailUnreachableBy).toBe(admin.userId);
+      /*
+        Nothing about the address, the name or any other field is written. What
+        R16 requires is that a profile CARRIES an address, not a working one —
+        so the profile stays valid with nothing outstanding on it, and the
+        address stays on the record for somebody to try again later.
+      */
+      expect(Object.keys(written).sort()).toEqual([
+        'emailUnreachableAt',
+        'emailUnreachableBy',
+        'updatedAt',
+      ]);
+      expect(audits.filter((a) => a.action === 'Marked address unreachable')).toHaveLength(1);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('clears the mark, nulling both columns', async () => {
+    const { updates } = fakeDb({
+      matrix: DEFAULT_ROLE_PERMISSIONS.admin,
+      profile: { ...PROFILE, emailUnreachableAt: new Date(), emailUnreachableBy: admin.userId },
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await put(base, admin, false);
+      expect(await res.json()).toMatchObject({ unreachable: false });
+      expect(updates.at(-1)).toMatchObject({ emailUnreachableAt: null, emailUnreachableBy: null });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('is idempotent, writing and auditing nothing when already in that state', async () => {
+    // A retried click is not a mistake, and re-stamping the date would
+    // misreport when the bouncing was discovered.
+    const { updates, audits } = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    const { server, base } = startApp();
+    try {
+      const res = await put(base, admin, false); // already unmarked
+      expect(res.status).toBe(200);
+      expect(updates).toHaveLength(0);
+      expect(audits.filter((a) => a.category === 'profiles')).toHaveLength(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a non-Admin, even one the matrix admits to profile edits', async () => {
+    /*
+      Deliberately NOT resolved through the matrix. `profiles.edit` governs the
+      record's fields; this is a note about the world beside the record, and an
+      organisation that lets a Reviewer correct a surname has not thereby said a
+      Reviewer may declare somebody uncontactable.
+    */
+    const { updates } = fakeDb({
+      matrix: { ...DEFAULT_ROLE_PERMISSIONS.assessor, profiles: { view: true, edit: true } } as PermissionMatrix,
+    });
+    const { server, base } = startApp();
+    try {
+      expect((await put(base, assessor, true)).status).toBe(403);
+      expect((await put(base, subjectCandidate, true)).status).toBe(403);
+      expect(updates).toHaveLength(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for a membership belonging to another organisation', async () => {
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin, membershipOrg: 'org-2' });
+    const { server, base } = startApp();
+    try {
+      expect((await put(base, admin, true)).status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('shows the mark on the record beside the address it applies to', async () => {
+    const marked = new Date('2026-08-01T00:00:00Z');
+    fakeDb({
+      matrix: DEFAULT_ROLE_PERMISSIONS.admin,
+      profile: { ...PROFILE, emailUnreachableAt: marked },
+    });
+    const { server, base } = startApp();
+    try {
+      const body = (await (
+        await fetch(`${base}/profiles/${SUBJECT_MEMBERSHIP}`, { headers: authHeader(admin) })
+      ).json()) as { profile: Record<string, unknown> };
+      expect(body.profile.emailUnreachableAt).toBe(marked.toISOString());
+      // The record is otherwise exactly as it was.
+      expect(body.profile.suburb).toBe('Boddington');
+    } finally {
+      server.close();
+    }
+  });
+});
