@@ -84,20 +84,15 @@ describe('mark styles', () => {
     for (const glyph of GLYPH_KINDS) expect(GLYPH_LABELS[glyph]).toBeTruthy();
   });
 
-  it('only claims a glyph draws when the exporter can draw it', () => {
-    // Everything on this list maps onto a mark round-trip.ts already produces:
-    // vector ticks and crosses, the verdict ring, scalar text, an embedded
-    // signature image. Adding one here without adding it there is the exact
-    // failure this list exists to prevent.
-    expect([...MARK_STYLES_DRAWN].sort()).toEqual(
-      ['cross_hand', 'ring', 'signature', 'stamp_date', 'tick_block', 'tick_hand', 'typed'].sort(),
-    );
-  });
-
-  it('reports the decorative styles as not yet drawn', () => {
-    for (const glyph of ['stamp_pass', 'stamp_na', 'initials', 'highlight', 'match_line'] as const) {
-      expect(isGlyphDrawn(glyph)).toBe(false);
-    }
+  it('claims EVERY glyph draws, because every one now does', () => {
+    /*
+      There is no longer an authorable-but-ignored tier. The exporter's
+      `DRAWN_BY_GLYPH` is a total `Record<GlyphKind, DrawnGlyph>`, so a glyph
+      added without a renderer fails to compile there — a stronger guard than
+      this list ever was, and the reason this list can now be derived.
+    */
+    expect([...MARK_STYLES_DRAWN].sort()).toEqual([...GLYPH_KINDS].sort());
+    for (const glyph of GLYPH_KINDS) expect(isGlyphDrawn(glyph)).toBe(true);
   });
 
   it('lists no glyph it does not also define', () => {

@@ -16,7 +16,7 @@
 ﻿import zlib from 'node:zlib';
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
-import { MARK_STYLES_DRAWN } from '@formai/shared';
+import { GLYPH_KINDS, MARK_STYLES_DRAWN } from '@formai/shared';
 import type { FormField, GlyphKind, PageBox, SubmissionValue } from '@formai/shared';
 import { resolveMarkStyle, roundTripExport } from './round-trip.js';
 import { LETTERHEAD, makeFlatPdf, makeTwoPageFlatPdf } from './test-pdfs.js';
@@ -1671,11 +1671,28 @@ describe('resolveMarkStyle', () => {
     expect(resolveMarkStyle(box({ glyph: 'tick_block' }), 'cross')).toBe('tick');
   });
 
-  it('falls back for a glyph it cannot draw, rather than drawing nothing', () => {
-    // A blank cell on this document class reads as unassessed. The author is
-    // told in the inspector; the page still gets the field's own mark.
-    for (const glyph of ['highlight', 'match_line', 'initials', 'stamp_pass', 'stamp_na'] as GlyphKind[]) {
-      expect(resolveMarkStyle(box({ glyph }), 'tick')).toBe('tick');
+  it('RESOLVES EVERY GLYPH TO ITS OWN MARK, with nothing falling back', () => {
+    /*
+      These five used to fall back to the field's default because the exporter
+      could not draw them — honest at the time, but it meant an author picked a
+      style and got a different mark. Each now has a renderer, so each resolves
+      to itself.
+    */
+    expect(resolveMarkStyle(box({ glyph: 'stamp_pass' }), 'tick')).toBe('stamp');
+    expect(resolveMarkStyle(box({ glyph: 'stamp_na' }), 'tick')).toBe('stamp');
+    expect(resolveMarkStyle(box({ glyph: 'initials' }), 'tick')).toBe('initials');
+    expect(resolveMarkStyle(box({ glyph: 'highlight' }), 'tick')).toBe('highlight');
+    expect(resolveMarkStyle(box({ glyph: 'match_line' }), 'tick')).toBe('match_line');
+  });
+
+  it('leaves NO glyph unmapped', () => {
+    // The fallback now means "no style was authored", and nothing else. A
+    // glyph reaching it would be one the exporter forgot.
+    for (const glyph of GLYPH_KINDS) {
+      expect(resolveMarkStyle(box({ glyph }), 'tick')).not.toBe('tick_unmapped' as never);
+      const againstText = resolveMarkStyle(box({ glyph }), 'text');
+      const againstTick = resolveMarkStyle(box({ glyph }), 'tick');
+      expect(againstText === 'text' && againstTick === 'tick').toBe(false);
     }
   });
 
@@ -1697,38 +1714,164 @@ describe('resolveMarkStyle', () => {
 });
 
 describe('roundTripExport — an unauthored placement is unchanged', () => {
-  it('produces the same marks with no markStyle and with a style it cannot draw', async () => {
+  /**
+   * The same fields, with one glyph authored onto every placed box.
+   *
+   * Covers BOTH geometry sources. A field carrying only the legacy
+   * `sourcePosition` has to be widened into a segment to hold a style at all —
+   * `legacySegment` constructs a bare box and drops `markStyle`, so a glyph can
+   * only ever live on `geometry`. Styling just the `geometry` half of this
+   * fixture left the one field that types a value untouched, and the test then
+   * proved nothing.
+   */
+  function styledWith(glyph: GlyphKind): FormField[] {
+    return FIELDS.map((f) => {
+      if (f.geometry) {
+        return {
+          ...f,
+          geometry: { segments: f.geometry.segments.map((s) => ({ ...s, markStyle: { glyph } })) },
+        };
+      }
+      if (f.sourcePosition) {
+        return { ...f, geometry: { segments: [{ ...f.sourcePosition, markStyle: { glyph } }] } };
+      }
+      return f;
+    });
+  }
+
+  it('THE CHARACTERIZATION TEST — no markStyle draws exactly what it always did', async () => {
     /*
-      THE CHARACTERIZATION TEST. An authored style the exporter does not draw
-      must change nothing at all about the output — not the glyph, not its
-      position. Otherwise "authored but not yet drawn" would silently become
-      "authored and drawn differently".
+      The property that makes this seam safe to have added to a file that draws
+      competency records. Every placement authored before mark styles existed
+      carries no `markStyle`, and must be byte-for-byte what it was.
+
+      This used to be phrased as "a style the exporter cannot draw changes
+      nothing", which held while five glyphs were ignored. They are all drawn
+      now, so the invariant is stated where it actually lives: on ABSENCE.
     */
     const original = await makeFlatPdf();
-    const plain = await roundTripExport({
-      originalPdf: original,
-      fields: FIELDS,
-      values: VALUES,
-    });
+    const a = await roundTripExport({ originalPdf: original, fields: FIELDS, values: VALUES });
+    const b2 = await roundTripExport({ originalPdf: original, fields: FIELDS, values: VALUES });
+
+    expect(drawnMarks(a)).toEqual(drawnMarks(b2));
+    expect(markXs(a)).toEqual(markXs(b2));
+    // Something was actually drawn, or the comparison above is two empties.
+    expect(drawnGlyphs(a).map((g) => g.text).join('')).toContain('Warehouse B');
+  });
+
+  it('an authored style now CHANGES the output, which is the point', async () => {
+    // While `highlight` was ignored, this pair was identical. A style that
+    // reaches the page has to be visible in it.
+    const original = await makeFlatPdf();
+    const plain = await roundTripExport({ originalPdf: original, fields: FIELDS, values: VALUES });
     const styled = await roundTripExport({
       originalPdf: original,
-      fields: FIELDS.map((f) =>
-        f.geometry
-          ? {
-              ...f,
-              geometry: {
-                segments: f.geometry.segments.map((s) => ({
-                  ...s,
-                  markStyle: { glyph: 'highlight' as GlyphKind },
-                })),
-              },
-            }
-          : f,
-      ),
+      fields: styledWith('highlight'),
       values: VALUES,
     });
 
-    expect(drawnMarks(styled)).toEqual(drawnMarks(plain));
-    expect(markXs(styled)).toEqual(markXs(plain));
+    // The value the plain export typed is replaced by a wash in the styled one.
+    expect(drawnGlyphs(plain).map((g) => g.text).join('')).toContain('Warehouse B');
+    expect(drawnGlyphs(styled).map((g) => g.text).join('')).not.toContain('Warehouse B');
+  });
+});
+
+describe('roundTripExport — the five glyphs that used to be ignored', () => {
+  /*
+    Each of these was authorable and silently dropped: an author picked it, the
+    inspector labelled it not-yet-drawn, and the page got the field's default.
+    These pin that each now puts its OWN ink on the page.
+
+    Asserted on the rendered content stream rather than on a mock, because the
+    failure being guarded against is precisely a renderer that is never reached.
+  */
+  function styledSite(glyph: GlyphKind): FormField[] {
+    return FIELDS.map((f) =>
+      f.id === 'site' && f.sourcePosition
+        ? { ...f, geometry: { segments: [{ ...f.sourcePosition, markStyle: { glyph } }] } }
+        : f,
+    );
+  }
+
+  it('stamp_pass prints the word PASS, not the recorded value', async () => {
+    const bytes = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: styledSite('stamp_pass'),
+      values: VALUES,
+    });
+    const text = drawnGlyphs(bytes).map((g) => g.text).join('');
+    expect(text).toContain('PASS');
+    // The value it replaced is gone from that box.
+    expect(text).not.toContain('Warehouse B');
+  });
+
+  it('stamp_na prints N/A', async () => {
+    const bytes = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: styledSite('stamp_na'),
+      values: VALUES,
+    });
+    expect(drawnGlyphs(bytes).map((g) => g.text).join('')).toContain('N/A');
+  });
+
+  it('initials reduces the recorded value to letters', async () => {
+    // "Warehouse B" initials "WB". A person signing a cell wants their mark,
+    // not their whole name across the printed row.
+    const bytes = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: styledSite('initials'),
+      values: VALUES,
+    });
+    const text = drawnGlyphs(bytes).map((g) => g.text).join('');
+    expect(text).toContain('WB');
+    expect(text).not.toContain('Warehouse B');
+  });
+
+  it('initials draws NOTHING when there is nothing recorded', async () => {
+    // Inventing initials would put a person's mark on a record they never
+    // signed — the one failure worse than a blank cell.
+    const bytes = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: styledSite('initials'),
+      values: { ...VALUES, site: '' },
+    });
+    expect(drawnGlyphs(bytes).map((g) => g.text).join('')).not.toContain('W');
+  });
+
+  it('highlight lays down a wash instead of typing the value', async () => {
+    /*
+      Asserted on BEHAVIOUR, not on pdf-lib's choice of path operator: it emits
+      a filled rectangle without a literal `re` token, and a test pinned to the
+      operator would break on a pdf-lib upgrade that still draws the same box.
+
+      What matters is that something was added to the page and the recorded
+      value was not typed over the top of it.
+    */
+    const original = await makeFlatPdf();
+    const plain = await roundTripExport({ originalPdf: original, fields: FIELDS, values: VALUES });
+    const bytes = await roundTripExport({
+      originalPdf: original,
+      fields: styledSite('highlight'),
+      values: VALUES,
+    });
+    const stream = contentStreams(bytes).join('');
+    expect(stream.length).toBeGreaterThan(contentStreams(plain).join('').length);
+    expect(drawnGlyphs(bytes).map((g) => g.text).join('')).not.toContain('Warehouse B');
+  });
+
+  it('match_line draws a connector across the box', async () => {
+    // The box IS the connector's extent: a PageBox carries one rectangle and
+    // no second endpoint, so the author spans the gap and this draws through it.
+    const plain = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: FIELDS,
+      values: VALUES,
+    });
+    const bytes = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: styledSite('match_line'),
+      values: VALUES,
+    });
+    expect(strokes(bytes).length).toBeGreaterThan(strokes(plain).length);
   });
 });

@@ -864,3 +864,104 @@ describe('GeometryEditorScreen — embedded in the assessment builder', () => {
     expect(screen.getByText('Publish version')).toBeTruthy();
   });
 });
+
+/**
+ * Choosing what a placed box PRINTS, on the screen that places it.
+ *
+ * The glyph picker was only ever in the import wizard's review step
+ * (`ImportReviewScreen` → `FieldInspector` → `GeometryInspector`). This screen
+ * — the standalone placement route AND the assessment builder's PDF mapping
+ * step — had no mark-style control at all, so the path an assessment tool is
+ * actually built through could not choose one.
+ */
+describe('GeometryEditorScreen — what a placed box prints', () => {
+  function renderWithPlacedBox() {
+    version.data = {
+      id: 'v1',
+      templateId: 'form1',
+      label: 'Draft v1',
+      state: 'draft',
+      isCurrent: false,
+      fields: [
+        {
+          id: 'sig',
+          type: 'text',
+          label: 'Assessor signature',
+          required: false,
+          source: 'imported',
+          geometry: {
+            segments: [
+              { page: 0, x: 10, y: 10, width: 80, height: 14, pageWidth: 595, pageHeight: 842 },
+            ],
+          },
+        },
+      ],
+      container: DEFAULT_CONTAINER,
+      sourcePdfAssetId: 'asset-1',
+    };
+    render(<GeometryEditorScreen />);
+    fireEvent.click(screen.getByText('Assessor signature'));
+  }
+
+  it('offers the picker once a box exists', () => {
+    renderWithPlacedBox();
+    expect(screen.getByText('What this box prints')).toBeTruthy();
+  });
+
+  it('offers EVERY glyph, because every one now draws', () => {
+    // The exporter used to ignore five of the twelve and the import-review
+    // picker labelled them as not-yet-drawn. All twelve reach the page now.
+    renderWithPlacedBox();
+    for (const label of ['Hand ✓', 'PASS', 'N/A', 'Initials', 'Highlight', 'Match line']) {
+      expect(screen.getByLabelText(`Print ${label}`)).toBeTruthy();
+    }
+  });
+
+  it('writes the chosen glyph onto the box', () => {
+    renderWithPlacedBox();
+    fireEvent.click(screen.getByLabelText('Print PASS'));
+    expect(screen.getByLabelText('Print PASS').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('CLEARS TO NO markStyle rather than an empty one', () => {
+    /*
+      Absent is what every placement authored before styles existed carries, and
+      it is the value the exporter treats as "the field's own mark". An empty
+      `markStyle` object is a different value that happens to behave the same
+      today.
+    */
+    renderWithPlacedBox();
+    fireEvent.click(screen.getByLabelText('Print PASS'));
+    fireEvent.click(screen.getByText('Default'));
+    expect(screen.getByText('Default').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByLabelText('Print PASS').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('explains what a match line does, since the box IS the connector', () => {
+    // A PageBox carries one rectangle and no second endpoint, so the author has
+    // to know to span the gap. Left unsaid, the glyph looks broken.
+    renderWithPlacedBox();
+    fireEvent.click(screen.getByLabelText('Print Match line'));
+    expect(screen.getByText(/spanning the gap between the two/)).toBeTruthy();
+  });
+
+  it('offers no picker for a field with no box yet', () => {
+    // A style with nowhere to print is a choice about nothing, and it would be
+    // lost the moment the box is drawn.
+    version.data = {
+      id: 'v1',
+      templateId: 'form1',
+      label: 'Draft v1',
+      state: 'draft',
+      isCurrent: false,
+      fields: [
+        { id: 'sig', type: 'text', label: 'Unplaced field', required: false, source: 'imported' },
+      ],
+      container: DEFAULT_CONTAINER,
+      sourcePdfAssetId: 'asset-1',
+    };
+    render(<GeometryEditorScreen />);
+    fireEvent.click(screen.getByText('Unplaced field'));
+    expect(screen.queryByText('What this box prints')).toBeNull();
+  });
+});

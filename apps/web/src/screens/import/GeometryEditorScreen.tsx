@@ -1,7 +1,15 @@
 import { useCallback, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
-import { geometrySegments, isChoiceField, type FormField, type PageBox } from '@formai/shared';
+import {
+  geometrySegments,
+  isChoiceField,
+  GLYPH_KINDS,
+  GLYPH_LABELS,
+  type FormField,
+  type GlyphKind,
+  type PageBox,
+} from '@formai/shared';
 import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../../lib/data/hooks.js';
 import type { FieldProposal, TableProposal, TextPage } from '../../lib/pdf-geometry.js';
 import {
@@ -1269,6 +1277,7 @@ function PlacementPanel({
                 armed={sameTarget(drawTarget, target)}
                 onToggleDraw={() => onToggleDraw(target)}
                 onClear={() => onSetOptionBox(option, null)}
+                onRestyle={(next) => onSetOptionBox(option, next)}
               />
             );
           })}
@@ -1280,6 +1289,7 @@ function PlacementPanel({
           armed={sameTarget(drawTarget, { fieldId: field.id, optionKey: null })}
           onToggleDraw={() => onToggleDraw({ fieldId: field.id, optionKey: null })}
           onClear={() => onSetScalarBox(null)}
+          onRestyle={onSetScalarBox}
         />
       )}
 
@@ -1293,18 +1303,88 @@ function PlacementPanel({
   );
 }
 
+/**
+ * What a placed box PRINTS on the exported document.
+ *
+ * The same choice `GeometryInspector` offers during import review, on the
+ * screen that actually places geometry for an assessment. It was only ever in
+ * the import wizard, so an author placing boxes here — the path an assessment
+ * tool is built through — could not choose a mark at all.
+ *
+ * Every style listed draws. That was not always true; the exporter used to
+ * ignore five of the twelve and this picker's ancestor labelled them, but
+ * `DRAWN_BY_GLYPH` in `round-trip.ts` is now a total map and a glyph without a
+ * renderer is a compile error there.
+ */
+function GlyphRow({ box, onChange }: { box: PageBox; onChange: (next: PageBox) => void }) {
+  const current = box.markStyle?.glyph;
+  const choose = (glyph: GlyphKind | undefined) => {
+    // Clearing writes NO markStyle rather than an empty one: absent is what
+    // every placement authored before styles existed carries, and it is the
+    // value the exporter treats as "the field's own mark".
+    const { markStyle: _drop, ...rest } = box;
+    onChange(glyph ? { ...rest, markStyle: { ...box.markStyle, glyph } } : rest);
+  };
+
+  return (
+    <div className="mt-1.5 border-t border-border-subtle pt-1.5">
+      <span className="mb-1 block text-[10.5px] font-semibold text-text-tertiary">
+        What this box prints
+      </span>
+      <div className="flex flex-wrap gap-1">
+        <button
+          type="button"
+          onClick={() => choose(undefined)}
+          aria-pressed={!current}
+          className={`rounded-sm border px-1.5 py-0.5 text-[10px] ${
+            !current
+              ? 'border-border-accent bg-surface-card font-semibold text-accent'
+              : 'border-border text-text-secondary hover:bg-surface-hover'
+          }`}
+        >
+          Default
+        </button>
+        {GLYPH_KINDS.map((glyph) => (
+          <button
+            key={glyph}
+            type="button"
+            onClick={() => choose(glyph)}
+            aria-pressed={current === glyph}
+            aria-label={`Print ${GLYPH_LABELS[glyph]}`}
+            className={`rounded-sm border px-1.5 py-0.5 text-[10px] ${
+              current === glyph
+                ? 'border-border-accent bg-surface-card font-semibold text-accent'
+                : 'border-border text-text-secondary hover:bg-surface-hover'
+            }`}
+          >
+            {GLYPH_LABELS[glyph]}
+          </button>
+        ))}
+      </div>
+      {current === 'match_line' && (
+        <p className="mt-1 text-[10px] leading-snug text-text-tertiary">
+          Draws a connector across this box, end to end — place it spanning the gap between the two
+          printed columns.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function BoxRow({
   label,
   box,
   armed,
   onToggleDraw,
   onClear,
+  onRestyle,
 }: {
   label: string;
   box: PageBox | undefined;
   armed: boolean;
   onToggleDraw: () => void;
   onClear: () => void;
+  onRestyle: (next: PageBox) => void;
 }) {
   return (
     <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
@@ -1329,6 +1409,9 @@ function BoxRow({
           </Button>
         )}
       </div>
+      {/* Only once there is a box: a style with nowhere to print is a choice
+          about nothing, and it would be lost the moment the box is drawn. */}
+      {box && <GlyphRow box={box} onChange={onRestyle} />}
     </div>
   );
 }

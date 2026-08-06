@@ -8,7 +8,7 @@
  * units/inch) — the same space pdf-lib's `drawText` uses — so values land
  * exactly where the source field was, at any DPI the original was authored in.
  */
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, type PDFFont } from 'pdf-lib';
 import {
   MARK_INSET,
   MARK_SIZE_CEIL,
@@ -42,7 +42,20 @@ import type {
  * nobody made — so the honest failure is to draw the default, and the
  * inspector says which styles reach the page.
  */
-export type DrawnGlyph = 'tick' | 'cross' | 'ring' | 'text' | 'signature';
+export type DrawnGlyph =
+  | 'tick'
+  | 'cross'
+  | 'ring'
+  | 'text'
+  | 'signature'
+  /** A fixed word — PASS, N/A — rather than the recorded value. */
+  | 'stamp'
+  /** The recorded value reduced to its initials. */
+  | 'initials'
+  /** A translucent wash over the box, leaving the printed text readable. */
+  | 'highlight'
+  /** A connector drawn ACROSS the box, for a matching question. */
+  | 'match_line';
 
 /**
  * Authored glyph → what the exporter draws for it.
@@ -53,11 +66,13 @@ export type DrawnGlyph = 'tick' | 'cross' | 'ring' | 'text' | 'signature';
  * paper. `stamp_date` is text because a date stamp is a date, drawn through the
  * same scalar path.
  *
- * A glyph absent from this table is authorable and previewable but NOT drawn —
- * `MARK_STYLES_DRAWN` in `builder.ts` is the list the inspector shows, and the
- * two are kept in step by the test that walks it.
+ * EVERY GLYPH NOW DRAWS. There is no longer an authorable-but-ignored tier:
+ * `MARK_STYLES_DRAWN` in `builder.ts` lists all of them, and the test that
+ * walks it is what keeps this table and that list from drifting. A style the
+ * exporter silently ignored was a mark an author believed was on a competency
+ * record and was not.
  */
-const DRAWN_BY_GLYPH: Partial<Record<GlyphKind, DrawnGlyph>> = {
+const DRAWN_BY_GLYPH: Record<GlyphKind, DrawnGlyph> = {
   tick_hand: 'tick',
   tick_block: 'tick',
   cross_hand: 'cross',
@@ -65,6 +80,17 @@ const DRAWN_BY_GLYPH: Partial<Record<GlyphKind, DrawnGlyph>> = {
   typed: 'text',
   stamp_date: 'text',
   signature: 'signature',
+  stamp_pass: 'stamp',
+  stamp_na: 'stamp',
+  initials: 'initials',
+  highlight: 'highlight',
+  match_line: 'match_line',
+};
+
+/** The word a stamp glyph prints. Fixed text, not the recorded value. */
+const STAMP_WORD: Partial<Record<GlyphKind, string>> = {
+  stamp_pass: 'PASS',
+  stamp_na: 'N/A',
 };
 
 /**
@@ -87,6 +113,26 @@ export function resolveMarkStyle(segment: PageBox | undefined, fallback: DrawnGl
   return DRAWN_BY_GLYPH[glyph] ?? fallback;
 }
 
+/**
+ * A person's initials from whatever their name was recorded as.
+ *
+ * First letter of each word, capped — an assessor signing "Ash Wyborn" initials
+ * "AW". Capped at four because past that it is not an initialling, and a long
+ * value would run out of the cell it is drawn in.
+ *
+ * A value that yields nothing draws NOTHING rather than a placeholder: an
+ * invented mark on a competency record is the failure this whole file is
+ * arranged against.
+ */
+export function initialsOf(value: string): string {
+  return value
+    .split(/[^A-Za-z]+/)
+    .filter(Boolean)
+    .slice(0, 4)
+    .map((w) => w[0]!.toUpperCase())
+    .join('');
+}
+
 const INK = rgb(0.094, 0.106, 0.098); // #181b19
 
 /**
@@ -98,6 +144,12 @@ const INK = rgb(0.094, 0.106, 0.098); // #181b19
  */
 const CORRECT_INK = rgb(0.05, 0.42, 0.16);
 const INCORRECT_INK = rgb(0.70, 0.10, 0.10);
+/**
+ * Highlighter amber. Survives a photocopier as a visible tint rather than
+ * vanishing, which is the whole point of marking something for attention on a
+ * record that travels by fax.
+ */
+const HIGHLIGHT_INK = rgb(0.98, 0.80, 0.20);
 
 /** How far a ring is drawn OUTSIDE the box it encircles, in points. */
 const RING_PAD = 1.6;
@@ -393,9 +445,34 @@ export async function roundTripExport({
       */
       const fallback: DrawnGlyph = verdict ? 'tick' : 'cross';
       const glyph = resolveMarkStyle(pos, fallback);
+      const verdictInk = verdict ? CORRECT_INK : INCORRECT_INK;
+
       if (glyph === 'ring') {
-        drawRing(page, pos, verdict ? CORRECT_INK : INCORRECT_INK);
+        drawRing(page, pos, verdictInk);
         continue;
+      }
+      if (glyph === 'highlight') {
+        drawHighlight(page, pos);
+        continue;
+      }
+      if (glyph === 'match_line') {
+        drawMatchLine(page, pos, verdictInk);
+        continue;
+      }
+      /*
+        A STAMP IN A VERDICT CELL MUST NOT CONTRADICT THE VERDICT. "PASS" over a
+        recorded failure is not a style choice, it is a false record — so the
+        word is drawn only where it agrees with what was recorded, and the
+        verdict's own mark is drawn where it does not. `N/A` is exempt: it
+        asserts no finding either way.
+      */
+      const stampWord = STAMP_WORD[pos?.markStyle?.glyph ?? 'typed'];
+      if (glyph === 'stamp' && stampWord) {
+        const contradicts = stampWord === 'PASS' && !verdict;
+        if (!contradicts) {
+          drawStampText(page, pos, stampWord, font, verdictInk);
+          continue;
+        }
       }
       const { x, y, size } = boxMarkPlacement(pos);
       drawMark(page, glyph === 'cross' ? 'cross' : glyph === 'tick' ? 'tick' : fallback, x, y, size);
@@ -432,7 +509,47 @@ export async function roundTripExport({
       continue;
     }
 
-    const text = scalarText(value);
+    /*
+      The authored glyph can change WHAT a scalar box prints, not whether it
+      prints. `typed` and `stamp_date` are the recorded value; a stamp is a
+      fixed word; `initials` reduces the value to letters. Anything shaped like
+      a mark rather than text — a tick, a ring, a highlight, a connector — is
+      drawn here too, because a scalar box is a legitimate place to want one.
+    */
+    const scalarGlyph = pos.markStyle?.glyph;
+    const drawn = resolveMarkStyle(pos, 'text');
+
+    if (drawn === 'highlight') {
+      drawHighlight(page, pos);
+      continue;
+    }
+    if (drawn === 'match_line') {
+      drawMatchLine(page, pos, INK);
+      continue;
+    }
+    if (drawn === 'ring') {
+      drawRing(page, pos, INK);
+      continue;
+    }
+    if (drawn === 'tick' || drawn === 'cross') {
+      const mark = boxMarkPlacement(pos);
+      drawMark(page, drawn, mark.x, mark.y, mark.size);
+      continue;
+    }
+
+    const stamp = scalarGlyph ? STAMP_WORD[scalarGlyph] : undefined;
+    if (drawn === 'stamp' && stamp) {
+      drawStampText(page, pos, stamp, font, INK);
+      continue;
+    }
+
+    const recorded = scalarText(value);
+    /*
+      Initials still need something recorded to initial. A box whose value is
+      empty draws NOTHING — inventing initials would put a person's mark on a
+      record they never signed.
+    */
+    const text = drawn === 'initials' ? initialsOf(recorded) : recorded;
     if (!text) continue;
 
     const size = Math.min(11, Math.max(8, pos.height - 4));
@@ -487,6 +604,88 @@ function boxMarkPlacement(box: PageBox): { x: number; y: number; size: number } 
  * letter, so an inset mark would strike through the very glyph the ring is meant
  * to identify.
  */
+/**
+ * A translucent wash over the box.
+ *
+ * Drawn with opacity rather than as a solid fill so the PRINTED TEXT UNDERNEATH
+ * STAYS READABLE — a highlight that hides the question it marks has destroyed
+ * the evidence it was meant to draw attention to. Amber rather than the verdict
+ * inks: a highlight says "look here", not "this is correct".
+ */
+function drawHighlight(
+  page: ReturnType<PDFDocument['getPages']>[number],
+  box: PageBox,
+): void {
+  page.drawRectangle({
+    x: box.x,
+    y: box.y,
+    width: box.width,
+    height: box.height,
+    color: HIGHLIGHT_INK,
+    opacity: 0.35,
+  });
+}
+
+/**
+ * A connector drawn across the box, for a matching question.
+ *
+ * THE BOX IS THE CONNECTOR'S EXTENT. A `PageBox` carries one rectangle and no
+ * second endpoint, so there is no way to derive "from this prompt to that
+ * answer" from the geometry model — the author places a box spanning the gap
+ * between the two printed columns and this draws the line through it, left edge
+ * to right edge at the vertical centre. That is a real instruction an author can
+ * follow, where a line to an endpoint nothing records would be a guess.
+ *
+ * The end dots are what make it read as a drawn connector rather than a rule or
+ * a strikethrough — the same two marks a person makes with a pen.
+ */
+function drawMatchLine(
+  page: ReturnType<PDFDocument['getPages']>[number],
+  box: PageBox,
+  color: ReturnType<typeof rgb>,
+): void {
+  const midY = box.y + box.height / 2;
+  const thickness = Math.max(0.9, Math.min(1.8, box.height / 8));
+  page.drawLine({
+    start: { x: box.x, y: midY },
+    end: { x: box.x + box.width, y: midY },
+    thickness,
+    color,
+  });
+  const dot = Math.max(1.2, thickness * 1.4);
+  for (const x of [box.x, box.x + box.width]) {
+    page.drawEllipse({ x, y: midY, xScale: dot, yScale: dot, color });
+  }
+}
+
+/**
+ * A fixed word, centred in the box and shrunk to fit it.
+ *
+ * Sized off the box rather than at a constant, because these land in printed
+ * cells that range from a margin tick-box to a full-width comment row, and a
+ * stamp that overruns its cell obscures the printed text beside it.
+ */
+function drawStampText(
+  page: ReturnType<PDFDocument['getPages']>[number],
+  box: PageBox,
+  word: string,
+  font: PDFFont,
+  color: ReturnType<typeof rgb>,
+): void {
+  let size = Math.min(11, Math.max(6, box.height - 3));
+  // Shrink until it fits the width, with a floor: below 5pt it is unreadable
+  // and a mark nobody can read is not a record.
+  while (size > 5 && font.widthOfTextAtSize(word, size) > box.width - 2) size -= 0.5;
+  const width = font.widthOfTextAtSize(word, size);
+  page.drawText(winAnsiSafe(word), {
+    x: box.x + Math.max(1, (box.width - width) / 2),
+    y: box.y + Math.max(1, (box.height - size) / 2 + size * 0.12),
+    size,
+    font,
+    color,
+  });
+}
+
 function drawRing(
   page: ReturnType<PDFDocument['getPages']>[number],
   box: PageBox,
