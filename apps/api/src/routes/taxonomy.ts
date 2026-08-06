@@ -1163,6 +1163,140 @@ taxonomyRouter.post(
   }),
 );
 
+const departmentTransferBody = z.object({
+  replacementDepartmentId: z.string().uuid(),
+  membershipId: z.string().uuid().optional(),
+});
+
+/**
+ * Move people off a retired Department to a replacement (U18, R135). A case
+ * records a Location and neither a Department nor a Role, so — as with a Role
+ * transfer — nothing on a case is rewritten and no carry-or-rewrite choice
+ * arises: cases in flight are left untouched and only standing recalculates,
+ * emergently. Each person's placement is repointed to the replacement Department
+ * (or the retired row dropped when they already hold the replacement, the unique
+ * pair forbidding a repeat), and every Role they held OF THE RETIRED DEPARTMENT
+ * is withdrawn — those Roles belong to the Department being left. A withdrawn
+ * Role is marked, not deleted (R113). The replacement Department grants no Roles;
+ * a person lands there with none, to be given the new Department's Roles on the
+ * team screen as needed.
+ */
+taxonomyRouter.post(
+  '/departments/:id/transfer',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const parsed = departmentTransferBody.safeParse(req.body);
+    if (!parsed.success)
+      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+    const departmentId = req.params.id!;
+    const { replacementDepartmentId, membershipId } = parsed.data;
+    if (replacementDepartmentId === departmentId) return reply(res, 400, { error: 'same_department' });
+
+    const [from, to] = await Promise.all([
+      db.query.departments.findFirst({
+        where: and(eq(schema.departments.id, departmentId), eq(schema.departments.orgId, tenant.orgId)),
+      }),
+      db.query.departments.findFirst({
+        where: and(
+          eq(schema.departments.id, replacementDepartmentId),
+          eq(schema.departments.orgId, tenant.orgId),
+        ),
+      }),
+    ]);
+    if (!from || !to) return reply(res, 404, { error: 'not_found' });
+
+    let holders = await db.query.membershipDepartments.findMany({
+      where: eq(schema.membershipDepartments.departmentId, departmentId),
+    });
+    if (membershipId) holders = holders.filter((h) => h.membershipId === membershipId);
+    if (holders.length === 0) return reply(res, 200, { peopleMoved: 0 });
+
+    const holderMembershipIds = [...new Set(holders.map((h) => h.membershipId))];
+    // Only ACTIVE memberships are moved — a deactivated one is not in the review (R128).
+    const memberships = await db.query.memberships.findMany({
+      where: and(
+        eq(schema.memberships.orgId, tenant.orgId),
+        inArray(schema.memberships.id, holderMembershipIds),
+        eq(schema.memberships.status, 'active'),
+      ),
+    });
+    const activeIds = new Set(memberships.map((m) => m.id));
+    if (activeIds.size === 0) return reply(res, 200, { peopleMoved: 0 });
+
+    // Every Role the retired Department carries, ANY status — a retired-but-held
+    // Role of this Department is still one being left behind, so it is withdrawn
+    // on the way out too (R119).
+    const deptRoles = await db.query.jobRoles.findMany({
+      where: and(
+        eq(schema.jobRoles.orgId, tenant.orgId),
+        eq(schema.jobRoles.departmentId, departmentId),
+      ),
+    });
+    const deptRoleIds = deptRoles.map((r) => r.id);
+
+    await db.transaction(async (tx) => {
+      // Repoint each person's Department placement to the replacement — unless
+      // they already hold it, in which case just drop the retired row (the unique
+      // (membership, department) pair forbids a repeat).
+      const existing = await tx.query.membershipDepartments.findMany({
+        where: inArray(schema.membershipDepartments.membershipId, [...activeIds]),
+      });
+      const holdsReplacement = new Set(
+        existing
+          .filter((row) => row.departmentId === replacementDepartmentId)
+          .map((row) => row.membershipId),
+      );
+      for (const mId of activeIds) {
+        if (holdsReplacement.has(mId)) {
+          await tx
+            .delete(schema.membershipDepartments)
+            .where(
+              and(
+                eq(schema.membershipDepartments.membershipId, mId),
+                eq(schema.membershipDepartments.departmentId, departmentId),
+              ),
+            );
+        } else {
+          await tx
+            .update(schema.membershipDepartments)
+            .set({ departmentId: replacementDepartmentId })
+            .where(
+              and(
+                eq(schema.membershipDepartments.membershipId, mId),
+                eq(schema.membershipDepartments.departmentId, departmentId),
+              ),
+            );
+        }
+      }
+      // Withdraw the retired Department's held Roles (marked, not deleted) — they
+      // belong to the Department being left. No assessment case is touched (R135).
+      if (deptRoleIds.length > 0) {
+        await tx
+          .update(schema.membershipRoles)
+          .set({ withdrawnAt: new Date() })
+          .where(
+            and(
+              inArray(schema.membershipRoles.membershipId, [...activeIds]),
+              inArray(schema.membershipRoles.roleId, deptRoleIds),
+              isNull(schema.membershipRoles.withdrawnAt),
+            ),
+          );
+      }
+    });
+
+    await recordAudit(db, tenant, {
+      action: 'Transferred people off retired department',
+      target: from.name,
+      category: 'settings',
+      icon: 'layers',
+    });
+    res.json({ peopleMoved: activeIds.size });
+  }),
+);
+
 // ── Organisation settings (R24, R25, R40) ────────────────────────────────────
 
 const settingsBody = z.object({

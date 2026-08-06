@@ -1031,6 +1031,15 @@ export const store = {
   declineTrainingRequest(id: string): Promise<{ state: 'declined' }> {
     return apiClient.post(`/training-requests/${id}/decline`, {});
   },
+  /** Move everyone off a retired Department to a replacement; cases untouched (U18, R135). */
+  transferDepartment(
+    departmentId: string,
+    replacementDepartmentId: string,
+  ): Promise<{ peopleMoved: number }> {
+    return apiClient.post(`/taxonomy/departments/${departmentId}/transfer`, {
+      replacementDepartmentId,
+    });
+  },
   getRoleRequiredAssessments(roleId: string): Promise<{ configured: boolean; toolIds: string[] }> {
     return apiClient.get(`/taxonomy/roles/${roleId}/required-assessments`);
   },

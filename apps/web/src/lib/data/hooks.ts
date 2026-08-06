@@ -1356,6 +1356,14 @@ export function useApproveTrainingRequest() {
 export function useDeclineTrainingRequest() {
   return useDecideTrainingRequest((id: string) => store.declineTrainingRequest(id));
 }
+
+/** Move everyone off a retired Department to a replacement; cases untouched (U18, R135). */
+export function useTransferDepartment() {
+  return useTransferMutation(
+    (input: { departmentId: string; replacementDepartmentId: string }) =>
+      store.transferDepartment(input.departmentId, input.replacementDepartmentId),
+  );
+}
 export function useUpdateTaxonomySettings() {
   return useTaxonomyMutation((patch: Partial<TaxonomySettings>) =>
     store.updateTaxonomySettings(patch),
