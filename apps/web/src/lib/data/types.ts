@@ -517,6 +517,34 @@ export interface TighteningReviewItem {
   heldRoles: Array<{ id: string; name: string }>;
 }
 
+/** One person-competency gap on the compliance report (U20). */
+export interface ComplianceGap {
+  userId: string;
+  name: string;
+  competencyId: string;
+  competencyName: string;
+}
+
+/** How the workforce stands, as an auditor reads it (U20). */
+export interface ComplianceReport {
+  /** A required competency that lapsed on its date. */
+  expired: ComplianceGap[];
+  /** A required competency the person has never held. */
+  neverHeld: ComplianceGap[];
+  /** A held competency that lapsed but no Role requires — reported, not a failure (R102). */
+  optionalLapses: ComplianceGap[];
+  /** Members no notification can reach (empty until the unreachable mark exists). */
+  unreachable: ComplianceGap[];
+}
+
+/** One thing waiting on an Admin, from any source, on the one working list (U19). */
+export interface WorkingListItem {
+  kind: 'training_request' | 'retirement_review' | 'overdue_case';
+  id: string;
+  subject: string;
+  createdAt: string | null;
+}
+
 /** An expiry notice served on a person's own record — a login delivery route (U21, R98). */
 export interface ExpiryNotice {
   id: string;

@@ -7,7 +7,7 @@ vi.mock('../db.js', () => ({ db: null, getDbStatus: () => 'unconfigured' }));
 // Spy on the sender: fail-soft is the sender's own contract; here we assert the
 // notice is recorded whatever the send returns, and can force a failed send.
 let emailResult = true;
-const sendExpiry = vi.fn(async () => emailResult);
+const sendExpiry = vi.fn(async (..._args: unknown[]) => emailResult);
 vi.mock('../email/resend.js', () => ({
   sendExpiryNoticeEmail: (...args: unknown[]) => sendExpiry(...args),
 }));

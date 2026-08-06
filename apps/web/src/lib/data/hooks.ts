@@ -103,6 +103,8 @@ const keys = {
   myNotices: ['myNotices'] as const,
   /** Everything waiting on an Admin, from all sources (U19). */
   workingList: ['workingList'] as const,
+  /** How the workforce stands, for compliance reporting (U20). */
+  compliance: ['compliance'] as const,
   assessmentCases: ['assessmentCases'] as const,
   /**
    * The shared assessor queue (U13). A SIBLING of assessmentCases — it shares no
@@ -1296,6 +1298,16 @@ export function useTransferRole() {
   return useTransferMutation((input: { roleId: string; replacementRoleId: string }) =>
     store.transferRole(input.roleId, input.replacementRoleId),
   );
+}
+
+/** Everything waiting on an Admin, from all sources, on one list (U19). */
+export function useWorkingList() {
+  return useQuery({ queryKey: keys.workingList, queryFn: () => store.getWorkingList() });
+}
+
+/** How the workforce stands — expired, never-held, unreachable (U20). */
+export function useComplianceReport() {
+  return useQuery({ queryKey: keys.compliance, queryFn: () => store.getComplianceReport() });
 }
 
 /** The caller's own expiry notices — the login delivery route (U21, R98). */

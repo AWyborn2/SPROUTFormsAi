@@ -1,0 +1,145 @@
+import { Router } from 'express';
+import { and, eq, inArray } from 'drizzle-orm';
+import { schema } from '@formai/db';
+import { competencyCurrency, countsAsHeld } from '@formai/shared';
+import { requireTenant } from '../middleware/tenant.js';
+import { requirePlanFeature } from '../middleware/plan.js';
+import { withErrorHandling } from '../lib/with-error-handling.js';
+import { requiredCompetencyIdsByUser } from '../lib/standing.js';
+import { db } from '../db.js';
+
+/**
+ * Compliance reporting (U20) — how the workforce stands, as the surface shown an
+ * auditor. Three things and no more: a REQUIRED competency expired, a required
+ * competency a holder has NEVER held, and a member no notification can reach.
+ *
+ * Only REQUIRED competencies count (R101): an optional lapse is not a compliance
+ * failure (R102), so standing is read here, not currency alone. The two gaps are
+ * reported SEPARATELY (R103) because they have different remedies — a refresher
+ * vs a training booking. The never-held figure reads the same requirement
+ * resolver the assignment engine reads, so a gap and an assignment describe one
+ * situation from two sides and cannot disagree. Nothing else reaches this
+ * surface: an overdue pooled case is a backlog and belongs on the working list.
+ */
+export const complianceRouter: Router = Router();
+
+function isAdmin(role: string): boolean {
+  return role === 'admin' || role === 'owner';
+}
+
+export interface ComplianceGap {
+  userId: string;
+  name: string;
+  competencyId: string;
+  competencyName: string;
+}
+
+complianceRouter.get(
+  '/',
+  requireTenant,
+  requirePlanFeature('assessments'),
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const orgId = tenant.orgId;
+    const now = new Date();
+
+    const memberships = await db.query.memberships.findMany({
+      where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
+    });
+    if (memberships.length === 0) {
+      // Unreachable is empty until the candidate-profile artifact's "address
+      // marked unreachable" mark exists — a person is reachable while they hold a
+      // login or an email nobody has flagged (R99).
+      res.json({ expired: [], neverHeld: [], unreachable: [] });
+      return;
+    }
+    const userIds = [...new Set(memberships.map((m) => m.userId))];
+
+    // The obligation per person, from the SAME resolver the assignment engine
+    // reads (R103) — required competencies only (R101).
+    const requiredByUser = await requiredCompetencyIdsByUser(db, orgId, userIds);
+    const users = await db.query.users.findMany({ where: inArray(schema.users.id, userIds) });
+    const nameByUser = new Map(users.map((u) => [u.id, u.name]));
+
+    const holders = await db.query.competencyHolders.findMany({
+      where: and(eq(schema.competencyHolders.orgId, orgId), inArray(schema.competencyHolders.userId, userIds)),
+    });
+    const grantsByKey = new Map<string, (typeof holders)[number][]>();
+    for (const h of holders) {
+      const key = `${h.userId}|${h.competencyId}`;
+      const list = grantsByKey.get(key) ?? [];
+      list.push(h);
+      grantsByKey.set(key, list);
+    }
+
+    // Every competency we must name — those required, plus those merely held (an
+    // optional lapse needs the held competency's validity and name too).
+    const relevantIds = new Set<string>();
+    for (const set of requiredByUser.values()) for (const id of set) relevantIds.add(id);
+    for (const h of holders) relevantIds.add(h.competencyId);
+    const competencies = relevantIds.size
+      ? await db.query.competencies.findMany({
+          where: and(eq(schema.competencies.orgId, orgId), inArray(schema.competencies.id, [...relevantIds])),
+        })
+      : [];
+    const competencyById = new Map(competencies.map((c) => [c.id, c]));
+
+    const gapOf = (userId: string, competencyId: string, competencyName: string): ComplianceGap => ({
+      userId,
+      name: nameByUser.get(userId) ?? 'Unknown user',
+      competencyId,
+      competencyName,
+    });
+
+    const expired: ComplianceGap[] = [];
+    const neverHeld: ComplianceGap[] = [];
+    const optionalLapses: ComplianceGap[] = [];
+    for (const membership of memberships) {
+      const required = requiredByUser.get(membership.userId) ?? new Set<string>();
+
+      // REQUIRED gaps — a required competency not currently held (R101).
+      for (const competencyId of required) {
+        const competency = competencyById.get(competencyId);
+        if (!competency) continue;
+        const currencies = (grantsByKey.get(`${membership.userId}|${competencyId}`) ?? []).map((g) =>
+          competencyCurrency(g, competency, now, 'assessor'),
+        );
+        if (currencies.some((c) => countsAsHeld(c))) continue; // compliant
+        const gap = gapOf(membership.userId, competencyId, competency.name);
+        // Lapsed on its date (not revoked) → a refresher; otherwise (no grant, or
+        // only a revoked one that counts as not held, R107) → a fresh assessment.
+        if (currencies.some((c) => !c.revoked && c.status === 'expired')) expired.push(gap);
+        else neverHeld.push(gap);
+      }
+
+      // OPTIONAL lapses — a competency the person HOLDS that expired but no Role
+      // requires (R102): reported, but not a compliance failure.
+      const seenOptional = new Set<string>();
+      for (const h of holders) {
+        if (h.userId !== membership.userId) continue;
+        if (required.has(h.competencyId) || seenOptional.has(h.competencyId)) continue;
+        const competency = competencyById.get(h.competencyId);
+        if (!competency) continue;
+        const currencies = (grantsByKey.get(`${membership.userId}|${h.competencyId}`) ?? []).map((g) =>
+          competencyCurrency(g, competency, now, 'assessor'),
+        );
+        // Only a genuine lapse (past its date, not revoked, not still current).
+        if (currencies.some((c) => countsAsHeld(c))) continue;
+        if (currencies.some((c) => !c.revoked && c.status === 'expired')) {
+          optionalLapses.push(gapOf(membership.userId, h.competencyId, competency.name));
+          seenOptional.add(h.competencyId);
+        }
+      }
+    }
+
+    res.json({ expired, neverHeld, optionalLapses, unreachable: [] });
+  }),
+);

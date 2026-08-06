@@ -66,6 +66,8 @@ import type {
   MemberPlacement,
   Taxonomy,
   ExpiryNotice,
+  WorkingListItem,
+  ComplianceReport,
   RetirementReview,
   TaxDepartment,
   TaxLocation,
@@ -1000,6 +1002,14 @@ export const store = {
   /** Move everyone off a retired Role to a replacement; cases untouched (U18, R135). */
   transferRole(roleId: string, replacementRoleId: string): Promise<{ peopleMoved: number }> {
     return apiClient.post(`/taxonomy/roles/${roleId}/transfer`, { replacementRoleId });
+  },
+  /** Everything waiting on an Admin, from all sources, on one list (U19). */
+  getWorkingList(): Promise<WorkingListItem[]> {
+    return apiClient.get<WorkingListItem[]>('/working-list');
+  },
+  /** How the workforce stands — expired, never-held, unreachable (U20). */
+  getComplianceReport(): Promise<ComplianceReport> {
+    return apiClient.get<ComplianceReport>('/compliance');
   },
   /** The caller's own expiry notices — a login delivery route (U21, R98). */
   listMyNotices(): Promise<ExpiryNotice[]> {
