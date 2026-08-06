@@ -24,8 +24,12 @@ function tool(over: Partial<AssignmentTool> & Pick<AssignmentTool, 'toolId'>): A
   };
 }
 
-function held(competencyId: string, status: HeldCompetencyState['status'] = 'held'): HeldCompetencyState {
-  return { competencyId, status };
+function held(
+  competencyId: string,
+  status: HeldCompetencyState['status'] = 'held',
+  revoked = false,
+): HeldCompetencyState {
+  return { competencyId, status, revoked };
 }
 
 function input(over: Partial<AssignmentInput>): AssignmentInput {
@@ -83,10 +87,12 @@ describe('decideAssignments — the skip rule', () => {
     expect(out).toEqual([]);
   });
 
-  it('creates a case when the competency is revoked though not expired (R45, R107)', () => {
+  it('creates a case when the competency is revoked though its date is fine (R45, R107)', () => {
+    // Revocation is decisive over the dated state: a grant the date would call
+    // `held` still does not count once revoked.
     const t1 = tool({ toolId: 't1', awardedCompetencyIds: [COMP_A] });
     const out = decideAssignments(
-      input({ roleRequirements: [['t1']], tools: { t1 }, held: [held(COMP_A, 'revoked')] }),
+      input({ roleRequirements: [['t1']], tools: { t1 }, held: [held(COMP_A, 'held', true)] }),
     );
     expect(out.map((d) => d.toolId)).toEqual(['t1']);
   });

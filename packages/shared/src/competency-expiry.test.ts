@@ -16,6 +16,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   EXPIRY_WARNING_DAYS,
+  competencyCurrency,
   competencyStatus,
   countsAsHeld,
   describeValidity,
@@ -113,13 +114,40 @@ describe('competencyStatus', () => {
     expect(competencyStatus({ grantedAt: GRANTED }, { ...TRACK_DOZER, gracePeriodDays: 0 }, day)).toBe('expired');
   });
 
-  it('lets revocation beat every date', () => {
-    // A deliberate act — an overturned appeal, an admin decision — outranks a
-    // date that would otherwise say the ticket is fine.
+  it('reports only the four dated states, never revocation', () => {
+    // R104: `competencyStatus` is pure date logic now. A revoked-but-in-date
+    // ticket still reads `held` here — revocation travels beside the date, not
+    // among the states, and is folded in by `countsAsHeld`.
     const revoked = { grantedAt: GRANTED, revokedAt: at('2026-06-01') };
 
-    expect(competencyStatus(revoked, TRACK_DOZER, at('2027-01-01'))).toBe('revoked');
-    expect(competencyStatus(revoked, {}, at('2027-01-01'))).toBe('revoked');
+    expect(competencyStatus(revoked, TRACK_DOZER, at('2027-01-01'))).toBe('held');
+    expect(competencyStatus(revoked, {}, at('2027-01-01'))).toBe('held');
+  });
+});
+
+describe('competencyCurrency', () => {
+  it('carries the dated state and the revoked flag as separate fields', () => {
+    expect(competencyCurrency({ grantedAt: GRANTED }, TRACK_DOZER, at('2027-01-01'))).toEqual({
+      status: 'held',
+      revoked: false,
+    });
+  });
+
+  it('marks revocation beside the dated state, not in place of it', () => {
+    // A deliberate act — an overturned appeal, an admin decision — is recorded
+    // beside a date that would otherwise say the ticket is fine.
+    const revoked = { grantedAt: GRANTED, revokedAt: at('2026-06-01') };
+
+    expect(competencyCurrency(revoked, TRACK_DOZER, at('2027-01-01'))).toEqual({
+      status: 'held',
+      revoked: true,
+    });
+    // A revoked competency with no validity period — one that would otherwise
+    // never expire — still carries `held` beside a decisive revoked flag (R106).
+    expect(competencyCurrency(revoked, {}, at('2027-01-01'))).toEqual({
+      status: 'held',
+      revoked: true,
+    });
   });
 });
 
@@ -127,14 +155,22 @@ describe('countsAsHeld', () => {
   it('counts held, expiring and grace', () => {
     // The rule that keeps a near-date or requalifying ticket from blocking an
     // assessment that is actually happening.
-    expect(countsAsHeld('held')).toBe(true);
-    expect(countsAsHeld('expiring')).toBe(true);
-    expect(countsAsHeld('grace')).toBe(true);
+    expect(countsAsHeld({ status: 'held', revoked: false })).toBe(true);
+    expect(countsAsHeld({ status: 'expiring', revoked: false })).toBe(true);
+    expect(countsAsHeld({ status: 'grace', revoked: false })).toBe(true);
   });
 
-  it('does not count expired or revoked', () => {
-    expect(countsAsHeld('expired')).toBe(false);
-    expect(countsAsHeld('revoked')).toBe(false);
+  it('does not count an expired ticket', () => {
+    expect(countsAsHeld({ status: 'expired', revoked: false })).toBe(false);
+  });
+
+  it('does not count a revoked ticket whatever its date', () => {
+    // Revocation is decisive: even a ticket the date would call current, and
+    // even one with no validity period, does not count once revoked (R107).
+    expect(countsAsHeld({ status: 'held', revoked: true })).toBe(false);
+    expect(countsAsHeld({ status: 'expiring', revoked: true })).toBe(false);
+    expect(countsAsHeld({ status: 'grace', revoked: true })).toBe(false);
+    expect(countsAsHeld({ status: 'expired', revoked: true })).toBe(false);
   });
 });
 

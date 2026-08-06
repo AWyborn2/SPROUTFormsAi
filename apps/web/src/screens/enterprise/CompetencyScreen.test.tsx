@@ -66,6 +66,8 @@ function holder(over: Partial<CompetencyHolder> = {}): CompetencyHolder {
     grantedAt: '2024-01-15T00:00:00.000Z',
     expiresAt: '2027-01-15T00:00:00.000Z',
     status: 'held',
+    revoked: false,
+    standing: 'optional',
     current: true,
     note: null,
     ...over,
@@ -190,6 +192,34 @@ describe('CompetencyScreen holder register', () => {
     expect(screen.getByText('Expired')).toBeDefined();
     expect(screen.getByText('Ada Current')).toBeDefined();
     expect(screen.getByText('Current')).toBeDefined();
+  });
+
+  it('marks a revoked holder as revoked, not by a dated badge (R104)', () => {
+    // The grant's date says held, but it was revoked. The reader must see the
+    // act, not the date — so the currency badge is replaced by a revoked mark.
+    competencies.data = [TRACK_DOZER];
+    holdersResult.data = [holder({ status: 'held', revoked: true, current: false })];
+    render(<CompetencyScreen />);
+    openRegister();
+
+    // The mark appears both on the sub-line and as the badge.
+    expect(screen.getAllByText('Revoked').length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText('Current')).toBeNull();
+    // A revoked grant is no longer current, so it swells the lapsed count.
+    expect(screen.getByText('1 of 1 no longer current')).toBeDefined();
+  });
+
+  it('shows each holder’s standing beside its currency (R108)', () => {
+    competencies.data = [TRACK_DOZER];
+    holdersResult.data = [
+      holder({ userId: 'req', name: 'Ida Required', standing: 'required' }),
+      holder({ userId: 'opt', name: 'Ola Optional', standing: 'optional' }),
+    ];
+    render(<CompetencyScreen />);
+    openRegister();
+
+    expect(screen.getByText('Required')).toBeDefined();
+    expect(screen.getByText('Optional')).toBeDefined();
   });
 
   it('counts how many are no longer current', () => {

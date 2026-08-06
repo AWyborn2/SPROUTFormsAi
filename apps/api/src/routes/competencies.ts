@@ -2,12 +2,13 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { competencyStatus, countsAsHeld, expiryNote, expiryOf } from '@formai/shared';
+import { competencyCurrency, countsAsHeld, expiryNote, expiryOf, standingOf } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
 import { findOwnedCompetency, grantCompetency, syncHolderCount } from '../lib/competency-grant.js';
+import { requiredCompetencyIdsByUser, requiredCompetencyIdsFor } from '../lib/standing.js';
 import { db } from '../db.js';
 
 /**
@@ -372,11 +373,14 @@ competenciesRouter.get(
       return;
     }
 
+    // A revoked grant is KEPT and shown, marked — an admin auditing this
+    // competency wants to see it was taken away, not have the holder vanish
+    // (R108, "renders revocation as a mark"). The eligibility lookup at
+    // `/held/:userId` is the one that filters it out; the register does not.
     const rows = await db.query.competencyHolders.findMany({
       where: and(
         eq(schema.competencyHolders.competencyId, competency.id),
         eq(schema.competencyHolders.orgId, tenant.orgId),
-        isNull(schema.competencyHolders.revokedAt),
       ),
     });
     if (rows.length === 0) {
@@ -389,19 +393,21 @@ competenciesRouter.get(
       is people × one competency, so a per-row lookup would issue a query per
       holder on a screen whose whole purpose is showing all of them at once.
     */
+    const holderUserIds = rows.map((r) => r.userId);
     const users = await db.query.users.findMany({
-      where: inArray(
-        schema.users.id,
-        rows.map((r) => r.userId),
-      ),
+      where: inArray(schema.users.id, holderUserIds),
     });
     const userById = new Map(users.map((u) => [u.id, u]));
+
+    // Standing per holder: is THIS competency one their held Roles require
+    // (R108)? Batched into one query path rather than per holder.
+    const requiredByUser = await requiredCompetencyIdsByUser(db, tenant.orgId, holderUserIds);
 
     // One instant for the whole response, so two holders cannot disagree about
     // what "today" is and sort inconsistently.
     const now = new Date();
     const holders = rows.map((r) => {
-      const status = competencyStatus(r, competency, now, 'assessor');
+      const currency = competencyCurrency(r, competency, now, 'assessor');
       const expiry = expiryOf(r, competency);
       const user = userById.get(r.userId);
       return {
@@ -413,21 +419,28 @@ competenciesRouter.get(
         evidenceRef: r.evidenceRef,
         grantedAt: r.grantedAt.toISOString(),
         expiresAt: expiry ? expiry.toISOString() : null,
-        status,
-        current: countsAsHeld(status),
-        note: expiryNote(status, expiry, competency.name),
+        status: currency.status,
+        revoked: currency.revoked,
+        standing: standingOf(competency.id, requiredByUser.get(r.userId) ?? new Set()),
+        current: countsAsHeld(currency),
+        // A revoked grant's date is moot; the revoked mark says all there is.
+        note: currency.revoked ? null : expiryNote(currency.status, expiry, competency.name),
       };
     });
 
     /*
       SORTED BY WHAT NEEDS DOING, not alphabetically. The reason to open this
       list is to find who has lapsed and who is about to, so those come first;
-      within a group the nearest date leads. A name-sorted register would bury
-      the two people who need booking among two hundred who do not.
+      within a group the nearest date leads. A revoked grant needs nothing —
+      it was deliberately taken away — so it sorts LAST, below even a current
+      one. A name-sorted register would bury the two people who need booking
+      among two hundred who do not.
     */
-    const URGENCY = { expired: 0, grace: 1, expiring: 2, held: 3, revoked: 4 } as const;
+    const URGENCY = { expired: 0, grace: 1, expiring: 2, held: 3 } as const;
+    const rankOf = (h: { status: keyof typeof URGENCY; revoked: boolean }) =>
+      h.revoked ? 4 : URGENCY[h.status];
     holders.sort((a, b) => {
-      const byUrgency = URGENCY[a.status] - URGENCY[b.status];
+      const byUrgency = rankOf(a) - rankOf(b);
       if (byUrgency !== 0) return byUrgency;
 
       /*
@@ -504,6 +517,11 @@ competenciesRouter.get(
         ? 'candidate'
         : 'assessor';
 
+    // Standing beside currency (R108): which of these the person's held Roles
+    // oblige them to hold. Resolved once for the whole record. Revoked rows were
+    // already excluded above, so `current` never has to fold revocation in here.
+    const required = await requiredCompetencyIdsFor(db, tenant.orgId, req.params.userId!);
+
     // One instant for the whole response, so two entries cannot disagree about
     // what "today" is.
     const now = new Date();
@@ -511,16 +529,18 @@ competenciesRouter.get(
       rows.map((r) => {
         const competency = byId.get(r.competencyId);
         const validity = competency ?? {};
-        const status = competencyStatus(r, validity, now, audience);
+        const currency = competencyCurrency(r, validity, now, audience);
         const expiry = expiryOf(r, validity);
         return {
           competencyId: r.competencyId,
           evidenceRef: r.evidenceRef,
-          status,
+          status: currency.status,
+          /** Required or optional for this person, from their held Roles (R108). */
+          standing: standingOf(r.competencyId, required),
           /** True while it still satisfies a requirement — held, expiring or grace. */
-          current: countsAsHeld(status),
+          current: countsAsHeld(currency),
           expiresAt: expiry ? expiry.toISOString() : null,
-          note: competency ? expiryNote(status, expiry, competency.name) : null,
+          note: competency ? expiryNote(currency.status, expiry, competency.name) : null,
         };
       }),
     );

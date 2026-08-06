@@ -28,7 +28,6 @@ const STATUS_STYLE: Record<CompetencyStatus, { label: string; variant: BadgeVari
   expiring: { label: 'Expiring', variant: 'warning' },
   grace: { label: 'In grace', variant: 'warning' },
   expired: { label: 'Expired', variant: 'danger' },
-  revoked: { label: 'Revoked', variant: 'neutral' },
 };
 
 /** ISO instant → the date alone. Nobody schedules requalification by the hour. */
@@ -92,24 +91,54 @@ function HolderRegister({ competencyId }: { competencyId: string }) {
                 <div className="truncate text-[12.5px] font-medium">{h.name}</div>
                 <div className="text-[10.5px] text-text-tertiary">
                   {/*
-                    PAST TENSE FOR A DATE THAT HAS PASSED. "Expires 2025-01-15"
-                    against a lapsed ticket reads as a future event, and the
-                    badge beside it having to correct that is one glance too
-                    many on a register whose whole job is telling you who is
-                    qualified right now.
+                    REVOKED SAYS SO PLAINLY. A revoked grant's date is moot — it
+                    was taken away regardless — so the sub-line names the act
+                    rather than an expiry that no longer decides anything.
 
-                    And no date at all on a perpetual competency: an expiry
-                    that does not exist should say so, not print a dash the
-                    reader has to interpret.
+                    Otherwise PAST TENSE FOR A DATE THAT HAS PASSED. "Expires
+                    2025-01-15" against a lapsed ticket reads as a future event,
+                    and the badge beside it having to correct that is one glance
+                    too many on a register whose whole job is telling you who is
+                    qualified right now. And no date at all on a perpetual
+                    competency: an expiry that does not exist should say so, not
+                    print a dash the reader has to interpret.
                   */}
-                  {!h.expiresAt
-                    ? 'No expiry set'
-                    : `${past ? 'Expired' : 'Expires'} ${onDate(h.expiresAt)}`}
+                  {h.revoked
+                    ? 'Revoked'
+                    : !h.expiresAt
+                      ? 'No expiry set'
+                      : `${past ? 'Expired' : 'Expires'} ${onDate(h.expiresAt)}`}
                 </div>
               </div>
-              <Badge variant={style.variant} dot>
-                {style.label}
-              </Badge>
+              {/*
+                STANDING AND CURRENCY, TWO MARKS (R108). Standing — required or
+                optional for this person's Roles — sits beside the currency
+                badge, because they answer different questions: obligation
+                versus the date. A required competency is the one that counts
+                against compliance when it lapses, so it is the louder mark.
+              */}
+              <span
+                className={`text-[10px] font-medium uppercase tracking-wide ${
+                  h.standing === 'required' ? 'text-text-secondary' : 'text-text-tertiary'
+                }`}
+              >
+                {h.standing === 'required' ? 'Required' : 'Optional'}
+              </span>
+              {/*
+                Revocation is a MARK, not a status (R104): a revoked grant still
+                has a dated state, but what the reader needs to see is that it
+                was taken away, so the neutral revoked badge replaces the dated
+                one rather than sitting beside it.
+              */}
+              {h.revoked ? (
+                <Badge variant="neutral" dot>
+                  Revoked
+                </Badge>
+              ) : (
+                <Badge variant={style.variant} dot>
+                  {style.label}
+                </Badge>
+              )}
             </li>
           );
         })}

@@ -202,7 +202,7 @@ async function computeRemovalEffects(
   if (removedCompetencies.size > 0) {
     for (const userId of holderUserIds) {
       const held = await heldCompetencyStates(database, orgId, userId, now);
-      const heldNow = new Set(held.filter((h) => countsAsHeld(h.status)).map((h) => h.competencyId));
+      const heldNow = new Set(held.filter((h) => countsAsHeld(h)).map((h) => h.competencyId));
       const stillRequiredComps = new Set<string>();
       for (const t of postChangeToolsByUser.get(userId) ?? []) {
         for (const c of awardsByTool.get(t) ?? []) stillRequiredComps.add(c);

@@ -13,6 +13,7 @@ import type {
   ExtractionResult,
   FormContainer,
   FormField,
+  Standing,
   SubmissionStatus,
   SubmissionValue,
   TaxonomyStatus,
@@ -425,7 +426,18 @@ export interface CompetencyHolder {
   /** ISO instant, or null when the competency has no validity period. */
   expiresAt: string | null;
   status: CompetencyStatus;
-  /** Still satisfies a requirement — held, expiring or grace. */
+  /**
+   * Revoked beats the date: a grant taken away by an appeal or an admin. Shown
+   * as a mark rather than a status badge (R104), and never `current`.
+   */
+  revoked: boolean;
+  /**
+   * Whether this person's held Roles OBLIGE them to hold this competency (R108).
+   * Answers a different question from `current`: standing is about obligation,
+   * currency is about the date.
+   */
+  standing: Standing;
+  /** Still satisfies a requirement — held, expiring or grace, and not revoked. */
   current: boolean;
   /** Wording for a status worth saying out loud; null when there is nothing. */
   note: string | null;

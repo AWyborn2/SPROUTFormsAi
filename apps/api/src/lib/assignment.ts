@@ -11,7 +11,7 @@
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import {
-  competencyStatus,
+  competencyCurrency,
   decideAssignments,
   orderedParts,
   type AssessmentToolManifest,
@@ -72,11 +72,14 @@ export async function heldCompetencyStates(
   const validityById = new Map(comps.map((c) => [c.id, c]));
   return holders.map((h) => {
     const validity = validityById.get(h.competencyId);
-    // A holder pointing at a competency the org no longer defines cannot be
-    // dated, so it proves nothing — treat it as revoked (it never satisfies).
-    // A revoked grant resolves to 'revoked' the same way (R107).
-    const status = validity ? competencyStatus(h, validity, now, 'assessor') : 'revoked';
-    return { competencyId: h.competencyId, status };
+    if (!validity) {
+      // A holder pointing at a competency the org no longer defines cannot be
+      // dated, so it proves nothing — mark it revoked so it never satisfies
+      // (the same not-held outcome R107 gives a genuinely revoked grant).
+      return { competencyId: h.competencyId, status: 'expired' as const, revoked: true };
+    }
+    const { status, revoked } = competencyCurrency(h, validity, now, 'assessor');
+    return { competencyId: h.competencyId, status, revoked };
   });
 }
 
