@@ -874,7 +874,18 @@ export function GeometryEditorScreen({
               if (!target?.optionKey || !target.toOptionKey) return;
               setOptionBox(target.fieldId, target.optionKey, from);
               setOptionBox(target.fieldId, target.toOptionKey, to);
-              setDrawTarget(null);
+              /*
+                THE MODE STAYS ON, advancing to the next unplaced pair.
+
+                `fields` is one state update behind — the two `setOptionBox`
+                calls above have not committed — so the keys just placed are
+                passed in rather than read back, or the mode would re-offer the
+                pair it has this moment finished.
+              */
+              const field = fields.find((f) => f.id === target.fieldId);
+              setDrawTarget(
+                field ? nextConnectTarget(field, [target.optionKey, target.toOptionKey]) : null,
+              );
             }}
             className="h-full"
           />
@@ -966,6 +977,39 @@ function isPerOptionField(field: FormField): boolean {
 /** Whether this field is placed as matching anchors — see `isPerOptionField`. */
 function isMatchAnchorField(field: FormField): boolean {
   return isChoiceField(field.type) && !field.printSelectedValue && isMatchingQuestion(field.options);
+}
+
+/**
+ * The next two anchors a connector drag would place — the first entry on each
+ * side that has no box yet.
+ *
+ * THIS IS WHAT KEEPS THE MODE ON. A drag used to disarm the page, so drawing a
+ * three-by-three question's connectors meant click, drag, click, drag, click,
+ * drag: half the gestures were re-arming a mode that had just been used for
+ * exactly what it is for. Advancing to the next pair instead means the mode is
+ * turned on once and the rest is drawing, which is the whole point of making
+ * the gesture a line.
+ *
+ * `alsoPlaced` is the pair the caller is placing right now. The field it holds
+ * is one React state update behind — `setOptionBox` has been called but not yet
+ * committed — so the keys have to be passed in rather than read back, or every
+ * drag would re-offer the pair it just finished.
+ *
+ * NULL WHEN EVERY ANCHOR IS DOWN, which disarms the page. Staying armed on an
+ * already-placed pair would let a stray drag silently move an anchor on a
+ * finished question; re-drawing one is the row's own Draw button.
+ */
+function nextConnectTarget(field: FormField, alsoPlaced: readonly string[] = []): DrawTarget | null {
+  if (!isMatchAnchorField(field)) return null;
+  const placed = new Set([
+    ...(field.geometry?.segments ?? []).map((s) => s.optionKey),
+    ...alsoPlaced,
+  ]);
+  const anchors = matchAnchors(field.options ?? []);
+  const from = anchors.find((a) => a.side === 'l' && !placed.has(a.key));
+  const to = anchors.find((a) => a.side === 'r' && !placed.has(a.key));
+  if (!from || !to) return null;
+  return { fieldId: field.id, optionKey: from.key, toOptionKey: to.key };
 }
 
 /**
@@ -1438,27 +1482,31 @@ function MatchAnchorRows({
   const answers = anchors.filter((a) => a.side === 'r');
 
   /*
-    WHICH TWO ENTRIES THE NEXT LINE JOINS.
+    WHICH TWO ENTRIES THE NEXT LINE JOINS — DERIVED, NOT REMEMBERED.
 
-    Defaulted to the first of each side with no anchor yet, so the common path
-    is: arm, drag, arm, drag — three gestures for a three-by-three question,
-    where placing anchors one at a time is six. The selects are the override,
-    for a paper whose entries are printed out of order or a pair already down.
+    This block held its own `from`/`to` state once, and that was a second source
+    of truth for a thing the armed target already knows. The two could disagree
+    the moment the screen advanced the target after a drag: the selects would
+    still be showing the pair just drawn while the page was armed for the next
+    one, and the labels beside a live gesture would be lying about what it was
+    about to do.
 
-    THEY NAME ANCHORS, NOT A PAIRING. Nothing about which statement goes with
+    Armed wins; otherwise the suggestion is the first entry on each side with no
+    box yet, which is the order a person works down the page in.
+
+    THESE NAME ANCHORS, NOT A PAIRING. Nothing about which statement goes with
     which sign is being said here — that is the answer key's job, and it is set
     in the pair builder. This says only "these two printed things are where the
-    line's ends live", which is why joining them in the wrong combination costs
+    line's ends live", which is why joining them in an odd combination costs
     nothing: every anchor is reusable by every pairing that names it.
   */
-  const [from, setFrom] = useState<string | null>(null);
-  const [to, setTo] = useState<string | null>(null);
-  const fromKey = from ?? prompts.find((a) => !has(a.key))?.key ?? prompts[0]?.key;
-  const toKey = to ?? answers.find((a) => !has(a.key))?.key ?? answers[0]?.key;
+  const armed =
+    drawTarget?.fieldId === field.id && drawTarget.toOptionKey !== undefined ? drawTarget : null;
+  const connectTarget = armed ?? nextConnectTarget(field);
+  const connecting = armed !== null;
 
-  const connectTarget: DrawTarget | null =
-    fromKey && toKey ? { fieldId: field.id, optionKey: fromKey, toOptionKey: toKey } : null;
-  const connecting = connectTarget !== null && sameTarget(drawTarget, connectTarget);
+  const textOf = (key: string | null | undefined) =>
+    anchors.find((a) => a.key === key)?.text ?? '';
 
   const side = (which: 'l' | 'r', heading: string) => {
     const rows = anchors.filter((a) => a.side === which);
@@ -1501,15 +1549,56 @@ function MatchAnchorRows({
       </p>
 
       {connectTarget && (
-        <div className="flex flex-col gap-1.5 rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+        <div
+          className={`flex flex-col gap-1.5 rounded-sm border p-[8px_9px] ${
+            connecting ? 'border-border-accent bg-surface-accent-soft' : 'border-border-subtle bg-surface-sunken'
+          }`}
+        >
           <span className="text-[10.5px] font-semibold uppercase tracking-wide text-text-tertiary">
-            Draw a line
+            Draw the lines
           </span>
+
+          <Button
+            variant={connecting ? 'primary' : 'outline'}
+            leadingIcon="spline"
+            className="w-full justify-center"
+            onClick={() => onToggleDraw(connectTarget)}
+          >
+            {connecting ? 'Drawing — click to stop' : 'Draw lines on the page'}
+          </Button>
+
+          {/*
+            WHAT THE NEXT DRAG WILL DO, named while the page is live.
+
+            The gesture places two anchors at once, and which two is the one
+            thing a drag cannot show you — the line under the cursor looks
+            identical whichever pair it belongs to. Saying it here is what makes
+            "just drag" safe to keep doing without stopping to check.
+          */}
+          <p className="text-[11px] leading-snug text-text-secondary">
+            {connecting ? 'Drag from ' : 'Next line: '}
+            <strong>{textOf(connectTarget.optionKey)}</strong>
+            {connecting ? ' to ' : ' → '}
+            <strong>{textOf(connectTarget.toOptionKey)}</strong>
+            {connecting && ' on the page.'}
+          </p>
+
+          <span className="text-[10.5px] leading-snug text-text-tertiary">
+            The mode stays on: each drag places both ends and moves to the next pair, so a
+            three-by-three question is three drags. Pick a different pair below to jump to it.
+          </span>
+
           <div className="flex items-center gap-1.5">
             <select
               aria-label="Line starts at"
-              value={fromKey}
-              onChange={(e) => setFrom(e.target.value)}
+              value={connectTarget.optionKey ?? ''}
+              onChange={(e) =>
+                onToggleDraw({
+                  fieldId: field.id,
+                  optionKey: e.target.value,
+                  toOptionKey: connectTarget.toOptionKey,
+                })
+              }
               className="h-[26px] min-w-0 flex-1 rounded-lg border border-border bg-surface-card px-1.5 text-[11px]"
             >
               {prompts.map((a) => (
@@ -1521,8 +1610,14 @@ function MatchAnchorRows({
             <Icon name="move-right" size={13} className="flex-none text-text-tertiary" />
             <select
               aria-label="Line ends at"
-              value={toKey}
-              onChange={(e) => setTo(e.target.value)}
+              value={connectTarget.toOptionKey ?? ''}
+              onChange={(e) =>
+                onToggleDraw({
+                  fieldId: field.id,
+                  optionKey: connectTarget.optionKey,
+                  toOptionKey: e.target.value,
+                })
+              }
               className="h-[26px] min-w-0 flex-1 rounded-lg border border-border bg-surface-card px-1.5 text-[11px]"
             >
               {answers.map((a) => (
@@ -1532,29 +1627,6 @@ function MatchAnchorRows({
               ))}
             </select>
           </div>
-          <Button
-            variant={connecting ? 'primary' : 'outline'}
-            leadingIcon="spline"
-            className="w-full justify-center"
-            onClick={() => {
-              onToggleDraw(connectTarget);
-              /*
-                The selects go back to "the next unanchored one" after arming,
-                so a second line follows the first without touching them. They
-                are cleared on ARM rather than on release because the release
-                lands in the screen's own handler, which knows nothing about
-                this component's state.
-              */
-              setFrom(null);
-              setTo(null);
-            }}
-          >
-            {connecting ? 'Drag from one to the other…' : 'Draw a line between these'}
-          </Button>
-          <span className="text-[10.5px] leading-snug text-text-tertiary">
-            One drag places both ends. This says where the line&rsquo;s ends live, not which
-            pairing is correct — that is the answer key.
-          </span>
         </div>
       )}
 
