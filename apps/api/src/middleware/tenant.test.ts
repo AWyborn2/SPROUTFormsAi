@@ -22,7 +22,7 @@ function mockRes() {
 }
 
 /** The membership the revalidation reads, or nothing at all. */
-function fakeDb(membership: { status: string } | undefined | 'throws') {
+function fakeDb(membership: { status: string; role?: string } | undefined | 'throws') {
   mockDbValue = {
     query: {
       memberships: {
@@ -145,6 +145,34 @@ describe('requireTenant', () => {
       await run(reqWith(sealSession(TENANT)), res, next);
 
       expect(next).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('the sealed role is corrected from the live row (R65)', () => {
+    it('refreshes req.tenant.role when the membership has been demoted since the cookie was sealed', async () => {
+      // The cookie was sealed while they were an owner; the live row now says
+      // viewer. Left alone, the demoted admin keeps Admin-only powers until the
+      // seven-day cookie lapses — so the live row's role must win.
+      fakeDb({ status: 'active', role: 'viewer' });
+      const req = reqWith(sealSession(TENANT));
+      const res = mockRes();
+      const next = vi.fn() as NextFunction;
+
+      await run(req, res, next);
+
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(req.tenant).toEqual({ ...TENANT, role: 'viewer' });
+    });
+
+    it('leaves the sealed role untouched when the live row agrees', async () => {
+      fakeDb({ status: 'active', role: 'owner' });
+      const req = reqWith(sealSession(TENANT));
+      const res = mockRes();
+      const next = vi.fn() as NextFunction;
+
+      await run(req, res, next);
+
+      expect(req.tenant).toEqual(TENANT);
     });
   });
 });

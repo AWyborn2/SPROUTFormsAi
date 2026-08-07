@@ -1220,6 +1220,28 @@ describe('DELETE /team/members/:id', () => {
     }
   });
 
+  it('blocks deactivating the last ACTIVE owner even when a suspended owner exists (R65)', async () => {
+    // A suspended owner cannot sign in, so the guard counts only active owners.
+    // The fixture models a predicate-honouring database applying the new
+    // status='active' filter: the org holds two owners, but only the active one
+    // (m-b) comes back. Deactivating it would strand the org with no owner who
+    // can act — under the old status-blind query both owners returned and the
+    // removal was wrongly allowed.
+    mockDbValue = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm-b', userId: 'u-b', orgId: 'org-1', role: 'owner', status: 'active' },
+      membershipsFindMany: [{ id: 'm-b', userId: 'u-b', orgId: 'org-1', role: 'owner', status: 'active' }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members/m-b`, { method: 'DELETE', headers: authHeader(adminTenant) });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe('cannot_remove_last_owner');
+    } finally {
+      server.close();
+    }
+  });
+
   it('DEACTIVATES a non-owner member rather than deleting them (R62, R63)', async () => {
     /*
       This route used to `DELETE` the membership row, which took the person's

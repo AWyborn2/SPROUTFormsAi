@@ -606,8 +606,16 @@ teamRouter.delete(
       return;
     }
     if (membership.role === 'owner') {
+      // Count only owners who can still act. A suspended owner cannot sign in
+      // (R65), so counting them would let an org deactivate its one remaining
+      // ACTIVE owner and lose all owner-level control — the guard must see the
+      // same live set the front door does.
       const owners = await db.query.memberships.findMany({
-        where: and(eq(schema.memberships.orgId, tenant.orgId), eq(schema.memberships.role, 'owner')),
+        where: and(
+          eq(schema.memberships.orgId, tenant.orgId),
+          eq(schema.memberships.role, 'owner'),
+          eq(schema.memberships.status, 'active'),
+        ),
       });
       if (owners.length <= 1) {
         res.status(403).json({ error: 'cannot_remove_last_owner' });
@@ -789,13 +797,23 @@ teamRouter.post(
     */
     const seat = await db.transaction(async (tx) => {
       const org = await lockOrgForSeats(tx, tenant.orgId);
-      if (!org) return {};
-      const check = await checkSeatAvailability(tx, org, membership.role as Role);
-      const resolved = await seatOrExpand(tx, org, check);
-      // Nothing has been written when this refuses — `seatOrExpand` writes only
-      // where it expands — so returning here leaves the organisation untouched.
-      if (!check.ok && !resolved.expansion) return { refusal: seatLimitError(check, org.planTier) };
-      return { expansion: resolved.expansion };
+      if (org) {
+        const check = await checkSeatAvailability(tx, org, membership.role as Role);
+        const resolved = await seatOrExpand(tx, org, check);
+        // Nothing has been written when this refuses — `seatOrExpand` writes
+        // only where it expands — so returning here leaves the org untouched.
+        if (!check.ok && !resolved.expansion) return { refusal: seatLimitError(check, org.planTier) };
+        // The status write lives INSIDE the lock the count was taken under, so
+        // the seat this returner just claimed is truly consumed before the lock
+        // releases. Two returners racing one free seat must not both pass a
+        // count neither has changed yet — the same reason the role PATCH above
+        // writes inside its transaction. `reactivateMember` settles the rest.
+        await tx.update(schema.memberships).set({ status: 'active' }).where(eq(schema.memberships.id, membership.id));
+        return { expansion: resolved.expansion };
+      }
+      // No seat accounting configured: no gate, but the activation still lands.
+      await tx.update(schema.memberships).set({ status: 'active' }).where(eq(schema.memberships.id, membership.id));
+      return {};
     });
     if (seat.refusal) {
       res.status(403).json(seat.refusal);

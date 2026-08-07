@@ -4,7 +4,7 @@ import { schema } from '@formai/db';
 import type { TenantContext } from '@formai/shared';
 import { unsealSession } from '../auth/replit-auth.js';
 import { bearerToken, parseApiKey, verifyApiKey } from '../auth/api-key.js';
-import { SESSION_COOKIE_NAME } from './tenant.js';
+import { SESSION_COOKIE_NAME, revalidateTenant } from './tenant.js';
 import { db } from '../db.js';
 
 declare global {
@@ -154,6 +154,15 @@ export async function requireMachineOrTenant(
     unauthenticated();
     return;
   }
-  req.tenant = tenant;
+  // The session-cookie door revalidates exactly as `requireTenant` does — a
+  // membership deactivated since the cookie was sealed is refused, and a stale
+  // role is corrected. Without this the machine-facing routes (/inductions,
+  // /mcp) would honour a leaver's cookie that every other route now rejects.
+  const current = await revalidateTenant(tenant);
+  if (!current) {
+    unauthenticated();
+    return;
+  }
+  req.tenant = current;
   next();
 }

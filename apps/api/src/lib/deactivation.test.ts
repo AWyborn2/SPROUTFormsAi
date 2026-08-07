@@ -176,14 +176,18 @@ describe('deactivateMember', () => {
 });
 
 describe('reactivateMember', () => {
-  it('restores the status and nothing else (R68, R69)', async () => {
+  it('leaves the status write to the caller and touches no other table (R68, R69)', async () => {
+    // The membership status flip is the route's, inside its seat-lock
+    // transaction — see routes/team.ts. So reactivateMember itself writes to no
+    // table (in particular never the competency tables: it revokes nothing,
+    // R66) and only records the audit.
     const { db, writes, inserts } = fakeDb({
       user: { id: 'u-2', name: 'Dale', email: 'dale@x.io', passwordHash: 'hash' },
     });
 
     const out = await reactivateMember(db, TENANT, MEMBER);
 
-    expect(writes).toEqual([{ table: schema.memberships, values: { status: 'active' } }]);
+    expect(writes).toEqual([]);
     expect(out).toMatchObject({ seatConsumed: 'candidate', needsFreshInvitation: false });
     expect(inserts.some((i) => i.table === schema.auditLogEntries)).toBe(true);
   });

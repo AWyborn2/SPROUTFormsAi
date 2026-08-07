@@ -23,30 +23,15 @@ export const SESSION_COOKIE_NAME = 'fai_session';
  * `tenant.orgId` — the enforced multi-tenant boundary.
  *
  * IT ALSO REVALIDATES THE MEMBERSHIP, which is what makes deactivation
- * immediate (R65).
+ * immediate (R65) and keeps the sealed role honest (see `revalidateTenant`).
  *
  * There is no session to revoke. `auth/replit-auth.ts` is a sealed-cookie pair
  * — an AES-256-GCM envelope carrying the tenant with a seven-day expiry — and
  * nothing server-side records that a session exists. So deactivation cannot
  * delete one; the cookie stays valid crypto until it expires. The only place
  * that envelope becomes authority is here, so here is where a membership that
- * has stopped being active must stop being honoured. Without it a leaver keeps
- * full access for up to seven days, which is exactly what R65 exists to prevent.
- *
- * IT REFUSES WHAT DEACTIVATION WRITES, and nothing else. `suspended` is the
- * state R62's deactivation puts a membership in; the check is against that
- * rather than against "anything that is not active", because the two are not
- * the same question. An `invited` membership is not a deactivated one, and a
- * rule phrased as not-active would refuse states that mean something else
- * entirely — turning a narrow revocation into a broad lockout the requirement
- * never asked for.
- *
- * FAIL-OPEN ON UNKNOWN. A lookup that cannot answer — no database configured, a
- * transient error, no row — passes, because the alternative is that one blip in
- * a read logs out every user of the product at once. That is the soft-fail
- * posture a certificate revocation check takes, and it is safe here for a
- * specific reason: deactivation is never a delete (R62), so the row is always
- * there to be read. A missing row means something other than "deactivated".
+ * has stopped being active must stop being honoured, and where a role the
+ * envelope has outlived must be corrected.
  *
  * COST: one indexed read per authenticated request, on every route rather than
  * only the profile ones.
@@ -59,14 +44,14 @@ export function requireTenant(req: Request, res: Response, next: NextFunction): 
     return;
   }
 
-  void membershipDeactivated(tenant).then((deactivated) => {
-    if (deactivated) {
+  void revalidateTenant(tenant).then((current) => {
+    if (!current) {
       // Same shape as an absent cookie: a deactivated session is simply not
       // authenticated any more.
       res.status(401).json({ error: 'unauthenticated' });
       return;
     }
-    req.tenant = tenant;
+    req.tenant = current;
     next();
   });
 }
@@ -75,23 +60,50 @@ export function requireTenant(req: Request, res: Response, next: NextFunction): 
 export const DEACTIVATED_STATUS = 'suspended';
 
 /**
- * Whether the membership the sealed context names has been deactivated.
+ * Revalidate a sealed context against the live membership row, returning the
+ * context to honour or `null` to refuse. Shared by every authenticated door so
+ * the two properties below cannot drift between the session middleware and the
+ * machine-or-tenant one.
  *
- * Returns false on anything it cannot determine — see the fail-open reasoning
- * above. Never throws: a rejected read must not become an unhandled rejection
- * on the request path.
+ * Two things the sealed cookie cannot be trusted for, because it is a seven-day
+ * AES envelope with nothing server-side to revoke or amend:
+ *
+ *  - STATUS. `suspended` is the state R62's deactivation writes; a membership
+ *    in it must stop being honoured at once (R65) — returns null. The check is
+ *    against what deactivation WRITES, not against "anything not active": an
+ *    `invited` membership is not a deactivated one, and the broader phrasing
+ *    would lock out states that mean something else entirely.
+ *  - ROLE. A membership demoted since the cookie was sealed still carries the
+ *    old access level in the envelope; left alone, a demoted admin keeps
+ *    Admin-only powers for up to seven days. The live row's role wins.
+ *
+ * FAIL-OPEN ON UNKNOWN. A lookup that cannot answer — no database configured, a
+ * transient error, no row — honours the sealed context unchanged, because the
+ * alternative is that one read blip logs out (or mis-roles) every user at once.
+ * Safe because deactivation is never a delete (R62): the row is always there to
+ * be read, so a missing row means something other than "deactivated". Never
+ * throws: a rejected read must not become an unhandled rejection on the path.
  */
-async function membershipDeactivated(tenant: TenantContext): Promise<boolean> {
-  if (!db) return false;
+export async function revalidateTenant(tenant: TenantContext): Promise<TenantContext | null> {
+  if (!db) return tenant;
+  let membership: { status: string; role?: string } | undefined;
   try {
-    const membership = await db.query.memberships.findFirst({
+    membership = await db.query.memberships.findFirst({
       where: and(
         eq(schema.memberships.userId, tenant.userId),
         eq(schema.memberships.orgId, tenant.orgId),
       ),
     });
-    return membership?.status === DEACTIVATED_STATUS;
   } catch {
-    return false;
+    return tenant;
   }
+  if (!membership) return tenant;
+  if (membership.status === DEACTIVATED_STATUS) return null;
+  // Refresh the role from the live row — the sealed cookie's may be stale after
+  // a demotion. Absent role (only in test doubles; the column is NOT NULL) keeps
+  // the sealed value under the same fail-open reasoning.
+  if (membership.role && membership.role !== tenant.role) {
+    return { ...tenant, role: membership.role as TenantContext['role'] };
+  }
+  return tenant;
 }

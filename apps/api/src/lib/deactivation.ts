@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema, type Db } from '@formai/db';
 import type { TenantContext } from '@formai/shared';
 import { DEACTIVATED_STATUS } from '../middleware/tenant.js';
@@ -174,18 +174,20 @@ export interface ReactivationOutcome {
  * them (R63); competencies still inside their expiry are valid immediately
  * without reassessment (R69) because nothing revoked them and expiry is derived
  * from dates; and one that lapsed while they were away reads as expired rather
- * than revoked (R66). Only the status moves.
+ * than revoked (R66).
  *
- * The seat is taken from the pool the membership's access level draws on, and
- * the caller performs that check — expansion at a full pool is U37's.
+ * THE STATUS WRITE IS THE CALLER'S, not this function's. The seat the returner
+ * claims and the row going `active` must land as one indivisible step under the
+ * seat lock (R78/R86), or two returners racing one free seat both pass a count
+ * neither has changed yet. So the route flips the status inside its transaction;
+ * this settles everything that write does not — whether a fresh invitation is
+ * needed (R76), the audit, and the outcome.
  */
 export async function reactivateMember(
   db: Db,
   tenant: TenantContext,
   membership: { id: string; userId: string; orgId: string; role: string },
 ): Promise<ReactivationOutcome> {
-  await db.update(schema.memberships).set({ status: 'active' }).where(eq(schema.memberships.id, membership.id));
-
   /*
     R76: somebody who had already accepted their invitation needs none reissued
     — their credentials still work and the front door is open again. Somebody
@@ -198,7 +200,10 @@ export async function reactivateMember(
         where: and(
           eq(schema.invites.orgId, membership.orgId),
           eq(schema.invites.email, user.email),
-          ne(schema.invites.acceptedByUserId, ''),
+          // acceptedByUserId is a uuid column: a "has been accepted" test is
+          // IS NOT NULL, never `<> ''` — an empty string is not a valid uuid
+          // literal and Postgres rejects the comparison outright.
+          isNotNull(schema.invites.acceptedByUserId),
         ),
       })
     : [];
