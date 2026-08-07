@@ -1619,3 +1619,54 @@ describe('removeSegment', () => {
     expect(removeSegment(segments, 7)).toBe(segments);
   });
 });
+
+import { deriveMatchAnchorsAcrossPages } from './geometry-actions.js';
+
+/**
+ * A matching question, across the whole document.
+ *
+ * The same document-wide ambiguity refusal `deriveOptionCellsAcrossPages`
+ * makes, and for the same reason: a question claimed by two pages is a question
+ * the document does not place, and anchoring the wrong page's copy draws every
+ * one of the candidate's lines onto text they never read.
+ */
+describe('deriveMatchAnchorsAcrossPages', () => {
+  const A4_PAGE = { width: 595, height: 842 };
+
+  const signItems: PositionedText[] = [
+    { text: 'Restricted area', x: 60, y: 700, width: 78 },
+    { text: 'Biosecurity sign', x: 380, y: 700, width: 80 },
+    { text: 'Permission to pass', x: 60, y: 670, width: 92 },
+    { text: 'Traffic hazard sign', x: 380, y: 670, width: 92 },
+  ];
+
+  const ANCHORS = [
+    { key: 'l0', side: 'l' as const, text: 'Restricted area' },
+    { key: 'l1', side: 'l' as const, text: 'Permission to pass' },
+    { key: 'r0', side: 'r' as const, text: 'Biosecurity sign' },
+    { key: 'r1', side: 'r' as const, text: 'Traffic hazard sign' },
+  ];
+
+  const blank: TextPage = { ...A4_PAGE, items: [] };
+  const signs: TextPage = { ...A4_PAGE, items: signItems };
+
+  it('finds the question on whichever page prints it, and says which', () => {
+    const res = deriveMatchAnchorsAcrossPages(ANCHORS, [blank, blank, signs]);
+
+    expect(res).not.toBeNull();
+    expect(res!.segments).toHaveLength(4);
+    expect(new Set(res!.segments.map((s) => s.page))).toEqual(new Set([2]));
+  });
+
+  it('REFUSES WHEN TWO PAGES BOTH CLAIM IT', () => {
+    expect(deriveMatchAnchorsAcrossPages(ANCHORS, [signs, blank, signs])).toBeNull();
+  });
+
+  it('refuses when no page carries it', () => {
+    expect(deriveMatchAnchorsAcrossPages(ANCHORS, [blank, blank])).toBeNull();
+  });
+
+  it('refuses a question with fewer than two entries before reading a page', () => {
+    expect(deriveMatchAnchorsAcrossPages([ANCHORS[0]!], [signs])).toBeNull();
+  });
+});

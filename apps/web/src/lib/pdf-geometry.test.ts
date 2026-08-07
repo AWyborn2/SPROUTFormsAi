@@ -1375,3 +1375,211 @@ describe('proposeInlineOptionCells — a numbered question that wraps', () => {
     ).toBeNull();
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * Matching anchors
+ * ------------------------------------------------------------------ */
+
+import { matchAnchorBoxAt, proposeMatchAnchorCells } from './pdf-geometry.js';
+
+/**
+ * A matching question as these papers print it: statements down the left,
+ * signs down the right, one pair per printed row.
+ *
+ * WHAT THIS REPLACES is six manual drags per question. The option-cell
+ * derivation could not read this shape at all — a matching question's options
+ * are PAIRINGS, and a pairing is something the candidate might do rather than
+ * something the page prints, so any hit would have been a coincidence placing a
+ * box against text that does not mean what the key says it means.
+ */
+function signPage(): PositionedText[] {
+  return [
+    { text: 'Match the statement with the appropriate signage.', x: 60, y: 740, width: 260 },
+    { text: 'Restricted area', x: 60, y: 700, width: 78 },
+    { text: 'Biosecurity sign', x: 380, y: 700, width: 80 },
+    { text: 'Permission to pass', x: 60, y: 670, width: 92 },
+    { text: 'Traffic hazard sign', x: 380, y: 670, width: 92 },
+    { text: 'Wash-down required', x: 60, y: 640, width: 98 },
+    { text: 'Wash bay sign', x: 380, y: 640, width: 70 },
+  ];
+}
+
+const SIGN_ANCHORS = [
+  { key: 'l0', side: 'l' as const, text: 'Restricted area' },
+  { key: 'l1', side: 'l' as const, text: 'Permission to pass' },
+  { key: 'l2', side: 'l' as const, text: 'Wash-down required' },
+  { key: 'r0', side: 'r' as const, text: 'Biosecurity sign' },
+  { key: 'r1', side: 'r' as const, text: 'Traffic hazard sign' },
+  { key: 'r2', side: 'r' as const, text: 'Wash bay sign' },
+];
+
+function proposeAnchors(items: PositionedText[], anchors = SIGN_ANCHORS) {
+  return proposeMatchAnchorCells({ page: 2, ...A4, items, anchors });
+}
+
+describe('proposeMatchAnchorCells', () => {
+  it('proposes one anchor per printed entry', () => {
+    const res = proposeAnchors(signPage());
+
+    expect(res).not.toBeNull();
+    expect(res!.segments.map((s) => s.optionKey)).toEqual(['l0', 'l1', 'l2', 'r0', 'r1', 'r2']);
+  });
+
+  it('puts each anchor on the INNER side of its own text', () => {
+    /*
+      Where a person with a pen starts the line: just clear of the statement,
+      facing the column it connects to. Outside the text on the far side would
+      put the connector's start behind the words it leaves from.
+    */
+    const res = proposeAnchors(signPage())!;
+    const byKey = new Map(res.segments.map((s) => [s.optionKey, s]));
+
+    // "Restricted area" runs 60..138 — the anchor sits right of it.
+    expect(byKey.get('l0')!.x).toBeGreaterThan(138);
+    // "Biosecurity sign" runs 380..460 — the anchor sits left of it.
+    expect(byKey.get('r0')!.x + byKey.get('r0')!.width).toBeLessThan(380);
+  });
+
+  it('puts each anchor on its own row', () => {
+    // One row out draws the candidate's line to a different statement.
+    const res = proposeAnchors(signPage())!;
+    const byKey = new Map(res.segments.map((s) => [s.optionKey, s]));
+
+    for (const [key, baseline] of [['l0', 700], ['l1', 670], ['l2', 640]] as const) {
+      const box = byKey.get(key)!;
+      expect(box.y).toBeLessThanOrEqual(baseline);
+      expect(box.y + box.height).toBeGreaterThan(baseline);
+    }
+  });
+
+  it('reads which side is which off the page rather than assuming', () => {
+    // A paper that prints the signs first is the same question.
+    const flipped = signPage().map((i) => ({ ...i, x: i.x === 60 ? 380 : i.x === 380 ? 60 : i.x }));
+
+    const res = proposeAnchors(flipped)!;
+    const byKey = new Map(res.segments.map((s) => [s.optionKey, s]));
+
+    // The prompt is on the right now, so its anchor faces LEFT.
+    expect(byKey.get('l0')!.x + byKey.get('l0')!.width).toBeLessThan(380);
+    expect(byKey.get('r0')!.x).toBeGreaterThan(138);
+  });
+
+  it('KEEPS EACH ENTRY ON ITS OWN TEXT WHEN TWO SHARE A WORD', () => {
+    /*
+      The regression this page was built around. "Wash-down required" and "Wash
+      bay sign" are printed on the same row and share the word "wash". Matching
+      an entry to every item carrying any of its words made each span swallow
+      the WHOLE row — both sides got the same centre, the two-column check saw
+      them overlap, and a perfectly readable page was refused outright.
+
+      The span is the contiguous run of WORDS, so each stays on its own text.
+    */
+    const res = proposeAnchors(signPage())!;
+    const byKey = new Map(res.segments.map((s) => [s.optionKey, s]));
+
+    // "Wash-down required" runs 60..158; "Wash bay sign" runs 380..450. Their
+    // anchors must land on opposite sides of the gap, not both in the middle.
+    expect(byKey.get('l2')!.x).toBeGreaterThan(158);
+    expect(byKey.get('r2')!.x + byKey.get('r2')!.width).toBeLessThan(380);
+  });
+
+  it('survives resolveGeometry, which is what decides a box is publishable', () => {
+    const res = proposeAnchors(signPage())!;
+
+    for (const segment of res.segments) {
+      expect(resolveGeometry({ geometry: { segments: [segment] } }, 3).segments).toHaveLength(1);
+    }
+  });
+});
+
+describe('proposeMatchAnchorCells — refusals', () => {
+  it('REFUSES WHEN ONE ENTRY IS FOUND NOWHERE', () => {
+    /*
+      ALL OF THEM OR NONE. A half-anchored question exports a connector for some
+      pairings and nothing for others, which on the evidence document reads as a
+      candidate who answered half the question.
+    */
+    const missing = signPage().filter((i) => i.text !== 'Wash bay sign');
+
+    expect(proposeAnchors(missing)).toBeNull();
+  });
+
+  it('REFUSES WHEN AN ENTRY APPEARS TWICE ON THE PAGE', () => {
+    /*
+      A second hit means the page does not say which one the author meant.
+      Anchoring the wrong one draws the candidate's line to a different
+      statement on a competency record — worse than asking for six drags.
+    */
+    const repeated = [
+      ...signPage(),
+      { text: 'Restricted area', x: 60, y: 300, width: 78 },
+    ];
+
+    expect(proposeAnchors(repeated)).toBeNull();
+  });
+
+  it('REFUSES WHEN THE TWO SIDES INTERLEAVE', () => {
+    /*
+      Then the page is not the two-column layout this reads, and nothing here
+      knows which side is which — every anchor placed from it would be
+      guesswork.
+    */
+    const mixed = signPage().map((i) =>
+      i.text === 'Wash bay sign' ? { ...i, x: 60, width: 70 } : i,
+    );
+
+    expect(proposeAnchors(mixed)).toBeNull();
+  });
+
+  it('refuses an entry too short to be evidence of itself', () => {
+    const shortEntry = [
+      ...signPage(),
+      { text: 'A', x: 60, y: 600, width: 6 },
+      { text: 'B', x: 380, y: 600, width: 6 },
+    ];
+
+    expect(
+      proposeAnchors(shortEntry, [
+        ...SIGN_ANCHORS,
+        { key: 'l3', side: 'l' as const, text: 'A' },
+        { key: 'r3', side: 'r' as const, text: 'B' },
+      ]),
+    ).toBeNull();
+  });
+
+  it('refuses a page with no text at all', () => {
+    expect(proposeAnchors([])).toBeNull();
+  });
+
+  it('refuses a question with fewer than two entries', () => {
+    expect(proposeAnchors(signPage(), [SIGN_ANCHORS[0]!])).toBeNull();
+  });
+});
+
+describe('matchAnchorBoxAt', () => {
+  it('centres an anchor on the point, at the same size the derivation uses', () => {
+    /*
+      ONE SIZE, TWO MINTERS. The exporter attaches to a box's facing edge at
+      mid-height, so a hand-drawn anchor a different size from a proposed one
+      would move that attachment point between two anchors an author cannot
+      tell apart on screen.
+    */
+    const proposed = proposeAnchors(signPage())!.segments[0]!;
+    const drawn = matchAnchorBoxAt({ x: 100, y: 400 }, { page: 0, ...A4 });
+
+    expect(drawn.width).toBe(proposed.width);
+    expect(drawn.height).toBe(proposed.height);
+    expect(drawn.x + drawn.width / 2).toBeCloseTo(100, 5);
+    expect(drawn.y + drawn.height / 2).toBeCloseTo(400, 5);
+  });
+
+  it('clamps to the page rather than refusing a point on its edge', () => {
+    // `resolveGeometry` drops a box that runs off the page, and a point at the
+    // very edge is a real thing to aim at.
+    const box = matchAnchorBoxAt({ x: 0, y: 842 }, { page: 0, ...A4 });
+
+    expect(box.x).toBe(0);
+    expect(box.y + box.height).toBeLessThanOrEqual(842);
+    expect(resolveGeometry({ geometry: { segments: [box] } }, 1).segments).toHaveLength(1);
+  });
+});

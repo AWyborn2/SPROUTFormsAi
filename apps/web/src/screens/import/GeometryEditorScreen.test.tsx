@@ -28,6 +28,9 @@ import type { PlacementMark } from './PdfViewer.js';
  */
 interface MockPdfViewerProps {
   onTextLayer: (pages: unknown[]) => void;
+  drawArmed?: boolean;
+  drawLine?: boolean;
+  onDrawConnector?: (from: PageBox, to: PageBox) => void;
   bandOverlay?: PageBox | null;
   bandSnapTargets?: readonly number[];
   bandSnapTargetsY?: readonly number[];
@@ -157,6 +160,11 @@ function proposal(confidence: number): FieldProposal {
     confidence,
     notes: [],
   };
+}
+
+/** An 8pt anchor box, as `matchAnchorBoxAt` mints one. */
+function anchorBox(x: number, y: number): PageBox {
+  return { page: 0, x, y, width: 8, height: 8, pageWidth: 595, pageHeight: 842 };
 }
 
 function renderWithField(field: FormField) {
@@ -997,8 +1005,10 @@ describe('GeometryEditorScreen — matching anchors', () => {
 
     expect(screen.getByText('Prompts')).toBeDefined();
     expect(screen.getByText('Answers')).toBeDefined();
-    expect(screen.getByText('Restricted area')).toBeDefined();
-    expect(screen.getByText('Biosecurity sign')).toBeDefined();
+    // `getAllBy` because each entry also names itself in the "Draw a line"
+    // selects — the row label and the option are two views of one anchor.
+    expect(screen.getAllByText('Restricted area').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Biosecurity sign').length).toBeGreaterThan(0);
     // The pairing itself is never offered as a thing to place.
     expect(screen.queryByText('Restricted area -> Biosecurity sign')).toBeNull();
   });
@@ -1073,5 +1083,121 @@ describe('GeometryEditorScreen — matching anchors', () => {
 
     expect(screen.queryByText('Prompts')).toBeNull();
     expect(screen.getByText(/3\/3 placed/)).toBeDefined();
+  });
+});
+
+/*
+  ONE DRAG, TWO ANCHORS.
+
+  A matching answer is a line from a statement to a sign — a person doing the
+  question with a pen draws exactly that. Placing anchors one at a time asks the
+  author to think in a model the page does not use, and costs six gestures where
+  three would do.
+*/
+describe('GeometryEditorScreen — drawing a matching connector', () => {
+  const PAIRINGS = [
+    'Restricted area -> Biosecurity sign',
+    'Restricted area -> Traffic hazard sign',
+    'Permission to pass -> Biosecurity sign',
+    'Permission to pass -> Traffic hazard sign',
+  ];
+
+  const matchingField = (geometry?: FormField['geometry']) =>
+    choiceField('q7', 'Match the statement to the signage', PAIRINGS, geometry);
+
+  /** The props the stubbed viewer was last rendered with. */
+  function lastViewerProps(): MockPdfViewerProps {
+    const calls = pdfViewerPropsSpy.mock.calls;
+    return calls[calls.length - 1]![0];
+  }
+
+  function open() {
+    renderWithField(matchingField());
+    fireEvent.click(screen.getByText('Match the statement to the signage'));
+  }
+
+  /** Which anchor keys currently carry a box, read off the viewer's placements. */
+  function placedKeys(): string[] {
+    return (lastViewerProps().placements ?? [])
+      .map((p) => p.slot.split('#')[1]!)
+      .sort();
+  }
+
+  it('ARMS LINE MODE, not box mode', () => {
+    open();
+    expect(lastViewerProps().drawLine).toBe(false);
+
+    fireEvent.click(screen.getByText('Draw a line between these'));
+
+    expect(lastViewerProps().drawArmed).toBe(true);
+    expect(lastViewerProps().drawLine).toBe(true);
+  });
+
+  it('places BOTH ends from one drag', () => {
+    open();
+    fireEvent.click(screen.getByText('Draw a line between these'));
+
+    act(() => {
+      lastViewerProps().onDrawConnector!(anchorBox(40, 700), anchorBox(400, 700));
+    });
+
+    // Both ends down from a single gesture — the count is what the header reads.
+    expect(screen.getByText(/2\/4 placed/)).toBeDefined();
+  });
+
+  it('defaults to the first UNANCHORED entry on each side', () => {
+    /*
+      So the common path is arm, drag, arm, drag — three gestures for a
+      three-by-three question where placing anchors one at a time is six. If the
+      selects held their first value the second line would overwrite the first.
+    */
+    open();
+    fireEvent.click(screen.getByText('Draw a line between these'));
+    act(() => {
+      lastViewerProps().onDrawConnector!(anchorBox(40, 700), anchorBox(400, 700));
+    });
+
+    expect((screen.getByLabelText('Line starts at') as HTMLSelectElement).value).toBe('l1');
+    expect((screen.getByLabelText('Line ends at') as HTMLSelectElement).value).toBe('r1');
+  });
+
+  it('draws a second line without clobbering the first', () => {
+    open();
+    for (const y of [700, 660]) {
+      fireEvent.click(screen.getByText('Draw a line between these'));
+      act(() => {
+        lastViewerProps().onDrawConnector!(anchorBox(40, y), anchorBox(400, y));
+      });
+    }
+
+    expect(screen.getByText(/4\/4 placed/)).toBeDefined();
+  });
+
+  it('lets the author override which two entries the line joins', () => {
+    // A paper whose entries are printed out of order, or a pair already down.
+    open();
+
+    fireEvent.change(screen.getByLabelText('Line ends at'), { target: { value: 'r1' } });
+    fireEvent.click(screen.getByText('Draw a line between these'));
+    act(() => {
+      lastViewerProps().onDrawConnector!(anchorBox(40, 700), anchorBox(400, 660));
+    });
+
+    // The far end landed on the CHOSEN answer, not the defaulted one.
+    expect(placedKeys()).toEqual(['l0', 'r1']);
+  });
+
+  it('LEAVES AN ORDINARY FIELD IN BOX MODE', () => {
+    // Line mode is armed by the connector target's far end, which only a
+    // matching question ever sets. A checkbox group must still rubber-band a
+    // rectangle.
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(null);
+    renderWithField(choiceField('f1', 'Ordinary group', ['Yes', 'No', 'Maybe']));
+    fireEvent.click(screen.getByText('Ordinary group'));
+
+    fireEvent.click(screen.getAllByText('Draw')[0]!);
+
+    expect(lastViewerProps().drawArmed).toBe(true);
+    expect(lastViewerProps().drawLine).toBe(false);
   });
 });

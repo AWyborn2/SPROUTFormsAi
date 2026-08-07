@@ -28,6 +28,7 @@ import {
   applyFieldChanges,
   classifyProposalTier,
   deriveAcrossPages,
+  deriveMatchAnchorsAcrossPages,
   deriveOptionCellsAcrossPages,
   handleAdjustment,
   isDeleteKey,
@@ -853,11 +854,26 @@ export function GeometryEditorScreen({
             bandSnapTargetsY={bandSnapTargetsY}
             onBandEdge={onBandEdge}
             drawArmed={drawTarget !== null}
+            drawLine={drawTarget?.toOptionKey !== undefined}
             onDrawBox={(box) => {
               if (!drawTarget) return;
               const { fieldId, optionKey } = drawTarget;
               if (optionKey === null) setScalarBox(fieldId, box);
               else setOptionBox(fieldId, optionKey, box);
+              setDrawTarget(null);
+            }}
+            /*
+              ONE DRAG, TWO ANCHORS. Both `setOptionBox` calls are safe back to
+              back: `mutate` writes through React's functional updater, so the
+              second folds over the first's result rather than over the same
+              pre-click snapshot — which is the KTD3 bug this screen already
+              fixed once for "Place all N".
+            */
+            onDrawConnector={(from, to) => {
+              const target = drawTarget;
+              if (!target?.optionKey || !target.toOptionKey) return;
+              setOptionBox(target.fieldId, target.optionKey, from);
+              setOptionBox(target.fieldId, target.toOptionKey, to);
               setDrawTarget(null);
             }}
             className="h-full"
@@ -907,10 +923,26 @@ interface DrawTarget {
   fieldId: string;
   /** Null for a scalar field, which has one box for the field as a whole. */
   optionKey: string | null;
+  /**
+   * The FAR end, for a matching connector — the anchor the drag finishes on.
+   *
+   * Present only in line mode. One drag places two anchors, which is what makes
+   * the gesture the shape of the thing being authored: a matching answer is a
+   * line from a statement to a sign, and a person doing the question with a pen
+   * draws exactly that. Absent everywhere else, where a drag is one box.
+   */
+  toOptionKey?: string;
 }
 
 function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
-  return a !== null && a.fieldId === b.fieldId && a.optionKey === b.optionKey;
+  return (
+    a !== null &&
+    a.fieldId === b.fieldId &&
+    a.optionKey === b.optionKey &&
+    // The far end is part of the identity: arming "statement 1 → sign 2" and
+    // then "statement 1 → sign 3" must swap the target, not toggle it off.
+    a.toOptionKey === b.toOptionKey
+  );
 }
 
 /**
@@ -1013,6 +1045,15 @@ function deriveProposal(
   textPages: readonly TextPage[],
 ): FieldProposal | TableProposal | null {
   if (textPages.length === 0) return null;
+  /*
+    Matching first, because its field IS a choice field and the option-cell
+    derivation would otherwise claim it — matching a field's PAIRINGS against
+    the text layer, which can only hit by coincidence, since a pairing is
+    something the candidate might do rather than something the page prints.
+  */
+  if (isMatchAnchorField(field)) {
+    return deriveMatchAnchorsAcrossPages(matchAnchors(field.options ?? []), textPages);
+  }
   if (isPerOptionField(field)) {
     return deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages);
   }
@@ -1029,7 +1070,10 @@ function deriveProposal(
  * (U4) so both apply a proposal identically.
  */
 function changesForProposal(field: FormField, proposal: FieldProposal | TableProposal): FieldChange[] {
-  if (isPerOptionField(field)) {
+  // Both keyed-segment shapes take the same path: a matching ANCHOR and a
+  // choice option are both a `PageBox` carrying an `optionKey`, and both must
+  // leave an already-placed sibling alone.
+  if (isPerOptionField(field) || isMatchAnchorField(field)) {
     const p = proposal as FieldProposal;
     // `deriveOptionCellsAcrossPages` derives a box for every option from the
     // field's label/options alone — it has no view of which are already
@@ -1242,9 +1286,13 @@ function PlacementPanel({
    */
   const proposal = useMemo(() => {
     if (textPages.length === 0) return null;
+    // Matching is checked first for the same reason `deriveProposal` checks it
+    // first: its field IS a choice field, and the option-cell derivation would
+    // otherwise match its PAIRINGS against text that never prints them.
+    if (matchAnchorField) return deriveMatchAnchorsAcrossPages(anchors, textPages);
     if (perOption) return deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages);
     return null;
-  }, [field, textPages, perOption]);
+  }, [field, textPages, perOption, matchAnchorField, anchors]);
 
   const tableProposal = useMemo(() => {
     if (textPages.length === 0 || field.type !== 'repeating_group') return null;
@@ -1383,7 +1431,34 @@ function MatchAnchorRows({
   onSetOptionBox: (optionKey: string, box: PageBox | null) => void;
 }) {
   const segments = field.geometry?.segments ?? [];
-  const placed = anchors.filter((a) => segments.some((s) => s.optionKey === a.key)).length;
+  const has = (key: string) => segments.some((s) => s.optionKey === key);
+  const placed = anchors.filter((a) => has(a.key)).length;
+
+  const prompts = anchors.filter((a) => a.side === 'l');
+  const answers = anchors.filter((a) => a.side === 'r');
+
+  /*
+    WHICH TWO ENTRIES THE NEXT LINE JOINS.
+
+    Defaulted to the first of each side with no anchor yet, so the common path
+    is: arm, drag, arm, drag — three gestures for a three-by-three question,
+    where placing anchors one at a time is six. The selects are the override,
+    for a paper whose entries are printed out of order or a pair already down.
+
+    THEY NAME ANCHORS, NOT A PAIRING. Nothing about which statement goes with
+    which sign is being said here — that is the answer key's job, and it is set
+    in the pair builder. This says only "these two printed things are where the
+    line's ends live", which is why joining them in the wrong combination costs
+    nothing: every anchor is reusable by every pairing that names it.
+  */
+  const [from, setFrom] = useState<string | null>(null);
+  const [to, setTo] = useState<string | null>(null);
+  const fromKey = from ?? prompts.find((a) => !has(a.key))?.key ?? prompts[0]?.key;
+  const toKey = to ?? answers.find((a) => !has(a.key))?.key ?? answers[0]?.key;
+
+  const connectTarget: DrawTarget | null =
+    fromKey && toKey ? { fieldId: field.id, optionKey: fromKey, toOptionKey: toKey } : null;
+  const connecting = connectTarget !== null && sameTarget(drawTarget, connectTarget);
 
   const side = (which: 'l' | 'r', heading: string) => {
     const rows = anchors.filter((a) => a.side === which);
@@ -1424,6 +1499,65 @@ function MatchAnchorRows({
         {placed < anchors.length &&
           ' · a pairing with either end unplaced draws nothing rather than guessing an endpoint'}
       </p>
+
+      {connectTarget && (
+        <div className="flex flex-col gap-1.5 rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+          <span className="text-[10.5px] font-semibold uppercase tracking-wide text-text-tertiary">
+            Draw a line
+          </span>
+          <div className="flex items-center gap-1.5">
+            <select
+              aria-label="Line starts at"
+              value={fromKey}
+              onChange={(e) => setFrom(e.target.value)}
+              className="h-[26px] min-w-0 flex-1 rounded-lg border border-border bg-surface-card px-1.5 text-[11px]"
+            >
+              {prompts.map((a) => (
+                <option key={a.key} value={a.key}>
+                  {a.text}
+                </option>
+              ))}
+            </select>
+            <Icon name="move-right" size={13} className="flex-none text-text-tertiary" />
+            <select
+              aria-label="Line ends at"
+              value={toKey}
+              onChange={(e) => setTo(e.target.value)}
+              className="h-[26px] min-w-0 flex-1 rounded-lg border border-border bg-surface-card px-1.5 text-[11px]"
+            >
+              {answers.map((a) => (
+                <option key={a.key} value={a.key}>
+                  {a.text}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Button
+            variant={connecting ? 'primary' : 'outline'}
+            leadingIcon="spline"
+            className="w-full justify-center"
+            onClick={() => {
+              onToggleDraw(connectTarget);
+              /*
+                The selects go back to "the next unanchored one" after arming,
+                so a second line follows the first without touching them. They
+                are cleared on ARM rather than on release because the release
+                lands in the screen's own handler, which knows nothing about
+                this component's state.
+              */
+              setFrom(null);
+              setTo(null);
+            }}
+          >
+            {connecting ? 'Drag from one to the other…' : 'Draw a line between these'}
+          </Button>
+          <span className="text-[10.5px] leading-snug text-text-tertiary">
+            One drag places both ends. This says where the line&rsquo;s ends live, not which
+            pairing is correct — that is the answer key.
+          </span>
+        </div>
+      )}
+
       {side('l', 'Prompts')}
       {side('r', 'Answers')}
     </div>
