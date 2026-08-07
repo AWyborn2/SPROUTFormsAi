@@ -1,7 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Db } from '@formai/db';
 import type { ValidProfileRow } from '@formai/shared';
-import { previewImportCost, resolveRows } from './member-create.js';
+
+// landImportRow orchestrates two collaborators whose internals (username
+// issuance, placement validation+write) have their own tests; mock them so these
+// tests exercise the landing logic — branch selection, the profile upsert, and
+// the placement-refusal path — rather than re-modelling those.
+vi.mock('./username.js', () => ({
+  insertUserWithUsername: vi.fn(async (_db: unknown, u: { name: string; email: string }) => ({ id: 'u-new', email: u.email })),
+}));
+vi.mock('./membership-placement.js', () => ({
+  writePlacement: vi.fn(async () => ({ ok: true as const })),
+}));
+
+const { insertUserWithUsername } = await import('./username.js');
+const { writePlacement } = await import('./membership-placement.js');
+import { landImportRow, previewImportCost, resolveRows, type ResolvedRow } from './member-create.js';
 
 /**
  * A db double over the reads the resolver and the preview make. The API suite
@@ -127,10 +141,11 @@ describe('resolveRows — the three branches', () => {
   });
 
   it('counts the same address twice in one file as one seat, not two', async () => {
-    // After the first row lands there IS an active membership, so the second is
-    // a merge. Counting it again would over-state the bill.
+    // The first row does the work; the second is a DUPLICATE — it costs nothing
+    // and lands nothing, distinct from a merge so it is never diffed against ids
+    // the first occurrence has not produced yet.
     const resolved = await resolveRows(fakeDb({}), ORG, [row(), row({ rowNumber: 3 })]);
-    expect(resolved.map((r) => r.disposition)).toEqual(['create', 'merge']);
+    expect(resolved.map((r) => r.disposition)).toEqual(['create', 'duplicate']);
     expect(resolved.filter((r) => r.pool !== null)).toHaveLength(1);
   });
 
@@ -271,5 +286,148 @@ describe('previewImportCost — seats, not rows', () => {
     const preview = await previewImportCost(fakeDb({}), ORG_ROW, rows);
     expect(preview.staff.overflow).toBe(5);
     expect(preview.refusedForSeats).toBeGreaterThanOrEqual(5);
+  });
+});
+
+/**
+ * A transaction-capable db double for landImportRow. Models only what the
+ * landing touches directly — the seat lock + count select, the membership
+ * insert/update, and the member_profiles upsert — plus the reads
+ * differencesAgainst makes. writePlacement and insertUserWithUsername are mocked
+ * above, so their own reads/writes never reach this double.
+ */
+function landDb(opts: {
+  org?: { id: string; planTier: string; seatLimit: number | null; candidateSeatLimit: number | null };
+  activeCount?: number;
+  mergeMembership?: { id: string; role: string } | undefined;
+} = {}) {
+  const org = 'org' in opts ? opts.org : { id: ORG, planTier: 'business', seatLimit: 15, candidateSeatLimit: 100 };
+  const inserted: Array<{ table: string; values: unknown; via: 'returning' | 'upsert' }> = [];
+  const updated: Array<Record<string, unknown>> = [];
+
+  const reads = {
+    memberships: { findFirst: async () => opts.mergeMembership },
+    membershipLocations: { findMany: async () => [] as unknown[] },
+    membershipDepartments: { findMany: async () => [] as unknown[] },
+    membershipRoles: { findMany: async () => [] as unknown[] },
+  };
+
+  const surface = {
+    query: reads,
+    select: (cols: Record<string, unknown>) => ({
+      from: () => ({
+        where: () =>
+          'count' in cols
+            ? Promise.resolve([{ count: opts.activeCount ?? 0 }])
+            : { for: async () => (org ? [org] : []) },
+      }),
+    }),
+    update: () => ({
+      set: (v: Record<string, unknown>) => ({
+        where: async () => {
+          updated.push(v);
+        },
+      }),
+    }),
+    insert: (table: { _: { name?: string } }) => ({
+      values: (v: unknown) => ({
+        returning: async () => {
+          inserted.push({ table: String(table), values: v, via: 'returning' });
+          return [{ id: 'm-new' }];
+        },
+        onConflictDoUpdate: async () => {
+          inserted.push({ table: String(table), values: v, via: 'upsert' });
+        },
+      }),
+    }),
+  };
+
+  const db = {
+    ...surface,
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(surface),
+  } as unknown as Db;
+  return { db, inserted, updated };
+}
+
+const SEED = { firstName: 'Jane', lastName: 'Smith' };
+const resolvedRow = (over: Partial<ResolvedRow> = {}): ResolvedRow => ({
+  row: row(),
+  disposition: 'create',
+  userId: null,
+  membershipId: null,
+  pool: 'candidate',
+  ...over,
+});
+
+describe('landImportRow', () => {
+  beforeEach(() => {
+    vi.mocked(writePlacement).mockResolvedValue({ ok: true });
+    vi.mocked(insertUserWithUsername).mockResolvedValue({ id: 'u-new', email: 'jane@example.com' } as never);
+  });
+
+  it('does nothing for a duplicate row — the first occurrence did the work (R1)', async () => {
+    const { db, inserted, updated } = landDb();
+    const out = await landImportRow(db, ORG, resolvedRow({ disposition: 'duplicate' }), SEED);
+    expect(out).toEqual({ kind: 'duplicate' });
+    expect(inserted).toHaveLength(0);
+    expect(updated).toHaveLength(0);
+    expect(vi.mocked(writePlacement)).not.toHaveBeenCalled();
+  });
+
+  it('creates the person, membership and profile on a create row', async () => {
+    const { db, inserted } = landDb({ activeCount: 0 });
+    const out = await landImportRow(db, ORG, resolvedRow(), SEED);
+    expect(out).toMatchObject({ kind: 'created', userId: 'u-new', membershipId: 'm-new' });
+    expect(vi.mocked(insertUserWithUsername)).toHaveBeenCalledOnce();
+    // The profile is written through the upsert, never a bare insert.
+    expect(inserted.find((i) => i.via === 'upsert')).toBeTruthy();
+  });
+
+  it('upserts the profile on a reactivate row, so an existing profile does not fail it (R63)', async () => {
+    // Deactivation never deletes the profile, so a returning worker already has
+    // one; a bare insert would hit member_profiles_membership_uq. The upsert path
+    // is what keeps the reactivation from failing.
+    const { db, inserted, updated } = landDb({ activeCount: 0 });
+    const out = await landImportRow(
+      db,
+      ORG,
+      resolvedRow({ disposition: 'reactivate', userId: 'u-1', membershipId: 'm-1' }),
+      SEED,
+    );
+    expect(out).toMatchObject({ kind: 'reactivated', membershipId: 'm-1' });
+    expect(updated).toContainEqual({ status: 'active', role: 'candidate' });
+    expect(inserted.every((i) => i.via === 'upsert')).toBe(true);
+  });
+
+  it('refuses a row for want of a seat, writing nothing (R170)', async () => {
+    const { db } = landDb({ org: { id: ORG, planTier: 'business', seatLimit: 15, candidateSeatLimit: 1 }, activeCount: 1 });
+    const out = await landImportRow(db, ORG, resolvedRow(), SEED);
+    expect(out).toEqual({ kind: 'refused', reason: 'seat_limit_reached', pool: 'candidate' });
+  });
+
+  it('refuses a row whose placement no longer validates, rather than landing it unplaced (R119)', async () => {
+    // The taxonomy retired a Role between the preview and the run: writePlacement
+    // returns a refusal, and landImportRow must surface it, not commit a member
+    // with no placement.
+    vi.mocked(writePlacement).mockResolvedValue({ ok: false, error: { code: 'role_not_offered', subjectId: 'jr-9' } });
+    const { db } = landDb({ activeCount: 0 });
+    const out = await landImportRow(db, ORG, resolvedRow(), SEED);
+    expect(out).toEqual({ kind: 'refused', reason: 'placement_invalid', code: 'role_not_offered', subjectId: 'jr-9' });
+  });
+
+  it('reports differences on a merge row without writing (R19)', async () => {
+    const { db, inserted, updated } = landDb({ mergeMembership: { id: 'm-1', role: 'assessor' } });
+    const out = await landImportRow(
+      db,
+      ORG,
+      resolvedRow({ disposition: 'merge', userId: 'u-1', membershipId: 'm-1', pool: null }),
+      SEED,
+    );
+    expect(out.kind).toBe('merged');
+    if (out.kind === 'merged') {
+      expect(out.differences).toContainEqual({ field: 'accessLevel', existing: 'assessor', fromFile: 'candidate' });
+    }
+    expect(inserted).toHaveLength(0);
+    expect(updated).toHaveLength(0);
   });
 });

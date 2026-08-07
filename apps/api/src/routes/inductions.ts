@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import {
   assessInductionReadiness,
@@ -423,9 +423,12 @@ inductionsRouter.get('/candidates/:id/profile-seed', requireMachineOrTenant, wit
     roles: jobRoles.filter((r) => r.status !== 'retired').map((r) => r.name),
   });
 
-  // The address match, U28's, read here rather than re-implemented.
+  // The address match, U28's, read here rather than re-implemented. Compared
+  // case-insensitively because users.email is stored as entered — matching the
+  // lowercased seed address against the raw column would miss an existing member
+  // whose stored address has any capital, and seed them as a new person.
   const existingUser = seed.email
-    ? await db.query.users.findFirst({ where: eq(schema.users.email, seed.email.toLowerCase()) })
+    ? await db.query.users.findFirst({ where: eq(sql`lower(${schema.users.email})`, seed.email.toLowerCase()) })
     : undefined;
   const membership = existingUser
     ? await db.query.memberships.findFirst({

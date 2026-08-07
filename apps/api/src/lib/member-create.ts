@@ -1,8 +1,9 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema, type Db } from '@formai/db';
 import {
   blocksForOverflow,
   emptyOptionalProfileFields,
+  type PlacementErrorCode,
   type SeatBlockPurchase,
   type Role,
   type ValidProfileRow,
@@ -73,7 +74,15 @@ export type RowDisposition =
   /** They hold a deactivated membership here — return it to active. Costs a seat (R78). */
   | 'reactivate'
   /** They are already an active member — keep it, report differences, cost nothing. */
-  | 'merge';
+  | 'merge'
+  /**
+   * A second (or later) row for an address an EARLIER row in this file already
+   * handled. Costs nothing and does nothing on landing — the first row is what
+   * created or matched the person (R1: one membership per person per org). Kept
+   * distinct from `merge` so the run does not try to diff or land it against ids
+   * the first occurrence may not have produced yet.
+   */
+  | 'duplicate';
 
 export interface ResolvedRow {
   row: ValidProfileRow;
@@ -97,8 +106,13 @@ export interface ResolvedRow {
  */
 export async function resolveRows(db: Db, orgId: string, rows: readonly ValidProfileRow[]): Promise<ResolvedRow[]> {
   const addresses = [...new Set(rows.map((r) => r.email.toLowerCase()))];
+  // Compare case-insensitively: users.email is stored as entered (never
+  // normalised on write), so a raw `email IN (...)` of lowercased addresses
+  // misses an existing member whose stored address has any capital — resolving
+  // them to `create` and forking a second users row for the same person. Mirror
+  // the `lower(email)` comparison team.ts and invites.ts already use.
   const users = addresses.length
-    ? await db.query.users.findMany({ where: inArray(schema.users.email, addresses) })
+    ? await db.query.users.findMany({ where: inArray(sql`lower(${schema.users.email})`, addresses) })
     : [];
   const userByEmail = new Map(users.map((u) => [u.email.toLowerCase(), u]));
 
@@ -131,13 +145,15 @@ export async function resolveRows(db: Db, orgId: string, rows: readonly ValidPro
     else disposition = 'reactivate';
 
     /*
-      A repeat of an address an earlier row already handled costs nothing more,
-      whatever it would have cost on its own: after that row lands there IS an
-      active membership, so this one is a merge. Counting it again would
-      over-state the bill on a file with a duplicated row.
+      A repeat of an address an earlier row already handled costs nothing more
+      and does nothing on landing — the first row is what created or matched the
+      person. It is a DUPLICATE, not a merge: a first occurrence resolving to
+      `create`/`add_membership` has produced no user/membership id yet, so
+      calling it a merge (which lands and diffs against those ids) would deref
+      nulls. Counting it again would also over-state the bill.
     */
     const repeated = seen.has(key);
-    if (repeated) disposition = 'merge';
+    if (repeated) disposition = 'duplicate';
     seen.add(key);
 
     resolved.push({
@@ -145,7 +161,7 @@ export async function resolveRows(db: Db, orgId: string, rows: readonly ValidPro
       disposition,
       userId: user?.id ?? null,
       membershipId: membership?.id ?? null,
-      pool: disposition === 'merge' ? null : poolFor(row.role),
+      pool: disposition === 'merge' || disposition === 'duplicate' ? null : poolFor(row.role),
     });
   }
   return resolved;
@@ -250,7 +266,15 @@ export async function previewImportCost(
 export type LandingOutcome =
   | { kind: 'created' | 'added' | 'reactivated'; userId: string; membershipId: string; incomplete: string[] }
   | { kind: 'merged'; userId: string; membershipId: string; differences: RowDifference[] }
-  | { kind: 'refused'; reason: 'seat_limit_reached'; pool: 'staff' | 'candidate' };
+  /** A repeat of an address an earlier row already handled — nothing written. */
+  | { kind: 'duplicate' }
+  | { kind: 'refused'; reason: 'seat_limit_reached'; pool: 'staff' | 'candidate' }
+  /**
+   * The placement the file names is no longer valid against the org's active
+   * taxonomy — a Location, Department or Role retired between the preview and the
+   * run (R119). Refused rather than landed unplaced; the run reports the code.
+   */
+  | { kind: 'refused'; reason: 'placement_invalid'; code: PlacementErrorCode; subjectId?: string };
 
 /** A value the row carries that the existing active membership does not (R19). */
 export interface RowDifference {
@@ -277,6 +301,19 @@ export interface ProfileSeed {
  * straight past the caps the preview quoted, and two runs against the same last
  * seat would both take it.
  */
+/**
+ * A placement that no longer validates, thrown to roll the whole row back from
+ * inside its transaction and translated into a `placement_invalid` refusal
+ * outside it. `writePlacement` returns rather than throws, so without this a
+ * refusal would be silently dropped and the member landed active but unplaced.
+ */
+class PlacementRefusedError extends Error {
+  constructor(readonly refusal: { code: PlacementErrorCode; subjectId?: string }) {
+    super('placement_invalid');
+    this.name = 'PlacementRefusedError';
+  }
+}
+
 export async function landImportRow(
   db: Db,
   orgId: string,
@@ -285,82 +322,111 @@ export async function landImportRow(
 ): Promise<LandingOutcome> {
   const { row, disposition } = resolved;
 
+  if (disposition === 'duplicate') {
+    // An address an earlier row already handled: the first row did the work.
+    return { kind: 'duplicate' };
+  }
+
   if (disposition === 'merge') {
     // Costs no seat and writes no placement: report the differences instead.
     const differences = await differencesAgainst(db, resolved);
     return { kind: 'merged', userId: resolved.userId!, membershipId: resolved.membershipId!, differences };
   }
 
-  return db.transaction(async (tx) => {
-    const org = await lockOrgForSeats(tx, orgId);
-    if (org) {
-      const check = await checkSeatAvailability(tx, org, row.role);
-      if (!check.ok) {
-        // Rolls back to nothing; the run reports it and continues (R170).
-        return { kind: 'refused', reason: 'seat_limit_reached', pool: check.pool } as const;
+  try {
+    return await db.transaction(async (tx) => {
+      const org = await lockOrgForSeats(tx, orgId);
+      if (org) {
+        const check = await checkSeatAvailability(tx, org, row.role);
+        if (!check.ok) {
+          // Rolls back to nothing; the run reports it and continues (R170).
+          return { kind: 'refused', reason: 'seat_limit_reached', pool: check.pool } as const;
+        }
       }
-    }
 
-    let userId = resolved.userId;
-    if (!userId) {
-      // R21: issued in the same transaction as the row it belongs to.
-      const created = await insertUserWithUsername(
-        tx,
-        { name: row.name, email: row.email },
-        { firstName: profile.firstName, lastName: profile.lastName },
-      );
-      userId = created.id;
-    }
+      let userId = resolved.userId;
+      if (!userId) {
+        // R21: issued in the same transaction as the row it belongs to.
+        const created = await insertUserWithUsername(
+          tx,
+          { name: row.name, email: row.email },
+          { firstName: profile.firstName, lastName: profile.lastName },
+        );
+        userId = created.id;
+      }
 
-    let membershipId = resolved.membershipId;
-    if (membershipId) {
-      // R19/R78: a row asserting somebody is part of the workforce being
-      // imported is an assertion that they are back. The competencies
-      // deactivation retained need no action — nothing revoked them (R63, R69).
-      await tx
-        .update(schema.memberships)
-        .set({ status: 'active', role: row.role })
-        .where(eq(schema.memberships.id, membershipId));
-    } else {
-      const [created] = await tx
-        .insert(schema.memberships)
-        // ACTIVE immediately: an import creates members, not invitations (R80).
-        .values({ orgId, userId, role: row.role, status: 'active' })
-        .returning();
-      membershipId = created!.id;
-    }
+      let membershipId = resolved.membershipId;
+      if (membershipId) {
+        // R19/R78: a row asserting somebody is part of the workforce being
+        // imported is an assertion that they are back. The competencies
+        // deactivation retained need no action — nothing revoked them (R63, R69).
+        await tx
+          .update(schema.memberships)
+          .set({ status: 'active', role: row.role })
+          .where(eq(schema.memberships.id, membershipId));
+      } else {
+        const [created] = await tx
+          .insert(schema.memberships)
+          // ACTIVE immediately: an import creates members, not invitations (R80).
+          .values({ orgId, userId, role: row.role, status: 'active' })
+          .returning();
+        membershipId = created!.id;
+      }
 
-    /*
-      The SAME writer the team screen places through (R155), so an import cannot
-      land a placement the screen would refuse. It opens a nested transaction,
-      which Postgres runs as a savepoint inside ours — the row still lands or
-      rolls back whole.
-    */
-    await writePlacement(tx as unknown as Db, orgId, membershipId, {
-      locationIds: row.locationIds,
-      departmentIds: row.departmentIds,
-      roleIds: row.roleIds,
-    });
-
-    const values = {
-      ...profile,
-      employeeNumber: row.employeeNumber.trim() || null,
-      swipeCardNumber: row.swipeCardNumber.trim() || null,
-    };
-    await tx.insert(schema.memberProfiles).values({ orgId, membershipId, ...values } as never);
-
-    return {
-      kind: resolved.disposition === 'create' ? 'created' : resolved.disposition === 'reactivate' ? 'reactivated' : 'added',
-      userId,
-      membershipId,
       /*
-        R19: a row that lands with optional fields empty is FLAGGED naming
-        exactly what it left empty, rather than having whoever ran the import
-        invent demographic answers for a worker they may never speak to.
+        The SAME writer the team screen places through (R155), so an import
+        cannot land a placement the screen would refuse. It opens a nested
+        transaction, which Postgres runs as a savepoint inside ours — the row
+        still lands or rolls back whole. It RETURNS a refusal rather than
+        throwing when the active taxonomy no longer admits the placement (a
+        Location/Department/Role retired since the preview, R119); throw it so
+        this row rolls back whole rather than committing a member with no
+        placement, and the run reports the code.
       */
-      incomplete: emptyOptionalProfileFields(values),
-    } as const;
-  });
+      const placement = await writePlacement(tx, orgId, membershipId, {
+        locationIds: row.locationIds,
+        departmentIds: row.departmentIds,
+        roleIds: row.roleIds,
+      });
+      if (!placement.ok) throw new PlacementRefusedError(placement.error);
+
+      const values = {
+        ...profile,
+        employeeNumber: row.employeeNumber.trim() || null,
+        swipeCardNumber: row.swipeCardNumber.trim() || null,
+      };
+      /*
+        A reactivated or re-imported member already carries a profile row —
+        deactivation never deletes it (R63) — so a bare INSERT hits
+        member_profiles_membership_uq. Upsert refreshes the existing row from the
+        file instead of failing the run.
+      */
+      await tx
+        .insert(schema.memberProfiles)
+        .values({ orgId, membershipId, ...values } as typeof schema.memberProfiles.$inferInsert)
+        .onConflictDoUpdate({
+          target: schema.memberProfiles.membershipId,
+          set: values as Partial<typeof schema.memberProfiles.$inferInsert>,
+        });
+
+      return {
+        kind: resolved.disposition === 'create' ? 'created' : resolved.disposition === 'reactivate' ? 'reactivated' : 'added',
+        userId,
+        membershipId,
+        /*
+          R19: a row that lands with optional fields empty is FLAGGED naming
+          exactly what it left empty, rather than having whoever ran the import
+          invent demographic answers for a worker they may never speak to.
+        */
+        incomplete: emptyOptionalProfileFields(values),
+      } as const;
+    });
+  } catch (e) {
+    if (e instanceof PlacementRefusedError) {
+      return { kind: 'refused', reason: 'placement_invalid', code: e.refusal.code, subjectId: e.refusal.subjectId };
+    }
+    throw e;
+  }
 }
 
 /** What the row says that the existing active membership does not (R19). */

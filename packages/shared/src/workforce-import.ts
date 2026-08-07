@@ -164,6 +164,7 @@ export type ImportRejectionReason =
   | 'role_not_offered'
   | 'too_many_roles'
   | 'unknown_competency'
+  | 'unknown_profile_email'
   | 'bad_grant_date'
   /*
     R7: both workforce numbers are unique WITHIN the organisation, which is what
@@ -400,13 +401,25 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
   }
 
   // Competency lines — the competency must be one a tool awards (R167) and the
-  // grant date must read (R167). A line naming an email no valid profile carries
-  // is dropped silently: the profile it belonged to was itself rejected, so its
-  // rejection already tells the Admin what to fix.
+  // grant date must read (R167).
+  //
+  // A line whose email matches a profile row that was itself REJECTED is dropped
+  // silently: that profile's own rejection already tells the Admin what to fix,
+  // and repeating it against the competency line would be noise. But a line
+  // naming an address NO profile row in the file carries is a typo naming
+  // nobody — dropping it silently would lose a grant with no trace, so it is a
+  // named rejection (R170).
+  const profileEmails = new Set(parsed.profiles.map((p) => p.email.toLowerCase()));
   const validCompetencies: ValidCompetencyRow[] = [];
   for (const row of parsed.competencies) {
     const subject = row.email || `row ${row.rowNumber}`;
-    if (!validEmails.has(row.email.toLowerCase())) continue;
+    const key = row.email.toLowerCase();
+    if (!validEmails.has(key)) {
+      if (!profileEmails.has(key)) {
+        rejected.push({ rowNumber: row.rowNumber, subject, reason: 'unknown_profile_email', detail: row.email });
+      }
+      continue;
+    }
     const competencyId = ctx.awardedCompetenciesByName.get(row.competency.trim().toLowerCase());
     if (!competencyId) {
       rejected.push({ rowNumber: row.rowNumber, subject, reason: 'unknown_competency', detail: row.competency });

@@ -179,6 +179,17 @@ describe('validateWorkforceImport — one test per rejection reason', () => {
     ].join('\n');
     expect(reasons(file)).toEqual(['bad_grant_date']);
   });
+  it('a competency line whose email names no profile row in the file (R170)', () => {
+    // A typo naming nobody — dropping it silently would lose the grant with no
+    // trace, so it is a named rejection.
+    const file = [
+      profileFile(),
+      '#competencies',
+      'email,competency,grant_date,evidence',
+      'typo@example.com,ATO - Track Dozer,2023-01-15,',
+    ].join('\n');
+    expect(reasons(file)).toEqual(['unknown_profile_email']);
+  });
 });
 
 describe('validateWorkforceImport — deliberate non-rejections and volume', () => {
@@ -188,6 +199,19 @@ describe('validateWorkforceImport — deliberate non-rejections and volume', () 
     const { validProfiles, rejected } = validateFile(profileFile({ email: 'existing@example.com' }));
     expect(rejected).toEqual([]);
     expect(validProfiles).toHaveLength(1);
+  });
+
+  it('drops a competency line silently when its own profile row was rejected', () => {
+    // The profile row carries that email but was rejected for a missing access
+    // level; its rejection already names the fix, so the competency line beneath
+    // it is dropped silently rather than flagged a second time.
+    const file = [
+      profileFile({ access_level: '' }),
+      '#competencies',
+      'email,competency,grant_date,evidence',
+      'ada@example.com,ATO - Track Dozer,2023-01-15,',
+    ].join('\n');
+    expect(reasons(file)).toEqual(['missing_access_level']);
   });
 
   it('validates 293 good rows and rejects 7 naming a missing Role, each with a reason (R170)', () => {

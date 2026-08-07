@@ -104,7 +104,14 @@ function fakeDb(
         findFirst: vi.fn().mockResolvedValue(opts.org ?? { id: 'org-1', planTier: 'business' }),
       },
       users: { findFirst: vi.fn().mockResolvedValue(opts.user) },
-      memberships: { findFirst: vi.fn().mockResolvedValue(opts.membership) },
+      memberships: {
+        // The FIRST read is the auth middleware revalidating the CALLER's own
+        // membership (a miss fails open, so the admin proceeds); the route's own
+        // subject lookup is every read after. Without the once-undefined the
+        // caller would be revalidated against the SUBJECT's membership and, for a
+        // suspended subject, 401 the admin doing the acting.
+        findFirst: vi.fn().mockResolvedValueOnce(undefined).mockResolvedValue(opts.membership),
+      },
       departments: {
         findMany: vi
           .fn()
