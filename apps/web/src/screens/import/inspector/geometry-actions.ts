@@ -11,6 +11,7 @@ import type { FormField, GeometryBand, GroupOrdinal, PageBox, RepeatingColumn } 
 import { markPlacement, resolveGeometry } from '@formai/shared';
 import type {
   FieldProposal,
+  MatchAnchorSpec,
   PositionedText,
   TableProposal,
   TextPage,
@@ -18,6 +19,7 @@ import type {
 import {
   proposeFieldOptionCells,
   proposeInlineOptionCells,
+  proposeMatchAnchorCells,
   proposeTableSegments,
 } from '../../../lib/pdf-geometry.js';
 
@@ -1311,6 +1313,43 @@ export function deriveOptionCellsAcrossPages(
     if (p) hits.push(p);
     // Two pages both claiming this question is the ambiguous case that matters;
     // stop as soon as it is established rather than scanning on.
+    if (hits.length > 1) return null;
+  }
+
+  return hits[0] ?? null;
+}
+
+/**
+ * Propose every anchor of a matching question, across the whole document.
+ *
+ * The counterpart to `deriveOptionCellsAcrossPages`, for the one field shape
+ * that derivation cannot read: a matching question's options are PAIRINGS, and a
+ * pairing is a thing the candidate might do rather than a thing the page prints,
+ * so matching a field's options against the text layer could only ever hit by
+ * coincidence. Its printed ENTRIES are what exist, and anchors are keyed to
+ * those.
+ *
+ * Same refusal on document-wide ambiguity, and for the same reason: a question
+ * claimed by two pages is a question the document does not place, and anchoring
+ * the wrong page's copy draws every one of the candidate's lines onto text they
+ * never read.
+ */
+export function deriveMatchAnchorsAcrossPages(
+  anchors: readonly MatchAnchorSpec[],
+  pages: readonly TextPage[],
+): FieldProposal | null {
+  if (anchors.length < 2) return null;
+
+  const hits: FieldProposal[] = [];
+  for (const [i, page] of pages.entries()) {
+    const p = proposeMatchAnchorCells({
+      page: i,
+      pageWidth: page.width,
+      pageHeight: page.height,
+      items: page.items,
+      anchors,
+    });
+    if (p) hits.push(p);
     if (hits.length > 1) return null;
   }
 

@@ -3,6 +3,7 @@ import * as pdfjs from 'pdfjs-dist';
 import { Icon } from '@formai/ui';
 import type { ExtractedField, ExtractionStatus, PageBox } from '@formai/shared';
 import type { PositionedText, TextPage } from '../../lib/pdf-geometry.js';
+import { matchAnchorBoxAt } from '../../lib/pdf-geometry.js';
 import {
   DRAW_SNAP_RANGE,
   type Matrix,
@@ -228,6 +229,19 @@ interface PdfViewerProps {
   drawArmed?: boolean;
   /** A hand-drawn, snapped, page-clamped placement box for the selected field. */
   onDrawBox?: (box: PageBox) => void;
+  /**
+   * Draw a CONNECTOR instead of a rectangle, for a matching question.
+   *
+   * The gesture is the shape of the thing being authored. A matching answer is
+   * a line from a statement to a sign — a person doing the question with a pen
+   * draws exactly that — so dragging a rectangle across the gap and calling the
+   * result "two anchors" asks the author to think in a model the page does not
+   * use. In line mode the rubber band IS a line, and its two ends become the
+   * two anchor boxes.
+   */
+  drawLine?: boolean;
+  /** The two ends of a hand-drawn connector, each already a placement box. */
+  onDrawConnector?: (from: PageBox, to: PageBox) => void;
   className?: string;
 }
 
@@ -555,6 +569,8 @@ function DrawSurface({
   ruleXs,
   ruleYs,
   onDrawBox,
+  line = false,
+  onDrawConnector,
 }: {
   pageIndex: number;
   /** Rendered page size in CSS px (tracks zoom). */
@@ -569,10 +585,23 @@ function DrawSurface({
   ruleXs: readonly number[];
   ruleYs: readonly number[];
   onDrawBox?: (box: PageBox) => void;
+  /** Rubber-band a CONNECTOR rather than a rectangle. */
+  line?: boolean;
+  onDrawConnector?: (from: PageBox, to: PageBox) => void;
 }) {
   const surface = useRef<HTMLDivElement>(null);
-  // The live rectangle in CSS px, or null when not dragging.
-  const [rect, setRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  /**
+   * The live drag in CSS px, or null when not dragging.
+   *
+   * Held as its two ORIGINAL corners rather than as a normalized rectangle,
+   * because a connector needs to know which end the author started from and a
+   * `Math.min`/`Math.abs` rectangle has already thrown that away. The box
+   * preview normalizes on the way out, where it always did.
+   */
+  const [drag, setDrag] = useState<{
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+  } | null>(null);
 
   const scaleX = pageWidth / naturalWidth;
   const scaleY = pageHeight / naturalHeight;
@@ -589,37 +618,64 @@ function DrawSurface({
     el.setPointerCapture(e.pointerId);
     const bounds = el.getBoundingClientRect();
     const start = { x: e.clientX - bounds.left, y: e.clientY - bounds.top };
-    setRect({ x: start.x, y: start.y, w: 0, h: 0 });
+    setDrag({ from: start, to: start });
 
     const move = (ev: PointerEvent) => {
-      const cx = ev.clientX - bounds.left;
-      const cy = ev.clientY - bounds.top;
-      setRect({ x: Math.min(start.x, cx), y: Math.min(start.y, cy), w: Math.abs(cx - start.x), h: Math.abs(cy - start.y) });
+      setDrag({
+        from: start,
+        to: { x: ev.clientX - bounds.left, y: ev.clientY - bounds.top },
+      });
     };
     const finish = (ev: PointerEvent, commit: boolean) => {
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);
       el.removeEventListener('pointercancel', cancel);
-      setRect(null);
-      if (!commit || !onDrawBox) return;
+      setDrag(null);
+      if (!commit) return;
       const endX = ev.clientX - bounds.left;
       const endY = ev.clientY - bounds.top;
-      // A press that barely moved is a mis-click, not a box — ignore it rather
-      // than emit a degenerate rectangle.
+      // A press that barely moved is a mis-click, not a gesture — ignore it
+      // rather than emit a degenerate rectangle or a zero-length connector.
       if (Math.hypot(endX - start.x, endY - start.y) < DRAG_THRESHOLD) return;
+      const pageMeta = { page: pageIndex, pageWidth: naturalWidth, pageHeight: naturalHeight };
+
+      if (line) {
+        if (!onDrawConnector) return;
+        /*
+          ONLY THE VERTICAL IS SNAPPED, and that asymmetry is deliberate.
+
+          Each end lands on a printed row, so pulling it onto the nearest text
+          baseline is what makes six anchors line up with six statements
+          instead of wobbling by a point or two. The HORIZONTAL is the author's
+          whole decision — which column, which side of the words — and a rule
+          line running down the middle of the page would drag an end straight
+          into the wrong column if it were snapped too.
+        */
+        const yTargets = ruleYs.length > 0 ? ruleYs : snapTargetsY(items);
+        const range = ruleYs.length > 0 ? RULE_SNAP_RANGE : DRAW_SNAP_RANGE;
+        const endpoint = (sx: number, sy: number) => {
+          const p = toPoints(sx, sy);
+          return matchAnchorBoxAt({ x: p.x, y: snapEdge(p.y, yTargets, range) }, pageMeta);
+        };
+        onDrawConnector(endpoint(start.x, start.y), endpoint(endX, endY));
+        return;
+      }
+
+      if (!onDrawBox) return;
       // Prefer the printed rule-lines — the actual grid the reviewer is tracing —
       // and only fall back to text edges (tightly) when a page carried no rules,
       // so a drawn box no longer jumps to a nearby caption (draw-jump fix).
       const hasRules = ruleXs.length > 0 || ruleYs.length > 0;
-      const box = snapDrawnBox(
-        toPoints(start.x, start.y),
-        toPoints(endX, endY),
-        { page: pageIndex, pageWidth: naturalWidth, pageHeight: naturalHeight },
-        ruleXs.length > 0 ? ruleXs : snapTargets(items),
-        ruleYs.length > 0 ? ruleYs : snapTargetsY(items),
-        hasRules ? RULE_SNAP_RANGE : DRAW_SNAP_RANGE,
+      onDrawBox(
+        snapDrawnBox(
+          toPoints(start.x, start.y),
+          toPoints(endX, endY),
+          pageMeta,
+          ruleXs.length > 0 ? ruleXs : snapTargets(items),
+          ruleYs.length > 0 ? ruleYs : snapTargetsY(items),
+          hasRules ? RULE_SNAP_RANGE : DRAW_SNAP_RANGE,
+        ),
       );
-      onDrawBox(box);
     };
     const up = (ev: PointerEvent) => finish(ev, true);
     const cancel = (ev: PointerEvent) => finish(ev, false);
@@ -637,14 +693,36 @@ function DrawSurface({
       // rather than pan.
       style={{ backgroundColor: 'color-mix(in srgb, var(--accent) 4%, transparent)' }}
     >
-      {rect && (
+      {drag && line && (
+        /*
+          The preview is the SHAPE OF THE THING BEING AUTHORED — a line with a
+          dot at each end, which is what the export draws and what a person
+          draws with a pen. An SVG rather than a rotated div so the ends stay
+          where the pointer is at any zoom.
+        */
+        <svg className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true">
+          <line
+            x1={drag.from.x}
+            y1={drag.from.y}
+            x2={drag.to.x}
+            y2={drag.to.y}
+            stroke="var(--accent)"
+            strokeWidth={1.5}
+            strokeDasharray="4 3"
+          />
+          {[drag.from, drag.to].map((p, i) => (
+            <circle key={i} cx={p.x} cy={p.y} r={3} fill="var(--accent)" />
+          ))}
+        </svg>
+      )}
+      {drag && !line && (
         <div
           className="absolute rounded-[2px]"
           style={{
-            left: rect.x,
-            top: rect.y,
-            width: rect.w,
-            height: rect.h,
+            left: Math.min(drag.from.x, drag.to.x),
+            top: Math.min(drag.from.y, drag.to.y),
+            width: Math.abs(drag.to.x - drag.from.x),
+            height: Math.abs(drag.to.y - drag.from.y),
             border: '1.5px dashed var(--accent)',
             backgroundColor: 'color-mix(in srgb, var(--accent) 12%, transparent)',
           }}
@@ -669,6 +747,8 @@ export function PdfViewer({
   onMoveBox,
   drawArmed = false,
   onDrawBox,
+  drawLine = false,
+  onDrawConnector,
   className = '',
 }: PdfViewerProps) {
   const [pages, setPages] = useState<PageRender[]>([]);
@@ -1066,6 +1146,8 @@ export function PdfViewer({
                     ruleXs={page.ruleXs}
                     ruleYs={page.ruleYs}
                     onDrawBox={onDrawBox}
+                    line={drawLine}
+                    onDrawConnector={onDrawConnector}
                   />
                 )}
               </div>
