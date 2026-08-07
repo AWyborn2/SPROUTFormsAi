@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { PLAN_CONFIG, PLAN_TIERS, schema, type Db } from '@formai/db';
 import { ROLES } from '@formai/shared';
-import { provisionTenant } from './tenant-provisioning.js';
+import { DeactivatedMemberError, provisionTenant } from './tenant-provisioning.js';
 
 class UniqueViolation extends Error {
   code = '23505';
@@ -28,7 +28,7 @@ function insertRejects(err: unknown) {
 
 function mockDb(opts: {
   existingUser?: { id: string; name: string; email: string };
-  existingMemberships?: { orgId: string; role: string }[];
+  existingMemberships?: { orgId: string; role: string; status?: string }[];
   newUserId?: string;
   newOrgId?: string;
   userInsertConflict?: boolean;
@@ -106,6 +106,48 @@ describe('provisionTenant', () => {
     const tenant = await provisionTenant(db, profile);
 
     expect(tenant).toEqual({ userId: 'u1', orgId: 'o1', role: 'admin' });
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it('skips a deactivated membership and resolves an active one instead (R1, R64)', async () => {
+    /*
+      Deactivation retains the membership rather than deleting it (R62), so the
+      row a leaver held is precisely the row this used to return — a fresh
+      seven-day session at their old access level. Shutting live sessions while
+      leaving the front door open would be no closure at all.
+
+      Being deactivated by one organisation says nothing about the others: a
+      contractor working for two customers keeps the second when the first lets
+      them go.
+    */
+    const { db, insert } = mockDb({
+      existingUser: { id: 'u1', name: profile.name, email: profile.email },
+      existingMemberships: [
+        { orgId: 'o1', role: 'admin', status: 'suspended' },
+        { orgId: 'o2', role: 'assessor', status: 'active' },
+      ],
+    });
+
+    const tenant = await provisionTenant(db, profile);
+
+    expect(tenant).toEqual({ userId: 'u1', orgId: 'o2', role: 'assessor' });
+    // Still a returning user — no new organisation is invented for them.
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it('refuses when every membership they hold is deactivated (R64)', async () => {
+    const { db, insert } = mockDb({
+      existingUser: { id: 'u1', name: profile.name, email: profile.email },
+      existingMemberships: [{ orgId: 'o1', role: 'admin', status: 'suspended' }],
+    });
+
+    await expect(provisionTenant(db, profile)).rejects.toThrow(DeactivatedMemberError);
+    /*
+      A refusal, NOT a fresh workspace. Falling through to the new-org path
+      would hand a leaver an organisation of their own on the strength of having
+      been deactivated — the login route turns this throw into the same 401 a
+      wrong password gets.
+    */
     expect(insert).not.toHaveBeenCalled();
   });
 

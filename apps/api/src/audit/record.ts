@@ -7,6 +7,15 @@ export interface AuditInput {
   target?: string;
   category: AuditCategory;
   icon?: string;
+  /**
+   * The profile inventory's key for the field this entry covers (R57, R58).
+   *
+   * Set only by a per-field write. R58's filter compares it against the
+   * inventory's sensitive marks, which is why it is a column rather than
+   * something parsed out of `target` — a filter over free text would have to
+   * pattern-match the very prose holding the values it is hiding.
+   */
+  field?: string | null;
 }
 
 /**
@@ -23,6 +32,7 @@ export async function recordAudit(db: Db, tenant: TenantContext, input: AuditInp
     action: input.action,
     target: input.target ?? '',
     category: input.category,
+    field: input.field ?? null,
     icon: input.icon ?? 'activity',
   });
 }
@@ -35,6 +45,8 @@ export function auditEntryDto(r: typeof schema.auditLogEntries.$inferSelect) {
     action: r.action,
     target: r.target,
     category: r.category,
+    /** Null on every entry that is not about one profile field (R57). */
+    field: r.field,
     icon: r.icon,
     createdAt: r.createdAt.toISOString(),
   };

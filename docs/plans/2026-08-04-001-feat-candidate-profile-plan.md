@@ -4,7 +4,7 @@ type: feat
 date: 2026-08-04
 topic: candidate-profile
 artifact_contract: ce-unified-plan/v1
-artifact_readiness: requirements-only
+artifact_readiness: implementation-ready
 product_contract_source: ce-brainstorm
 execution: code
 ---
@@ -14,9 +14,12 @@ execution: code
 ## Goal Capsule
 
 - **Objective.** Give every member of an organisation a full workforce record — personal details, organisation-assigned identifiers, where they are placed, documents, competencies and assessment history — held on the person rather than scattered across form submissions.
-- **Blocking prerequisite.** The Organisation Settings work in `docs/plans/2026-08-04-002-feat-organisation-settings-plan.md`, which builds the Location and Department lists and, within each Department, the Roles that Department offers. A profile cannot carry a Department until a customer can create one. That artifact also owns eight rules this one references rather than restates: voluntary training, competency expiry notification, compliance reporting, how standing is derived from Roles and how it splits from currency, assignment filling gaps and expiry reopening them, the pooled case that names no assessor, the union of parts across a person's Locations, and automatic marking together with the attribution a part it marks records.
-- **Still open.** A selection of what Outstanding Questions carries, not the whole of it. How the new permission matrix category is divided — one switch for the whole profile or a switch per field, which are very different products and which decides the shape of the central mechanism here. Whether a Business organisation may buy expansion blocks or must move tier once it fills its allocation, what a purchased seat block is over time, and which block size an overflow adds. What an action past a full staff allocation does, now that an import row names its own access level and every row naming anything but Candidate draws on the staff pool.
-- **Not in this artifact.** The Assessor access level expansion, the mechanism that runs automatic assignment, and the interface that issues an invitation.
+- **Authority.** The Product Contract below is the target and outranks the code wherever the two disagree. `packages/db/src/plans.ts` is the standing example of that and is not edited by this plan under KTD27. The Organisation Settings artifact `docs/plans/2026-08-04-002-feat-organisation-settings-plan.md` owns eight rules this one references rather than restates — voluntary training, expiry notification, what compliance reporting counts of a competency, the standing and currency split, assignment filling gaps with expiry reopening them, the pooled case that names no assessor, the union of parts across a person's Locations, and automatic marking with the attribution it records — and its statement of each wins.
+- **Prerequisite, now met.** That artifact's Phase A shipped the Location and Department lists and the Roles each Department offers, so a membership can carry them. Phases B through G shipped alongside it; `Repo state at planning time` records what that changes for this plan, and several of the Product Contract's own grounding notes are superseded there rather than in place.
+- **Execution profile.** Sixteen units, U25 to U40, across four phases. Phase J alone unblocks the second half of the workforce import in the sibling artifact; nothing later here is a prerequisite for it.
+- **Stop conditions.** A unit that appears to need `packages/db/src/plans.ts` edited, a second permission category beside the `profiles` one that already ships, or a rule the Organisation Settings artifact owns re-derived here has hit a stop condition.
+- **Tail.** Each unit is one commit naming its U-ID. Progress is derived from git; this document records decisions and is not updated as work lands.
+- **Not in this artifact.** The Assessor access level expansion, the mechanism that runs automatic assignment, the import surface itself, and the interface that issues an invitation.
 
 ---
 
@@ -956,3 +959,1182 @@ AE58. **Covers:** R19, R69, R78, R80.
 - `apps/web/src/lib/data/types.ts:150-154` — the frontend hardcodes five role names and offers four in the invite dialog, so neither an assessor nor a candidate can currently be invited through the UI, and this is where the rename to access levels bites.
 - `docs/plans/2026-08-04-002-feat-organisation-settings-plan.md` — the Organisation Settings artifact this work depends on. It builds the Location, Department and Role lists a profile carries — the Roles among them held per Department and each Department governing its own count, which R4, R6, R111 and R114 read — and it owns the eight rules R95, R96, R98, R99, R115, R116, R117 and R118 reference: voluntary training, expiry notification, compliance reporting, the derivation of standing from Roles and its split from currency, assignment filling gaps with expiry reopening them, the pooled case with its shared queue, its staying unowned, its Location and both tie-breaks, and its surfacing once overdue, the union of parts across Locations, and automatic marking together with the attribution a part marked automatically carries. It also owns four rules referenced where they bear on the profile rather than as headings of their own: what a record points at and therefore what a rename reaches, under R4; reinstatement of a withdrawn Role and the clearing of a review when a retired value returns to active, under R107 and R108; what an import does with a matching email address, a rule-breaking row and a competency line carrying no grant date, under R19 and R105; and what a removal's blast-radius preview reports, under R97. It also settles what the prerequisite warning and the appeal conflict rule do on a case naming no assessor — the field is empty, both read it and neither breaks — which is why this artifact carries no question about it. In the other direction it relies on this artifact for the field inventory including the unreachable address mark and the two surfaces that mark reaches, the identifiers, the documents, seats including what an import's rows cost in each pool and what it states about both before it runs, the member lifecycle including the reactivation an import row performs, and the matrix profile category's contents and defaults.
 - `docs/plans/2026-07-28-001-feat-multi-part-assessment-workflow-plan.md` — the prior plan establishing the Candidate access level, assessor competency eligibility and separate candidate seat metering.
+
+---
+
+## Planning Contract
+
+**Product Contract preservation.** Product Contract unchanged. No requirement, actor, flow, acceptance example or scope boundary above was edited. Several of its `Dependencies and Assumptions` and `Sources` observations have been overtaken by work that shipped after it was written; those are corrected below rather than in place, so the product decisions and the repo grounding stay separable on review.
+
+### Repo state at planning time
+
+The contract was written against a branch state that Phases B to G of the sibling artifact have since moved. Each item below supersedes a `Dependencies and Assumptions` or `Sources` bullet above.
+
+- **The permission matrix already carries the profile category.** `packages/shared/src/roles.ts` ships a seventh category, `profiles`, with `view`, `edit` and `approve` as distinct actions, and an Assessor default of view and approve without edit. R40's "the matrix carries no such category" is superseded: the category exists and R55's default is already the shipped one. What does not exist is anything for it to govern, which is why R39 lands as enforcement work rather than as configuration work.
+- **Currency already carries the four dated states and nothing else.** `packages/shared/src/competency-expiry.ts` exports `CompetencyStatus` as held, expiring, grace and expired, with revocation carried separately. R100's change to the competency model has landed.
+- **Revocation is already decisive wherever currency is read.** The assignment engine resolves each held competency to a dated state plus a revoked flag and treats a revoked grant as not held (`packages/shared/src/assignment.ts`, `apps/api/src/lib/assignment.ts`), and the candidate prerequisite check filters `revokedAt IS NULL` (`apps/api/src/routes/assessments.ts`). R101's consequences are in force; this plan asserts them rather than building them.
+- **An access-level change already runs a binding seat check.** `apps/api/src/routes/team.ts` locks the organisation row and counts the target pool when a change crosses pools. The contract's note that this route runs no seat check is superseded; what R86 still needs is expansion in place of refusal.
+- **The pooled case, the marking-time eligibility warning and answer-key marking have all landed.** A case may name no assessor, the shared queue exists, eligibility is checked and warned at marking, and an automatically marked attempt records a marker kind rather than a name (`attemptMarkerKindEnum` in `packages/db/src/schema/enums.ts`). R114 to R118 read behaviour that now exists.
+- **The organisation's choice of display identifier has landed; the identifiers have not.** `organizations.displayIdentifier` is an enum column defaulting to the employee number. R7's setting is built and R24's fallback has nothing to fall back through yet.
+- **Expiry notification lead time is per-organisation configuration.** `organizations.notificationLeadDays` defaults to thirty, and the sweep and the sent-notice record exist. The contract's open question on lead time and channel is answered by that work.
+- **The working list and compliance reporting are built and are waiting on this plan.** `apps/api/src/routes/working-list.ts` ships three of the sources R20 names and its own comment names the two it expects from here; `apps/api/src/routes/compliance.ts` returns an empty unreachable list for the same reason. Both gain their remaining source rather than being rebuilt.
+- **The person record still holds no workforce data and no username.** `packages/db/src/schema/organizations.ts` carries id, Clerk id, a single `name`, a product-wide unique email, a password hash and a created-at. The first and last name R3 derives a display name from do not exist as separate fields anywhere.
+- **The import parser and validator have landed and have nowhere to write.** `packages/shared/src/workforce-import.ts` produces a validated row carrying an employee number and a swipe card number that no table can store, which is the blockage U28 clears.
+
+### Key Technical Decisions
+
+KTD numbering continues the sibling artifact's rather than restarting, so a citation of "KTD17" means one decision across both documents. Implementation Units do the same, starting at U25.
+
+KTD18. **The profile is its own table keyed one-to-one on the membership.** R1 resolves a profile to a person and to that person's single membership, and makes one organisation's view of a person unreachable from another's. Personal detail therefore cannot sit on `users`, which is product-wide and uniquely keyed on an email address shared across every organisation the person works for. It is also too wide to bolt onto `memberships`, which every seat count and permission resolution reads. `member_profiles` carries a unique `membershipId` and an `orgId` for the org-scoped indexes.
+
+KTD19. **Display name and Indigenous status are derived on read and never stored.** R3 and R15 both make a value a function of fields already on the record, so a stored copy is a second source that can disagree with the first. This is the posture KTD6 already took for standing. `isIndigenousEthnicity` in `packages/shared/src/chc-intake.ts` already returns `boolean | null`, which is exactly R15's three values with `null` reading as not stated.
+
+KTD20. **Both workforce identifiers are nullable and unique per organisation by partial index.** R7 requires uniqueness and R12 leaves both optional indefinitely, so a plain unique index would make two people holding neither identifier a collision. A partial unique index over non-null values per organisation gives R7's uniqueness and R24's fallback at once, mirroring the partial-on-active indexes the taxonomy tables already use.
+
+KTD21. **The generated username is a column on `users`, and issuing one happens wherever a `users` row is inserted.** R21 and R23 make it a sign-in identity, and sign-in is product-wide rather than per organisation, so it cannot live on the profile beside the fields it is derived from. R21 says every person the organisation holds a record for, which means the rule binds at the four places a person is actually born: the three inserts into `users` that exist today — first sign-in provisioning, self-signup, and invite acceptance — plus U28's creation service. The team screen is not among them; it inserts an invite row, and the person arrives later. Issuance runs in the same transaction as the insert, so no row can exist without one. Collision under the first-initial-plus-surname-plus-number shape is resolved by re-rolling the suffix inside the issuing function against the unique index, so every caller and the backfill share one rule. The backfill for existing rows runs through that same function rather than through SQL.
+
+KTD22. **The unreachable mark is a nullable timestamp on the profile, not a change to the address.** R16 keeps the address on the record and invalidates no profile, and `users.email` is both unique product-wide and the person-record lookup key, so nothing may be written into or cleared from it. Putting the mark on the profile also scopes it correctly: one organisation's mail bouncing is not a fact about another's.
+
+KTD23. **A competency document is a row pointing at a key the existing uploader minted.** `apps/api/src/routes/uploads.ts` already validates type, size and magic bytes over a provider interface and mints server-side keys. R25 to R32 need retention, supersession and an audited removal, which are a table and its states — not a second store. Nothing about the validator or the key namespace changes.
+
+KTD24. **Document history is expressed as state, never as a delete.** R31 retains a superseded document, R52 retains a rejected replacement and R32 makes outright removal Admin-only, audited and reasoned. One `state` column over held, pending, superseded, rejected and removed carries all four, and every "the document on this competency" read filters to held — the same discipline `revokedAt IS NULL` and `withdrawnAt IS NULL` already state elsewhere.
+
+KTD25. **Competency documents are served by a new grant-checked route, not by the sealed short-lived link and not by the existing attachment route.** This settles the contract's deferred question. The sealed link in `apps/api/src/routes/inductions.ts` exists because its reader is unauthenticated and the token is the credential; every reader of a competency document is an authenticated member whose grant must be checked, so the token would be answering a question the matrix should answer. The existing `GET /uploads/file/*` cannot be reused as-is either, because it checks tenancy and the key namespace but knows nothing about R39's grant or R50's fixed candidate read. The new route reuses the same storage client and the same nosniff, sandbox and private-cache headers.
+
+KTD26. **The category divides by object rather than by field — the profile on one axis, its documents on another.** This settles the contract's open question on how the category divides. The field half is answered by what already shipped: `profiles` carries `view`, `edit` and `approve` and no field dimension, so there is one grant over the profile's fields, and a per-field matrix would be a different product rather than an extension of this one. The object half is not answered, and two requirements need it. R44 makes fields and documents separately configurable, so restricting an access level's reach into fields must not restrict its reach into documents. R41 does the same for competencies and assessment history, which is the read an assessor needs to judge who they may assess and which R55 lets an organisation tighten on its own. One `view` cannot express either split, so an organisation configuring exactly the case the contract describes — assessors out of personal details, still approving certificates — would silently lose the eligibility read as well. U29 therefore adds `view_documents` and `view_competencies` beside the three, exactly as the sibling artifact added `approve` and for the same reason, leaving both absent from every other category's defaults so no existing grant widens. U30's serving route resolves `view_documents` specifically; gating it on `view` would make the new action decorative. R8's sensitive mark is none of these axes: it drives redaction in exports and agent-facing reads, as the inventory note states, and does not decide who sees a field on the profile itself.
+
+KTD27. **Automatic expansion raises the organisation's own candidate seat column by the smallest block; the staff pool keeps refusing.** R86 is written entirely in candidate-seat terms and R84 prices blocks per candidate seat, so the parked billing cluster leaves no staff-side overflow rule to implement — a full staff pool therefore refuses exactly as it does today, and the two-pool preview under R86 reports the staff side as a hard limit rather than as a purchasable one. An overflow adds a block of fifty, the smallest R84 sells: it is the least the action needs and the least an organisation is committed to by a charge it did not ask for, and the contract's open question about a pre-selected size moves a value rather than the mechanism. Expansion writes `organizations.candidateSeatLimit`, which already overrides the tier, so `packages/db/src/plans.ts` is untouched and KTD17 holds across both artifacts. One consequence is worth stating: on the shipped configuration Enterprise resolves to unlimited, so R82's Enterprise arm and the Enterprise half of the contract's two-tier acceptance example cannot fire until the parked reconciliation lands. The mechanism is proved instead against an explicit per-organisation limit, which the column already supports.
+
+KTD28. **Every seat check on a pending invitation goes, for both pools; every check on the acceptance path stays and only the locked ones expand.** R80 makes creating a profile and issuing an invitation consume nothing from either pool and permits both while an allocation is full, so a check that refuses a pending invitation is refusing something that reserves nothing. Two do: the one in `apps/api/src/routes/team.ts` that runs immediately before the invite row is inserted, and the pool-crossing check in that file's pending-invite branch, whose own comment says it exists to stop someone walking around the first. Removing the first without the second leaves the workaround refused while the direct path succeeds. Neither is in `apps/api/src/routes/invites.ts`, whose three checks are all on the acceptance path, where a membership genuinely is created.
+
+Acceptance keeps all three and none is removed, but they divide: each stops refusing on the candidate pool, and only the two inside a transaction holding `lockOrgForSeats` perform the expansion write. The third is deliberately outside that transaction — its comment explains that hashing inside would hold the organisation row lock for the length of a KDF — so it can serialise nothing, and expanding there would let two concurrent signups each add and charge a block. It stops refusing so a signup reaches the transaction that will expand; the transaction does the expanding.
+
+The staff pool is where this decision has a cost worth stating. Removing the creation check there is right under R80, but KTD27 keeps the staff pool refusing at acceptance, so the refusal moves from the Admin at invite time to the invitee at acceptance time. That is a worse place for it, so staff invite creation returns a non-blocking warning naming the full pool — the invitation is still issued, and the Admin still learns.
+
+KTD29. **Profile edits audit through the existing recorder under a new category, and the entries covering sensitive fields are filtered out of a non-Admin audit read.** R57 needs old and new values, which the current `audit_log_entries` shape carries in its free-text target. R58 confines the sensitive ones to Admin, and a Reviewer holds `audit: { view: true }` today, so the read is narrowed by category rather than by role rewrite — which answers the contract's open question about whether R58 narrows a Reviewer. A new `profiles` value on the audit category enum is what makes that filter expressible, and nothing backfills rows to it.
+
+### High-Level Technical Design
+
+What this plan adds, and what points at it:
+
+```mermaid
+erDiagram
+  organizations ||--o{ memberships : has
+  users ||--o{ memberships : holds
+  memberships ||--|| member_profiles : "described by"
+  organizations ||--o{ member_profiles : owns
+  users ||--o{ competency_holders : holds
+  competencies ||--o{ competency_holders : "granted as"
+  competency_holders ||--o{ competency_documents : "evidenced by"
+  organizations ||--o{ competency_documents : owns
+  memberships ||--o{ membership_locations : "placed at"
+  memberships ||--o{ membership_departments : "placed in"
+  memberships ||--o{ membership_roles : holds
+```
+
+`member_profiles` and `competency_documents` are new. The three placement tables and `competency_holders` already exist and are read rather than changed, except for the two licence columns U31 adds. `users` gains one column, the username. A stored file is a key on a row rather than a row of its own: `member_profiles` carries the profile picture's key and `competency_documents` carries each document's, both minted by the uploader that already exists.
+
+A document moves between five states and never leaves by deletion:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Held : Admin or an approver attaches it
+  [*] --> Pending : the candidate supplies a replacement
+  Pending --> Held : an approver accepts it
+  Pending --> Rejected : an approver declines it
+  Held --> Superseded : an accepted replacement takes its place
+  Held --> Removed : Admin removes it, audited and with a reason
+```
+
+Rejected and Superseded are terminal and retained — a rejected replacement records what the candidate submitted and when, and a superseded document records what was held and sighted at the time. Removed is the only state reached by a deliberate Admin act and exists for the document filed against the wrong person. Nothing here changes the competency the document hangs off: an approval, a rejection and an unapproved document all leave its currency, its standing and its prerequisite value exactly as they were.
+
+Who may read what on a profile, and by what route:
+
+```mermaid
+flowchart TB
+  R["A caller opens a member's profile"]
+  OWN{"Is the caller the subject, holding the Candidate access level?"}
+  FIXED["Every field, every competency document, the history in full; writes mobile, address and emergency contact"]
+  M{"Does the matrix grant this access level view on profiles?"}
+  DENY["Nothing is shown"]
+  SHOW["Shown as the grant admits"]
+  E{"Edit granted?"}
+  A{"Approve granted?"}
+  X{"Is this an export or an agent-facing read?"}
+  RED["Sensitive fields redacted; document files not"]
+  R --> OWN
+  OWN -->|yes| FIXED
+  OWN -->|no| M
+  M -->|no| DENY
+  M -->|yes| SHOW
+  SHOW --> E
+  SHOW --> A
+  SHOW --> X
+  X -->|yes| RED
+```
+
+The subject branch is the candidate's alone and bypasses the matrix entirely; every other member reaching their own record goes down the matrix branch like any other caller. Redaction hangs off the export and agent-facing branch rather than off the profile read, which is what keeps the sensitive mark a separate axis from the grant under KTD26. Export itself is not on this diagram because no branch reaches it — it is Admin-only whatever the matrix says.
+
+What a validated import row creates, which is the shape U28 hands the sibling artifact:
+
+```mermaid
+flowchart TB
+  ROW["A validated import row"]
+  A{"Does that address already name a person?"}
+  NEWP["Create the person record; issue a username"]
+  EXIST["Use the person record that exists"]
+  B{"Do they hold a membership of this organisation?"}
+  NEWM["Create an active membership at the level the row names; take a seat from that level's pool"]
+  DEACT["Return the deactivated membership to active; take a seat from that level's pool"]
+  ACTIVE["Keep the membership; take no seat; report every difference"]
+  PROF["Write the profile: names, placement, and each identifier the row carries; flag what it left empty"]
+  ROW --> A
+  A -->|no| NEWP --> NEWM
+  A -->|yes| EXIST --> B
+  B -->|none| NEWM
+  B -->|deactivated| DEACT
+  B -->|active| ACTIVE
+  NEWM --> PROF
+  DEACT --> PROF
+  ACTIVE --> PROF
+```
+
+The deactivated branch is this artifact's contribution rather than the sibling's: a row asserting somebody is part of the workforce being imported is an assertion that they are back, so it costs a seat like any other reactivation and returns the competencies deactivation retained. The active branch is the one that costs nothing and reports rather than overwrites — an import must not be able to demote an administrator on the strength of a column.
+
+Phases and the dependencies that cross them:
+
+```mermaid
+flowchart LR
+  subgraph PJ["J — The record"]
+    U25
+    U26
+    U27
+    U28
+    U29
+  end
+  subgraph PK["K — Documents and evidence"]
+    U30
+    U31
+    U32
+    U33
+    U34
+  end
+  subgraph PL["L — Lifecycle and seats"]
+    U35
+    U36
+    U37
+  end
+  subgraph PM["M — Surfaces, export and seeding"]
+    U38
+    U39
+    U40
+  end
+  U25 --> U26
+  U25 --> U27
+  U26 --> U28
+  U27 --> U28
+  U25 --> U29
+  U26 --> U29
+  U25 --> U30
+  U30 --> U31
+  U30 --> U32
+  U32 --> U33
+  U30 --> U34
+  U28 --> U34
+  U29 --> U34
+  U29 --> U35
+  U25 --> U36
+  U29 --> U36
+  U28 --> U37
+  U35 --> U37
+  U29 --> U38
+  U31 --> U38
+  U36 --> U38
+  U29 --> U39
+  U30 --> U39
+  U28 --> U40
+  U29 --> U40
+  U38 --> U40
+```
+
+U28 is the only unit the sibling artifact waits on, which is why the cost preview and the competency's import mark sit there rather than in the later units their subject matter would otherwise suggest. Phase K and Phase L are independent of each other and of everything but Phase J, so the two can run in either order once the record exists. Phase M follows both, because U38 reads U31's licence and U36's unreachable mark and U39 exports the documents U30 stores.
+
+### Sequencing and delivery
+
+**Phase J — The record (U25–U29).** The profile table and its inventory, the two identifiers, the username, the creation service an import row calls, and the API that finally gives the shipped permission category something to govern. U28 is the unblock: once it lands, the sibling artifact's U23 part 2 and U24 have somewhere to put a validated row.
+
+**Phase K — Documents and evidence (U30–U34).** Real files on competencies, the licence as one of them, approval and rejection, the candidate's replacement submission, and the owed-file tracking that gives the working list its fourth source.
+
+**Phase L — Lifecycle and seats (U35–U37).** Deactivation and reactivation with their immediate half, the unreachable mark and the two surfaces it populates, and the seat rules — expansion, the invitation check's removal, and the two-pool preview the import consumes.
+
+**Phase M — Surfaces, export and seeding (U38–U40).** The profile screen, the Admin-only audited export, and seeding a profile from an induction submission.
+
+The order across phases is J first, then whichever of K and L the customer needs soonest, then M — which follows both, because the profile screen renders what K and L produce and the export carries K's documents. An organisation migrating a workforce wants J then L; one chasing an audit wants J then K.
+
+### System-wide impact
+
+- **Migrations.** Ten units carry schema changes — U25, U26, U27, U28, U29, U30, U32, U34, U35 and U36 — plus the two licence columns in U31. None is destructive: every column added is nullable or carries a default, and no column is dropped or rewritten. The riskiest is U27's username backfill, which is a data migration over every existing `users` row and is run through the issuing function rather than in SQL.
+- **Two enums widen, and two permission actions are added.** U29 adds `profiles` to `auditCategoryEnum` and U35 adds `invalidated` to `assessmentCaseStateEnum`. Nothing backfills rows to either new value, which keeps both clear of the 55P04 restriction the codebase already documents for an enum value added alongside other DDL. U29 also adds `view_documents` and `view_competencies` to `PermissionAction`, both set on the `profiles` category alone.
+- **The permission matrix gains its first enforcement, behind a data migration.** The `profiles` category has shipped and governs nothing. U29 is the first call site — and because a stored matrix is returned verbatim, with the product defaults reached only when no row exists, every organisation that has customised any access level would be denied on the day it lands. U29's backfill writes the category into each stored matrix that lacks it, guarded on absence so no customisation is overwritten. Until U29 lands, tightening the category changes no behaviour anywhere.
+- **Every authenticated request gains one indexed read.** U35 revalidates the membership named in the sealed cookie on each request, because the session carries no server-side state that deactivation could revoke. This is the cost of R65's immediacy and it falls on every route, not only the profile ones.
+- **Sign-in accepts a second identifier.** U27 relaxes the login body from an email address to an identifier and adds a username lookup beside the email one. The constant-time comparison that defeats enumeration must cover both lookups, or the new path becomes the oracle the old one was built to avoid. The web login form's label and validation move with it.
+- **Seat metering gains a writer and loses two gates.** U37 makes candidate overflow write `organizations.candidateSeatLimit`, and removes both checks that refuse a pending invitation — the one before the invite insert and the pool-crossing one on a pending invite's role change. The three checks on the acceptance path stay; each stops refusing on the candidate pool and only the two inside a locked transaction perform the expansion write. The staff pool's refusal behaviour does not change, and staff invite creation gains a non-blocking warning instead.
+- **Deactivation becomes immediate, and closes the front door too.** U35 revalidates the session per request, closes an outstanding invitation, and refuses a login whose membership is deactivated — none of which the product does today. All three are new reach into the auth surface rather than a change to a state the product already reaches.
+- **The working list and compliance reporting complete.** U34 and U36 add the two sources those routes were built expecting. Both are additive queries in routes that already compose whichever sources exist.
+- **A third serving route for stored bytes.** U30 adds a grant-checked read beside the public asset route and the authenticated attachment route. It reuses the storage client and the response headers; what is new is the authorisation in front of it.
+
+### Risks and dependencies
+
+- **The username backfill touches every existing person.** U27 issues a username to every `users` row, deriving it from the single `name` column those rows carry rather than from first and last names that do not exist yet. A name that does not split cleanly, or a collision at volume, has to be handled by the issuing function rather than by the migration. Running the backfill idempotently, so a partial run can simply be repeated, is what makes that safe.
+- **R82's numbers cannot both be exercised.** The contract sets 100 and 500; the configuration carries 200 and unlimited and is not edited. The Business arm is testable against the shipped configuration and the Enterprise arm is not, because unlimited never overflows. U37 proves the mechanism against an explicit per-organisation limit instead, and the divergence is recorded rather than resolved.
+- **The rejected-document destination reads a contract enumeration as exhaustive.** R47 sends a rejected document to an Admin to resolve and R20's working list does not enumerate one, so U32 and U33 put it in the approval queue rather than widening a list the contract states exhaustively. If R20's enumeration turns out to be illustrative, adding a seventh source is a one-query change in U34's file.
+- **The agent-facing read R8's redaction serves is built by no unit.** The contract gives the sensitive mark two consumers, exports and agent-facing reads; U39 builds the first and nothing here builds the second, nor does any scope boundary park it. The redaction helper is written and tested against the inventory regardless, so the surface can be added later without reopening R8.
+- **Two organisations may hold different spellings of one person's name.** Putting first, middle and last names on the profile is what R1's isolation requires and what lets an Admin correct a surname without reaching another customer's record. The consequence is that `users.name` and a profile's derived display name can differ, and every surface has to be clear about which it shows. U26 fixes that the profile's display name wins wherever a profile exists.
+- **Seven billing questions stay parked and one of them shapes a default.** The plan implements expansion for the candidate pool and refusal for the staff pool because the contract prices only the first. If the answer to the staff-side question is that it expands too, U37 gains an arm rather than being rewritten.
+- **The sibling artifact is being built in parallel on the same branch.** U28's contract with its U23 and U24 is the coupling point. A change to the validated-row shape on either side breaks the other, which is why U28 extends the existing validator's context rather than introducing a second one.
+
+### Open questions
+
+**Deferred — none blocks implementation.**
+
+- Whether the demographic value lists are fixed product-wide or configurable per organisation. U25 ships them product-wide, moved out of the intake module into one the profile owns, so a per-organisation override is an additive change to that module rather than a rework of the field inventory.
+- Which warning window a profile renders a competency's currency on, given the model separates held from approaching expiry at ninety days for an assessor and thirty for the candidate themselves. U38 renders the reader's own audience window, so a candidate sees their own and everyone else sees the assessor's; a single window for the surface is the alternative.
+- The whole parked billing cluster: block pricing and who is charged, whether a Business organisation may buy blocks or must move tier, what a purchased block is over time, whether an Admin is told when one is added outside an import, and what a full staff allocation does. U37 implements what the contract fixes and nothing beyond it. The one member of the cluster U37 could not defer — which block size an overflow adds — is fixed at the smallest under KTD27, so a later answer moves a constant.
+
+---
+
+## Implementation Units
+
+### Unit Index
+
+| U-ID | Title | Key files | Depends on |
+| --- | --- | --- | --- |
+| U25 | The profile record and its field inventory | `packages/db/src/schema/profiles.ts`, `packages/shared/src/profile.ts` | — |
+| U26 | The two identifiers and the display name | `packages/db/src/schema/profiles.ts`, `apps/api/src/routes/team.ts` | U25 |
+| U27 | The generated username and sign-in | `packages/db/src/schema/organizations.ts`, `apps/api/src/lib/username.ts`, `apps/api/src/routes/auth.ts` | U25 |
+| U28 | What an import row creates, and what a file will cost | `apps/api/src/lib/member-create.ts`, `packages/shared/src/seat-blocks.ts`, `packages/shared/src/workforce-import.ts` | U26, U27 |
+| U29 | The profile API and the matrix category enforced | `apps/api/src/routes/profiles.ts`, `apps/api/src/lib/profile-access.ts` | U25, U26 |
+| U30 | Competency documents: storage, retention and removal | `packages/db/src/schema/documents.ts`, `apps/api/src/routes/competency-documents.ts` | U25 |
+| U31 | A licence is a competency | `packages/db/src/schema/governance.ts`, `apps/api/src/routes/competencies.ts` | U30 |
+| U32 | Approval, rejection, and what neither changes | `apps/api/src/routes/competency-documents.ts` | U30 |
+| U33 | The candidate's replacement document and its queue | `apps/api/src/routes/competency-documents.ts` | U32 |
+| U34 | Owed files, the profile picture, and the working list's fourth source | `apps/api/src/routes/working-list.ts`, `apps/api/src/routes/profiles.ts` | U28, U29, U30 |
+| U35 | Deactivation and reactivation | `apps/api/src/lib/deactivation.ts`, `apps/api/src/routes/team.ts` | U29 |
+| U36 | The unreachable mark and its two surfaces | `packages/db/src/schema/profiles.ts`, `apps/api/src/routes/compliance.ts` | U25, U29 |
+| U37 | Seat expansion at the allocation boundary | `apps/api/src/lib/seats.ts`, `apps/api/src/lib/seat-blocks.ts` | U28, U35 |
+| U38 | The profile screen | `apps/web/src/screens/enterprise/ProfileScreen.tsx` | U29, U31, U36 |
+| U39 | Export, Admin-only and audited | `apps/api/src/routes/profiles.ts`, `packages/shared/src/profile-export.ts` | U29, U30 |
+| U40 | Seeding a profile from an induction submission | `apps/api/src/routes/inductions.ts`, `packages/shared/src/profile-seed.ts` | U28, U29, U38 |
+
+---
+
+### Phase J — The record
+
+#### U25. The profile record and its field inventory
+
+**Goal** — Give every membership a profile row carrying the field inventory, with the derived values derived, the declined answers recordable, and the sensitive ones marked.
+
+**Requirements** — R1, R2, R8, R10, R12, R13, R14, R15. Covers F1 steps 2–4.
+
+**Dependencies** — None.
+
+**Files**
+- `packages/db/src/schema/profiles.ts` — create. `member_profiles`, one row per membership.
+- `packages/db/src/schema/index.ts` — modify. Export the new table and its relations.
+- `packages/db/drizzle/` — generated migration.
+- `packages/shared/src/profile.ts` — create. The field inventory as data: each field's presence, sensitivity, and whether it is entered, derived or generated. The demographic value lists move here.
+- `packages/shared/src/profile.test.ts` — create.
+- `packages/shared/src/index.ts` — modify.
+- `packages/shared/src/chc-intake.ts` — modify. Re-export the three value lists from their new home so the intake form keeps its options and there is one list rather than two.
+
+**Approach** — KTD18 puts the table on the membership: `membershipId` unique, `orgId` for the org-scoped indexes, and the inventory's entered fields as columns. Names are three columns — first, middle, last — because R3 derives a display name from two of them and the existing `users.name` is one undivided string that cannot answer R3 at all.
+
+The inventory itself lives in shared as data rather than being implied by the column list, because four separate consumers read it: creation validates required presence against it, the export redacts against its sensitive marks, the import flags what a row left empty against it, and the screen renders it. A column list cannot express "required at creation but editable to empty later", "derived", or "may follow and stays owed", which are three different things R12 and R18 draw apart.
+
+Gender, Ethnicity and Starter type are stored as text validated against the shared lists rather than as enums, so the deferred question about per-organisation lists stays a change to one module rather than a migration. Indigenous status is not a column at all under KTD19 — it is `isIndigenousEthnicity` read over the stored ethnicity, which already returns the three values R15 needs with `null` meaning not stated.
+
+**Execution note** — Write the inventory and its derivations test-first in shared. It is pure, four consumers depend on agreeing with it, and the required-versus-optional split is the rule an import and a screen are most likely to drift on.
+
+**Patterns to follow** — `packages/db/src/schema/taxonomy.ts` for a per-organisation table with partial indexes and a docstring carrying the reasoning. `packages/shared/src/standing.ts` for a pure derivation module with no database import. `packages/shared/src/chc-intake.ts` for the value lists and `isIndigenousEthnicity` as they stand today.
+
+**Test scenarios**
+- A profile is created with every required field and no optional one, and is valid. *(Covers R12.)*
+- A profile missing a required field is refused, naming the field.
+- A profile created with no middle name, no employee number, no swipe card number and no induction date is valid, and none of the four is reported as outstanding. *(Covers AE49 / R12.)*
+- Gender recorded as Undisclosed and Ethnicity as Unknown both count as answered, so neither required field is outstanding. *(Covers AE4 / R13.)*
+- An ethnicity of Aboriginal derives Indigenous; Torres Strait Islander derives Indigenous; Caucasian derives not Indigenous; Unknown derives not stated; an absent ethnicity derives not stated. *(Covers R15.)*
+- Indigenous status has no column and cannot be written. *(Covers R15.)*
+- The inventory marks ethnicity, Indigenous status, date of birth, address, suburb and postcode sensitive, and marks the emergency contact's name and phone not sensitive. *(Covers R8.)*
+- The display name is first and last name, and a member with a middle name is displayed without it. *(Covers R3.)*
+- A profile exists for a membership whose invitation has not been accepted. *(Covers R10.)*
+- Two organisations hold profiles for one person and neither reads the other's. *(Covers AE5 / R1.)*
+- A membership cannot carry two profiles.
+- The intake form's Gender, Ethnicity and Starter type options are the same values the profile validates against, read from one list.
+
+**Verification** — `pnpm --filter @formai/shared test` and `pnpm --filter @formai/api test` pass; `pnpm --filter @formai/db generate` produces exactly one migration and its SQL is read before it is committed; `packages/shared/src/profile.ts` has no database import.
+
+---
+
+#### U26. The two identifiers and the display name
+
+**Goal** — Let an organisation issue an employee number and a swipe card number, keep each unique within the organisation, and identify a member by name plus whichever of the two the organisation displays — falling back rather than failing when a member holds one or neither.
+
+**Requirements** — R3, R7, R24, R61. Covers F1 step 5.
+
+**Dependencies** — U25.
+
+**Files**
+- `packages/db/src/schema/profiles.ts` — modify. `employeeNumber`, `swipeCardNumber`, both nullable, each with a partial unique index per organisation.
+- `packages/db/drizzle/` — generated migration.
+- `packages/shared/src/profile.ts` — modify. The display resolution: name plus the chosen identifier, the other where only it is held, the name alone where neither is.
+- `packages/shared/src/profile.test.ts` — modify.
+- `apps/api/src/routes/team.ts` — modify. The member list returns the resolved display identity.
+- `apps/api/src/routes/team.test.ts` — modify.
+- `apps/api/src/lib/display-identity.ts` — create. The one live resolution every surface that names a person calls.
+- `apps/api/src/lib/display-identity.test.ts` — create.
+- `apps/api/src/routes/assessments.ts` — modify. A case and an attempt read the identifier live rather than carrying a copy.
+- `apps/api/src/routes/assessments.test.ts` — modify.
+
+**Approach** — KTD20's partial unique index is what makes uniqueness and optionality hold together: indexing only non-null values means two members holding no employee number are not a collision, while a second issue of a number already held is refused. The index is per organisation because R7 scopes uniqueness there, and because the same person may carry different numbers for two customers.
+
+Resolution is a pure function taking the profile and the organisation's `displayIdentifier` choice, so the team screen, a case and an attempt all render one answer. R61 makes that a live read rather than a capture, which is the deliberate difference from the name: an attempt keeps the printed name it was signed under, and a corrected identifier corrects itself everywhere. That means nothing writes an identifier onto a case or an attempt — a scenario below asserts it.
+
+**Patterns to follow** — the partial-unique-on-active indexes in `packages/db/src/schema/taxonomy.ts`. `assessment_part_attempts` in `packages/db/src/schema/assessments.ts` for the captured printed name this rule is explicitly unlike.
+
+**Test scenarios**
+- A member holding both identifiers, in an organisation displaying the employee number, is shown by name and employee number. *(Covers AE22 / R24.)*
+- A member holding only the swipe card number, in that same organisation, is shown by name and swipe card number. *(Covers AE22 / R24.)*
+- A member holding neither is shown by name alone, and is not on the working list for it. *(Covers AE22 / R24, R12.)*
+- Issuing a swipe card number already held by another member of the same organisation is refused. *(Covers AE23 / R7.)*
+- Issuing the same number in a different organisation succeeds. *(Covers R7.)*
+- Two members of one organisation both holding no employee number is not a collision. *(Covers R7, R12.)*
+- Changing the organisation's display choice to the swipe card number changes what an existing member is shown by, with no write to any profile. *(Covers AE23 / R7.)*
+- Correcting an employee number changes what an open case and a signed attempt both show. *(Covers AE32 / R61.)*
+- Correcting a surname leaves a signed attempt showing the name it was signed under while the profile's display name changes. *(Covers AE32 / R3, R60.)*
+- No code path writes an identifier onto a case or an attempt. *(Covers R61.)*
+
+**Verification** — `pnpm --filter @formai/shared test` and `pnpm --filter @formai/api test` pass; one migration generated and its SQL read; no column named for an identifier exists on `assessment_cases` or `assessment_part_attempts`.
+
+---
+
+#### U27. The generated username and sign-in
+
+**Goal** — Issue every person a unique username, let them sign in with it or with their email address, and keep a corrected address from moving who they are.
+
+**Requirements** — R21, R22, R23. Covers F1 step 7 and F5 step 1.
+
+**Dependencies** — U25.
+
+**Files**
+- `packages/db/src/schema/organizations.ts` — modify. `users.username`, nullable and unique.
+- `packages/db/drizzle/` — generated migration.
+- `apps/api/src/lib/username.ts` — create. Issuance, collision handling, and the surname normalisation.
+- `apps/api/src/lib/username.test.ts` — create.
+- `apps/api/src/routes/auth.ts` — modify. Login accepts an identifier; the email change retires the old address as a credential; self-signup issues a username with the row it inserts.
+- `apps/api/src/routes/auth.test.ts` — modify.
+- `apps/api/src/auth/tenant-provisioning.ts` — modify. First sign-in issues a username with the row it inserts.
+- `apps/api/src/routes/invites.ts` — modify. Invite acceptance issues a username with the row it inserts.
+- `apps/api/src/routes/invites.test.ts` — modify.
+- `apps/api/src/routes/internal.ts` — modify. The one-shot idempotent backfill for existing rows.
+- `apps/api/src/routes/internal.test.ts` — modify.
+- `apps/web/src/screens/onboarding/LoginScreen.tsx` — modify. The field is an identifier rather than an email address.
+- `apps/web/src/screens/onboarding/LoginScreen.test.tsx` — create.
+
+**Approach** — KTD21 puts the column on `users` because sign-in is product-wide, and puts issuance in one function called from every path that inserts a `users` row. Getting that list right is the whole of R21: there are three such paths today — first sign-in provisioning, self-signup and invite acceptance — plus U28's creation service, and wiring only the backfill would leave every person arriving after this ships unable to sign in by username. Issuance runs inside the same transaction as the insert, so no row lands without one. The shape is first initial, surname and a random number; the surname is normalised for spaces, hyphens and apostrophes, which settles the contract's deferred question about how one is formed. A collision re-rolls the number inside the function and retries against the unique index rather than pre-checking, so two concurrent issues cannot both pass a check and then collide.
+
+Login is the delicate half. The body's email validation relaxes to an identifier, and the lookup becomes email-or-username. The constant-time path that defeats enumeration has to cover both branches — a username miss returning faster than an email miss would rebuild the oracle the current code was written to close, so the dummy-hash comparison runs on either miss.
+
+R23 retires the old address as a credential simply by the address moving: the lookup is on the current value, so the previous one stops matching. The username is untouched by that change, which is the whole point of the decision.
+
+The backfill derives first initial and surname from the single `name` column existing rows carry, because those rows have no profile. It runs through the issuing function, so a name that does not split and a collision are handled once. It is idempotent — a row that already holds a username is skipped — so a partial run is repeated rather than reconciled.
+
+**Execution note** — Write the login tests first, including the two miss paths. This unit widens an authentication surface, and the failure it must not introduce is a timing difference that is invisible to a functional test written afterwards.
+
+**Patterns to follow** — the `DUMMY_HASH` constant-time comparison already in `apps/api/src/routes/auth.ts`. `apps/api/src/routes/internal.ts` for a shared-secret internal route. The token-uniqueness indexes in `packages/db/src/schema/organizations.ts` for a unique credential column.
+
+**Test scenarios**
+- Two members named Jane Smith and John Smith are each issued a unique username of first initial, surname and a number. *(Covers AE20 / R21.)*
+- A username is issued whatever access level the person holds, including Admin and Assessor. *(Covers R21.)*
+- A self-signup, an invite acceptance and a first sign-in each land holding a username. *(Covers R21, R22.)*
+- No path inserts a `users` row without one.
+- A surname carrying a space, a hyphen or an apostrophe produces a usable username.
+- An issuance colliding with a username already held re-rolls and succeeds. *(Covers R21.)*
+- A person signs in with their username and with their email address, and both reach the same account. *(Covers AE20 / R22.)*
+- Correcting the profile email leaves the username signing the person in exactly as before, and the old address no longer does. *(Covers AE21 / R23.)*
+- A login for an unknown email and a login for an unknown username both run the dummy-hash comparison and return the same refusal. *(Covers R22.)*
+- The backfill issues a username to every existing user row, run twice changes nothing on the second pass, and skips a row that already holds one.
+- A person whose stored name is a single word is still issued a username by the backfill.
+- The login field accepts a username as well as an email address, and rejects neither on client-side validation. *(Covers R22.)*
+
+**Verification** — `pnpm --filter @formai/api test` and `pnpm --filter @formai/web test` pass; one migration generated and read; the backfill run twice against fixed data produces identical state.
+
+---
+
+#### U28. What an import row creates, and what a file will cost
+
+**Goal** — Give a validated import row somewhere to land: one function that creates or finds the person, creates or reactivates the membership at the level the row names, writes the profile, reports what the row left empty, and states what a whole file will cost in both seat pools before any of it is written — so the sibling artifact's import route and run can be written.
+
+**Requirements** — R1, R7, R10, R12, R16, R19, R21, R79, R80, R86 (the preview a run states before it spends; the expansion half is U37's), R91. Covers F1's outcome reached without an invitation.
+
+**Dependencies** — U26, U27.
+
+**Files**
+- `apps/api/src/lib/member-create.ts` — create. The creation service, the address match, the three membership branches, and the two-pool cost preview.
+- `apps/api/src/lib/member-create.test.ts` — create.
+- `packages/shared/src/seat-blocks.ts` — create. The block sizes, their discounts and how many blocks an overflow of N buys. Pure; U37's expansion reads the same module.
+- `packages/shared/src/seat-blocks.test.ts` — create.
+- `packages/shared/src/index.ts` — modify.
+- `packages/db/src/schema/governance.ts` — modify. A nullable provenance mark on `competency_holders` recording that a grant arrived in an import run.
+- `packages/db/drizzle/` — generated migration.
+- `packages/shared/src/workforce-import.ts` — modify. Two identifier-uniqueness rejection reasons and the context they resolve against.
+- `packages/shared/src/workforce-import.test.ts` — modify.
+
+**Approach** — This unit is the contract with the sibling artifact's U23 part 2 and U24, and it is deliberately a library function rather than a route: the upload surface, the file it reads and the confirmation step belong to that artifact under Scope Boundaries, and this one supplies what they call. It carries everything those two need from this plan, which is what makes the Phase J gate a real unblock rather than a partial one.
+
+The three branches are the diagram in the Planning Contract. A row whose address names nobody creates the person and issues a username through U27's function. A row whose address names somebody who holds no membership here adds one. A row matching a deactivated membership returns it to active, which is this artifact's rule rather than the sibling's — a row asserting somebody is part of the workforce being imported is an assertion that they are back, so it costs a seat like any other reactivation and the competencies deactivation retained come back with it. A row matching an active membership takes no seat and reports every difference rather than writing it, because an import must not be able to demote an administrator on the strength of a column.
+
+Seats go through `lockOrgForSeats` and `checkSeatAvailability` unchanged. Expansion is U37's; until it lands, a row whose pool is full is refused with the reason the sibling's run report already carries. That ordering is deliberate — it lets the import ship and expand later, rather than blocking the unblock on the billing-adjacent unit — but it puts a window between the two units where the preview must not promise what the run cannot do. R86 makes the run proceed only once the Admin confirms, so the preview is the thing that confirmation is given against, and a preview quoting blocks while the run refuses every overflowing row would have the Admin authorise a purchase and receive a pile of rejections. Until U37 has landed the preview reports candidate overflow as rows that will be refused rather than as blocks that will be bought; once it has, the same preview reports blocks.
+
+The cost preview is here rather than in U37 because it is the same address match read a second way: pricing a file means resolving every row against existing people and memberships, which is exactly what landing one does, and a preview written separately from the run is a preview that can be wrong about the run. Counting rows would be wrong on precisely the file R86 exists for — a row merging onto an already-active membership costs nothing, a row matching a deactivated membership costs one, and the same address twice in one file costs one in total — so a customer whose assessors already hold logins would be over-billed by a count of rows, getting runs abandoned or overflow authorised that the run never spends. The preview reports the two pools separately, what the included allocation covers in each, and how many blocks the candidate overflow would buy at the size KTD27 fixes. It is computable before the run starts because every row names its own access level.
+
+The validator gains what it could not check before: an employee or swipe card number already held in the organisation, and the same number twice within one file. Both are rejections rather than merges, because R7's uniqueness is what makes an identifier able to tell two people apart. Every other field on the row stays optional, and what a landed row left empty is returned so the run can flag it.
+
+One column goes on the competency grant: a nullable mark recording that it arrived in an import run. R19 waives the certificate against the competencies a run loads while holding one recorded on the same person afterwards to the ordinary rule, and nothing on the record tells those apart today. It is a plain nullable mark rather than a reference to the run, because the run table belongs to the sibling artifact and this plan must not take a dependency on it; U34 reads the mark to decide what is owed, and the sibling's run writes it.
+
+**Execution note** — Write the three membership branches test-first. They differ in what they cost, what they report and what they bring back, and they are the paths a real migration file hits most often, because the assessors being migrated are the population most likely to already hold logins.
+
+**Patterns to follow** — `apps/api/src/lib/membership-placement.ts` for the read-and-write helper shape and for reusing `validatePlacement` rather than restating it. `apps/api/src/lib/seats.ts` for the lock-then-count discipline. `apps/api/src/routes/invites.ts` for the only path that creates an active membership today.
+
+**Test scenarios**
+- A row whose address names nobody creates the person, the active membership at the level the row names, and the profile, and issues a username. *(Covers R1, R10, R21.)*
+- A landed row creates no invitation and no login. *(Covers R19, R80.)*
+- A row naming Candidate takes a candidate seat; a row naming Assessor takes a staff seat. *(Covers R80.)*
+- A row whose address belongs to somebody holding no membership here adds one and creates their profile. *(Covers R19, R91.)*
+- A row matching a deactivated membership returns it to active, takes a seat for the level it names, and leaves the competencies deactivation retained valid where they are in date. *(Covers AE58 / R19, R78, R80.)*
+- A row matching an already-active membership takes no seat and creates no second profile. *(Covers R1, R80, R91.)*
+- A placement or access-level difference against an active membership is reported and not written. *(Covers R19.)*
+- A row carrying only the required set lands, and what it left empty is returned naming each field. *(Covers AE27 / R12, R19.)*
+- A row carrying no employee number and no swipe card number lands rather than being rejected. *(Covers AE27 / R19.)*
+- A row naming an employee number already held in the organisation is rejected with that reason. *(Covers R7.)*
+- The same swipe card number on two rows of one file rejects the second. *(Covers R7.)*
+- The same number in a different organisation's file is not a rejection. *(Covers R7.)*
+- A row with no email address is rejected, because no profile exists without one. *(Covers R16, R19.)*
+- A row whose pool is full is refused with the seat reason and leaves no person, membership or profile behind. *(Covers R80.)*
+- Each membership insert goes through the lock and the count, so two concurrent runs cannot take the same last seat.
+- A competency a run loads carries the import mark; one recorded on the same person afterwards does not. *(Covers R19.)*
+- The preview reports candidate seats and staff seats separately for a mixed file. *(Covers R80, R86.)*
+- A four-hundred-row file naming Candidate on 360 rows and Assessor on 40, against an included candidate allocation of 100, previews 360 candidate seats and 40 staff seats, states that the allocation covers 100 of the first, and states that blocks would be bought for the other 260 rather than for all 400. *(Covers AE53 / R19, R80, R86.)*
+- A file whose rows all match already-active memberships previews zero seats on both pools. *(Covers R79, R80.)*
+- A row matching a deactivated membership previews one seat on its level's pool. *(Covers AE58 / R78, R80.)*
+- The same address twice in one file previews one seat, not two. *(Covers R80.)*
+- The preview and a subsequent run agree on the seat count for the same file.
+- Before U37 lands, an overflowing file previews its overflow as refusals and the run refuses exactly those rows. *(Covers R86.)*
+
+**Verification** — `pnpm --filter @formai/api test` and `pnpm --filter @formai/shared test` pass; a refused row leaves nothing half-made; one migration generated and read; the sibling artifact's U23 part 2 and U24 can both be started against this function's signature without a further change here.
+
+---
+
+#### U29. The profile API and the matrix category enforced
+
+**Goal** — Read and write a profile through the permission category that already ships, give the candidate their fixed access to their own record outside it, and audit every edit.
+
+**Requirements** — R2, R8, R37, R38, R39, R41, R42, R44, R48, R49, R51, R53, R55, R56, R57, R58, R59. Covers F4 steps 1–3 and F5 steps 2–4.
+
+**Dependencies** — U25, U26.
+
+**Files**
+- `apps/api/src/routes/profiles.ts` — create. Read, create and update.
+- `apps/api/src/routes/profiles.test.ts` — create.
+- `apps/api/src/lib/profile-access.ts` — create. The subject-versus-matrix resolution the diagram draws.
+- `apps/api/src/lib/profile-access.test.ts` — create.
+- `apps/api/src/app.ts` — modify. Mount the router.
+- `packages/db/src/schema/enums.ts` — modify. Add `profiles` to `auditCategoryEnum`.
+- `packages/db/src/schema/governance.ts` — modify. Add a nullable `field` column to `audit_log_entries`.
+- `packages/db/drizzle/` — generated migration, plus a data migration backfilling the `profiles` category into every stored `role_permissions.matrix` that lacks it.
+- `packages/shared/src/roles.ts` — modify. Add `view_documents` and `view_competencies` to `PermissionAction` and set both in the `profiles` defaults only.
+- `packages/shared/src/roles.test.ts` — modify.
+- `apps/api/src/auth/tenant-provisioning.ts` — modify. The seeded defaults carry the two new actions.
+- `apps/api/src/audit/record.ts` — modify. Carry the changed field's key.
+- `apps/api/src/routes/audit.ts` — modify. Filter sensitive-field profile entries from a non-Admin read.
+- `apps/api/src/routes/audit.test.ts` — modify.
+
+**Approach** — This is the first enforcement of the `profiles` category, which has shipped and governs nothing. Every read and write resolves through one function so the rule is stated once: if the caller is the subject and holds the Candidate access level, R49, R50 and R51 apply and the matrix is not consulted at all; otherwise the matrix decides, including when the caller is the subject at any other access level. Scoping the fixed rule to the Candidate access level is what keeps it a protection rather than a hole — an assessor reading their own record goes through the matrix like anybody else.
+
+The category gains two actions here, under KTD26. R44 makes fields and documents separately configurable, so an organisation restricting an access level's reach into fields does not thereby restrict its reach into documents — and the shipped `view` cannot say that, because it is one grant over one object. R41 does the same for the other pair: an assessor may view a candidate's competencies and assessment history, and R55 lets an organisation tighten or loosen every part of that default independently, which is the whole reason the default exists. Collapsing both onto `view` would mean an organisation that keeps its assessors out of personal details also loses the eligibility read F4 is built around. So `view_documents` and `view_competencies` are added beside `view`, `edit` and `approve`, set on the `profiles` category alone and left absent from every other category's defaults so no existing grant widens. Both ship true for the access levels that already default to those reads, which keeps the shipped assessor behaviour unchanged. This mirrors exactly how the sibling artifact added `approve` and is the same size of change.
+
+Turning enforcement on is where the danger is, and it is a migration rather than a code change. `apps/api/src/lib/permissions.ts` returns a stored matrix verbatim and falls back to the product defaults only when no row exists at all, so a key absent from a stored matrix resolves to denied. Every organisation that has customised any access level therefore loses profile access on the day this unit lands, and every organisation loses the two new reads. The backfill writes the full `profiles` category into each stored matrix that lacks it, guarded on the key being absent so a customised value is never overwritten — the pattern `packages/db/drizzle/0012_seed_assessment_roles.sql` already established when the assessment roles shipped.
+
+Approving stays its own action rather than a shade of editing, which is what the shipped category already expresses and what U32 consumes. Editing is resolved against the inventory's editable set, so the candidate's three writable fields are enforced by the same data the screen renders from rather than by a second list.
+
+One gate sits in front of all of it: a profile surface is unreachable for an organisation below the tier that carries assessments, matching the taxonomy a profile's placement depends on. It lives in the access resolution rather than on each route, so every surface this plan adds inherits it from one place rather than six units each remembering.
+
+The audit needs a field of its own before R57 and R58 are expressible. `audit_log_entries` carries `action`, a free-text `target` and a category, so "which field changed" is not recorded anywhere and R58's filter would have to pattern-match the same prose that holds the values it is meant to hide. A nullable `field` column, written with the inventory's field key, makes R57's record and R58's filter both a comparison on data. A profile edit writes one entry per changed field.
+
+An assessor's reach is every candidate in the organisation rather than only those on a case assigned to them, because the category carries no case dimension and R48 says so explicitly.
+
+Audit carries old and new values in the existing target field and lands under the new category. R58's narrowing is expressed as a filter on the audit read keyed on that category plus the inventory's sensitive marks, which settles the contract's question about a Reviewer: the Reviewer keeps the audit read it holds today and stops seeing the sensitive-field profile entries within it.
+
+**Execution note** — Write the access resolution test-first, one test per branch of the diagram, including the branch that most easily goes wrong: a non-candidate member reading their own record, who must go through the matrix rather than through the fixed rule.
+
+**Patterns to follow** — `apps/api/src/lib/permissions.ts` for `hasPermission` and its fail-closed posture, and for why a scoped grant answers false to the org-wide question. `apps/api/src/audit/record.ts` for the recorder. `apps/api/src/routes/working-list.ts` for the Admin gate shape.
+
+**Test scenarios**
+- On the shipped defaults an assessor opening a candidate's profile sees the date of birth, the address, the competencies and the assessment history. *(Covers AE1 / R41, R44, R55.)*
+- An organisation that tightens the category so Assessor cannot view profiles hides it from an assessor there, where the same assessor on the defaults sees it. *(Covers AE29 / R39, R55.)*
+- A candidate reads every field on their own record, including the sensitive ones, in an organisation that has tightened every access level as far as the matrix allows. *(Covers AE51 / R49.)*
+- A candidate saves a change to their mobile number and cannot change their employee number. *(Covers AE2 / R51, R53.)*
+- A candidate sees their date of birth and their Indigenous status and can edit neither. *(Covers AE3 / R15, R49, R51.)*
+- An assessor reading their own record goes through the matrix, not through the candidate's fixed rule.
+- An assessor with view but not edit cannot write any field. *(Covers R39.)*
+- An access level granted view is not thereby granted approve. *(Covers R39.)*
+- An organisation that restricts an access level's reach into profile fields leaves its reach into documents untouched, and the two are set independently. *(Covers R44.)*
+- An organisation that restricts an access level's reach into profile fields leaves its reach into competencies and assessment history untouched. *(Covers R41, R55.)*
+- Adding the two actions widens no grant in any category other than `profiles`, and leaves the shipped assessor behaviour unchanged. *(Covers R40, R55.)*
+- An organisation provisioned before the `profiles` category existed reads the shipped assessor default rather than being denied. *(Covers R40, R55.)*
+- An organisation that had customised one access level keeps that customisation after the backfill, and gains the category on the levels it had not customised. *(Covers R39.)*
+- An organisation below the tier that carries assessments reaches no profile at all, by any route.
+- A profile edit touching three fields writes three audit entries, each naming its field.
+- A Reviewer's audit read excludes the entry for a sensitive field and keeps the entry for a non-sensitive field changed in the same request. *(Covers R58.)*
+- An assessor reaches a candidate who is on no case of theirs. *(Covers R48.)*
+- A candidate reads their assessment history in full — every case, every attempt, its outcome and its reason, including a failed attempt and a case still in flight. *(Covers AE33 / R38.)*
+- Every field edit writes an audit entry carrying the old and the new value and the actor. *(Covers AE10 / R57.)*
+- A Reviewer's audit read excludes the sensitive-field profile entries and keeps everything else it returns today. *(Covers R58.)*
+- A candidate opening their own record sees a corrected date of birth and not the audit entry recording the correction. *(Covers AE11 / R49, R58.)*
+- Correcting a name on the profile alters no signed assessment record. *(Covers AE10 / R59.)*
+- The candidate's name still shows on a case and on sign-off. *(Covers AE30 / R56.)*
+- A caller from another organisation reaches no profile.
+
+**Verification** — `pnpm --filter @formai/api test` passes; the generated migration and the hand-written backfill are both read before they are committed; no route reads a profile without going through the access resolution; tightening the category in a stored matrix demonstrably changes what a read returns; no profile surface is reachable below the tier that carries assessments; an organisation whose matrix predates the category is not denied after the backfill runs.
+
+---
+
+### Phase K — Documents and evidence
+
+#### U30. Competency documents: storage, retention and removal
+
+**Goal** — Hold the bytes of a competency's evidence so a human can open it, keep every version that was ever held, serve it only to a caller the organisation admits, and make removing one an Admin act with a reason.
+
+**Requirements** — R25, R26, R27, R28, R29, R30, R31, R32, R44. Covers F3 step 2.
+
+**Dependencies** — U25, U29.
+
+**Files**
+- `packages/db/src/schema/documents.ts` — create. `competency_documents`, with the state column and the storage key.
+- `packages/db/src/schema/index.ts` — modify.
+- `packages/db/drizzle/` — generated migration.
+- `apps/api/src/routes/competency-documents.ts` — create. Attach, list, serve, remove.
+- `apps/api/src/routes/competency-documents.test.ts` — create.
+- `apps/api/src/app.ts` — modify.
+- `apps/api/src/routes/uploads.ts` — modify. Two changes: export the storage-key namespace check so the serving route tests the same shape rather than writing a second regex, and refuse any key this unit's table claims.
+- `apps/api/src/routes/uploads.test.ts` — modify.
+
+**Approach** — KTD23 keeps the uploader exactly as it is: a document is attached by uploading through the door that already validates PNG, JPEG, WebP and PDF at ten megabytes with a magic-byte check and a server-minted key, and the row this unit adds records the key, the competency it evidences, who attached it and when. Nothing about the validator, the key namespace or the storage adapters changes.
+
+KTD24 makes the row's `state` the whole of its history: held, pending, superseded, rejected and removed. A competency's current evidence is the held row or rows — R28 admits several — and everything else stays retrievable beside it. Removal writes the removed state with a reason and an audit entry rather than deleting the row or the object, so R31's retention and R32's narrow escape hatch do not fight each other.
+
+KTD25's serving route is where this unit differs most from what exists. `GET /uploads/file/*` checks tenancy and the key namespace and nothing else, which is right for a submission attachment and wrong for a licence image whose reader must hold a grant. The new route checks the namespace, then the tenancy, then the access resolution U29 built — resolving `view_documents` specifically rather than `view`, because R44 makes the document reach separately configurable and gating on `view` would collapse the distinction the action exists for — and admits the subject candidate under R50 without any grant. Only then does it stream, reusing the storage client and the nosniff, sandbox and private-cache headers verbatim. R30 is exactly the property that route enforces: a key is not a permission.
+
+Adding a grant-checked door achieves nothing while the ungated one is still open, and it is: KTD23 deliberately keeps the key namespace unchanged, so a competency document's key is indistinguishable from a submission attachment's and the existing attachment route would serve the same bytes to any member of the organisation on tenancy alone. That would falsify this plan's own stated property that no document reaches storage before the resolution has run, and would hand an organisation restricting documents nothing at all. So the attachment route refuses any key this unit's table claims, returning the same not-found response it already gives an unrecognised key, before any storage call.
+
+**Execution note** — Write the serving route's refusal paths test-first. This is the one route in the plan where a mistake exposes a photograph and a date of birth, and the refusals are the behaviour that is easiest to leave untested.
+
+**Patterns to follow** — `apps/api/src/routes/uploads.ts` for `storeAttachment`, `ATTACHMENT_KEY_RE`, and the response headers on the serving route. `apps/api/src/routes/inductions.ts` for the identity-document reasoning this route deliberately does not reuse. `competency_holders` in `packages/db/src/schema/governance.ts` for the revoked-without-erasure posture the state column mirrors.
+
+**Test scenarios**
+- A document attached to a competency is stored and opens as the file itself rather than as a note that a file exists. *(Covers AE13 / R25, R26, R27.)*
+- A competency carries several attached documents. *(Covers R28.)*
+- A file that is not a PNG, JPEG, WebP or PDF is refused, and one whose bytes contradict its declared type is refused. *(Covers R25.)*
+- A caller holding no grant is refused the document, and the refusal is indistinguishable from the document not existing. *(Covers AE14 / R30.)*
+- A caller from another organisation is refused a key belonging to this one. *(Covers R30.)*
+- A submission attachment key replayed through this route is refused. *(Covers R30.)*
+- A competency document key replayed through the attachment route is refused, with the same response an unrecognised key gets and before any storage call. *(Covers R30.)*
+- An access level holding view on profile fields but not on documents is refused a document. *(Covers R44.)*
+- An access level holding view on documents but not on profile fields opens one. *(Covers R44.)*
+- The subject candidate opens a document held on their own record without any grant. *(Covers R30, R50.)*
+- An assessor removing a document is refused; an Admin removing it succeeds, records a reason and writes an audit entry. *(Covers AE16 / R32.)*
+- A removed document's row and object are both retained. *(Covers R31, R32.)*
+- The response carries the nosniff and sandbox headers and is not shared-cacheable.
+
+**Verification** — `pnpm --filter @formai/api test` passes; one migration generated and read; no document read reaches storage before the access resolution has run.
+
+---
+
+#### U31. A licence is a competency
+
+**Goal** — Record a licence as a competency carrying its class, its number, its expiry and its document, so it inherits expiry, grace, revocation and every prerequisite check for free.
+
+**Requirements** — R33, R34, R35, R36, R100, R101, R102, R103. Covers F3 steps 1 and 3.
+
+**Dependencies** — U30.
+
+**Files**
+- `packages/db/src/schema/governance.ts` — modify. `licenceClass` and `licenceNumber` on `competency_holders`, both nullable.
+- `packages/db/drizzle/` — generated migration.
+- `apps/api/src/routes/competencies.ts` — modify. Accept and return the two fields; attach the document through U30.
+- `apps/api/src/routes/competencies.test.ts` — modify.
+
+**Approach** — The competency model already carries a grant date, a derived expiry, a grace period, a revocation flag and a reason, and already derives expiry from the qualification's validity rather than freezing it. A licence is that record with two more facts on it, so this unit adds two nullable columns and nothing else — the expiry R34 names is the existing override column, used exactly as an imported record uses it.
+
+R35 and R36 are then satisfied by not doing anything: the licence is in the prerequisite check and the compliance count because it is a competency, not because a second path was built for it. The four currency states and the decisiveness of revocation are already in force, as `Repo state at planning time` records, so R100 to R103 are asserted here rather than implemented — this is the unit where a licence makes them concrete, which is why it carries the scenarios.
+
+**Patterns to follow** — `apps/api/src/lib/competency-grant.ts` for the upsert-on-regrant behaviour and the imported-expiry rule a licence inherits. `packages/shared/src/competency-expiry.ts` for the derivation and the four states.
+
+**Test scenarios**
+- A licence recorded with a class, a number and an expiry appears as a competency on the profile with its currency and its standing. *(Covers R33, R34, R37.)*
+- The licence's document opens as evidence. *(Covers F3 / R27.)*
+- A licence whose expiry has passed fails a prerequisite that requires it, and the check reports it as not current. *(Covers AE12 / R35, R36, R103.)*
+- A licence inside its grace period satisfies a prerequisite; one past grace does not. *(Covers R102, R103.)*
+- A revoked licence satisfies no prerequisite however good its dates are, and what a Role required of its holder stands as a gap. *(Covers AE44 / R101.)*
+- A licence held optionally satisfies a prerequisite exactly as a required one does. *(Covers AE44 / R102.)*
+- Revoked is not one of the four currency states a licence reports. *(Covers R100.)*
+- No licence class, number or expiry field exists anywhere on the profile record. *(Covers R33.)*
+
+**Verification** — `pnpm --filter @formai/api test` passes; one migration generated and read; no query reads a competency for currency without filtering `revokedAt IS NULL`.
+
+---
+
+#### U32. Approval, rejection, and what neither changes
+
+**Goal** — Let a reader the organisation admits record that a certificate was sighted and accepted, or reject one they cannot read, while neither act touches the competency's currency, its standing or its prerequisite value.
+
+**Requirements** — R39, R42, R43, R45, R46, R47, R55. Covers F4 steps 8–10.
+
+**Dependencies** — U30.
+
+**Files**
+- `packages/db/src/schema/documents.ts` — modify. The approval record: who, when, and the rejection reason.
+- `packages/db/drizzle/` — generated migration.
+- `apps/api/src/routes/competency-documents.ts` — modify. Approve and reject.
+- `apps/api/src/routes/competency-documents.test.ts` — modify.
+
+**Approach** — Approval is resolved against the category's own `approve` action, which U29 already separates from view and edit and which the shipped defaults already grant an assessor. That separation is the whole reason this unit is small: the verb exists, the default exists, and what is missing is a record of the act.
+
+The approval is evidence that a human opened the certificate and accepted it, and it is deliberately inert everywhere else — a scenario below asserts that a competency's currency, its standing and the prerequisites it satisfies are the same before and after. R46 is the mirror of that: an unapproved document is not checked yet rather than in doubt, so it holds nothing up either.
+
+Rejection flags the document to an Admin to resolve with the person and revokes nothing, because revocation means the qualification was taken away and an illegible photograph is not that. Where it reaches the Admin is settled here rather than left open: the queue U33 builds lists rejected held documents beside pending replacements, and the profile shows the document in its rejected state. It is not added to the working list, whose contents R20 enumerates exhaustively. Two different things are called rejection across these units and the queue must not confuse them — a rejected *replacement* under R52 never became the record's evidence and leaves the held document in force, while a rejected *held* document under R47 is the record's evidence and is what an Admin has to resolve. The queue filters on both and labels them apart.
+
+**Patterns to follow** — the `approve` action already in `packages/shared/src/roles.ts` and its assessor default. `revokedAt` and `revokedReason` on `competency_holders` for the timestamp-plus-reason shape, which this record mirrors and must not be confused with.
+
+**Test scenarios**
+- An assessor on the shipped defaults views and approves a competency document. *(Covers AE1 / R42, R45, R55.)*
+- An access level granted view but not approve cannot approve. *(Covers R39.)*
+- An approval changes neither the competency's currency nor its standing nor whether it satisfies a prerequisite. *(Covers R43.)*
+- A competency whose document nobody has approved keeps its currency, its standing and its prerequisite value. *(Covers AE17 / R46.)*
+- A rejected certificate is flagged to an Admin, the competency keeps its currency and its standing, and nothing is marked revoked. *(Covers AE17 / R47.)*
+- A rejection carries the rejecting reader and the reason.
+- A rejected document is still retrievable.
+- The approval record names who approved and when.
+
+**Verification** — `pnpm --filter @formai/api test` passes; one migration generated and read; a test asserts a competency's prerequisite outcome is identical before and after an approval and after a rejection.
+
+---
+
+#### U33. The candidate's replacement document and its queue
+
+**Goal** — Let a candidate supply a better copy of a document held on their own record, hold it for review rather than writing it into the record, and keep both the one it replaces and the one that is refused.
+
+**Requirements** — R31, R47, R50, R52. Covers F5 step 5.
+
+**Dependencies** — U32.
+
+**Files**
+- `apps/api/src/routes/competency-documents.ts` — modify. The candidate's submission and the queue.
+- `apps/api/src/routes/competency-documents.test.ts` — modify.
+- `apps/api/src/routes/notices.ts` — modify. The candidate's own-scope outcome notice.
+- `apps/api/src/routes/notices.test.ts` — modify.
+- `apps/web/src/screens/enterprise/ApprovalQueue.tsx` — create. The queue an approver works.
+- `apps/web/src/screens/enterprise/ApprovalQueue.test.tsx` — create.
+- `apps/web/src/lib/screens.ts` — modify. Register it for the access levels the category admits to approving.
+
+**Approach** — Nothing in the product lets the subject of a record put a file into it, so this is new capability rather than a widened permission. It is expressed as a state rather than as a new door: the candidate uploads through the same validator every other file goes through, and the row lands pending instead of held. That is what keeps R51 true and unwidened — a pending row is not the record's evidence, so the candidate has still written only their mobile, their address and their emergency contact.
+
+Acceptance moves the pending row to held and the row it replaces to superseded, in one step, so there is never a moment with two held documents or none. Rejection moves it to rejected and leaves the held row untouched, which is the deliberate difference from U32's rejection: that one acts on a document already on the record and flags it to an Admin, this one leaves the record exactly as it was.
+
+Telling the candidate is a fixed part of R52 rather than a courtesy, and the delivery route already exists — `apps/api/src/routes/notices.ts` serves a person their own notices on their own record, which is the same own-scope read the matrix does not gate. Accepting or rejecting a replacement writes one, so the outcome reaches them whether or not any address does. Nothing stops them supplying another afterwards.
+
+The queue this unit builds is the approver's whole surface, so it carries U32's rejected held documents beside these pending replacements, labelled apart — a rejected held document is the record's evidence and needs an Admin to resolve it with the person, a rejected replacement never became evidence and needs nothing.
+
+An unbounded write from the least-privileged actor needs a bound. A candidate can otherwise push ten-megabyte files indefinitely, every rejected one is retained by design, and the only removal verb is Admin-only and scoped to wrong-person uploads — so nothing reclaims anything. A competency therefore carries at most one pending replacement per candidate, a fresh submission superseding the previous pending row rather than stacking beside it, and the submission is rate-limited per membership on the in-process window `smartFillRateLimited` in `apps/api/src/routes/fill-links.ts` already establishes.
+
+**Patterns to follow** — `packages/shared/src/roles.ts` for the candidate's own-scope grant and why a scoped value reads as denied to the org-wide question. `apps/api/src/routes/notices.ts` for an own-scope read the matrix does not gate — which this unit writes to rather than only imitating. `smartFillRateLimited` in `apps/api/src/routes/fill-links.ts` for the in-process rate-limit window.
+
+**Test scenarios**
+- A candidate opens a document on their own record and supplies a replacement; the document already held stays the record's evidence. *(Covers AE15 / R50, R52.)*
+- Once an approver accepts it, the replacement is what is held and the one it replaced is retained as evidence of what was sighted at the time. *(Covers AE15 / R31, R52.)*
+- A rejected replacement never becomes the record's evidence, is retained as a record of what was submitted and when, and leaves the held document in force. *(Covers R52.)*
+- The candidate is told the outcome in both cases through a notice on their own record, and may supply another after a rejection. *(Covers R52.)*
+- A second replacement supersedes the first pending row rather than creating a second pending row on the same competency. *(Covers R52.)*
+- A candidate submitting repeatedly is rate-limited per membership, and the limit does not reach an Admin attaching a document. *(Covers R52.)*
+- A rejected held document appears in the queue for an Admin, labelled apart from a rejected replacement. *(Covers R47.)*
+- A candidate cannot supply a replacement on another member's record. *(Covers R52.)*
+- Supplying a replacement writes no profile field, so the candidate's writable set is still mobile, address and emergency contact. *(Covers R51, R52.)*
+- The queue lists pending replacements to a reader the category admits to approving, and to nobody else. *(Covers R42, R52.)*
+- Acceptance never leaves two held documents or none on one competency.
+
+**Verification** — `pnpm --filter @formai/api test` and `pnpm --filter @formai/web test` pass; no path lets a candidate write a held document row.
+
+---
+
+#### U34. Owed files, the profile picture, and the working list's fourth source
+
+**Goal** — Let the profile picture and a competency document arrive after the record does, mark what is still owed, list it for an Admin, and let it block nothing.
+
+**Requirements** — R18, R20. Covers F1's closing step.
+
+**Dependencies** — U28, U29, U30.
+
+**Files**
+- `packages/db/src/schema/profiles.ts` — modify. The profile picture's storage key, nullable.
+- `packages/db/drizzle/` — generated migration.
+- `apps/api/src/routes/profiles.ts` — modify. Upload and serve the picture behind U29's access resolution; report what is owed.
+- `apps/api/src/routes/profiles.test.ts` — modify.
+- `apps/api/src/routes/working-list.ts` — modify. The owed-file source.
+- `apps/api/src/routes/working-list.test.ts` — modify.
+
+**Approach** — The picture is a key on the profile rather than a row of its own, because there is one of it and no version history to keep — the intake this inventory is adopted from carries one photograph, and the licence image it also carries is a competency document under U31 rather than a second identity picture.
+
+It is served like a competency document and not like a logo. The organisation logo's read is deliberately public and immutably cached, because logged-out respondents render it on a fill page; a photograph of a member is the opposite kind of object. So the upload borrows the logo route's shape and the read does not: it runs U29's access resolution and returns the same private, non-shared-cache, nosniff headers U30's document route uses.
+
+Owed is derived rather than stored: a profile with no picture key owes one, and a competency with no held document owes one. Deriving it means nothing has to be reconciled when a file arrives, which is the same posture the working list already takes towards every source it composes — it is a union over facts, and an item leaves because the fact changed.
+
+The exception R19 carves out is scoped to the run that needed it: a competency an import loaded owes no document, while one recorded on the same person afterwards owes its document like any other. This unit reads the provenance mark U28 put on the grant rather than inferring it, because inferring it from a null granting user would also catch grants the product itself made, and a one-off migration concession must not become the standard.
+
+R18's disposition is the one thing to get right: an owed file marks and lists, and blocks nothing. No case, no assessment and no competency waits on it.
+
+**Patterns to follow** — `apps/api/src/routes/working-list.ts` for adding a source to a route built to compose whichever exist. `orgLogoRouter` in `apps/api/src/routes/assets.ts` for the upload shape only — its sibling `publicAssetsRouter` is the unauthenticated read and is deliberately not the pattern here. U30's serving route for the read.
+
+**Test scenarios**
+- A profile is created with no picture, the picture is supplied later, and the record is valid throughout. *(Covers R18.)*
+- A profile owing a picture appears on the working list, and stops appearing once one is supplied. *(Covers R18, R20.)*
+- A caller holding no grant is refused the picture, and a caller from another organisation is refused it. *(Covers R30.)*
+- The picture response is private and not shared-cacheable, unlike the organisation logo.
+- A competency with no held document appears as owed; attaching one clears it. *(Covers R18.)*
+- A competency an import run loaded owes no document, while one recorded on the same person afterwards owes its own. *(Covers AE27 / R19.)*
+- An owed file stops no case being created, no assessment being assigned and no competency counting. *(Covers AE27 / R18.)*
+- The working list carries the owed file beside the training request, the retirement review and the overdue pooled case, on one list. *(Covers AE56 / R20.)*
+- The working list is refused to a non-Admin.
+- Nothing an owed file contributes reaches compliance reporting. *(Covers AE56 / R20.)*
+
+**Verification** — `pnpm --filter @formai/api test` passes; one migration generated and read; the working list carries no owed-file item before this unit and carries one after, with every kind it already returned still present.
+
+---
+
+### Phase L — Lifecycle and seats
+
+#### U35. Deactivation and reactivation
+
+**Goal** — Retire a leaver by shutting the door behind them at once while keeping every record, and bring a returner back with the certifications they legitimately still hold.
+
+**Requirements** — R62, R63, R64, R65, R66, R67, R68, R69, R70, R71, R72, R73, R74, R75, R76, R77, R78. Covers F6 and F7 end to end.
+
+**Dependencies** — U29.
+
+**Files**
+- `packages/db/src/schema/enums.ts` — modify. Add `invalidated` to `assessmentCaseStateEnum`.
+- `packages/db/drizzle/` — generated migration.
+- `apps/api/src/lib/deactivation.ts` — create. The whole transition, both directions.
+- `apps/api/src/lib/deactivation.test.ts` — create.
+- `apps/api/src/routes/team.ts` — modify. Deactivate and reactivate.
+- `apps/api/src/routes/team.test.ts` — modify.
+- `apps/api/src/middleware/tenant.ts` — modify. Revalidate the membership named in the sealed cookie on every authenticated request.
+- `apps/api/src/middleware/tenant.test.ts` — modify.
+- `apps/api/src/auth/tenant-provisioning.ts` — modify. Resolve an active membership rather than the first one found.
+- `apps/api/src/routes/auth.ts` — modify. Refuse a login whose membership of the organisation is deactivated.
+- `apps/api/src/routes/auth.test.ts` — modify.
+- `apps/api/src/routes/invites.ts` — modify. Close an outstanding invitation on deactivation.
+- `apps/api/src/routes/assessments.ts` — modify. Invalidate a case in flight and notify.
+
+**Approach** — Deactivation does two separable things and both are load-bearing: it retains every record indefinitely, and it ends reach into the product immediately. The second half is entirely new — nothing in the product ends a signed-in session on a membership change and nothing closes an outstanding invitation other than accepting it — so this unit is where a state the product does not reach today gets built.
+
+Ending a session is not a delete, because there is no session to delete. `apps/api/src/auth/replit-auth.ts` is a sealed-cookie pair — an AES-256-GCM envelope carrying the tenant with a seven-day expiry — and `apps/api/src/middleware/tenant.ts` resolves the whole tenant context from that cookie without touching the database, so nothing server-side records that a session exists and nothing could revoke one. The mechanism is therefore a revalidation rather than a revocation: `requireTenant` re-reads the status of the membership the cookie names on every authenticated request and refuses once it is no longer active. That is what makes R65 immediate and what makes this unit's gate — unusable on the next request — a real assertion. It costs one indexed read per authenticated request, which is recorded in System-wide impact.
+
+Closing the door at the front is the other half, and it is a different file. Login resolves a tenant through `provisionTenant`, which returns the first membership it finds with no status filter at all — so a deactivated person signs in and is handed a fresh seven-day session at their old access level, which would defeat both R64 and the revalidation above. Login refuses where the membership is deactivated, and `provisionTenant` resolves an active membership rather than the first.
+
+Deactivation writes `suspended`, the value `membershipStatusEnum` already carries for a membership that is neither active nor invited. No enum value is added for it; the only enum this unit widens is the case state below.
+
+Invalidity is a state the case record cannot currently express: `assessmentCaseStateEnum` carries open, awaiting sign-off, competent and closed, and none of them means "abandoned because the candidate left, retained as history". Closing it would be wrong, because a closed case reads as one that finished. The enum gains `invalidated`, and nothing backfills a row to it — the value is written only at runtime after the migration, which keeps it clear of the restriction the codebase already documents for an enum value added alongside other DDL.
+
+Retention is the easy half and is expressed by not doing anything: no competency is revoked, no document is removed, no history is touched, and the grace clock goes on running because it is derived from dates rather than ticked. A returner's competency that is still in date is valid immediately for exactly that reason.
+
+A case in flight becomes invalid and is retained with everything already signed on it, and every assessor eligible for that tool at the case's Location is told — through the notifier U18 of the sibling artifact already built, which is why the notification reaches a pool rather than an individual. A reactivated candidate starts a fresh case rather than resuming the invalidated one.
+
+Seats move with the membership's status through the meters that already exist: deactivation releases one from the pool the access level draws on, reactivation takes one. Reactivation proceeds even when no seat is free — expansion is U37's, and until it lands this path takes the seat and the refusal it would otherwise hit is the one U37 replaces.
+
+**Execution note** — Write the session and login halves test-first. Both are new reach into the auth surface, and a deactivation that retains every record while leaving a live session running — or while leaving the front door open — is the failure this unit exists to prevent.
+
+**Patterns to follow** — `apps/api/src/middleware/tenant.ts` for where a sealed cookie becomes a tenant context, which is the only point a stateless session can be refused. `apps/api/src/lib/pool-notify.ts` for the eligible-assessor fan-out R73 needs. `apps/api/src/lib/seats.ts` for which pool a level draws on. The pending-invite partial unique index in `packages/db/src/schema/organizations.ts` for what closing one means.
+
+**Test scenarios**
+- Deactivating a candidate retains the profile, the documents, the competencies and the assessment history, all still retrievable. *(Covers AE6 / R62, R63.)*
+- A member of any access level is deactivated by the same path. *(Covers R62.)*
+- The deactivated member cannot sign in and can be assigned no new assessment. *(Covers R64.)*
+- A session the person is signed into ends at once rather than running until it would have lapsed: a request carrying their still-valid sealed cookie is refused on the next call. *(Covers AE7 / R65.)*
+- A deactivated member's login is refused rather than issuing a fresh session at their old access level. *(Covers R64.)*
+- A person holding memberships of two organisations, deactivated in one, still signs in and reaches the other. *(Covers R1, R64.)*
+- An active member's request is unaffected by the revalidation.
+- An invitation they never accepted is closed rather than left open. *(Covers AE7 / R65, R75.)*
+- No competency is revoked by deactivation, and none carries a revocation reason afterwards. *(Covers AE9 / R66, R67.)*
+- Deactivation releases a candidate seat where the membership carried the Candidate access level and a staff seat where it carried any other. *(Covers AE6 / R77.)*
+- A case in flight becomes invalid and is retained with its signed attempt, whether or not the person returns. *(Covers AE41 / R71, R72.)*
+- Every assessor eligible for that tool at the case's Location is notified, and the named assessor too where the case names one. *(Covers AE41 / R73.)*
+- Reactivating a member restores the profile and its history as they were. *(Covers R68.)*
+- A competency still inside its expiry is valid immediately with no reassessment. *(Covers AE8 / R69.)*
+- A competency that lapsed during the absence reads as expired and not as revoked. *(Covers AE9 / R66, R69.)*
+- A grace period is measured as having run through the deactivation. *(Covers AE40 / R70.)*
+- A member who had accepted their invitation needs no fresh one; one deactivated before accepting is invited again. *(Covers AE7 / R76.)*
+- A reactivated candidate begins a fresh case rather than resuming the invalidated one. *(Covers AE41 / R74.)*
+- Reactivation takes a seat from the pool the membership's access level draws on. *(Covers R78.)*
+- An invalidated case reads as invalidated rather than as closed or competent, and is distinguishable from a case that finished. *(Covers R71, R72.)*
+
+**Verification** — `pnpm --filter @formai/api test` passes; one migration generated and read; a deactivated member's live session is unusable on the next request; no record of any kind is deleted by either transition.
+
+---
+
+#### U36. The unreachable mark and its two surfaces
+
+**Goal** — Let an Admin mark an address that no longer reaches anybody, without taking anything off the record, and put that member on the two surfaces an Admin reads.
+
+**Requirements** — R16, R20, R98, R99. Covers F1's email capture and the fallback it makes real.
+
+**Dependencies** — U25, U29.
+
+**Files**
+- `packages/db/src/schema/profiles.ts` — modify. `emailUnreachableAt`, nullable, and who marked it.
+- `packages/db/drizzle/` — generated migration.
+- `apps/api/src/routes/profiles.ts` — modify. Mark and clear.
+- `apps/api/src/routes/profiles.test.ts` — modify.
+- `apps/api/src/routes/working-list.ts` — modify. The unreachable-address source.
+- `apps/api/src/routes/working-list.test.ts` — modify.
+- `apps/api/src/routes/compliance.ts` — modify. Populate the unreachable list.
+- `apps/api/src/routes/compliance.test.ts` — modify.
+- `apps/api/src/lib/sweep.ts` — modify. Do not send to a marked address.
+
+**Approach** — KTD22 puts the mark on the profile as a timestamp because `users.email` is unique product-wide and is the person-record lookup key, so nothing may be written into it or cleared from it, and because one organisation's mail bouncing is not a fact about another's. The address stays, the profile stays valid and nothing is left outstanding on it — what is required is that a profile carries an address, not a working one.
+
+This is the unit that finishes two routes built expecting it. Compliance reporting already returns an empty unreachable list and says why; the working list already names this as one of the two sources it is waiting on. Both gain a query rather than a redesign.
+
+The overlap is the point and is worth asserting: the marked member is the single item on both surfaces, because somebody has to chase them and because a member no notification reaches is a compliance fact. Nothing else on the working list is a compliance fact, and nothing compliance reporting counts about a competency is a working-list item.
+
+The two surfaces read the mark differently, and saying so is what keeps R16's overlap property true rather than approximately true. The working list is populated by the mark alone — an Admin marked the address because mail bounces, so an expiry that would have been emailed now needs a person to chase it, whether or not the member also holds a login. Compliance reporting counts the narrower population: the mark plus no login, because the sibling's sweep also serves its notice on a person's own record, so somebody with a login is still reached and is not a compliance fact. That narrowing of R98 is a reading the sibling artifact already wrote into its notice route, and it means the single item on both surfaces is a marked member holding no login rather than every marked member. A marked member who still signs in is on the working list and not in the report — which is correct, and is exactly the case that would otherwise make the overlap claim unsatisfiable.
+
+**Patterns to follow** — `apps/api/src/routes/compliance.ts` for the empty-list stub and its comment naming this work. `apps/api/src/routes/notices.ts` for why a login is the second delivery route.
+
+**Test scenarios**
+- Marking an address unreachable leaves the address on the record and the profile valid with nothing outstanding. *(Covers AE54 / R16.)*
+- The marked member appears on the working list. *(Covers AE54 / R16, R20.)*
+- The marked member appears in compliance reporting's unreachable list. *(Covers AE54 / R16, R99.)*
+- A marked member holding no login is the only item on both surfaces — no owed file, import gap, training request or retirement review reaches compliance reporting, and no expired or never-held competency reaches the working list. *(Covers AE56 / R20, R99.)*
+- A marked member who still holds a login is on the working list and not in compliance reporting. *(Covers R20, R98, R99.)*
+- The expiry sweep sends nothing to a marked address. *(Covers R98.)*
+- A member holding a login is still reached on their own record and is not counted unreachable. *(Covers R98, R99.)*
+- Clearing the mark removes the member from both surfaces.
+- A non-Admin cannot mark or clear an address.
+- Marking writes an audit entry.
+
+**Verification** — `pnpm --filter @formai/api test` passes; one migration generated and read; compliance reporting returns a populated unreachable list where it returned an empty one; the working list carries no unreachable item before this unit and carries one after, with every kind it already returned still present.
+
+---
+
+#### U37. Seat expansion at the allocation boundary
+
+**Goal** — Stop refusing the action that would take an organisation past a finite candidate allocation and add a charged block instead, and let a profile be created and an invitation issued while either pool is full.
+
+**Requirements** — R79, R80, R81, R82, R83, R84, R85, R86 (the expansion; the preview a run states first is U28's). Covers F7's expansion step.
+
+**Dependencies** — U28, U35.
+
+**Files**
+- `apps/api/src/lib/seat-blocks.ts` — create. The expansion write, reading the sizes and discounts U28 put in shared.
+- `apps/api/src/lib/seat-blocks.test.ts` — create.
+- `apps/api/src/lib/seats.ts` — modify. Expansion in place of refusal on the candidate pool, resolving the effective limit before it writes.
+- `apps/api/src/routes/team.ts` — modify. Three changes: remove the seat check running immediately before the invite row is inserted at `POST /members`, for both pools; remove the pool-crossing check in the pending-invite branch of `PATCH /members/:id`; and make a pool-crossing change on an active membership expand rather than refuse. Staff invite creation returns a non-blocking warning when the staff pool is full.
+- `apps/api/src/routes/team.test.ts` — modify.
+- `apps/api/src/routes/invites.ts` — modify. All three acceptance-path checks stop refusing on the candidate pool; the two inside a locked transaction perform the expansion write and the unlocked pre-hash one does not. None is removed.
+- `apps/api/src/routes/invites.test.ts` — modify.
+- `apps/api/src/audit/record.ts` — modify. Record an expansion.
+
+**Approach** — KTD27 writes expansion to `organizations.candidateSeatLimit`, which already overrides the tier, so `packages/db/src/plans.ts` is untouched and the contract's allocations stay the target rather than being reconciled here. The staff pool keeps refusing, because R86 and R84 are written entirely in candidate-seat terms and the parked billing cluster leaves no staff-side rule to implement. An overflow adds a block of fifty under KTD27.
+
+KTD28 decides which checks go, and the files matter more than they look. There are six live seat checks and this unit reaches five of them. Two are on pending invitations in `apps/api/src/routes/team.ts` — the one above the only insert of an invite row in the product, and the pool-crossing check on a pending invite's role change — and both go, for both pools, because a pending invitation reserves nothing either way. Three are on the acceptance path in `apps/api/src/routes/invites.ts` and none is removed: each stops refusing on the candidate pool, and only the two holding the organisation row lock write the expansion. The sixth, the pool-crossing check on an *active* membership, stays and gains expansion — that one guards a real seat.
+
+Expansion resolves the effective limit before it writes. `candidate_seat_limit` is nullable and a null means inherit from the tier rather than unlimited, so writing a bare block size onto a null would drop a Business organisation from two hundred seats to fifty and lock out enrolment. The write resolves the limit through the same column-then-tier order `apps/api/src/lib/seats.ts` already uses and stores that resolved value plus the block.
+
+Nothing else in this plan spends money, and nothing else leaves so little trace: a moved integer on the organisation row is indistinguishable from an Admin editing it by hand. Every expansion writes an audit entry naming the pool, the block size, the resulting limit, the action that triggered it and the actor — which is the same recorder profile edits, document removal, the unreachable mark and the export all already go through.
+
+A tier allocated no candidate seats never expands into an allocation at all, which is the one place the rule does not reach.
+
+The Enterprise arm of R82 cannot fire on the shipped configuration, which resolves Enterprise to unlimited. The mechanism is proved against an explicit per-organisation limit instead, which the column already supports, and the divergence stays recorded rather than resolved.
+
+**Execution note** — Write the expansion against the locked path test-first. Expansion has to happen inside the same transaction that holds the row lock, or two acceptances arriving together each expand by a block and the organisation is charged twice for one seat.
+
+**Patterns to follow** — `apps/api/src/lib/seats.ts` for `limitFor`, the lock-then-count discipline and the refusal body. `apps/api/src/routes/team.ts` for the pool-crossing check an access-level change already runs, which is the one check in that file that stays.
+
+**Test scenarios**
+- Creating a profile and handing over an invitation nobody accepts consumes no seat, adds no block and charges nothing, on an organisation holding every seat its allocation includes. *(Covers AE34 / R79, R80, R86.)*
+- A candidate invitation is issued while the candidate pool is full. *(Covers R80.)*
+- A staff invitation is issued while the staff pool is full, and the response carries a warning naming the full pool. *(Covers R80.)*
+- A pending staff invitation is changed to Candidate while the candidate pool is full. *(Covers R80.)*
+- Accepting an invitation while the candidate pool is full expands and charges rather than stranding the holder, and is not refused by the pre-hash check before it gets there. *(Covers R80, R86.)*
+- An already-signed-in user redeeming an invite on a full candidate pool expands rather than being refused. *(Covers R80, R86.)*
+- An organisation whose candidate seat limit is null on the Business tier expands to two hundred and fifty rather than to fifty. *(Covers R86.)*
+- Every expansion writes an audit entry naming the pool, the block size, the resulting limit, the triggering action and the actor. *(Covers R86.)*
+- Changing an active member's access level to Candidate takes a candidate seat, releases the staff seat, and goes through with a block added and charged when the pool is full. *(Covers AE35 / R81, R86.)*
+- Reactivating a candidate with no free seat goes through, adds a block and charges it. *(Covers AE36 / R78, R86.)*
+- An organisation holding every candidate seat of an explicit finite allocation expands rather than being refused. *(Covers AE37 / R82, R86.)*
+- A tier allocated no candidate seats enrols none and gains no block. *(Covers AE38 / R83.)*
+- An overflow of one seat adds a block of fifty, not a hundred or five hundred. *(Covers R84, R86.)*
+- A block of 50 is priced at the list rate, a block of 100 at 15 percent off and a block of 500 at 25 percent off; 500 bought as one block costs less than ten blocks of 50. *(Covers AE39 / R84.)*
+- The per-seat list price is unset, and nothing invents one. *(Covers R85.)*
+- A full staff pool refuses an action that would consume a staff seat, and the refusal names the staff pool. *(Covers R80.)*
+- Two acceptances arriving together against one free seat expand by one block in total, not two.
+- `packages/db/src/plans.ts` is unchanged by this unit.
+
+**Verification** — `pnpm --filter @formai/api test` passes; `packages/db/src/plans.ts` still reads Business 200 and Enterprise unlimited; no expanding action is refused on the candidate pool, and none on the staff pool expands; no seat check refuses any pending-invitation path in either file; every expansion write happens inside a transaction holding `lockOrgForSeats`.
+
+---
+
+### Phase M — Surfaces, export and seeding
+
+#### U38. The profile screen
+
+**Goal** — Show a member's record — fields as their reader is admitted to them, competencies with standing beside currency, documents, and assessment history — and let an Admin create and edit one.
+
+**Requirements** — R2, R12, R13, R14, R37, R38, R39, R44, R49, R51, R55, R104, R109. Covers F1 steps 2–6, F4 steps 4–7 and F5 step 1.
+
+**Dependencies** — U29, U31, U36.
+
+**Files**
+- `apps/web/src/screens/enterprise/ProfileScreen.tsx` — create. The record, and the Admin's create-and-edit form.
+- `apps/web/src/screens/enterprise/ProfileScreen.test.tsx` — create.
+- `apps/web/src/lib/screens.ts` — modify. Register it for the access levels the category admits.
+
+**Approach** — The screen renders the inventory from shared rather than from a hand-written field list, so a field added there appears here without a second edit and the required, sensitive and derived marks cannot drift between the two.
+
+It carries the Admin's entry form as well as the read, because otherwise nothing in the plan lets an Admin type a date of birth or an emergency contact into the product and F1 — the first flow, and the one eighteen requirements hang off — cannot be walked. U29 builds that write with no caller; this is the caller. The form renders from the same inventory, marks required fields from it, offers the decline values for gender and ethnicity, shows Indigenous status derived and read-only, and drives its Location, Department and Role pickers from the organisation's own lists under each Department's one-or-several setting. U40's seeded-create entry point reuses this form rather than introducing a second one.
+
+Reads resolve per section rather than all at once. After U29 splits the category, `view` governs the fields, `view_competencies` the competencies and the assessment history, and `view_documents` the documents, so an organisation that tightens fields but leaves documents open renders the documents alone — which is the configuration R44 exists to allow and which a screen with only two states, everything or nothing, would render as a blank page.
+
+Each competency shows standing and currency as two facts side by side, because they answer different questions — standing is obligation and follows the person's Roles, currency is eligibility and follows the competency's own dates — and a reader who cannot tell them apart reads an expired optional competency as a compliance failure. Retired and withdrawn values are marked in place for the same reason: a reader has to be able to tell a Role that still counts from one that does not.
+
+Currency renders on the reader's own audience window, so a candidate sees the thirty-day warning and everyone else sees the assessor's ninety. That is the plan's answer to the contract's question and is the least surprising reading of a model that already keys the window by audience; a single window for the surface is the alternative and is recorded in Open questions.
+
+The candidate's own view is the same screen taking the fixed path, which is what keeps their read demonstrably in full rather than a second, thinner surface that could quietly diverge.
+
+**Patterns to follow** — `apps/web/src/screens/enterprise/ComplianceScreen.tsx` and `WorkingListScreen.tsx` for the screen, fetch and empty-state shape. `apps/web/src/screens/enterprise/CompetencyScreen.tsx` for how a competency's dates are already rendered.
+
+**Test scenarios**
+- A member's competencies render, each showing its standing and its currency. *(Covers R37, R104.)*
+- A required competency in date and an optional one that has expired both render, and the expired optional one does not read as a compliance failure. *(Covers AE43 / R37, R104.)*
+- A candidate's assessment history renders in full — three assessments, a failed and re-sat attempt, and one still in flight, each with its outcome and reason. *(Covers AE33 / R38.)*
+- A retired Location, Department or Role is marked as retired where it appears. *(Covers R109.)*
+- A withdrawn Role is marked as withdrawn and is distinguishable from one that still counts. *(Covers R109.)*
+- An assessor on the shipped defaults sees fields, competencies, history and documents; the same assessor in a tightened organisation sees nothing. *(Covers AE1, AE29 / R39, R55.)*
+- An assessor in an organisation that has tightened fields but not documents sees the documents section and no fields. *(Covers R44.)*
+- An assessor in an organisation that has tightened fields but not competencies still reads the competencies and the assessment history. *(Covers R41, R55.)*
+- An Admin creates a profile from scratch: required fields are marked, a missing one blocks the save naming the field, and gender and ethnicity offer their decline values. *(Covers F1 / R2, R12, R13, R14.)*
+- The create form shows Indigenous status derived and offers no way to enter it. *(Covers R15.)*
+- The create form offers only the organisation's own Locations and Departments, and only the Roles the chosen Department offers, under that Department's one-or-several setting. *(Covers F1 / R4, R6.)*
+- An Admin edits an existing profile and the changed fields save. *(Covers R2.)*
+- A profile is created with no middle name, no employee number, no swipe card number and no induction date. *(Covers AE49 / R12.)*
+- A candidate opening their own record sees every field including the sensitive ones, and an editable mobile, address and emergency contact and nothing else. *(Covers AE2, AE3, AE51 / R49, R51.)*
+- A candidate sees currency on the thirty-day window and an assessor on the ninety-day one.
+- The screen renders from the shared inventory, so a field added there appears with no change here.
+
+**Verification** — `pnpm --filter @formai/web test` passes; the screen holds no second copy of the field inventory.
+
+---
+
+#### U39. Export, Admin-only and audited
+
+**Goal** — Let an Admin and nobody else export a member's record, redact the sensitive fields from a caller the organisation has not released them to, carry the document files unredacted, and write every export to the audit.
+
+**Requirements** — R8, R29, R54. Covers the export F4 and F5 both stop short of.
+
+**Dependencies** — U29, U30.
+
+**Files**
+- `packages/shared/src/profile-export.ts` — create. The export shape and the redaction, driven by the inventory's sensitive marks.
+- `packages/shared/src/profile-export.test.ts` — create.
+- `apps/api/src/routes/profiles.ts` — modify. The export route.
+- `apps/api/src/routes/profiles.test.ts` — modify.
+
+**Approach** — Export is the one act no configuration opens up, and the gate is therefore not a matrix lookup at all: it is the Admin access level, which admits an Owner as the level holding everything Admin holds and admits nobody else. An assessor admitted to the profile in full by the defaults still cannot export it, and neither can the candidate reading their own record in full. A scenario asserts both, because the tempting implementation is an `export` action on the category and that would be wrong.
+
+Redaction is driven by the inventory's sensitive marks rather than by a second list, and document files are exempt from it — the point of an export is that the licence can be produced as evidence, and a redacted image is not evidence.
+
+Where the redaction actually fires needs saying, because on this route it never does. R54 admits only Admin and an Owner, and both hold every field, so every caller who reaches the export is released to sensitive detail by definition and the route emits nothing redacted. R8's mark is not a matrix grant either — KTD26 keeps it off the category deliberately — so there is no predicate on this route for "a caller the organisation has not released sensitive detail to", and inventing one would be specifying an access-control rule nobody asked for on the most sensitive act in the product. The redaction therefore lives in shared as a pure function over the inventory, proved by unit tests rather than through a route caller, and the export's own consumer of it is the identity case. The other consumer the contract names — an agent-facing read — is built by no unit here, which is recorded in Open questions.
+
+The audit line is what the unredacted files make necessary: a licence image carries a date of birth, an address and a photograph, so a leak has to be traceable. Traceable to whom is half the answer — the entry records the exported member as its subject alongside the actor and the moment, because "who ran an export" without "whose record left" cannot answer the question asked after an incident.
+
+**Patterns to follow** — the `redact` helper and the sensitive-detail segregation in `apps/api/src/routes/inductions.ts` and `packages/shared/src/induction.ts`, which is the established pattern this follows and deliberately departs from on the emergency contact. `apps/api/src/audit/record.ts` for the audit line.
+
+**Test scenarios**
+- An Admin exports a member's record and the export is written to the audit naming the Admin, the exported member and the moment. *(Covers AE25 / R54.)*
+- An assessor and a candidate are both refused the export, in an organisation on the defaults and in one that has loosened its matrix as far as it goes. *(Covers AE25 / R54.)*
+- An Owner may export. *(Covers R54.)*
+- No matrix setting grants export on profiles to any other access level. *(Covers R54.)*
+- The redaction helper, given a profile and the inventory, withholds the date of birth and leaves the document file intact — proved as a pure function, because the route admits no caller it would fire for. *(Covers AE26 / R8, R29.)*
+- The emergency contact's name and phone are not redacted by that helper, departing from the induction pattern. *(Covers R8.)*
+- The export route emits nothing redacted, because R54 admits only callers who hold every field. *(Covers R54.)*
+- The export carries the field inventory's values and the documents held on the record.
+- An export of an assessor's record is refused to everyone the same way it is for a candidate's. *(Covers R54.)*
+
+**Verification** — `pnpm --filter @formai/api test` and `pnpm --filter @formai/shared test` pass; no `export` action is added to the `profiles` permission category.
+
+---
+
+#### U40. Seeding a profile from an induction submission
+
+**Goal** — Create a profile from an induction submission instead of typing it again, without ever creating a second record for somebody who already has one.
+
+**Requirements** — R87, R88, R89, R90, R91, R92, R93, R94. Covers F2 end to end.
+
+**Dependencies** — U28, U29, U38.
+
+**Files**
+- `packages/shared/src/profile-seed.ts` — create. The intake-answer to profile-field mapping.
+- `packages/shared/src/profile-seed.test.ts` — create.
+- `apps/api/src/routes/inductions.ts` — modify. Seed from a submission, and route a repeat to review.
+- `apps/api/src/routes/inductions.test.ts` — modify.
+- `apps/web/src/screens/enterprise/ProfileScreen.tsx` — modify. The seeded-create entry point.
+
+**Approach** — The mapping is pure and lives in shared beside the inventory it targets, because the intake's field ids and the profile's fields are two vocabularies and the translation between them is a fact worth testing on its own. Indigenous status is derived from the ethnicity the submission carries rather than mapped, which is the same derivation everywhere else reads.
+
+Nothing carries across as a document, because an induction submission holds only a marker that a file was supplied — the bytes were never kept. Employee number and swipe card number come from no submission either and are Admin's to enter afterwards.
+
+A submission for somebody who already has a profile creates nothing and goes to an Admin, who is told the record exists and asked whether the person should be reactivated. That is the same three-way address match U28 makes for an import row, read for a different inbound path, and the matching itself is the contract's deferred question — this unit matches on the address alone, as the sibling's import does, so the two agree.
+
+R94's branch reaches only a historical submission. One raised since the organisation's lists exist can carry only values those lists hold, so the fallback — read the answer as a suggestion and let the Admin pick from the current lists — is scoped to submissions raised while the intake still offered hardcoded options.
+
+**Patterns to follow** — `packages/shared/src/induction.ts` for the submission-to-profile shape already extracted for the intake. `packages/shared/src/chc-intake.ts` for the field ids the mapping reads. `apps/api/src/lib/member-create.ts` from U28 for the address match this reuses rather than re-implements.
+
+**Test scenarios**
+- A submission carrying names, date of birth, address and emergency contact seeds a profile with those answers. *(Covers AE18 / R87, R88.)*
+- The seeded profile is created with both identifiers empty and the Admin enters them afterwards. *(Covers AE18 / R89.)*
+- Indigenous status on the seeded profile is derived from the submission's ethnicity. *(Covers R15, R88.)*
+- A submission recording Unknown for ethnicity seeds a profile whose Indigenous status reads as not stated. *(Covers AE4 / R13, R15.)*
+- No document is carried across, and the competency documents the profile owes are owed. *(Covers R90.)*
+- Admin supplies an email address where the submission carries none, and the profile cannot be created without one. *(Covers AE19 / R16.)*
+- A submission for a person who already has a profile creates no second profile. *(Covers AE42 / R91, R92.)*
+- That submission is routed to an Admin, who is told the record exists and asked whether to reactivate. *(Covers AE42 / R92, R93.)*
+- A historical submission carrying a Department no current list holds does not fail: the answer is offered as a suggestion and the Admin picks from the organisation's current lists. *(Covers R94.)*
+- A submission raised since the lists exist carries only list values and needs no fallback. *(Covers R94.)*
+- The seeded profile is placed by Location, Department and the Roles the chosen Department offers. *(Covers F2 / R4, R6.)*
+
+**Verification** — `pnpm --filter @formai/api test` and `pnpm --filter @formai/shared test` pass; `packages/shared/src/profile-seed.ts` has no database import; no path creates a second profile for a person who already has one.
+
+---
+
+## Verification Contract
+
+### Commands
+
+Run from the repo root unless a filter is given.
+
+```bash
+pnpm typecheck
+```
+
+```bash
+pnpm lint
+```
+
+```bash
+pnpm --filter @formai/shared test
+```
+
+```bash
+pnpm --filter @formai/api test
+```
+
+```bash
+pnpm --filter @formai/web test
+```
+
+```bash
+pnpm --filter @formai/db generate
+```
+
+```bash
+pnpm build
+```
+
+`packages/db` carries no test script. Its correctness is proved through the API tests that read the schema and through each generated migration being read by hand before it is committed.
+
+### Gates
+
+- **Every unit**: `pnpm typecheck` clean across the workspace, and the test command for every package the unit touched passing.
+- **Every unit carrying a schema change**: `pnpm --filter @formai/db generate` produces exactly one migration and its SQL is read before it is committed. Every column this plan adds is nullable or carries a default; a migration that drops or rewrites a column has exceeded the plan and is a stop condition.
+- **U27 specifically**: the username backfill run twice against fixed data produces identical state, and a partial run followed by a full one leaves every row with exactly one username. Both login miss paths — unknown email and unknown username — take the constant-time comparison.
+- **U28 specifically**: the sibling artifact's U23 part 2 and U24 can both be started against this unit without a further change here — the creation service, the two-pool cost preview, the identifier-uniqueness rejections and the competency's import mark are the whole of what they need from this plan. A refused row leaves no person, no membership and no profile behind, and the preview and a subsequent run agree on the seat count for the same file.
+- **U30 specifically**: every refusal path on the serving route returns the same response as a document that does not exist, so no probe distinguishes a forbidden key from an absent one.
+- **U35 specifically**: a deactivated member's live session is unusable on the next request, and no record of any kind is deleted by either direction of the transition.
+- **U37 specifically**: `packages/db/src/plans.ts` is byte-identical to its state before the unit.
+- **Before Phase M**: `pnpm build` passes, because the profile screen is the first surface consuming nearly every earlier unit.
+
+### What proves the plan
+
+Each unit's test scenarios are the floor. Beyond them, seven properties hold across the whole plan and are worth asserting wherever a unit touches them.
+
+- No route reads a profile field, a competency document or an assessment history on a profile without going through the one access resolution — the candidate's fixed path and the matrix path are the only two ways in.
+- No competency document reaches storage before that resolution has run. A key is never on its own a permission.
+- No column anywhere stores a display name or an Indigenous status; both are derived on read.
+- Nothing writes a workforce identifier onto an assessment case or an attempt. The name is captured and the identifier is read live, and the two must not converge.
+- No query reads a competency for currency without filtering `revokedAt IS NULL`, which is the sibling artifact's property read here for a licence.
+- No `export` action is added to the `profiles` permission category, because export is not the organisation's to configure.
+- `packages/db/src/plans.ts` is unchanged. The candidate allocations still read Business 200 and Enterprise unlimited, and the divergence from the contract's 100 and 500 stays recorded rather than reconciled.
+
+## Definition of Done
+
+### Global
+
+- Every requirement R1 to R118 is either implemented by a named unit, cited as the Organisation Settings artifact's, satisfied by code that has already shipped, or recorded in Open Questions as deferred. None is silently dropped. Twenty-four appear in no unit's Requirements line, and every one of them is accounted for below; any twenty-fifth absentee is a dropped requirement.
+  - **Nineteen are the sibling artifact's** and are relied on rather than built here: the taxonomy a placement chooses from and what a rename reaches (R4), how many Locations and Departments a person may hold (R5), what a Department offers and how many of it (R6), that a profile's Location and a case's are one axis (R11), how standing is derived from Roles (R95), voluntary training (R96), a withdrawn assessment leaving a case in flight alone (R97), the dates a migrated competency keeps (R105), what retiring a value does and what returning it to active clears (R107, R110), when a Role stops counting and what withdraws it (R108, R111, R112), the bulk transfer (R113), and assignment, the pooled case, the union of parts and automatic marking (R114 to R118).
+  - **Five are already satisfied by shipped code** and are asserted by this plan's tests rather than built: the access level carried on the membership (R9), the address held independently of how an invitation is delivered (R17), the permission matrix's profile category (R40), an unsigned attempt keeping its captured name (R60), and expiry derived from the grant date and the qualification's validity (R106).
+- All eight Key Flows are walkable end to end in the product against a seeded organisation.
+- `pnpm typecheck`, `pnpm lint` and `pnpm build` pass from the repo root.
+- Every package's test suite passes.
+- Every profile surface is gated to the tier that carries assessments, matching the taxonomy it depends on. An organisation below that tier holds no profiles.
+- No user-facing string calls an access level a job Role, or a job Role an access level.
+- The seven cross-plan properties in `What proves the plan` hold.
+- Abandoned approaches are removed from the diff. A long run accumulates experiments; none ships.
+- Any decision a future reader would need — particularly the shape of the U27 username backfill, and whatever the rejected-document destination is finally settled as — is written to `docs/solutions/`.
+
+### Per unit
+
+A unit is done when:
+
+- Its goal is met and every requirement it names is implemented.
+- Every test scenario it lists exists as a real test and passes.
+- Its files are the files it touched, or the plan is corrected to say what it actually touched.
+- Its verification passes.
+- The unit is one commit, and that commit's message names the U-ID.
+
+### Phase gates
+
+- **Phase J done** means the sibling artifact is unblocked: a validated import row has somewhere to land, and its U23 part 2 and U24 can be written. Confirm that explicitly before starting Phase K.
+- **Phase K done** means a licence can be opened and judged rather than assumed, every version of a document that was ever held is still retrievable, and the person the record is about can supply a better copy without writing it into the record.
+- **Phase L done** means a leaver is out of the product at once with every record intact, a returner keeps what is still in date, and no action at a seat boundary stops work on a site to settle a billing question.
+- **Phase M done** means a member's record can be read, exported once by an Admin with the export recorded, and created from an induction submission without ever making a second one.
+
+---
+
+## Deferred / Open Questions
+
+### From 2026-08-06 review
+
+- **Expansion writing candidateSeatLimit silently voids a later tier upgrade** — Planning Contract, KTD27 (P1, product-lens, confidence 75)
+
+  A Business organisation that auto-expands once is pinned at that number for good, so moving to Enterprise afterwards delivers none of the larger allocation R82 sells — the customer pays for a tier and receives the seats they were already auto-charged for. `limitFor` resolves the explicit column ahead of the tier, so a written column wins over every later tier change including Enterprise's unlimited. Deferred because the alternative — incrementing a separate purchased-seats counter and resolving the limit as allocation plus counter — changes the seat data model, which belongs with the parked billing work rather than being settled here.
+
+- **The smallest-block rule overcharges every overflow above fifty seats** — Planning Contract, KTD27 (P1, product-lens, confidence 75)
+
+  On the one action R86 asks an Admin to confirm, the product proposes the most expensive composition of the blocks it sells: a 260-seat overflow buys six blocks of 50 at list price where three blocks of 100 cover 300 seats at 15 percent off. KTD27's rationale — the smallest block is what an organisation is least committed to — holds only up to 50 seats. Deferred because which composition to sell is a pricing decision in the parked billing cluster, not a defect in the mechanism; `packages/shared/src/seat-blocks.ts` is where a cheapest-composition rule would land when the answer arrives.
+
+- **An API key issued by a deactivated member keeps authenticating at that member's role** — Implementation Units, U35 (P1, security-lens, confidence 75)
+
+  A leaver who ever created an API key walks out with a working org-scoped credential whose plaintext only they hold, so deactivation shuts the session and the invitation and leaves a third door open. `resolveApiKey` checks only that the key is unrevoked and the issuer's user row still exists — never membership status. Deferred because whether those are the person's credentials or the organisation's is a real fork: revoking them on deactivation breaks an integration the organisation may still depend on, and leaving them breaks the containment R65 is about.
+
+- **Screens are registered by a gate the screen registry cannot express** — Implementation Units, U38 and U33 (P2, feasibility, confidence 75)
+
+  `apps/web/src/lib/screens.ts` gates on a single `minAccessLevel` rank, so a profile screen the candidate must reach can only be registered as visible to everyone — putting it on a Viewer's and a Builder's sidebar where the matrix denies profiles, which is the dead entry the registry's own docstring exists to avoid. The same rank cannot follow a per-organisation `approve` grant for the approval queue. Deferred because extending `ScreenDef` with a matrix-resolved gate and registering with no rank behind an API gate are both defensible, and the choice shapes every screen added after these two.

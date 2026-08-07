@@ -67,8 +67,13 @@ export function poolFor(role: Role): 'staff' | 'candidate' {
  * per-org column first, then the tier config. A null column means INHERIT (rows
  * written before the column existed read back null), not unlimited — unlimited
  * is the tier config itself resolving to null.
+ *
+ * EXPORTED because expansion (U37) must resolve by exactly this order before it
+ * writes. `candidate_seat_limit` is nullable and a null inherits, so writing a
+ * bare block size onto a null would drop a Business organisation from two
+ * hundred seats to fifty and lock out enrolment.
  */
-function limitFor(
+export function limitFor(
   org: { planTier: string; seatLimit: number | null; candidateSeatLimit: number | null },
   role: Role,
 ): { limit: number | null; pool: 'staff' | 'candidate' } {

@@ -42,6 +42,29 @@ function makeCtx(over: Partial<ImportContext> = {}): ImportContext {
   };
 }
 
+/** Build a file from several profile lines, each a partial override of the valid row. */
+function profileFileOf(rows: Array<Partial<Record<string, string>>>): string {
+  const line = (cells: Partial<Record<string, string>>) => {
+    const c = {
+      name: 'Ada Assessor',
+      email: 'ada@example.com',
+      access_level: 'Assessor',
+      locations: 'Raw Materials',
+      departments: 'Operations',
+      roles: 'Dozer Operator',
+      employee_number: '',
+      swipe_card_number: '',
+      ...cells,
+    };
+    return `${c.name},${c.email},${c.access_level},${c.locations},${c.departments},${c.roles},${c.employee_number},${c.swipe_card_number}`;
+  };
+  return [
+    '#profiles',
+    'name,email,access_level,locations,departments,roles,employee_number,swipe_card_number',
+    ...rows.map(line),
+  ].join('\n');
+}
+
 /** Build a one-profile file from a partial profile line, defaulting to a valid row. */
 function profileFile(cells: Partial<Record<string, string>> = {}): string {
   const c = {
@@ -186,6 +209,56 @@ describe('validateWorkforceImport — deliberate non-rejections and volume', () 
     expect(validProfiles).toHaveLength(293);
     expect(rejected).toHaveLength(7);
     expect(new Set(rejected.map((r) => r.reason))).toEqual(new Set(['unknown_role']));
+  });
+
+  it('rejects a row naming an employee number already issued in the organisation (R7)', () => {
+    const ctx = makeCtx({ heldEmployeeNumbers: new Set(['e1']) });
+    expect(reasons(profileFile({ employee_number: 'E1' }), ctx)).toEqual(['duplicate_employee_number']);
+  });
+
+  it('rejects a row naming a swipe card number already issued (R7)', () => {
+    const ctx = makeCtx({ heldSwipeCardNumbers: new Set(['s9']) });
+    expect(reasons(profileFile({ swipe_card_number: 'S9' }), ctx)).toEqual(['duplicate_swipe_card_number']);
+  });
+
+  it('matches a held number case-insensitively, as the profile index does', () => {
+    // The partial unique indexes fold case. A case-SENSITIVE check here would
+    // pass a row the insert then rejects, part-way through a run.
+    const ctx = makeCtx({ heldEmployeeNumbers: new Set(['e1']) });
+    expect(reasons(profileFile({ employee_number: 'e1' }), ctx)).toEqual(['duplicate_employee_number']);
+  });
+
+  it('rejects the SECOND of two rows sharing a swipe card number within one file (R7)', () => {
+    // The likelier mistake than a clash with a number already on record, and
+    // one the database would only surface part-way through the run.
+    const file = profileFileOf([
+      { email: 'a@example.com', swipe_card_number: 'S9' },
+      { email: 'b@example.com', swipe_card_number: 'S9' },
+    ]);
+    const { validProfiles, rejected } = validateFile(file);
+    expect(validProfiles).toHaveLength(1);
+    expect(validProfiles[0]!.email).toBe('a@example.com');
+    expect(rejected.map((r) => r.reason)).toEqual(['duplicate_swipe_card_number']);
+  });
+
+  it('accepts many rows holding NO identifier at all', () => {
+    // AE27 / R12: both stay optional indefinitely, so a file of people holding
+    // neither is ordinary rather than a pile of collisions on the empty string.
+    const file = profileFileOf([
+      { email: 'a@example.com' },
+      { email: 'b@example.com' },
+      { email: 'c@example.com' },
+    ]);
+    const { validProfiles, rejected } = validateFile(file);
+    expect(validProfiles).toHaveLength(3);
+    expect(rejected).toEqual([]);
+  });
+
+  it('does not treat a number held in a DIFFERENT organisation as a clash (R7)', () => {
+    // Uniqueness is scoped per organisation — the context carries only this
+    // organisation's numbers, so an empty set is the whole assertion.
+    const ctx = makeCtx({ heldEmployeeNumbers: new Set() });
+    expect(reasons(profileFile({ employee_number: 'E1' }), ctx)).toEqual([]);
   });
 
   it('records a valid competency line with the row’s own grant date, resolved', () => {

@@ -77,6 +77,38 @@ export async function sweepOrganization(
   });
   const userById = new Map(users.map((u) => [u.id, u]));
 
+  /*
+    Addresses an Admin has flagged as reaching nobody (U36, R16, R98).
+
+    Sending to one is not merely wasted: repeated mail to a dead address is what
+    gets a sender's domain marked as a spammer, which would cost every OTHER
+    member their notices. The record below is still written — it is the login
+    delivery route and the idempotence guard, and neither depends on what the
+    email did — so a marked member who signs in is notified exactly as before.
+
+    Read per organisation, keyed by USER because the holder rows are, and scoped
+    to this org's profiles because one customer's mail bouncing says nothing
+    about another's.
+  */
+  const orgMemberships = await database.query.memberships.findMany({
+    where: eq(schema.memberships.orgId, org.id),
+  });
+  const orgProfiles = orgMemberships.length
+    ? await database.query.memberProfiles.findMany({
+        where: inArray(
+          schema.memberProfiles.membershipId,
+          orgMemberships.map((m) => m.id),
+        ),
+      })
+    : [];
+  const userForMembership = new Map(orgMemberships.map((m) => [m.id, m.userId]));
+  const unreachableUsers = new Set(
+    orgProfiles
+      .filter((p) => Boolean(p.emailUnreachableAt))
+      .map((p) => userForMembership.get(p.membershipId))
+      .filter((id): id is string => Boolean(id)),
+  );
+
   for (const holder of holders) {
     const competency = competencyById.get(holder.competencyId);
     if (!competency) continue;
@@ -98,8 +130,9 @@ export async function sweepOrganization(
     if (already) continue; // once per window (KTD11)
 
     const user = userById.get(holder.userId);
-    // Email is best-effort and never gates the record below.
-    if (user?.email) {
+    // Email is best-effort and never gates the record below — and it is skipped
+    // entirely for an address flagged as reaching nobody (R98).
+    if (user?.email && !unreachableUsers.has(holder.userId)) {
       await sendExpiryNoticeEmail({ to: user.email, competencyName: competency.name, expiresOn });
     }
     // The record IS the login route AND the idempotence guard, so it is written

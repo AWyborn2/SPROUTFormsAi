@@ -320,6 +320,13 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
       { id: nextId(), orgId: ORG, userId: CANDIDATE, role: 'candidate', status: 'active' },
       { id: nextId(), orgId: ORG, userId: OTHER_CANDIDATE, role: 'candidate', status: 'active' },
     ],
+    /*
+      Profiles backing the live display-identifier read a case DTO makes (R24,
+      R61). Empty by default, which is the state these cases actually run in —
+      the identifier resolves to null and the DTO shows the name it always did,
+      so every existing assertion about `candidateName` holds unchanged.
+    */
+    memberProfiles: [],
   };
 
   const nameOf = (table: unknown) =>

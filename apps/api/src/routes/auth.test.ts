@@ -93,6 +93,96 @@ describe('POST /auth/login', () => {
     }
   });
 
+  it('signs a person in with their generated username as well as their email (R22)', async () => {
+    // AE20: each person is issued a username and signs in with either.
+    mockProvisionTenant.mockResolvedValue(tenant);
+    const withUsername = { ...userRow, username: 'awyborn4821' };
+    for (const identifier of ['ash@x.io', 'awyborn4821']) {
+      mockDbValue = loginDb(withUsername);
+      const { server, base } = startApp();
+      try {
+        const res = await postLogin(base, { identifier, password: 'correct horse battery' });
+        expect(res.status, `identifier ${identifier}`).toBe(200);
+        expect(res.headers.get('set-cookie')).toContain('fai_session=');
+      } finally {
+        server.close();
+      }
+    }
+  });
+
+  it('resolves both credentials in ONE query, so neither miss is slower than the other', async () => {
+    /*
+      The security property, not a style preference. An email lookup followed by
+      a username lookup would make an unknown email take two round trips and an
+      unknown username one, which is a measurable enumeration oracle on exactly
+      the surface the dummy-hash compare exists to close.
+    */
+    const db = loginDb(undefined);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      await postLogin(base, { identifier: 'nobody@x.io', password: 'whatever-pass' });
+      expect(db.query.users.findFirst).toHaveBeenCalledTimes(1);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s identically for an unknown username and an unknown email', async () => {
+    for (const identifier of ['nobody@x.io', 'nsuchperson1234']) {
+      mockDbValue = loginDb(undefined);
+      const { server, base } = startApp();
+      try {
+        const res = await postLogin(base, { identifier, password: 'whatever-pass' });
+        expect(res.status).toBe(401);
+        expect(await res.json()).toEqual({
+          error: 'invalid_credentials',
+          message: 'Invalid username or password.',
+        });
+      } finally {
+        server.close();
+      }
+    }
+  });
+
+  it('accepts a username that is not a valid email address', async () => {
+    // A `.email()` rule on this field would reject every generated username
+    // before the lookup ever ran.
+    mockProvisionTenant.mockResolvedValue(tenant);
+    mockDbValue = loginDb({ ...userRow, username: 'jsmith1234' });
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { identifier: 'jsmith1234', password: 'correct horse battery' });
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still accepts the legacy email key, so an un-updated client keeps working', async () => {
+    mockProvisionTenant.mockResolvedValue(tenant);
+    mockDbValue = loginDb(userRow);
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { email: 'ash@x.io', password: 'correct horse battery' });
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s when neither identifier nor email is supplied', async () => {
+    mockDbValue = loginDb(userRow);
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { password: 'correct horse battery' });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('validation_error');
+    } finally {
+      server.close();
+    }
+  });
+
   it('backs the unknown-email path with a structurally valid, full-cost dummy hash', async () => {
     // A malformed constant would make bcrypt.compare short-circuit instead of
     // doing full-cost work, reintroducing the timing oracle the dummy compare

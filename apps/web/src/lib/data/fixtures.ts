@@ -82,6 +82,10 @@ export const AUDIT_CATEGORY_META: Record<AuditEntry['category'], { icon: string;
   settings: { icon: 'palette', color: 'var(--text-secondary)' },
   security: { icon: 'shield', color: 'var(--danger)' },
   general: { icon: 'activity', color: 'var(--text-secondary)' },
+  /** A profile field edit or the unreachable mark (U29, U36, R57). */
+  profiles: { icon: 'user', color: 'var(--accent)' },
+  /** A candidate seat block bought at the allocation boundary (U37, R86). */
+  billing: { icon: 'credit-card', color: 'var(--warning)' },
 };
 
 /** Category filter pills for the audit screen (vmAudit `filters`). */

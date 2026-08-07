@@ -11,6 +11,10 @@ const KIND_META: Record<WorkingListItem['kind'], { label: string; variant: Badge
   training_request: { label: 'Training request', variant: 'neutral' },
   retirement_review: { label: 'Retirement review', variant: 'warning' },
   overdue_case: { label: 'Overdue case', variant: 'danger' },
+  /** A profile picture or a certificate that has not arrived (U34, R18). */
+  owed_file: { label: 'File owed', variant: 'neutral' },
+  /** An address an Admin flagged as reaching nobody (U36, R16, R20). */
+  unreachable: { label: 'Address unreachable', variant: 'warning' },
 };
 
 /**
