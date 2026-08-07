@@ -66,6 +66,9 @@ function mockDb(opts: {
       organizations: { findFirst: vi.fn().mockResolvedValue(undefined) },
     },
     insert,
+    // insertUserWithUsername issues each attempt in its own savepoint, so the
+    // handle must offer a transaction — run against the same surface here.
+    transaction: async (fn: (t: unknown) => Promise<unknown>) => fn(db),
   } as unknown as Db;
 
   return { db, insert, insertValues };

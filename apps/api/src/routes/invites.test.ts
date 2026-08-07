@@ -138,7 +138,11 @@ function fakeDb(opts: {
     })),
   });
 
-  const tx = makeSurface('tx');
+  const tx = makeSurface('tx') as Record<string, unknown>;
+  // insertUserWithUsername runs each attempt in its own savepoint (a nested
+  // transaction), so the tx surface must offer one — running the callback
+  // against itself, so the insert still records on the tx.
+  tx.transaction = async (fn: (t: unknown) => Promise<unknown>) => fn(tx);
   const transaction = vi.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx));
   const db = { ...makeSurface('root'), transaction } as unknown as Db;
 
