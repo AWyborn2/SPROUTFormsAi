@@ -34,6 +34,14 @@ export interface ComplianceGap {
   competencyName: string;
 }
 
+/** A member no notification can reach: a flagged address AND no login (R98, R99). */
+export interface UnreachableMember {
+  userId: string;
+  name: string;
+  /** What an Admin acts on — the profile carrying the mark. */
+  membershipId: string;
+}
+
 complianceRouter.get(
   '/',
   requireTenant,
@@ -55,11 +63,10 @@ complianceRouter.get(
       where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
     });
     if (memberships.length === 0) {
-      // Unreachable is empty until the candidate-profile artifact's "address
-      // marked unreachable" mark exists — a person is reachable while they hold a
-      // login or an email nobody has flagged (R99). Return the FULL shape (all
-      // four keys) so this path never differs from the normal one — the web type
-      // has no optional keys and reads `optionalLapses.length` unconditionally.
+      // An organisation with no active members has nobody to report on, and
+      // nobody unreachable. Returns the FULL shape (all four keys) so this path
+      // never differs from the normal one — the web type has no optional keys
+      // and reads `optionalLapses.length` unconditionally.
       res.json({ expired: [], neverHeld: [], optionalLapses: [], unreachable: [] });
       return;
     }
@@ -148,6 +155,46 @@ complianceRouter.get(
       }
     }
 
-    res.json({ expired, neverHeld, optionalLapses, unreachable: [] });
+    /*
+      UNREACHABLE (R98, R99) — a member no notification can reach.
+
+      Reachable means EITHER delivery route works, so unreachable is the
+      conjunction: an address an Admin flagged as bouncing AND no login. The
+      sweep serves its notice on the person's own record regardless of what the
+      email did, so somebody who signs in has been notified whatever their
+      address does, and counting them here would report a failure that did not
+      occur.
+
+      Narrower than the working list's reading of the same mark on purpose. The
+      working list asks "does somebody need chasing", and a marked member with a
+      login still does. This asks "did the organisation discharge its
+      obligation", and for them it did.
+    */
+    const unreachable: UnreachableMember[] = [];
+    const profiles = await db.query.memberProfiles.findMany({
+      where: inArray(
+        schema.memberProfiles.membershipId,
+        memberships.map((m) => m.id),
+      ),
+    });
+    const markedMembership = new Set(
+      profiles.filter((p) => Boolean(p.emailUnreachableAt)).map((p) => p.membershipId),
+    );
+    if (markedMembership.size > 0) {
+      // A password hash is what makes a login real: an invited person who never
+      // completed their signup has an account row but cannot sign in.
+      const hasLogin = new Set(users.filter((u) => Boolean(u.passwordHash)).map((u) => u.id));
+      for (const membership of memberships) {
+        if (!markedMembership.has(membership.id)) continue;
+        if (hasLogin.has(membership.userId)) continue;
+        unreachable.push({
+          userId: membership.userId,
+          name: nameByUser.get(membership.userId) ?? 'A member',
+          membershipId: membership.id,
+        });
+      }
+    }
+
+    res.json({ expired, neverHeld, optionalLapses, unreachable });
   }),
 );

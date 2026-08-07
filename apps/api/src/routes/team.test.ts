@@ -53,6 +53,10 @@ function fakeDb(opts: {
   organizationsFindFirst?: unknown;
   invitesFindFirst?: unknown;
   invitesFindMany?: unknown[];
+  /** Profiles backing the live display-identifier read (R24). Default: none. */
+  memberProfilesFindMany?: unknown[];
+  /** Cases in flight that deactivation invalidates (R71). */
+  openCases?: unknown[];
   /** Throw from the `invites` insert — the pending-invite unique violation. */
   inviteInsertError?: unknown;
   insertedCompetency?: unknown;
@@ -79,7 +83,22 @@ function fakeDb(opts: {
       findMany: vi.fn().mockResolvedValue(opts.rolePermissionsFindMany ?? []),
     },
     memberships: {
-      findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst),
+      /*
+        TWO different lookups reach this, and they ask about different people.
+        `requireTenant` revalidates the CALLER's own membership before the route
+        runs (R65); the route then looks up the member being acted ON. This
+        fixture carries only the latter, so the caller's lookup is modelled as a
+        miss — which is what a predicate-honouring database would return, and
+        which the middleware treats as "nothing known, carry on".
+
+        Without this the middleware would read the target's row as if it were the
+        caller's, and a test acting on a suspended member would 401 the admin
+        doing the acting.
+      */
+      findFirst: vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValue(opts.membershipsFindFirst),
       findMany: vi.fn().mockResolvedValue(opts.membershipsFindMany ?? []),
     },
     users: {
@@ -92,6 +111,22 @@ function fakeDb(opts: {
     invites: {
       findFirst: vi.fn().mockResolvedValue(opts.invitesFindFirst),
       findMany: vi.fn().mockResolvedValue(opts.invitesFindMany ?? []),
+    },
+    /*
+      The member list resolves each person's display identifier live from their
+      profile (R24, R61). Defaults to none, which is the ordinary state before a
+      workforce is entered — the list then shows the name it always did.
+    */
+    memberProfiles: {
+      findMany: vi.fn().mockResolvedValue(opts.memberProfilesFindMany ?? []),
+    },
+    /*
+      Deactivation closes an outstanding invitation (R65) and invalidates a case
+      in flight (R71). Both default to none, which is the ordinary case for a
+      member who accepted long ago and holds no open assessment.
+    */
+    assessmentCases: {
+      findMany: vi.fn().mockResolvedValue(opts.openCases ?? []),
     },
   };
 
@@ -173,9 +208,52 @@ describe('GET /team/members', () => {
       const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
       expect(res.status).toBe(200);
       const body = await res.json();
+      // `identifier` is null until a profile carrying one exists (R24) — the
+      // list keeps working through the state every org is in before its
+      // workforce is entered.
       expect(body).toEqual([
-        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', email: 'ash@x.io', role: 'admin', status: 'active' },
+        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', identifier: null, email: 'ash@x.io', role: 'admin', status: 'active' },
       ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('shows each member by the identifier the organisation chose, falling back per person (R24)', async () => {
+    // AE22: three members share the name Chris Taylor. One holds an employee
+    // number, one holds only a swipe card, the third holds neither.
+    mockDbValue = fakeDb({
+      organizationsFindFirst: { id: 'org-1', displayIdentifier: 'employee_number' },
+      membershipsFindMany: [
+        { id: 'm1', userId: 'u1', role: 'candidate', status: 'active' },
+        { id: 'm2', userId: 'u2', role: 'assessor', status: 'active' },
+        { id: 'm3', userId: 'u3', role: 'admin', status: 'active' },
+      ],
+      usersFindMany: [
+        { id: 'u1', name: 'Chris Taylor', email: 'c1@x.io' },
+        { id: 'u2', name: 'Chris Taylor', email: 'c2@x.io' },
+        { id: 'u3', name: 'Chris Taylor', email: 'c3@x.io' },
+      ],
+      memberProfilesFindMany: [
+        { membershipId: 'm1', firstName: 'Chris', lastName: 'Taylor', employeeNumber: 'E100', swipeCardNumber: null },
+        { membershipId: 'm2', firstName: 'Chris', lastName: 'Taylor', employeeNumber: null, swipeCardNumber: 'S900' },
+        { membershipId: 'm3', firstName: 'Chris', lastName: 'Taylor', employeeNumber: null, swipeCardNumber: null },
+      ],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Array<{ userId: string; name: string; identifier: string | null }>;
+      // The chosen number; the other one where only it is held; the name alone
+      // where neither is — and every member, whatever access level they carry.
+      expect(body.map((r) => [r.userId, r.identifier])).toEqual([
+        ['u1', 'E100'],
+        ['u2', 'S900'],
+        ['u3', null],
+      ]);
+      expect(new Set(body.map((r) => r.name))).toEqual(new Set(['Chris Taylor']));
     } finally {
       server.close();
     }
@@ -238,8 +316,8 @@ describe('GET /team/members', () => {
       // The invitee has no user row yet — the name is derived from the address
       // the inviter typed, and `status` is what marks them as not-yet-joined.
       expect(await res.json()).toEqual([
-        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', email: 'ash@x.io', role: 'admin', status: 'active' },
-        { id: 'inv-1', userId: null, name: 'Sam Lee', email: 'sam.lee@x.io', role: 'builder', status: 'invited' },
+        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', identifier: null, email: 'ash@x.io', role: 'admin', status: 'active' },
+        { id: 'inv-1', userId: null, name: 'Sam Lee', identifier: null, email: 'sam.lee@x.io', role: 'builder', status: 'invited' },
       ]);
     } finally {
       server.close();
@@ -416,7 +494,17 @@ describe('POST /team/members', () => {
     }
   });
 
-  it('403s with seat_limit_reached when active seats already fill the org seatLimit', async () => {
+  it('ISSUES a staff invitation on a full staff pool, warning rather than refusing (U37, R79, R80)', async () => {
+    /*
+      This used to 403. A pending invitation reserves nothing — issuing one costs
+      no seat and an organisation may hold far more outstanding invitations than
+      it has free seats — so refusing here blocked an action that charges
+      nothing, on a count it did not change.
+
+      The staff seat is still finite and acceptance will still refuse, so the
+      check survives as a WARNING: the Admin learns the pool is full without
+      being stopped from inviting somebody they intend to make room for.
+    */
     const { db, insertValues } = fakeDb({
       rolePermissionsFindFirst: ADMIN_PERMS,
       organizationsFindFirst: { id: 'org-1', name: 'Solo Co', planTier: 'individual', seatLimit: 1 },
@@ -430,13 +518,16 @@ describe('POST /team/members', () => {
         headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
         body: JSON.stringify({ email: 'sam@x.io', role: 'builder' }),
       });
-      expect(res.status).toBe(403);
-      const body = (await res.json()) as { error: string; seatLimit: number; seatUsed: number };
-      expect(body.error).toBe('seat_limit_reached');
-      expect(body.seatLimit).toBe(1);
-      expect(body.seatUsed).toBe(1);
-      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeUndefined();
-      expect(emailMocks.sendInviteEmail).not.toHaveBeenCalled();
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as {
+        seatWarning?: { error: string; seatLimit: number; seatUsed: number };
+      };
+      expect(body.seatWarning).toMatchObject({
+        error: 'seat_limit_reached',
+        seatLimit: 1,
+        seatUsed: 1,
+      });
+      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeDefined();
     } finally {
       server.close();
     }
@@ -475,7 +566,11 @@ describe('POST /team/members', () => {
     }
   });
 
-  it('403s with candidate_limit_reached, distinct from the staff seat error', async () => {
+  it('issues a candidate invitation on a full candidate pool, with NO warning (R80)', async () => {
+    // No warning, because unlike the staff pool there is nothing to warn about:
+    // acceptance expands rather than refusing (R86), so the invitation will be
+    // honoured. Saying "full" here would be telling the Admin about a boundary
+    // that is not going to stop anybody.
     const { db, insertValues } = fakeDb({
       rolePermissionsFindFirst: ADMIN_PERMS,
       organizationsFindFirst: {
@@ -495,11 +590,9 @@ describe('POST /team/members', () => {
         headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
         body: JSON.stringify({ email: 'operator@x.io', role: 'candidate' }),
       });
-      expect(res.status).toBe(403);
-      const body = (await res.json()) as { error: string; seatLimit: number };
-      expect(body.error).toBe('candidate_limit_reached');
-      expect(body.seatLimit).toBe(200);
-      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeUndefined();
+      expect(res.status).toBe(201);
+      expect((await res.json()) as Record<string, unknown>).not.toHaveProperty('seatWarning');
+      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeDefined();
     } finally {
       server.close();
     }
@@ -532,11 +625,12 @@ describe('POST /team/members', () => {
     }
   });
 
-  it('403s with seat_limit_reached via the plan-tier fallback when org.seatLimit is null', async () => {
+  it('warns via the plan-tier fallback when org.seatLimit is null', async () => {
+    // Legacy org row: seatLimit was never backfilled — the team tier's
+    // configured limit (5) is what the warning must report, which is the
+    // resolution order the binding check at acceptance also uses.
     const { db, insertValues } = fakeDb({
       rolePermissionsFindFirst: ADMIN_PERMS,
-      // Legacy org row: seatLimit was never backfilled — the team tier's
-      // configured limit (5) must still be enforced.
       organizationsFindFirst: { id: 'org-1', name: 'Legacy Co', planTier: 'team', seatLimit: null },
       activeSeatCount: 5,
     });
@@ -548,21 +642,19 @@ describe('POST /team/members', () => {
         headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
         body: JSON.stringify({ email: 'sam@x.io', role: 'builder' }),
       });
-      expect(res.status).toBe(403);
-      const body = (await res.json()) as { error: string; seatLimit: number; seatUsed: number };
-      expect(body.error).toBe('seat_limit_reached');
-      expect(body.seatLimit).toBe(5);
-      expect(body.seatUsed).toBe(5);
-      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeUndefined();
-      expect(emailMocks.sendInviteEmail).not.toHaveBeenCalled();
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { seatWarning?: { seatLimit: number; seatUsed: number } };
+      expect(body.seatWarning).toMatchObject({ seatLimit: 5, seatUsed: 5 });
+      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeDefined();
     } finally {
       server.close();
     }
   });
 
-  it('403s with seat_limit_reached when seatLimit is absent from the org row entirely', async () => {
-    // `N >= undefined` is false, so a missing column must not bypass enforcement.
-    const { db, insertValues } = fakeDb({
+  it('warns when seatLimit is absent from the org row entirely', async () => {
+    // `N >= undefined` is false, so a missing column must not read as unlimited
+    // — the tier's own limit is still the answer.
+    const { db } = fakeDb({
       rolePermissionsFindFirst: ADMIN_PERMS,
       organizationsFindFirst: { id: 'org-1', name: 'Legacy Co', planTier: 'individual' },
       activeSeatCount: 1,
@@ -575,11 +667,9 @@ describe('POST /team/members', () => {
         headers: { ...authHeader(adminTenant), 'content-type': 'application/json' },
         body: JSON.stringify({ email: 'sam@x.io', role: 'builder' }),
       });
-      expect(res.status).toBe(403);
-      const body = (await res.json()) as { error: string; seatLimit: number };
-      expect(body.error).toBe('seat_limit_reached');
-      expect(body.seatLimit).toBe(1);
-      expect(insertValues.mock.calls.find(([table]) => table === schema.invites)).toBeUndefined();
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { seatWarning?: { seatLimit: number } };
+      expect(body.seatWarning).toMatchObject({ seatLimit: 1 });
     } finally {
       server.close();
     }
@@ -859,8 +949,17 @@ describe('PATCH /team/members/:id', () => {
       }
     });
 
-    it('refuses the same demotion when it is the CANDIDATE pool that is full', async () => {
-      const { db, updateSet } = fakeDb({
+    it('EXPANDS rather than refusing the same demotion on a full candidate pool (AE35, R81, R86)', async () => {
+      /*
+        This used to 403. R81 says the change goes through: moving somebody to
+        Candidate takes a candidate seat and releases a staff one, and refusing
+        it would stop work on a site to settle a billing question.
+
+        Both writes are asserted — the raised limit and the role — because an
+        expansion that did not also complete the action would have charged the
+        organisation for nothing.
+      */
+      const { db, updateSet, insertValues, ops } = fakeDb({
         rolePermissionsFindFirst: ADMIN_PERMS,
         membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'builder', status: 'active' },
         usersFindFirst: { id: 'u2', name: 'Priya Nair', email: 'priya@x.io' },
@@ -870,10 +969,44 @@ describe('PATCH /team/members/:id', () => {
       mockDbValue = db;
       const { server, base } = startApp();
       try {
-        const res = await patchRole(base, 'm1', 'candidate');
+        expect((await patchRole(base, 'm1', 'candidate')).status).toBe(200);
+        expect(updateSet).toHaveBeenCalledWith(schema.organizations, { candidateSeatLimit: 53 });
+        expect(updateSet).toHaveBeenCalledWith(schema.memberships, { role: 'candidate' });
+
+        // The block is bought under the SAME lock the count was taken under —
+        // otherwise two admins promoting two people at once buy one block each
+        // for one seat.
+        const seatOps = ops.filter((o) => o.op === 'lock' || (o.op === 'update' && o.table === schema.organizations));
+        expect(seatOps.map((o) => `${o.on}:${o.op}`)).toEqual(['tx:lock', 'tx:update']);
+
+        const audit = insertValues.mock.calls.find(
+          ([table, v]) => table === schema.auditLogEntries && (v as { category?: string }).category === 'billing',
+        );
+        expect(audit?.[1]).toMatchObject({ action: 'Added candidate seat block' });
+      } finally {
+        server.close();
+      }
+    });
+
+    it('still REFUSES a promotion into a full staff pool, naming that pool (R80)', async () => {
+      // No rule has been written for expanding the staff pool — R84 and R86 are
+      // written entirely in candidate terms — so it keeps refusing rather than
+      // charging against a rule nobody wrote.
+      const { db, updateSet } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'candidate', status: 'active' },
+        usersFindFirst: { id: 'u2', name: 'Dale Rivers', email: 'dale@x.io' },
+        organizationsFindFirst: FULL_STAFF_ORG,
+        activeSeatCount: 5,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await patchRole(base, 'm1', 'assessor');
         expect(res.status).toBe(403);
-        expect(await res.json()).toMatchObject({ error: 'candidate_limit_reached', seatLimit: 3 });
+        expect(await res.json()).toMatchObject({ error: 'seat_limit_reached' });
         expect(updateSet.mock.calls.find(([table]) => table === schema.memberships)).toBeUndefined();
+        expect(updateSet.mock.calls.find(([table]) => table === schema.organizations)).toBeUndefined();
       } finally {
         server.close();
       }
@@ -927,7 +1060,15 @@ describe('PATCH /team/members/:id', () => {
       }
     });
 
-    it('refuses re-roling a PENDING invite into a full pool, closing the creation-check bypass', async () => {
+    it('re-roles a PENDING invite into a full pool without any seat check (U37, R80)', async () => {
+      /*
+        This check existed to stop "create a viewer invite, then PATCH it to
+        candidate" walking around the creation-time check. Both are gone, and
+        for the same reason: a pending invitation reserves nothing, so neither
+        was guarding a seat. Nothing is bypassed, because the seat is settled at
+        acceptance under the row lock — where a full candidate pool expands and a
+        full staff pool refuses.
+      */
       const { db, updateSet } = fakeDb({
         rolePermissionsFindFirst: ADMIN_PERMS,
         membershipsFindFirst: undefined,
@@ -938,12 +1079,89 @@ describe('PATCH /team/members/:id', () => {
       mockDbValue = db;
       const { server, base } = startApp();
       try {
-        // Otherwise: create a viewer invite, PATCH it to candidate, and the
-        // candidate limit checked at creation never applies.
-        const res = await patchRole(base, 'inv-1', 'candidate');
+        expect((await patchRole(base, 'inv-1', 'candidate')).status).toBe(200);
+        expect(updateSet).toHaveBeenCalledWith(schema.invites, { role: 'candidate' });
+        // No block was bought either — nothing here consumed a seat to pay for.
+        expect(updateSet.mock.calls.find(([table]) => table === schema.organizations)).toBeUndefined();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('expands a NULL candidate limit to 250 on Business, not to 50 (R86)', async () => {
+      /*
+        `candidate_seat_limit` is nullable and a null INHERITS from the tier
+        rather than meaning unlimited. Writing a bare block size onto it would
+        take this organisation from two hundred seats to fifty — a refusal for
+        every candidate past the fiftieth, caused by the very write meant to add
+        room. End-to-end here as well as in the unit test, because the resolution
+        happens on the row the LOCK returned rather than the one the route read.
+      */
+      const { db, updateSet } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'builder', status: 'active' },
+        usersFindFirst: { id: 'u2', name: 'Priya Nair', email: 'priya@x.io' },
+        organizationsFindFirst: {
+          id: 'org-1',
+          name: 'Mine Co',
+          planTier: 'business',
+          seatLimit: 50,
+          candidateSeatLimit: null,
+        },
+        activeSeatCount: 200,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        expect((await patchRole(base, 'm1', 'candidate')).status).toBe(200);
+        expect(updateSet).toHaveBeenCalledWith(schema.organizations, { candidateSeatLimit: 250 });
+      } finally {
+        server.close();
+      }
+    });
+
+    it('enrols nobody and buys no block on a tier allocated no candidate seats (AE38, R83)', async () => {
+      // That plan does not enrol candidates at all, so there is no allocation to
+      // expand INTO — selling a block would be selling a feature the plan does
+      // not include. It refuses, and the refusal is the correct answer.
+      const { db, updateSet } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: { id: 'm1', userId: 'u2', orgId: 'org-1', role: 'builder', status: 'active' },
+        usersFindFirst: { id: 'u2', name: 'Priya Nair', email: 'priya@x.io' },
+        organizationsFindFirst: {
+          id: 'org-1',
+          name: 'Solo Co',
+          planTier: 'individual',
+          seatLimit: 1,
+          candidateSeatLimit: null,
+        },
+        activeSeatCount: 0,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await patchRole(base, 'm1', 'candidate');
         expect(res.status).toBe(403);
-        expect(await res.json()).toMatchObject({ error: 'candidate_limit_reached' });
-        expect(updateSet.mock.calls.find(([table]) => table === schema.invites)).toBeUndefined();
+        expect(await res.json()).toMatchObject({ error: 'candidate_limit_reached', seatLimit: 0 });
+        expect(updateSet.mock.calls.find(([table]) => table === schema.organizations)).toBeUndefined();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('re-roles a pending STAFF invite into a full staff pool too (R80)', async () => {
+      const { db, updateSet } = fakeDb({
+        rolePermissionsFindFirst: ADMIN_PERMS,
+        membershipsFindFirst: undefined,
+        invitesFindFirst: { id: 'inv-1', orgId: 'org-1', email: 'sam@x.io', role: 'candidate', acceptedAt: null },
+        organizationsFindFirst: FULL_STAFF_ORG,
+        activeSeatCount: 5,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        expect((await patchRole(base, 'inv-1', 'assessor')).status).toBe(200);
+        expect(updateSet).toHaveBeenCalledWith(schema.invites, { role: 'assessor' });
       } finally {
         server.close();
       }
@@ -1002,8 +1220,15 @@ describe('DELETE /team/members/:id', () => {
     }
   });
 
-  it('removes a non-owner member and records an audit entry', async () => {
-    const { db, deleteWhere, insertValues } = fakeDb({
+  it('DEACTIVATES a non-owner member rather than deleting them (R62, R63)', async () => {
+    /*
+      This route used to `DELETE` the membership row, which took the person's
+      placement with it on cascade and left the competency evidence that
+      certified them pointing at a membership that no longer existed. R62 makes
+      leaving a deactivation and R63 retains every record indefinitely — which
+      is the whole reason a returning worker keeps competencies still in date.
+    */
+    const { db, deleteWhere, updateSet, insertValues } = fakeDb({
       rolePermissionsFindFirst: ADMIN_PERMS,
       membershipsFindFirst: { id: 'm2', userId: 'u2', orgId: 'org-1', role: 'viewer', status: 'active' },
       usersFindFirst: { id: 'u2', name: 'Tom Reyes', email: 'tom@x.io' },
@@ -1013,12 +1238,134 @@ describe('DELETE /team/members/:id', () => {
     const { server, base } = startApp();
     try {
       const res = await fetch(`${base}/team/members/m2`, { method: 'DELETE', headers: authHeader(adminTenant) });
-      expect(res.status).toBe(204);
-      expect(deleteWhere).toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ seatReleased: 'staff' });
+      // The membership moves to suspended; nothing is deleted.
+      expect(updateSet).toHaveBeenCalledWith(schema.memberships, { status: 'suspended' });
+      expect(deleteWhere).not.toHaveBeenCalled();
       const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
-      expect(auditInsert?.[1]).toMatchObject({ action: 'Removed member', target: 'tom@x.io' });
+      expect(auditInsert?.[1]).toMatchObject({ action: 'Deactivated member' });
     } finally {
       server.close();
+    }
+  });
+
+  it('releases the CANDIDATE seat where the membership carried that level (R77)', async () => {
+    const { db } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm2', userId: 'u2', orgId: 'org-1', role: 'candidate', status: 'active' },
+      usersFindFirst: { id: 'u2', name: 'Dale Rivers', email: 'dale@x.io' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members/m2`, { method: 'DELETE', headers: authHeader(adminTenant) });
+      expect(await res.json()).toMatchObject({ seatReleased: 'candidate' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reactivates a candidate with NO free seat, buying a block (AE36, R78, R86)', async () => {
+    /*
+      A returning worker turned away at the allocation boundary would stop work
+      on a site to settle a billing question. R78 takes the seat, R86 buys it.
+    */
+    const { db, updateSet, insertValues } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm2', userId: 'u2', orgId: 'org-1', role: 'candidate', status: 'suspended' },
+      usersFindFirst: { id: 'u2', name: 'Dale Rivers', email: 'dale@x.io', passwordHash: 'x' },
+      organizationsFindFirst: {
+        id: 'org-1',
+        name: 'Mine Co',
+        planTier: 'business',
+        seatLimit: 15,
+        candidateSeatLimit: 3,
+      },
+      activeSeatCount: 3,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members/m2/reactivate`, {
+        method: 'POST',
+        headers: authHeader(adminTenant),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ seatConsumed: 'candidate', seatsAdded: 50 });
+      expect(updateSet).toHaveBeenCalledWith(schema.organizations, { candidateSeatLimit: 53 });
+      expect(updateSet).toHaveBeenCalledWith(schema.memberships, { status: 'active' });
+
+      const audit = insertValues.mock.calls.find(
+        ([table, v]) => table === schema.auditLogEntries && (v as { category?: string }).category === 'billing',
+      );
+      expect(String(audit?.[1].target)).toContain('member reactivated');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses to reactivate into a full STAFF pool, changing nothing (R80)', async () => {
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm2', userId: 'u2', orgId: 'org-1', role: 'assessor', status: 'suspended' },
+      usersFindFirst: { id: 'u2', name: 'Dale Rivers', email: 'dale@x.io' },
+      organizationsFindFirst: { id: 'org-1', name: 'Meridian', planTier: 'team', seatLimit: 5, candidateSeatLimit: 200 },
+      activeSeatCount: 5,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members/m2/reactivate`, {
+        method: 'POST',
+        headers: authHeader(adminTenant),
+      });
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ error: 'seat_limit_reached' });
+      // Neither the status nor the limit moved — a refused reactivation leaves
+      // the member exactly as deactivation left them.
+      expect(updateSet.mock.calls.find(([table]) => table === schema.memberships)).toBeUndefined();
+      expect(updateSet.mock.calls.find(([table]) => table === schema.organizations)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reactivates a returner, and is idempotent on somebody already active (R68)', async () => {
+    const { db, updateSet } = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm2', userId: 'u2', orgId: 'org-1', role: 'candidate', status: 'suspended' },
+      usersFindFirst: { id: 'u2', name: 'Dale Rivers', email: 'dale@x.io', passwordHash: 'x' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members/m2/reactivate`, {
+        method: 'POST',
+        headers: authHeader(adminTenant),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ seatConsumed: 'candidate', needsFreshInvitation: false });
+      expect(updateSet).toHaveBeenCalledWith(schema.memberships, { status: 'active' });
+    } finally {
+      server.close();
+    }
+
+    const already = fakeDb({
+      rolePermissionsFindFirst: ADMIN_PERMS,
+      membershipsFindFirst: { id: 'm2', userId: 'u2', orgId: 'org-1', role: 'viewer', status: 'active' },
+    });
+    mockDbValue = already.db;
+    const two = startApp();
+    try {
+      // A retried click is not a mistake.
+      const res = await fetch(`${two.base}/team/members/m2/reactivate`, {
+        method: 'POST',
+        headers: authHeader(adminTenant),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      two.server.close();
     }
   });
 

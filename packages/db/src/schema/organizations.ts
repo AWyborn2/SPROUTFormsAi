@@ -99,6 +99,22 @@ export const users = pgTable('users', {
   clerkUserId: text('clerk_user_id').unique(),
   name: text().notNull(),
   email: text().notNull().unique(),
+  /**
+   * The generated sign-in identity (R21) — first initial, surname, a random
+   * suffix. A person signs in with this OR their email address (R22).
+   *
+   * HERE rather than on the profile because sign-in is product-wide while a
+   * profile is per organisation: somebody working for two customers signs in
+   * once. It is what makes an email address correctable without moving who the
+   * person is to the system (R23) — correcting the address retires it as a
+   * credential and leaves this untouched.
+   *
+   * NULLABLE only for rows written before it existed. The backfill fills them
+   * and every insert path issues one, so a null is a legacy row rather than a
+   * person without an identity. Issuance lives in `apps/api/src/lib/username.ts`
+   * and re-rolls its suffix against this index rather than pre-checking.
+   */
+  username: text().unique(),
   passwordHash: text('password_hash'),
   createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
 });

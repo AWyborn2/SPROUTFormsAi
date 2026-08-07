@@ -26,12 +26,18 @@ function authHeader(t: { userId: string; orgId: string; role: string }) {
   return { cookie: `fai_session=${sealSession(t)}` };
 }
 
-function fakeDb(opts: { notices?: unknown[]; competencies?: unknown[] }) {
+function fakeDb(opts: { notices?: unknown[]; competencies?: unknown[]; documentNotices?: unknown[] }) {
   return {
     query: {
       organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: 'enterprise' }) },
       sentNotices: { findMany: vi.fn().mockResolvedValue(opts.notices ?? []) },
       competencies: { findMany: vi.fn().mockResolvedValue(opts.competencies ?? []) },
+      /*
+        The outcome of a replacement the caller supplied (R52), read on the same
+        own-scope surface as their expiry notices — a person should not have to
+        know which kind of notice they are looking for. Empty by default.
+      */
+      documentNotices: { findMany: vi.fn().mockResolvedValue(opts.documentNotices ?? []) },
     },
   } as unknown as Db;
 }

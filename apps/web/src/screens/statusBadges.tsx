@@ -59,6 +59,13 @@ const CASE_STATE: Record<AssessmentCaseState, { variant: BadgeVariant; label: st
   // Terminal but not a pass. "Closed" is the state name; "not yet competent" is
   // what it means to the person reading the row.
   closed: { variant: 'danger', label: 'Not yet competent' },
+  /*
+    Abandoned because the candidate was deactivated — no judgement about their
+    competence, which is why it is neutral rather than `danger`. Reading it as
+    "not yet competent" would put a failure against somebody's name for the
+    single reason that they left.
+  */
+  invalidated: { variant: 'neutral', label: 'Discontinued' },
 };
 
 export function CaseStateBadge({ state, size }: { state: AssessmentCaseState; size?: 'sm' | 'md' }) {

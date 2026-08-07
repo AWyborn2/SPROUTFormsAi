@@ -218,7 +218,17 @@ export interface CreatedApiKey extends ApiKey {
 export const API_KEY_ROLES: RoleName[] = ['Admin', 'Builder', 'Reviewer', 'Viewer'];
 
 /** Category keys used to colour/icon and filter audit entries. */
-export type AuditCategory = 'forms' | 'submissions' | 'team' | 'settings' | 'security' | 'general';
+export type AuditCategory =
+  | 'forms'
+  | 'submissions'
+  | 'team'
+  | 'settings'
+  | 'security'
+  | 'general'
+  /** A profile field edit or the unreachable mark (U29, U36, R57). */
+  | 'profiles'
+  /** A candidate seat block added at the allocation boundary (U37, R86). */
+  | 'billing';
 
 /** An audit-log row (denormalised for display, matching the prototype shape). */
 export interface AuditEntry {
@@ -533,13 +543,27 @@ export interface ComplianceReport {
   neverHeld: ComplianceGap[];
   /** A held competency that lapsed but no Role requires — reported, not a failure (R102). */
   optionalLapses: ComplianceGap[];
-  /** Members no notification can reach (empty until the unreachable mark exists). */
-  unreachable: ComplianceGap[];
+  /** Members no notification can reach: no login AND a flagged address (R98, R99). */
+  unreachable: UnreachableMember[];
+}
+
+/**
+ * A member no notification can reach (U36, R98, R99).
+ *
+ * NOT a `ComplianceGap`: this is about a person, not a competency, so it carries
+ * no competency to name. Typing it as one rendered a blank second column and
+ * keyed the row on an undefined id.
+ */
+export interface UnreachableMember {
+  userId: string;
+  name: string;
+  /** The profile carrying the mark — what an Admin opens to clear it. */
+  membershipId: string;
 }
 
 /** One thing waiting on an Admin, from any source, on the one working list (U19). */
 export interface WorkingListItem {
-  kind: 'training_request' | 'retirement_review' | 'overdue_case';
+  kind: 'training_request' | 'retirement_review' | 'overdue_case' | 'owed_file' | 'unreachable';
   id: string;
   subject: string;
   createdAt: string | null;
@@ -608,6 +632,115 @@ export interface Taxonomy {
 }
 
 /** Where a member is placed — the ids on their membership (R21). */
+/**
+ * A member's workforce record as its reader is admitted to it (U29, U38, R1).
+ *
+ * `displayName` and `indigenousStatus` are DERIVED by the API and stored
+ * nowhere (R3, R15, KTD19) — the screen renders them and offers no way to enter
+ * them.
+ */
+export interface MemberProfile {
+  membershipId: string;
+  firstName: string | null;
+  middleName: string | null;
+  lastName: string | null;
+  displayName: string;
+  identifier: string | null;
+  gender: string | null;
+  ethnicity: string | null;
+  indigenousStatus: 'indigenous' | 'not_indigenous' | 'not_stated';
+  dateOfBirth: string | null;
+  addressStreet: string | null;
+  suburb: string | null;
+  postcode: string | null;
+  mobile: string | null;
+  emergencyContactName: string | null;
+  emergencyContactPhone: string | null;
+  starterType: string | null;
+  employeeNumber: string | null;
+  swipeCardNumber: string | null;
+  inductionDate: string | null;
+  /**
+   * On `users`, not the profile — unique product-wide and the person-record
+   * lookup key (R16). Read here so the record renders it; not writable through
+   * the profile route, which `editableFields` already reflects.
+   */
+  email: string | null;
+  /** Set where an Admin flagged the address as reaching nobody (U36, R16). */
+  emailUnreachableAt: string | null;
+}
+
+/**
+ * What THIS reader may do with the record (R44).
+ *
+ * Resolved per section rather than as one grant, which is what lets an
+ * organisation restrict fields while leaving documents open — a screen with only
+ * two states would render that configuration as a blank page.
+ */
+export interface ProfileAccess {
+  canViewDocuments: boolean;
+  canViewCompetencies: boolean;
+  canApprove: boolean;
+  /** Field keys this caller may write. Empty means read-only (R51, R53). */
+  editableFields: string[];
+  /** True where the caller IS the member, on the fixed own-record path (R49). */
+  isSubject: boolean;
+}
+
+/**
+ * One held competency on a member's record (U38, R37, R104).
+ *
+ * STANDING and CURRENCY are two facts, not one. Standing is obligation and
+ * follows the person's Roles; currency is eligibility and follows the
+ * competency's own dates. A reader who cannot tell them apart reads an expired
+ * OPTIONAL competency as a compliance failure, which it is not (R102).
+ */
+export interface HeldCompetencyRow {
+  competencyId: string;
+  evidenceRef: string | null;
+  /** Set only where this grant IS a licence (R34). */
+  licenceClass: string | null;
+  licenceNumber: string | null;
+  status: CompetencyStatus;
+  standing: Standing;
+  /** True while it still satisfies a requirement — held, expiring or grace. */
+  current: boolean;
+  expiresAt: string | null;
+  note: string | null;
+}
+
+/**
+ * What an induction submission would put on a profile (U40, R87-R94).
+ *
+ * `disposition` is the whole point: a submission for somebody who already holds
+ * a record creates NOTHING and goes to an Admin instead (R89, R90).
+ */
+export interface ProfileSeedResponse {
+  submissionId: string;
+  disposition: 'create' | 'existing_record' | 'deactivated';
+  seed: {
+    fields: Record<string, string>;
+    department: string;
+    roles: string[];
+    email: string;
+    indigenousStatus: 'indigenous' | 'not_indigenous' | 'not_stated';
+    /** Answers the organisation's CURRENT lists no longer offer (R94). */
+    unmatched: Array<{ key: string; value: string }>;
+  };
+  /** Set on a repeat, so an Admin can open the record rather than retype it. */
+  membershipId: string | null;
+}
+
+export interface ProfileResponse {
+  profile: MemberProfile;
+  /**
+   * The PERSON behind the membership. Competency grants and assessment cases
+   * are keyed on the user, not the membership, so the screen needs both ids.
+   */
+  userId: string;
+  access: ProfileAccess;
+}
+
 export interface MemberPlacement {
   locationIds: string[];
   departmentIds: string[];

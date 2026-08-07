@@ -22,6 +22,7 @@ import {
   describeValidity,
   expiryNote,
   expiryOf,
+  type CompetencyStatus,
 } from './competency-expiry.js';
 
 const at = (iso: string) => new Date(iso);
@@ -225,5 +226,35 @@ describe('the audience windows', () => {
     // Pinned as a relationship rather than two magic numbers, so a later edit
     // has to think about which one it is changing.
     expect(EXPIRY_WARNING_DAYS.assessor).toBeGreaterThan(EXPIRY_WARNING_DAYS.candidate);
+  });
+});
+
+describe('currency is four DATED states, with revocation lifted out (R100, R101)', () => {
+  it('carries held, expiring, grace and expired — and no revoked state', () => {
+    /*
+      R100 takes `revoked` out of the currency set and R101 carries it as a mark
+      of its own beside currency and standing. Lifting it out is what makes the
+      rule about it statable rather than implied: a revoked competency counts as
+      NOT HELD wherever currency is read, however good its dates are.
+    */
+    const statuses: CompetencyStatus[] = ['held', 'expiring', 'grace', 'expired'];
+    expect(statuses).toHaveLength(4);
+    // @ts-expect-error — 'revoked' is deliberately not a currency status.
+    const notAStatus: CompetencyStatus = 'revoked';
+    expect(notAStatus).toBe('revoked');
+  });
+
+  it('counts a revoked competency as not held whatever its dates say (R101)', () => {
+    // AE44: well inside its expiry date and marked revoked — satisfies nothing.
+    expect(countsAsHeld({ status: 'held', revoked: true })).toBe(false);
+    expect(countsAsHeld({ status: 'expiring', revoked: true })).toBe(false);
+    expect(countsAsHeld({ status: 'grace', revoked: true })).toBe(false);
+  });
+
+  it('counts held, expiring and grace as held, and expired as not (R102, R103)', () => {
+    expect(countsAsHeld({ status: 'held', revoked: false })).toBe(true);
+    expect(countsAsHeld({ status: 'expiring', revoked: false })).toBe(true);
+    expect(countsAsHeld({ status: 'grace', revoked: false })).toBe(true);
+    expect(countsAsHeld({ status: 'expired', revoked: false })).toBe(false);
   });
 });

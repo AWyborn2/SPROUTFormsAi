@@ -35,6 +35,8 @@ interface DbOpts {
   holders?: Record<string, unknown>[];
   comps?: Record<string, unknown>[];
   users?: Record<string, unknown>[];
+  /** Profiles backing the unreachable-address read (U36, R98). Default: none marked. */
+  profiles?: Record<string, unknown>[];
   holdersFindMany?: () => Promise<Record<string, unknown>[]>;
 }
 
@@ -64,6 +66,7 @@ function makeDb(opts: DbOpts) {
       competencyHolders: { findMany: opts.holdersFindMany ?? (async () => opts.holders ?? []) },
       competencies: { findMany: async () => opts.comps ?? [] },
       users: { findMany: async () => opts.users ?? [] },
+      memberProfiles: { findMany: async () => opts.profiles ?? [] },
       // Coarse-but-sufficient idempotence: a single-holder run inserts one row,
       // and the next run finds it and skips.
       sentNotices: { findFirst: async () => notices[0] },
@@ -160,6 +163,55 @@ describe('sweepOrganization — notification pass', () => {
     // The login-served record is written regardless — it is the other route.
     expect(result.noticesSent).toBe(1);
     expect(notices).toHaveLength(1);
+  });
+
+  it('sends NOTHING to an address marked unreachable, but still records the notice (U36, R98)', async () => {
+    /*
+      Two separate claims, and both matter.
+
+      Not sending: repeated mail to a dead address is what gets a sender's
+      domain marked as a spammer, which would cost every other member their
+      notices.
+
+      Still recording: the row IS the login delivery route and the idempotence
+      guard. Skipping it would mean a marked member who signs in sees nothing,
+      and the next sweep would try the dead address all over again.
+    */
+    const { db, notices } = makeDb({
+      memberships: [{ id: 'm1', orgId: 'org-1', userId: 'u1', status: 'active' }],
+      profiles: [{ membershipId: 'm1', emailUnreachableAt: daysFromNow(-5) }],
+      holders: [{ userId: 'u1', competencyId: 'c1', ...grantExpiringIn(20), revokedAt: null }],
+      comps: [COMP],
+      users: [USER],
+    });
+
+    const result = await sweepOrganization(db, org() as never, NOW);
+
+    expect(sendExpiry).not.toHaveBeenCalled();
+    expect(result.noticesSent).toBe(1);
+    expect(notices).toHaveLength(1);
+  });
+
+  it('still emails an UNMARKED address belonging to the same organisation', async () => {
+    // The skip is per person, not per organisation — one member's dead address
+    // must not silence their colleagues.
+    const { db } = makeDb({
+      memberships: [
+        { id: 'm1', orgId: 'org-1', userId: 'u1', status: 'active' },
+        { id: 'm2', orgId: 'org-1', userId: 'u2', status: 'active' },
+      ],
+      profiles: [
+        { membershipId: 'm1', emailUnreachableAt: daysFromNow(-5) },
+        { membershipId: 'm2', emailUnreachableAt: null },
+      ],
+      holders: [{ userId: 'u2', competencyId: 'c1', ...grantExpiringIn(20), revokedAt: null }],
+      comps: [COMP],
+      users: [{ id: 'u2', email: 'u2@example.com' }],
+    });
+
+    await sweepOrganization(db, org() as never, NOW);
+
+    expect(sendExpiry).toHaveBeenCalledWith(expect.objectContaining({ to: 'u2@example.com' }));
   });
 });
 

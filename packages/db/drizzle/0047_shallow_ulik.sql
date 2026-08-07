@@ -1,0 +1,1 @@
+ALTER TYPE "public"."assessment_case_state" ADD VALUE 'invalidated';

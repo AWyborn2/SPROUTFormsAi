@@ -90,7 +90,19 @@ export type NotSatisfactoryDisposition = (typeof NS_DISPOSITIONS)[number];
  * the product unable to answer "what is waiting on me", which is the one
  * question an assessor opens it to ask.
  */
-export const CASE_STATES = ['open', 'awaiting_sign_off', 'competent', 'closed'] as const;
+export const CASE_STATES = [
+  'open',
+  'awaiting_sign_off',
+  'competent',
+  'closed',
+  /*
+    Abandoned because the candidate was deactivated, and retained as history
+    along with anything already signed on it. Distinct from `closed` because a
+    closed case reads as one that finished, and a returner begins that
+    assessment as a NEW case rather than resuming this one.
+  */
+  'invalidated',
+] as const;
 export type AssessmentCaseState = (typeof CASE_STATES)[number];
 
 /**
@@ -99,8 +111,18 @@ export type AssessmentCaseState = (typeof CASE_STATES)[number];
  * Exists because the single state writer used to stamp `closedAt` on anything
  * that was not `open` — a ternary that silently dates a live case the moment a
  * fourth, non-terminal state exists. Ask this instead of comparing to 'open'.
+ *
+ * `invalidated` belongs here even though it is not an outcome anyone wanted: the
+ * candidate has left, nobody will work it again, and `closedAt` dates the
+ * abandonment. What distinguishes it from `closed` is its own state value, NOT
+ * its terminality — and treating it as in-flight would have every sweep over
+ * live work pick it up, re-creating assessments for somebody who is gone.
  */
-export const TERMINAL_CASE_STATES: readonly AssessmentCaseState[] = ['competent', 'closed'];
+export const TERMINAL_CASE_STATES: readonly AssessmentCaseState[] = [
+  'competent',
+  'closed',
+  'invalidated',
+];
 
 export function isTerminalCaseState(state: AssessmentCaseState): boolean {
   return TERMINAL_CASE_STATES.includes(state);

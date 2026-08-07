@@ -84,7 +84,26 @@ export type PermissionAction =
   // Approving a document is distinct from viewing or editing it (R34): a
   // document is approved without being changed, and a reader admitted to view
   // one is not thereby admitted to approve it. Used by the `profiles` category.
-  | 'approve';
+  | 'approve'
+  /*
+    The `profiles` category divides by OBJECT, not by field (KTD26). `view`
+    covers the profile's fields; these two cover the other objects on the record,
+    because two requirements make them separately configurable and one `view`
+    cannot say so:
+
+     - R44: restricting an access level's reach into FIELDS must not restrict
+       its reach into DOCUMENTS. An assessor kept out of personal details must
+       still be able to open and approve a certificate.
+     - R41/R55: an assessor may view a candidate's competencies and assessment
+       history, and an organisation may tighten that on its own. Collapsing it
+       onto `view` would mean an organisation hiding personal details also loses
+       the eligibility read F4 is built around.
+
+    Both are absent from every other category's defaults, so no existing grant
+    widens. Added the same way, and for the same reason, as `approve` above.
+  */
+  | 'view_documents'
+  | 'view_competencies';
 
 /**
  * What a role may do with an action. `'own'` means "only records this user
@@ -143,6 +162,8 @@ const NONE: Partial<Record<PermissionAction, PermissionValue>> = {
   invite: false,
   manage: false,
   approve: false,
+  view_documents: false,
+  view_competencies: false,
 };
 
 /**
@@ -159,7 +180,7 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: true, manage: true },
     audit: { view: true },
     assessments: { view: true, create: true, edit: true, delete: true, export: true },
-    profiles: { view: true, edit: true, approve: true },
+    profiles: { view: true, edit: true, approve: true, view_documents: true, view_competencies: true },
   },
   admin: {
     forms: { view: true, create: true, edit: true, delete: true },
@@ -168,7 +189,7 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: true, manage: false },
     audit: { view: true },
     assessments: { view: true, create: true, edit: true, delete: true, export: true },
-    profiles: { view: true, edit: true, approve: true },
+    profiles: { view: true, edit: true, approve: true, view_documents: true, view_competencies: true },
   },
   builder: {
     forms: { view: true, create: true, edit: true, delete: false },
@@ -177,7 +198,7 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: false, manage: false },
     audit: { view: false },
     assessments: { view: true, create: false, edit: false, delete: false, export: false },
-    profiles: { view: false, edit: false, approve: false },
+    profiles: { view: false, edit: false, approve: false, view_documents: false, view_competencies: false },
   },
   reviewer: {
     forms: { view: true, create: false, edit: false, delete: false },
@@ -186,7 +207,7 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: false, manage: false },
     audit: { view: true },
     assessments: { view: true, create: false, edit: false, delete: false, export: true },
-    profiles: { view: false, edit: false, approve: false },
+    profiles: { view: false, edit: false, approve: false, view_documents: false, view_competencies: false },
   },
   viewer: {
     forms: { view: true, create: false, edit: false, delete: false },
@@ -195,7 +216,7 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: false, manage: false },
     audit: { view: false },
     assessments: { view: true, create: false, edit: false, delete: false, export: false },
-    profiles: { view: false, edit: false, approve: false },
+    profiles: { view: false, edit: false, approve: false, view_documents: false, view_competencies: false },
   },
   /**
    * Runs assessments but does not administer the org. Eligibility to assess a
@@ -210,11 +231,18 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissions = {
     billing: { view: false, manage: false },
     audit: { view: false },
     assessments: { view: true, create: true, edit: true, delete: false, export: true },
-    // R35: on the shipped default an assessor may view member profiles and the
-    // documents on them, and approve those documents — so they can judge
-    // eligibility and accept training evidence. Not edit. The candidate profile
-    // artifact owns tightening or loosening this per organisation.
-    profiles: { view: true, edit: false, approve: true },
+    /*
+      R35/R55: on the shipped default an assessor may view member profiles, the
+      competencies and assessment history on them, and the documents held
+      against them — and may approve those documents. Not edit.
+
+      The three reads are SEPARATE grants (KTD26), which is what lets an
+      organisation configure the case the contract describes: assessors kept out
+      of personal details but still approving certificates. Tightening `view`
+      alone leaves `view_documents` and `view_competencies` standing, so the
+      eligibility read F4 is built around survives.
+    */
+    profiles: { view: true, edit: false, approve: true, view_documents: true, view_competencies: true },
   },
   /**
    * The workforce member being assessed. Scoped to their own cases and denied

@@ -98,6 +98,16 @@ export interface GrantInput {
    * the formula. Omit for a normal grant.
    */
   expiresAt?: Date | null;
+  /**
+   * Licence class and number, where this competency IS a licence (R33, R34).
+   *
+   * Recorded on the grant rather than as profile fields, so the licence
+   * inherits expiry, grace, revocation and every prerequisite check from this
+   * model instead of rebuilding them badly. Its expiry is `expiresAt` above and
+   * its document is a `competency_documents` row; nothing else is needed.
+   */
+  licenceClass?: string | null;
+  licenceNumber?: string | null;
 }
 
 /**
@@ -163,6 +173,10 @@ export async function grantCompetency(
         grantedByUserId: tenant.userId,
         grantedAt,
         expiresAt: input.expiresAt ?? null,
+        // Carried forward unless new ones are supplied: renewing a ticket
+        // rarely changes its class or its number (R34).
+        licenceClass: input.licenceClass ?? existing.licenceClass ?? null,
+        licenceNumber: input.licenceNumber ?? existing.licenceNumber ?? null,
         // A fresh grant supersedes an earlier revocation — the person has just
         // demonstrated the competency again.
         revokedAt: null,
@@ -179,6 +193,8 @@ export async function grantCompetency(
       grantedByUserId: tenant.userId,
       grantedAt,
       expiresAt: input.expiresAt ?? null,
+      licenceClass: input.licenceClass ?? null,
+      licenceNumber: input.licenceNumber ?? null,
     });
   }
 

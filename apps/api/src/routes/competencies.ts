@@ -211,6 +211,17 @@ competenciesRouter.delete(
 const grantBody = z.object({
   userId: z.string().uuid(),
   evidenceRef: z.string().max(200).optional(),
+  /*
+    A LICENCE IS RECORDED HERE, not as profile fields (R33, R34). Class and
+    number on the grant, its expiry as `expiresAt`, its document as a
+    `competency_documents` row — which is what gives it expiry, grace periods,
+    revocation and a place in every prerequisite check for free (R35, R36).
+    Absent on an ordinary competency.
+  */
+  licenceClass: z.string().max(20).optional(),
+  licenceNumber: z.string().max(60).optional(),
+  /** An explicit end date, for a licence whose expiry does not follow the qualification's validity. */
+  expiresAt: z.string().datetime().optional(),
 });
 
 /**
@@ -256,6 +267,9 @@ competenciesRouter.post(
       competencyId: req.params.id!,
       userId: parsed.data.userId,
       evidenceRef: parsed.data.evidenceRef ?? null,
+      licenceClass: parsed.data.licenceClass ?? null,
+      licenceNumber: parsed.data.licenceNumber ?? null,
+      expiresAt: parsed.data.expiresAt ? new Date(parsed.data.expiresAt) : null,
     });
     if (!result.ok) {
       // Kept distinct: an admin granting by hand needs to know whether they
@@ -417,6 +431,9 @@ competenciesRouter.get(
         name: user?.name ?? 'Unknown user',
         email: user?.email ?? null,
         evidenceRef: r.evidenceRef,
+        /** Null on an ordinary competency; set where this grant IS a licence (R34). */
+        licenceClass: r.licenceClass,
+        licenceNumber: r.licenceNumber,
         grantedAt: r.grantedAt.toISOString(),
         expiresAt: expiry ? expiry.toISOString() : null,
         status: currency.status,
@@ -534,6 +551,9 @@ competenciesRouter.get(
         return {
           competencyId: r.competencyId,
           evidenceRef: r.evidenceRef,
+          /** Null on an ordinary competency; set where this grant IS a licence (R34). */
+          licenceClass: r.licenceClass,
+          licenceNumber: r.licenceNumber,
           status: currency.status,
           /** Required or optional for this person, from their held Roles (R108). */
           standing: standingOf(r.competencyId, required),

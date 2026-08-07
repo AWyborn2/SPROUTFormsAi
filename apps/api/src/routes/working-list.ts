@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
+import { owedProfileFiles } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -26,7 +27,14 @@ function isAdmin(role: string): boolean {
   return role === 'admin' || role === 'owner';
 }
 
-export type WorkingListKind = 'training_request' | 'retirement_review' | 'overdue_case';
+export type WorkingListKind =
+  | 'training_request'
+  | 'retirement_review'
+  | 'overdue_case'
+  /** A profile picture or a competency certificate that has not arrived (R18). */
+  | 'owed_file'
+  /** An address an Admin flagged as reaching nobody (R16, R20). */
+  | 'unreachable';
 
 export interface WorkingListItem {
   kind: WorkingListKind;
@@ -111,6 +119,12 @@ workingListRouter.get(
       }
     }
 
+    // ── Source: files still owed (U34, R18) ──────────────────────────────────
+    for (const item of await owedFileItems(orgId)) items.push(item);
+
+    // ── Source: an address that reaches nobody (U36, R16, R20) ───────────────
+    for (const item of await unreachableItems(orgId)) items.push(item);
+
     // Default ordering by age — oldest first; a dateless item sorts last.
     items.sort((a, b) => {
       if (a.createdAt === b.createdAt) return 0;
@@ -121,6 +135,146 @@ workingListRouter.get(
     res.json(items);
   }),
 );
+
+/**
+ * Files a record still owes (U34, R18) — a missing profile picture, and a
+ * competency carrying no document.
+ *
+ * DERIVED, never stored. A profile with no picture key owes one; a competency
+ * with no held document owes one. Deriving it means nothing has to be
+ * reconciled when a file arrives — the item leaves because the underlying fact
+ * changed, which is the posture this whole list takes.
+ *
+ * THE IMPORT WAIVER IS READ, NOT INFERRED (R19). A competency a migration run
+ * loaded owes no certificate — a customer bringing in a decade of tickets has no
+ * scans of them — while one recorded on the same person afterwards owes its own,
+ * so the concession never becomes the standard. `importedAt` on the grant is what
+ * tells those apart. Inferring it from a null granting user would also catch
+ * grants the product itself made, which owe their documents like any other.
+ *
+ * GATES NOTHING. An owed file marks and lists; no case, no assessment and no
+ * competency waits on it.
+ */
+async function owedFileItems(orgId: string): Promise<WorkingListItem[]> {
+  const database = db!;
+  const items: WorkingListItem[] = [];
+
+  const memberships = await database.query.memberships.findMany({
+    where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
+  });
+  if (memberships.length === 0) return items;
+
+  const nameFor = new Map<string, string>();
+  const users = await database.query.users.findMany({
+    where: inArray(schema.users.id, [...new Set(memberships.map((m) => m.userId))]),
+  });
+  for (const u of users) nameFor.set(u.id, u.name);
+
+  // A profile with no picture key owes one.
+  const profiles = await database.query.memberProfiles.findMany({
+    where: inArray(
+      schema.memberProfiles.membershipId,
+      memberships.map((m) => m.id),
+    ),
+  });
+  const userForMembership = new Map(memberships.map((m) => [m.id, m.userId]));
+  for (const profile of profiles) {
+    if (owedProfileFiles(profile).length === 0) continue;
+    const who = nameFor.get(userForMembership.get(profile.membershipId) ?? '') ?? 'A member';
+    items.push({
+      kind: 'owed_file',
+      id: profile.membershipId,
+      subject: `Profile picture owed: ${who}`,
+      createdAt: profile.createdAt.toISOString(),
+    });
+  }
+
+  // A competency with no HELD document owes one, unless an import loaded it.
+  const grants = await database.query.competencyHolders.findMany({
+    where: and(eq(schema.competencyHolders.orgId, orgId), isNull(schema.competencyHolders.revokedAt)),
+  });
+  const ownGrants = grants.filter((g) => g.importedAt === null);
+  if (ownGrants.length === 0) return items;
+
+  const documents = await database.query.competencyDocuments.findMany({
+    where: and(
+      eq(schema.competencyDocuments.orgId, orgId),
+      inArray(
+        schema.competencyDocuments.competencyHolderId,
+        ownGrants.map((g) => g.id),
+      ),
+    ),
+  });
+  const heldFor = new Set(documents.filter((d) => d.state === 'held').map((d) => d.competencyHolderId));
+
+  const competencies = await database.query.competencies.findMany({
+    where: eq(schema.competencies.orgId, orgId),
+  });
+  const competencyName = new Map(competencies.map((c) => [c.id, c.name]));
+  const activeUsers = new Set(memberships.map((m) => m.userId));
+
+  for (const grant of ownGrants) {
+    if (heldFor.has(grant.id)) continue;
+    // A grant belonging to somebody who is no longer an active member is not an
+    // Admin's to chase.
+    if (!activeUsers.has(grant.userId)) continue;
+    items.push({
+      kind: 'owed_file',
+      id: grant.id,
+      subject: `Certificate owed: ${nameFor.get(grant.userId) ?? 'A member'} — ${competencyName.get(grant.competencyId) ?? 'a competency'}`,
+      createdAt: grant.grantedAt.toISOString(),
+    });
+  }
+
+  return items;
+}
+
+/**
+ * Members whose address an Admin has flagged as reaching nobody (U36, R16, R20).
+ *
+ * THE MARK ALONE, deliberately — this is the broader of the two populations the
+ * mark feeds, and the difference from compliance reporting is the point rather
+ * than an inconsistency. An Admin flagged the address because mail bounces, so
+ * an expiry notice that would have been emailed now needs a person to chase it.
+ * That is true whether or not the member also holds a login: the notice still
+ * lands on their own record, but nobody can rely on their opening it.
+ *
+ * Compliance reporting counts the narrower population (the mark AND no login),
+ * because there "unreachable" is a claim about whether the organisation
+ * discharged its obligation, and a login discharges it. Here it is a claim about
+ * whether somebody needs chasing.
+ */
+async function unreachableItems(orgId: string): Promise<WorkingListItem[]> {
+  const database = db!;
+  const memberships = await database.query.memberships.findMany({
+    where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
+  });
+  if (memberships.length === 0) return [];
+
+  const profiles = await database.query.memberProfiles.findMany({
+    where: inArray(
+      schema.memberProfiles.membershipId,
+      memberships.map((m) => m.id),
+    ),
+  });
+  const marked = profiles.filter((p) => Boolean(p.emailUnreachableAt));
+  if (marked.length === 0) return [];
+
+  const userForMembership = new Map(memberships.map((m) => [m.id, m.userId]));
+  const users = await database.query.users.findMany({
+    where: inArray(schema.users.id, [...new Set(memberships.map((m) => m.userId))]),
+  });
+  const nameFor = new Map(users.map((u) => [u.id, u.name]));
+
+  return marked.map((profile) => ({
+    kind: 'unreachable' as const,
+    id: profile.membershipId,
+    subject: `Address unreachable: ${nameFor.get(userForMembership.get(profile.membershipId) ?? '') ?? 'A member'}`,
+    // When the flag was raised, not when the profile was created — the age that
+    // matters here is how long somebody has gone unchased.
+    createdAt: profile.emailUnreachableAt!.toISOString(),
+  }));
+}
 
 /** Retired Locations / Departments / Roles that ACTIVE people still hold (U18) → one item each. */
 async function retirementReviewItems(orgId: string): Promise<WorkingListItem[]> {

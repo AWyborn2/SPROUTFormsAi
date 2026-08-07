@@ -28,6 +28,7 @@ import { ClientBrandsScreen } from './screens/enterprise/ClientBrandsScreen.js';
 import { WhiteLabelScreen } from './screens/enterprise/WhiteLabelScreen.js';
 import { CompetencyScreen } from './screens/enterprise/CompetencyScreen.js';
 import { WorkingListScreen } from './screens/enterprise/WorkingListScreen.js';
+import { ProfileScreen } from './screens/enterprise/ProfileScreen.js';
 import { ComplianceScreen } from './screens/enterprise/ComplianceScreen.js';
 import { AssessmentCasesScreen } from './screens/assessments/AssessmentCasesScreen.js';
 import { AssessorQueueScreen } from './screens/assessments/AssessorQueueScreen.js';
@@ -67,6 +68,8 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   competency: <CompetencyScreen />,
   'working-list': <WorkingListScreen />,
   compliance: <ComplianceScreen />,
+  profile: <ProfileScreen />,
+  'my-profile': <ProfileScreen />,
   assessments: <AssessmentCasesScreen />,
   'assessment-queue': <AssessorQueueScreen />,
   'assessment-progress': <AssessmentDashboard />,
