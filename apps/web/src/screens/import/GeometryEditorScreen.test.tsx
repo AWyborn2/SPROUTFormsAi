@@ -1127,7 +1127,7 @@ describe('GeometryEditorScreen — drawing a matching connector', () => {
     open();
     expect(lastViewerProps().drawLine).toBe(false);
 
-    fireEvent.click(screen.getByText('Draw a line between these'));
+    fireEvent.click(screen.getByText('Draw lines on the page'));
 
     expect(lastViewerProps().drawArmed).toBe(true);
     expect(lastViewerProps().drawLine).toBe(true);
@@ -1135,7 +1135,7 @@ describe('GeometryEditorScreen — drawing a matching connector', () => {
 
   it('places BOTH ends from one drag', () => {
     open();
-    fireEvent.click(screen.getByText('Draw a line between these'));
+    fireEvent.click(screen.getByText('Draw lines on the page'));
 
     act(() => {
       lastViewerProps().onDrawConnector!(anchorBox(40, 700), anchorBox(400, 700));
@@ -1145,46 +1145,84 @@ describe('GeometryEditorScreen — drawing a matching connector', () => {
     expect(screen.getByText(/2\/4 placed/)).toBeDefined();
   });
 
-  it('defaults to the first UNANCHORED entry on each side', () => {
+  it('STAYS ARMED AND ADVANCES, so the next drag needs no click', () => {
     /*
-      So the common path is arm, drag, arm, drag — three gestures for a
-      three-by-three question where placing anchors one at a time is six. If the
-      selects held their first value the second line would overwrite the first.
+      The gesture is only "just draw" if the mode survives it. Disarming after
+      each drag made a three-by-three question click, drag, click, drag, click,
+      drag — half the gestures re-arming a mode that had just been used for
+      exactly what it is for.
     */
     open();
-    fireEvent.click(screen.getByText('Draw a line between these'));
+    fireEvent.click(screen.getByText('Draw lines on the page'));
     act(() => {
       lastViewerProps().onDrawConnector!(anchorBox(40, 700), anchorBox(400, 700));
     });
 
+    expect(lastViewerProps().drawArmed).toBe(true);
+    expect(lastViewerProps().drawLine).toBe(true);
     expect((screen.getByLabelText('Line starts at') as HTMLSelectElement).value).toBe('l1');
     expect((screen.getByLabelText('Line ends at') as HTMLSelectElement).value).toBe('r1');
   });
 
-  it('draws a second line without clobbering the first', () => {
+  it('draws every line from ONE arming click', () => {
     open();
+    fireEvent.click(screen.getByText('Draw lines on the page'));
     for (const y of [700, 660]) {
-      fireEvent.click(screen.getByText('Draw a line between these'));
       act(() => {
         lastViewerProps().onDrawConnector!(anchorBox(40, y), anchorBox(400, y));
       });
     }
 
     expect(screen.getByText(/4\/4 placed/)).toBeDefined();
+    expect(placedKeys()).toEqual(['l0', 'l1', 'r0', 'r1']);
   });
 
-  it('lets the author override which two entries the line joins', () => {
+  it('DISARMS ONCE EVERY ANCHOR IS DOWN', () => {
+    /*
+      Staying armed on a finished question would let a stray drag silently move
+      an anchor. Re-drawing one is that row's own Draw button.
+    */
+    open();
+    fireEvent.click(screen.getByText('Draw lines on the page'));
+    for (const y of [700, 660]) {
+      act(() => {
+        lastViewerProps().onDrawConnector!(anchorBox(40, y), anchorBox(400, y));
+      });
+    }
+
+    expect(lastViewerProps().drawArmed).toBe(false);
+  });
+
+  it('lets the author jump to a different pair from the selects', () => {
     // A paper whose entries are printed out of order, or a pair already down.
     open();
 
     fireEvent.change(screen.getByLabelText('Line ends at'), { target: { value: 'r1' } });
-    fireEvent.click(screen.getByText('Draw a line between these'));
     act(() => {
       lastViewerProps().onDrawConnector!(anchorBox(40, 700), anchorBox(400, 660));
     });
 
-    // The far end landed on the CHOSEN answer, not the defaulted one.
+    // The far end landed on the CHOSEN answer, not the suggested one.
     expect(placedKeys()).toEqual(['l0', 'r1']);
+  });
+
+  it('NAMES THE PAIR THE NEXT DRAG WILL PLACE', () => {
+    /*
+      Which two anchors a drag lands on is the one thing the gesture cannot
+      show: the line under the cursor looks identical whichever pair it belongs
+      to. Saying it is what makes "just keep dragging" safe.
+    */
+    open();
+    fireEvent.click(screen.getByText('Draw lines on the page'));
+
+    expect(screen.getByText(/Drag from/)).toBeDefined();
+    expect(screen.getAllByText('Restricted area').length).toBeGreaterThan(0);
+
+    act(() => {
+      lastViewerProps().onDrawConnector!(anchorBox(40, 700), anchorBox(400, 700));
+    });
+
+    expect((screen.getByLabelText('Line starts at') as HTMLSelectElement).value).toBe('l1');
   });
 
   it('LEAVES AN ORDINARY FIELD IN BOX MODE', () => {
