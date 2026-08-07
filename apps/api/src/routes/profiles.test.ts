@@ -234,6 +234,109 @@ describe('GET /profiles/:membershipId', () => {
   });
 });
 
+describe('POST /profiles/:membershipId', () => {
+  const createBody = {
+    firstName: 'Jane',
+    middleName: 'Alexandra',
+    lastName: 'Smith',
+    gender: 'Female',
+    ethnicity: 'Aboriginal',
+    dateOfBirth: '1990-04-17',
+    addressStreet: '12 Mill Road',
+    suburb: 'Boddington',
+    postcode: '6390',
+    mobile: '0400 000 000',
+    emergencyContactName: 'Chris Smith',
+    emergencyContactPhone: '0400 111 111',
+    starterType: 'New starter',
+    employeeNumber: 'E100',
+  };
+
+  it('refuses the subject creating their own record — that is never the subject’s (R51)', async () => {
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/profiles/${SUBJECT_MEMBERSHIP}`, {
+        method: 'POST',
+        headers: { ...authHeader(subjectCandidate), 'content-type': 'application/json' },
+        body: JSON.stringify(createBody),
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses an access level the matrix grants no edit (AE25)', async () => {
+    // The assessor default is read + approve, no edit — editableFields is empty.
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.assessor });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/profiles/${SUBJECT_MEMBERSHIP}`, {
+        method: 'POST',
+        headers: { ...authHeader(assessor), 'content-type': 'application/json' },
+        body: JSON.stringify(createBody),
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s on an invalid body', async () => {
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/profiles/${SUBJECT_MEMBERSHIP}`, {
+        method: 'POST',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify({ dateOfBirth: 12345 }),
+      });
+      expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('creates the record for an Admin and writes an audit entry (201)', async () => {
+    const f = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/profiles/${SUBJECT_MEMBERSHIP}`, {
+        method: 'POST',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify(createBody),
+      });
+      expect(res.status).toBe(201);
+      expect(f.audits.some((a) => a.action === 'Created profile')).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s when the membership already carries a profile or the number is taken (R1, R7)', async () => {
+    const f = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    f.db.insert = (() => ({
+      values: () => ({
+        returning: async () => {
+          throw Object.assign(new Error('duplicate'), { code: '23505' });
+        },
+      }),
+    })) as never;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/profiles/${SUBJECT_MEMBERSHIP}`, {
+        method: 'POST',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify(createBody),
+      });
+      expect(res.status).toBe(409);
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('PATCH /profiles/:membershipId', () => {
   it('saves a candidate’s mobile and silently drops their attempt on the employee number', async () => {
     // AE2 / R51, R53: the mobile saves and the identifier is not theirs to write.

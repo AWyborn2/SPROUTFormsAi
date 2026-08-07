@@ -2,9 +2,20 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import bcrypt from 'bcryptjs';
 
-const mockProvisionTenant = vi.fn();
+const { mockProvisionTenant, DeactivatedMemberError } = vi.hoisted(() => {
+  // The route catches this by `instanceof`, so the mocked module must export the
+  // same class the route imports from it — a real class the test can throw.
+  class DeactivatedMemberError extends Error {
+    constructor() {
+      super('every membership for this person has been deactivated');
+      this.name = 'DeactivatedMemberError';
+    }
+  }
+  return { mockProvisionTenant: vi.fn(), DeactivatedMemberError };
+});
 vi.mock('../auth/tenant-provisioning.js', () => ({
   provisionTenant: mockProvisionTenant,
+  DeactivatedMemberError,
 }));
 
 let mockDbValue: object | null = {};
@@ -88,6 +99,24 @@ describe('POST /auth/login', () => {
       expect(res.status).toBe(401);
       // Same error body as a wrong password — no email enumeration.
       expect(((await res.json()) as { error: string }).error).toBe('invalid_credentials');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s with the same invalid_credentials shape for a fully-deactivated member, setting no cookie (R64)', async () => {
+    // The third of deactivation's three enforcement points: provisionTenant
+    // refuses when every membership the person holds is deactivated, and the
+    // login route turns that into the SAME opaque answer a wrong password gets,
+    // with no session issued.
+    mockDbValue = loginDb(userRow);
+    mockProvisionTenant.mockRejectedValue(new DeactivatedMemberError());
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { email: 'ash@x.io', password: 'correct horse battery' });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_credentials');
+      expect(res.headers.get('set-cookie')).toBeNull();
     } finally {
       server.close();
     }

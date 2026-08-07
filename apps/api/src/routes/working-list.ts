@@ -155,20 +155,34 @@ workingListRouter.get(
  * GATES NOTHING. An owed file marks and lists; no case, no assessment and no
  * competency waits on it.
  */
+/**
+ * The active members of an organisation with the two lookups both the owed-file
+ * and the unreachable listings derive per person: the display name by user, and
+ * the membership→user map. Read once here rather than re-derived in each source.
+ */
+async function loadActiveMembers(orgId: string) {
+  const database = db!;
+  const memberships = await database.query.memberships.findMany({
+    where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
+  });
+  const users = memberships.length
+    ? await database.query.users.findMany({
+        where: inArray(schema.users.id, [...new Set(memberships.map((m) => m.userId))]),
+      })
+    : [];
+  return {
+    memberships,
+    nameFor: new Map(users.map((u) => [u.id, u.name])),
+    userForMembership: new Map(memberships.map((m) => [m.id, m.userId])),
+  };
+}
+
 async function owedFileItems(orgId: string): Promise<WorkingListItem[]> {
   const database = db!;
   const items: WorkingListItem[] = [];
 
-  const memberships = await database.query.memberships.findMany({
-    where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
-  });
+  const { memberships, nameFor, userForMembership } = await loadActiveMembers(orgId);
   if (memberships.length === 0) return items;
-
-  const nameFor = new Map<string, string>();
-  const users = await database.query.users.findMany({
-    where: inArray(schema.users.id, [...new Set(memberships.map((m) => m.userId))]),
-  });
-  for (const u of users) nameFor.set(u.id, u.name);
 
   // A profile with no picture key owes one.
   const profiles = await database.query.memberProfiles.findMany({
@@ -177,7 +191,6 @@ async function owedFileItems(orgId: string): Promise<WorkingListItem[]> {
       memberships.map((m) => m.id),
     ),
   });
-  const userForMembership = new Map(memberships.map((m) => [m.id, m.userId]));
   for (const profile of profiles) {
     if (owedProfileFiles(profile).length === 0) continue;
     const who = nameFor.get(userForMembership.get(profile.membershipId) ?? '') ?? 'A member';
@@ -246,9 +259,7 @@ async function owedFileItems(orgId: string): Promise<WorkingListItem[]> {
  */
 async function unreachableItems(orgId: string): Promise<WorkingListItem[]> {
   const database = db!;
-  const memberships = await database.query.memberships.findMany({
-    where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
-  });
+  const { memberships, nameFor, userForMembership } = await loadActiveMembers(orgId);
   if (memberships.length === 0) return [];
 
   const profiles = await database.query.memberProfiles.findMany({
@@ -259,12 +270,6 @@ async function unreachableItems(orgId: string): Promise<WorkingListItem[]> {
   });
   const marked = profiles.filter((p) => Boolean(p.emailUnreachableAt));
   if (marked.length === 0) return [];
-
-  const userForMembership = new Map(memberships.map((m) => [m.id, m.userId]));
-  const users = await database.query.users.findMany({
-    where: inArray(schema.users.id, [...new Set(memberships.map((m) => m.userId))]),
-  });
-  const nameFor = new Map(users.map((u) => [u.id, u.name]));
 
   return marked.map((profile) => ({
     kind: 'unreachable' as const,
@@ -330,16 +335,18 @@ async function retirementReviewItems(orgId: string): Promise<WorkingListItem[]> 
   });
   const activeIds = new Set(active.map((m) => m.id));
 
-  const heldBy = (rows: Array<{ membershipId: string }>, valueId: (r: never) => string) => {
+  // Generic over the row type, so each call site's real shape flows to its
+  // valueId callback and no casts are needed.
+  const heldBy = <T extends { membershipId: string }>(rows: T[], valueId: (r: T) => string) => {
     const held = new Set<string>();
     for (const row of rows) {
-      if (activeIds.has(row.membershipId)) held.add(valueId(row as never));
+      if (activeIds.has(row.membershipId)) held.add(valueId(row));
     }
     return held;
   };
-  const locHeld = heldBy(locHolders, (r) => (r as { locationId: string }).locationId);
-  const deptHeld = heldBy(deptHolders, (r) => (r as { departmentId: string }).departmentId);
-  const roleHeld = heldBy(roleHolders, (r) => (r as { roleId: string }).roleId);
+  const locHeld = heldBy(locHolders, (r) => r.locationId);
+  const deptHeld = heldBy(deptHolders, (r) => r.departmentId);
+  const roleHeld = heldBy(roleHolders, (r) => r.roleId);
 
   const items: WorkingListItem[] = [];
   for (const l of locations) if (locHeld.has(l.id)) items.push({ kind: 'retirement_review', id: l.id, subject: `Retired Location still held: ${l.name}`, createdAt: null });

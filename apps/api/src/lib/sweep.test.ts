@@ -47,9 +47,13 @@ function makeDb(opts: DbOpts) {
     values: (v: Record<string, unknown>) => {
       if (table === schema.sentNotices) notices.push(v);
       else if (table === schema.assessmentCases) cases.push(v);
+      const row = { id: `row-${notices.length + cases.length}` };
       return {
-        returning: async () => [{ id: `row-${notices.length + cases.length}` }],
-        onConflictDoNothing: async () => undefined,
+        returning: async () => [row],
+        // The notice insert claims the window first, then reads back the row it
+        // won (or none, on a conflict) — so this returns a builder with its own
+        // `.returning`, mirroring the real onConflictDoNothing().returning().
+        onConflictDoNothing: () => ({ returning: async () => [row] }),
       };
     },
   }));
@@ -110,6 +114,21 @@ describe('sweepOrganization — notification pass', () => {
     expect(result.noticesSent).toBe(1);
     expect(notices[0]).toMatchObject({ userId: 'u1', competencyId: 'c1' });
     expect(sendExpiry).toHaveBeenCalledOnce();
+  });
+
+  it('does not notify a holder whose membership here has been deactivated (R65)', async () => {
+    // A leaver is swept out of pass 1 too; pass 2 must not mail them expiry
+    // notices for a ticket they hold no live seat against.
+    const { db, notices } = makeDb({
+      holders: [{ userId: 'u1', competencyId: 'c1', ...grantExpiringIn(20), revokedAt: null }],
+      comps: [COMP],
+      users: [USER],
+      memberships: [{ id: 'm1', orgId: 'org-1', userId: 'u1', status: 'suspended' }],
+    });
+    const result = await sweepOrganization(db, org() as never, NOW);
+    expect(result.noticesSent).toBe(0);
+    expect(notices).toHaveLength(0);
+    expect(sendExpiry).not.toHaveBeenCalled();
   });
 
   it('notifies an OPTIONAL competency’s holder too — the window does not read standing (R97)', async () => {

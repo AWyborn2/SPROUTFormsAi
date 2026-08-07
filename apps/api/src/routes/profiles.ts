@@ -14,7 +14,7 @@ import {
 } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
-import { membershipForProfile, resolveProfileAccess, tierCarriesProfiles } from '../lib/profile-access.js';
+import { membershipForProfile, profileTierOrg, resolveProfileAccess } from '../lib/profile-access.js';
 import { isUniqueViolation } from '../lib/db-errors.js';
 import { recordAudit } from '../audit/record.js';
 import { db } from '../db.js';
@@ -238,7 +238,7 @@ profilesRouter.post(
     try {
       const [created] = await db
         .insert(schema.memberProfiles)
-        .values({ orgId: tenant.orgId, membershipId: membership.id, ...values } as never)
+        .values({ orgId: tenant.orgId, membershipId: membership.id, ...values } as typeof schema.memberProfiles.$inferInsert)
         .returning();
       await recordAudit(db, tenant, {
         action: 'Created profile',
@@ -317,7 +317,7 @@ profilesRouter.patch(
     try {
       await db
         .update(schema.memberProfiles)
-        .set({ ...values, updatedAt: new Date() } as never)
+        .set({ ...values, updatedAt: new Date() } as Partial<typeof schema.memberProfiles.$inferInsert>)
         .where(eq(schema.memberProfiles.membershipId, membership.id));
     } catch (err) {
       if (isUniqueViolation(err)) {
@@ -379,17 +379,9 @@ profilesRouter.put(
       res.status(403).json({ error: 'forbidden' });
       return;
     }
-    /*
-      The TIER gate.  applies it for every read and write
-      of the record, but this route does not go through it — an Admin act needs
-      no matrix resolution — so it applies the same rule directly. An
-      organisation below the tier that carries assessments holds no profiles at
-      all, and neither of these routes may be its way in.
-    */
-    const org = await db.query.organizations.findFirst({
-      where: eq(schema.organizations.id, tenant.orgId),
-    });
-    if (!org || !tierCarriesProfiles(org.planTier)) {
+    // The tier gate resolveProfileAccess applies to every matrix-gated read and
+    // write, applied directly here because this Admin act resolves no matrix.
+    if (!(await profileTierOrg(db, tenant.orgId))) {
       res.status(403).json({ error: 'forbidden' });
       return;
     }
@@ -483,17 +475,12 @@ profilesRouter.get(
       res.status(403).json({ error: 'forbidden' });
       return;
     }
-    /*
-      The TIER gate.  applies it for every read and write
-      of the record, but this route does not go through it — an Admin act needs
-      no matrix resolution — so it applies the same rule directly. An
-      organisation below the tier that carries assessments holds no profiles at
-      all, and neither of these routes may be its way in.
-    */
-    const org = await db.query.organizations.findFirst({
-      where: eq(schema.organizations.id, tenant.orgId),
-    });
-    if (!org || !tierCarriesProfiles(org.planTier)) {
+    // The tier gate resolveProfileAccess applies to every matrix-gated read and
+    // write, applied directly here because this Admin act resolves no matrix.
+    // The org row is kept: the export names each field by the identifier the
+    // organisation chose (R24).
+    const org = await profileTierOrg(db, tenant.orgId);
+    if (!org) {
       res.status(403).json({ error: 'forbidden' });
       return;
     }

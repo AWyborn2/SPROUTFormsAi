@@ -91,6 +91,24 @@ export function tierCarriesProfiles(planTier: string): boolean {
 }
 
 /**
+ * The organisation row when `orgId` is on a tier that carries profiles, else
+ * null — the tier gate as a value, so a caller can both gate on it and read the
+ * columns it returns (the display identifier the export needs).
+ *
+ * The tier gate `resolveProfileAccess` applies to every matrix-gated read and
+ * write, extracted so the two Admin-only routes that resolve no matrix (the
+ * unreachable mark and the export) apply the SAME rule directly rather than each
+ * repeating the org lookup. An organisation below the assessments tier holds no
+ * profiles at all, and neither route may be its way in.
+ */
+export async function profileTierOrg(db: Db, orgId: string) {
+  const org = await db.query.organizations.findFirst({
+    where: eq(schema.organizations.id, orgId),
+  });
+  return org && tierCarriesProfiles(org.planTier) ? org : null;
+}
+
+/**
  * Resolve what `tenant` may do on the profile belonging to `subjectMembership`.
  *
  * `subjectMembership` is the membership the profile hangs off, so the subject

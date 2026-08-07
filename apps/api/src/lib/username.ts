@@ -141,11 +141,22 @@ export async function insertUserWithUsername(
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
-      const [row] = await db
-        .insert(schema.users)
-        .values({ ...values, username: usernameCandidate(firstName, lastName) })
-        .returning();
-      return row!;
+      /*
+        Each attempt in its own savepoint. When `db` is a caller's transaction
+        (invite acceptance, an import row), a 23505 aborts the WHOLE transaction,
+        so a bare retry would re-issue the INSERT on an already-aborted handle
+        and fail hard — the retry would be dead exactly where it is needed. A
+        nested transaction is a SAVEPOINT: a collision rolls back only the
+        attempt and the next runs clean. On the root client it is an ordinary
+        one-statement transaction.
+      */
+      return await db.transaction(async (sp) => {
+        const [row] = await sp
+          .insert(schema.users)
+          .values({ ...values, username: usernameCandidate(firstName, lastName) })
+          .returning();
+        return row!;
+      });
     } catch (err) {
       if (isUniqueViolationOn(err, USERNAME_INDEX)) continue;
       throw err;

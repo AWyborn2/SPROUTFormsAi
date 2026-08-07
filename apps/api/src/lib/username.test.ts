@@ -23,7 +23,7 @@ function uniqueViolation(constraint: string) {
  */
 function insertingDb(failures: string[] = []) {
   const attempted: string[] = [];
-  const db = {
+  const surface = {
     insert: () => ({
       values: (v: { username: string }) => ({
         returning: async () => {
@@ -34,6 +34,13 @@ function insertingDb(failures: string[] = []) {
         },
       }),
     }),
+  };
+  // Each issue attempt runs in its own savepoint (a nested transaction), so the
+  // double must run the callback rather than throw — modelling the savepoint the
+  // retry depends on inside a caller's transaction.
+  const db = {
+    ...surface,
+    transaction: async (fn: (sp: unknown) => Promise<unknown>) => fn(surface),
   } as unknown as UserDb;
   return { db, attempted };
 }
