@@ -680,3 +680,104 @@ describe('GET /competency-documents/:holderId', () => {
     }
   });
 });
+
+describe('GET /competency-documents/queue', () => {
+  const queueDocs = [
+    { id: 'q-1', competencyHolderId: HOLDER, fileName: 'new.jpg', state: 'pending', rejectedAt: null, rejectedReason: null, uploadedAt: new Date() },
+    { id: 'q-2', competencyHolderId: HOLDER, fileName: 'bad.jpg', state: 'held', rejectedAt: new Date(), rejectedReason: 'illegible', uploadedAt: new Date() },
+    { id: 'q-3', competencyHolderId: HOLDER, fileName: 'fine.jpg', state: 'held', rejectedAt: null, rejectedReason: null, uploadedAt: new Date() },
+  ];
+
+  it('is reachable — it is registered before /:holderId, which would otherwise shadow it', async () => {
+    // The whole point of the fix: Express matches in order, and a /queue
+    // declared after GET /:holderId never runs. A 200 here proves it does.
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin, docs: queueDocs });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/queue`, { headers: authHeader(admin) });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Array<{ kind: string }>;
+      // Only the pending replacement and the rejected-held evidence; the clean
+      // held document is not in the queue.
+      expect(body.map((i) => i.kind).sort()).toEqual(['rejected_evidence', 'replacement']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a member who cannot approve documents org-wide — a candidate cannot enumerate the queue', async () => {
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate, docs: queueDocs });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/queue`, { headers: authHeader(subject) });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('POST /competency-documents/:holderId — the Admin attach route', () => {
+  const upload = { fileBase64: BYTES.toString('base64'), mimeType: 'image/jpeg', fileName: 'ticket.jpg' };
+
+  it('attaches evidence for an access level admitted to edit the record (201)', async () => {
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${HOLDER}`, {
+        method: 'POST',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify(upload),
+      });
+      expect(res.status).toBe(201);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses the subject candidate — their own path is the replacement, not the attach (R52)', async () => {
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${HOLDER}`, {
+        method: 'POST',
+        headers: { ...authHeader(subject), 'content-type': 'application/json' },
+        body: JSON.stringify(upload),
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s for an unknown holder', async () => {
+    const base1 = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    base1.db.query.competencyHolders.findFirst = vi.fn().mockResolvedValue(undefined);
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/nope`, {
+        method: 'POST',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify(upload),
+      });
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s on an invalid body', async () => {
+    fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competency-documents/${HOLDER}`, {
+        method: 'POST',
+        headers: { ...authHeader(admin), 'content-type': 'application/json' },
+        body: JSON.stringify({ fileName: 'x.jpg' }),
+      });
+      expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+});

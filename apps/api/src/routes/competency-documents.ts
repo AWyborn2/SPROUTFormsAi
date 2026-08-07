@@ -5,6 +5,7 @@ import { schema } from '@formai/db';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { resolveProfileAccess } from '../lib/profile-access.js';
+import { permissionScope } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
 import { getStorageClient } from '../storage/index.js';
 import { ATTACHMENT_KEY_RE, EXT_CONTENT_TYPE, storeAttachment } from './uploads.js';
@@ -56,6 +57,63 @@ const attachBody = z.object({
   mimeType: z.string().min(1),
   fileName: z.string().min(1).max(400),
 });
+
+// ── GET /competency-documents/queue ────────────────────────────────────────
+
+/**
+ * What an approver has to look at (R47, R52).
+ *
+ * TWO KINDS, deliberately labelled apart, because "rejected" means two things
+ * across these rules and confusing them would send an Admin to the wrong record:
+ *
+ *  - a PENDING replacement a candidate supplied, waiting to become evidence;
+ *  - a REJECTED HELD document, which IS the record's evidence and is what R47
+ *    flags for an Admin to resolve with the person.
+ *
+ * A rejected REPLACEMENT is in neither: it never became evidence and needs
+ * nothing, though it is retained as a record of what was submitted.
+ *
+ * REGISTERED BEFORE THE `/:holderId` ROUTES. Express matches in registration
+ * order, so a `/queue` declared after `GET /:holderId` is swallowed by it and
+ * never runs — the literal path must come first.
+ *
+ * GATED ORG-WIDE. The queue spans every holder, so there is no subject to
+ * resolve access against; the authority to see it is `profiles.approve` granted
+ * for the whole organisation — the same grant the per-holder approve routes
+ * require of a non-subject. Without it any member, a candidate included, could
+ * enumerate every pending and rejected document in the org.
+ */
+competencyDocumentsRouter.get(
+  '/queue',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role) && (await permissionScope(tenant, 'profiles', 'approve')) !== 'all') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const rows = await db.query.competencyDocuments.findMany({
+      where: eq(schema.competencyDocuments.orgId, tenant.orgId),
+    });
+
+    const items = rows
+      .filter((r) => r.state === 'pending' || (r.state === 'held' && r.rejectedAt !== null))
+      .map((r) => ({
+        id: r.id,
+        competencyHolderId: r.competencyHolderId,
+        fileName: r.fileName,
+        kind: r.state === 'pending' ? ('replacement' as const) : ('rejected_evidence' as const),
+        rejectedReason: r.rejectedReason,
+        uploadedAt: r.uploadedAt.toISOString(),
+      }));
+
+    res.json(items);
+  }),
+);
 
 // ── POST /competency-documents/:holderId ───────────────────────────────────
 
@@ -366,47 +424,6 @@ competencyDocumentsRouter.post(
 
 // ── GET /competency-documents/queue ────────────────────────────────────────
 
-/**
- * What an approver has to look at (R47, R52).
- *
- * TWO KINDS, deliberately labelled apart, because "rejected" means two things
- * across these rules and confusing them would send an Admin to the wrong record:
- *
- *  - a PENDING replacement a candidate supplied, waiting to become evidence;
- *  - a REJECTED HELD document, which IS the record's evidence and is what R47
- *    flags for an Admin to resolve with the person.
- *
- * A rejected REPLACEMENT is in neither: it never became evidence and needs
- * nothing, though it is retained as a record of what was submitted.
- */
-competencyDocumentsRouter.get(
-  '/queue',
-  requireTenant,
-  withErrorHandling(async (req, res) => {
-    if (!db) {
-      res.status(503).json({ error: 'db_unavailable' });
-      return;
-    }
-    const tenant = req.tenant!;
-    const rows = await db.query.competencyDocuments.findMany({
-      where: eq(schema.competencyDocuments.orgId, tenant.orgId),
-    });
-
-    const items = rows
-      .filter((r) => r.state === 'pending' || (r.state === 'held' && r.rejectedAt !== null))
-      .map((r) => ({
-        id: r.id,
-        competencyHolderId: r.competencyHolderId,
-        fileName: r.fileName,
-        kind: r.state === 'pending' ? ('replacement' as const) : ('rejected_evidence' as const),
-        rejectedReason: r.rejectedReason,
-        uploadedAt: r.uploadedAt.toISOString(),
-      }));
-
-    res.json(items);
-  }),
-);
-
 // ── POST /competency-documents/:id/approve ─────────────────────────────────
 
 /**
@@ -445,7 +462,20 @@ competencyDocumentsRouter.post(
         displaced is RETAINED as evidence of what was held and sighted at the
         time — never deleted.
       */
-      await db!.transaction(async (tx) => {
+      const applied = await db!.transaction(async (tx) => {
+        /*
+          Re-read the target under the transaction before touching anything.
+          `loadForDecision` read it a moment ago; a concurrent approve, reject or
+          removal could have moved it since. Without this guard a second approval
+          arriving after the document was removed or already superseded would
+          flip it back to `held` — the TOCTOU this check closes. Bail before
+          superseding the held documents, so a lost race writes nothing.
+        */
+        const current = await tx.query.competencyDocuments.findFirst({
+          where: eq(schema.competencyDocuments.id, row.id),
+        });
+        if (current?.state !== 'pending') return false;
+
         const held = await tx.query.competencyDocuments.findMany({
           where: and(
             eq(schema.competencyDocuments.competencyHolderId, row.competencyHolderId),
@@ -467,7 +497,13 @@ competencyDocumentsRouter.post(
             supersededDocumentId: held[0]?.id ?? null,
           })
           .where(eq(schema.competencyDocuments.id, row.id));
+        return true;
       });
+      if (!applied) {
+        // Somebody else decided this document first; the queue is stale.
+        res.status(409).json({ error: 'not_pending' });
+        return;
+      }
       // R52: the candidate is told the outcome either way, through the notice
       // route that already serves a person their own record.
       await noticeReplacementOutcome(tenant.orgId, row, 'accepted');

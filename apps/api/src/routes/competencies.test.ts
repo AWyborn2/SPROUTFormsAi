@@ -1,9 +1,10 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Db } from '@formai/db';
+import { DEFAULT_ROLE_PERMISSIONS, type PermissionMatrix } from '@formai/shared';
 
 const tenant = { userId: 'u1', orgId: 'org-1', role: 'admin' as const };
-let sealSession: (t: typeof tenant) => string;
+let sealSession: (t: { userId: string; orgId: string; role: string }) => string;
 
 let mockDbValue: Db | null = null;
 vi.mock('../db.js', () => ({
@@ -55,6 +56,8 @@ function fakeDb(opts: {
   assessmentToolsFindMany?: unknown[];
   /** Every route is gated by requirePlanFeature('competencyGating'). */
   planTier?: string;
+  /** The caller's stored permission matrix; absent falls back to the role default. */
+  matrix?: PermissionMatrix;
 }) {
   const deleteWhere = vi.fn();
   const updateSet = vi.fn();
@@ -64,6 +67,9 @@ function fakeDb(opts: {
     query: {
       organizations: {
         findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: opts.planTier ?? 'enterprise' }),
+      },
+      rolePermissions: {
+        findFirst: vi.fn().mockResolvedValue(opts.matrix ? { matrix: opts.matrix } : undefined),
       },
       competencies: {
         findFirst: vi.fn().mockResolvedValue(opts.competenciesFindFirst),
@@ -825,6 +831,58 @@ describe('competency holders', () => {
     } finally {
       server.close();
     }
+  });
+
+  describe('licence numbers are gated by profiles.view_competencies (R34)', () => {
+    const withLicence = {
+      competencyHoldersFindMany: [
+        { competencyId: 'c1', evidenceRef: 'L', grantedAt: daysAgo(10), licenceClass: 'HR', licenceNumber: 'WA1234567' },
+      ],
+      competenciesFindMany: [{ id: 'c1', name: 'Driver Licence', validForMonths: 36 }],
+    };
+    const candidateCaller = { userId: 'u-cand', orgId: 'org-1', role: 'candidate' as const };
+
+    it('hides them from a caller reading someone else without the grant', async () => {
+      mockDbValue = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate, ...withLicence }).db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, {
+          headers: { cookie: `fai_session=${sealSession(candidateCaller)}` },
+        });
+        const [row] = (await res.json()) as { licenceNumber: string | null; licenceClass: string | null }[];
+        expect(row!.licenceNumber).toBeNull();
+        expect(row!.licenceClass).toBeNull();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('shows them to a caller granted view_competencies org-wide', async () => {
+      mockDbValue = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin, ...withLicence }).db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+        const [row] = (await res.json()) as { licenceNumber: string | null }[];
+        expect(row!.licenceNumber).toBe('WA1234567');
+      } finally {
+        server.close();
+      }
+    });
+
+    it('shows a candidate their OWN licence even without the grant (R49)', async () => {
+      const self = { userId: HOLDER_ID, orgId: 'org-1', role: 'candidate' as const };
+      mockDbValue = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate, ...withLicence }).db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, {
+          headers: { cookie: `fai_session=${sealSession(self)}` },
+        });
+        const [row] = (await res.json()) as { licenceNumber: string | null }[];
+        expect(row!.licenceNumber).toBe('WA1234567');
+      } finally {
+        server.close();
+      }
+    });
   });
 
   it('reports a lapsed ticket as expired, and NOT current', async () => {
