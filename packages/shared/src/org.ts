@@ -51,4 +51,29 @@ export interface SessionInfo extends TenantContext {
   teamSize: string | null;
   /** ISO timestamp of onboarding wizard completion; null while the wizard is pending. */
   onboardingCompletedAt: string | null;
+  /**
+   * What the organisation's plan includes, RESOLVED SERVER-SIDE.
+   *
+   * Sent on the session rather than left for the web to derive, for two
+   * reasons. The tier-to-feature mapping lives in `packages/db/src/plans.ts`
+   * and the web cannot import it, so deriving there would mean a hand-copied
+   * mirror — and the one the web already keeps for the billing screen has
+   * drifted twice. And the nav needs this on first paint: reading it from a
+   * separate billing call would leave every gated entry flickering in or out
+   * once that call returned.
+   *
+   * Null only where the org row could not be resolved, which the nav treats as
+   * "show nothing gated" — the API is the real boundary either way.
+   */
+  features: PlanFeatureFlags | null;
 }
+
+/**
+ * The plan-feature flags a session carries.
+ *
+ * Structurally the same as `PlanFeatures` in `packages/db/src/plans.ts`, stated
+ * here as an index signature rather than a field list so it CANNOT drift: a
+ * feature added there flows through without an edit, and the nav's
+ * `requiresFeature` is checked against the keys actually present.
+ */
+export type PlanFeatureFlags = Readonly<Record<string, boolean>>;

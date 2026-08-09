@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { eq, or } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { schema } from '@formai/db';
+import { PLAN_CONFIG, schema, type PlanTier } from '@formai/db';
 import type { SessionInfo, TenantContext } from '@formai/shared';
 import { db } from '../db.js';
 import { sealSession, unsealSession } from '../auth/replit-auth.js';
@@ -87,6 +87,13 @@ async function buildSessionInfo(tenant: TenantContext): Promise<SessionInfo> {
     branding: org?.branding ?? null,
     teamSize: org?.teamSize ?? null,
     onboardingCompletedAt: org?.onboardingCompletedAt?.toISOString() ?? null,
+    /*
+      Resolved here rather than in the web, which cannot import PLAN_CONFIG and
+      would otherwise keep a hand-copied mirror of it. Null where the org row
+      could not be read — the nav reads that as "show nothing gated", and the
+      API's own `requirePlanFeature` remains the boundary regardless.
+    */
+    features: org ? (PLAN_CONFIG[org.planTier as PlanTier]?.features ?? null) : null,
   };
 }
 

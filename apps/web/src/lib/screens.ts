@@ -25,6 +25,19 @@ export interface ScreenDef {
    * than showing an entry that 403s on click.
    */
   minAccessLevel?: Role;
+  /**
+   * A plan feature the organisation must hold for this screen to appear.
+   *
+   * The API already refuses these surfaces below their tier — every route
+   * behind them carries `requirePlanFeature`, and the profile ones resolve the
+   * same rule through `tierCarriesProfiles`. Without this the nav advertised
+   * them anyway and the click 403d, which reads as a broken product rather
+   * than a plan boundary.
+   *
+   * NOT a security control. The API is the boundary; this only stops the nav
+   * offering what the organisation cannot use.
+   */
+  requiresFeature?: string;
 }
 
 /**
@@ -75,32 +88,32 @@ export const SCREENS: ScreenDef[] = [
 
   // Enterprise & org
   { key: 'team', path: '/app/team', group: 'Enterprise & org', label: 'Team management', icon: 'users', shell: 'app', inNav: true },
-  { key: 'taxonomy', path: '/app/taxonomy', group: 'Enterprise & org', label: 'Locations & roles', icon: 'map-pin', shell: 'app', inNav: true, minAccessLevel: 'admin' },
+  { key: 'taxonomy', path: '/app/taxonomy', group: 'Enterprise & org', label: 'Locations & roles', icon: 'map-pin', shell: 'app', inNav: true, minAccessLevel: 'admin' , requiresFeature: 'assessments' },
   { key: 'roles', path: '/app/roles', group: 'Enterprise & org', label: 'Access levels', icon: 'shield', shell: 'app', inNav: true },
-  { key: 'working-list', path: '/app/working-list', group: 'Enterprise & org', label: 'Working list', icon: 'list-checks', shell: 'app', inNav: true, minAccessLevel: 'admin' },
-  { key: 'compliance', path: '/app/compliance', group: 'Enterprise & org', label: 'Compliance', icon: 'shield-check', shell: 'app', inNav: true, minAccessLevel: 'admin' },
+  { key: 'working-list', path: '/app/working-list', group: 'Enterprise & org', label: 'Working list', icon: 'list-checks', shell: 'app', inNav: true, minAccessLevel: 'admin' , requiresFeature: 'assessments' },
+  { key: 'compliance', path: '/app/compliance', group: 'Enterprise & org', label: 'Compliance', icon: 'shield-check', shell: 'app', inNav: true, minAccessLevel: 'admin' , requiresFeature: 'assessments' },
   // The member record (U38). SERVES EVERY MEMBER, not only candidates — an
   // assessor's and an administrator's record is this same screen. No
   // `minAccessLevel`: the `profiles` matrix category is the real gate, and a
   // candidate reaches their OWN record here on the fixed path (R49), so a level
   // floor would lock out the very reader R49 admits.
-  { key: 'profile', path: '/app/profile/:id', group: 'Enterprise & org', label: 'Member record', icon: 'user', shell: 'app' },
-  { key: 'my-profile', path: '/app/profile', group: 'Enterprise & org', label: 'My record', icon: 'user', shell: 'app', inNav: true },
-  { key: 'audit', path: '/app/audit', group: 'Enterprise & org', label: 'Audit log', icon: 'scroll-text', shell: 'app', inNav: true },
+  { key: 'profile', path: '/app/profile/:id', group: 'Enterprise & org', label: 'Member record', icon: 'user', shell: 'app' , requiresFeature: 'assessments' },
+  { key: 'my-profile', path: '/app/profile', group: 'Enterprise & org', label: 'My record', icon: 'user', shell: 'app', inNav: true , requiresFeature: 'assessments' },
+  { key: 'audit', path: '/app/audit', group: 'Enterprise & org', label: 'Audit log', icon: 'scroll-text', shell: 'app', inNav: true , requiresFeature: 'auditExport' },
   { key: 'billing', path: '/app/billing', group: 'Enterprise & org', label: 'Billing', icon: 'credit-card', shell: 'app', inNav: true },
-  { key: 'competency', path: '/app/competency', group: 'Competency gating', label: 'Competency gating', icon: 'graduation-cap', shell: 'app', inNav: true },
+  { key: 'competency', path: '/app/competency', group: 'Competency gating', label: 'Competency gating', icon: 'graduation-cap', shell: 'app', inNav: true , requiresFeature: 'competencyGating' },
 
   // Multi-part assessments. The case list is one screen for two audiences —
   // an assessor sees the org's cases, a candidate sees their own — because the
   // API scopes the read by permission rather than the screen filtering it.
-  { key: 'assessments', path: '/app/assessments', group: 'Assessments', label: 'Assessments', icon: 'clipboard-check', shell: 'app', inNav: true },
+  { key: 'assessments', path: '/app/assessments', group: 'Assessments', label: 'Assessments', icon: 'clipboard-check', shell: 'app', inNav: true , requiresFeature: 'assessments' },
   // Progress across every case in one table. Declared BEFORE the case route so
   // the literal segment is listed ahead of the parameter it would otherwise be
   // read as; the API declares its matching endpoint in the same order.
-  { key: 'assessment-progress', path: '/app/assessments/progress', group: 'Assessments', label: 'Assessment progress', icon: 'gauge', shell: 'app' },
+  { key: 'assessment-progress', path: '/app/assessments/progress', group: 'Assessments', label: 'Assessment progress', icon: 'gauge', shell: 'app' , requiresFeature: 'assessments' },
   // Literal 'queue' segment, so it is not read as `/app/assessments/:id`; the API
   // gate is the real access boundary, this only hides the nav entry (U13).
-  { key: 'assessment-queue', path: '/app/assessments/queue', group: 'Assessments', label: 'Assessment queue', icon: 'inbox', shell: 'app', inNav: true, minAccessLevel: 'assessor' },
+  { key: 'assessment-queue', path: '/app/assessments/queue', group: 'Assessments', label: 'Assessment queue', icon: 'inbox', shell: 'app', inNav: true, minAccessLevel: 'assessor' , requiresFeature: 'assessments' },
   // Who fills each section of an assessment, and in what order. Under a literal
   // /tools/ segment rather than another parameter on /assessments/:id, which
   // would be read as a case id — the same reason `progress` is declared above.
@@ -138,10 +151,22 @@ export const NAV_SCREENS = SCREENS.filter((s) => s.inNav);
  * levels that do not rank high enough (an Admin-only screen never appears on a
  * viewer's or candidate's sidebar).
  */
-export function navScreensFor(role: string | undefined): ScreenDef[] {
+export function navScreensFor(
+  role: string | undefined,
+  /*
+    The organisation's resolved plan features, from the session. UNDEFINED means
+    not yet known (the session is still loading), and is treated as "hide the
+    gated entries" — an entry that appears and then vanishes is worse than one
+    that appears a moment late, and this is the only reading that never
+    advertises a surface the organisation does not hold.
+  */
+  features?: Readonly<Record<string, boolean>> | null,
+): ScreenDef[] {
   const rank = ACCESS_RANK[role ?? ''] ?? 0;
   return NAV_SCREENS.filter(
-    (s) => !s.minAccessLevel || rank >= (ACCESS_RANK[s.minAccessLevel] ?? Number.POSITIVE_INFINITY),
+    (s) =>
+      (!s.minAccessLevel || rank >= (ACCESS_RANK[s.minAccessLevel] ?? Number.POSITIVE_INFINITY)) &&
+      (!s.requiresFeature || features?.[s.requiresFeature] === true),
   );
 }
 

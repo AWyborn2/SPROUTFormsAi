@@ -24,6 +24,9 @@ function session(patch: Partial<SessionInfo> = {}): SessionInfo {
     userEmail: 'jane@acme.test',
     accountKind: 'team',
     branding: null,
+    // The resolved plan features the session now carries; this fixture is a
+    // Business-tier org, which is where assessments and profiles start.
+    features: { assessments: true, competencyGating: true, auditExport: true },
     teamSize: null,
     onboardingCompletedAt: null,
     ...patch,

@@ -19,7 +19,12 @@ export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const current = screenByPath(location.pathname);
-  const navScreens = navScreensFor(session?.role);
+  /*
+    The plan features ride the SESSION, so the nav is right on first paint. A
+    separate billing call would leave every gated entry flickering in once it
+    returned.
+  */
+  const navScreens = navScreensFor(session?.role, session?.features);
   const userName = session?.userName || session?.userEmail || 'Account';
   const orgName = session?.orgName || 'Your organization';
   const orgInitial = (orgName.trim()[0] ?? '?').toUpperCase();
