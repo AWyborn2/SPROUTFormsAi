@@ -29,6 +29,8 @@ import {
   logbookColumnsFor,
   movePart,
   proposeCoverPointers,
+  proposePartMarks,
+  proposeSignOff,
   setPathways,
   updatePart,
 } from './builder-manifest.js';
@@ -335,14 +337,14 @@ describe('buildManifest', () => {
   it('proposes the candidate-name box from the cover section', () => {
     // Missing it exports a certificate with a blank name on it.
     const manifest = buildManifest([], [
-      { id: 'n', label: 'Candidate Name', coverSection: 'candidate_declaration' as const },
+      { id: 'n', label: 'Candidate Name', type: 'text' as const, coverSection: 'candidate_declaration' as const },
     ]);
     expect(manifest.candidateNameFieldId).toBe('n');
   });
 
   it('proposes nothing when no cover field looks like a name box', () => {
     const manifest = buildManifest([], [
-      { id: 'c', label: 'Company', coverSection: 'candidate_declaration' as const },
+      { id: 'c', label: 'Company', type: 'text' as const, coverSection: 'candidate_declaration' as const },
     ]);
     expect(manifest.candidateNameFieldId).toBeUndefined();
   });
@@ -351,7 +353,7 @@ describe('buildManifest', () => {
     // coverSection is bounded to the document's FIRST page by rule 8; a
     // per-part sign-off prints the same words and carries none.
     const manifest = buildManifest([], [
-      { id: 'n', label: 'Candidate Name' },
+      { id: 'n', label: 'Candidate Name', type: 'text' as const },
     ]);
     expect(manifest.candidateNameFieldId).toBeUndefined();
   });
@@ -412,5 +414,134 @@ describe('logbookColumnsFor', () => {
     expect(logbookColumnsFor({ startFieldId: 'lead' }, withLead)).toEqual([
       { key: 'duration', label: 'Hours' },
     ]);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Automatic marking: the printed boxes the verdict is written into
+ * ------------------------------------------------------------------ */
+
+/**
+ * Nothing in this builder has ever written `signOff` or a part's verdict boxes.
+ * They existed in the model and were populated only by the authoring SCRIPT
+ * this builder replaces — so every tool built here exported its certification
+ * block blank, invisibly, because an empty `signOff` is perfectly valid.
+ */
+describe('proposeSignOff', () => {
+  const cover = (over: Partial<Parameters<typeof proposeSignOff>[0][number]> & { id: string; label: string }) => ({
+    type: 'check_cross' as const,
+    ...over,
+  });
+
+  it('proposes the whole certification block from the printed labels', () => {
+    const signOff = proposeSignOff([
+      cover({ id: 'coach', label: 'More coaching and/or training required?' }),
+      cover({ id: 'result', label: 'Assessment Result' }),
+      cover({ id: 'name', label: 'Name of Assessor [Print]', type: 'text' }),
+      cover({ id: 'sig', label: 'Assessor Signature', type: 'signature' }),
+      cover({ id: 'date', label: 'Date', type: 'date' }),
+    ]);
+
+    expect(signOff?.assessorNameFieldId).toBe('name');
+    expect(signOff?.assessorSignatureFieldId).toBe('sig');
+    expect(signOff?.signedDateFieldId).toBe('date');
+    expect(signOff?.overallSatisfactory).toEqual({ fieldId: 'result', value: true });
+    expect(signOff?.overallNotSatisfactory).toEqual({ fieldId: 'result', value: false });
+  });
+
+  it('MAPS "YES, COACHING REQUIRED" TO THE NOT-SATISFACTORY HALF', () => {
+    /*
+      The one pair whose polarity is inverted. "More coaching required: Yes" is
+      the FAILING answer, so a scheme that lined the two pairs up positionally
+      would tick "no coaching needed" on every failed assessment.
+    */
+    const signOff = proposeSignOff([
+      cover({ id: 'coach', label: 'More coaching and/or training required?' }),
+    ]);
+
+    expect(signOff?.moreCoachingRequiredYes).toEqual({ fieldId: 'coach', value: false });
+    expect(signOff?.moreCoachingRequiredNo).toEqual({ fieldId: 'coach', value: true });
+  });
+
+  it('REFUSES WHEN TWO FIELDS COULD BE THE SAME BOX', () => {
+    /*
+      This paper reprints its certification block after every part. The
+      authoring script searched the whole document, matched seven of each box,
+      and refused all seven — correctly — but then shipped an empty `signOff`
+      in silence, so a signed competent case exported a certificate with nobody's
+      name on it. Refusing is right; the caller scopes the slice so it does not
+      have to.
+    */
+    const signOff = proposeSignOff([
+      cover({ id: 'a', label: 'Assessment Result' }),
+      cover({ id: 'b', label: 'Assessment Result' }),
+    ]);
+
+    expect(signOff?.overallSatisfactory).toBeUndefined();
+  });
+
+  it('refuses a box whose type cannot carry a verdict', () => {
+    // A text box would take a boolean and render the word "true".
+    const signOff = proposeSignOff([
+      cover({ id: 'result', label: 'Assessment Result', type: 'text' }),
+    ]);
+
+    expect(signOff?.overallSatisfactory).toBeUndefined();
+  });
+
+  it('reads a choice field’s own printed options rather than their order', () => {
+    // "Candidate Competent" and "Candidate not yet Competent" are printed words;
+    // taking the first option would be a coin toss on the most consequential
+    // cell of the document.
+    const signOff = proposeSignOff([
+      cover({
+        id: 'result',
+        label: 'Assessment Result',
+        type: 'radio',
+        options: ['Candidate not yet Competent', 'Candidate Competent'],
+      }),
+    ]);
+
+    expect(signOff?.overallSatisfactory).toEqual({ fieldId: 'result', value: 'Candidate Competent' });
+    expect(signOff?.overallNotSatisfactory).toEqual({
+      fieldId: 'result',
+      value: 'Candidate not yet Competent',
+    });
+  });
+
+  it('proposes nothing at all for a cover with no recognisable boxes', () => {
+    expect(proposeSignOff([cover({ id: 'x', label: 'Company' })])).toBeUndefined();
+  });
+});
+
+describe('proposePartMarks', () => {
+  const f = (id: string, label: string, type: 'check_cross' | 'textarea' = 'check_cross') => ({
+    id,
+    label,
+    type,
+  });
+
+  it('proposes the verdict pair and the further-action box', () => {
+    const marks = proposePartMarks([
+      f('v', 'The Candidate’s responses were:'),
+      f('act', 'Detail further action:', 'textarea'),
+    ]);
+
+    expect(marks.outcomeSatisfactory).toEqual({ fieldId: 'v', value: true });
+    expect(marks.outcomeNotSatisfactory).toEqual({ fieldId: 'v', value: false });
+    expect(marks.furtherActionFieldId).toBe('act');
+  });
+
+  it('refuses a verdict box the section prints twice', () => {
+    const marks = proposePartMarks([
+      f('a', 'The Candidate’s responses were:'),
+      f('b', 'The Candidate’s responses were:'),
+    ]);
+
+    expect(marks.outcomeSatisfactory).toBeUndefined();
+  });
+
+  it('proposes nothing for a section that prints neither', () => {
+    expect(proposePartMarks([f('q', 'Manoeuvres the dozer safely')])).toEqual({});
   });
 });
