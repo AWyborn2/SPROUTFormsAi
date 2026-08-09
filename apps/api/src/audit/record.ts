@@ -28,7 +28,13 @@ export async function recordAudit(db: Db, tenant: TenantContext, input: AuditInp
   await db.insert(schema.auditLogEntries).values({
     orgId: tenant.orgId,
     actorId: tenant.userId,
-    actorName: actor?.name ?? 'System',
+    /*
+      `actorLabel` wins where the caller set it — a machine call whose issuing
+      Admin has been deactivated names the KEY rather than a person who cannot
+      sign in. The id below is unchanged either way, so the entry stays
+      traceable to whoever authorised that key.
+    */
+    actorName: tenant.actorLabel ?? actor?.name ?? 'System',
     action: input.action,
     target: input.target ?? '',
     category: input.category,

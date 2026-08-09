@@ -207,6 +207,16 @@ export interface ApiKey {
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
+  /**
+   * The name of the Admin who issued this key, where they have since been
+   * DEACTIVATED (R65); null otherwise.
+   *
+   * The key is the organisation's and keeps working — revoking it on somebody's
+   * departure would turn an HR event into an unannounced outage — but they hold
+   * a copy of the plaintext, so an Admin needs to see which keys are worth
+   * rotating.
+   */
+  issuerDeactivatedName?: string | null;
 }
 
 /** The create response — the only place the plaintext ever appears. */
@@ -563,7 +573,13 @@ export interface UnreachableMember {
 
 /** One thing waiting on an Admin, from any source, on the one working list (U19). */
 export interface WorkingListItem {
-  kind: 'training_request' | 'retirement_review' | 'overdue_case' | 'owed_file' | 'unreachable';
+  kind:
+    | 'training_request'
+    | 'retirement_review'
+    | 'overdue_case'
+    | 'owed_file'
+    | 'unreachable'
+    | 'api_key_review';
   id: string;
   subject: string;
   createdAt: string | null;

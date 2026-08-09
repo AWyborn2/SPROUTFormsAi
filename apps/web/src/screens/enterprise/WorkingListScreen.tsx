@@ -15,6 +15,8 @@ const KIND_META: Record<WorkingListItem['kind'], { label: string; variant: Badge
   owed_file: { label: 'File owed', variant: 'neutral' },
   /** An address an Admin flagged as reaching nobody (U36, R16, R20). */
   unreachable: { label: 'Address unreachable', variant: 'warning' },
+  /** A live API key whose issuing Admin has been deactivated (R65). */
+  api_key_review: { label: 'API key to review', variant: 'danger' },
 };
 
 /**

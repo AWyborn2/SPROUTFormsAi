@@ -116,6 +116,19 @@ export function ApiKeysScreen() {
               <span className="block truncate font-mono text-xs text-text-tertiary">
                 fai_{key.prefix}…
               </span>
+              {/*
+                The issuer has left and still holds a copy of this key's
+                plaintext (R65). The key is the organisation's, so it keeps
+                working — revoking it on somebody's departure would take down
+                whatever integration it drives, unannounced — but rotating it is
+                a decision only an Admin can make, and only if they are told.
+              */}
+              {!key.revokedAt && key.issuerDeactivatedName && (
+                <span className="mt-1 flex items-center gap-1 text-xs text-warning-text">
+                  <Icon name="key-round" size={12} />
+                  Issued by {key.issuerDeactivatedName}, since deactivated — consider rotating
+                </span>
+              )}
             </span>
             <span className="w-[110px]">
               {key.revokedAt ? (
