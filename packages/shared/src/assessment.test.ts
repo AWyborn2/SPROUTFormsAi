@@ -609,6 +609,119 @@ describe('fieldsInPart', () => {
   });
 });
 
+/* ------------------------------------------------------------------ *
+ * The verdict pair
+ * ------------------------------------------------------------------ */
+
+/**
+ * Both printed shapes are real, and the validator has to accept both.
+ *
+ * A form may print two boxes — "☐ Satisfactory ☐ Not Satisfactory" — which is
+ * two fields. Or it may print ONE ✓/✗ cell whose tick means satisfactory and
+ * whose cross means not, which extraction reads as a single `check_cross` field
+ * that both halves name. Claiming each half separately would reject the second
+ * shape as a self-collision — the exact layout the paper this was built for
+ * uses.
+ */
+describe('validateManifest — the part verdict pair', () => {
+  const verdictFields = [...fields, question('v'), question('v2'), question('act')];
+
+  it('ACCEPTS ONE ✓/✗ CELL CARRYING BOTH HALVES', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        part({
+          key: 'a',
+          ordinal: 1,
+          outcomeSatisfactory: { fieldId: 'v', value: true },
+          outcomeNotSatisfactory: { fieldId: 'v', value: false },
+        }),
+      ],
+    };
+
+    expect(validateManifest(manifest, verdictFields)).toEqual([]);
+  });
+
+  it('accepts two separate boxes', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        part({
+          key: 'a',
+          ordinal: 1,
+          outcomeSatisfactory: { fieldId: 'v', value: true },
+          outcomeNotSatisfactory: { fieldId: 'v2', value: true },
+        }),
+      ],
+    };
+
+    expect(validateManifest(manifest, verdictFields)).toEqual([]);
+  });
+
+  it('REJECTS A SHARED CELL CARRYING THE SAME VALUE TWICE', () => {
+    /*
+      The failure sharing a cell can hide. A pass and a fail would print
+      identically, so an auditor reading the record could not tell which
+      happened and neither could anyone re-deriving it.
+    */
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        part({
+          key: 'a',
+          ordinal: 1,
+          outcomeSatisfactory: { fieldId: 'v', value: true },
+          outcomeNotSatisfactory: { fieldId: 'v', value: true },
+        }),
+      ],
+    };
+
+    const problems = validateManifest(manifest, verdictFields);
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('same value for both outcomes');
+  });
+
+  it('REJECTS TWO PARTS CLAIMING ONE VERDICT BOX', () => {
+    // The last resolved part's verdict would overwrite the first's, so a passed
+    // part and a failed one would print the same mark with nothing to notice it.
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        part({ key: 'a', ordinal: 1, outcomeSatisfactory: { fieldId: 'v', value: true } }),
+        part({ key: 'b', ordinal: 2, outcomeSatisfactory: { fieldId: 'v', value: true } }),
+      ],
+    };
+
+    const problems = validateManifest(manifest, verdictFields);
+
+    expect(problems.some((p) => p.includes('claimed by both'))).toBe(true);
+  });
+
+  it('rejects a verdict box that is not in this version', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [part({ key: 'a', ordinal: 1, outcomeSatisfactory: { fieldId: 'gone', value: true } })],
+    };
+
+    const problems = validateManifest(manifest, verdictFields);
+
+    expect(problems.some((p) => p.includes('gone'))).toBe(true);
+  });
+
+  it('rejects a further-action box that is not in this version', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [part({ key: 'a', ordinal: 1, furtherActionFieldId: 'gone' })],
+    };
+
+    expect(validateManifest(manifest, verdictFields).some((p) => p.includes('gone'))).toBe(true);
+  });
+
+  it('rejects an overall not-satisfactory box that is not in this version', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [part({ key: 'a', ordinal: 1 })],
+      signOff: { overallNotSatisfactory: { fieldId: 'gone', value: true } },
+    };
+
+    expect(validateManifest(manifest, verdictFields).some((p) => p.includes('gone'))).toBe(true);
+  });
+});
+
 describe('isTerminalCaseState', () => {
   /*
     Terminal decides two things at once: whether the single state writer stamps

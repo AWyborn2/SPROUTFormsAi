@@ -1,5 +1,6 @@
 import {
   caseProgress,
+  isCaseCompetent,
   moreCoachingRequired,
   requiredParts,
   validateManifest,
@@ -266,15 +267,32 @@ export function assembleCaseValues({
       retry counts as satisfactory.
     */
     if (resolved) {
-      const coaching = moreCoachingRequired(
-        caseProgress(manifest, pathway, attempts.map((a) => ({
-          partKey: a.partKey,
-          attemptNumber: a.attemptNumber,
-          outcome: a.outcome,
-        }))),
-      );
+      const progress = caseProgress(manifest, pathway, attempts.map((a) => ({
+        partKey: a.partKey,
+        attemptNumber: a.attemptNumber,
+        outcome: a.outcome,
+      })));
+      const coaching = moreCoachingRequired(progress);
       if (coaching === true) writeMark(values, marks.moreCoachingRequiredYes);
       if (coaching === false) writeMark(values, marks.moreCoachingRequiredNo);
+
+      /*
+        "Candidate not yet Competent" — the negative half of the printed
+        Assessment Result pair.
+
+        A DIFFERENT GATE FROM ITS PARTNER, and the asymmetry is the point.
+        `overallSatisfactory` is the certification and waits for a signature
+        below: a competency claim on a record nobody signed is the one thing
+        this file must never manufacture. "Not yet competent" certifies
+        nothing — it is the absence of a claim — and a failed case very often
+        ends with no sign-off at all, so gating it the same way would leave the
+        box permanently blank on exactly the records that need it.
+
+        Without this the pair was half-written: a passed case ticked Competent
+        and a failed one ticked nothing, so the two were told apart only by a
+        box that was empty either way until somebody signed.
+      */
+      if (!isCaseCompetent(progress)) writeMark(values, marks.overallNotSatisfactory);
     }
 
     /*

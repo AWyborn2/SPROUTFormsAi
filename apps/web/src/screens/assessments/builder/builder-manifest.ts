@@ -23,15 +23,19 @@
 
 import {
   fieldsInSection,
+  isSelfAnswering,
   type AssessmentPart,
   type AssessmentPathway,
   type AssessmentToolManifest,
   type ExtractedField,
   type FormField,
+  type FormFieldType,
   type PartKind,
   type SetupAnswers,
   type StructureSection,
+  type DeclaredMark,
   type DraftAnswerKey,
+  type SubmissionValue,
 } from '@formai/shared';
 
 /* ------------------------------------------------------------------ *
@@ -187,6 +191,13 @@ export function derivePartsFromStructure({
       startFieldId,
       ...(mandatoryFieldIds.length > 0 ? { mandatoryFieldIds } : {}),
       ...(durationColumnKey ? { durationColumnKey } : {}),
+      /*
+        The part's own verdict boxes, read off its printed labels. Scoped to
+        this section's fields, because the certification block repeats once per
+        part — a whole-document search would find one per part and be unable to
+        say which belongs here.
+      */
+      ...proposePartMarks(sectionFields),
     });
   }
 
@@ -260,16 +271,197 @@ export function proposeCoverPointers(
   return candidate ? { candidateNameFieldId: candidate.id } : {};
 }
 
+/* ------------------------------------------------------------------ *
+ * Automatic marking: finding the printed boxes the verdict is written into
+ * ------------------------------------------------------------------ */
+
+/**
+ * The declared boxes the marking writes, proposed from the PRINTED LABELS.
+ *
+ * WHY THIS IS PROPOSED RATHER THAN AUTHORED. `signOff` and the per-part verdict
+ * marks have existed in the manifest model for a while and nothing in the
+ * builder has ever written one — they were populated only by the authoring
+ * SCRIPT this builder replaces. So a tool built here has always exported its
+ * front page blank, and adding a verdict-writing engine without this would have
+ * changed nothing an author could see.
+ *
+ * Asking instead would be worse than it sounds: this paper repeats its
+ * certification block once per part, so a form with six parts would ask an
+ * author to point at eighteen boxes before anything marked itself. The labels
+ * are printed and consistent; reading them is the same trade
+ * `proposeCoverPointers` already makes for the candidate name.
+ *
+ * A PROPOSAL IS NOT A DECISION, and every one of these is overridable and
+ * absent-by-default. Nothing is written where the label does not clearly say
+ * what the box is: a mark in the wrong box on a competency record states a
+ * finding nobody made, and a blank box is the failure someone notices.
+ */
+
+/** Phrases that identify each printed box. Deliberately narrow. */
+const SATISFACTORY = /candidate'?s?\s+responses?\s+were|responses?\s+were\s*:?\s*$|^satisfactory$/i;
+const COACHING = /more\s+coaching|coaching\s+and\s*\/?\s*or\s+training/i;
+const FURTHER_ACTION = /detail\s+further\s+action|further\s+action/i;
+const RESULT = /assessment\s+result|overall\s+performance\s+meets|candidate\s+competent|not\s+yet\s+competent/i;
+const ASSESSOR_NAME = /name\s+of\s+assessor|assessor'?s?\s+name/i;
+const ASSESSOR_SIGNATURE = /assessor'?s?\s+signature/i;
+
+/**
+ * A field the verdict can be written into.
+ *
+ * `check_cross` and `boolean_yes_no` are the types whose FALSE is a recorded
+ * finding, which is what lets one cell carry both halves of a pair. A choice
+ * field with printed options works too — the value written is the option text
+ * — but anything else (a text box, a signature) would take a boolean and render
+ * it as the word "true", so it is refused rather than mis-marked.
+ */
+function markableValue(f: Pick<MarkingProposalField, 'type' | 'options'>, want: boolean): SubmissionValue | null {
+  if (isSelfAnswering(f.type)) return want;
+  const options = f.options ?? [];
+  if (options.length === 0) return null;
+  /*
+    Match the option to the outcome by its own printed words, and REQUIRE a
+    hit. Falling back to "the first option" would tick whichever box the model
+    happened to list first, which on a Competent / Not-yet-Competent pair is a
+    coin toss on the most consequential cell of the document.
+  */
+  const yes = /^(?:yes|satisfactory|competent|candidate competent|pass(?:ed)?)$/i;
+  const no = /^(?:no|not satisfactory|not yet competent|candidate not yet competent|fail(?:ed)?)$/i;
+  const wanted = options.find((o) => (want ? yes : no).test(o.trim()));
+  return wanted ?? null;
+}
+
+/** Both halves of a verdict pair over one field, where the field can carry them. */
+function pairOn(
+  f: Pick<MarkingProposalField, 'id' | 'type' | 'options'>,
+): { yes: DeclaredMark; no: DeclaredMark } | null {
+  const yes = markableValue(f, true);
+  const no = markableValue(f, false);
+  if (yes === null || no === null || yes === no) return null;
+  return { yes: { fieldId: f.id, value: yes }, no: { fieldId: f.id, value: no } };
+}
+
+/**
+ * The little a marking proposal reads.
+ *
+ * Structural rather than `Pick<ExtractedField, …>` because both sides feed it:
+ * the front page from the EXTRACTION (which is where `coverSection` lives, and
+ * which is how the cover slice is taken) and each part from the builder's own
+ * `FormField` list. A Pick of either would exclude the other.
+ */
+export interface MarkingProposalField {
+  id: string;
+  label: string;
+  type: FormFieldType;
+  options?: readonly string[];
+}
+
+/**
+ * Propose the case-level sign-off block from the assessor-declaration fields.
+ *
+ * Scoped to the fields the caller gives it, which for the front page is the
+ * COVER slice — this paper prints the same certification block at the end of
+ * every part, so a whole-document search finds seven of each and could not say
+ * which is the front one. That is the same trap the authoring script fell into,
+ * where a global search matched seven fields, refused all seven as ambiguous,
+ * and shipped an empty `signOff` that exported a certificate with no assessor
+ * name, no date and no verdict.
+ */
+export function proposeSignOff(
+  fields: readonly MarkingProposalField[],
+): AssessmentToolManifest['signOff'] | undefined {
+  const one = (re: RegExp) => {
+    const hits = fields.filter((f) => re.test(f.label));
+    // Exactly one, or nothing. Two candidates means the labels do not say which
+    // box is meant, and picking either is a guess printed on a certificate.
+    return hits.length === 1 ? hits[0]! : undefined;
+  };
+
+  const out: NonNullable<AssessmentToolManifest['signOff']> = {};
+
+  const name = one(ASSESSOR_NAME);
+  if (name) out.assessorNameFieldId = name.id;
+  const signature = one(ASSESSOR_SIGNATURE);
+  if (signature) out.assessorSignatureFieldId = signature.id;
+  const date = fields.filter((f) => /^date$|signed\s+date|date\s+signed/i.test(f.label.trim()));
+  if (date.length === 1) out.signedDateFieldId = date[0]!.id;
+
+  const coaching = one(COACHING);
+  const coachingPair = coaching ? pairOn(coaching) : null;
+  if (coachingPair) {
+    // Yes means coaching IS required, so it is the NOT-satisfactory half.
+    out.moreCoachingRequiredYes = coachingPair.no;
+    out.moreCoachingRequiredNo = coachingPair.yes;
+  }
+
+  const result = one(RESULT);
+  const resultPair = result ? pairOn(result) : null;
+  if (resultPair) {
+    out.overallSatisfactory = resultPair.yes;
+    out.overallNotSatisfactory = resultPair.no;
+  }
+
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Propose one part's verdict boxes from the fields printed inside it.
+ *
+ * Scoped to the part's own slice for the same reason the sign-off is scoped to
+ * the cover: the block repeats, and a part must claim its own copy or none.
+ */
+export function proposePartMarks(
+  fields: readonly MarkingProposalField[],
+): Pick<AssessmentPart, 'outcomeSatisfactory' | 'outcomeNotSatisfactory' | 'furtherActionFieldId'> {
+  const out: Pick<
+    AssessmentPart,
+    'outcomeSatisfactory' | 'outcomeNotSatisfactory' | 'furtherActionFieldId'
+  > = {};
+
+  const verdicts = fields.filter((f) => SATISFACTORY.test(f.label));
+  const verdict = verdicts.length === 1 ? pairOn(verdicts[0]!) : null;
+  if (verdict) {
+    out.outcomeSatisfactory = verdict.yes;
+    out.outcomeNotSatisfactory = verdict.no;
+  }
+
+  const actions = fields.filter((f) => FURTHER_ACTION.test(f.label));
+  if (actions.length === 1) out.furtherActionFieldId = actions[0]!.id;
+
+  return out;
+}
+
 /** Assemble the manifest the publish step will validate and write. */
+/** The sign-off block, from the cover's assessor-declaration fields alone. */
+function signOffFrom(
+  extracted: readonly Pick<ExtractedField, 'id' | 'label' | 'type' | 'options' | 'coverSection'>[],
+): AssessmentToolManifest['signOff'] | undefined {
+  return proposeSignOff(extracted.filter((f) => f.coverSection === 'assessor_declaration'));
+}
+
 export function buildManifest(
   parts: readonly DerivedPart[],
-  extracted: readonly Pick<ExtractedField, 'id' | 'label' | 'coverSection'>[],
+  extracted: readonly Pick<ExtractedField, 'id' | 'label' | 'type' | 'options' | 'coverSection'>[],
   setup?: Pick<SetupAnswers, 'theoryRendering'>,
 ): AssessmentToolManifest {
   return {
     // `sectionKey` is builder bookkeeping and must not reach the stored record.
     parts: parts.map(({ sectionKey: _sectionKey, ...part }) => part),
     ...proposeCoverPointers(extracted),
+    /*
+      THE FRONT PAGE, from the assessor-declaration slice only.
+
+      Nothing in this builder has ever written `signOff`, so every tool it
+      produced exported its certification block blank — no assessor name, no
+      date, no verdict. That was invisible because a manifest with an empty
+      `signOff` is perfectly valid and the export raises nothing.
+
+      Scoped to `assessor_declaration` because this paper reprints the same
+      block after every part. The authoring script searched the whole document,
+      matched seven of each box, refused all seven as ambiguous, and shipped the
+      empty `signOff` that made a signed competent case export a certificate
+      with nobody's name on it.
+    */
+    ...(signOffFrom(extracted) ? { signOff: signOffFrom(extracted) } : {}),
     /*
       The setup answer follows the tool, not the draft.
 

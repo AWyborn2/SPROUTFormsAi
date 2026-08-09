@@ -25,7 +25,12 @@
  */
 
 import { fieldsInPart } from './assessment.js';
-import type { AssessmentPart, AssessmentToolManifest, PartOutcome } from './assessment.js';
+import type {
+  AssessmentPart,
+  AssessmentToolManifest,
+  DeclaredMark,
+  PartOutcome,
+} from './assessment.js';
 import type { FormField, FormFieldType, OutcomeTarget } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 import { visibleFields, type VisibilityAnswers } from './visibility.js';
@@ -202,6 +207,55 @@ export function stripMarkingSecrets(fields: readonly FormField[]): FormField[] {
   });
 }
 
+/**
+ * The questions a candidate did not get right, named as the paper names them.
+ *
+ * WHAT GOES IN "DETAIL FURTHER ACTION". The printed box asks the assessor what
+ * happens next after a not-satisfactory result, and the answer on a keyed
+ * theory part is always the same shape: these are the questions to go back
+ * over. An assessor writing that by hand is reading thirty ticks off a page and
+ * transcribing the crosses — which is both the slowest part of marking and the
+ * easiest to get wrong.
+ *
+ * WRONG AND UNANSWERED ARE DISTINGUISHED, because they call for different
+ * coaching: a wrong answer is a misunderstanding to correct, a blank is a
+ * question the candidate never reached. Rolling them together would hide which
+ * happened on the one document that records it.
+ *
+ * The LABEL is what identifies each question, because that is what is printed
+ * beside it — these papers number their questions in the label itself ("7. Which
+ * sign means…"), so the reference an assessor would cite comes along for free.
+ * Long labels are cut at a word boundary: this lands in a printed box a couple
+ * of lines high, and an overrun draws over whatever is beneath it.
+ *
+ * Returns EMPTY when nothing was missed, and the caller writes nothing. A box
+ * reading "None" beside a passed assessment is a sentence nobody wrote.
+ */
+export function incorrectQuestionsNote(
+  marks: readonly QuestionMark[],
+  fields: readonly FormField[],
+): string {
+  const labelById = new Map(fields.map((f) => [f.id, f.label]));
+  const name = (id: string) => {
+    const label = (labelById.get(id) ?? id).trim();
+    if (label.length <= INCORRECT_LABEL_CHARS) return label;
+    const cut = label.slice(0, INCORRECT_LABEL_CHARS);
+    const lastSpace = cut.lastIndexOf(' ');
+    return `${(lastSpace > INCORRECT_LABEL_CHARS / 2 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+  };
+
+  const wrong = marks.filter((m) => !m.correct && !m.unanswered).map((m) => name(m.fieldId));
+  const blank = marks.filter((m) => m.unanswered).map((m) => name(m.fieldId));
+
+  const parts: string[] = [];
+  if (wrong.length > 0) parts.push(`Answered incorrectly: ${wrong.join('; ')}.`);
+  if (blank.length > 0) parts.push(`Not answered: ${blank.join('; ')}.`);
+  return parts.join(' ');
+}
+
+/** How much of a question's printed label the further-action box carries. */
+const INCORRECT_LABEL_CHARS = 70;
+
 export interface MarkTheoryInput {
   /** The full field set of the template version. */
   fields: readonly FormField[];
@@ -212,8 +266,18 @@ export interface MarkTheoryInput {
    * mark: every question comes out unanswered, which is incorrect.
    */
   values: Record<string, SubmissionValue> | null | undefined;
-  /** The theory part being marked — supplies the mandatory section. */
-  part: Pick<AssessmentPart, 'mandatoryFieldIds'>;
+  /**
+   * The theory part being marked — supplies the mandatory section, and the
+   * printed boxes the verdict is written into.
+   *
+   * A part naming none of the verdict boxes marks exactly as it always has: the
+   * per-question ✓/✗ and nothing else. That is what keeps every tool authored
+   * before this existed unchanged.
+   */
+  part: Pick<
+    AssessmentPart,
+    'mandatoryFieldIds' | 'outcomeSatisfactory' | 'outcomeNotSatisfactory' | 'furtherActionFieldId'
+  >;
 }
 
 /**
@@ -254,13 +318,79 @@ export function markTheory({ fields, values, part }: MarkTheoryInput): TheoryMar
   const correctCount = marks.filter((m) => m.correct).length;
   const mandatoryMarks = marks.filter((m) => m.mandatory);
   const mandatoryAllCorrect = mandatoryMarks.every((m) => m.correct);
+  const outcome: PartOutcome = mandatoryAllCorrect ? 'satisfactory' : 'not_satisfactory';
+
+  const derivedValues = applyMarks(marks, answers);
+
+  /*
+    THE PART'S OWN VERDICT BOX, written from the same arithmetic that produced
+    the ✓/✗ above.
+
+    "The Candidate's responses were: ☐ Satisfactory ☐ Not Satisfactory" is
+    printed at the end of each part, and on a fully-keyed theory part it is a
+    restatement of `outcome` — an assessor ticking it is transcribing a sum,
+    thirty questions after doing nothing else the machine did not do.
+
+    EXACTLY ONE OF THE PAIR IS WRITTEN. Ticking both, or deriving one from the
+    other's absence, would leave the record saying two things or nothing; two
+    boxes are printed because both answers are positive statements.
+  */
+  const verdict = outcome === 'satisfactory' ? part.outcomeSatisfactory : part.outcomeNotSatisfactory;
+  if (verdict) writeDeclared(derivedValues, verdict);
+
+  /*
+    "Detail further action" — the questions to go back over.
+
+    Only on a NOT-satisfactory part, and only when something was actually
+    missed. A satisfactory part leaves the box alone: an empty box beside a
+    passed assessment is correct, and "None" is a sentence nobody wrote.
+
+    Written only where the box is EMPTY. An assessor who has already typed into
+    it has said something this cannot improve on, and overwriting a person's
+    words on a competency record is not a thing an automatic mark may do.
+  */
+  if (outcome === 'not_satisfactory' && part.furtherActionFieldId) {
+    const existing = derivedValues[part.furtherActionFieldId];
+    const untouched = existing === undefined || existing === null || existing === '';
+    const note = incorrectQuestionsNote(marks, fields);
+    if (untouched && note) derivedValues[part.furtherActionFieldId] = note;
+  }
 
   return {
     marks,
-    derivedValues: applyMarks(marks, answers),
+    derivedValues,
     correctCount,
     totalCount: marks.length,
     mandatoryAllCorrect,
-    outcome: mandatoryAllCorrect ? 'satisfactory' : 'not_satisfactory',
+    outcome,
   };
+}
+
+/**
+ * Write one declared mark into a value map — the marking-side twin of the
+ * exporter's `writeMark`.
+ *
+ * Duplicated rather than shared for now because the two live either side of the
+ * package boundary and this one has no repeating-group case to get wrong: a
+ * part's verdict box is a printed tick, not a table cell. If a paper ever prints
+ * one inside a grid, this grows the same row/column handling and the two should
+ * be folded together at that point rather than before.
+ */
+function writeDeclared(values: Record<string, SubmissionValue>, mark: DeclaredMark): void {
+  if (mark.rowKey && mark.columnKey) {
+    const existing = Array.isArray(values[mark.fieldId])
+      ? (values[mark.fieldId] as RepeatingRowValue[])
+      : [];
+    const rows: RepeatingRowValue[] = existing.map((r) => ({ ...r }));
+    const cell = mark.value;
+    // A non-primitive in a cell exports as nothing (the PDF writer refuses it),
+    // so refusing here keeps the two sides agreeing about what was written.
+    if (cell !== null && typeof cell === 'object') return;
+    const row = rows.find((r) => r.__key === mark.rowKey);
+    if (row) row[mark.columnKey] = cell;
+    else rows.push({ __key: mark.rowKey, [mark.columnKey]: cell });
+    values[mark.fieldId] = rows;
+    return;
+  }
+  values[mark.fieldId] = mark.value;
 }
