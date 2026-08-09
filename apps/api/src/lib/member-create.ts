@@ -6,9 +6,11 @@ import {
   type PlacementErrorCode,
   type SeatBlockPurchase,
   type Role,
+  type TenantContext,
   type ValidProfileRow,
 } from '@formai/shared';
 import { checkSeatAvailability, lockOrgForSeats, poolFor, type SeatOrg } from './seats.js';
+import { recordExpansion, seatOrExpand, type SeatExpansion } from './seat-blocks.js';
 import { writePlacement } from './membership-placement.js';
 import { insertUserWithUsername } from './username.js';
 
@@ -201,10 +203,15 @@ export interface ImportCostPreview {
  * Whether automatic expansion exists yet (U37).
  *
  * Read rather than assumed so the preview and the run agree in BOTH windows —
- * before U37 the preview promises refusals and the run delivers them; after it,
- * the same preview promises blocks. Flipped to `true` by U37.
+ * before U37 the preview promised refusals and the run delivered them; now the
+ * same preview promises blocks and `landImportRow` buys them.
+ *
+ * TRUE since U37 landed. The flag survives its own flip because it is what ties
+ * the quote to the enforcement: a preview promising blocks against a run that
+ * refuses is worse than either behaviour on its own, so the two read one
+ * constant rather than each deciding for itself.
  */
-export const AUTOMATIC_EXPANSION_AVAILABLE = false;
+export const AUTOMATIC_EXPANSION_AVAILABLE = true;
 
 function poolCost(needed: number, limit: number | null, used: number): PoolCost {
   if (limit === null) return { needed, available: null, covered: needed, overflow: 0 };
@@ -254,8 +261,9 @@ export async function previewImportCost(
     staff,
     blocks: AUTOMATIC_EXPANSION_AVAILABLE ? blocksForOverflow(candidate.overflow) : [],
     /*
-      The staff pool never expands (KTD27), so its overflow is always a refusal.
-      The candidate pool's is one too until U37 lands.
+      The staff pool never expands (KTD27), so its overflow is ALWAYS a refusal
+      whatever the flag says. The candidate pool's is a purchase now that U37
+      has landed.
     */
     refusedForSeats: staff.overflow + (AUTOMATIC_EXPANSION_AVAILABLE ? 0 : candidate.overflow),
   };
@@ -316,11 +324,22 @@ class PlacementRefusedError extends Error {
 
 export async function landImportRow(
   db: Db,
-  orgId: string,
+  /*
+    The whole tenant rather than a bare orgId, because landing a row may SPEND
+    MONEY (R86) and an expansion has to name the actor who triggered it. Two
+    separate sources of org identity could disagree; one cannot.
+  */
+  tenant: TenantContext,
   resolved: ResolvedRow,
   profile: ProfileSeed,
 ): Promise<LandingOutcome> {
   const { row, disposition } = resolved;
+  /*
+    Collected inside the transaction and audited after it commits, matching how
+    every other expansion site records one: an audit insert that failed must not
+    roll back seats the organisation is now relying on.
+  */
+  const expansions: SeatExpansion[] = [];
 
   if (disposition === 'duplicate') {
     // An address an earlier row already handled: the first row did the work.
@@ -334,11 +353,23 @@ export async function landImportRow(
   }
 
   try {
-    return await db.transaction(async (tx) => {
-      const org = await lockOrgForSeats(tx, orgId);
+    const outcome = await db.transaction(async (tx) => {
+      const org = await lockOrgForSeats(tx, tenant.orgId);
       if (org) {
         const check = await checkSeatAvailability(tx, org, row.role);
-        if (!check.ok) {
+        /*
+          A full CANDIDATE pool buys a block rather than refusing the row (U37,
+          R86), under the lock the count was taken beneath — the same rule the
+          five other allocation boundaries apply.
+
+          This is what makes `previewImportCost`'s promise good: the preview
+          quotes blocks for candidate overflow, so a run that refused instead
+          would price a file one way and then deliver another. A full STAFF pool
+          still refuses, because no rule has been written for expanding it.
+        */
+        const { expansion } = await seatOrExpand(tx, org, check);
+        if (expansion) expansions.push(expansion);
+        if (!check.ok && !expansion) {
           // Rolls back to nothing; the run reports it and continues (R170).
           return { kind: 'refused', reason: 'seat_limit_reached', pool: check.pool } as const;
         }
@@ -368,7 +399,7 @@ export async function landImportRow(
         const [created] = await tx
           .insert(schema.memberships)
           // ACTIVE immediately: an import creates members, not invitations (R80).
-          .values({ orgId, userId, role: row.role, status: 'active' })
+          .values({ orgId: tenant.orgId, userId, role: row.role, status: 'active' })
           .returning();
         membershipId = created!.id;
       }
@@ -383,7 +414,7 @@ export async function landImportRow(
         this row rolls back whole rather than committing a member with no
         placement, and the run reports the code.
       */
-      const placement = await writePlacement(tx, orgId, membershipId, {
+      const placement = await writePlacement(tx, tenant.orgId, membershipId, {
         locationIds: row.locationIds,
         departmentIds: row.departmentIds,
         roleIds: row.roleIds,
@@ -403,7 +434,7 @@ export async function landImportRow(
       */
       await tx
         .insert(schema.memberProfiles)
-        .values({ orgId, membershipId, ...values } as typeof schema.memberProfiles.$inferInsert)
+        .values({ orgId: tenant.orgId, membershipId, ...values } as typeof schema.memberProfiles.$inferInsert)
         .onConflictDoUpdate({
           target: schema.memberProfiles.membershipId,
           set: values as Partial<typeof schema.memberProfiles.$inferInsert>,
@@ -421,6 +452,16 @@ export async function landImportRow(
         incomplete: emptyOptionalProfileFields(values),
       } as const;
     });
+
+    /*
+      R86: audited only once the transaction has COMMITTED. Recording inside it
+      would name a purchase that a later rollback — a refused placement, say —
+      un-bought, and recording before it would name one that had not happened.
+    */
+    for (const expansion of expansions) {
+      await recordExpansion(db, tenant, expansion, `workforce import row ${row.rowNumber}`);
+    }
+    return outcome;
   } catch (e) {
     if (e instanceof PlacementRefusedError) {
       return { kind: 'refused', reason: 'placement_invalid', code: e.refusal.code, subjectId: e.refusal.subjectId };
