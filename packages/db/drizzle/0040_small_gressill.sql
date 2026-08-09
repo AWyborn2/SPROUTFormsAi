@@ -1,0 +1,1 @@
+ALTER TABLE "competency_holders" ADD COLUMN "imported_at" timestamp with time zone;

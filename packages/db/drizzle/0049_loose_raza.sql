@@ -1,0 +1,1 @@
+ALTER TYPE "public"."audit_category" ADD VALUE 'billing';

@@ -41,7 +41,15 @@ const grant = (competencyId: string, over: Record<string, unknown> = {}) => ({
 });
 
 /** A member whose Role requires a tool that awards COMP — so COMP is required for u1. */
-function fakeDb(opts: { holders?: unknown[]; competencies?: unknown[]; memberships?: unknown[] }) {
+function fakeDb(opts: {
+  holders?: unknown[];
+  competencies?: unknown[];
+  memberships?: unknown[];
+  /** Profiles backing the unreachable read (R99). Default: none marked. */
+  profiles?: unknown[];
+  /** Overrides the default user row — pass `passwordHash` to give somebody a login. */
+  users?: unknown[];
+}) {
   return {
     query: {
       organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: 'enterprise' }) },
@@ -53,7 +61,13 @@ function fakeDb(opts: { holders?: unknown[]; competencies?: unknown[]; membershi
       membershipRoles: { findMany: vi.fn().mockResolvedValue([{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }]) },
       roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue([{ orgId: 'org-1', roleId: 'r1', toolId: 't1' }]) },
       assessmentTools: { findMany: vi.fn().mockResolvedValue([{ id: 't1', orgId: 'org-1', awardedCompetencyIds: [COMP] }]) },
-      users: { findMany: vi.fn().mockResolvedValue([{ id: 'u1', name: 'Bo Worker' }]) },
+      /*
+        No `passwordHash` by default — an invited person who never completed
+        their signup. That is the case where the mark alone decides, so the
+        fixture starts there and the login case sets one explicitly.
+      */
+      users: { findMany: vi.fn().mockResolvedValue(opts.users ?? [{ id: 'u1', name: 'Bo Worker' }]) },
+      memberProfiles: { findMany: vi.fn().mockResolvedValue(opts.profiles ?? []) },
       competencies: {
         findMany: vi.fn().mockResolvedValue(
           opts.competencies ?? [
@@ -159,5 +173,76 @@ describe('GET /compliance (U20)', () => {
     const res = await fetch(`${base}/compliance`, { headers: authHeader(candidate) });
     expect(res.status).toBe(403);
     server.close();
+  });
+
+  describe('the unreachable list (U36, R98, R99)', () => {
+    /** Current on the required competency, so no gap competes with the mark. */
+    const CURRENT = [grant(COMP, { expiresAt: daysAhead(200) })];
+    const marked = { membershipId: 'm1', emailUnreachableAt: daysAgo(2) };
+
+    it('reports a marked address with no login', async () => {
+      mockDbValue = fakeDb({ holders: CURRENT, profiles: [marked] });
+      const { server, base } = startApp();
+      const body = (await (
+        await fetch(`${base}/compliance`, { headers: authHeader(admin) })
+      ).json()) as { unreachable: Array<{ userId: string; name: string; membershipId: string }> };
+      expect(body.unreachable).toEqual([{ userId: 'u1', name: 'Bo Worker', membershipId: 'm1' }]);
+      server.close();
+    });
+
+    it('does NOT report a marked address where the person holds a login (R98)', async () => {
+      /*
+        Reachable means EITHER route works. The sweep serves its notice on the
+        person's own record whatever the email did, so somebody who signs in has
+        been notified — counting them here would report a failure that did not
+        occur. They are still on the working list, which asks the different
+        question of whether anyone needs chasing.
+      */
+      mockDbValue = fakeDb({
+        holders: CURRENT,
+        profiles: [marked],
+        users: [{ id: 'u1', name: 'Bo Worker', passwordHash: 'hash' }],
+      });
+      const { server, base } = startApp();
+      const body = (await (
+        await fetch(`${base}/compliance`, { headers: authHeader(admin) })
+      ).json()) as { unreachable: unknown[] };
+      expect(body.unreachable).toEqual([]);
+      server.close();
+    });
+
+    it('does not report an unmarked address, login or not', async () => {
+      mockDbValue = fakeDb({
+        holders: CURRENT,
+        profiles: [{ membershipId: 'm1', emailUnreachableAt: null }],
+      });
+      const { server, base } = startApp();
+      const body = (await (
+        await fetch(`${base}/compliance`, { headers: authHeader(admin) })
+      ).json()) as { unreachable: unknown[] };
+      expect(body.unreachable).toEqual([]);
+      server.close();
+    });
+
+    it('is the only entry, with no competency gap beside it (AE56, R99)', async () => {
+      // The other half of R16's overlap: this member is the single item on the
+      // working list AND the single entry here, and nothing compliance
+      // reporting counts about a competency reaches the working list.
+      mockDbValue = fakeDb({ holders: CURRENT, profiles: [marked] });
+      const { server, base } = startApp();
+      const body = (await (
+        await fetch(`${base}/compliance`, { headers: authHeader(admin) })
+      ).json()) as {
+        expired: unknown[];
+        neverHeld: unknown[];
+        optionalLapses: unknown[];
+        unreachable: unknown[];
+      };
+      expect(body.expired).toEqual([]);
+      expect(body.neverHeld).toEqual([]);
+      expect(body.optionalLapses).toEqual([]);
+      expect(body.unreachable).toHaveLength(1);
+      server.close();
+    });
   });
 });

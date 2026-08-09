@@ -67,7 +67,14 @@ function fakeDb(opts: {
   const db = {
     query: {
       passwordResets: { findFirst: vi.fn().mockResolvedValue(opts.passwordResetsFindFirst) },
-      memberships: { findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst) },
+      memberships: {
+        // The FIRST read is requireTenant revalidating the caller's own
+        // membership (a miss fails open, so the admin keeps their sealed role);
+        // the route's subject lookup is every read after. Without the
+        // once-undefined the caller would be revalidated against the SUBJECT's
+        // membership and pick up its role, 403-ing the admin doing the reset.
+        findFirst: vi.fn().mockResolvedValueOnce(undefined).mockResolvedValue(opts.membershipsFindFirst),
+      },
       users: {
         findFirst: vi
           .fn()

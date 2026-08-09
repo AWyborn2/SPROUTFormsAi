@@ -49,6 +49,7 @@ import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission, permissionScope } from '../lib/permissions.js';
 import { heldCompetencyStates } from '../lib/assignment.js';
+import { identifyMember, loadDisplayIdentities } from '../lib/display-identity.js';
 import { recordAudit } from '../audit/record.js';
 import { grantCompetency, revokeGrantsFromCase } from '../lib/competency-grant.js';
 import { CaseExportError, exportCasePdf } from '../pdf/index.js';
@@ -1177,6 +1178,14 @@ assessmentCasesRouter.get(
       where: inArray(schema.users.id, candidateIds),
     });
     const nameById = new Map(candidates.map((u) => [u.id, u.name]));
+    /*
+      R61: the identifier beside the name is read LIVE from the profile on every
+      render and is never captured onto the case. That is the deliberate
+      difference from the printed name a signed attempt keeps (R60) — a wrongly
+      typed employee number, once corrected, corrects itself on every case it
+      appears on rather than needing them rewritten.
+    */
+    const caseIdentities = await loadDisplayIdentities(db, tenant.orgId, candidateIds);
 
     // Every attempt in the org in ONE query, grouped by case in code. A query
     // per case is the N+1 this endpoint exists to replace: a site with three
@@ -1243,7 +1252,9 @@ assessmentCasesRouter.get(
           id: c.id,
           toolName: tool?.name ?? '',
           candidateUserId: c.candidateUserId,
-          candidateName: nameById.get(c.candidateUserId) ?? '',
+          candidateName: identifyMember(caseIdentities, c.candidateUserId, nameById.get(c.candidateUserId) ?? '').name,
+          /** Read live from the profile, never captured onto the case (R61). */
+          candidateIdentifier: identifyMember(caseIdentities, c.candidateUserId, '').identifier,
           pathway: c.pathway,
           state: c.state,
           currentPartKey: current?.part.key ?? null,
@@ -1406,6 +1417,12 @@ assessmentCasesRouter.get(
     const candidate = await db.query.users.findFirst({
       where: eq(schema.users.id, row.candidateUserId),
     });
+    // R61: live, never captured. See the list route above for why.
+    const detailIdentity = identifyMember(
+      await loadDisplayIdentities(db, tenant.orgId, [row.candidateUserId]),
+      row.candidateUserId,
+      candidate?.name ?? '',
+    );
     const locationName = row.locationId
       ? ((await locationNamesByIdFor(db, tenant.orgId, [row.locationId])).get(row.locationId) ?? null)
       : null;
@@ -1416,7 +1433,9 @@ assessmentCasesRouter.get(
       toolName: tool.name,
       appeals: appeals.map((c) => ({ id: c.id, state: c.state, createdAt: c.createdAt })),
       candidateUserId: row.candidateUserId,
-      candidateName: candidate?.name ?? '',
+      candidateName: detailIdentity.name,
+      /** Read live from the profile, never captured onto the case (R61). */
+      candidateIdentifier: detailIdentity.identifier,
       assessorUserId: row.assessorUserId,
       pathway: row.pathway,
       locationId: row.locationId,

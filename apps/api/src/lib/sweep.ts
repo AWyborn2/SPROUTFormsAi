@@ -77,6 +77,49 @@ export async function sweepOrganization(
   });
   const userById = new Map(users.map((u) => [u.id, u]));
 
+  /*
+    Addresses an Admin has flagged as reaching nobody (U36, R16, R98).
+
+    Sending to one is not merely wasted: repeated mail to a dead address is what
+    gets a sender's domain marked as a spammer, which would cost every OTHER
+    member their notices. The record below is still written — it is the login
+    delivery route and the idempotence guard, and neither depends on what the
+    email did — so a marked member who signs in is notified exactly as before.
+
+    Read per organisation, keyed by USER because the holder rows are, and scoped
+    to this org's profiles because one customer's mail bouncing says nothing
+    about another's.
+  */
+  const orgMemberships = await database.query.memberships.findMany({
+    where: eq(schema.memberships.orgId, org.id),
+  });
+  const orgProfiles = orgMemberships.length
+    ? await database.query.memberProfiles.findMany({
+        where: inArray(
+          schema.memberProfiles.membershipId,
+          orgMemberships.map((m) => m.id),
+        ),
+      })
+    : [];
+  const userForMembership = new Map(orgMemberships.map((m) => [m.id, m.userId]));
+  const unreachableUsers = new Set(
+    orgProfiles
+      .filter((p) => Boolean(p.emailUnreachableAt))
+      .map((p) => userForMembership.get(p.membershipId))
+      .filter((id): id is string => Boolean(id)),
+  );
+
+  /*
+    Members deactivated here (U35, R65). Pass 1 already sweeps only active
+    members; pass 2 must skip them too, or a leaver receives expiry mail — and a
+    login-delivery record — for a competency they hold no live seat against.
+    Keyed by user, matching the holder rows. On reactivation the window's record
+    is absent, so they are reminded then.
+  */
+  const deactivatedUsers = new Set(
+    orgMemberships.filter((m) => m.status !== 'active').map((m) => m.userId),
+  );
+
   for (const holder of holders) {
     const competency = competencyById.get(holder.competencyId);
     if (!competency) continue;
@@ -96,18 +139,19 @@ export async function sweepOrganization(
       ),
     });
     if (already) continue; // once per window (KTD11)
+    if (deactivatedUsers.has(holder.userId)) continue; // a leaver is not reminded
 
-    const user = userById.get(holder.userId);
-    // Email is best-effort and never gates the record below.
-    if (user?.email) {
-      await sendExpiryNoticeEmail({ to: user.email, competencyName: competency.name, expiresOn });
-    }
-    // The record IS the login route AND the idempotence guard, so it is written
-    // whether or not the email went out. `onConflictDoNothing` on the (user,
-    // competency, window) unique index makes a lost check-then-insert race — two
-    // sweeps overlapping — a no-op rather than an error that would abort the rest
-    // of this organisation's pass.
-    await database
+    /*
+      CLAIM THE WINDOW BEFORE SENDING. The record is the login route AND the
+      idempotence guard, written whether or not the email goes out. Writing it
+      first and sending only when the insert WON closes the overlapping-sweep
+      race: two sweeps both pass the `already` check above, but the (user,
+      competency, window) unique index lets only one insert land — the other's
+      `onConflictDoNothing` returns no row, so only the winner emails and the
+      loser does not double-send. A returned row is also this pass's proof the
+      notice is ours to count.
+    */
+    const [claimed] = await database
       .insert(schema.sentNotices)
       .values({ orgId: org.id, userId: holder.userId, competencyId: holder.competencyId, expiresOn })
       .onConflictDoNothing({
@@ -116,7 +160,16 @@ export async function sweepOrganization(
           schema.sentNotices.competencyId,
           schema.sentNotices.expiresOn,
         ],
-      });
+      })
+      .returning();
+    if (!claimed) continue; // another sweep claimed this window first
+
+    const user = userById.get(holder.userId);
+    // Email is best-effort and never gates the record above — and it is skipped
+    // entirely for an address flagged as reaching nobody (R98).
+    if (user?.email && !unreachableUsers.has(holder.userId)) {
+      await sendExpiryNoticeEmail({ to: user.email, competencyName: competency.name, expiresOn });
+    }
     noticesSent++;
   }
 

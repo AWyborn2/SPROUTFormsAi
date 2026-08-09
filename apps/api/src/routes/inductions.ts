@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import {
   assessInductionReadiness,
@@ -12,6 +12,8 @@ import {
   nextBookableInductionDate,
   isFileRef,
   readStarterProfile,
+  dispositionForSubmission,
+  seedProfileFromStarter,
   type AssessedStarter,
   type FormField,
   type StarterProfile,
@@ -19,6 +21,7 @@ import {
 import { requireMachineOrTenant } from '../middleware/machine.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
+import { tierCarriesProfiles } from '../lib/profile-access.js';
 import { recordAudit } from '../audit/record.js';
 import { sealSession, unsealSession } from '../auth/replit-auth.js';
 import { getStorageClient } from '../storage/index.js';
@@ -343,6 +346,110 @@ inductionsRouter.get('/candidates/:id', requireMachineOrTenant, withErrorHandlin
     return;
   }
   res.json({ ...body, sensitive: profile.sensitive });
+}));
+
+/**
+ * What a submission would seed onto a member profile, and whether it may (U40).
+ *
+ * A READ, not a write. It answers the two questions the Admin's create screen
+ * needs — what the record would say, and whether this person already has one —
+ * and leaves the creating to the profile route the screen already calls. That
+ * keeps ONE create path: a second one here would need its own validation, its
+ * own seat check and its own audit line, and would drift from all three.
+ *
+ * R89/R90: a submission for somebody who already holds a record creates
+ * NOTHING. It goes to an Admin, who is told the record exists and — where they
+ * were deactivated — asked whether they should be reactivated. Reactivation
+ * takes a seat and may buy a block (R78, R86), so it is not a decision to take
+ * automatically off the back of a form submission.
+ *
+ * The address match is U28's, read for a different inbound path rather than
+ * re-implemented, so a person entering through an import and through an
+ * induction cannot end up with two records.
+ */
+inductionsRouter.get('/candidates/:id/profile-seed', requireMachineOrTenant, withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const tenant = req.tenant!;
+  // Seeding a record is an Admin act — it is the entry point to creating one.
+  if (!(await hasPermission(tenant, 'profiles', 'edit'))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  /*
+    And the TIER gate every other profile surface applies: an organisation below
+    the tier that carries assessments holds no profiles at all, so this route
+    must not be its way in. The permission check above reads the matrix, which
+    knows nothing about the plan.
+  */
+  const seedOrg = await db.query.organizations.findFirst({
+    where: eq(schema.organizations.id, tenant.orgId),
+  });
+  if (!seedOrg || !tierCarriesProfiles(seedOrg.planTier)) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+
+  const row = await db.query.submissions.findFirst({
+    where: and(eq(schema.submissions.id, req.params.id!), eq(schema.submissions.orgId, tenant.orgId)),
+  });
+  if (!row) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+  const version = await db.query.formTemplateVersions.findFirst({
+    where: eq(schema.formTemplateVersions.id, row.templateVersionId),
+  });
+  const fields = Array.isArray(version?.fields) ? (version.fields as FormField[]) : [];
+  const profile = readStarterProfile(fields, row.values);
+  if (!profile) {
+    res.status(404).json({ error: 'not_an_induction_candidate' });
+    return;
+  }
+
+  /*
+    R94 needs the organisation's CURRENT lists, because the check is whether a
+    historical answer still exists as an option. Retired values are excluded:
+    a retired Department is exactly one the answer may no longer be written to.
+  */
+  const [departments, jobRoles] = await Promise.all([
+    db.query.departments.findMany({ where: eq(schema.departments.orgId, tenant.orgId) }),
+    db.query.jobRoles.findMany({ where: eq(schema.jobRoles.orgId, tenant.orgId) }),
+  ]);
+  const seed = seedProfileFromStarter(profile, {
+    departments: departments.filter((d) => d.status !== 'retired').map((d) => d.name),
+    roles: jobRoles.filter((r) => r.status !== 'retired').map((r) => r.name),
+  });
+
+  // The address match, U28's, read here rather than re-implemented. Compared
+  // case-insensitively because users.email is stored as entered — matching the
+  // lowercased seed address against the raw column would miss an existing member
+  // whose stored address has any capital, and seed them as a new person.
+  const existingUser = seed.email
+    ? await db.query.users.findFirst({ where: eq(sql`lower(${schema.users.email})`, seed.email.toLowerCase()) })
+    : undefined;
+  const membership = existingUser
+    ? await db.query.memberships.findFirst({
+        where: and(
+          eq(schema.memberships.orgId, tenant.orgId),
+          eq(schema.memberships.userId, existingUser.id),
+        ),
+      })
+    : undefined;
+  const disposition = dispositionForSubmission({
+    hasMembership: Boolean(membership),
+    membershipStatus: membership?.status,
+  });
+
+  res.json({
+    submissionId: row.id,
+    disposition,
+    seed,
+    /** Set on a repeat, so the Admin can open the record rather than retype it. */
+    membershipId: membership?.id ?? null,
+  });
 }));
 
 const cohortQuery = z.object({

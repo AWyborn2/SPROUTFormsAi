@@ -21,6 +21,7 @@ import { DEFAULT_ROLE_PERMISSIONS, type AssessmentToolManifest, type FormField }
 
 const ORG = 'org-1';
 const ADMIN = '00000000-0000-4000-8000-00000000000a';
+const BUILDER = '00000000-0000-4000-8000-00000000000b';
 const CANDIDATE = '00000000-0000-4000-8000-00000000000c';
 const OTHER_CANDIDATE = '00000000-0000-4000-8000-00000000000d';
 const COMPETENCY = '00000000-0000-4000-8000-0000000000f1';
@@ -317,9 +318,17 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
     */
     memberships: [
       { id: nextId(), orgId: ORG, userId: ADMIN, role: 'admin', status: 'active' },
+      { id: nextId(), orgId: ORG, userId: BUILDER, role: 'builder', status: 'active' },
       { id: nextId(), orgId: ORG, userId: CANDIDATE, role: 'candidate', status: 'active' },
       { id: nextId(), orgId: ORG, userId: OTHER_CANDIDATE, role: 'candidate', status: 'active' },
     ],
+    /*
+      Profiles backing the live display-identifier read a case DTO makes (R24,
+      R61). Empty by default, which is the state these cases actually run in —
+      the identifier resolves to null and the DTO shows the name it always did,
+      so every existing assertion about `candidateName` holds unchanged.
+    */
+    memberProfiles: [],
   };
 
   const nameOf = (table: unknown) =>
@@ -905,7 +914,7 @@ describe('PATCH /assessment-tools/:id/location-parts', () => {
     try {
       const tool = await makeTool(base);
       const asBuilder = await setRule(base, tool.id, { [MINING]: ['p1'] }, {
-        userId: ADMIN,
+        userId: BUILDER,
         orgId: ORG,
         role: 'builder',
       });
@@ -1010,7 +1019,7 @@ describe('PATCH /assessment-tools/:id/classification and the filter', () => {
     const { server, base } = startApp();
     try {
       const tool = await makeTool(base);
-      const res = await classify(base, tool.id, DEPT_OPS, { userId: ADMIN, orgId: ORG, role: 'builder' });
+      const res = await classify(base, tool.id, DEPT_OPS, { userId: BUILDER, orgId: ORG, role: 'builder' });
       expect(res.status).toBe(403);
     } finally {
       server.close();
@@ -2463,6 +2472,9 @@ describe('GET /assessment-cases/progress', () => {
 
   it('refuses a caller whose role grants no assessments view', async () => {
     const { db, store } = makeDb();
+    // The caller is a genuine viewer, so requireTenant's role revalidation keeps
+    // that role and the customised matrix below is what denies them.
+    (store.memberships!.find((m) => (m as { userId: string }).userId === ADMIN) as { role: string }).role = 'viewer';
     // Every shipped role may view assessments, so the denial has to come from a
     // customised matrix — which is the real-world shape of it too: an org that
     // has turned the category off for a role.
@@ -2693,6 +2705,13 @@ describe('POST /assessment-cases/:id/sign-off', () => {
 
   it('refuses to let the candidate certify themselves', async () => {
     const { db, store } = makeDb();
+    // The scenario is a sign-off-capable user who is ALSO the candidate on the
+    // case. Give that user a genuine admin membership so requireTenant's role
+    // revalidation keeps their authority and the route reaches the
+    // self-certification refusal rather than a bare permission denial.
+    (rows(store, 'memberships').find((m) => (m as { userId: string }).userId === CANDIDATE) as {
+      role: string;
+    }).role = 'admin';
     mockDbValue = db;
     const { server, base } = startApp();
     try {

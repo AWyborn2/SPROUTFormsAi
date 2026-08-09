@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { eq } from 'drizzle-orm';
+import { schema } from '@formai/db';
 import {
   ALLOWED_ATTACHMENT_TYPES,
   MAX_ATTACHMENT_BYTES,
@@ -8,6 +10,7 @@ import {
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { getStorageClient } from '../storage/index.js';
+import { db } from '../db.js';
 
 /**
  * Submission attachments — the bytes behind a `file_upload` answer.
@@ -241,6 +244,31 @@ uploadsRouter.get(
       res.status(404).json({ error: 'not_found' });
       return;
     }
+    /*
+      COMPETENCY DOCUMENTS ARE NOT SERVED HERE (R30, R44).
+
+      Their keys are minted by this same uploader and so are indistinguishable
+      from a submission attachment's — deliberately, because reusing the one
+      validator is the point. But this route authorises on tenancy alone, which
+      is right for a submission attachment and wrong for a licence image whose
+      reader must hold a grant. Left open, it would serve those bytes to any
+      member of the organisation, make the `view_documents` grant decorative, and
+      falsify the plan's stated property that no document reaches storage before
+      the access resolution has run.
+
+      Refused with the SAME not-found this route gives an unrecognised key, and
+      before any storage call, so it leaks nothing about what exists.
+    */
+    if (db) {
+      const claimed = await db.query.competencyDocuments.findFirst({
+        where: eq(schema.competencyDocuments.storageKey, key),
+      });
+      if (claimed) {
+        res.status(404).json({ error: 'not_found' });
+        return;
+      }
+    }
+
     const client = getStorageClient();
     if (!client) {
       res.status(503).json({ error: 'storage_unavailable' });

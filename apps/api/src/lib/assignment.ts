@@ -19,6 +19,7 @@ import {
   type HeldCompetencyState,
 } from '@formai/shared';
 import { db } from '../db.js';
+import { DEACTIVATED_STATUS } from '../middleware/tenant.js';
 
 type Database = NonNullable<typeof db>;
 
@@ -93,7 +94,15 @@ export interface AssignmentResult {
  * `toolIds` scopes the tool context — the whole of a membership's requirements
  * for the real assignment, or just the ADDED tools for a U12 preview — while the
  * held competencies, Locations and open cases are membership-wide. Null when the
- * membership is not the organisation's.
+ * membership is not the organisation's, or is DEACTIVATED (R64).
+ *
+ * Deactivation is refused here rather than at each caller because assignment
+ * reaches this function from four directions — a direct assign, a Role's
+ * requirements changing, a placement edit, and an approved training request —
+ * and only the first has a person on the other end to be told. A leaver whose
+ * old Role gained a requirement would otherwise be handed an assessment they
+ * cannot sign in to take, which then reads as outstanding on the compliance
+ * report for as long as the record is retained.
  */
 async function loadMembershipContext(
   database: Database,
@@ -106,6 +115,7 @@ async function loadMembershipContext(
     where: and(eq(schema.memberships.id, membershipId), eq(schema.memberships.orgId, orgId)),
   });
   if (!membership) return null;
+  if (membership.status === DEACTIVATED_STATUS) return null;
 
   const tools: Record<string, AssignmentTool> = {};
   const currentVersionByTool = new Map<string, string | null>();
