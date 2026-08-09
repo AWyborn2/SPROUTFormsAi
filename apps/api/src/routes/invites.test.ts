@@ -138,7 +138,11 @@ function fakeDb(opts: {
     })),
   });
 
-  const tx = makeSurface('tx');
+  const tx = makeSurface('tx') as Record<string, unknown>;
+  // insertUserWithUsername runs each attempt in its own savepoint (a nested
+  // transaction), so the tx surface must offer one — running the callback
+  // against itself, so the insert still records on the tx.
+  tx.transaction = async (fn: (t: unknown) => Promise<unknown>) => fn(tx);
   const transaction = vi.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx));
   const db = { ...makeSurface('root'), transaction } as unknown as Db;
 
@@ -355,13 +359,21 @@ describe('POST /invites/:token/accept', () => {
       }
     });
 
-    it('draws a candidate invite on the candidate pool, not the staff one', async () => {
-      const { db } = fakeDb({
+    it('EXPANDS the candidate pool at acceptance rather than stranding the holder (U37, R80, R86)', async () => {
+      /*
+        This used to 403. Somebody standing at a site induction with a QR code
+        in their hand is not the person to settle a billing question with, and
+        the invitation was issued precisely so they could join — so a full
+        candidate pool buys a block and lets them in.
+
+        The write happens under the lock this count was taken beneath, which is
+        what stops two acceptances arriving together buying a block each for one
+        seat.
+      */
+      const { db, updateSet, insertValues, ops } = fakeDb({
         invitesFindFirst: { ...PENDING_INVITE, role: 'candidate' },
         membershipsFindFirst: undefined,
         lockedOrg: SMALL_ORG,
-        // Full on candidates, room to spare on staff — the pools are separate,
-        // so this must refuse rather than borrow a staff seat.
         seatsUsed: 3,
       });
       mockDbValue = db;
@@ -371,8 +383,40 @@ describe('POST /invites/:token/accept', () => {
           method: 'POST',
           headers: authHeader(memberTenant),
         });
+        expect(res.status).toBe(200);
+        expect(updateSet).toHaveBeenCalledWith(schema.organizations, { candidateSeatLimit: 53 });
+        expect(insertValues.mock.calls.find(([table]) => table === schema.memberships)).toBeDefined();
+
+        const seatOps = ops.filter((o) => o.op === 'lock' || (o.op === 'update' && o.table === schema.organizations));
+        expect(seatOps.map((o) => `${o.on}:${o.op}`)).toEqual(['tx:lock', 'tx:update']);
+
+        const audit = insertValues.mock.calls.find(
+          ([table, v]) => table === schema.auditLogEntries && (v as { category?: string }).category === 'billing',
+        );
+        expect(audit?.[1]).toMatchObject({ action: 'Added candidate seat block' });
+      } finally {
+        server.close();
+      }
+    });
+
+    it('still refuses acceptance into a full STAFF pool, which does not expand (R80)', async () => {
+      const { db, insertValues, updateSet } = fakeDb({
+        invitesFindFirst: { ...PENDING_INVITE, role: 'assessor' },
+        membershipsFindFirst: undefined,
+        lockedOrg: SMALL_ORG,
+        seatsUsed: 2,
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/invites/tok-abc/accept`, {
+          method: 'POST',
+          headers: authHeader(memberTenant),
+        });
         expect(res.status).toBe(403);
-        expect(await res.json()).toMatchObject({ error: 'candidate_limit_reached', seatLimit: 3 });
+        expect(await res.json()).toMatchObject({ error: 'seat_limit_reached', seatLimit: 2 });
+        expect(insertValues.mock.calls.find(([table]) => table === schema.memberships)).toBeUndefined();
+        expect(updateSet.mock.calls.find(([table]) => table === schema.organizations)).toBeUndefined();
       } finally {
         server.close();
       }
@@ -441,6 +485,88 @@ describe('POST /invites/:token/signup', () => {
     });
   }
 
+  it('gets past the pre-hash check on a full candidate pool, and expands under the lock (R80, R86)', async () => {
+    /*
+      TWO claims, and the first is the one that used to fail. The unlocked
+      pre-hash check ran BEFORE bcrypt and refused a full pool outright, so an
+      accepting candidate never reached the locked check that could have
+      expanded for them. It now defers on the candidate pool entirely.
+
+      The second: it performs no expansion ITSELF. Writing a charged block from
+      an unlocked check is exactly the double-charge the lock exists to prevent,
+      so the single organizations UPDATE here is the locked one.
+    */
+    const { db, updateSet, insertValues, ops } = fakeDb({
+      invitesFindFirst: { ...PENDING_INVITE, role: 'candidate' },
+      usersFindFirst: undefined,
+      lockedOrg: SMALL_ORG,
+      organizationsFindFirst: SMALL_ORG,
+      seatsUsed: 3,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await signup(base, 'tok-abc', GOOD);
+      expect(res.status).toBe(201);
+
+      const orgUpdates = updateSet.mock.calls.filter(([table]) => table === schema.organizations);
+      expect(orgUpdates).toHaveLength(1);
+      expect(orgUpdates[0]![1]).toEqual({ candidateSeatLimit: 53 });
+      expect(insertValues.mock.calls.find(([t]) => t === schema.memberships)).toBeDefined();
+
+      // The block was bought on the transaction, after the lock.
+      const seatOps = ops.filter((o) => o.op === 'lock' || (o.op === 'update' && o.table === schema.organizations));
+      expect(seatOps.map((o) => `${o.on}:${o.op}`)).toEqual(['tx:lock', 'tx:update']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still refuses a full STAFF pool before spending the hash (R80)', async () => {
+    // The staff pool does not expand, so the pre-hash refusal still saves a
+    // deliberately-slow KDF on a request the locked check would refuse anyway.
+    const { db, insertValues } = fakeDb({
+      invitesFindFirst: { ...PENDING_INVITE, role: 'assessor' },
+      usersFindFirst: undefined,
+      organizationsFindFirst: SMALL_ORG,
+      lockedOrg: SMALL_ORG,
+      seatsUsed: 2,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await signup(base, 'tok-abc', GOOD);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ error: 'seat_limit_reached' });
+      expect(insertValues.mock.calls.find(([t]) => t === schema.users)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('buys NO second block while the first still has room', async () => {
+    /*
+      One block covers the next fifty acceptances. Expanding again on each of
+      them would charge an organisation fifty times for fifty seats it had
+      already bought once — which is why the check reads the limit the LOCK
+      returns rather than any value read earlier.
+    */
+    const { db, updateSet } = fakeDb({
+      invitesFindFirst: { ...PENDING_INVITE, role: 'candidate' },
+      usersFindFirst: undefined,
+      lockedOrg: { ...SMALL_ORG, candidateSeatLimit: 53 },
+      organizationsFindFirst: { ...SMALL_ORG, candidateSeatLimit: 53 },
+      seatsUsed: 4,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      expect((await signup(base, 'tok-abc', GOOD)).status).toBe(201);
+      expect(updateSet.mock.calls.find(([table]) => table === schema.organizations)).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
   it('creates the account, claims the invite, grants the role and seals a session', async () => {
     const { db, insertValues, updateSet } = fakeDb({
       invitesFindFirst: PENDING_INVITE,

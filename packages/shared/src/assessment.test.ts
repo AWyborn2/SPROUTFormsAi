@@ -12,9 +12,11 @@ import {
   type AssessmentToolManifest,
   type AttemptFact,
   type PartOutcome,
+  CASE_STATES,
   caseProgress,
   fieldsInPart,
   isCaseCompetent,
+  isTerminalCaseState,
   moreCoachingRequired,
   orderedParts,
   requiredParts,
@@ -604,5 +606,34 @@ describe('fieldsInPart', () => {
     };
 
     expect(fieldsInPart(docFields, reversed, 'one').map((f) => f.id)).toEqual(['q1', 'q2', 'h-mid']);
+  });
+});
+
+describe('isTerminalCaseState', () => {
+  /*
+    Terminal decides two things at once: whether the single state writer stamps
+    `closedAt`, and whether a sweep over live work picks the case up. A state
+    added to the enum without being classified here is therefore treated as IN
+    FLIGHT by omission — which is how `invalidated` (a case abandoned when its
+    candidate left) would have been re-created as live work by a Role's
+    requirements changing, for somebody who is gone.
+  */
+  it('classifies every case state, so none is in flight by omission', () => {
+    expect(CASE_STATES.filter(isTerminalCaseState)).toEqual([
+      'competent',
+      'closed',
+      'invalidated',
+    ]);
+    expect(CASE_STATES.filter((s) => !isTerminalCaseState(s))).toEqual([
+      'open',
+      'awaiting_sign_off',
+    ]);
+  });
+
+  it('treats an invalidated case as finished, not as one still being worked', () => {
+    // Nobody will work it again. Only its OUTCOME differs from a case that
+    // finished, and the state value is what carries that distinction (R71–R74).
+    expect(isTerminalCaseState('invalidated')).toBe(true);
+    expect(isTerminalCaseState('awaiting_sign_off')).toBe(false);
   });
 });

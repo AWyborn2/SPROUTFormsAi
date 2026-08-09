@@ -1,6 +1,6 @@
 import { Card, Icon } from '@formai/ui';
 import { useComplianceReport } from '../../lib/data/hooks.js';
-import type { ComplianceGap } from '../../lib/data/types.js';
+import type { ComplianceGap, UnreachableMember } from '../../lib/data/types.js';
 
 /**
  * Compliance reporting (U20) — how the workforce stands, as an auditor reads it.
@@ -44,15 +44,49 @@ export function ComplianceScreen() {
             gaps={report.optionalLapses}
             icon="info"
           />
-          <GapSection
-            title="Members no notification can reach"
-            hint="No login and an address marked unreachable — expiry notices reach them by neither route."
-            gaps={report.unreachable}
-            icon="mail-x"
-          />
+          <UnreachableSection members={report.unreachable} />
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Its own section because an unreachable member is a PERSON, not a competency
+ * gap (U36, R99) — there is no ticket to name in a second column, and rendering
+ * one through `GapSection` printed an empty cell beside every name.
+ */
+function UnreachableSection({ members }: { members: UnreachableMember[] }) {
+  return (
+    <Card className="p-5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Icon
+            name="mail-x"
+            size={16}
+            className={members.length > 0 ? 'text-danger-text' : 'text-text-tertiary'}
+          />
+          <h3 className="font-ui text-sm font-semibold">Members no notification can reach</h3>
+        </div>
+        <span className="text-[13px] font-semibold tabular-nums">{members.length}</span>
+      </div>
+      <p className="mt-1 text-[12px] text-text-tertiary">
+        No login and an address marked unreachable — an expiry notice reaches them by neither
+        route, so somebody has to tell them in person.
+      </p>
+      {members.length > 0 && (
+        <ul className="mt-3 flex flex-col gap-1">
+          {members.map((m) => (
+            <li
+              key={m.membershipId}
+              className="flex items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-1.5 text-[12.5px]"
+            >
+              <span className="truncate font-medium">{m.name}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
 

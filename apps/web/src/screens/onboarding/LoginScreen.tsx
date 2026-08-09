@@ -115,11 +115,13 @@ export function LoginScreen() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ email, password }),
+        // R22: the field carries either credential, so it is sent as an
+        // identifier. Signing up still sends a real `email` below.
+        body: JSON.stringify({ identifier: email, password }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({})) as { message?: string };
-        setError(body?.message ?? 'Invalid email or password.');
+        setError(body?.message ?? 'Invalid username or password.');
         return;
       }
       await queryClient.invalidateQueries({ queryKey: ['session'] });
@@ -234,13 +236,19 @@ export function LoginScreen() {
             <form onSubmit={handleEmailContinue} className="space-y-4">
               <div>
                 <label className="block text-[11px] font-semibold uppercase tracking-widest mb-1.5" style={{ color: '#9ca3af' }}>
-                  Email
+                  Email or username
                 </label>
+                {/*
+                  `type="text"`, not `"email"` (R22). A generated username is not
+                  a valid email address, so the browser's own validation on an
+                  email input would refuse to submit it before the request was
+                  ever made — which is the whole population issued one.
+                */}
                 <FieldInput
-                  type="email"
+                  type="text"
                   value={email}
                   onChange={e => setEmail(e.target.value)}
-                  placeholder="you@company.com"
+                  placeholder="you@company.com or jsmith1234"
                   required
                   autoFocus
                 />

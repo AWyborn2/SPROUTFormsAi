@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull } from 'drizzle-orm';
-import { schema, type Db } from '@formai/db';
+import { schema, type Db, type DbOrTx } from '@formai/db';
 import { validatePlacement, type PlacementContext, type PlacementResult } from '@formai/shared';
 
 /**
@@ -17,7 +17,7 @@ export interface PlacementInput {
 }
 
 /** The organisation's ACTIVE taxonomy — the offer sets and count rules the validator reads. */
-export async function loadPlacementContext(db: Db, orgId: string): Promise<PlacementContext> {
+export async function loadPlacementContext(db: DbOrTx, orgId: string): Promise<PlacementContext> {
   const [departments, roles] = await Promise.all([
     db.query.departments.findMany({
       where: and(eq(schema.departments.orgId, orgId), eq(schema.departments.status, 'active')),
@@ -51,7 +51,7 @@ export async function loadPlacementContext(db: Db, orgId: string): Promise<Place
  * still bounded by that Department's own rule (R6).
  */
 export async function admitHeldRoles(
-  db: Db,
+  db: DbOrTx,
   orgId: string,
   membershipId: string,
   base: PlacementContext,
@@ -132,7 +132,7 @@ export async function readPlacement(db: Db, membershipId: string): Promise<Place
  * dropped (R119).
  */
 export async function writePlacement(
-  db: Db,
+  db: DbOrTx,
   orgId: string,
   membershipId: string,
   input: PlacementInput,

@@ -9,6 +9,7 @@ import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
 import { findOwnedCompetency, grantCompetency, syncHolderCount } from '../lib/competency-grant.js';
 import { requiredCompetencyIdsByUser, requiredCompetencyIdsFor } from '../lib/standing.js';
+import { permissionScope } from '../lib/permissions.js';
 import { db } from '../db.js';
 
 /**
@@ -211,6 +212,17 @@ competenciesRouter.delete(
 const grantBody = z.object({
   userId: z.string().uuid(),
   evidenceRef: z.string().max(200).optional(),
+  /*
+    A LICENCE IS RECORDED HERE, not as profile fields (R33, R34). Class and
+    number on the grant, its expiry as `expiresAt`, its document as a
+    `competency_documents` row — which is what gives it expiry, grace periods,
+    revocation and a place in every prerequisite check for free (R35, R36).
+    Absent on an ordinary competency.
+  */
+  licenceClass: z.string().max(20).optional(),
+  licenceNumber: z.string().max(60).optional(),
+  /** An explicit end date, for a licence whose expiry does not follow the qualification's validity. */
+  expiresAt: z.string().datetime().optional(),
 });
 
 /**
@@ -256,6 +268,9 @@ competenciesRouter.post(
       competencyId: req.params.id!,
       userId: parsed.data.userId,
       evidenceRef: parsed.data.evidenceRef ?? null,
+      licenceClass: parsed.data.licenceClass ?? null,
+      licenceNumber: parsed.data.licenceNumber ?? null,
+      expiresAt: parsed.data.expiresAt ? new Date(parsed.data.expiresAt) : null,
     });
     if (!result.ok) {
       // Kept distinct: an admin granting by hand needs to know whether they
@@ -399,6 +414,14 @@ competenciesRouter.get(
     });
     const userById = new Map(users.map((u) => [u.id, u]));
 
+    // A licence number is sensitive profile data (R34), gated by the same
+    // `profiles.view_competencies` grant the profile surface uses — it must not
+    // leak through this register just because a member can see who holds what.
+    // A holder still sees their own licence on their own row.
+    const licenceScope = await permissionScope(tenant, 'profiles', 'view_competencies');
+    const canSeeLicence = (holderUserId: string) =>
+      licenceScope === 'all' || holderUserId === tenant.userId;
+
     // Standing per holder: is THIS competency one their held Roles require
     // (R108)? Batched into one query path rather than per holder.
     const requiredByUser = await requiredCompetencyIdsByUser(db, tenant.orgId, holderUserIds);
@@ -417,6 +440,9 @@ competenciesRouter.get(
         name: user?.name ?? 'Unknown user',
         email: user?.email ?? null,
         evidenceRef: r.evidenceRef,
+        /** Null on an ordinary competency, or when the caller may not see it; set where this grant IS a licence (R34). */
+        licenceClass: canSeeLicence(r.userId) ? r.licenceClass : null,
+        licenceNumber: canSeeLicence(r.userId) ? r.licenceNumber : null,
         grantedAt: r.grantedAt.toISOString(),
         expiresAt: expiry ? expiry.toISOString() : null,
         status: currency.status,
@@ -522,6 +548,13 @@ competenciesRouter.get(
     // already excluded above, so `current` never has to fold revocation in here.
     const required = await requiredCompetencyIdsFor(db, tenant.orgId, req.params.userId!);
 
+    // Licence numbers are sensitive profile data (R34): a caller sees them on
+    // someone else's record only with the `profiles.view_competencies` grant —
+    // the same gate the profile surface applies — but always on their own.
+    const canSeeLicence =
+      req.params.userId === tenant.userId ||
+      (await permissionScope(tenant, 'profiles', 'view_competencies')) === 'all';
+
     // One instant for the whole response, so two entries cannot disagree about
     // what "today" is.
     const now = new Date();
@@ -534,6 +567,9 @@ competenciesRouter.get(
         return {
           competencyId: r.competencyId,
           evidenceRef: r.evidenceRef,
+          /** Null on an ordinary competency, or when the caller may not see it; set where this grant IS a licence (R34). */
+          licenceClass: canSeeLicence ? r.licenceClass : null,
+          licenceNumber: canSeeLicence ? r.licenceNumber : null,
           status: currency.status,
           /** Required or optional for this person, from their held Roles (R108). */
           standing: standingOf(r.competencyId, required),

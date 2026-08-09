@@ -133,6 +133,38 @@ export const competencyHolders = pgTable(
       either lie about the grant date or lose the real expiry.
     */
     expiresAt: timestamp('expires_at', { withTimezone: true }),
+    /*
+      WHETHER THIS GRANT ARRIVED IN A BULK IMPORT RUN (R19).
+
+      R19 waives the certificate against the competencies a migration run loads
+      — a customer bringing in a decade of tickets has no scans of them — while
+      holding a competency recorded on the same person AFTERWARDS to the
+      ordinary rule, so the concession never becomes the standard. Nothing on
+      the record tells those two apart without this.
+
+      A plain nullable timestamp rather than a reference to the run: the import
+      run table belongs to the Organisation Settings artifact, and a foreign key
+      to it would make this schema depend on a table that plan has not created
+      yet. The owed-file list reads only whether it is set.
+
+      Null on every grant the product itself made, which is the existing case.
+    */
+    importedAt: timestamp('imported_at', { withTimezone: true }),
+    /*
+      A LICENCE IS A COMPETENCY, NOT A PROFILE FIELD (R33, R34).
+
+      Class, number, expiry and document have the exact shape this table already
+      handles. Recorded here, a licence inherits expiry dates, grace periods,
+      revocation and a place in every prerequisite and compliance check for free
+      (R35, R36); recorded as three flat fields on a form answer — which is where
+      it lives today — it inherits none of that and expires silently.
+
+      Two columns rather than four: the expiry is `expiresAt` above, used exactly
+      as an imported record uses it, and the document is a `competency_documents`
+      row. Nullable because most competencies are not licences.
+    */
+    licenceClass: text('licence_class'),
+    licenceNumber: text('licence_number'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
@@ -192,6 +224,19 @@ export const auditLogEntries = pgTable(
     action: text().notNull(),
     target: text().notNull().default(''),
     category: auditCategoryEnum().notNull().default('general'),
+    /*
+      WHICH FIELD this entry covers, as the profile inventory's key (R57, R58).
+      Null on every entry that is not about one field, which is every entry
+      written before this existed.
+
+      Structured rather than parsed out of `target`, because R58 confines
+      sensitive-field entries to Admin and a filter over free text would have to
+      pattern-match the same prose that holds the values it is trying to hide —
+      leaking a date of birth whenever the match missed, and over-hiding ordinary
+      history whenever it matched too much. A column makes the filter a
+      comparison on data.
+    */
+    field: text(),
     icon: text().notNull().default('activity'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
