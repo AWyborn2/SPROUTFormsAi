@@ -7,7 +7,15 @@
 export type PlanTier = 'individual' | 'team' | 'business' | 'enterprise';
 export type AccountKind = 'individual' | 'team';
 
-export interface PlanFeatures {
+/*
+  A TYPE ALIAS rather than an interface, deliberately. Only an alias gets an
+  implicit index signature, which is what lets the resolved flags be handed to
+  `SessionInfo.features` (declared in shared as a string-keyed boolean record,
+  because shared cannot import this package without a cycle) with no cast. An
+  interface would force an `as` at that boundary, and an assertion there would
+  keep compiling the day a non-boolean field is added here.
+*/
+export type PlanFeatures = {
   /** Custom branding (logo, colors, fonts) on forms. Free at every tier. */
   branding: boolean;
   /** Remove "Powered by" attribution / full white-label. Business+ only. */

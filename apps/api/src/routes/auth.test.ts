@@ -1,6 +1,9 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import bcrypt from 'bcryptjs';
+// The session's `features` are resolved from this, so the assertion reads the
+// same source the route does rather than restating the flags by hand.
+import { PLAN_CONFIG } from '@formai/db';
 
 const { mockProvisionTenant, DeactivatedMemberError } = vi.hoisted(() => {
   // The route catches this by `instanceof`, so the mocked module must export the
@@ -52,7 +55,7 @@ describe('POST /auth/login', () => {
     return {
       query: {
         users: { findFirst: vi.fn().mockResolvedValue(user) },
-        organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme Inc' }) },
+        organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme Inc', planTier: 'business' }) },
       },
     };
   }
@@ -237,6 +240,12 @@ describe('POST /auth/login', () => {
         branding: null,
         teamSize: null,
         onboardingCompletedAt: null,
+        /*
+          Resolved SERVER-SIDE from the org's tier (U38 follow-up). The nav gates
+          on this, so it has to ride the session rather than a separate billing
+          call — otherwise every gated entry flickers in once that call returns.
+        */
+        features: PLAN_CONFIG.business.features,
       });
       const setCookie = res.headers.get('set-cookie') ?? '';
       expect(setCookie).toContain('fai_session=');
@@ -278,7 +287,7 @@ describe('GET /auth/me', () => {
     const tenant = { userId: 'u1', orgId: 'o1', role: 'owner' as const };
     mockDbValue = {
       query: {
-        organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme Inc' }) },
+        organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme Inc', planTier: 'business' }) },
         users: {
           findFirst: vi.fn().mockResolvedValue({ id: 'u1', name: 'Ash Wyborn', email: 'ash@x.io' }),
         },
@@ -300,6 +309,12 @@ describe('GET /auth/me', () => {
         branding: null,
         teamSize: null,
         onboardingCompletedAt: null,
+        /*
+          Resolved SERVER-SIDE from the org's tier (U38 follow-up). The nav gates
+          on this, so it has to ride the session rather than a separate billing
+          call — otherwise every gated entry flickers in once that call returns.
+        */
+        features: PLAN_CONFIG.business.features,
       });
     } finally {
       server.close();

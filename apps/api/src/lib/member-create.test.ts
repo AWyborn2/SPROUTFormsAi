@@ -68,6 +68,8 @@ function fakeDb(opts: {
 }
 
 const ORG = 'org-1';
+/** Landing a row may spend money (R86), so it names the Admin who triggered it. */
+const TENANT = { userId: 'u-admin', orgId: ORG, role: 'admin' as const };
 
 const ORG_ROW = { id: ORG, planTier: 'business', seatLimit: 15, candidateSeatLimit: 100 };
 
@@ -266,22 +268,28 @@ describe('previewImportCost — seats, not rows', () => {
     expect(preview.candidate.overflow).toBe(0);
   });
 
-  it('promises refusals rather than blocks while automatic expansion does not exist', async () => {
+  it('quotes BLOCKS for candidate overflow now that expansion exists (R84, R86)', async () => {
     /*
       R86 makes the run proceed only once the Admin confirms, and the preview is
-      what that confirmation is given against. Quoting blocks the run cannot buy
-      would have them authorise a purchase and receive rejections instead. U37
-      flips this and the same preview then quotes blocks.
+      what that confirmation is given against — so the quote has to match what
+      the run will actually do. Before U37 this promised refusals and the run
+      delivered them; U37 landed the expansion, so the same overflow is now a
+      purchase and  buys it.
+
+      Five seats over buys ONE block of fifty: blocks are indivisible, and it is
+      the smallest size sold (KTD27).
     */
     const rows = Array.from({ length: 105 }, (_, i) => row({ email: `c${i}@x.io` }));
     const preview = await previewImportCost(fakeDb({}), ORG_ROW, rows);
     expect(preview.candidate.overflow).toBe(5);
-    expect(preview.blocks).toEqual([]);
-    expect(preview.refusedForSeats).toBe(5);
+    expect(preview.blocks).toEqual([{ size: 50, count: 1, seats: 50, discount: 0 }]);
+    // Nothing is refused for want of a candidate seat any more.
+    expect(preview.refusedForSeats).toBe(0);
   });
 
-  it('always counts staff overflow as refused, because the staff pool never expands', async () => {
-    // KTD27: R86 and R84 are written entirely in candidate-seat terms.
+  it('still counts STAFF overflow as refused, because that pool never expands', async () => {
+    // KTD27: R84 and R86 are written entirely in candidate-seat terms, so there
+    // is no staff rule to implement and the flag above does not reach it.
     const rows = Array.from({ length: 20 }, (_, i) => row({ email: `a${i}@x.io`, role: 'assessor' }));
     const preview = await previewImportCost(fakeDb({}), ORG_ROW, rows);
     expect(preview.staff.overflow).toBe(5);
@@ -307,6 +315,8 @@ function landDb(opts: {
 
   const reads = {
     memberships: { findFirst: async () => opts.mergeMembership },
+    // recordAudit reads the actor's name; an expansion writes an entry (R86).
+    users: { findFirst: async () => ({ id: TENANT.userId, name: 'Ada Admin' }) },
     membershipLocations: { findMany: async () => [] as unknown[] },
     membershipDepartments: { findMany: async () => [] as unknown[] },
     membershipRoles: { findMany: async () => [] as unknown[] },
@@ -367,7 +377,7 @@ describe('landImportRow', () => {
 
   it('does nothing for a duplicate row — the first occurrence did the work (R1)', async () => {
     const { db, inserted, updated } = landDb();
-    const out = await landImportRow(db, ORG, resolvedRow({ disposition: 'duplicate' }), SEED);
+    const out = await landImportRow(db, TENANT, resolvedRow({ disposition: 'duplicate' }), SEED);
     expect(out).toEqual({ kind: 'duplicate' });
     expect(inserted).toHaveLength(0);
     expect(updated).toHaveLength(0);
@@ -376,7 +386,7 @@ describe('landImportRow', () => {
 
   it('creates the person, membership and profile on a create row', async () => {
     const { db, inserted } = landDb({ activeCount: 0 });
-    const out = await landImportRow(db, ORG, resolvedRow(), SEED);
+    const out = await landImportRow(db, TENANT, resolvedRow(), SEED);
     expect(out).toMatchObject({ kind: 'created', userId: 'u-new', membershipId: 'm-new' });
     expect(vi.mocked(insertUserWithUsername)).toHaveBeenCalledOnce();
     // The profile is written through the upsert, never a bare insert.
@@ -390,7 +400,7 @@ describe('landImportRow', () => {
     const { db, inserted, updated } = landDb({ activeCount: 0 });
     const out = await landImportRow(
       db,
-      ORG,
+      TENANT,
       resolvedRow({ disposition: 'reactivate', userId: 'u-1', membershipId: 'm-1' }),
       SEED,
     );
@@ -399,10 +409,33 @@ describe('landImportRow', () => {
     expect(inserted.every((i) => i.via === 'upsert')).toBe(true);
   });
 
-  it('refuses a row for want of a seat, writing nothing (R170)', async () => {
-    const { db } = landDb({ org: { id: ORG, planTier: 'business', seatLimit: 15, candidateSeatLimit: 1 }, activeCount: 1 });
-    const out = await landImportRow(db, ORG, resolvedRow(), SEED);
-    expect(out).toEqual({ kind: 'refused', reason: 'seat_limit_reached', pool: 'candidate' });
+  it('EXPANDS rather than refusing a candidate row at a full pool (U37, R86)', async () => {
+    /*
+      This used to refuse. The preview quotes blocks for candidate overflow, so
+      a run that refused instead would price a file one way and deliver another
+      — the exact disagreement AUTOMATIC_EXPANSION_AVAILABLE exists to prevent.
+    */
+    const { db, updated } = landDb({
+      org: { id: ORG, planTier: 'business', seatLimit: 15, candidateSeatLimit: 1 },
+      activeCount: 1,
+    });
+    const out = await landImportRow(db, TENANT, resolvedRow(), SEED);
+
+    expect(out.kind).toBe('created');
+    // The block was bought: the limit moved from 1 to 51, inside the same
+    // transaction that held the lock the count was taken beneath.
+    expect(updated.some((u) => u.candidateSeatLimit === 51)).toBe(true);
+  });
+
+  it('still refuses a STAFF row at a full pool, writing nothing (R170)', async () => {
+    // KTD27: no rule has been written for expanding the staff pool, so it keeps
+    // refusing rather than charging against a rule nobody wrote.
+    const { db } = landDb({
+      org: { id: ORG, planTier: 'business', seatLimit: 1, candidateSeatLimit: 100 },
+      activeCount: 1,
+    });
+    const out = await landImportRow(db, TENANT, resolvedRow({ row: row({ role: 'assessor' }), pool: 'staff' }), SEED);
+    expect(out).toEqual({ kind: 'refused', reason: 'seat_limit_reached', pool: 'staff' });
   });
 
   it('refuses a row whose placement no longer validates, rather than landing it unplaced (R119)', async () => {
@@ -411,7 +444,7 @@ describe('landImportRow', () => {
     // with no placement.
     vi.mocked(writePlacement).mockResolvedValue({ ok: false, error: { code: 'role_not_offered', subjectId: 'jr-9' } });
     const { db } = landDb({ activeCount: 0 });
-    const out = await landImportRow(db, ORG, resolvedRow(), SEED);
+    const out = await landImportRow(db, TENANT, resolvedRow(), SEED);
     expect(out).toEqual({ kind: 'refused', reason: 'placement_invalid', code: 'role_not_offered', subjectId: 'jr-9' });
   });
 
@@ -419,7 +452,7 @@ describe('landImportRow', () => {
     const { db, inserted, updated } = landDb({ mergeMembership: { id: 'm-1', role: 'assessor' } });
     const out = await landImportRow(
       db,
-      ORG,
+      TENANT,
       resolvedRow({ disposition: 'merge', userId: 'u-1', membershipId: 'm-1', pool: null }),
       SEED,
     );
