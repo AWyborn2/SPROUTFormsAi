@@ -19,6 +19,8 @@
 import type { ImportSnapshot } from './import-draft-store.js';
 import type {
   BrandingKit,
+  FormBrand,
+  FormBrandInput,
   FormContainer,
   FormField,
   PermissionCategory,
@@ -37,6 +39,8 @@ import type {
   AuditCategory,
   AuditEntry,
   CreatedApiKey,
+  BrandEditProposal,
+  BrandPdfScan,
   BrandScanProposal,
   Competency,
   CompetencyHolder,
@@ -59,8 +63,28 @@ import type {
   RoleName,
   SubmissionDetail,
   SubmissionRow,
+  MemberPlacement,
+  ProfileResponse,
+  ProfileSeedResponse,
+  HeldCompetencyRow,
+  Taxonomy,
+  ExpiryNotice,
+  WorkingListItem,
+  ComplianceReport,
+  RetirementReview,
+  TaxDepartment,
+  TaxLocation,
+  TaxRole,
+  TighteningReviewItem,
+  TrainingRequest,
+  TaxonomySettings,
   TemplateStatus,
 } from './types.js';
+import type {
+  AssessmentToolManifest,
+  RequiredAssessmentsChangeEffects,
+  TaxonomyStatus,
+} from '@formai/shared';
 
 /** Shape returned by `PATCH /org` (see apps/api routes/org.ts). */
 export interface OrgSettingsDto {
@@ -89,6 +113,8 @@ interface FormDetailDto extends FormSummaryDto {
   container: FormContainer;
   /** Per-form voice override; null (or absent on older payloads) = inherit. */
   voiceInput?: boolean | null;
+  /** The brand the form is presented in; null/absent = the org's own theme. */
+  brandId?: string | null;
   versions: Array<{
     id: string;
     label: string;
@@ -157,6 +183,7 @@ function toFormDetail(dto: FormDetailDto): FormDetail {
     fields: dto.fields,
     container: dto.container,
     voiceInput: dto.voiceInput ?? null,
+    brandId: dto.brandId ?? null,
     versions: dto.versions.map((v) => ({
       id: v.id,
       label: v.label,
@@ -528,6 +555,52 @@ export const store = {
       .then((dto) => ({ form: toFormSummary(dto), versionId: dto.createdVersionId }));
   },
 
+  /**
+   * Create a form whose first version is a DRAFT, and hand back both ids.
+   *
+   * The builder needs somewhere to put geometry before anything is published:
+   * geometry lives on a version's fields, so the version has to exist while the
+   * tool is still being authored. `publishImport` cannot be reused — it
+   * hardcodes `publish: true`, which would put an unfinished assessment in front
+   * of fillers.
+   *
+   * `POST /forms` returns the created version's id as `currentVersionId` whether
+   * or not it published, so one call is enough; the template's status stays
+   * `draft` until the builder publishes it.
+   */
+  createDraftForm(input: {
+    name: string;
+    fields: FormField[];
+    sourcePdfAssetId?: string;
+  }): Promise<{ formId: string; versionId: string }> {
+    return apiClient
+      .post<FormSummaryDto>('/forms', {
+        name: input.name,
+        sourceType: 'pdf_import',
+        fields: input.fields,
+        ...(input.sourcePdfAssetId ? { sourcePdfAssetId: input.sourcePdfAssetId } : {}),
+        publish: false,
+      })
+      .then((dto) => ({ formId: dto.id, versionId: dto.currentVersionId ?? '' }));
+  },
+
+  /**
+   * Create the assessment tool for a published template version.
+   *
+   * The server validates the manifest and the answer keys against the
+   * template's CURRENT version, which is only set once a version publishes —
+   * so this is the last call in the publish sequence, not the first. The
+   * builder runs the same two validators before any of it, so this refusing is
+   * a bug rather than a normal outcome.
+   */
+  createAssessmentTool(input: {
+    templateId: string;
+    name: string;
+    manifest: AssessmentToolManifest;
+  }): Promise<{ id: string }> {
+    return apiClient.post<{ id: string }>('/assessment-tools', input);
+  },
+
   publishFormVersion(input: { formId: string; versionId: string }): Promise<FormSummary> {
     return apiClient
       .post<FormSummaryDto>(`/forms/${input.formId}/versions/${input.versionId}/publish`, {})
@@ -546,6 +619,50 @@ export const store = {
         { voiceInput: input.voiceInput },
       )
       .then(() => undefined);
+  },
+
+  /** Which client's brand a form is presented in. Null returns it to the org's. */
+  setFormBrand(input: { formId: string; brandId: string | null }): Promise<void> {
+    return apiClient
+      .patch<{ id: string; brandId: string | null }>(`/forms/${input.formId}/brand`, {
+        brandId: input.brandId,
+      })
+      .then(() => undefined);
+  },
+
+  listFormBrands(): Promise<FormBrand[]> {
+    return apiClient.get<FormBrand[]>('/form-brands');
+  },
+
+  createFormBrand(input: FormBrandInput): Promise<FormBrand> {
+    return apiClient.post<FormBrand>('/form-brands', input);
+  },
+
+  updateFormBrand(input: { id: string } & Partial<FormBrandInput>): Promise<FormBrand> {
+    const { id, ...body } = input;
+    return apiClient.patch<FormBrand>(`/form-brands/${id}`, body);
+  },
+
+  /**
+   * Read a client's colours and logo off their PDF. Returns a PROPOSAL —
+   * nothing is stored, and no brand is created or changed.
+   */
+  scanBrandFromPdf(input: { assetId?: string; pdfBase64?: string }): Promise<BrandPdfScan> {
+    return apiClient.post<BrandPdfScan>('/form-brands/scan', input);
+  },
+
+  /**
+   * Change a brand by describing the change. Returns a PROPOSAL over its
+   * current kit — nothing is stored until the author saves.
+   */
+  editFormBrandByChat(input: { id: string; instruction: string }): Promise<BrandEditProposal> {
+    return apiClient.post<BrandEditProposal>(`/form-brands/${input.id}/edit`, {
+      instruction: input.instruction,
+    });
+  },
+
+  deleteFormBrand(id: string): Promise<void> {
+    return apiClient.delete<void>(`/form-brands/${id}`).then(() => undefined);
   },
 
   archiveForm(id: string): Promise<FormSummary> {
@@ -793,7 +910,12 @@ export const store = {
    * on a public fill page. Callers rasterise SVG to PNG first — the API only
    * accepts PNG/JPEG/WebP, verified by magic bytes server-side.
    */
-  uploadOrgLogo(input: { imageBase64: string; mimeType: string }): Promise<{ url: string }> {
+  uploadOrgLogo(input: {
+    imageBase64: string;
+    mimeType: string;
+    /** What the logo is for — drives the audit wording, nothing else. */
+    usage?: 'org' | 'brand';
+  }): Promise<{ url: string }> {
     return apiClient.post<{ url: string }>('/org/logo', input);
   },
 
@@ -807,6 +929,175 @@ export const store = {
    */
   scanBrandFromWebsite(input: { url: string }): Promise<BrandScanProposal> {
     return apiClient.post<BrandScanProposal>('/org/brand-scan', input);
+  },
+
+  /* ── Taxonomy (Locations, Departments, Roles) ──────────────────────────── */
+
+  getTaxonomy(): Promise<Taxonomy> {
+    return apiClient.get<Taxonomy>('/taxonomy');
+  },
+  createLocation(name: string): Promise<TaxLocation> {
+    return apiClient.post<TaxLocation>('/taxonomy/locations', { name });
+  },
+  updateLocation(id: string, patch: { name?: string; status?: TaxonomyStatus }): Promise<TaxLocation> {
+    return apiClient.patch<TaxLocation>(`/taxonomy/locations/${id}`, patch);
+  },
+  createDepartment(input: { name: string; allowsMultipleRoles?: boolean }): Promise<TaxDepartment> {
+    return apiClient.post<TaxDepartment>('/taxonomy/departments', input);
+  },
+  updateDepartment(
+    id: string,
+    patch: { name?: string; allowsMultipleRoles?: boolean; status?: TaxonomyStatus },
+  ): Promise<TaxDepartment> {
+    return apiClient.patch<TaxDepartment>(`/taxonomy/departments/${id}`, patch);
+  },
+  createRole(departmentId: string, name: string): Promise<TaxRole> {
+    return apiClient.post<TaxRole>(`/taxonomy/departments/${departmentId}/roles`, { name });
+  },
+  updateRole(id: string, patch: { name?: string; status?: TaxonomyStatus }): Promise<TaxRole> {
+    return apiClient.patch<TaxRole>(`/taxonomy/roles/${id}`, patch);
+  },
+  /** Stop offering a Role (U17, R52): retire it AND withdraw it from every holder. */
+  stopOfferingRole(id: string): Promise<TaxRole> {
+    return apiClient.post<TaxRole>(`/taxonomy/roles/${id}/stop-offering`, {});
+  },
+  /** The people a Department tightening still has to resolve (U17, R112). */
+  getTighteningReview(departmentId: string): Promise<TighteningReviewItem[]> {
+    return apiClient.get<TighteningReviewItem[]>(
+      `/taxonomy/departments/${departmentId}/tightening-review`,
+    );
+  },
+  /** Apply one person's tightening choice: keep one Role, withdraw the rest (U17, R113). */
+  resolveTightening(
+    departmentId: string,
+    membershipId: string,
+    survivingRoleId: string,
+  ): Promise<{ ok: true }> {
+    return apiClient.post(`/taxonomy/departments/${departmentId}/tightening/resolve`, {
+      membershipId,
+      survivingRoleId,
+    });
+  },
+  /** The people still holding a retired value, by axis (U18). */
+  getRetirementReview(): Promise<RetirementReview> {
+    return apiClient.get<RetirementReview>('/taxonomy/retirement-review');
+  },
+  /** What a Location transfer would move, before committing (U18, R132). */
+  previewLocationTransfer(
+    locationId: string,
+    replacementLocationId: string,
+  ): Promise<{ peopleMoved: number; inFlightCases: number }> {
+    return apiClient.post(`/taxonomy/locations/${locationId}/transfer/preview`, {
+      replacementLocationId,
+    });
+  },
+  /** Move everyone off a retired Location, carrying or rewriting their in-flight cases (U18, R133). */
+  transferLocation(
+    locationId: string,
+    replacementLocationId: string,
+    caseOutcome: 'carry' | 'rewrite',
+  ): Promise<{ peopleMoved: number; casesRewritten: number; casesCarried: number }> {
+    return apiClient.post(`/taxonomy/locations/${locationId}/transfer`, {
+      replacementLocationId,
+      caseOutcome,
+    });
+  },
+  /** Move everyone off a retired Role to a replacement; cases untouched (U18, R135). */
+  transferRole(roleId: string, replacementRoleId: string): Promise<{ peopleMoved: number }> {
+    return apiClient.post(`/taxonomy/roles/${roleId}/transfer`, { replacementRoleId });
+  },
+  /** Everything waiting on an Admin, from all sources, on one list (U19). */
+  getWorkingList(): Promise<WorkingListItem[]> {
+    return apiClient.get<WorkingListItem[]>('/working-list');
+  },
+  /** How the workforce stands — expired, never-held, unreachable (U20). */
+  getComplianceReport(): Promise<ComplianceReport> {
+    return apiClient.get<ComplianceReport>('/compliance');
+  },
+  /** The caller's own expiry notices — a login delivery route (U21, R98). */
+  listMyNotices(): Promise<ExpiryNotice[]> {
+    return apiClient.get<ExpiryNotice[]>('/notices');
+  },
+  /** Request voluntary training for a tool — own-scope (U22, R37). */
+  requestTraining(toolId: string): Promise<TrainingRequest> {
+    return apiClient.post<TrainingRequest>('/training-requests', { toolId });
+  },
+  /** The org's pending training requests, for the Admin to work through (U22). */
+  listTrainingRequests(): Promise<TrainingRequest[]> {
+    return apiClient.get<TrainingRequest[]>('/training-requests');
+  },
+  /** Approve a request — assigns the tool through the ordinary path (U22, R94). */
+  approveTrainingRequest(id: string): Promise<{ state: 'approved'; createdCaseIds: string[] }> {
+    return apiClient.post(`/training-requests/${id}/approve`, {});
+  },
+  /** Decline a request — nothing assigned (U22). */
+  declineTrainingRequest(id: string): Promise<{ state: 'declined' }> {
+    return apiClient.post(`/training-requests/${id}/decline`, {});
+  },
+  /** Move everyone off a retired Department to a replacement; cases untouched (U18, R135). */
+  transferDepartment(
+    departmentId: string,
+    replacementDepartmentId: string,
+  ): Promise<{ peopleMoved: number }> {
+    return apiClient.post(`/taxonomy/departments/${departmentId}/transfer`, {
+      replacementDepartmentId,
+    });
+  },
+  getRoleRequiredAssessments(roleId: string): Promise<{ configured: boolean; toolIds: string[] }> {
+    return apiClient.get(`/taxonomy/roles/${roleId}/required-assessments`);
+  },
+  /** The blast radius of a proposed change, computed without committing (U12). */
+  previewRoleRequiredAssessments(
+    roleId: string,
+    toolIds: string[],
+  ): Promise<{ effects: RequiredAssessmentsChangeEffects }> {
+    return apiClient.post(`/taxonomy/roles/${roleId}/required-assessments/preview`, { toolIds });
+  },
+  setRoleRequiredAssessments(
+    roleId: string,
+    toolIds: string[],
+  ): Promise<{ configured: boolean; toolIds: string[]; effects: RequiredAssessmentsChangeEffects }> {
+    return apiClient.put(`/taxonomy/roles/${roleId}/required-assessments`, { toolIds });
+  },
+  updateTaxonomySettings(patch: Partial<TaxonomySettings>): Promise<TaxonomySettings> {
+    return apiClient.patch<TaxonomySettings>('/taxonomy/settings', patch);
+  },
+  /**
+   * One person's held competencies, each with its standing and its currency
+   * (U38, R37, R104). The API resolves the currency on the CALLER's audience
+   * window, so a candidate reading their own record sees the thirty-day warning
+   * and everybody else the assessor's ninety.
+   */
+  getHeldCompetencies(userId: string): Promise<HeldCompetencyRow[]> {
+    return apiClient.get<HeldCompetencyRow[]>(`/competencies/held/${userId}`);
+  },
+  /**
+   * What an induction submission would seed onto a profile, and whether it may
+   * (U40, R89). A READ — the creating goes through the profile route, so there
+   * is one create path rather than two that could drift.
+   */
+  getProfileSeed(submissionId: string): Promise<ProfileSeedResponse> {
+    return apiClient.get<ProfileSeedResponse>(`/inductions/candidates/${submissionId}/profile-seed`);
+  },
+  /** A member's record as this reader is admitted to it (U29, U38). */
+  getProfile(membershipId: string): Promise<ProfileResponse> {
+    return apiClient.get<ProfileResponse>(`/profiles/${membershipId}`);
+  },
+  /** The caller's own membership id, for the fixed own-record read (R49). */
+  getMyProfileMembership(): Promise<{ membershipId: string }> {
+    return apiClient.get<{ membershipId: string }>('/profiles/');
+  },
+  createProfile(membershipId: string, values: Record<string, string>): Promise<{ membershipId: string }> {
+    return apiClient.post<{ membershipId: string }>(`/profiles/${membershipId}`, values);
+  },
+  updateProfile(membershipId: string, values: Record<string, string>): Promise<{ membershipId: string }> {
+    return apiClient.patch<{ membershipId: string }>(`/profiles/${membershipId}`, values);
+  },
+  getMemberPlacement(membershipId: string): Promise<MemberPlacement> {
+    return apiClient.get<MemberPlacement>(`/team/members/${membershipId}/placement`);
+  },
+  setMemberPlacement(membershipId: string, input: MemberPlacement): Promise<MemberPlacement> {
+    return apiClient.put<MemberPlacement>(`/team/members/${membershipId}/placement`, input);
   },
 
   /* ── Competency gating ─────────────────────────────────────────────────── */

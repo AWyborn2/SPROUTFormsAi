@@ -1,10 +1,24 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import bcrypt from 'bcryptjs';
+// The session's `features` are resolved from this, so the assertion reads the
+// same source the route does rather than restating the flags by hand.
+import { PLAN_CONFIG } from '@formai/db';
 
-const mockProvisionTenant = vi.fn();
+const { mockProvisionTenant, DeactivatedMemberError } = vi.hoisted(() => {
+  // The route catches this by `instanceof`, so the mocked module must export the
+  // same class the route imports from it — a real class the test can throw.
+  class DeactivatedMemberError extends Error {
+    constructor() {
+      super('every membership for this person has been deactivated');
+      this.name = 'DeactivatedMemberError';
+    }
+  }
+  return { mockProvisionTenant: vi.fn(), DeactivatedMemberError };
+});
 vi.mock('../auth/tenant-provisioning.js', () => ({
   provisionTenant: mockProvisionTenant,
+  DeactivatedMemberError,
 }));
 
 let mockDbValue: object | null = {};
@@ -41,7 +55,7 @@ describe('POST /auth/login', () => {
     return {
       query: {
         users: { findFirst: vi.fn().mockResolvedValue(user) },
-        organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme Inc' }) },
+        organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme Inc', planTier: 'business' }) },
       },
     };
   }
@@ -93,6 +107,114 @@ describe('POST /auth/login', () => {
     }
   });
 
+  it('401s with the same invalid_credentials shape for a fully-deactivated member, setting no cookie (R64)', async () => {
+    // The third of deactivation's three enforcement points: provisionTenant
+    // refuses when every membership the person holds is deactivated, and the
+    // login route turns that into the SAME opaque answer a wrong password gets,
+    // with no session issued.
+    mockDbValue = loginDb(userRow);
+    mockProvisionTenant.mockRejectedValue(new DeactivatedMemberError());
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { email: 'ash@x.io', password: 'correct horse battery' });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_credentials');
+      expect(res.headers.get('set-cookie')).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('signs a person in with their generated username as well as their email (R22)', async () => {
+    // AE20: each person is issued a username and signs in with either.
+    mockProvisionTenant.mockResolvedValue(tenant);
+    const withUsername = { ...userRow, username: 'awyborn4821' };
+    for (const identifier of ['ash@x.io', 'awyborn4821']) {
+      mockDbValue = loginDb(withUsername);
+      const { server, base } = startApp();
+      try {
+        const res = await postLogin(base, { identifier, password: 'correct horse battery' });
+        expect(res.status, `identifier ${identifier}`).toBe(200);
+        expect(res.headers.get('set-cookie')).toContain('fai_session=');
+      } finally {
+        server.close();
+      }
+    }
+  });
+
+  it('resolves both credentials in ONE query, so neither miss is slower than the other', async () => {
+    /*
+      The security property, not a style preference. An email lookup followed by
+      a username lookup would make an unknown email take two round trips and an
+      unknown username one, which is a measurable enumeration oracle on exactly
+      the surface the dummy-hash compare exists to close.
+    */
+    const db = loginDb(undefined);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      await postLogin(base, { identifier: 'nobody@x.io', password: 'whatever-pass' });
+      expect(db.query.users.findFirst).toHaveBeenCalledTimes(1);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s identically for an unknown username and an unknown email', async () => {
+    for (const identifier of ['nobody@x.io', 'nsuchperson1234']) {
+      mockDbValue = loginDb(undefined);
+      const { server, base } = startApp();
+      try {
+        const res = await postLogin(base, { identifier, password: 'whatever-pass' });
+        expect(res.status).toBe(401);
+        expect(await res.json()).toEqual({
+          error: 'invalid_credentials',
+          message: 'Invalid username or password.',
+        });
+      } finally {
+        server.close();
+      }
+    }
+  });
+
+  it('accepts a username that is not a valid email address', async () => {
+    // A `.email()` rule on this field would reject every generated username
+    // before the lookup ever ran.
+    mockProvisionTenant.mockResolvedValue(tenant);
+    mockDbValue = loginDb({ ...userRow, username: 'jsmith1234' });
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { identifier: 'jsmith1234', password: 'correct horse battery' });
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still accepts the legacy email key, so an un-updated client keeps working', async () => {
+    mockProvisionTenant.mockResolvedValue(tenant);
+    mockDbValue = loginDb(userRow);
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { email: 'ash@x.io', password: 'correct horse battery' });
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s when neither identifier nor email is supplied', async () => {
+    mockDbValue = loginDb(userRow);
+    const { server, base } = startApp();
+    try {
+      const res = await postLogin(base, { password: 'correct horse battery' });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('validation_error');
+    } finally {
+      server.close();
+    }
+  });
+
   it('backs the unknown-email path with a structurally valid, full-cost dummy hash', async () => {
     // A malformed constant would make bcrypt.compare short-circuit instead of
     // doing full-cost work, reintroducing the timing oracle the dummy compare
@@ -118,6 +240,12 @@ describe('POST /auth/login', () => {
         branding: null,
         teamSize: null,
         onboardingCompletedAt: null,
+        /*
+          Resolved SERVER-SIDE from the org's tier (U38 follow-up). The nav gates
+          on this, so it has to ride the session rather than a separate billing
+          call — otherwise every gated entry flickers in once that call returns.
+        */
+        features: PLAN_CONFIG.business.features,
       });
       const setCookie = res.headers.get('set-cookie') ?? '';
       expect(setCookie).toContain('fai_session=');
@@ -159,7 +287,7 @@ describe('GET /auth/me', () => {
     const tenant = { userId: 'u1', orgId: 'o1', role: 'owner' as const };
     mockDbValue = {
       query: {
-        organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme Inc' }) },
+        organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme Inc', planTier: 'business' }) },
         users: {
           findFirst: vi.fn().mockResolvedValue({ id: 'u1', name: 'Ash Wyborn', email: 'ash@x.io' }),
         },
@@ -181,6 +309,12 @@ describe('GET /auth/me', () => {
         branding: null,
         teamSize: null,
         onboardingCompletedAt: null,
+        /*
+          Resolved SERVER-SIDE from the org's tier (U38 follow-up). The nav gates
+          on this, so it has to ride the session rather than a separate billing
+          call — otherwise every gated entry flickers in once that call returns.
+        */
+        features: PLAN_CONFIG.business.features,
       });
     } finally {
       server.close();

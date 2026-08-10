@@ -4,7 +4,7 @@ import { schema } from '@formai/db';
 import type { TenantContext } from '@formai/shared';
 import { unsealSession } from '../auth/replit-auth.js';
 import { bearerToken, parseApiKey, verifyApiKey } from '../auth/api-key.js';
-import { SESSION_COOKIE_NAME } from './tenant.js';
+import { DEACTIVATED_STATUS, SESSION_COOKIE_NAME, revalidateTenant } from './tenant.js';
 import { db } from '../db.js';
 
 declare global {
@@ -45,6 +45,27 @@ declare global {
  * URL-credentialed connector path — so revocation, issuer resolution and the
  * last-used stamp cannot drift apart between them.
  */
+/**
+ * Whether the issuer holds a DEACTIVATED membership of the key's organisation.
+ *
+ * Only a KNOWN-deactivated membership counts. A read that fails, or an
+ * organisation whose membership row cannot be found, answers false — this
+ * decides a display label, not access, and a database hiccup must not start
+ * renaming the actor on audit entries. The same fail-open-on-unknown posture
+ * `revalidateTenant` takes, for the same reason.
+ */
+async function issuerIsDeactivated(orgId: string, userId: string): Promise<boolean> {
+  if (!db) return false;
+  try {
+    const membership = await db.query.memberships.findFirst({
+      where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.userId, userId)),
+    });
+    return membership?.status === DEACTIVATED_STATUS;
+  } catch {
+    return false;
+  }
+}
+
 async function resolveApiKey(
   presented: string,
 ): Promise<{ tenant: TenantContext; apiKeyId: string } | null> {
@@ -64,6 +85,23 @@ async function resolveApiKey(
   });
   if (!issuer) return null;
 
+  /*
+    The key KEEPS WORKING when its issuer is deactivated, because it is the
+    organisation's credential rather than theirs — its own role, its own
+    lifecycle, revocable by any Admin. Cutting it here would turn somebody
+    leaving into an unannounced outage of whatever integration it drives.
+
+    What must NOT survive is the attribution. Naming a person who can no longer
+    sign in as the actor on every write the key makes would have the audit trail
+    assert something untrue, indefinitely. The entry keeps their id — the key
+    really was theirs to authorise — and shows the key's name instead.
+
+    An Admin is told about the key through the working list and the keys screen;
+    rotating it is their decision, and R65's containment is prompted rather than
+    enforced. See `lib/orphaned-keys.ts`.
+  */
+  const issuerDeactivated = await issuerIsDeactivated(key.orgId, issuer.id);
+
   // Best-effort: a last-used stamp is for detection, and failing to write it
   // must never fail the request it was observing.
   void db
@@ -72,7 +110,15 @@ async function resolveApiKey(
     .where(eq(schema.apiKeys.id, key.id))
     .catch(() => {});
 
-  return { tenant: { userId: issuer.id, orgId: key.orgId, role: key.role }, apiKeyId: key.id };
+  return {
+    tenant: {
+      userId: issuer.id,
+      orgId: key.orgId,
+      role: key.role,
+      ...(issuerDeactivated ? { actorLabel: `${key.name} (API key)` } : {}),
+    },
+    apiKeyId: key.id,
+  };
 }
 
 /**
@@ -154,6 +200,15 @@ export async function requireMachineOrTenant(
     unauthenticated();
     return;
   }
-  req.tenant = tenant;
+  // The session-cookie door revalidates exactly as `requireTenant` does — a
+  // membership deactivated since the cookie was sealed is refused, and a stale
+  // role is corrected. Without this the machine-facing routes (/inductions,
+  // /mcp) would honour a leaver's cookie that every other route now rejects.
+  const current = await revalidateTenant(tenant);
+  if (!current) {
+    unauthenticated();
+    return;
+  }
+  req.tenant = current;
   next();
 }

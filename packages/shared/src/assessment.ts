@@ -28,6 +28,7 @@
 
 import type { FormField, FormFieldType } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
+import type { AssessmentWorkflow } from './workflow.js';
 
 /**
  * The routes through an assessment tool.
@@ -47,6 +48,46 @@ export type AssessmentPathway = (typeof ASSESSMENT_PATHWAYS)[number];
  */
 export const PART_KINDS = ['theory', 'practical', 'logbook'] as const;
 export type PartKind = (typeof PART_KINDS)[number];
+
+/**
+ * How a theory part's questions are PRESENTED to a candidate.
+ *
+ * Lives here rather than with the builder's own setup answers because it
+ * outlives the draft: the fill surface reads it off the published tool, long
+ * after the builder session that chose it is gone. A tool that names none is
+ * resolved by `theoryRenderingOf` below — never by a local fallback.
+ */
+export const THEORY_RENDERINGS = ['one_per_screen', 'stacked'] as const;
+export type TheoryRendering = (typeof THEORY_RENDERINGS)[number];
+
+/**
+ * How a tool that names no rendering presents its theory.
+ *
+ * `one_per_screen`, and this reverses the previous answer. Two defaults
+ * disagreed: the builder's setup answers have always started at
+ * `one_per_screen`, while a stored manifest naming nothing resolved to
+ * `stacked` — "what every theory part has always rendered as". So an author
+ * who never touched the toggle chose paged and shipped stacked, and the only
+ * way to get the product's own default was to toggle it off and on again.
+ *
+ * `stacked` remains authorable and is now the value worth STORING, since it is
+ * the one that differs from the default.
+ */
+export const DEFAULT_THEORY_RENDERING: TheoryRendering = 'one_per_screen';
+
+/**
+ * A tool's theory rendering, resolved.
+ *
+ * One rule, because the API serves this to the fill surface and the builder
+ * previews it: two `?? 'stacked'` fallbacks in different files is how a
+ * candidate's screen and an author's preview come to disagree about the same
+ * assessment.
+ */
+export function theoryRenderingOf(
+  manifest: Pick<AssessmentToolManifest, 'theoryRendering'>,
+): TheoryRendering {
+  return manifest.theoryRendering ?? DEFAULT_THEORY_RENDERING;
+}
 
 /** The two outcomes the printed paper offers. There is no third. */
 export const PART_OUTCOMES = ['satisfactory', 'not_satisfactory'] as const;
@@ -78,7 +119,19 @@ export type NotSatisfactoryDisposition = (typeof NS_DISPOSITIONS)[number];
  * the product unable to answer "what is waiting on me", which is the one
  * question an assessor opens it to ask.
  */
-export const CASE_STATES = ['open', 'awaiting_sign_off', 'competent', 'closed'] as const;
+export const CASE_STATES = [
+  'open',
+  'awaiting_sign_off',
+  'competent',
+  'closed',
+  /*
+    Abandoned because the candidate was deactivated, and retained as history
+    along with anything already signed on it. Distinct from `closed` because a
+    closed case reads as one that finished, and a returner begins that
+    assessment as a NEW case rather than resuming this one.
+  */
+  'invalidated',
+] as const;
 export type AssessmentCaseState = (typeof CASE_STATES)[number];
 
 /**
@@ -87,8 +140,18 @@ export type AssessmentCaseState = (typeof CASE_STATES)[number];
  * Exists because the single state writer used to stamp `closedAt` on anything
  * that was not `open` — a ternary that silently dates a live case the moment a
  * fourth, non-terminal state exists. Ask this instead of comparing to 'open'.
+ *
+ * `invalidated` belongs here even though it is not an outcome anyone wanted: the
+ * candidate has left, nobody will work it again, and `closedAt` dates the
+ * abandonment. What distinguishes it from `closed` is its own state value, NOT
+ * its terminality — and treating it as in-flight would have every sweep over
+ * live work pick it up, re-creating assessments for somebody who is gone.
  */
-export const TERMINAL_CASE_STATES: readonly AssessmentCaseState[] = ['competent', 'closed'];
+export const TERMINAL_CASE_STATES: readonly AssessmentCaseState[] = [
+  'competent',
+  'closed',
+  'invalidated',
+];
 
 export function isTerminalCaseState(state: AssessmentCaseState): boolean {
   return TERMINAL_CASE_STATES.includes(state);
@@ -154,6 +217,37 @@ export interface AssessmentPart {
    * part has no must-pass-entirely set.
    */
   mandatoryFieldIds?: string[];
+
+  /**
+   * This part's own printed verdict pair — "The Candidate's responses were:
+   * ☐ Satisfactory  ☐ Not Satisfactory".
+   *
+   * WRITTEN FROM THE MARKING, NOT BY THE ASSESSOR. On a fully-keyed theory part
+   * the verdict is arithmetic: every mandatory question correct is satisfactory
+   * and anything less is not. An assessor ticking that box by hand is
+   * transcribing a sum the machine already did, thirty questions at a time, and
+   * a transcription is a place to be wrong.
+   *
+   * TWO MARKS RATHER THAN ONE BOOLEAN, for the same reason the coaching pair is
+   * two: both answers are positive statements printed as their own box, and
+   * encoding "not satisfactory" as the absence of a tick makes it
+   * indistinguishable from a part nobody marked.
+   */
+  outcomeSatisfactory?: DeclaredMark;
+  outcomeNotSatisfactory?: DeclaredMark;
+
+  /**
+   * Where "Detail further action" is written when this part is NOT
+   * satisfactory — the questions the candidate got wrong.
+   *
+   * A field id rather than a `DeclaredMark`, because the value is derived from
+   * the marking rather than declared: which questions were missed is not
+   * knowable when the tool is authored.
+   *
+   * Nothing is written on a satisfactory part. An empty box beside a passed
+   * assessment is correct; "None" would be a sentence nobody wrote.
+   */
+  furtherActionFieldId?: string;
 }
 
 /**
@@ -200,6 +294,22 @@ export interface AssessmentToolManifest {
    */
   candidateNameFieldId?: string;
   /**
+   * Who does what, and in what order — see `workflow.ts`.
+   *
+   * Optional, and absent on every tool authored before it existed. A tool
+   * without one behaves exactly as it always has: `workflowOf` synthesises a
+   * section per part in document order, so nothing changes until somebody
+   * configures it.
+   */
+  workflow?: AssessmentWorkflow;
+  /**
+   * How a theory part's questions are presented — see `THEORY_RENDERINGS`.
+   *
+   * Absent means `stacked`, which is what every theory part rendered as before
+   * this existed, so no stored tool changes meaning by gaining the property.
+   */
+  theoryRendering?: TheoryRendering;
+  /**
    * The front page's certification block.
    *
    * Manifest-level, not part-level, because the front page belongs to no part:
@@ -220,6 +330,23 @@ export interface AssessmentToolManifest {
     signedDateFieldId?: string;
     /** The overall "satisfactory" mark, written when the case reaches competent. */
     overallSatisfactory?: DeclaredMark;
+    /**
+     * The "Candidate not yet Competent" box — the negative half of the printed
+     * Assessment Result pair.
+     *
+     * A DIFFERENT GATE FROM ITS PARTNER, deliberately. `overallSatisfactory` is
+     * the certification and prints only once an assessor has SIGNED: a
+     * competency claim on a record nobody signed is the one thing this export
+     * must never manufacture. "Not yet competent" certifies nothing — it is the
+     * absence of a claim — so it prints as soon as the case is RESOLVED and not
+     * competent, which is the state a failed case actually ends in, often with
+     * no sign-off ever taking place.
+     *
+     * Without this the pair was half-written: a passed case ticked Competent
+     * and a failed one ticked nothing, so the two outcomes were told apart only
+     * by a box that was empty either way until somebody signed.
+     */
+    overallNotSatisfactory?: DeclaredMark;
     /**
      * The "more coaching required" pair. Exactly one is written on a RESOLVED
      * case, chosen from the parts' FINAL outcomes — a part that failed once and
@@ -286,6 +413,51 @@ export function requiredParts(
   pathway: AssessmentPathway,
 ): AssessmentPart[] {
   return orderedParts(manifest).filter((p) => p.pathways.includes(pathway));
+}
+
+/**
+ * A tool's parts rule (U9): Location id → the part keys required at that
+ * Location. Keyed by id, not name, so a Location rename cannot silently detach a
+ * rule from the site it governs.
+ */
+export type LocationPartKeys = Readonly<Record<string, readonly string[]>>;
+
+/**
+ * The part keys required for a person placed at `locationIds`, given a tool's
+ * parts rule (R74, R75, R80, R81).
+ *
+ * A Location the rule LISTS requires exactly its listed keys; a Location the
+ * rule does not mention requires every part `allPartKeys` names — whether no
+ * rule was ever configured or the Location postdates the tool (R75). The answer
+ * is the union across every Location held, returned in `allPartKeys` order, so a
+ * person at several sites is assessed ONCE against the combined set rather than
+ * once per site (R80, R81).
+ *
+ * The absence rule is the safe direction: the worst outcome of a missing entry
+ * is a longer assessment, never a skipped part. A person with no Location at all
+ * narrows nothing and is therefore required every part, on the same reasoning.
+ * A listed key the manifest no longer declares is dropped rather than surfaced.
+ */
+export function resolveLocationParts(
+  allPartKeys: readonly string[],
+  rule: LocationPartKeys,
+  locationIds: readonly string[],
+): string[] {
+  const all = [...allPartKeys];
+  if (locationIds.length === 0) return all;
+
+  const required = new Set<string>();
+  for (const locationId of locationIds) {
+    const listed = rule[locationId];
+    if (listed === undefined) {
+      // No rule at this Location — every part applies (R75), which is already
+      // the whole set, so nothing the other Locations add can widen it.
+      return all;
+    }
+    for (const key of listed) required.add(key);
+  }
+  // Document order, and only keys the manifest still declares.
+  return all.filter((key) => required.has(key));
 }
 
 /**
@@ -440,6 +612,9 @@ export function validateManifest(
       ['assessorNameFieldId', part.assessorNameFieldId],
       ['signedDateFieldId', part.signedDateFieldId],
       ['checklistMark', part.checklistMark?.fieldId],
+      ['outcomeSatisfactory', part.outcomeSatisfactory?.fieldId],
+      ['outcomeNotSatisfactory', part.outcomeNotSatisfactory?.fieldId],
+      ['furtherActionFieldId', part.furtherActionFieldId],
     ] as const) {
       if (id && !fieldIds.has(id)) {
         problems.push(`Part "${part.key}" names ${what} "${id}", which is not in this version.`);
@@ -460,10 +635,61 @@ export function validateManifest(
     if (prior) problems.push(`Field "${id}" is claimed by both ${prior} and ${by}.`);
     else claimed.set(id, by);
   };
+
+  /**
+   * Claim a satisfactory / not-satisfactory pair, allowing the two halves to
+   * share one printed cell.
+   *
+   * Sharing is legitimate and common — a single ✓/✗ box says both things — and
+   * safe, because exactly one half is ever written. The failure it CAN hide is
+   * the two halves carrying the same value, which prints a pass and a fail
+   * identically: an auditor reading the record could not tell which happened,
+   * and neither could anyone re-deriving it.
+   */
+  const claimVerdictPair = (
+    yes: DeclaredMark | undefined,
+    no: DeclaredMark | undefined,
+    what: string,
+  ) => {
+    const sameCell =
+      yes && no && yes.fieldId === no.fieldId && yes.rowKey === no.rowKey && yes.columnKey === no.columnKey;
+    if (sameCell) {
+      if (yes.value === no.value) {
+        problems.push(
+          `${what} writes the same value for both outcomes, so a pass and a fail would print identically.`,
+        );
+      }
+      claim(yes.fieldId, what);
+      return;
+    }
+    claim(yes?.fieldId, `${what} (satisfactory)`);
+    claim(no?.fieldId, `${what} (not satisfactory)`);
+  };
   for (const part of parts) {
     claim(part.assessorNameFieldId, `part "${part.key}" assessorNameFieldId`);
     claim(part.signedDateFieldId, `part "${part.key}" signedDateFieldId`);
     claim(part.checklistMark?.fieldId, `part "${part.key}" checklistMark`);
+    /*
+      The verdict pair is claimed as ONE unit, and that is not a shortcut.
+
+      Two printed shapes are both real. A form may print two boxes — "☐
+      Satisfactory ☐ Not Satisfactory" — which is two fields and two marks. Or
+      it may print ONE ✓/✗ cell whose tick means satisfactory and whose cross
+      means not, which extraction reads as a single `check_cross` field and
+      which both halves therefore name. Claiming each half separately would
+      reject that second shape as a self-collision, refusing the exact layout
+      the paper this was built for actually uses.
+
+      Exactly one half is ever written, so sharing a field cannot clobber
+      anything. What it CAN do is carry the same value twice, which would print
+      a pass and a fail identically — that is checked instead.
+    */
+    claimVerdictPair(
+      part.outcomeSatisfactory,
+      part.outcomeNotSatisfactory,
+      `part "${part.key}" verdict`,
+    );
+    claim(part.furtherActionFieldId, `part "${part.key}" furtherActionFieldId`);
   }
 
   /*
@@ -473,7 +699,12 @@ export function validateManifest(
   */
   const marksNamingCells: [string, DeclaredMark | undefined][] = [
     ...parts.map((p) => [`part "${p.key}" checklistMark`, p.checklistMark] as [string, DeclaredMark | undefined]),
+    ...parts.flatMap((p) => [
+      [`part "${p.key}" outcomeSatisfactory`, p.outcomeSatisfactory],
+      [`part "${p.key}" outcomeNotSatisfactory`, p.outcomeNotSatisfactory],
+    ] as [string, DeclaredMark | undefined][]),
     ['signOff.overallSatisfactory', manifest.signOff?.overallSatisfactory],
+    ['signOff.overallNotSatisfactory', manifest.signOff?.overallNotSatisfactory],
     ['signOff.moreCoachingRequiredYes', manifest.signOff?.moreCoachingRequiredYes],
     ['signOff.moreCoachingRequiredNo', manifest.signOff?.moreCoachingRequiredNo],
   ];
@@ -495,6 +726,7 @@ export function validateManifest(
       ['signOff.signedDateFieldId', signOff.signedDateFieldId],
       ['signOff.assessorSignatureFieldId', signOff.assessorSignatureFieldId],
       ['signOff.overallSatisfactory', signOff.overallSatisfactory?.fieldId],
+      ['signOff.overallNotSatisfactory', signOff.overallNotSatisfactory?.fieldId],
       ['signOff.moreCoachingRequiredYes', signOff.moreCoachingRequiredYes?.fieldId],
       ['signOff.moreCoachingRequiredNo', signOff.moreCoachingRequiredNo?.fieldId],
     ] as const) {

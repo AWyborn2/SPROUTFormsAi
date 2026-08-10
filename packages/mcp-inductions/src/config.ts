@@ -13,6 +13,15 @@ export interface McpConfig {
   apiUrl: string;
   /** An org-scoped API key issued from the app's API keys screen. */
   apiKey: string;
+  /**
+   * Base URL to compose CALLER-FACING links from, when it differs from
+   * `apiUrl`. The stdio server never sets this — its `apiUrl` is already the
+   * public base the operator configured. The HTTP mount on the API does: its
+   * `apiUrl` is the API's own loopback address, and a document link composed
+   * from that reaches the caller as `http://127.0.0.1:8000/...` — a URL only
+   * the API host itself could ever fetch.
+   */
+  publicApiUrl?: string;
 }
 
 export class ConfigError extends Error {

@@ -164,3 +164,39 @@ describe('new roles', () => {
     }
   });
 });
+
+describe('profiles category (R33, R34, R35)', () => {
+  it('carries a profiles grant for every access level', () => {
+    for (const role of ROLES) {
+      expect(DEFAULT_ROLE_PERMISSIONS[role].profiles).toBeDefined();
+    }
+  });
+
+  it('admits an assessor to view profiles and approve documents, but not edit (R35)', () => {
+    const p = DEFAULT_ROLE_PERMISSIONS.assessor.profiles;
+    expect(matrixAllows(DEFAULT_ROLE_PERMISSIONS.assessor, 'profiles', 'view')).toBe(true);
+    expect(matrixAllows(DEFAULT_ROLE_PERMISSIONS.assessor, 'profiles', 'approve')).toBe(true);
+    expect(p?.edit).toBe(false);
+  });
+
+  it('grants a candidate nothing through the category — own-record access is outside it (R36)', () => {
+    expect(matrixAllows(DEFAULT_ROLE_PERMISSIONS.candidate, 'profiles', 'view')).toBe(false);
+    expect(matrixAllows(DEFAULT_ROLE_PERMISSIONS.candidate, 'profiles', 'approve')).toBe(false);
+  });
+
+  it('leaves every pre-existing category denying the new approve action (R34)', () => {
+    for (const role of ROLES) {
+      for (const category of ['forms', 'submissions', 'team', 'billing', 'audit', 'assessments'] as const) {
+        expect(matrixAllows(DEFAULT_ROLE_PERMISSIONS[role], category, 'approve')).toBe(false);
+      }
+    }
+  });
+
+  it('never grants export through the category — export stays Admin-only (R34)', () => {
+    // The profiles category grants view/edit/approve; exporting a member's
+    // record is not one of its switches, so no level is granted it here.
+    for (const role of ROLES) {
+      expect(matrixAllows(DEFAULT_ROLE_PERMISSIONS[role], 'profiles', 'export')).toBe(false);
+    }
+  });
+});

@@ -7,22 +7,33 @@ import {
   ASSESSMENT_PATHWAYS,
   NS_DISPOSITIONS,
   caseProgress,
-  competencyStatus,
+  competencyCurrency,
   countsAsHeld,
   fieldsInPart,
   fieldsInSection,
   isCaseCompetent,
   isTerminalCaseState,
+  isSelfMarking,
   moreCoachingRequired,
   type AssessmentCaseState,
   logbookRows,
   markTheory,
+  ACCESS_LEVELS,
+  VALUE_SOURCES,
+  WORKFLOW_ROLES,
   orderedParts,
   requiredParts,
   resolveAssessorRequirements,
+  validateWorkflow,
+  hiddenFieldIds,
+  sectionForPart,
+  workflowOf,
+  writableFieldIds,
+  type WorkflowRole,
   streamCheckWarning,
   totalLoggedHours,
   stripMarkingSecrets,
+  theoryRenderingOf,
   validateAnswerKeys,
   validateManifest,
   type AssessmentPart,
@@ -32,11 +43,14 @@ import {
   type FormField,
   type RepeatingRowValue,
   type SubmissionValue,
+  THEORY_RENDERINGS,
 } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission, permissionScope } from '../lib/permissions.js';
+import { heldCompetencyStates } from '../lib/assignment.js';
+import { identifyMember, loadDisplayIdentities } from '../lib/display-identity.js';
 import { recordAudit } from '../audit/record.js';
 import { grantCompetency, revokeGrantsFromCase } from '../lib/competency-grant.js';
 import { CaseExportError, exportCasePdf } from '../pdf/index.js';
@@ -72,6 +86,16 @@ const GATE = [requireTenant, requirePlanFeature('assessments')] as const;
 // ── shared helpers ──────────────────────────────────────────────────────────
 
 type Database = NonNullable<typeof db>;
+
+/*
+  The Admin access level (R73). Declaring the parts rule reads the organisation's
+  Location taxonomy and decides which sections a candidate must complete to be
+  certified, so it sits on the same gate R12 puts on managing that taxonomy —
+  not on the permission that authors a document's wording.
+*/
+function isAdmin(role: string): boolean {
+  return role === 'admin' || role === 'owner';
+}
 
 async function loadTool(database: Database, toolId: string, orgId: string) {
   return (
@@ -253,7 +277,7 @@ async function unmetPrerequisites(
       gaps.push({ competencyId, reason: 'missing' });
       continue;
     }
-    if (!countsAsHeld(competencyStatus(grant, validity, now, 'assessor'))) {
+    if (!countsAsHeld(competencyCurrency(grant, validity, now, 'assessor'))) {
       gaps.push({ competencyId, reason: 'expired' });
     }
   }
@@ -301,6 +325,40 @@ const partSchema = z.object({
   mandatoryFieldIds: z.array(z.string()).optional(),
 });
 
+/**
+ * The configured workflow, as it arrives over HTTP.
+ *
+ * Structure only. Whether it makes SENSE — a section covering a part the tool
+ * does not have, a dependency loop, a field two sections both claim — is
+ * `validateWorkflow`'s job, because those answers need the manifest and the
+ * version's fields, which zod cannot see.
+ */
+const accessLevel = z.enum(ACCESS_LEVELS);
+const fieldAccess = z.union([accessLevel, z.literal('inherit')]);
+
+const workflowSchema = z.object({
+  roles: z.array(z.enum(WORKFLOW_ROLES)).min(1),
+  sections: z.array(
+    z.object({
+      key: z.string().min(1),
+      ordinal: z.number().int().nonnegative(),
+      label: z.string().min(1),
+      partKey: z.string().min(1).optional(),
+      fieldIds: z.array(z.string().min(1)).optional(),
+      access: z.record(z.enum(WORKFLOW_ROLES), accessLevel),
+      fieldAccess: z.record(z.string(), z.record(z.enum(WORKFLOW_ROLES), fieldAccess)).optional(),
+      fieldSource: z.record(z.string(), z.enum(VALUE_SOURCES)).optional(),
+      requires: z.array(z.string().min(1)).optional(),
+    }),
+  ),
+});
+
+/** What may be changed on an existing tool. Everything optional — it is a patch. */
+const updateToolBody = z.object({
+  name: z.string().min(1).optional(),
+  workflow: workflowSchema.optional(),
+});
+
 const toolBody = z.object({
   templateId: z.string().uuid(),
   name: z.string().min(1),
@@ -317,6 +375,19 @@ const toolBody = z.object({
       around.
     */
     candidateNameFieldId: z.string().optional(),
+    /*
+      Who does what, and when. The same trap this file warns about above: a
+      manifest property this schema does not name is silently STRIPPED, so a
+      builder that appeared to save a workflow would discard it and the tool
+      would quietly fall back to the derived default.
+    */
+    workflow: workflowSchema.optional(),
+    /*
+      Named here for the third time for the same reason: a manifest property
+      this schema does not list is silently STRIPPED, so a builder that appeared
+      to save a one-question-per-screen tool would publish a stacked one.
+    */
+    theoryRendering: z.enum(THEORY_RENDERINGS).optional(),
     signOff: z
       .object({
         assessorNameFieldId: z.string().optional(),
@@ -401,6 +472,11 @@ assessmentToolsRouter.post(
         assessorCompetencyIds: parsed.data.assessorCompetencyIds ?? [],
         assessorStreamCompetencyIds: parsed.data.assessorStreamCompetencyIds ?? {},
         awardedCompetencyIds: parsed.data.awardedCompetencyIds ?? [],
+        // The parts rule and the Department classification are declared later,
+        // both behind the Admin gate (U9/U10, R73/R9) — never at create, which
+        // runs on the authoring permission.
+        locationPartKeys: {},
+        departmentId: null,
       })
       .returning();
     if (!row) throw new Error('tool_create_failed: insert returned no row');
@@ -425,40 +501,379 @@ assessmentToolsRouter.get(
       return;
     }
     const tenant = req.tenant!;
-    const rows = await db.query.assessmentTools.findMany({
-      where: eq(schema.assessmentTools.orgId, tenant.orgId),
-    });
+    const [rows, orgLocations] = await Promise.all([
+      db.query.assessmentTools.findMany({ where: eq(schema.assessmentTools.orgId, tenant.orgId) }),
+      db.query.locations.findMany({
+        where: and(eq(schema.locations.orgId, tenant.orgId), eq(schema.locations.status, 'active')),
+        orderBy: (l, { asc }) => [asc(l.name)],
+      }),
+    ]);
+
+    /*
+      Filter by Department (R9), if asked. An UNCLASSIFIED tool (department_id
+      null) appears in EVERY Department filter (R10, R11) so it cannot be
+      silently missed — that is `dept === asked || dept === null`, the null
+      standing for "no Department yet", not "every Department". Applied here
+      rather than in the query so the null-appears-everywhere rule reads in one
+      place; the per-org tool list is small.
+    */
+    const filterDept = typeof req.query.departmentId === 'string' ? req.query.departmentId : null;
+    const visible = filterDept
+      ? rows.filter((t) => t.departmentId === filterDept || t.departmentId === null)
+      : rows;
+
     res.json(
-      rows.map((t) => ({
+      visible.map((t) => ({
         id: t.id,
         name: t.name,
         templateId: t.templateId,
+        departmentId: t.departmentId,
         parts: orderedParts(t.manifest).map((p) => ({ key: p.key, label: p.label, kind: p.kind })),
         /*
-          The location streams this tool's assessor rule distinguishes, so the
-          new-case form can offer them instead of leaving somebody to guess the
-          spelling. Matching is case-insensitive, but "Raw Mats" is not "Raw
-          Materials" under any normalisation, and a stream the tool does not
-          recognise silently contributes no requirement.
-
-          Names only, never the competency ids behind them: which qualification
-          authorises which site is not something the case form needs, and this
-          list is served to anyone who may open a case.
+          The organisation's Locations, offered on the new-case form so a case is
+          placed by choosing from the managed list rather than typing a stream
+          name (R77). The assessor rule adds requirements only at the Locations
+          it keys, but a case may be assessed at any of the organisation's sites,
+          so the whole active list is offered.
         */
-        locationStreams: Object.keys(t.assessorStreamCompetencyIds ?? {}),
+        locations: orgLocations.map((l) => ({ id: l.id, name: l.name })),
       })),
     );
   }),
 );
 
+/**
+ * One tool, with everything the workflow builder needs to render.
+ *
+ * The manifest AND the current version's fields, in one response. The builder
+ * shows the document on one side and the process on the other, so splitting
+ * them across two round trips would let it draw half a screen against a version
+ * the other half does not describe.
+ *
+ * `workflow` is always present — synthesised from the parts when nobody has
+ * configured one — so the builder never has to invent a starting state, and
+ * what it shows on first open is exactly what the server is already enforcing.
+ */
+assessmentToolsRouter.get(
+  '/:id',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const tool = await loadTool(db, req.params.id!, tenant.orgId);
+    if (!tool) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const [template, orgLocations] = await Promise.all([
+      db.query.formTemplates.findFirst({
+        where: and(
+          eq(schema.formTemplates.id, tool.templateId),
+          eq(schema.formTemplates.orgId, tenant.orgId),
+        ),
+      }),
+      db.query.locations.findMany({
+        where: and(eq(schema.locations.orgId, tenant.orgId), eq(schema.locations.status, 'active')),
+      }),
+    ]);
+    const fields = template?.currentVersionId
+      ? await fieldsForVersion(db, template.currentVersionId)
+      : [];
+
+    const workflow = workflowOf(tool.manifest, fields);
+    const { problems, warnings } = validateWorkflow(workflow, tool.manifest, fields);
+
+    res.json({
+      id: tool.id,
+      name: tool.name,
+      templateId: tool.templateId,
+      /** The Department that classifies this tool, or null for unclassified (R9, R10). */
+      departmentId: tool.departmentId,
+      manifest: tool.manifest,
+      workflow,
+      /*
+        The active Locations the parts rule may distinguish (R76), and the rule
+        as stored (U9). A rule may still name a Location since retired (R118), so
+        the editor merges those keys with this list rather than assuming every
+        key appears here.
+      */
+      locations: orgLocations.map((l) => ({ id: l.id, name: l.name })),
+      locationPartKeys: tool.locationPartKeys ?? {},
+      /*
+        Whether the stored workflow is real or synthesised. The builder needs to
+        say "this is the default, nobody has configured it" rather than implying
+        somebody chose it — and an author who has genuinely never opened this
+        screen should not be shown a configuration presented as theirs.
+      */
+      workflowIsDefault: tool.manifest.workflow === undefined,
+      /*
+        Answer-key-bearing fields are served to the builder because it is an
+        AUTHORING surface — the same place keys are set. Fill surfaces get
+        `stripMarkingSecrets`; this deliberately does not.
+      */
+      fields,
+      problems,
+      warnings,
+    });
+  }),
+);
+
+/**
+ * Change a tool after creation.
+ *
+ * There has been no way to do this: a tool was write-once, so a manifest
+ * corrected after the fact needed a direct SQL script. That is why the workflow
+ * builder needs this route before it needs a screen.
+ *
+ * Refuses to store a structurally broken workflow. `warnings` come back with a
+ * 200 — an unfinished configuration is a real state to save and return to, and
+ * refusing it would make the builder unusable halfway through a first pass.
+ */
+assessmentToolsRouter.patch(
+  '/:id',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await hasPermission(tenant, 'assessments', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = updateToolBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tool = await loadTool(db, req.params.id!, tenant.orgId);
+    if (!tool) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const manifest: AssessmentToolManifest = parsed.data.workflow
+      ? { ...tool.manifest, workflow: parsed.data.workflow }
+      : tool.manifest;
+
+    const template = await db.query.formTemplates.findFirst({
+      where: and(
+        eq(schema.formTemplates.id, tool.templateId),
+        eq(schema.formTemplates.orgId, tenant.orgId),
+      ),
+    });
+    const fields = template?.currentVersionId
+      ? await fieldsForVersion(db, template.currentVersionId)
+      : [];
+
+    const { problems, warnings } = validateWorkflow(workflowOf(manifest, fields), manifest, fields);
+    if (problems.length > 0) {
+      // Nothing written. A half-applied workflow is worse than a rejected one:
+      // it decides who may write a competency record.
+      res.status(400).json({ error: 'invalid_workflow', problems });
+      return;
+    }
+
+    await db
+      .update(schema.assessmentTools)
+      .set({
+        ...(parsed.data.name ? { name: parsed.data.name } : {}),
+        ...(parsed.data.workflow ? { manifest } : {}),
+      })
+      .where(eq(schema.assessmentTools.id, tool.id));
+
+    await recordAudit(db, tenant, {
+      action: 'Updated assessment tool',
+      target: `${parsed.data.name ?? tool.name}${parsed.data.workflow ? ' (workflow)' : ''}`,
+      category: 'settings',
+      icon: 'clipboard-check',
+    });
+
+    res.json({ id: tool.id, workflow: workflowOf(manifest, fields), warnings });
+  }),
+);
+
+/** A parts rule: Location id → the manifest part keys required at that Location. */
+const locationPartsBody = z.object({
+  locationPartKeys: z.record(z.string().uuid(), z.array(z.string().min(1))),
+});
+
+/**
+ * Declare which of a tool's parts apply at each Location (U9, R71–R75).
+ *
+ * ADMIN, not the authoring permission (R73): the rule decides which sections a
+ * candidate must complete to be certified — a statement about the standard the
+ * organisation holds people to — so it sits on the same gate R12 puts on the
+ * Location taxonomy it reads, which is why this is its own route rather than a
+ * field on the tool PATCH above.
+ *
+ * A Location ABSENT from the map requires every part (R75), so the map is only
+ * the exceptions. A NEW entry must name an active Location (R118), but an entry
+ * already stored for a Location since retired is preserved rather than rejected
+ * — a rule stays with the Location it names.
+ */
+assessmentToolsRouter.patch(
+  '/:id/location-parts',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = locationPartsBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tool = await loadTool(db, req.params.id!, tenant.orgId);
+    if (!tool) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const partKeys = new Set(orderedParts(tool.manifest).map((p) => p.key));
+    const alreadyDeclared = new Set(Object.keys(tool.locationPartKeys ?? {}));
+    const activeLocations = await db.query.locations.findMany({
+      where: and(eq(schema.locations.orgId, tenant.orgId), eq(schema.locations.status, 'active')),
+    });
+    const activeIds = new Set(activeLocations.map((l) => l.id));
+
+    for (const [locationId, keys] of Object.entries(parsed.data.locationPartKeys)) {
+      // R118 / R16: a rule can only be ADDED for an active Location. One already
+      // declared for a since-retired Location is allowed through so re-saving the
+      // map does not strip it.
+      if (!activeIds.has(locationId) && !alreadyDeclared.has(locationId)) {
+        res.status(400).json({ error: 'location_not_found', locationId });
+        return;
+      }
+      const unknown = keys.find((k) => !partKeys.has(k));
+      if (unknown) {
+        res.status(400).json({ error: 'unknown_part', partKey: unknown });
+        return;
+      }
+    }
+
+    await db
+      .update(schema.assessmentTools)
+      .set({ locationPartKeys: parsed.data.locationPartKeys })
+      .where(eq(schema.assessmentTools.id, tool.id));
+
+    await recordAudit(db, tenant, {
+      action: 'Set assessment location parts rule',
+      target: tool.name,
+      category: 'settings',
+      icon: 'clipboard-check',
+    });
+
+    res.json({ id: tool.id, locationPartKeys: parsed.data.locationPartKeys });
+  }),
+);
+
+/** Classify a tool with a Department, or clear it (U10, R9, R10). Null unclassifies. */
+const classificationBody = z.object({ departmentId: z.string().uuid().nullable() });
+
+/**
+ * Set (or clear) which Department classifies a tool (U10, R9).
+ *
+ * ADMIN, like the parts rule and for the same reason (R73's sibling): it reads
+ * the Department taxonomy R12 gates. A tool carries at most one Department, so
+ * this replaces rather than adds. Only an ACTIVE Department can be assigned
+ * (R10/R16 admit only active values); null clears it to unclassified, which is
+ * not "every Department" but "no Department yet" (R10) and shows in every filter
+ * (R11). A Department already on the tool and since retired is left alone because
+ * this endpoint is only reached to CHANGE the classification (R117's precondition).
+ */
+assessmentToolsRouter.patch(
+  '/:id/classification',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = classificationBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tool = await loadTool(db, req.params.id!, tenant.orgId);
+    if (!tool) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    if (parsed.data.departmentId) {
+      const dept = await db.query.departments.findFirst({
+        where: and(
+          eq(schema.departments.id, parsed.data.departmentId),
+          eq(schema.departments.orgId, tenant.orgId),
+          eq(schema.departments.status, 'active'),
+        ),
+      });
+      if (!dept) {
+        res.status(400).json({ error: 'department_not_found' });
+        return;
+      }
+    }
+
+    await db
+      .update(schema.assessmentTools)
+      .set({ departmentId: parsed.data.departmentId })
+      .where(eq(schema.assessmentTools.id, tool.id));
+
+    await recordAudit(db, tenant, {
+      action: parsed.data.departmentId ? 'Classified assessment tool' : 'Unclassified assessment tool',
+      target: tool.name,
+      category: 'settings',
+      icon: 'clipboard-check',
+    });
+
+    res.json({ id: tool.id, departmentId: parsed.data.departmentId });
+  }),
+);
+
 // ── cases ───────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve Location ids to their current names — for the assessor warning, for
+ * display, and for the answer the assessment document reads for its own stream
+ * question (R78). Read live so a rename reaches everywhere at once (R136).
+ */
+async function locationNamesByIdFor(
+  database: NonNullable<typeof db>,
+  orgId: string,
+  ids: readonly (string | null | undefined)[],
+): Promise<Map<string, string>> {
+  const unique = [...new Set(ids.filter((x): x is string => Boolean(x)))];
+  if (unique.length === 0) return new Map();
+  const rows = await database.query.locations.findMany({
+    where: and(eq(schema.locations.orgId, orgId), inArray(schema.locations.id, unique)),
+  });
+  return new Map(rows.map((r) => [r.id, r.name]));
+}
 
 const createCaseBody = z.object({
   toolId: z.string().uuid(),
   candidateUserId: z.string().uuid(),
   assessorUserId: z.string().uuid().optional(),
   pathway: z.enum(ASSESSMENT_PATHWAYS),
-  locationStream: z.string().optional(),
+  // A managed Location id chosen from the organisation's list, never typed (R77).
+  locationId: z.string().uuid().optional(),
   rplJustification: z.string().min(1).optional(),
 });
 
@@ -480,8 +895,15 @@ assessmentCasesRouter.post(
       res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
       return;
     }
-    const { toolId, candidateUserId, pathway, locationStream, rplJustification } = parsed.data;
-    const assessorUserId = parsed.data.assessorUserId ?? tenant.userId;
+    const { toolId, candidateUserId, pathway, locationId, rplJustification } = parsed.data;
+    /*
+      A manual create that NAMES an assessor keeps them; one that names none
+      leaves the case UNOWNED, in the shared queue (U13, R61) — it no longer
+      substitutes the creator. R61 is about not silently owning a case nobody
+      chose to own; naming an assessor is still a real choice and is honoured.
+      This matches the automatic path, which already creates unowned cases.
+    */
+    const assessorUserId = parsed.data.assessorUserId ?? null;
 
     // RPL waives the logged-hours parts, so the reason it was granted is the
     // only record of WHY they were skipped. Without it the case looks
@@ -495,6 +917,22 @@ assessmentCasesRouter.post(
     if (!tool) {
       res.status(404).json({ error: 'tool_not_found' });
       return;
+    }
+
+    // A Location, if given, must be one of the organisation's active values
+    // (R16, R77). A value chosen from a list cannot be a near-miss.
+    if (locationId) {
+      const loc = await db.query.locations.findFirst({
+        where: and(
+          eq(schema.locations.id, locationId),
+          eq(schema.locations.orgId, tenant.orgId),
+          eq(schema.locations.status, 'active'),
+        ),
+      });
+      if (!loc) {
+        res.status(400).json({ error: 'location_not_found' });
+        return;
+      }
     }
 
     const template = await db.query.formTemplates.findFirst({
@@ -530,15 +968,21 @@ assessmentCasesRouter.post(
     */
     const assessorNeeds = resolveAssessorRequirements(
       { always: tool.assessorCompetencyIds, byStream: tool.assessorStreamCompetencyIds },
-      locationStream,
+      locationId,
     );
 
-    const [candidateGaps, assessorGaps] = await Promise.all([
+    const [candidateGaps, assessorGaps, ruleLocationNames] = await Promise.all([
       unmetPrerequisites(db, tenant.orgId, candidateUserId, tool.candidatePrerequisiteIds),
       unmetPrerequisites(db, tenant.orgId, assessorUserId, assessorNeeds.required),
+      locationNamesByIdFor(db, tenant.orgId, assessorNeeds.knownLocationIds),
     ]);
-    // A partial check reported as a complete one is worse than saying so.
-    const streamWarning = streamCheckWarning(assessorNeeds, locationStream);
+    // A partial check reported as a complete one is worse than saying so. The
+    // warning names the Locations the tool has a rule for, so an admin can set
+    // one — the ids the rule is keyed by are not human-readable.
+    const streamWarning = streamCheckWarning(
+      assessorNeeds,
+      assessorNeeds.knownLocationIds.map((id) => ruleLocationNames.get(id) ?? id),
+    );
     const warnings = [
       ...candidateGaps.map((gap) => describeGap('candidate', gap)),
       ...assessorGaps.map((gap) => describeGap('assessor', gap)),
@@ -553,7 +997,7 @@ assessmentCasesRouter.post(
         candidateUserId,
         assessorUserId,
         pathway,
-        locationStream: locationStream ?? null,
+        locationId: locationId ?? null,
         currentVersionId: template.currentVersionId,
         rplJustification: rplJustification ?? null,
         prerequisiteWarnings: warnings,
@@ -626,6 +1070,8 @@ assessmentCasesRouter.get(
         candidateUserId: c.candidateUserId,
         pathway: c.pathway,
         state: c.state,
+        /** Null on a pooled case — the table shows it as unassigned (U13). */
+        assessorUserId: c.assessorUserId,
         createdAt: c.createdAt,
       })),
     );
@@ -733,6 +1179,14 @@ assessmentCasesRouter.get(
       where: inArray(schema.users.id, candidateIds),
     });
     const nameById = new Map(candidates.map((u) => [u.id, u.name]));
+    /*
+      R61: the identifier beside the name is read LIVE from the profile on every
+      render and is never captured onto the case. That is the deliberate
+      difference from the printed name a signed attempt keeps (R60) — a wrongly
+      typed employee number, once corrected, corrects itself on every case it
+      appears on rather than needing them rewritten.
+    */
+    const caseIdentities = await loadDisplayIdentities(db, tenant.orgId, candidateIds);
 
     // Every attempt in the org in ONE query, grouped by case in code. A query
     // per case is the N+1 this endpoint exists to replace: a site with three
@@ -799,7 +1253,9 @@ assessmentCasesRouter.get(
           id: c.id,
           toolName: tool?.name ?? '',
           candidateUserId: c.candidateUserId,
-          candidateName: nameById.get(c.candidateUserId) ?? '',
+          candidateName: identifyMember(caseIdentities, c.candidateUserId, nameById.get(c.candidateUserId) ?? '').name,
+          /** Read live from the profile, never captured onto the case (R61). */
+          candidateIdentifier: identifyMember(caseIdentities, c.candidateUserId, '').identifier,
           pathway: c.pathway,
           state: c.state,
           currentPartKey: current?.part.key ?? null,
@@ -824,6 +1280,90 @@ assessmentCasesRouter.get(
         };
       }),
     );
+  }),
+);
+
+/**
+ * The shared pool (U13, R62–R64): OPEN cases nobody owns, at Locations the
+ * reading assessor is eligible to assess. Eligibility is the tool's assessor
+ * requirement for the case's Location, read through the same resolver creation
+ * and sign-off use — not a new rule. Working a case never claims it, so it stays
+ * here for every eligible assessor until it is signed off.
+ *
+ * Declared before `/:id` so `queue` is not read as a case id — the same reason
+ * `/progress` is declared above.
+ */
+assessmentCasesRouter.get(
+  '/queue',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    // The pool is an assessor surface. A candidate's own-scope edit resolves
+    // false, so their own cases never leak into it.
+    if (!(await hasPermission(tenant, 'assessments', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+
+    const [pooled, org, held] = await Promise.all([
+      db.query.assessmentCases.findMany({
+        where: and(
+          eq(schema.assessmentCases.orgId, tenant.orgId),
+          eq(schema.assessmentCases.state, 'open'),
+          isNull(schema.assessmentCases.assessorUserId),
+        ),
+        orderBy: (c) => [desc(c.createdAt)],
+      }),
+      db.query.organizations.findFirst({ where: eq(schema.organizations.id, tenant.orgId) }),
+      heldCompetencyStates(db, tenant.orgId, tenant.userId, new Date()),
+    ]);
+    const heldNow = new Set(held.filter((h) => countsAsHeld(h)).map((h) => h.competencyId));
+    const overdueDays = org?.pooledCaseOverdueDays ?? 14;
+
+    const toolIds = [...new Set(pooled.map((c) => c.toolId))];
+    const tools = toolIds.length
+      ? await db.query.assessmentTools.findMany({ where: inArray(schema.assessmentTools.id, toolIds) })
+      : [];
+    const toolById = new Map(tools.map((t) => [t.id, t]));
+    const locationIds = [
+      ...new Set(pooled.map((c) => c.locationId).filter((id): id is string => Boolean(id))),
+    ];
+    const locationNames = await locationNamesByIdFor(db, tenant.orgId, locationIds);
+
+    const now = Date.now();
+    const items = pooled.flatMap((c) => {
+      const tool = toolById.get(c.toolId);
+      if (!tool) return [];
+      const needs = resolveAssessorRequirements(
+        { always: tool.assessorCompetencyIds, byStream: tool.assessorStreamCompetencyIds },
+        c.locationId,
+      );
+      // Eligible iff the reader holds every competency the tool needs at this
+      // case's Location, current — the create/sign-off rule, read here (R64).
+      if (!needs.required.every((id) => heldNow.has(id))) return [];
+
+      // Overdue is DERIVED from age and the org threshold — nothing is stamped on
+      // the case, so a change to the threshold re-dates every pooled case (R63).
+      const ageDays = Math.floor((now - c.createdAt.getTime()) / 86_400_000);
+      return [
+        {
+          id: c.id,
+          toolName: tool.name,
+          candidateUserId: c.candidateUserId,
+          pathway: c.pathway,
+          locationId: c.locationId,
+          locationName: c.locationId ? (locationNames.get(c.locationId) ?? null) : null,
+          createdAt: c.createdAt,
+          ageDays,
+          overdue: ageDays >= overdueDays,
+        },
+      ];
+    });
+    res.json(items);
   }),
 );
 
@@ -878,6 +1418,15 @@ assessmentCasesRouter.get(
     const candidate = await db.query.users.findFirst({
       where: eq(schema.users.id, row.candidateUserId),
     });
+    // R61: live, never captured. See the list route above for why.
+    const detailIdentity = identifyMember(
+      await loadDisplayIdentities(db, tenant.orgId, [row.candidateUserId]),
+      row.candidateUserId,
+      candidate?.name ?? '',
+    );
+    const locationName = row.locationId
+      ? ((await locationNamesByIdFor(db, tenant.orgId, [row.locationId])).get(row.locationId) ?? null)
+      : null;
 
     res.json({
       id: row.id,
@@ -885,10 +1434,13 @@ assessmentCasesRouter.get(
       toolName: tool.name,
       appeals: appeals.map((c) => ({ id: c.id, state: c.state, createdAt: c.createdAt })),
       candidateUserId: row.candidateUserId,
-      candidateName: candidate?.name ?? '',
+      candidateName: detailIdentity.name,
+      /** Read live from the profile, never captured onto the case (R61). */
+      candidateIdentifier: detailIdentity.identifier,
       assessorUserId: row.assessorUserId,
       pathway: row.pathway,
-      locationStream: row.locationStream,
+      locationId: row.locationId,
+      locationName,
       state: row.state,
       currentVersionId: row.currentVersionId,
       prerequisiteWarnings: row.prerequisiteWarnings,
@@ -914,6 +1466,10 @@ assessmentCasesRouter.get(
         dispositionReason: a.dispositionReason,
         templateVersionId: a.templateVersionId,
         signedAt: a.signedAt,
+        /** Who marked it (U15) — null until it is marked; 'automatic' names nobody. */
+        markerKind: a.markerKind,
+        /** Any assessor-eligibility shortfall recorded when a person marked it (U14). */
+        markingEligibilityWarnings: a.markingEligibilityWarnings,
       })),
     });
   }),
@@ -1145,11 +1701,50 @@ assessmentCasesRouter.get(
 
     const allFields = await fieldsForVersion(db, attempt.templateVersionId);
 
+    /*
+      WHICH PARTY IS ASKING. The candidate on the case is the candidate;
+      anybody else with access to it is acting as the assessor. Derived from the
+      case rather than from the org role, because "assessor" here means "the
+      person on the other side of this assessment", and an admin opening a case
+      to fill in for an assessor is doing exactly that.
+
+      A supervisor is not yet distinguishable — nothing on the case names one —
+      so a workflow that assigns them work resolves to no writable fields rather
+      than to somebody else's. That is the safe direction: a section nobody can
+      currently fill is visible as stuck, where guessing would let the wrong
+      person sign a logbook.
+    */
+    const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
+    // The FIELDS matter here: a question's ✓/✗ cell is declared on the question,
+    // not in the manifest, so `workflowOf` cannot mark it `auto` without them —
+    // and an unmarked cell is one the candidate can press.
+    const section = sectionForPart(workflowOf(manifest, allFields), attempt.partKey);
+    const partFields = fieldsInPart(allFields, manifest, attempt.partKey);
+    const hidden = new Set(hiddenFieldIds(section, partFields, party));
+    const visibleFields = partFields.filter((f) => !hidden.has(f.id));
+
+    // The document's own stream question is answered with the Location's NAME
+    // (R78), resolved live from the case's pointer.
+    const locationName = row.locationId
+      ? ((await locationNamesByIdFor(db, tenant.orgId, [row.locationId])).get(row.locationId) ?? null)
+      : null;
+
     res.json({
       id: attempt.id,
       partKey: attempt.partKey,
       partLabel: part.label,
       partKind: part.kind,
+      /*
+        How this part's theory questions should be presented (U21).
+
+        Read off the tool's manifest rather than decided by the renderer,
+        because the choice was made once by the author in the builder and has to
+        survive to every candidate who opens the assessment. Absent means
+        `stacked`, which is what every theory part rendered as before.
+      */
+      // Resolved, never raw: a manifest naming nothing means the default,
+      // and `?? null` here spelled that as "stacked" on the fill surface.
+      theoryRendering: theoryRenderingOf(manifest),
       attemptNumber: attempt.attemptNumber,
       outcome: attempt.outcome,
       submittedAt: attempt.submittedAt,
@@ -1163,7 +1758,7 @@ assessmentCasesRouter.get(
        * none, because hiding content nobody chose to hide would silently shorten
        * the assessment.
        */
-      locationStream: row.locationStream,
+      locationStream: locationName,
       locationStreamFieldId: manifest.locationStreamFieldId ?? null,
       /**
        * The stream question itself, sent as a lookup source because it often
@@ -1176,7 +1771,23 @@ assessmentCasesRouter.get(
         : null,
       minimumHours: part.minimumHours ?? null,
       durationColumnKey: part.durationColumnKey ?? null,
-      fields: stripMarkingSecrets(fieldsInPart(allFields, manifest, attempt.partKey)),
+      fields: stripMarkingSecrets(visibleFields),
+      /*
+        WHAT THIS CALLER MAY CHANGE, decided here rather than on the screen.
+
+        The fill surface renders what it is given and disables what is not in
+        this list; it does not work out scope itself, for the same reason the
+        case screen does not work out part state. A second implementation of the
+        rule deciding who may write a competency record is a rule that can
+        disagree with itself.
+
+        Hidden fields are REMOVED from `fields` above rather than listed here.
+        Read-only and absent are different answers to different questions: a
+        candidate sees the practical criteria they will be marked against — that
+        is the standard being applied to them — and never sees the assessor's
+        private comments.
+      */
+      writableFieldIds: writableFieldIds(section, visibleFields, party),
       values: attempt.values ?? {},
     });
   }),
@@ -1332,9 +1943,83 @@ assessmentCasesRouter.patch(
       return;
     }
 
-    let values = parsed.data.values as Record<string, SubmissionValue>;
     const tool = await loadTool(db, row.toolId, tenant.orgId);
     const part = tool ? orderedParts(tool.manifest).find((p) => p.key === attempt.partKey) : undefined;
+
+    /*
+      AN ATTEMPT MAY ONLY BE WRITTEN WITH ITS OWN PART'S FIELDS.
+
+      This route asked who owned the CASE and never what part the attempt was
+      for, so any field id in the body was accepted. A candidate could open
+      their own theory attempt and post the practical's observation checklist —
+      the criteria their assessor is meant to mark while watching them operate
+      the machine — and it would be stored against the case and merged into the
+      evidence PDF.
+
+      Scoped to the attempt's PINNED version rather than the template's current
+      one: the attempt records what was asked at the time, and a template edited
+      mid-programme must not change what an open attempt is allowed to contain.
+
+      Two shapes matter here. An unchanged echo of a foreign key is tolerated,
+      because the fill screen seeds its state from the stored values and PATCHes
+      the whole map back — rejecting outright would permanently 409 any attempt
+      already holding a stray key, and real data does carry rows under keys the
+      manifest never named. And the merge is onto the stored map rather than a
+      replacement, so a key the client omits is no longer silently deleted —
+      harmless while one party writes an attempt, silent data loss the moment
+      workflow ownership lets two.
+    */
+    const stored = (attempt.values ?? {}) as Record<string, SubmissionValue>;
+    /*
+      AND ONLY WITH THE FIELDS THIS PARTY OWNS.
+
+      Part scoping alone stopped a candidate writing ANOTHER part's checklist.
+      It did not stop them writing THIS part's, which is the case the customer
+      described: the candidate fills nothing in a practical, but the practical
+      is one part and its fields are all in it.
+
+      So the allowed set narrows from "this part's fields" to "the fields the
+      workflow says this party may write". A tool with no workflow authored
+      still resolves to the whole part, so nothing changes until somebody
+      configures it — and `writableFieldIds` also drops `prefill` and `auto`
+      fields, whose values come from the case record or from marking and must
+      not be typed over.
+    */
+    const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
+    /*
+      Read ONCE and passed to both, because `workflowOf` needs the fields too:
+      a question's ✓/✗ cell is declared on the question rather than in the
+      manifest, so without them the derived workflow cannot mark it `auto` and
+      a candidate's typed outcome would be accepted here.
+    */
+    const versionFields = tool ? await fieldsForVersion(db, attempt.templateVersionId) : [];
+    const allowed = tool
+      ? new Set(
+          writableFieldIds(
+            sectionForPart(workflowOf(tool.manifest, versionFields), attempt.partKey),
+            fieldsInPart(versionFields, tool.manifest, attempt.partKey),
+            party,
+          ),
+        )
+      : null;
+
+    let values: Record<string, SubmissionValue> = { ...stored };
+    if (allowed) {
+      const foreign: string[] = [];
+      for (const [key, value] of Object.entries(parsed.data.values)) {
+        if (allowed.has(key)) {
+          values[key] = value as SubmissionValue;
+        } else if (JSON.stringify(value) !== JSON.stringify(stored[key])) {
+          foreign.push(key);
+        }
+      }
+      if (foreign.length > 0) {
+        res.status(403).json({ error: 'field_not_in_part', fields: foreign });
+        return;
+      }
+    } else {
+      values = { ...stored, ...(parsed.data.values as Record<string, SubmissionValue>) };
+    }
 
     let hours: number | null = null;
     let thresholdReached = false;
@@ -1477,6 +2162,13 @@ assessmentCasesRouter.post(
     const candidate = await db.query.users.findFirst({
       where: eq(schema.users.id, row.candidateUserId),
     });
+    // A settled case prints the Location NAME it was signed with (R138); an open
+    // one resolves the current name live from its pointer (R78).
+    const exportLocationName =
+      row.signedOffLocationName ||
+      (row.locationId
+        ? ((await locationNamesByIdFor(db, tenant.orgId, [row.locationId])).get(row.locationId) ?? null)
+        : null);
 
     try {
       const out = await exportCasePdf({
@@ -1484,7 +2176,7 @@ assessmentCasesRouter.post(
         fields: (version.fields ?? []) as FormField[],
         manifest: tool.manifest,
         pathway: row.pathway as AssessmentPathway,
-        locationStream: row.locationStream,
+        locationStream: exportLocationName,
         candidateName: candidate?.name ?? '',
         attempts: attempts.map((a) => ({
           partKey: a.partKey,
@@ -1573,17 +2265,41 @@ assessmentCasesRouter.post(
       return;
     }
 
-    // The conflict constraint, both sides of it: the initiating admin must not
-    // be the disputed assessor, and the appeal must go to a DIFFERENT assessor
-    // — "an independent Assessor" in the source document's words.
-    if (disputed.assessorUserId === tenant.userId) {
+    /*
+      INDEPENDENCE ON A CASE NOBODY OWNS (U13). A pooled case names no assessor,
+      so keying independence off `assessor_user_id` alone would let anyone
+      initiate or hear the appeal on a case they actually marked. The independent
+      set is whoever RECORDED A PART on the disputed case — every person marker on
+      its attempts, plus the named owner if it has one, which keeps a
+      conventionally-owned case behaving exactly as before. Automatic marks name
+      nobody (U15), so they add no one, correctly.
+    */
+    const disputedAttempts = await attemptsFor(db, disputed.id);
+    const recordedBy = new Set<string>(
+      disputedAttempts.map((a) => a.assessorUserId).filter((x): x is string => Boolean(x)),
+    );
+    if (disputed.assessorUserId) recordedBy.add(disputed.assessorUserId);
+    /*
+      The person who SIGNED IT OFF is the assessor of record — the one whose
+      decision the certificate carries — so they are not independent of it
+      either. On a pooled case that self-marked every part no attempt names a
+      person and the case never took an owner, so without this the signer could
+      initiate and hear the appeal of their own certification; it also covers a
+      case whose opener differs from its signer.
+    */
+    if (disputed.signedOffByUserId) recordedBy.add(disputed.signedOffByUserId);
+
+    // Both sides of the conflict: the initiator must not be someone who marked
+    // it, and the appeal must go to someone who did not — "an independent
+    // Assessor" in the source document's words.
+    if (recordedBy.has(tenant.userId)) {
       res.status(409).json({
         error: 'appeal_conflict',
         message: 'The assessor whose decision is disputed cannot initiate the appeal.',
       });
       return;
     }
-    if (parsed.data.assessorUserId === disputed.assessorUserId) {
+    if (recordedBy.has(parsed.data.assessorUserId)) {
       res.status(409).json({
         error: 'appeal_assessor_not_independent',
         message: 'An appeal must be assessed by someone other than the disputed assessor.',
@@ -1612,7 +2328,7 @@ assessmentCasesRouter.post(
         candidateUserId: disputed.candidateUserId,
         assessorUserId: parsed.data.assessorUserId,
         pathway: disputed.pathway,
-        locationStream: disputed.locationStream,
+        locationId: disputed.locationId,
         currentVersionId: template.currentVersionId,
         appealOfCaseId: disputed.id,
         appealReason: parsed.data.reason,
@@ -1728,12 +2444,20 @@ assessmentCasesRouter.post(
     let derivedValues = attempt.values;
     /**
      * Was this verdict COMPUTED from the answer key, or JUDGED by the assessor?
-     * The distinction decides what the record has to demand below.
+     * The distinction decides what the record has to demand below, and who is
+     * recorded as having marked it.
+     *
+     * Decided by keyed-ness, not by `part.kind` (U15): a part marks itself only
+     * when EVERY real question carries a key. A part with any unkeyed question —
+     * a partly-keyed theory part, or a practical demonstration — is judged by a
+     * person, which is what stops a part self-marking against the keys it happens
+     * to hold and passing the rest unchecked.
      */
-    const computed = part.kind === 'theory';
+    const fields = await fieldsForVersion(db, attempt.templateVersionId);
+    // `fieldsForVersion` is UNSTRIPPED — the gate must see answerKey/outcomeTarget.
+    const computed = isSelfMarking(fields, tool.manifest, part.key);
 
     if (computed) {
-      const fields = await fieldsForVersion(db, attempt.templateVersionId);
       const marked = markTheory({ fields, values: attempt.values, part });
       outcome = marked.outcome;
       derivedValues = marked.derivedValues;
@@ -1777,6 +2501,35 @@ assessmentCasesRouter.post(
       }
     }
 
+    /*
+      ELIGIBILITY WARNED AT MARKING (U14, R65). Only a PERSON's mark runs the
+      check — an automatic mark has no marker whose eligibility is at stake. The
+      subject is the person recording THIS attempt, not the case's named assessor:
+      a pooled case names none, and two people may mark different parts. Warn,
+      never block — the mark stands — mirroring the create and sign-off checks. A
+      tool with no assessor requirement resolves to nothing and warns about
+      nothing, with no extra branch.
+    */
+    let markingEligibilityWarnings: string[] = [];
+    if (!computed) {
+      const assessorNeeds = resolveAssessorRequirements(
+        { always: tool.assessorCompetencyIds, byStream: tool.assessorStreamCompetencyIds },
+        row.locationId,
+      );
+      const [assessorGaps, ruleLocationNames] = await Promise.all([
+        unmetPrerequisites(db, tenant.orgId, tenant.userId, assessorNeeds.required),
+        locationNamesByIdFor(db, tenant.orgId, assessorNeeds.knownLocationIds),
+      ]);
+      const streamWarning = streamCheckWarning(
+        assessorNeeds,
+        assessorNeeds.knownLocationIds.map((id) => ruleLocationNames.get(id) ?? id),
+      );
+      markingEligibilityWarnings = [
+        ...assessorGaps.map((gap) => describeGap('assessor', gap)),
+        ...(streamWarning ? [streamWarning] : []),
+      ];
+    }
+
     await db
       .update(schema.assessmentPartAttempts)
       .set({
@@ -1785,8 +2538,17 @@ assessmentCasesRouter.post(
         disposition: outcome === 'not_satisfactory' ? disposition : null,
         dispositionReason: outcome === 'not_satisfactory' ? reason : null,
         belowThresholdReason: parsed.data.belowThresholdReason ?? null,
-        assessorUserId: tenant.userId,
-        assessorName: parsed.data.assessorName ?? '',
+        // Empty for an automatic mark (R65); the person's gaps otherwise (U14).
+        markingEligibilityWarnings,
+        /*
+          Attribution (U15, R70). A COMPUTED mark was made by no person, so it
+          names nobody — `markerKind: 'automatic'` with the user and printed-name
+          columns left null/empty, even on a case that does name an assessor. A
+          JUDGED mark carries the person and the name they marked under.
+        */
+        markerKind: computed ? 'automatic' : 'person',
+        assessorUserId: computed ? null : tenant.userId,
+        assessorName: computed ? '' : (parsed.data.assessorName ?? ''),
         signedAt: new Date(),
       })
       .where(eq(schema.assessmentPartAttempts.id, attempt.id));
@@ -1969,15 +2731,16 @@ assessmentCasesRouter.post(
     */
     const assessorNeeds = resolveAssessorRequirements(
       { always: tool.assessorCompetencyIds, byStream: tool.assessorStreamCompetencyIds },
-      row.locationStream,
+      row.locationId,
     );
-    const assessorGaps = await unmetPrerequisites(
-      db,
-      tenant.orgId,
-      tenant.userId,
-      assessorNeeds.required,
+    const [assessorGaps, ruleLocationNames] = await Promise.all([
+      unmetPrerequisites(db, tenant.orgId, tenant.userId, assessorNeeds.required),
+      locationNamesByIdFor(db, tenant.orgId, [...assessorNeeds.knownLocationIds, row.locationId]),
+    ]);
+    const signOffStreamWarning = streamCheckWarning(
+      assessorNeeds,
+      assessorNeeds.knownLocationIds.map((id) => ruleLocationNames.get(id) ?? id),
     );
-    const signOffStreamWarning = streamCheckWarning(assessorNeeds, row.locationStream);
 
     const signedOffAt = new Date();
     await db
@@ -1986,6 +2749,9 @@ assessmentCasesRouter.post(
         signedOffAt,
         signedOffByUserId: tenant.userId,
         signedOffName: parsed.data.assessorName,
+        // Capture the Location's name as signed (R138), so a later rename does
+        // not change what this settled certificate reads.
+        signedOffLocationName: row.locationId ? (ruleLocationNames.get(row.locationId) ?? '') : '',
         signedOffSignature: parsed.data.signature,
         state: 'competent',
         closedAt: signedOffAt,

@@ -1,4 +1,4 @@
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
   boolean,
   index,
@@ -11,12 +11,12 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import type { PermissionMatrix } from '@formai/shared';
-import { auditCategoryEnum, roleEnum } from './enums.ts';
+import { auditCategoryEnum, roleEnum, trainingRequestStateEnum } from './enums.ts';
 import { organizations, users } from './organizations.ts';
 import { formTemplates } from './forms.ts';
 import { submissions } from './submissions.ts';
 // One-way: assessments.ts imports nothing from here, so this is not a cycle.
-import { assessmentCases } from './assessments.ts';
+import { assessmentCases, assessmentTools } from './assessments.ts';
 
 /** Competencies held by workers (Should-tier gating). */
 export const competencies = pgTable(
@@ -133,6 +133,38 @@ export const competencyHolders = pgTable(
       either lie about the grant date or lose the real expiry.
     */
     expiresAt: timestamp('expires_at', { withTimezone: true }),
+    /*
+      WHETHER THIS GRANT ARRIVED IN A BULK IMPORT RUN (R19).
+
+      R19 waives the certificate against the competencies a migration run loads
+      — a customer bringing in a decade of tickets has no scans of them — while
+      holding a competency recorded on the same person AFTERWARDS to the
+      ordinary rule, so the concession never becomes the standard. Nothing on
+      the record tells those two apart without this.
+
+      A plain nullable timestamp rather than a reference to the run: the import
+      run table belongs to the Organisation Settings artifact, and a foreign key
+      to it would make this schema depend on a table that plan has not created
+      yet. The owed-file list reads only whether it is set.
+
+      Null on every grant the product itself made, which is the existing case.
+    */
+    importedAt: timestamp('imported_at', { withTimezone: true }),
+    /*
+      A LICENCE IS A COMPETENCY, NOT A PROFILE FIELD (R33, R34).
+
+      Class, number, expiry and document have the exact shape this table already
+      handles. Recorded here, a licence inherits expiry dates, grace periods,
+      revocation and a place in every prerequisite and compliance check for free
+      (R35, R36); recorded as three flat fields on a form answer — which is where
+      it lives today — it inherits none of that and expires silently.
+
+      Two columns rather than four: the expiry is `expiresAt` above, used exactly
+      as an imported record uses it, and the document is a `competency_documents`
+      row. Nullable because most competencies are not licences.
+    */
+    licenceClass: text('licence_class'),
+    licenceNumber: text('licence_number'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [
@@ -192,6 +224,19 @@ export const auditLogEntries = pgTable(
     action: text().notNull(),
     target: text().notNull().default(''),
     category: auditCategoryEnum().notNull().default('general'),
+    /*
+      WHICH FIELD this entry covers, as the profile inventory's key (R57, R58).
+      Null on every entry that is not about one field, which is every entry
+      written before this existed.
+
+      Structured rather than parsed out of `target`, because R58 confines
+      sensitive-field entries to Admin and a filter over free text would have to
+      pattern-match the same prose that holds the values it is trying to hide —
+      leaking a date of birth whenever the match missed, and over-hiding ordinary
+      history whenever it matched too much. A column makes the filter a
+      comparison on data.
+    */
+    field: text(),
     icon: text().notNull().default('activity'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
@@ -319,10 +364,108 @@ export const inductionBookingStarters = pgTable(
       .notNull()
       .references(() => submissions.id, { onDelete: 'restrict' }),
     starterName: text('starter_name').notNull(),
+    /*
+      CONFIRMATION lives here, per starter, not on the booking. A booking is
+      tentative until the Thursday gate check says the starter is ready and the
+      seat stands — and that check is per person, so a cohort booking can be
+      partially confirmed. The booking reads as confirmed only when every
+      starter row is.
+
+      Null means unconfirmed, which is accurate for every row that predates the
+      column: no backfill, no destructive change. The actor pair mirrors
+      `bookedByUserId`/`bookedByApiKeyId` on the booking, for the same reason —
+      a machine confirmation stays distinguishable from a human one.
+    */
+    confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+    /** The acting user. For a machine call this is the API key's issuer. */
+    confirmedByUserId: uuid('confirmed_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    /** Set when an agent confirmed it, so machine and human confirmations stay distinguishable. */
+    confirmedByApiKeyId: uuid('confirmed_by_api_key_id').references(() => apiKeys.id, {
+      onDelete: 'set null',
+    }),
   },
   (t) => [
     uniqueIndex('induction_booking_starters_uq').on(t.bookingId, t.submissionId),
     index('induction_booking_starters_submission_idx').on(t.submissionId),
+  ],
+);
+
+/**
+ * A voluntary training request (U22, KTD9's one new table).
+ *
+ * A person asks for an assessment no Role obliges them to hold (R94). The
+ * request is an action on their OWN record — the requester is always the subject
+ * (`userId`), never raised on another's behalf — so the permission matrix does
+ * not gate it (R37). It waits `pending` on the working list until an Admin
+ * approves it (which assigns the tool through the ordinary assignment path) or
+ * declines it; there is no self-service enrolment (R96).
+ */
+export const trainingRequests = pgTable(
+  'training_requests',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** The subject AND requester — the two are the same person (R37). */
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** The assessment tool being asked for — what an approval assigns. */
+    toolId: uuid('tool_id')
+      .notNull()
+      .references(() => assessmentTools.id, { onDelete: 'cascade' }),
+    state: trainingRequestStateEnum().notNull().default('pending'),
+    /** The Admin who approved or declined it; null while pending. */
+    decidedByUserId: uuid('decided_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('training_requests_org_idx').on(t.orgId),
+    index('training_requests_user_idx').on(t.userId),
+    // A person needs at most one open request per tool — a retried click does not
+    // stack duplicates on the working list.
+    uniqueIndex('training_requests_pending_uq')
+      .on(t.userId, t.toolId)
+      .where(sql`${t.state} = 'pending'`),
+  ],
+);
+
+/**
+ * A notice the expiry sweep has already sent (U21, KTD11). Its existence is what
+ * makes the sweep idempotent: a competency inside its notification window is
+ * notified UNLESS a row already records it for that holder and that window, so a
+ * second sweep before the window changes sends nothing twice. The window is keyed
+ * by the EXPIRY DATE — a renewal moves the expiry, opening a fresh window that
+ * may notify again. The row is also the LOGIN delivery route (R98): served to its
+ * holder on their own record, so a person with a login but no reachable email is
+ * still reached.
+ */
+export const sentNotices = pgTable(
+  'sent_notices',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    userId: uuid()
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    competencyId: uuid('competency_id')
+      .notNull()
+      .references(() => competencies.id, { onDelete: 'cascade' }),
+    /** The expiry the notice was about, `YYYY-MM-DD` — the window key (R97). */
+    expiresOn: text('expires_on').notNull(),
+    sentAt: timestamp('sent_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('sent_notices_org_idx').on(t.orgId),
+    index('sent_notices_user_idx').on(t.userId),
+    // One notice per holder per competency per window — the idempotence guard.
+    uniqueIndex('sent_notices_uq').on(t.userId, t.competencyId, t.expiresOn),
   ],
 );
 

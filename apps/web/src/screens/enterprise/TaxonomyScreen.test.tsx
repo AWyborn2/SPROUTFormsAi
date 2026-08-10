@@ -1,0 +1,398 @@
+// @vitest-environment jsdom
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, within } from '@testing-library/react';
+import type { RetirementReview, Taxonomy, TighteningReviewItem } from '../../lib/data/types.js';
+
+const taxonomy: { data: Taxonomy | undefined; isLoading: boolean } = {
+  data: undefined,
+  isLoading: false,
+};
+const createLocation = vi.fn();
+const updateLocation = vi.fn();
+const createDepartment = vi.fn();
+const updateDepartment = vi.fn();
+const createRole = vi.fn();
+const updateRole = vi.fn();
+const stopOffering = vi.fn();
+const resolveTightening = vi.fn();
+const previewLocationTransfer = vi.fn();
+const transferLocation = vi.fn();
+const transferRole = vi.fn();
+const updateSettings = vi.fn();
+const setRequirements = vi.fn();
+/** The tightening-review query result (U17); empty by default so no review shows. */
+const tighteningReview: { data: TighteningReviewItem[] | undefined } = { data: undefined };
+/** The retirement-review query result (U18); empty by default so no panel shows. */
+const retirementReview: { data: RetirementReview | undefined } = { data: undefined };
+const tools: { data: Array<{ id: string; name: string }> } = { data: [] };
+const roleRequirements: { data: { configured: boolean; toolIds: string[] } | undefined } = {
+  data: undefined,
+};
+// The preview mutation resolves with the effects the confirmation panel shows.
+const previewEffects: { value: Record<string, unknown> } = {
+  value: {
+    addedToolIds: ['tool-a'],
+    removedToolIds: [],
+    affected: 3,
+    created: 2,
+    inFlightContinuing: 0,
+    competenciesDemoting: 0,
+  },
+};
+const previewRequirements = vi.fn(
+  (_ids: string[], opts?: { onSuccess?: (r: { effects: Record<string, unknown> }) => void }) =>
+    opts?.onSuccess?.({ effects: previewEffects.value }),
+);
+
+vi.mock('../../lib/data/hooks.js', () => ({
+  useTaxonomy: () => taxonomy,
+  useCreateLocation: () => ({ mutate: createLocation }),
+  useUpdateLocation: () => ({ mutate: updateLocation }),
+  useCreateDepartment: () => ({ mutate: createDepartment }),
+  useUpdateDepartment: () => ({ mutate: updateDepartment }),
+  useCreateRole: () => ({ mutate: createRole }),
+  useUpdateRole: () => ({ mutate: updateRole }),
+  useStopOfferingRole: () => ({ mutate: stopOffering }),
+  useTighteningReview: () => tighteningReview,
+  useResolveTightening: () => ({ mutate: resolveTightening, isPending: false }),
+  useRetirementReview: () => retirementReview,
+  usePreviewLocationTransfer: () => ({ mutate: previewLocationTransfer, isPending: false }),
+  useTransferLocation: () => ({ mutate: transferLocation, isPending: false }),
+  useTransferRole: () => ({ mutate: transferRole, isPending: false }),
+  useUpdateTaxonomySettings: () => ({ mutate: updateSettings }),
+  useAssessmentTools: () => tools,
+  useRoleRequiredAssessments: () => roleRequirements,
+  usePreviewRoleRequiredAssessments: () => ({ mutate: previewRequirements, isPending: false }),
+  useSetRoleRequiredAssessments: () => ({ mutate: setRequirements, isPending: false }),
+}));
+
+const toast = vi.fn();
+vi.mock('@formai/ui', async () => {
+  const actual = await vi.importActual<typeof import('@formai/ui')>('@formai/ui');
+  return { ...actual, useToast: () => ({ toast }) };
+});
+
+const { TaxonomyScreen } = await import('./TaxonomyScreen.js');
+
+function base(): Taxonomy {
+  return {
+    locations: [],
+    departments: [],
+    settings: {
+      allowMultipleLocations: false,
+      allowMultipleDepartments: false,
+      displayIdentifier: 'employee_number',
+      pooledCaseOverdueDays: 14,
+      notificationLeadDays: 30,
+    },
+  };
+}
+
+afterEach(() => {
+  vi.clearAllMocks();
+  taxonomy.data = undefined;
+  taxonomy.isLoading = false;
+  tools.data = [];
+  roleRequirements.data = undefined;
+  tighteningReview.data = undefined;
+  retirementReview.data = undefined;
+  previewEffects.value = {
+    addedToolIds: ['tool-a'],
+    removedToolIds: [],
+    affected: 3,
+    created: 2,
+    inFlightContinuing: 0,
+    competenciesDemoting: 0,
+  };
+});
+
+const withOneRole = (roleOver: Record<string, unknown> = {}): Taxonomy => ({
+  ...base(),
+  departments: [
+    {
+      id: 'dep-1',
+      name: 'Operations',
+      allowsMultipleRoles: true,
+      status: 'active',
+      createdAt: '',
+      roles: [
+        { id: 'role-1', departmentId: 'dep-1', name: 'Dozer Operator', status: 'active', createdAt: '', ...roleOver },
+      ],
+    },
+  ],
+});
+
+describe('TaxonomyScreen', () => {
+  it('shows a Role nested under its Department (R5)', () => {
+    taxonomy.data = {
+      ...base(),
+      departments: [
+        {
+          id: 'dep-1',
+          name: 'Operations',
+          allowsMultipleRoles: true,
+          status: 'active',
+          createdAt: '',
+          roles: [
+            { id: 'role-1', departmentId: 'dep-1', name: 'Dozer Operator', status: 'active', createdAt: '' },
+          ],
+        },
+      ],
+    };
+    render(<TaxonomyScreen />);
+    expect(screen.getByText('Operations')).toBeDefined();
+    expect(screen.getByText('Dozer Operator')).toBeDefined();
+    // The Role sits inside the Department's own add-a-Role affordance.
+    expect(screen.getByLabelText('New role in Operations')).toBeDefined();
+  });
+
+  it('offers no add-a-Role control until a Department exists (R5)', () => {
+    taxonomy.data = base();
+    render(<TaxonomyScreen />);
+    expect(screen.queryByRole('button', { name: /add role/i })).toBeNull();
+  });
+
+  it('persists a Department toggled to several Roles', () => {
+    taxonomy.data = {
+      ...base(),
+      departments: [
+        { id: 'dep-1', name: 'Maintenance', allowsMultipleRoles: false, status: 'active', createdAt: '', roles: [] },
+      ],
+    };
+    render(<TaxonomyScreen />);
+    fireEvent.click(screen.getByLabelText('Maintenance allows several Roles'));
+    expect(updateDepartment).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'dep-1', allowsMultipleRoles: true }),
+      expect.anything(),
+    );
+  });
+
+  it('renders a retired Location struck through with a Return action, never a delete', () => {
+    taxonomy.data = {
+      ...base(),
+      locations: [{ id: 'loc-1', name: 'Old Pit', status: 'retired', createdAt: '' }],
+    };
+    render(<TaxonomyScreen />);
+    expect(screen.getByText('Old Pit')).toBeDefined();
+    expect(screen.getByText('Retired')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Return' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: /delete/i })).toBeNull();
+  });
+
+  it('offers the two workforce numbers and persists the display-identifier choice (R40)', () => {
+    taxonomy.data = base();
+    render(<TaxonomyScreen />);
+    const select = screen.getByLabelText('Display identifier') as HTMLSelectElement;
+    const values = Array.from(select.options).map((o) => o.value);
+    expect(values).toContain('employee_number');
+    expect(values).toContain('swipe_card_number');
+    fireEvent.change(select, { target: { value: 'swipe_card_number' } });
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ displayIdentifier: 'swipe_card_number' }),
+      expect.anything(),
+    );
+  });
+
+  it('creates a Location from the add field', () => {
+    taxonomy.data = base();
+    render(<TaxonomyScreen />);
+    fireEvent.change(screen.getByLabelText('New location name'), { target: { value: 'Raw Materials' } });
+    const panel = screen.getByText('Locations').closest('div')!;
+    fireEvent.click(within(panel).getByRole('button', { name: 'Add' }));
+    expect(createLocation).toHaveBeenCalledWith('Raw Materials', expect.anything());
+  });
+});
+
+describe('TaxonomyScreen — a Role’s required assessments (U10)', () => {
+  const openEditor = () =>
+    fireEvent.click(screen.getByLabelText('Required assessments for Dozer Operator'));
+
+  it('shows "not set up" apart from "requires nothing" (R50)', () => {
+    taxonomy.data = withOneRole();
+
+    roleRequirements.data = { configured: false, toolIds: [] };
+    const { rerender } = render(<TaxonomyScreen />);
+    expect(screen.getByText(/not set up/)).toBeDefined();
+
+    roleRequirements.data = { configured: true, toolIds: [] };
+    rerender(<TaxonomyScreen />);
+    expect(screen.getByText(/requires nothing/)).toBeDefined();
+  });
+
+  it('reviews the blast radius, then applies on confirm (R43, R84, R87)', () => {
+    taxonomy.data = withOneRole();
+    tools.data = [
+      { id: 'tool-a', name: 'Track Dozer' },
+      { id: 'tool-b', name: 'Excavator' },
+    ];
+    roleRequirements.data = { configured: false, toolIds: [] };
+    render(<TaxonomyScreen />);
+    openEditor();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Track Dozer' }));
+    // Save now goes through a preview first — nothing is written yet.
+    fireEvent.click(screen.getByRole('button', { name: 'Review change' }));
+    expect(previewRequirements).toHaveBeenCalledWith(['tool-a'], expect.anything());
+    expect(setRequirements).not.toHaveBeenCalled();
+
+    // The blast radius is shown; confirming applies it.
+    expect(screen.getByText(/affects 3 people, creating 2 cases/)).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm change' }));
+    expect(setRequirements).toHaveBeenCalledWith(['tool-a'], expect.anything());
+  });
+
+  it('abandons the change on cancel, writing nothing (R86)', () => {
+    taxonomy.data = withOneRole();
+    tools.data = [{ id: 'tool-a', name: 'Track Dozer' }];
+    roleRequirements.data = { configured: false, toolIds: [] };
+    render(<TaxonomyScreen />);
+    openEditor();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Track Dozer' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review change' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(setRequirements).not.toHaveBeenCalled();
+    // Back to the review affordance, nothing committed.
+    expect(screen.getByRole('button', { name: 'Review change' })).toBeDefined();
+  });
+
+  it('describes a removal by what it changes, not what it creates (R85)', () => {
+    previewEffects.value = {
+      addedToolIds: [],
+      removedToolIds: ['tool-a'],
+      affected: 4,
+      created: 0,
+      inFlightContinuing: 2,
+      competenciesDemoting: 3,
+    };
+    taxonomy.data = withOneRole();
+    tools.data = [{ id: 'tool-a', name: 'Track Dozer' }];
+    roleRequirements.data = { configured: true, toolIds: ['tool-a'] };
+    render(<TaxonomyScreen />);
+    openEditor();
+
+    // Deselect the only tool, then review.
+    fireEvent.click(screen.getByRole('button', { name: 'Track Dozer' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Review change' }));
+
+    expect(screen.getByText(/2 cases already in progress will run to completion/)).toBeDefined();
+    expect(screen.getByText(/3 competency standings become optional/)).toBeDefined();
+    // A removal never advertises a creation count.
+    expect(screen.queryByText(/creating/)).toBeNull();
+  });
+
+  it('reads only for a retired Role — no toggles, no review (R121)', () => {
+    taxonomy.data = withOneRole({ status: 'retired' });
+    tools.data = [{ id: 'tool-a', name: 'Track Dozer' }];
+    roleRequirements.data = { configured: true, toolIds: ['tool-a'] };
+    render(<TaxonomyScreen />);
+    openEditor();
+
+    expect(screen.getByText(/no new requirements/)).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Review change' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Track Dozer' })).toHaveProperty('disabled', true);
+  });
+});
+
+describe('TaxonomyScreen — Role withdrawal and tightening (U17)', () => {
+  it('stops offering a Role, a distinct act from retiring (R52)', () => {
+    taxonomy.data = withOneRole();
+    render(<TaxonomyScreen />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop offering' }));
+    expect(stopOffering).toHaveBeenCalledWith('role-1', expect.anything());
+  });
+
+  it('does not offer stop-offering on an already-retired Role', () => {
+    taxonomy.data = withOneRole({ status: 'retired' });
+    render(<TaxonomyScreen />);
+
+    expect(screen.queryByRole('button', { name: 'Stop offering' })).toBeNull();
+  });
+
+  it('shows no tightening review while the Department allows several Roles', () => {
+    taxonomy.data = withOneRole(); // allowsMultipleRoles: true
+    tighteningReview.data = [
+      { membershipId: 'm1', userId: 'u1', name: 'Bo Multi', heldRoles: [{ id: 'role-1', name: 'Dozer Operator' }] },
+    ];
+    render(<TaxonomyScreen />);
+
+    expect(screen.queryByText(/holds several Roles here|hold several Roles here/)).toBeNull();
+  });
+
+  it('surfaces the people a single-Role Department still has to resolve (R112)', () => {
+    taxonomy.data = {
+      ...base(),
+      departments: [
+        {
+          id: 'dep-1',
+          name: 'Operations',
+          allowsMultipleRoles: false,
+          status: 'active',
+          createdAt: '',
+          roles: [
+            { id: 'role-1', departmentId: 'dep-1', name: 'Dozer Operator', status: 'active', createdAt: '' },
+            { id: 'role-2', departmentId: 'dep-1', name: 'Grader Operator', status: 'active', createdAt: '' },
+          ],
+        },
+      ],
+    };
+    tighteningReview.data = [
+      {
+        membershipId: 'm1',
+        userId: 'u1',
+        name: 'Bo Multi',
+        heldRoles: [
+          { id: 'role-1', name: 'Dozer Operator' },
+          { id: 'role-2', name: 'Grader Operator' },
+        ],
+      },
+    ];
+    render(<TaxonomyScreen />);
+
+    expect(screen.getByText('Bo Multi')).toBeDefined();
+    // Keeping a chosen Role applies the per-person choice (R113).
+    fireEvent.click(screen.getByRole('button', { name: 'Keep' }));
+    expect(resolveTightening).toHaveBeenCalledWith(
+      { membershipId: 'm1', survivingRoleId: 'role-1' },
+      expect.anything(),
+    );
+  });
+});
+
+describe('TaxonomyScreen — retirement review (U18)', () => {
+  it('shows no review panel when nothing retired is still held (R123)', () => {
+    taxonomy.data = base();
+    retirementReview.data = { locations: [], departments: [], roles: [] };
+    render(<TaxonomyScreen />);
+    expect(screen.queryByText('Retired values still held')).toBeNull();
+  });
+
+  it('lists a retired Location still held and transfers people off it (R116, R133)', () => {
+    taxonomy.data = {
+      ...base(),
+      locations: [
+        { id: 'loc-new', name: 'New Site', status: 'active', createdAt: '' },
+        { id: 'loc-old', name: 'Old Site', status: 'retired', createdAt: '' },
+      ],
+    };
+    retirementReview.data = {
+      locations: [
+        { id: 'loc-old', name: 'Old Site', holders: [{ membershipId: 'm1', userId: 'u1', name: 'Bo Holder' }] },
+      ],
+      departments: [],
+      roles: [],
+    };
+    render(<TaxonomyScreen />);
+
+    expect(screen.getByText('Retired values still held')).toBeDefined();
+    expect(screen.getByText(/Bo Holder/)).toBeDefined();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Transfer' }));
+    expect(transferLocation).toHaveBeenCalledWith(
+      { locationId: 'loc-old', replacementLocationId: 'loc-new', caseOutcome: 'carry' },
+      expect.anything(),
+    );
+  });
+});

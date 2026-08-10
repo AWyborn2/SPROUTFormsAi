@@ -1,0 +1,3 @@
+ALTER TABLE "member_profiles" ADD COLUMN "email_unreachable_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "member_profiles" ADD COLUMN "email_unreachable_by" uuid;--> statement-breakpoint
+ALTER TABLE "member_profiles" ADD CONSTRAINT "member_profiles_email_unreachable_by_users_id_fk" FOREIGN KEY ("email_unreachable_by") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action;

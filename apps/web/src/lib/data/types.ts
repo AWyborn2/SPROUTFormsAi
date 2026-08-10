@@ -7,12 +7,16 @@
  */
 import type {
   BrandingKit,
+  FormBrandKit,
   CompetencyStatus,
+  DisplayIdentifier,
   ExtractionResult,
   FormContainer,
   FormField,
+  Standing,
   SubmissionStatus,
   SubmissionValue,
+  TaxonomyStatus,
 } from '@formai/shared';
 
 export type TemplateStatus = 'draft' | 'published' | 'archived';
@@ -61,6 +65,12 @@ export interface FormDetail extends FormSummary {
    * true/false pins this form. Edited from the form library rail.
    */
   voiceInput: boolean | null;
+  /**
+   * The brand this form is presented in — usually a client's, not the org's.
+   * Null means the org's own theme, which is the fallback for a form nobody
+   * has assigned rather than a claim that the form is ours.
+   */
+  brandId: string | null;
 }
 
 /** A submissions-table row. */
@@ -147,7 +157,15 @@ export interface PublishImportInput {
  * `Role` union in @formai/shared, so screens read the same strings the design
  * validated. (@formai/shared `ROLE_LABELS` maps the two if needed later.)
  */
-export const ROLE_NAMES = ['Owner', 'Admin', 'Builder', 'Reviewer', 'Viewer'] as const;
+export const ROLE_NAMES = [
+  'Owner',
+  'Admin',
+  'Builder',
+  'Reviewer',
+  'Viewer',
+  'Assessor',
+  'Candidate',
+] as const;
 export type RoleName = (typeof ROLE_NAMES)[number];
 
 /** Roles that can be assigned via the invite dialog (Owner is not invitable). */
@@ -189,6 +207,16 @@ export interface ApiKey {
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
+  /**
+   * The name of the Admin who issued this key, where they have since been
+   * DEACTIVATED (R65); null otherwise.
+   *
+   * The key is the organisation's and keeps working — revoking it on somebody's
+   * departure would turn an HR event into an unannounced outage — but they hold
+   * a copy of the plaintext, so an Admin needs to see which keys are worth
+   * rotating.
+   */
+  issuerDeactivatedName?: string | null;
 }
 
 /** The create response — the only place the plaintext ever appears. */
@@ -200,7 +228,17 @@ export interface CreatedApiKey extends ApiKey {
 export const API_KEY_ROLES: RoleName[] = ['Admin', 'Builder', 'Reviewer', 'Viewer'];
 
 /** Category keys used to colour/icon and filter audit entries. */
-export type AuditCategory = 'forms' | 'submissions' | 'team' | 'settings' | 'security' | 'general';
+export type AuditCategory =
+  | 'forms'
+  | 'submissions'
+  | 'team'
+  | 'settings'
+  | 'security'
+  | 'general'
+  /** A profile field edit or the unreachable mark (U29, U36, R57). */
+  | 'profiles'
+  /** A candidate seat block added at the allocation boundary (U37, R86). */
+  | 'billing';
 
 /** An audit-log row (denormalised for display, matching the prototype shape). */
 export interface AuditEntry {
@@ -215,8 +253,16 @@ export interface AuditEntry {
   time: string;
 }
 
-/** Permission actions across all categories. */
-export type PermAction = 'view' | 'create' | 'edit' | 'delete' | 'export' | 'invite' | 'manage';
+/** Permission actions across all categories. `approve` is used by the profiles category (R34). */
+export type PermAction =
+  | 'view'
+  | 'create'
+  | 'edit'
+  | 'delete'
+  | 'export'
+  | 'invite'
+  | 'manage'
+  | 'approve';
 
 /** One capability category and the actions it exposes in the matrix. */
 export interface PermCategoryDef {
@@ -226,8 +272,14 @@ export interface PermCategoryDef {
   actions: Array<[PermAction, string]>;
 }
 
-/** role → category → action → allowed. Mirrors the prototype `perms` object. */
-export type PermState = Record<RoleName, Record<string, Partial<Record<PermAction, boolean>>>>;
+/**
+ * role → category → action → grant. The grant is `true` (org-wide), `false`
+ * (denied), or `'own'` (scoped to the user's own records — a Candidate confined
+ * to their own cases). The scoped value must survive to the screen so it renders
+ * distinctly rather than as a plain ON switch a toggle would collapse.
+ */
+export type PermGrant = boolean | 'own';
+export type PermState = Record<RoleName, Record<string, Partial<Record<PermAction, PermGrant>>>>;
 
 /* ── Billing / plan tiers ─────────────────────────────────────────────────── */
 
@@ -394,7 +446,18 @@ export interface CompetencyHolder {
   /** ISO instant, or null when the competency has no validity period. */
   expiresAt: string | null;
   status: CompetencyStatus;
-  /** Still satisfies a requirement — held, expiring or grace. */
+  /**
+   * Revoked beats the date: a grant taken away by an appeal or an admin. Shown
+   * as a mark rather than a status badge (R104), and never `current`.
+   */
+  revoked: boolean;
+  /**
+   * Whether this person's held Roles OBLIGE them to hold this competency (R108).
+   * Answers a different question from `current`: standing is about obligation,
+   * currency is about the date.
+   */
+  standing: Standing;
+  /** Still satisfies a requirement — held, expiring or grace, and not revoked. */
   current: boolean;
   /** Wording for a status worth saying out loud; null when there is nothing. */
   note: string | null;
@@ -430,4 +493,307 @@ export interface FormVersionDetail {
   fields: FormField[];
   container: FormContainer;
   sourcePdfAssetId: string | null;
+}
+
+/* ── Taxonomy (Locations, Departments, Roles) ─────────────────────────────── */
+
+/** A managed Location the organisation assesses at. */
+export interface TaxLocation {
+  id: string;
+  name: string;
+  status: TaxonomyStatus;
+  createdAt: string;
+}
+
+/** A job Role offered within a Department. */
+export interface TaxRole {
+  id: string;
+  departmentId: string;
+  name: string;
+  status: TaxonomyStatus;
+  createdAt: string;
+}
+
+/** A Department, carrying the Roles it offers and its one-or-several rule (R5). */
+export interface TaxDepartment {
+  id: string;
+  name: string;
+  allowsMultipleRoles: boolean;
+  status: TaxonomyStatus;
+  createdAt: string;
+  roles: TaxRole[];
+}
+
+/**
+ * One person a Department tightening still has to resolve (U17, R112): they hold
+ * more than one of the Department's Roles, and an Admin picks which survives. A
+ * LIVE list — a person drops off it the moment they are resolved.
+ */
+export interface TighteningReviewItem {
+  membershipId: string;
+  userId: string | null;
+  name: string;
+  /** This Department's Roles the person holds — the Admin keeps exactly one. */
+  heldRoles: Array<{ id: string; name: string }>;
+}
+
+/** One person-competency gap on the compliance report (U20). */
+export interface ComplianceGap {
+  userId: string;
+  name: string;
+  competencyId: string;
+  competencyName: string;
+}
+
+/** How the workforce stands, as an auditor reads it (U20). */
+export interface ComplianceReport {
+  /** A required competency that lapsed on its date. */
+  expired: ComplianceGap[];
+  /** A required competency the person has never held. */
+  neverHeld: ComplianceGap[];
+  /** A held competency that lapsed but no Role requires — reported, not a failure (R102). */
+  optionalLapses: ComplianceGap[];
+  /** Members no notification can reach: no login AND a flagged address (R98, R99). */
+  unreachable: UnreachableMember[];
+}
+
+/**
+ * A member no notification can reach (U36, R98, R99).
+ *
+ * NOT a `ComplianceGap`: this is about a person, not a competency, so it carries
+ * no competency to name. Typing it as one rendered a blank second column and
+ * keyed the row on an undefined id.
+ */
+export interface UnreachableMember {
+  userId: string;
+  name: string;
+  /** The profile carrying the mark — what an Admin opens to clear it. */
+  membershipId: string;
+}
+
+/** One thing waiting on an Admin, from any source, on the one working list (U19). */
+export interface WorkingListItem {
+  kind:
+    | 'training_request'
+    | 'retirement_review'
+    | 'overdue_case'
+    | 'owed_file'
+    | 'unreachable'
+    | 'api_key_review';
+  id: string;
+  subject: string;
+  createdAt: string | null;
+}
+
+/** An expiry notice served on a person's own record — a login delivery route (U21, R98). */
+export interface ExpiryNotice {
+  id: string;
+  competencyId: string;
+  competencyName: string;
+  /** `YYYY-MM-DD` — when the competency expires. */
+  expiresOn: string;
+  sentAt: string;
+}
+
+/** A voluntary training request (U22). Pending ones wait on the working list. */
+export interface TrainingRequest {
+  id: string;
+  userId: string;
+  toolId: string;
+  state: 'pending' | 'approved' | 'declined';
+  createdAt: string;
+}
+
+/** One active person still holding a retired value (U18, R116). */
+export interface ReviewHolder {
+  membershipId: string;
+  userId: string;
+  name: string;
+}
+
+/** A retired value and the active people still holding it (U18). */
+export interface RetiredValueReview {
+  id: string;
+  name: string;
+  holders: ReviewHolder[];
+}
+
+/**
+ * The people still holding a retired value, by axis (U18, KTD8). A pure read: a
+ * value returned to active drops out because nobody holds "something retired"
+ * any more (R123).
+ */
+export interface RetirementReview {
+  locations: RetiredValueReview[];
+  departments: RetiredValueReview[];
+  roles: Array<RetiredValueReview & { departmentId: string }>;
+}
+
+/** The three organisation settings that govern how far a person may spread (R24, R25, R40). */
+export interface TaxonomySettings {
+  allowMultipleLocations: boolean;
+  allowMultipleDepartments: boolean;
+  displayIdentifier: DisplayIdentifier;
+  /** Days before a pooled case reads as overdue (U13, R63). */
+  pooledCaseOverdueDays: number;
+  /** Days ahead of an expiry the sweep notifies a holder (U21, KTD12). */
+  notificationLeadDays: number;
+}
+
+/** The whole taxonomy in one read, for the settings screen. */
+export interface Taxonomy {
+  locations: TaxLocation[];
+  departments: TaxDepartment[];
+  settings: TaxonomySettings;
+}
+
+/** Where a member is placed — the ids on their membership (R21). */
+/**
+ * A member's workforce record as its reader is admitted to it (U29, U38, R1).
+ *
+ * `displayName` and `indigenousStatus` are DERIVED by the API and stored
+ * nowhere (R3, R15, KTD19) — the screen renders them and offers no way to enter
+ * them.
+ */
+export interface MemberProfile {
+  membershipId: string;
+  firstName: string | null;
+  middleName: string | null;
+  lastName: string | null;
+  displayName: string;
+  identifier: string | null;
+  gender: string | null;
+  ethnicity: string | null;
+  indigenousStatus: 'indigenous' | 'not_indigenous' | 'not_stated';
+  dateOfBirth: string | null;
+  addressStreet: string | null;
+  suburb: string | null;
+  postcode: string | null;
+  mobile: string | null;
+  emergencyContactName: string | null;
+  emergencyContactPhone: string | null;
+  starterType: string | null;
+  employeeNumber: string | null;
+  swipeCardNumber: string | null;
+  inductionDate: string | null;
+  /**
+   * On `users`, not the profile — unique product-wide and the person-record
+   * lookup key (R16). Read here so the record renders it; not writable through
+   * the profile route, which `editableFields` already reflects.
+   */
+  email: string | null;
+  /** Set where an Admin flagged the address as reaching nobody (U36, R16). */
+  emailUnreachableAt: string | null;
+}
+
+/**
+ * What THIS reader may do with the record (R44).
+ *
+ * Resolved per section rather than as one grant, which is what lets an
+ * organisation restrict fields while leaving documents open — a screen with only
+ * two states would render that configuration as a blank page.
+ */
+export interface ProfileAccess {
+  canViewDocuments: boolean;
+  canViewCompetencies: boolean;
+  canApprove: boolean;
+  /** Field keys this caller may write. Empty means read-only (R51, R53). */
+  editableFields: string[];
+  /** True where the caller IS the member, on the fixed own-record path (R49). */
+  isSubject: boolean;
+}
+
+/**
+ * One held competency on a member's record (U38, R37, R104).
+ *
+ * STANDING and CURRENCY are two facts, not one. Standing is obligation and
+ * follows the person's Roles; currency is eligibility and follows the
+ * competency's own dates. A reader who cannot tell them apart reads an expired
+ * OPTIONAL competency as a compliance failure, which it is not (R102).
+ */
+export interface HeldCompetencyRow {
+  competencyId: string;
+  evidenceRef: string | null;
+  /** Set only where this grant IS a licence (R34). */
+  licenceClass: string | null;
+  licenceNumber: string | null;
+  status: CompetencyStatus;
+  standing: Standing;
+  /** True while it still satisfies a requirement — held, expiring or grace. */
+  current: boolean;
+  expiresAt: string | null;
+  note: string | null;
+}
+
+/**
+ * What an induction submission would put on a profile (U40, R87-R94).
+ *
+ * `disposition` is the whole point: a submission for somebody who already holds
+ * a record creates NOTHING and goes to an Admin instead (R89, R90).
+ */
+export interface ProfileSeedResponse {
+  submissionId: string;
+  disposition: 'create' | 'existing_record' | 'deactivated';
+  seed: {
+    fields: Record<string, string>;
+    department: string;
+    roles: string[];
+    email: string;
+    indigenousStatus: 'indigenous' | 'not_indigenous' | 'not_stated';
+    /** Answers the organisation's CURRENT lists no longer offer (R94). */
+    unmatched: Array<{ key: string; value: string }>;
+  };
+  /** Set on a repeat, so an Admin can open the record rather than retype it. */
+  membershipId: string | null;
+}
+
+export interface ProfileResponse {
+  profile: MemberProfile;
+  /**
+   * The PERSON behind the membership. Competency grants and assessment cases
+   * are keyed on the user, not the membership, so the screen needs both ids.
+   */
+  userId: string;
+  access: ProfileAccess;
+}
+
+export interface MemberPlacement {
+  locationIds: string[];
+  departmentIds: string[];
+  roleIds: string[];
+}
+
+/**
+ * What `POST /form-brands/scan` read off a client's document.
+ *
+ * A PROPOSAL. Colours are ordered by how often the document sets them, which
+ * is not the same as how prominent they are — a table-border colour can lead
+ * the list. Logos arrive as base64 rather than uploaded URLs so declining one
+ * leaves nothing behind; the chosen one goes through the ordinary upload door.
+ */
+export interface BrandPdfScan {
+  colors: string[];
+  logos: Array<{
+    imageBase64: string;
+    mimeType: 'image/png' | 'image/jpeg';
+    width: number;
+    height: number;
+  }>;
+  /** Why the result is thin: a monochrome document, a page cap, an unreadable file. */
+  notes: string[];
+}
+
+/**
+ * What `POST /form-brands/:id/edit` proposed from a described change.
+ *
+ * A PROPOSAL over the brand's CURRENT kit — nothing is stored, and the author
+ * sees it in the live preview before saving. `notes` carries what the model
+ * could not do and every value that was refused: a refused value is dropped
+ * rather than corrected, so saying so is what makes the author ask again.
+ */
+export interface BrandEditProposal {
+  patch: FormBrandKit;
+  /** One short sentence, in plain words rather than token names. */
+  summary: string;
+  notes: string[];
 }

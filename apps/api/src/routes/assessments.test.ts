@@ -21,11 +21,20 @@ import { DEFAULT_ROLE_PERMISSIONS, type AssessmentToolManifest, type FormField }
 
 const ORG = 'org-1';
 const ADMIN = '00000000-0000-4000-8000-00000000000a';
+const BUILDER = '00000000-0000-4000-8000-00000000000b';
 const CANDIDATE = '00000000-0000-4000-8000-00000000000c';
 const OTHER_CANDIDATE = '00000000-0000-4000-8000-00000000000d';
 const COMPETENCY = '00000000-0000-4000-8000-0000000000f1';
 const TEMPLATE = '00000000-0000-4000-8000-000000000001';
 const VERSION = '00000000-0000-4000-8000-000000000002';
+// The organisation's managed Locations (U8). A case points at one of these by
+// id; the assessor rule is keyed by the same ids.
+const MINING = '00000000-0000-4000-8000-0000000000a1';
+const RAW_MATERIALS = '00000000-0000-4000-8000-0000000000a2';
+const OFFICE = '00000000-0000-4000-8000-0000000000a3';
+// Departments that classify a tool (U10).
+const DEPT_OPS = '00000000-0000-4000-8000-0000000000d1';
+const DEPT_MAINT = '00000000-0000-4000-8000-0000000000d2';
 
 const admin = { userId: ADMIN, orgId: ORG, role: 'admin' as const };
 const candidate = { userId: CANDIDATE, orgId: ORG, role: 'candidate' as const };
@@ -101,9 +110,32 @@ const FIELDS: FormField[] = [
   },
   { id: 'q1-out', type: 'check_cross', label: 'Q1 outcome', required: false, source: 'imported' },
   streamSection('h-mining', 'Mining'),
-  { id: 'q-mining', type: 'text', label: 'Mining only', required: false, source: 'imported' },
+  // Location-specific theory questions. Keyed like the general ones, so the
+  // theory part is fully self-marking (U15) — a candidate sees only their
+  // stream's set, and the hidden set is never marked.
+  {
+    id: 'q-mining',
+    type: 'checkbox_group',
+    label: 'Mining only',
+    required: false,
+    source: 'imported',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: 'q-mining-out' },
+  },
+  { id: 'q-mining-out', type: 'check_cross', label: 'Mining outcome', required: false, source: 'imported' },
   streamSection('h-raw', 'Raw Materials'),
-  { id: 'q-raw', type: 'text', label: 'Raw Materials only', required: false, source: 'imported' },
+  {
+    id: 'q-raw',
+    type: 'checkbox_group',
+    label: 'Raw Materials only',
+    required: false,
+    source: 'imported',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: 'q-raw-out' },
+  },
+  { id: 'q-raw-out', type: 'check_cross', label: 'Raw Materials outcome', required: false, source: 'imported' },
   header('h-prac1'),
   header('h-log'),
   {
@@ -164,25 +196,79 @@ const MANIFEST: AssessmentToolManifest = {
 
 // ── stateful fake database ──────────────────────────────────────────────────
 
-/** Bound values inside a drizzle where-clause. */
-function whereValues(node: unknown, depth = 0, out: string[] = []): string[] {
-  if (!node || depth > 8) return out;
+/*
+  Keys that hang the schema metadata off a column node — the whole pgTable, its
+  encoders, its default expression. The bound param values live directly in the
+  query chunks, so skipping these keeps the walk cheap and, since a column points
+  back at its table, keeps it from looping.
+*/
+const SKIP_KEYS = new Set(['table', 'config', 'encoder', 'decoder', 'session', 'dialect', 'default']);
+
+/** Every string `.value` (a bound param) reachable under a node. */
+function stringValues(node: unknown, out: string[] = [], depth = 0): string[] {
+  if (!node || depth > 10) return out;
   if (Array.isArray(node)) {
-    for (const n of node) whereValues(n, depth + 1, out);
+    for (const n of node) stringValues(n, out, depth + 1);
     return out;
   }
   if (typeof node !== 'object') return out;
   const rec = node as Record<string, unknown>;
   if (typeof rec.value === 'string') out.push(rec.value);
-  for (const v of Object.values(rec)) whereValues(v, depth + 1, out);
+  for (const [k, v] of Object.entries(rec)) if (!SKIP_KEYS.has(k)) stringValues(v, out, depth + 1);
   return out;
+}
+
+/**
+ * A drizzle where-clause reduced to what the fake db matches on: `all` are the
+ * operands that must every one be present (an `and` of `eq`s), and each `anyOf`
+ * group is an `inArray` where the row matching ANY one operand is a match.
+ *
+ * `inArray` renders as `col in $params`, so its operands are an OR — collecting
+ * them into `all` like the eqs would demand a single row hold every id at once
+ * and match nothing. Enough structure to model these routes' reads without
+ * importing a SQL engine.
+ */
+function whereTerms(
+  node: unknown,
+  acc: { all: string[]; anyOf: string[][] } = { all: [], anyOf: [] },
+  depth = 0,
+): { all: string[]; anyOf: string[][] } {
+  if (!node || depth > 10) return acc;
+  if (Array.isArray(node)) {
+    for (const n of node) whereTerms(n, acc, depth + 1);
+    return acc;
+  }
+  if (typeof node !== 'object') return acc;
+  const rec = node as Record<string, unknown>;
+
+  const chunks = rec.queryChunks;
+  if (Array.isArray(chunks)) {
+    const text = chunks
+      .map((c) => {
+        const v = (c as { value?: unknown } | null)?.value;
+        return Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '';
+      })
+      .join('');
+    if (text.includes(' in ')) {
+      const group = stringValues(chunks);
+      if (group.length) acc.anyOf.push(group);
+      return acc;
+    }
+    for (const c of chunks) whereTerms(c, acc, depth + 1);
+    return acc;
+  }
+
+  if (typeof rec.value === 'string') acc.all.push(rec.value);
+  for (const [k, v] of Object.entries(rec)) if (!SKIP_KEYS.has(k)) whereTerms(v, acc, depth + 1);
+  return acc;
 }
 
 function matchesWhere(row: Record<string, unknown>, where: unknown): boolean {
   if (!where) return true;
-  const wanted = [...new Set(whereValues(where))];
+  const { all, anyOf } = whereTerms(where);
   const present = new Set(Object.values(row).filter((v) => typeof v === 'string'));
-  return wanted.every((w) => present.has(w));
+  if (![...new Set(all)].every((w) => present.has(w))) return false;
+  return anyOf.every((group) => group.some((w) => present.has(w)));
 }
 
 let idSeq = 0;
@@ -198,7 +284,26 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
     ],
     formTemplates: [{ id: TEMPLATE, orgId: ORG, name: 'Track Dozer', currentVersionId: VERSION }],
     formTemplateVersions: [{ id: VERSION, templateId: TEMPLATE, fields: FIELDS }],
+    /*
+      The org's managed Locations (U8). A case points at one by id and the
+      assessor rule is keyed by the same ids, so creation validates the id is one
+      of these and the eligibility check is a plain lookup. OFFICE exists but no
+      tool has a rule for it — that is a Location with no extra requirement, not a
+      near-miss (R79).
+    */
+    locations: [
+      { id: MINING, orgId: ORG, name: 'Mining', status: 'active' },
+      { id: RAW_MATERIALS, orgId: ORG, name: 'Raw Materials', status: 'active' },
+      { id: OFFICE, orgId: ORG, name: 'Head Office', status: 'active' },
+    ],
+    // Departments that classify tools (U10). MAINT is retired, to test that a
+    // classification cannot be set to a retired Department.
+    departments: [
+      { id: DEPT_OPS, orgId: ORG, name: 'Operations', status: 'active' },
+      { id: DEPT_MAINT, orgId: ORG, name: 'Maintenance', status: 'retired' },
+    ],
     assessmentTools: [],
+    roleRequiredAssessments: [],
     assessmentCases: [],
     assessmentPartAttempts: [],
     competencies: [{ id: COMPETENCY, orgId: ORG, name: 'Track Dozer Operator', code: 'TD-OP', holders: 0 }],
@@ -213,9 +318,17 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
     */
     memberships: [
       { id: nextId(), orgId: ORG, userId: ADMIN, role: 'admin', status: 'active' },
+      { id: nextId(), orgId: ORG, userId: BUILDER, role: 'builder', status: 'active' },
       { id: nextId(), orgId: ORG, userId: CANDIDATE, role: 'candidate', status: 'active' },
       { id: nextId(), orgId: ORG, userId: OTHER_CANDIDATE, role: 'candidate', status: 'active' },
     ],
+    /*
+      Profiles backing the live display-identifier read a case DTO makes (R24,
+      R61). Empty by default, which is the state these cases actually run in —
+      the identifier resolves to null and the DTO shows the name it always did,
+      so every existing assertion about `candidateName` holds unchanged.
+    */
+    memberProfiles: [],
   };
 
   const nameOf = (table: unknown) =>
@@ -607,7 +720,7 @@ describe('POST /assessment-cases', () => {
   const WORSLEY = '00000000-0000-4000-8000-0000000000e1';
   const MOBILE_PLANT = '00000000-0000-4000-8000-0000000000e2';
 
-  async function caseInStream(base: string, locationStream?: string, byStream = true) {
+  async function caseAtLocation(base: string, locationId?: string, byStream = true) {
     const created = await fetch(`${base}/assessment-tools`, {
       method: 'POST',
       headers: auth(),
@@ -616,8 +729,9 @@ describe('POST /assessment-cases', () => {
         name: 'Track Dozer',
         manifest: MANIFEST,
         assessorCompetencyIds: [COMPETENCY],
+        // Keyed by Location id now, not by stream name (U8).
         ...(byStream
-          ? { assessorStreamCompetencyIds: { Mining: [WORSLEY], 'Raw Materials': [MOBILE_PLANT] } }
+          ? { assessorStreamCompetencyIds: { [MINING]: [WORSLEY], [RAW_MATERIALS]: [MOBILE_PLANT] } }
           : {}),
       }),
     });
@@ -629,18 +743,21 @@ describe('POST /assessment-cases', () => {
       body: JSON.stringify({
         toolId: tool.id,
         candidateUserId: CANDIDATE,
+        // Name an assessor who holds nothing, so the assessor-eligibility check
+        // has a subject (a pooled create names none and warns about none — U13).
+        assessorUserId: ADMIN,
         pathway: 'experienced',
-        ...(locationStream ? { locationStream } : {}),
+        ...(locationId ? { locationId } : {}),
       }),
     });
-    return (await res.json()) as { prerequisiteWarnings: string[] };
+    return { status: res.status, body: (await res.json()) as { prerequisiteWarnings?: string[]; error?: string } };
   }
 
   it('asks for the mine authority at the mine, and not the other one', async () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base, 'Mining')).prerequisiteWarnings.join('\n');
+      const warnings = (await caseAtLocation(base, MINING)).body.prerequisiteWarnings!.join('\n');
 
       expect(warnings).toContain(COMPETENCY);
       expect(warnings).toContain(WORSLEY);
@@ -655,7 +772,7 @@ describe('POST /assessment-cases', () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base, 'Raw Materials')).prerequisiteWarnings.join('\n');
+      const warnings = (await caseAtLocation(base, RAW_MATERIALS)).body.prerequisiteWarnings!.join('\n');
 
       expect(warnings).toContain(MOBILE_PLANT);
       expect(warnings).not.toContain(WORSLEY);
@@ -664,34 +781,40 @@ describe('POST /assessment-cases', () => {
     }
   });
 
-  it('matches the stream however it was typed', async () => {
-    // Free text somebody enters by hand. An unrecognised stream contributes no
-    // requirement at all, so a near-miss spelling skips the check silently —
-    // which is why the comparison is normalised rather than exact.
+  it('refuses a case at a Location that is not the organisation\'s', async () => {
+    /*
+      A Location is chosen from the org's list, never typed (R77), so an id that
+      is not one of the org's active Locations is a bad request, not a case
+      opened against an unknown site. This is the check that makes a near-miss
+      impossible — there is nothing to normalise because nothing is free text.
+    */
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base, '  raw materials  ')).prerequisiteWarnings.join('\n');
+      const notOurs = '00000000-0000-4000-8000-0000000000bb';
+      const { status, body } = await caseAtLocation(base, notOurs);
 
-      expect(warnings).toContain(MOBILE_PLANT);
+      expect(status).toBe(400);
+      expect(body.error).toBe('location_not_found');
     } finally {
       server.close();
     }
   });
 
-  it('says the check was only partial when the case names no stream', async () => {
+  it('says the check was only partial when the case names no Location', async () => {
     /*
       Reporting just the always-required half would present a partial check as a
       complete one. The case still opens — eligibility never blocks — but the
-      warning has to say what went unchecked and name the streams, because the
-      fix is to set one and nobody can guess the spelling.
+      warning has to say what went unchecked and name the Locations the tool has
+      a rule for, because the fix is to set one.
     */
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base)).prerequisiteWarnings.join('\n');
+      const warnings = (await caseAtLocation(base)).body.prerequisiteWarnings!.join('\n');
 
       expect(warnings).toContain('only partly checked');
+      // Named by their current Location names, resolved from the keyed ids.
       expect(warnings).toContain('Mining');
       expect(warnings).toContain('Raw Materials');
       // And it invented no gap for a requirement it could not resolve.
@@ -702,44 +825,271 @@ describe('POST /assessment-cases', () => {
     }
   });
 
-  it('warns rather than passing when the stream is one it does not know', async () => {
+  it('treats a Location the tool has no rule for as matched, not a near-miss (R79)', async () => {
     /*
-      THE FAILURE THIS WHOLE FEATURE NEARLY SHIPPED WITH.
-
-      An unrecognised stream used to resolve to the always-required half with a
-      clean result, on the reasoning that a location outside the list carries no
-      extra requirement. But this value is free text shared with the document's
-      own stream question, so a value outside the list is far more likely a
-      near-miss spelling of a location the rule DOES cover.
-
-      "Mine" against a tool keyed "Mining" reduced the rule from
-      `category AND (mining OR raw materials)` to the category alone and called
-      it fully checked — so an assessor holding only the raw-materials authority
-      could sign off a mining assessment with nothing anywhere saying so.
+      The failure the old free-text model nearly shipped with is now impossible.
+      A Location is an id chosen from the org's list, so a case at a Location the
+      tool has no rule for is a site with no extra requirement — the always-half
+      applies and the check is complete. There is no "unrecognised" state to warn
+      about, because there is no spelling to get wrong.
     */
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base, 'Mine')).prerequisiteWarnings.join('\n');
+      const warnings = (await caseAtLocation(base, OFFICE)).body.prerequisiteWarnings!.join('\n');
 
-      expect(warnings).toContain('only partly checked');
-      // Quotes what was actually recorded, so the typo is visible.
-      expect(warnings).toContain('"Mine"');
-      expect(warnings).toContain('Mining');
+      expect(warnings).not.toContain('only partly checked');
+      // The always-required half still surfaces; no location-specific gap is invented.
+      expect(warnings).toContain(COMPETENCY);
+      expect(warnings).not.toContain(WORSLEY);
+      expect(warnings).not.toContain(MOBILE_PLANT);
     } finally {
       server.close();
     }
   });
 
-  it('says nothing about streams for a tool whose rule does not vary', async () => {
-    // Every tool that existed before this column. A missing stream is not a gap
+  it('says nothing about Locations for a tool whose rule does not vary', async () => {
+    // Every tool that existed before this column. A missing Location is not a gap
     // when nothing depended on it — warning here would fire on every case.
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
-      const warnings = (await caseInStream(base, undefined, false)).prerequisiteWarnings.join('\n');
+      const warnings = (await caseAtLocation(base, undefined, false)).body.prerequisiteWarnings!.join('\n');
 
       expect(warnings).not.toContain('only partly checked');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ── the location-to-parts rule (U9) ─────────────────────────────────────────
+
+describe('PATCH /assessment-tools/:id/location-parts', () => {
+  async function makeTool(base: string) {
+    const res = await fetch(`${base}/assessment-tools`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST }),
+    });
+    return (await res.json()) as { id: string };
+  }
+
+  function setRule(
+    base: string,
+    toolId: string,
+    locationPartKeys: Record<string, string[]>,
+    session: Session = admin,
+  ) {
+    return fetch(`${base}/assessment-tools/${toolId}/location-parts`, {
+      method: 'PATCH',
+      headers: auth(session),
+      body: JSON.stringify({ locationPartKeys }),
+    });
+  }
+
+  it('declares the rule as an Admin and reads it back on the tool', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      expect((await setRule(base, tool.id, { [MINING]: ['p1', 'p2'] })).status).toBe(200);
+
+      const got = await fetch(`${base}/assessment-tools/${tool.id}`, { headers: auth() });
+      const body = (await got.json()) as {
+        locationPartKeys: Record<string, string[]>;
+        locations: Array<{ id: string; name: string }>;
+      };
+      expect(body.locationPartKeys).toEqual({ [MINING]: ['p1', 'p2'] });
+      // The active Locations the rule may distinguish come back for the editor (R76).
+      expect(body.locations.map((l) => l.id)).toContain(MINING);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a Builder and accepts an Admin (R73)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      const asBuilder = await setRule(base, tool.id, { [MINING]: ['p1'] }, {
+        userId: BUILDER,
+        orgId: ORG,
+        role: 'builder',
+      });
+      expect(asBuilder.status).toBe(403);
+
+      expect((await setRule(base, tool.id, { [MINING]: ['p1'] })).status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a rule declared for a retired Location (R118)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const RETIRED = '00000000-0000-4000-8000-0000000000b9';
+    rows(store, 'locations').push({ id: RETIRED, orgId: ORG, name: 'Old Pit', status: 'retired' });
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      const res = await setRule(base, tool.id, { [RETIRED]: ['p1'] });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('location_not_found');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('keeps a rule for a Location retired after it was declared, and still returns it (R118)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      // Declared while MINING is active…
+      expect((await setRule(base, tool.id, { [MINING]: ['p1', 'p2'] })).status).toBe(200);
+      // …then MINING retires. A rule stays with the Location it names.
+      for (const l of rows(store, 'locations')) if (l.id === MINING) l.status = 'retired';
+      // Re-saving the same map is not rejected — the entry already existed.
+      expect((await setRule(base, tool.id, { [MINING]: ['p1', 'p2'] })).status).toBe(200);
+
+      const got = await fetch(`${base}/assessment-tools/${tool.id}`, { headers: auth() });
+      const body = (await got.json()) as { locationPartKeys: Record<string, string[]> };
+      expect(body.locationPartKeys).toEqual({ [MINING]: ['p1', 'p2'] });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a part key the manifest does not declare', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      const res = await setRule(base, tool.id, { [MINING]: ['p1', 'ghost'] });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('unknown_part');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ── tool classification and the Department filter (U10) ─────────────────────
+
+describe('PATCH /assessment-tools/:id/classification and the filter', () => {
+  async function makeTool(base: string) {
+    const res = await fetch(`${base}/assessment-tools`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST }),
+    });
+    return (await res.json()) as { id: string };
+  }
+  function classify(base: string, id: string, departmentId: string | null, session: Session = admin) {
+    return fetch(`${base}/assessment-tools/${id}/classification`, {
+      method: 'PATCH',
+      headers: auth(session),
+      body: JSON.stringify({ departmentId }),
+    });
+  }
+  async function toolDept(base: string, id: string) {
+    const got = (await (await fetch(`${base}/assessment-tools/${id}`, { headers: auth() })).json()) as {
+      departmentId: string | null;
+    };
+    return got.departmentId;
+  }
+
+  it('classifies a tool as an Admin and reads it back (R9)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      expect((await classify(base, tool.id, DEPT_OPS)).status).toBe(200);
+      expect(await toolDept(base, tool.id)).toBe(DEPT_OPS);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses classification by a non-admin (R73 sibling)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      const res = await classify(base, tool.id, DEPT_OPS, { userId: BUILDER, orgId: ORG, role: 'builder' });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a retired Department (R10, R16)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      const res = await classify(base, tool.id, DEPT_MAINT);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('department_not_found');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('carries at most one Department — a second classification replaces the first (R9)', async () => {
+    const { db, store } = makeDb();
+    const DEPT_RAIL = '00000000-0000-4000-8000-0000000000d3';
+    rows(store, 'departments').push({ id: DEPT_RAIL, orgId: ORG, name: 'Rail', status: 'active' });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      expect((await classify(base, tool.id, DEPT_OPS)).status).toBe(200);
+      expect((await classify(base, tool.id, DEPT_RAIL)).status).toBe(200);
+      expect(await toolDept(base, tool.id)).toBe(DEPT_RAIL);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('clears the classification to unclassified with null (R10)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await makeTool(base);
+      await classify(base, tool.id, DEPT_OPS);
+      expect((await classify(base, tool.id, null)).status).toBe(200);
+      expect(await toolDept(base, tool.id)).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('filters by Department, and an unclassified tool appears in every filter (R9, R10, R11)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const classified = await makeTool(base);
+      await classify(base, classified.id, DEPT_OPS);
+      const unclassified = await makeTool(base);
+
+      const ops = (await (
+        await fetch(`${base}/assessment-tools?departmentId=${DEPT_OPS}`, { headers: auth() })
+      ).json()) as Array<{ id: string }>;
+      const opsIds = ops.map((t) => t.id);
+      expect(opsIds).toContain(classified.id); // carries this Department
+      expect(opsIds).toContain(unclassified.id); // and the unclassified appears everywhere (R11)
+
+      // Filtering by a different Department drops the classified tool, keeps the unclassified.
+      const other = (await (
+        await fetch(`${base}/assessment-tools?departmentId=${DEPT_MAINT}`, { headers: auth() })
+      ).json()) as Array<{ id: string }>;
+      const otherIds = other.map((t) => t.id);
+      expect(otherIds).not.toContain(classified.id);
+      expect(otherIds).toContain(unclassified.id);
     } finally {
       server.close();
     }
@@ -1150,6 +1500,91 @@ describe('candidate scoping', () => {
  * Covers AE3 (the failed attempt survives while the passing one becomes
  * authoritative) and AE2 (theory is computed from the answer key, not entered).
  */
+describe('marker attribution (U15)', () => {
+  async function openCase(base: string) {
+    const tool = await seedTool(base);
+    const res = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+    });
+    return (await res.json()) as { id: string };
+  }
+  async function openPart(base: string, caseId: string, partKey: string) {
+    return (await (
+      await fetch(`${base}/assessment-cases/${caseId}/parts/${partKey}/attempts`, {
+        method: 'POST',
+        headers: auth(),
+      })
+    ).json()) as { id: string };
+  }
+
+  it('records an automatically marked part as marked by nobody, even given a name (R70)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await openCase(base);
+      const a = await openPart(base, c.id, 'p1'); // p1 is fully keyed → self-marking
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      const res = await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ assessorName: 'Should Be Ignored' }),
+      });
+      expect(res.status).toBe(200);
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === a.id);
+      expect(row?.outcome).toBe('satisfactory');
+      expect(row?.markerKind).toBe('automatic');
+      // Named by nobody — the submitted name is not stamped onto an automatic mark.
+      expect(row?.assessorUserId).toBeNull();
+      expect(row?.assessorName).toBe('');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records a person-judged part as marked by that person, named (R70)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await openCase(base);
+      // Pass the theory part so the practical unlocks.
+      const p1 = await openPart(base, c.id, 'p1');
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${p1.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${p1.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({}),
+      });
+
+      // p2 is a practical part carrying no key → judged by a person.
+      const p2 = await openPart(base, c.id, 'p2');
+      const res = await fetch(`${base}/assessment-cases/${c.id}/attempts/${p2.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat Assessor' }),
+      });
+      expect(res.status).toBe(200);
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === p2.id);
+      expect(row?.markerKind).toBe('person');
+      expect(row?.assessorUserId).toBe(ADMIN);
+      expect(row?.assessorName).toBe('Pat Assessor');
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('full case lifecycle', () => {
   it('drives a new candidate to competent, keeping the failed attempt', async () => {
     const { db, store } = makeDb();
@@ -1547,12 +1982,18 @@ describe('POST /assessment-cases/:id/appeal', () => {
     const { server, base } = startApp();
     try {
       const tool = await seedTool(base);
-      // The disputed case is assessed by THE ADMIN calling the appeal route.
+      // The disputed case is OWNED by the admin calling the appeal route (a
+      // manual create naming an assessor keeps them — U13).
       const c = (await (
         await fetch(`${base}/assessment-cases`, {
           method: 'POST',
           headers: auth(),
-          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
+          body: JSON.stringify({
+            toolId: tool.id,
+            candidateUserId: CANDIDATE,
+            assessorUserId: ADMIN,
+            pathway: 'experienced',
+          }),
         })
       ).json()) as { id: string };
 
@@ -2031,6 +2472,9 @@ describe('GET /assessment-cases/progress', () => {
 
   it('refuses a caller whose role grants no assessments view', async () => {
     const { db, store } = makeDb();
+    // The caller is a genuine viewer, so requireTenant's role revalidation keeps
+    // that role and the customised matrix below is what denies them.
+    (store.memberships!.find((m) => (m as { userId: string }).userId === ADMIN) as { role: string }).role = 'viewer';
     // Every shipped role may view assessments, so the denial has to come from a
     // customised matrix — which is the real-world shape of it too: an org that
     // has turned the category off for a role.
@@ -2261,6 +2705,13 @@ describe('POST /assessment-cases/:id/sign-off', () => {
 
   it('refuses to let the candidate certify themselves', async () => {
     const { db, store } = makeDb();
+    // The scenario is a sign-off-capable user who is ALSO the candidate on the
+    // case. Give that user a genuine admin membership so requireTenant's role
+    // revalidation keeps their authority and the route reaches the
+    // self-certification refusal rather than a bare permission denial.
+    (rows(store, 'memberships').find((m) => (m as { userId: string }).userId === CANDIDATE) as {
+      role: string;
+    }).role = 'admin';
     mockDbValue = db;
     const { server, base } = startApp();
     try {
@@ -2667,6 +3118,625 @@ describe('GET /assessment-cases/:id — candidate name', () => {
       const res = await fetch(`${base}/assessment-cases/${created.id}`, { headers: auth() });
       expect(res.status).toBe(200);
       expect(((await res.json()) as { candidateName: string }).candidateName).toBe('');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/*
+  AN ATTEMPT MAY ONLY BE WRITTEN WITH ITS OWN PART'S FIELDS.
+
+  The save route asked who owned the CASE and never what part the attempt was
+  for, so any field id in the body was accepted. A candidate could open their
+  own theory attempt and post the practical's observation checklist — the
+  criteria their assessor is meant to mark while watching them operate the
+  machine — and it would be stored against the case and merged into the
+  evidence PDF.
+*/
+describe('attempt writes are scoped to their part', () => {
+  async function openAttempt(base: string) {
+    const tool = await seedTool(base);
+    const caseRes = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+    });
+    const c = (await caseRes.json()) as { id: string };
+    const attemptRes = await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, {
+      method: 'POST',
+      headers: auth(),
+    });
+    return { caseId: c.id, attempt: (await attemptRes.json()) as { id: string } };
+  }
+
+  function save(base: string, caseId: string, attemptId: string, values: Record<string, unknown>) {
+    return fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ values }),
+    });
+  }
+
+  it('refuses a field belonging to a DIFFERENT part', async () => {
+    // `log-table` is Part 3's. Writing it through a Part 1 attempt is the hole.
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attempt } = await openAttempt(base);
+      const res = await save(base, caseId, attempt.id, { 'log-table': [{ duration: 99 }] });
+
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; fields: string[] };
+      expect(body.error).toBe('field_not_in_part');
+      expect(body.fields).toEqual(['log-table']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('accepts a field that IS in the part', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attempt } = await openAttempt(base);
+      const res = await save(base, caseId, attempt.id, { q1: ['a'] });
+
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not delete a field the client left out', async () => {
+    /*
+      The route replaced the whole value map, so an omitted key vanished.
+      Harmless while one party writes an attempt; silent data loss the moment
+      workflow ownership lets two write one part.
+    */
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attempt } = await openAttempt(base);
+      await save(base, caseId, attempt.id, { q1: ['a'], 'q-mining': 'noted' });
+      await save(base, caseId, attempt.id, { q1: ['b'] });
+
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attempt.id}`, {
+        headers: auth(),
+      });
+      const body = (await res.json()) as { values: Record<string, unknown> };
+      expect(body.values['q-mining']).toBe('noted');
+      expect(body.values.q1).toEqual(['b']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('tolerates an unchanged echo of a foreign key', async () => {
+    /*
+      The fill screen seeds its state from the stored values and PATCHes the
+      whole map back. Rejecting outright would permanently 403 any attempt
+      already carrying a stray key — and real data does, under keys the manifest
+      never named.
+    */
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attempt } = await openAttempt(base);
+      // Nothing stored under it, and nothing sent for it either — an echo of
+      // undefined is not a change.
+      const res = await save(base, caseId, attempt.id, { q1: ['a'], 'log-table': undefined });
+
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/*
+  AND ONLY WITH THE FIELDS THIS PARTY OWNS.
+
+  Part scoping stopped a candidate writing ANOTHER part's checklist. It did not
+  stop them writing THIS part's — which is the case the customer described: the
+  candidate fills nothing in a practical, but the practical is one part and its
+  fields are all in it.
+
+  The caller here IS the candidate (ADMIN opens the case, so these use a case
+  whose candidate is the caller) — that is what makes the party resolution the
+  thing under test rather than incidental.
+*/
+describe('workflow ownership is enforced on an attempt', () => {
+  /** A tool whose Part 1 the candidate may read but not write. */
+  const READ_ONLY_THEORY = {
+    roles: ['candidate', 'assessor'] as const,
+    sections: [
+      { key: 'p1', ordinal: 1, label: 'Part 1', partKey: 'p1', access: { candidate: 'view', assessor: 'fill' } },
+      { key: 'p2', ordinal: 2, label: 'Part 2', partKey: 'p2', access: { candidate: 'view', assessor: 'fill' } },
+      { key: 'p3', ordinal: 3, label: 'Part 3', partKey: 'p3', access: { candidate: 'fill', assessor: 'view' } },
+      { key: 'p4', ordinal: 4, label: 'Part 4', partKey: 'p4', access: { candidate: 'view', assessor: 'fill' } },
+    ],
+  };
+
+  async function caseAsCandidate(base: string, workflow?: unknown) {
+    const created = await fetch(`${base}/assessment-tools`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({
+        templateId: TEMPLATE,
+        name: 'Track Dozer',
+        manifest: workflow ? { ...MANIFEST, workflow } : MANIFEST,
+      }),
+    });
+    const tool = (await created.json()) as { id: string };
+    // The CALLER is the candidate, so party resolution puts them on the
+    // candidate side of their own case.
+    const caseRes = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ toolId: tool.id, candidateUserId: ADMIN, pathway: 'new' }),
+    });
+    const c = (await caseRes.json()) as { id: string };
+    const attemptRes = await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, {
+      method: 'POST',
+      headers: auth(),
+    });
+    return { caseId: c.id, attemptId: ((await attemptRes.json()) as { id: string }).id };
+  }
+
+  it('refuses a field the workflow says this party may only VIEW', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseAsCandidate(base, READ_ONLY_THEORY);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { fields: string[] }).fields).toEqual(['q1']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('allows it when the workflow says this party fills it', async () => {
+    const FILLS = {
+      ...READ_ONLY_THEORY,
+      sections: READ_ONLY_THEORY.sections.map((s) =>
+        s.key === 'p1' ? { ...s, access: { candidate: 'fill', assessor: 'view' } } : s,
+      ),
+    };
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseAsCandidate(base, FILLS);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('changes nothing for a tool with no workflow authored', async () => {
+    // The migration story. Every existing tool must keep behaving exactly as it
+    // did until somebody opens the builder.
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseAsCandidate(base);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('tells the fill surface what may be changed', async () => {
+    /*
+      Decided server-side and sent, rather than worked out on the screen. A
+      second implementation of the rule deciding who may write a competency
+      record is a rule that can disagree with itself.
+    */
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseAsCandidate(base, READ_ONLY_THEORY);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(),
+      });
+
+      const body = (await res.json()) as { fields: { id: string }[]; writableFieldIds: string[] };
+      // Visible — a candidate reads the standard they are held to…
+      expect(body.fields.some((f) => f.id === 'q1')).toBe(true);
+      // …and cannot mark themselves against it.
+      expect(body.writableFieldIds).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('removes a HIDDEN field rather than sending it read-only', async () => {
+    // Read-only and absent are different answers. Assessor comments are not
+    // the candidate's business at all.
+    const HIDES = {
+      ...READ_ONLY_THEORY,
+      sections: READ_ONLY_THEORY.sections.map((s) =>
+        s.key === 'p1'
+          ? { ...s, fieldAccess: { q1: { candidate: 'hidden' as const } } }
+          : s,
+      ),
+    };
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await caseAsCandidate(base, HIDES);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(),
+      });
+
+      const body = (await res.json()) as { fields: { id: string }[] };
+      expect(body.fields.some((f) => f.id === 'q1')).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('the pooled queue and unowned cases (U13)', () => {
+  const POOL_TOOL = '00000000-0000-4000-8000-0000000000c1';
+  const POOL_CASE = '00000000-0000-4000-8000-0000000000c2';
+  const ADMIN2 = '00000000-0000-4000-8000-0000000000bc';
+  const admin2 = { userId: ADMIN2, orgId: ORG, role: 'admin' as const };
+
+  function seedPooled(store: ReturnType<typeof makeDb>['store'], over: Record<string, unknown> = {}) {
+    rows(store, 'assessmentTools').push({
+      id: POOL_TOOL,
+      orgId: ORG,
+      templateId: TEMPLATE,
+      name: 'Track Dozer',
+      manifest: MANIFEST,
+      assessorCompetencyIds: [COMPETENCY],
+      assessorStreamCompetencyIds: {},
+      candidatePrerequisiteIds: [],
+      awardedCompetencyIds: [],
+      locationPartKeys: {},
+      departmentId: null,
+    });
+    rows(store, 'assessmentCases').push({
+      id: POOL_CASE,
+      orgId: ORG,
+      toolId: POOL_TOOL,
+      candidateUserId: CANDIDATE,
+      assessorUserId: null,
+      state: 'open',
+      locationId: null,
+      pathway: 'new',
+      currentVersionId: VERSION,
+      createdAt: new Date(),
+      prerequisiteWarnings: [],
+      ...over,
+    });
+  }
+  function holdCompetency(store: ReturnType<typeof makeDb>['store'], userId: string) {
+    rows(store, 'competencyHolders').push({
+      competencyId: COMPETENCY,
+      userId,
+      orgId: ORG,
+      grantedAt: new Date('2025-01-01'),
+      expiresAt: null,
+      revokedAt: null,
+    });
+  }
+  const detail = async (base: string, id: string) =>
+    (await (await fetch(`${base}/assessment-cases/${id}`, { headers: auth() })).json()) as {
+      assessorUserId: string | null;
+    };
+  const queue = async (base: string, session = admin) =>
+    (await (await fetch(`${base}/assessment-cases/queue`, { headers: auth(session) })).json()) as Array<{
+      id: string;
+      overdue: boolean;
+    }>;
+
+  it('a manual create with no assessor lands unowned; naming one keeps it (R61)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const pooled = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+        })
+      ).json()) as { id: string };
+      const owned = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({
+            toolId: tool.id,
+            candidateUserId: OTHER_CANDIDATE,
+            assessorUserId: ADMIN,
+            pathway: 'new',
+          }),
+        })
+      ).json()) as { id: string };
+
+      expect((await detail(base, pooled.id)).assessorUserId).toBeNull();
+      expect((await detail(base, owned.id)).assessorUserId).toBe(ADMIN);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns a pooled case to an eligible assessor, and not to an ineligible one (R62, R64)', async () => {
+    const { db, store } = makeDb();
+    seedPooled(store);
+    holdCompetency(store, ADMIN); // ADMIN holds the tool's assessor competency
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // ADMIN is eligible; ADMIN2 (holds nothing) is not.
+      expect((await queue(base)).map((c) => c.id)).toContain(POOL_CASE);
+      expect(await queue(base, admin2)).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses the queue to a candidate', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-cases/queue`, { headers: auth(candidate) });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reads a pooled case older than the threshold as overdue, re-dating when it changes (R63)', async () => {
+    const { db, store } = makeDb();
+    seedPooled(store, { createdAt: new Date(Date.now() - 30 * 86_400_000) }); // 30 days old
+    holdCompetency(store, ADMIN);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // Default threshold is 14 → overdue.
+      expect((await queue(base)).find((c) => c.id === POOL_CASE)?.overdue).toBe(true);
+      // Raise the threshold past its age → no longer overdue, with no case write.
+      (rows(store, 'organizations')[0] as { pooledCaseOverdueDays?: number }).pooledCaseOverdueDays = 60;
+      expect((await queue(base)).find((c) => c.id === POOL_CASE)?.overdue).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('excludes from an appeal whoever recorded a part on the pooled case (R61, R62)', async () => {
+    const { db, store } = makeDb();
+    seedPooled(store);
+    // ADMIN recorded a part on the pooled case — so ADMIN is not independent.
+    rows(store, 'assessmentPartAttempts').push({
+      id: '00000000-0000-4000-8000-0000000000c9',
+      orgId: ORG,
+      caseId: POOL_CASE,
+      partKey: 'p1',
+      attemptNumber: 1,
+      templateVersionId: VERSION,
+      assessorUserId: ADMIN,
+      markerKind: 'person',
+      outcome: 'satisfactory',
+      values: {},
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // ADMIN cannot INITIATE (they marked a part).
+      const asInitiator = await fetch(`${base}/assessment-cases/${POOL_CASE}/appeal`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ assessorUserId: ADMIN2, reason: 'Disputed' }),
+      });
+      expect(asInitiator.status).toBe(409);
+      expect(((await asInitiator.json()) as { error: string }).error).toBe('appeal_conflict');
+
+      // Naming ADMIN (who marked) as the independent assessor is refused too.
+      const asAssessor = await fetch(`${base}/assessment-cases/${POOL_CASE}/appeal`, {
+        method: 'POST',
+        headers: auth(admin2),
+        body: JSON.stringify({ assessorUserId: ADMIN, reason: 'Disputed' }),
+      });
+      expect(asAssessor.status).toBe(409);
+      expect(((await asAssessor.json()) as { error: string }).error).toBe('appeal_assessor_not_independent');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('assessor eligibility warned at marking (U14)', () => {
+  async function toolWithAssessorReq(base: string) {
+    const res = await fetch(`${base}/assessment-tools`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({
+        templateId: TEMPLATE,
+        name: 'Track Dozer',
+        manifest: MANIFEST,
+        assessorCompetencyIds: [COMPETENCY],
+      }),
+    });
+    return (await res.json()) as { id: string };
+  }
+  async function openCaseFor(base: string, toolId: string) {
+    return (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId, candidateUserId: CANDIDATE, pathway: 'new' }),
+      })
+    ).json()) as { id: string };
+  }
+  async function openPart(base: string, caseId: string, partKey: string) {
+    return (await (
+      await fetch(`${base}/assessment-cases/${caseId}/parts/${partKey}/attempts`, {
+        method: 'POST',
+        headers: auth(),
+      })
+    ).json()) as { id: string };
+  }
+  async function passP1(base: string, caseId: string) {
+    const p1 = await openPart(base, caseId, 'p1');
+    await fetch(`${base}/assessment-cases/${caseId}/attempts/${p1.id}`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ values: { q1: ['a'] } }),
+    });
+    await fetch(`${base}/assessment-cases/${caseId}/attempts/${p1.id}/outcome`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({}),
+    });
+  }
+
+  it('records a warning naming what the marker is missing, and the mark still stands (R65)', async () => {
+    const { db, store } = makeDb(); // ADMIN holds no competency
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await toolWithAssessorReq(base);
+      const c = await openCaseFor(base, tool.id);
+      await passP1(base, c.id);
+      const p2 = await openPart(base, c.id, 'p2');
+      const res = await fetch(`${base}/assessment-cases/${c.id}/attempts/${p2.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat' }),
+      });
+      expect(res.status).toBe(200);
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === p2.id);
+      expect(row?.outcome).toBe('satisfactory'); // the mark stands
+      expect((row?.markingEligibilityWarnings as string[]).join('\n')).toContain(COMPETENCY);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records no warning when the marker holds the assessor competency', async () => {
+    const { db, store } = makeDb();
+    rows(store, 'competencyHolders').push({
+      competencyId: COMPETENCY,
+      userId: ADMIN,
+      orgId: ORG,
+      grantedAt: new Date('2025-01-01'),
+      expiresAt: null,
+      revokedAt: null,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await toolWithAssessorReq(base);
+      const c = await openCaseFor(base, tool.id);
+      await passP1(base, c.id);
+      const p2 = await openPart(base, c.id, 'p2');
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${p2.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat' }),
+      });
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === p2.id);
+      expect(row?.markingEligibilityWarnings).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records no eligibility warning on an automatically marked part (R65)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await toolWithAssessorReq(base);
+      const c = await openCaseFor(base, tool.id);
+      const p1 = await openPart(base, c.id, 'p1');
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${p1.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      await fetch(`${base}/assessment-cases/${c.id}/attempts/${p1.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({}),
+      });
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === p1.id);
+      expect(row?.markerKind).toBe('automatic');
+      expect(row?.markingEligibilityWarnings).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('appeal independence covers the sign-off assessor (U13 review fix)', () => {
+  const POOL_TOOL = '00000000-0000-4000-8000-0000000000d1';
+  const POOL_CASE = '00000000-0000-4000-8000-0000000000d2';
+  const OTHER_ADMIN = '00000000-0000-4000-8000-0000000000da';
+
+  it('refuses the assessor who signed off a self-marked pooled case as appeal initiator', async () => {
+    const { db, store } = makeDb();
+    rows(store, 'assessmentTools').push({
+      id: POOL_TOOL,
+      orgId: ORG,
+      templateId: TEMPLATE,
+      name: 'Track Dozer',
+      manifest: MANIFEST,
+      assessorCompetencyIds: [],
+      assessorStreamCompetencyIds: {},
+      candidatePrerequisiteIds: [],
+      awardedCompetencyIds: [],
+      locationPartKeys: {},
+      departmentId: null,
+    });
+    // Pooled (no named assessor), self-marked (no person attempts), but SIGNED
+    // OFF by ADMIN — who is therefore not independent of it.
+    rows(store, 'assessmentCases').push({
+      id: POOL_CASE,
+      orgId: ORG,
+      toolId: POOL_TOOL,
+      candidateUserId: CANDIDATE,
+      assessorUserId: null,
+      signedOffByUserId: ADMIN,
+      state: 'competent',
+      locationId: null,
+      pathway: 'new',
+      currentVersionId: VERSION,
+      createdAt: new Date(),
+      prerequisiteWarnings: [],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-cases/${POOL_CASE}/appeal`, {
+        method: 'POST',
+        headers: auth(), // ADMIN, who signed it off
+        body: JSON.stringify({ assessorUserId: OTHER_ADMIN, reason: 'Disputed' }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('appeal_conflict');
     } finally {
       server.close();
     }

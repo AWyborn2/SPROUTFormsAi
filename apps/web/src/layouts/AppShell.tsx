@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Avatar, Icon } from '@formai/ui';
-import { NAV_SCREENS, screenByPath } from '../lib/screens.js';
+import { navScreensFor, screenByPath } from '../lib/screens.js';
 import { useKeyboard } from '../lib/keyboard/KeyboardProvider.js';
 import { useSession } from '../lib/data/hooks.js';
 import { orgBrandVars } from '../lib/branding.js';
@@ -19,6 +19,12 @@ export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const current = screenByPath(location.pathname);
+  /*
+    The plan features ride the SESSION, so the nav is right on first paint. A
+    separate billing call would leave every gated entry flickering in once it
+    returned.
+  */
+  const navScreens = navScreensFor(session?.role, session?.features);
   const userName = session?.userName || session?.userEmail || 'Account';
   const orgName = session?.orgName || 'Your organization';
   const orgInitial = (orgName.trim()[0] ?? '?').toUpperCase();
@@ -62,7 +68,7 @@ export function AppShell() {
           <Icon name="chevrons-up-down" size={15} color="rgba(255,255,255,.4)" />
         </div>
         <nav className="fai-scroll flex-1 overflow-auto px-2 py-2">
-          {NAV_SCREENS.map((s) => (
+          {navScreens.map((s) => (
             <NavLink
               key={s.key}
               to={s.path}

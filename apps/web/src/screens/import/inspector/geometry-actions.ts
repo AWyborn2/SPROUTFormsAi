@@ -8,9 +8,10 @@
  * be read and tested directly.
  */
 import type { FormField, GeometryBand, GroupOrdinal, PageBox, RepeatingColumn } from '@formai/shared';
-import { markPlacement } from '@formai/shared';
+import { markPlacement, resolveGeometry } from '@formai/shared';
 import type {
   FieldProposal,
+  MatchAnchorSpec,
   PositionedText,
   TableProposal,
   TextPage,
@@ -18,6 +19,7 @@ import type {
 import {
   proposeFieldOptionCells,
   proposeInlineOptionCells,
+  proposeMatchAnchorCells,
   proposeTableSegments,
 } from '../../../lib/pdf-geometry.js';
 
@@ -733,6 +735,115 @@ export function snapEdge(value: number, targets: readonly number[], range = SNAP
 }
 
 /**
+ * Widen a segment box so it contains every one of its bands, clamped to the
+ * page. Bands outside the box are rejected by the shared validator, so an
+ * adjustment that pushes past the current edge has to carry the box with it.
+ *
+ * Mirrors `import-session.ts`'s private helper of the same name exactly — both
+ * `moveBand`/`moveBoundary` here and `adjustGeometryBand`/`adjustGeometryBoundary`
+ * there need it, and this module is the pure-function home, so the definition
+ * lives here and `import-session.ts` no longer needs its own copy.
+ */
+function growToFit(segment: PageBox): PageBox {
+  const cols = segment.columnBands ?? [];
+  const rows = segment.rowBands ?? [];
+
+  const left = Math.max(Math.min(segment.x, ...cols.map((b) => b.start)), 0);
+  const right = Math.min(
+    Math.max(segment.x + segment.width, ...cols.map((b) => b.end)),
+    segment.pageWidth,
+  );
+  const bottom = Math.max(Math.min(segment.y, ...rows.map((b) => b.start)), 0);
+  const top = Math.min(
+    Math.max(segment.y + segment.height, ...rows.map((b) => b.end)),
+    segment.pageHeight,
+  );
+
+  return { ...segment, x: left, y: bottom, width: right - left, height: top - bottom };
+}
+
+/**
+ * Move one band edge, the pure core of `import-session.ts`'s `adjustGeometryBand`
+ * (R8/U6/KTD5).
+ *
+ * Extracted so the Placement screen (`GeometryEditorScreen`) can drive the same
+ * validated band-drag/nudge the import review screen uses, writing the result
+ * into its own `edited` field array instead of the import session's
+ * `geometryProposals` map. Returns `null` for an inverted band, a grow-past-page
+ * edit, or an edit the shipped validator (`resolveGeometry`) would refuse —
+ * exactly the refusals `adjustGeometryBand` encodes as "do nothing".
+ */
+export function moveBand(
+  segment: PageBox,
+  axis: 'column' | 'row',
+  key: string,
+  edge: 'start' | 'end',
+  value: number,
+): PageBox | null {
+  const bands = axis === 'column' ? segment.columnBands : segment.rowBands;
+  const band = bands?.find((b) => b.key === key);
+  if (!band) return null;
+
+  const moved = { ...band, [edge]: value };
+  if (!(moved.end > moved.start)) return null; // an inverted band is not an edit
+
+  const withMove: PageBox = {
+    ...segment,
+    ...(axis === 'column'
+      ? { columnBands: segment.columnBands!.map((b) => (b.key === key ? moved : b)) }
+      : { rowBands: segment.rowBands!.map((b) => (b.key === key ? moved : b)) }),
+  };
+
+  // Grow the box to contain the moved band. Bands must lie inside the segment,
+  // so without this a reviewer dragging the outermost edge outward would see
+  // the control simply do nothing — the edit is legitimate, it is the box that
+  // was too small.
+  const next = growToFit(withMove);
+
+  // Reject an edit the shipped validator would refuse, rather than storing a
+  // grid that silently vanishes at publish. Overlapping a neighbour is the
+  // common case when dragging an edge past it.
+  if (resolveGeometry({ geometry: { segments: [next] } }).segments.length !== 1) return null;
+
+  return next;
+}
+
+/**
+ * Move the shared boundary between two adjacent bands, the pure core of
+ * `import-session.ts`'s `adjustGeometryBoundary` (R8/U6/KTD5).
+ *
+ * `centresToBands` makes bands contiguous — `bands[i].end === bands[i+1].start`
+ * — so an interior edge belongs to two bands at once. Moving only one of them
+ * opens a gap the exporter cannot resolve: a tick printed in it falls in no
+ * column at all. The two edges are therefore one control, moved together or
+ * not at all, validated the same way `moveBand` is.
+ */
+export function moveBoundary(
+  segment: PageBox,
+  axis: 'column' | 'row',
+  leftKey: string,
+  rightKey: string,
+  value: number,
+): PageBox | null {
+  const bands = (axis === 'column' ? segment.columnBands : segment.rowBands) ?? [];
+  const left = bands.find((b) => b.key === leftKey);
+  const right = bands.find((b) => b.key === rightKey);
+  if (!left || !right) return null;
+  if (!(value > left.start) || !(value < right.end)) return null;
+
+  const moved = bands.map((b) =>
+    b.key === leftKey ? { ...b, end: value } : b.key === rightKey ? { ...b, start: value } : b,
+  );
+  const next = growToFit({
+    ...segment,
+    ...(axis === 'column' ? { columnBands: moved } : { rowBands: moved }),
+  });
+  if (resolveGeometry({ geometry: { segments: [next] } }).segments.length !== 1) return null;
+
+  return next;
+}
+
+/**
  * Vertical snap targets: the printed text baselines on a page (U1).
  *
  * The horizontal `snapTargets` gives the left/right edges a column-band drag
@@ -1107,6 +1218,62 @@ export function panelState(
 }
 
 /**
+ * Which confidence tier a proposal falls into, for the auto-detect flow (U1,
+ * R1/R2).
+ *
+ * Reuses the exact boundary `panelState` already treats as clean:
+ * `confidence === 1` is a full match with nothing inferred, versus
+ * `confidence < 1` — which `panelState` already surfaces as a caution note —
+ * needing a reviewer's eyes. `null` means detection found nothing to propose
+ * at all, which is its own tier rather than a low-confidence `needs-review`:
+ * there is no box to review, only a field to hand-place.
+ */
+export type ProposalTier = 'auto-confirm' | 'needs-review' | 'no-match';
+
+export function classifyProposalTier(
+  proposal: FieldProposal | TableProposal | null,
+): ProposalTier {
+  if (!proposal) return 'no-match';
+  return proposal.confidence === 1 ? 'auto-confirm' : 'needs-review';
+}
+
+/** One field-level edit to fold into a batch (U2/KTD3). */
+export interface FieldChange {
+  fieldId: string;
+  change: (field: FormField) => FormField;
+}
+
+/**
+ * Apply every change in one pass over a single snapshot (U2/KTD3).
+ *
+ * `GeometryEditorScreen`'s `mutate()` used to recompute `fields.map(...)` fresh
+ * off the SAME pre-click `fields` snapshot for every call, so N synchronous
+ * `mutate()` calls inside one handler — the "Place all N" button already loops
+ * once per segment, and a later bulk auto-confirm will loop once per field —
+ * left only the LAST call's `setEdited(...)` result in state: every earlier
+ * change in the batch was silently discarded. Folding every change over one
+ * accumulating snapshot here, in a pure function `GeometryEditorScreen` calls
+ * from a single functional `setState` updater, is what makes calling this once
+ * with the whole batch correct regardless of how many changes land on the same
+ * field or how many fields are touched.
+ *
+ * Changes targeting the same `fieldId` apply in ARRAY ORDER against the
+ * accumulating result, not all against the original snapshot — so two changes
+ * to one field (place one option, then another) compose instead of the second
+ * clobbering the first.
+ */
+export function applyFieldChanges(
+  fields: readonly FormField[],
+  changes: readonly FieldChange[],
+): FormField[] {
+  let next: FormField[] = [...fields];
+  for (const { fieldId, change } of changes) {
+    next = next.map((f) => (f.id === fieldId ? change(f) : f));
+  }
+  return next;
+}
+
+/**
  * Propose one checkmark box per option for a NON-TABLE choice field, across the
  * whole document.
  *
@@ -1150,4 +1317,173 @@ export function deriveOptionCellsAcrossPages(
   }
 
   return hits[0] ?? null;
+}
+
+/**
+ * Propose every anchor of a matching question, across the whole document.
+ *
+ * The counterpart to `deriveOptionCellsAcrossPages`, for the one field shape
+ * that derivation cannot read: a matching question's options are PAIRINGS, and a
+ * pairing is a thing the candidate might do rather than a thing the page prints,
+ * so matching a field's options against the text layer could only ever hit by
+ * coincidence. Its printed ENTRIES are what exist, and anchors are keyed to
+ * those.
+ *
+ * Same refusal on document-wide ambiguity, and for the same reason: a question
+ * claimed by two pages is a question the document does not place, and anchoring
+ * the wrong page's copy draws every one of the candidate's lines onto text they
+ * never read.
+ */
+export function deriveMatchAnchorsAcrossPages(
+  anchors: readonly MatchAnchorSpec[],
+  pages: readonly TextPage[],
+): FieldProposal | null {
+  if (anchors.length < 2) return null;
+
+  const hits: FieldProposal[] = [];
+  for (const [i, page] of pages.entries()) {
+    const p = proposeMatchAnchorCells({
+      page: i,
+      pageWidth: page.width,
+      pageHeight: page.height,
+      items: page.items,
+      anchors,
+    });
+    if (p) hits.push(p);
+    if (hits.length > 1) return null;
+  }
+
+  return hits[0] ?? null;
+}
+
+/* ------------------------------------------------------------------ *
+ * Whole-box movement
+ *
+ * Everything above moves a band EDGE — which is the right tool for saying which
+ * option column a mark belongs in, and the wrong one for "this whole box is two
+ * points too high". Placing a box was one-shot until now: it snapped where it
+ * landed and the only correction was to delete it and draw it again, on a
+ * screen where a real paper carries three hundred of them.
+ * ------------------------------------------------------------------ */
+
+/**
+ * How far a whole box moves per coarse nudge, in PDF points.
+ *
+ * Ten steps of `NUDGE_POINTS`, so Shift+arrow and ten arrows land in exactly the
+ * same place — a coarse step that is not a multiple of the fine one makes the
+ * two disagree about where a box ends up, and an author who used both cannot
+ * predict either.
+ */
+export const NUDGE_POINTS_COARSE = NUDGE_POINTS * 10;
+
+/** The step one arrow-key press moves a selected box. */
+export function nudgeStep(coarse: boolean): number {
+  return coarse ? NUDGE_POINTS_COARSE : NUDGE_POINTS;
+}
+
+/**
+ * A delta clamped so the box stays wholly on its page.
+ *
+ * A box dragged off the edge is not a placement — the exporter would draw its
+ * mark outside the media box, where it does not appear on the printed page at
+ * all. That reads on a competency record as a mark nobody made, which is the
+ * same silence a missing outcome box produces.
+ *
+ * Clamps the DELTA rather than the resulting box, so a drag that would overshoot
+ * slides along the edge instead of stopping dead: the axis that still has room
+ * keeps moving.
+ */
+export function clampDelta(
+  segment: Pick<PageBox, 'x' | 'y' | 'width' | 'height' | 'pageWidth' | 'pageHeight'>,
+  dx: number,
+  dy: number,
+): { dx: number; dy: number } {
+  return {
+    dx: Math.max(-segment.x, Math.min(dx, segment.pageWidth - segment.width - segment.x)),
+    dy: Math.max(-segment.y, Math.min(dy, segment.pageHeight - segment.height - segment.y)),
+  };
+}
+
+/**
+ * Move a whole placement box, bands and all.
+ *
+ * THE BANDS MOVE WITH IT, AND THAT IS THE WHOLE POINT. `GeometryBand.start` /
+ * `end` are absolute PDF-point coordinates in the same space as `PageBox.x` /
+ * `y` — `markPlacement` reads `columnBand.start` directly as the mark's x. Move
+ * the outline without moving the bands and the box lands where the author put
+ * it while every mark it draws stays where it was, so the preview agrees with
+ * nothing and the export puts ticks in the wrong cells. Column bands follow the
+ * x delta, row bands the y delta.
+ *
+ * Returns the SAME segment when the clamped delta is zero, so a drag held
+ * against the page edge produces no re-render and a nudge at the boundary is a
+ * no-op rather than a churn of identical states.
+ */
+export function moveSegment(segment: PageBox, dx: number, dy: number): PageBox {
+  const clamped = clampDelta(segment, dx, dy);
+  if (clamped.dx === 0 && clamped.dy === 0) return segment;
+
+  const shift = (bands: GeometryBand[] | undefined, by: number) =>
+    bands?.map((b) => ({ ...b, start: b.start + by, end: b.end + by }));
+
+  const columnBands = shift(segment.columnBands, clamped.dx);
+  const rowBands = shift(segment.rowBands, clamped.dy);
+
+  return {
+    ...segment,
+    x: segment.x + clamped.dx,
+    y: segment.y + clamped.dy,
+    ...(columnBands ? { columnBands } : {}),
+    ...(rowBands ? { rowBands } : {}),
+  };
+}
+
+/** Which way an arrow key moves a box, in PDF points. */
+export const ARROW_DELTAS: Record<string, { dx: number; dy: number }> = {
+  ArrowLeft: { dx: -1, dy: 0 },
+  ArrowRight: { dx: 1, dy: 0 },
+  // PDF y grows UPWARD, and the screen's y grows downward. ArrowUp has to mean
+  // "up the printed page", so it is a POSITIVE y here. Getting this backwards
+  // sends every box the wrong way and reads as the control being broken.
+  ArrowUp: { dx: 0, dy: 1 },
+  ArrowDown: { dx: 0, dy: -1 },
+};
+
+/**
+ * The move one key press means, or null if the key is not a movement key.
+ *
+ * Null rather than a zero delta, so a caller can tell "this key is not mine"
+ * from "this key moved nothing" and leave the event unhandled — swallowing every
+ * keystroke on a screen with a filter box would stop an author typing in it.
+ */
+export function keyMove(key: string, coarse: boolean): { dx: number; dy: number } | null {
+  const direction = ARROW_DELTAS[key];
+  if (!direction) return null;
+  const step = nudgeStep(coarse);
+  return { dx: direction.dx * step, dy: direction.dy * step };
+}
+
+/** Whether a key press should remove the selected box. */
+export function isDeleteKey(key: string): boolean {
+  return key === 'Delete' || key === 'Backspace';
+}
+
+/**
+ * Drop one page's box from a field's geometry.
+ *
+ * Returns undefined when the last segment goes, rather than an empty geometry:
+ * `geometry.ts` treats an absent footprint as "not placed", and a geometry
+ * carrying zero segments is a third state nothing downstream reads — it would
+ * pass a "has geometry" check and then draw nothing.
+ */
+export function removeSegment(
+  segments: readonly PageBox[],
+  page: number,
+  optionKey?: string,
+): PageBox[] | undefined {
+  const next = segments.filter(
+    (s) => !(s.page === page && (s.optionKey ?? undefined) === (optionKey ?? undefined)),
+  );
+  if (next.length === segments.length) return segments as PageBox[];
+  return next.length > 0 ? next : undefined;
 }

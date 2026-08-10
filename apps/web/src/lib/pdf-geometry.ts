@@ -1710,3 +1710,238 @@ export function proposeScalarCell(input: ScalarProposeInput): ScalarOutcome {
     },
   };
 }
+
+/* ------------------------------------------------------------------ *
+ * Matching anchors
+ * ------------------------------------------------------------------ */
+
+/**
+ * A matching anchor's side, in points.
+ *
+ * Small on purpose. An anchor is not a cell to be marked; it is the END of a
+ * connector, and the exporter reads its facing edge at mid-height. A large box
+ * would move that point away from the text it belongs to without saying so.
+ */
+const ANCHOR_SIZE = 8;
+
+/** How far an anchor sits clear of the text it belongs to, in points. */
+const ANCHOR_GAP = 4;
+
+/**
+ * Below this many characters an entry is not evidence of itself.
+ *
+ * Shorter than `bandMatches`'s twelve, deliberately: a printed answer is a sign
+ * name, not a sentence, and "Wash bay" is four words shorter than any criterion
+ * on the page. Uniqueness across the whole document is what actually carries
+ * the safety here — this floor only keeps a one-or-two-character entry from
+ * being "found" everywhere.
+ */
+const ANCHOR_MIN_CHARS = 3;
+
+/** One entry of a matching question, as the caller wants it anchored. */
+export interface MatchAnchorSpec {
+  /** The segment's `optionKey` — `l0`, `r2`. */
+  key: string;
+  side: 'l' | 'r';
+  /** The printed text this anchor attaches to. */
+  text: string;
+}
+
+export interface MatchAnchorProposeInput {
+  page: number;
+  pageWidth: number;
+  pageHeight: number;
+  items: PositionedText[];
+  anchors: readonly MatchAnchorSpec[];
+}
+
+/** Where an entry's text was found: its row baseline and horizontal extent. */
+interface FoundEntry {
+  y: number;
+  x1: number;
+  x2: number;
+}
+
+/**
+ * Locate one entry's printed text on the page, or refuse.
+ *
+ * EXACTLY ONE ROW, OR NOTHING. A matching question's prompts are statements the
+ * page may well repeat elsewhere — "Restricted area" appears in a heading and
+ * again in the list — and a second hit means the page does not say which one
+ * the author meant. Anchoring the wrong one draws the candidate's line to a
+ * different statement on a competency record, which is worse than asking for
+ * six drags.
+ *
+ * The extent is measured from the ITEMS that carry the wanted words, not from
+ * the whole row: a row printing a statement and its sign side by side would
+ * otherwise give both entries the same span, and both anchors the same point.
+ */
+function findEntryRow(rows: Row[], text: string): FoundEntry | null {
+  const wanted = normalizeForMatch(text);
+  if (wanted.length < ANCHOR_MIN_CHARS) return null;
+
+  const want = wanted.split(' ').filter(Boolean);
+  const hits: FoundEntry[] = [];
+
+  for (const row of rows) {
+    /*
+      THE SPAN IS THE CONTIGUOUS RUN OF WORDS, NOT THE ITEMS THAT SHARE ONE.
+
+      A text layer splits a line into runs at arbitrary points, so an item's
+      boundaries are not word boundaries and the span has to be found at word
+      granularity. The obvious shortcut — keep every item carrying any wanted
+      word — is wrong in a way that only shows up on the real page: this
+      question prints "Wash-down required" against "Wash bay sign", the two
+      share the word "wash", and each entry's span swallowed the WHOLE row. Both
+      sides then had the same centre, the two-column check saw them overlap, and
+      a perfectly readable page was refused.
+
+      Tagging each word with the item it came from and taking only the items
+      under the matched run keeps each entry on its own text.
+    */
+    const words: { word: string; item: PositionedText }[] = [];
+    for (const item of row.items) {
+      for (const word of normalizeForMatch(item.text).split(' ').filter(Boolean)) {
+        words.push({ word, item });
+      }
+    }
+
+    for (let i = 0; i + want.length <= words.length; i++) {
+      if (!want.every((w, j) => words[i + j]!.word === w)) continue;
+      const span = words.slice(i, i + want.length).map((x) => x.item);
+      hits.push({
+        y: row.y,
+        x1: Math.min(...span.map((it) => it.x)),
+        x2: Math.max(...span.map((it) => it.x + it.width)),
+      });
+      // A row printing the same entry twice is as ambiguous as two rows doing
+      // it, so runs are counted across the page rather than per row.
+      if (hits.length > 1) return null;
+    }
+  }
+
+  return hits[0] ?? null;
+}
+
+/**
+ * Propose one anchor per printed entry of a matching question.
+ *
+ * WHAT THIS REPLACES: six manual drags per matching question. The placement
+ * screen proposed nothing for a matching field, correctly — the option-cell
+ * derivation matches a field's label row and then its OPTIONS within it, and a
+ * matching question's options are pairings that appear nowhere on the page, so
+ * any hit would have been a coincidence placing a box against text that does
+ * not mean what the key says it means.
+ *
+ * The printed ENTRIES do appear, which is the whole reason anchors are the
+ * geometry model. Each is located by its own text and given a small box on its
+ * inner side — right of a prompt, left of an answer — which is where a person
+ * with a pen starts and ends the line.
+ *
+ * REFUSES ON ANYTHING UNSETTLED, and the refusals are the design:
+ *
+ *  - an entry found nowhere, or in more than one row;
+ *  - prompts and answers whose columns INTERLEAVE, which means the page is not
+ *    the two-column layout this reads and nothing here knows which side is
+ *    which.
+ *
+ * Every refusal leaves the author drawing the anchors by hand, which is the
+ * work this saves and not work it prevents. A confidently misplaced anchor is a
+ * line drawn to the wrong statement on a competency record.
+ */
+export function proposeMatchAnchorCells(input: MatchAnchorProposeInput): FieldProposal | null {
+  if (input.anchors.length < 2 || input.items.length === 0) return null;
+
+  const rows = toRows(input.items);
+  const found = new Map<string, FoundEntry>();
+  for (const anchor of input.anchors) {
+    const hit = findEntryRow(rows, anchor.text);
+    // ALL of them or none. A half-anchored question exports a connector for
+    // some pairings and nothing for others, which reads as a candidate who
+    // answered half the question.
+    if (!hit) return null;
+    found.set(anchor.key, hit);
+  }
+
+  const centre = (key: string) => {
+    const e = found.get(key)!;
+    return (e.x1 + e.x2) / 2;
+  };
+  const lefts = input.anchors.filter((a) => a.side === 'l').map((a) => centre(a.key));
+  const rights = input.anchors.filter((a) => a.side === 'r').map((a) => centre(a.key));
+  if (lefts.length === 0 || rights.length === 0) return null;
+
+  /*
+    THE TWO SIDES MUST OCCUPY SEPARATE COLUMNS.
+
+    A matching question is printed as statements down one side and answers down
+    the other — which side is which varies by paper, so it is read off the
+    geometry rather than assumed. If the two sets overlap horizontally this is
+    not that layout, and every anchor placed from it would be guesswork.
+  */
+  const promptsFirst = Math.max(...lefts) < Math.min(...rights);
+  const answersFirst = Math.max(...rights) < Math.min(...lefts);
+  if (!promptsFirst && !answersFirst) return null;
+
+  const segments: PageBox[] = input.anchors.map((anchor) => {
+    const e = found.get(anchor.key)!;
+    // The INNER edge — the side facing the other column, which is where the
+    // line has to leave from.
+    const outward = anchor.side === 'l' ? promptsFirst : answersFirst;
+    const x = outward ? e.x2 + ANCHOR_GAP : e.x1 - ANCHOR_GAP - ANCHOR_SIZE;
+    return {
+      page: input.page,
+      // Clamped so an entry printed hard against a margin still lands on the
+      // page — `resolveGeometry` drops a box that runs off it.
+      x: Math.max(0, Math.min(input.pageWidth - ANCHOR_SIZE, x)),
+      // Straddling the baseline slightly high, so the anchor sits in the
+      // text's x-height rather than under its descenders.
+      y: Math.max(0, Math.min(input.pageHeight - ANCHOR_SIZE, e.y - ANCHOR_SIZE / 4)),
+      width: ANCHOR_SIZE,
+      height: ANCHOR_SIZE,
+      pageWidth: input.pageWidth,
+      pageHeight: input.pageHeight,
+      optionKey: anchor.key,
+    };
+  });
+
+  return {
+    segments,
+    confidence: 1,
+    notes: [
+      `Each anchor sits beside its own printed text, ${
+        promptsFirst ? 'prompts on the left' : 'prompts on the right'
+      }. Check two of them against the page before saving — the lines are drawn from these.`,
+    ],
+  };
+}
+
+/**
+ * An anchor box centred on a point — what one end of a hand-drawn connector
+ * becomes.
+ *
+ * The SIZE LIVES IN ONE PLACE, which is the reason this is a function rather
+ * than an exported constant plus arithmetic at each call site. The derivation
+ * above and the drag gesture both mint anchors, and an anchor drawn by hand
+ * that is a different size from one proposed automatically would move the
+ * exporter's attachment point — the box's facing edge at mid-height — between
+ * two anchors an author cannot tell apart on screen.
+ *
+ * Clamped rather than refused: a point on the very edge of the page is a real
+ * thing to aim at, and `resolveGeometry` drops a box that runs off it.
+ */
+export function matchAnchorBoxAt(
+  point: { x: number; y: number },
+  page: { page: number; pageWidth: number; pageHeight: number },
+): PageBox {
+  const clamp = (v: number, max: number) => Math.min(Math.max(v, 0), max);
+  return {
+    page: page.page,
+    x: clamp(point.x - ANCHOR_SIZE / 2, page.pageWidth - ANCHOR_SIZE),
+    y: clamp(point.y - ANCHOR_SIZE / 2, page.pageHeight - ANCHOR_SIZE),
+    width: ANCHOR_SIZE,
+    height: ANCHOR_SIZE,
+    pageWidth: page.pageWidth,
+    pageHeight: page.pageHeight,
+  };
+}

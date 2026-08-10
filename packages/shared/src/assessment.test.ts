@@ -12,12 +12,15 @@ import {
   type AssessmentToolManifest,
   type AttemptFact,
   type PartOutcome,
+  CASE_STATES,
   caseProgress,
   fieldsInPart,
   isCaseCompetent,
+  isTerminalCaseState,
   moreCoachingRequired,
   orderedParts,
   requiredParts,
+  resolveLocationParts,
   totalLoggedHours,
   validateAnswerKeys,
   validateManifest,
@@ -99,6 +102,76 @@ describe('requiredParts', () => {
 
     expect(keys).toEqual(['theory', 'prac-1']);
     expect(keys).not.toContain('log-1');
+  });
+});
+
+describe('resolveLocationParts', () => {
+  // Three theory sections; the location rule picks which apply where (U9).
+  const ALL = ['t1', 't2', 't3'];
+  const MINING = 'loc-mining';
+  const RAW = 'loc-raw';
+  const OFFICE = 'loc-office';
+
+  it('requires exactly the parts a Location selects', () => {
+    const rule = { [MINING]: ['t1', 't2'], [RAW]: ['t2', 't3'] };
+
+    expect(resolveLocationParts(ALL, rule, [MINING])).toEqual(['t1', 't2']);
+    expect(resolveLocationParts(ALL, rule, [RAW])).toEqual(['t2', 't3']);
+  });
+
+  it('requires every part at a Location the rule does not mention (R75)', () => {
+    const rule = { [MINING]: ['t1'] };
+
+    expect(resolveLocationParts(ALL, rule, [OFFICE])).toEqual(ALL);
+  });
+
+  it('requires every part at every Location when there is no rule at all (R75)', () => {
+    expect(resolveLocationParts(ALL, {}, [MINING])).toEqual(ALL);
+  });
+
+  it('requires every part at a Location added after the tool was written (R75)', () => {
+    // OFFICE postdates a rule that only ever mentioned MINING — same absence.
+    const rule = { [MINING]: ['t1', 't2'] };
+
+    expect(resolveLocationParts(ALL, rule, [OFFICE])).toEqual(ALL);
+  });
+
+  it('takes the union across Locations whose rules differ (R80)', () => {
+    const rule = { [MINING]: ['t1', 't2'], [RAW]: ['t2', 't3'] };
+
+    expect(resolveLocationParts(ALL, rule, [MINING, RAW])).toEqual(['t1', 't2', 't3']);
+  });
+
+  it('returns one set for a person at several Locations, not one per site (R81)', () => {
+    const rule = { [MINING]: ['t1', 't2'], [RAW]: ['t1', 't2'] };
+
+    // The two overlap entirely — the union is that set once, never doubled.
+    expect(resolveLocationParts(ALL, rule, [MINING, RAW])).toEqual(['t1', 't2']);
+  });
+
+  it('widens to every part if any held Location has no rule', () => {
+    // MINING narrows, OFFICE does not — the union with "everything" is everything.
+    const rule = { [MINING]: ['t1'] };
+
+    expect(resolveLocationParts(ALL, rule, [MINING, OFFICE])).toEqual(ALL);
+  });
+
+  it('requires every part for a person placed at no Location', () => {
+    const rule = { [MINING]: ['t1'] };
+
+    expect(resolveLocationParts(ALL, rule, [])).toEqual(ALL);
+  });
+
+  it('returns the union in document order, not the order Locations were listed', () => {
+    const rule = { [MINING]: ['t3'], [RAW]: ['t1'] };
+
+    expect(resolveLocationParts(ALL, rule, [MINING, RAW])).toEqual(['t1', 't3']);
+  });
+
+  it('drops a listed key the manifest no longer declares', () => {
+    const rule = { [MINING]: ['t1', 'gone'] };
+
+    expect(resolveLocationParts(ALL, rule, [MINING])).toEqual(['t1']);
   });
 });
 
@@ -533,5 +606,147 @@ describe('fieldsInPart', () => {
     };
 
     expect(fieldsInPart(docFields, reversed, 'one').map((f) => f.id)).toEqual(['q1', 'q2', 'h-mid']);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * The verdict pair
+ * ------------------------------------------------------------------ */
+
+/**
+ * Both printed shapes are real, and the validator has to accept both.
+ *
+ * A form may print two boxes — "☐ Satisfactory ☐ Not Satisfactory" — which is
+ * two fields. Or it may print ONE ✓/✗ cell whose tick means satisfactory and
+ * whose cross means not, which extraction reads as a single `check_cross` field
+ * that both halves name. Claiming each half separately would reject the second
+ * shape as a self-collision — the exact layout the paper this was built for
+ * uses.
+ */
+describe('validateManifest — the part verdict pair', () => {
+  const verdictFields = [...fields, question('v'), question('v2'), question('act')];
+
+  it('ACCEPTS ONE ✓/✗ CELL CARRYING BOTH HALVES', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        part({
+          key: 'a',
+          ordinal: 1,
+          outcomeSatisfactory: { fieldId: 'v', value: true },
+          outcomeNotSatisfactory: { fieldId: 'v', value: false },
+        }),
+      ],
+    };
+
+    expect(validateManifest(manifest, verdictFields)).toEqual([]);
+  });
+
+  it('accepts two separate boxes', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        part({
+          key: 'a',
+          ordinal: 1,
+          outcomeSatisfactory: { fieldId: 'v', value: true },
+          outcomeNotSatisfactory: { fieldId: 'v2', value: true },
+        }),
+      ],
+    };
+
+    expect(validateManifest(manifest, verdictFields)).toEqual([]);
+  });
+
+  it('REJECTS A SHARED CELL CARRYING THE SAME VALUE TWICE', () => {
+    /*
+      The failure sharing a cell can hide. A pass and a fail would print
+      identically, so an auditor reading the record could not tell which
+      happened and neither could anyone re-deriving it.
+    */
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        part({
+          key: 'a',
+          ordinal: 1,
+          outcomeSatisfactory: { fieldId: 'v', value: true },
+          outcomeNotSatisfactory: { fieldId: 'v', value: true },
+        }),
+      ],
+    };
+
+    const problems = validateManifest(manifest, verdictFields);
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('same value for both outcomes');
+  });
+
+  it('REJECTS TWO PARTS CLAIMING ONE VERDICT BOX', () => {
+    // The last resolved part's verdict would overwrite the first's, so a passed
+    // part and a failed one would print the same mark with nothing to notice it.
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        part({ key: 'a', ordinal: 1, outcomeSatisfactory: { fieldId: 'v', value: true } }),
+        part({ key: 'b', ordinal: 2, outcomeSatisfactory: { fieldId: 'v', value: true } }),
+      ],
+    };
+
+    const problems = validateManifest(manifest, verdictFields);
+
+    expect(problems.some((p) => p.includes('claimed by both'))).toBe(true);
+  });
+
+  it('rejects a verdict box that is not in this version', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [part({ key: 'a', ordinal: 1, outcomeSatisfactory: { fieldId: 'gone', value: true } })],
+    };
+
+    const problems = validateManifest(manifest, verdictFields);
+
+    expect(problems.some((p) => p.includes('gone'))).toBe(true);
+  });
+
+  it('rejects a further-action box that is not in this version', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [part({ key: 'a', ordinal: 1, furtherActionFieldId: 'gone' })],
+    };
+
+    expect(validateManifest(manifest, verdictFields).some((p) => p.includes('gone'))).toBe(true);
+  });
+
+  it('rejects an overall not-satisfactory box that is not in this version', () => {
+    const manifest: AssessmentToolManifest = {
+      parts: [part({ key: 'a', ordinal: 1 })],
+      signOff: { overallNotSatisfactory: { fieldId: 'gone', value: true } },
+    };
+
+    expect(validateManifest(manifest, verdictFields).some((p) => p.includes('gone'))).toBe(true);
+  });
+});
+
+describe('isTerminalCaseState', () => {
+  /*
+    Terminal decides two things at once: whether the single state writer stamps
+    `closedAt`, and whether a sweep over live work picks the case up. A state
+    added to the enum without being classified here is therefore treated as IN
+    FLIGHT by omission — which is how `invalidated` (a case abandoned when its
+    candidate left) would have been re-created as live work by a Role's
+    requirements changing, for somebody who is gone.
+  */
+  it('classifies every case state, so none is in flight by omission', () => {
+    expect(CASE_STATES.filter(isTerminalCaseState)).toEqual([
+      'competent',
+      'closed',
+      'invalidated',
+    ]);
+    expect(CASE_STATES.filter((s) => !isTerminalCaseState(s))).toEqual([
+      'open',
+      'awaiting_sign_off',
+    ]);
+  });
+
+  it('treats an invalidated case as finished, not as one still being worked', () => {
+    // Nobody will work it again. Only its OUTCOME differs from a case that
+    // finished, and the state value is what carries that distinction (R71–R74).
+    expect(isTerminalCaseState('invalidated')).toBe(true);
+    expect(isTerminalCaseState('awaiting_sign_off')).toBe(false);
   });
 });

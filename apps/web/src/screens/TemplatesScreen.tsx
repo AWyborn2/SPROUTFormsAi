@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Button, Dialog, Icon, useToast, type BadgeVariant } from '@formai/ui';
+import { intakeTemplateDrift, mergeIntakeQuestions } from '@formai/shared';
 import { ApiError } from '../lib/data/api-client.js';
 import { useForkDraftVersion,
   useArchiveForm,
@@ -10,9 +11,12 @@ import { useForkDraftVersion,
   useForm,
   useForms,
   usePublishFormVersion,
+  usePublishVersion,
   useRestoreForm,
   useRevokeFillLink,
   useSetFormVoiceInput,
+  useFormBrands,
+  useSetFormBrand,
 } from '../lib/data/hooks.js';
 import { FORM_ICON_STYLE } from '../lib/data/fixtures.js';
 import { fillLinkUrl } from '../lib/fill-link-url.js';
@@ -50,6 +54,7 @@ export function TemplatesScreen() {
   const [showArchived, setShowArchived] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | undefined>(undefined);
+  const [driftOpen, setDriftOpen] = useState(false);
   const [publishTargetId, setPublishTargetId] = useState<string | undefined>(undefined);
   const archivedCount = forms.filter((f) => f.status === 'archived').length;
   // Archived forms leave the active list by default; the toggle brings them back.
@@ -67,8 +72,61 @@ export function TemplatesScreen() {
   const restoreForm = useRestoreForm();
   const deleteForm = useDeleteForm();
   const publishVersion = usePublishFormVersion();
+  const publishFields = usePublishVersion();
   const setVoiceInput = useSetFormVoiceInput();
+  const setFormBrand = useSetFormBrand();
+  const { data: brands } = useFormBrands();
   const publishTarget = selected?.versions.find((v) => v.id === publishTargetId);
+
+  /**
+   * Questions the induction intake asks that this published version does not.
+   *
+   * Worth surfacing here because it is invisible everywhere else: the bespoke
+   * intake screen renders its own questions from code, so a version that has
+   * fallen behind still produces a form that looks complete and submits
+   * cleanly. The only symptom is an answer missing from a starter's record
+   * later — see `intakeTemplateDrift`.
+   *
+   * PUBLISHED forms only. A draft serves nobody yet and an archived one is out
+   * of circulation, so neither is collecting the answers this is about — and
+   * offering the fix there would be worse than saying nothing, since publishing
+   * a version also un-archives the form it belongs to.
+   */
+  const drift = useMemo(
+    () => (selected?.status === 'published' ? intakeTemplateDrift(selected.fields) : []),
+    [selected],
+  );
+  const driftLabel = drift.map((f) => f.label).join(', ');
+
+  function onAddMissingQuestions() {
+    if (!selected) return;
+    publishFields.mutate(
+      {
+        formId: selected.id,
+        fields: mergeIntakeQuestions(selected.fields),
+        container: selected.container,
+      },
+      {
+        onSuccess: () => {
+          setDriftOpen(false);
+          toast({
+            variant: 'success',
+            message: `Published a new version — ${driftLabel} added. Live fill links serve it now.`,
+          });
+        },
+        onError: (err) => {
+          setDriftOpen(false);
+          toast({
+            variant: 'danger',
+            message:
+              err instanceof ApiError && err.status === 403
+                ? 'You don’t have permission to publish a new version of this form.'
+                : 'Could not publish the updated version. Nothing was changed.',
+          });
+        },
+      },
+    );
+  }
 
   // Newest active link (the API lists active only, newest first).
   const activeLink = fillLinks[0];
@@ -126,6 +184,32 @@ export function TemplatesScreen() {
             toast({ variant: 'warning', message: "You don't have permission to change form settings." });
           } else {
             toast({ variant: 'danger', message: 'Could not update voice input — try again.' });
+          }
+        },
+      },
+    );
+  }
+
+  /** '' → null (the org's own theme), otherwise the chosen brand's id. */
+  function onSetBrand(value: string) {
+    if (!selected) return;
+    const brandId = value === '' ? null : value;
+    const name = brands?.find((br) => br.id === brandId)?.name;
+    setFormBrand.mutate(
+      { formId: selected.id, brandId },
+      {
+        onSuccess: () =>
+          toast({
+            variant: 'success',
+            message: name
+              ? `This form now looks like a ${name} form — live links updated.`
+              : 'This form uses your own branding again — live links updated.',
+          }),
+        onError: (err) => {
+          if (err instanceof ApiError && err.status === 403) {
+            toast({ variant: 'warning', message: "You don't have permission to change form settings." });
+          } else {
+            toast({ variant: 'danger', message: 'Could not change the brand — try again.' });
           }
         },
       },
@@ -325,6 +409,29 @@ export function TemplatesScreen() {
             <div className="mt-px text-[12.5px] text-text-tertiary">
               {selected?.dept} · {selected?.version}
             </div>
+
+            {drift.length > 0 && (
+              <div className="mt-[14px] rounded-md border border-border bg-warning-soft p-[11px_13px]">
+                <div className="mb-1 flex items-center gap-1.5 text-[12.5px] font-semibold text-warning-text">
+                  <Icon name="alert-triangle" size={13} className="flex-none" />
+                  {drift.length === 1 ? 'A question is missing' : `${drift.length} questions are missing`}
+                </div>
+                <p className="text-[12px] leading-snug text-warning-text">
+                  The induction intake asks{' '}
+                  <span className="font-semibold">{driftLabel}</span>, but this published version does
+                  not. Answers to {drift.length === 1 ? 'it' : 'them'} may not reach a starter’s record.
+                </p>
+                <button
+                  type="button"
+                  disabled={publishFields.isPending}
+                  onClick={() => setDriftOpen(true)}
+                  className="mt-1.5 text-[11.5px] font-semibold text-warning-text underline hover:no-underline disabled:opacity-60"
+                >
+                  {publishFields.isPending ? 'Publishing…' : 'Add and publish'}
+                </button>
+              </div>
+            )}
+
             <div className="mt-[14px] flex flex-col gap-2">
               <Button
                 size="sm"
@@ -424,6 +531,38 @@ export function TemplatesScreen() {
                   </select>
                 </div>
               )}
+              {/* Which client this form belongs to. Hidden entirely until at
+                  least one brand exists, so an org that only uses its own
+                  branding never sees a control with one option. */}
+              {selected && (brands?.length ?? 0) > 0 && (
+                <div className="flex items-center justify-between gap-2 rounded-md border border-border-subtle bg-surface-sunken p-[8px_10px]">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 text-[12.5px] font-semibold">
+                      <Icon name="palette" size={13} className="flex-none text-text-tertiary" />
+                      Brand
+                    </div>
+                    <div className="text-[11px] text-text-tertiary">
+                      Whose form this looks like online
+                    </div>
+                  </div>
+                  {/* "Your own branding", not "None": a form with no brand is
+                      not unbranded, it renders in the org's own theme. */}
+                  <select
+                    value={selected.brandId ?? ''}
+                    disabled={setFormBrand.isPending}
+                    aria-label="Brand for this form"
+                    onChange={(e) => onSetBrand(e.target.value)}
+                    className="h-8 max-w-[150px] flex-none cursor-pointer truncate rounded-md border border-border-strong bg-surface-card px-2 font-ui text-[12.5px] font-semibold text-text-primary focus:outline-none focus-visible:border-border-accent focus-visible:shadow-focus disabled:opacity-60"
+                  >
+                    <option value="">Your own branding</option>
+                    {brands!.map((brand) => (
+                      <option key={brand.id} value={brand.id}>
+                        {brand.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               {activeLink && (
                 <div className="flex items-center gap-2 rounded-md border border-border-subtle bg-surface-sunken p-[8px_10px]">
                   <Icon name="link" size={13} className="flex-none text-text-tertiary" />
@@ -515,6 +654,39 @@ export function TemplatesScreen() {
           </div>
         </div>
       </div>
+
+      <Dialog
+        open={driftOpen}
+        onClose={() => !publishFields.isPending && setDriftOpen(false)}
+        title={drift.length === 1 ? `Add “${driftLabel}” to this form?` : 'Add the missing questions?'}
+        description={
+          `${driftLabel} will be added in ${drift.length === 1 ? 'its' : 'their'} usual place and published as a new version. ` +
+          'Nothing already on the form is changed — every existing question keeps its wording, order and settings, ' +
+          'including any you have edited. Live fill links serve the new version immediately; fills already in progress ' +
+          'still submit under the version they were opened with.'
+        }
+        size="sm"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={publishFields.isPending}
+              onClick={() => setDriftOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              leadingIcon="rocket"
+              disabled={publishFields.isPending}
+              onClick={onAddMissingQuestions}
+            >
+              {publishFields.isPending ? 'Publishing…' : 'Add & publish'}
+            </Button>
+          </>
+        }
+      />
 
       <Dialog
         open={deleteOpen}

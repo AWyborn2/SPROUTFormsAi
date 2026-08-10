@@ -110,13 +110,21 @@ function fakeDb(
     versions?: unknown[];
     apiKey?: unknown;
     bookings?: unknown[];
-    bookingStarters?: { bookingId: string; submissionId: string; starterName: string }[];
+    bookingFindFirst?: unknown;
+    bookingStarters?: {
+      id?: string;
+      bookingId: string;
+      submissionId: string;
+      starterName: string;
+      confirmedAt?: Date | null;
+    }[];
   } = {},
 ) {
   const versions = opts.versions ?? [
     { id: 'ver-intake', templateId: 'tpl-intake', fields: INTAKE_FIELDS },
   ];
   const insertValues = vi.fn();
+  const updateValues = vi.fn();
 
   const db = {
     query: {
@@ -131,7 +139,10 @@ function fakeDb(
       rolePermissions: { findFirst: vi.fn().mockResolvedValue(undefined) },
       users: { findFirst: vi.fn().mockResolvedValue({ id: 'u-owner', name: 'Ash Wyborn' }) },
       apiKeys: { findFirst: vi.fn().mockResolvedValue(opts.apiKey) },
-      inductionBookings: { findMany: vi.fn().mockResolvedValue(opts.bookings ?? []) },
+      inductionBookings: {
+        findMany: vi.fn().mockResolvedValue(opts.bookings ?? []),
+        findFirst: vi.fn().mockResolvedValue(opts.bookingFindFirst),
+      },
       inductionBookingStarters: { findMany: vi.fn().mockResolvedValue(opts.bookingStarters ?? []) },
     },
     insert: vi.fn((table: unknown) => ({
@@ -147,11 +158,17 @@ function fakeDb(
         );
       },
     })),
-    update: vi.fn(() => ({ set: () => ({ where: () => Promise.resolve() }) })),
+    update: vi.fn((table: unknown) => ({
+      set: (v: unknown) => {
+        updateValues(table, v);
+        return { where: () => Promise.resolve() };
+      },
+    })),
   } as unknown as Db;
 
-  return Object.assign(db, { __insertValues: insertValues }) as Db & {
+  return Object.assign(db, { __insertValues: insertValues, __updateValues: updateValues }) as Db & {
     __insertValues: ReturnType<typeof vi.fn>;
+    __updateValues: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -198,6 +215,92 @@ describe('GET /inductions/candidates', () => {
       // KTD6 — documents are presence and metadata, never a fetchable handle.
       expect(text).toContain('marlee.jpg');
       expect(text).not.toContain('upload-secret-key');
+    } finally {
+      server.close();
+    }
+  });
+
+  /**
+   * The intake is an EDITABLE template, so an administrator who adds or
+   * re-creates a question in the builder gets a generated id rather than the
+   * preset's. Reading answers by preset id alone reported those as blank, and
+   * nothing between here and the MCP could tell that from an unanswered
+   * question — which is how a supplied Ethnicity stopped reaching registrations.
+   */
+  describe('a question carrying a builder-assigned id', () => {
+    /** The intake with Ethnicity re-created in the builder: same options, id `b7`. */
+    const EDITED_FIELDS = INTAKE_FIELDS.map((f) =>
+      f.id === CHC_FIELD_IDS.ethnicity ? { ...f, id: 'b7' } : f,
+    );
+
+    it('still reaches the payload', async () => {
+      mockDbValue = fakeDb({
+        submissions: [submission('sub-1', starterValues({ b7: 'Aboriginal' }))],
+        versions: [{ id: 'ver-intake', templateId: 'tpl-intake', fields: EDITED_FIELDS }],
+      });
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/inductions/candidates`, { headers: authHeader(OWNER) });
+        const candidate = (await jsonBody(res)).candidates[0];
+        expect(candidate.starter.ethnicity).toBe('Aboriginal');
+        expect(candidate.starter.indigenous).toBe(true);
+        expect(candidate.starter.notCollected).toEqual([]);
+        expect(candidate.warnings).not.toContain('intake_incomplete');
+      } finally {
+        server.close();
+      }
+    });
+
+    it('does not drop the whole starter when it is one the reader detects on', async () => {
+      // Worse than a blank answer: an unrecognised `department` made
+      // readStarterProfile return null, and this route skips nulls silently —
+      // so the starter vanished from every induction surface with nothing said.
+      mockDbValue = fakeDb({
+        submissions: [
+          submission('sub-1', starterValues({ [CHC_FIELD_IDS.department]: '', b9: 'Operations' })),
+        ],
+        versions: [
+          {
+            id: 'ver-intake',
+            templateId: 'tpl-intake',
+            fields: INTAKE_FIELDS.map((f) =>
+              f.id === CHC_FIELD_IDS.department ? { ...f, id: 'b9' } : f,
+            ),
+          },
+        ],
+      });
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/inductions/candidates`, { headers: authHeader(OWNER) });
+        const body = await jsonBody(res);
+        expect(body.candidates).toHaveLength(1);
+        expect(body.candidates[0].starter.department).toBe('Operations');
+        expect(body.candidates[0].starter.roles).toEqual(['Dozer Operator']);
+      } finally {
+        server.close();
+      }
+    });
+  });
+
+  it('says when the form version never asked a question, rather than reporting a blank', async () => {
+    mockDbValue = fakeDb({
+      submissions: [submission('sub-1', starterValues())],
+      versions: [
+        {
+          id: 'ver-intake',
+          templateId: 'tpl-intake',
+          fields: INTAKE_FIELDS.filter((f) => f.id !== CHC_FIELD_IDS.ethnicity),
+        },
+      ],
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/inductions/candidates`, { headers: authHeader(OWNER) });
+      const candidate = (await jsonBody(res)).candidates[0];
+      expect(candidate.starter.notCollected).toContain(CHC_FIELD_IDS.ethnicity);
+      expect(candidate.warnings).toContain('intake_incomplete');
+      // A seat is still bookable — the gap stops a REGISTRATION, not a booking.
+      expect(candidate.readiness).toBe('ready');
     } finally {
       server.close();
     }
@@ -927,6 +1030,351 @@ describe('GET /inductions/bookings', () => {
         await fetch(`${base}/inductions/bookings`, { headers: authHeader(OWNER) }),
       );
       expect(body).toEqual({ bookings: [] });
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('POST /inductions/bookings/:id/confirm', () => {
+  const BOOKING = {
+    id: 'booking-1',
+    orgId: 'org-1',
+    inductionDate: VALID_MONDAY,
+    seats: 2,
+    externalReference: 'BIS-9931',
+    note: '',
+    noticeOverrideReason: '',
+    bookedByUserId: 'u-owner',
+    bookedByApiKeyId: null,
+    createdAt: new Date('2026-03-11T02:00:00Z'),
+  };
+
+  function seat(
+    id: string,
+    submissionId: string,
+    starterName: string,
+    confirmedAt: Date | null = null,
+  ) {
+    return { id, bookingId: 'booking-1', submissionId, starterName, confirmedAt };
+  }
+
+  function confirmRequest(
+    body: Record<string, unknown> = {},
+    tenant: { userId: string; orgId: string; role: string } = OWNER,
+  ) {
+    return {
+      method: 'POST',
+      headers: { ...authHeader(tenant), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    };
+  }
+
+  it('marks every seat with timestamp and actor, and the response reflects it', async () => {
+    // AE5 — the booking reads confirmed once the Thursday decision is recorded.
+    const db = fakeDb({
+      bookingFindFirst: BOOKING,
+      bookingStarters: [
+        seat('st-1', 'sub-1', 'Marlee Okonkwo'),
+        seat('st-2', 'sub-2', 'Rowan Fletcher'),
+      ],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/inductions/bookings/booking-1/confirm`, confirmRequest());
+      expect(res.status).toBe(200);
+      const body = await jsonBody(res);
+      expect(body.confirmed).toBe(true);
+      expect(body.newlyConfirmed).toEqual(['sub-1', 'sub-2']);
+      expect(body.alreadyConfirmed).toEqual([]);
+      for (const s of body.starters) expect(s.confirmedAt).toBe(NOW.toISOString());
+
+      const [, updated] = db.__updateValues.mock.calls[0]!;
+      expect(updated).toMatchObject({
+        confirmedByUserId: OWNER.userId,
+        confirmedByApiKeyId: null,
+      });
+      expect((updated as { confirmedAt: Date }).confirmedAt).toEqual(NOW);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('confirms only the named seats, leaving the booking unconfirmed overall', async () => {
+    mockDbValue = fakeDb({
+      bookingFindFirst: BOOKING,
+      bookingStarters: [
+        seat('st-1', 'sub-1', 'Marlee Okonkwo'),
+        seat('st-2', 'sub-2', 'Rowan Fletcher'),
+        seat('st-3', 'sub-3', 'Priya Raman'),
+      ],
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(
+        `${base}/inductions/bookings/booking-1/confirm`,
+        confirmRequest({ submissionIds: ['sub-2'] }),
+      );
+      const body = await jsonBody(res);
+      expect(body.confirmed).toBe(false);
+      expect(body.newlyConfirmed).toEqual(['sub-2']);
+      const bySubmission = new Map(
+        body.starters.map((s: { submissionId: string; confirmedAt: string | null }) => [
+          s.submissionId,
+          s.confirmedAt,
+        ]),
+      );
+      expect(bySubmission.get('sub-2')).toBe(NOW.toISOString());
+      expect(bySubmission.get('sub-1')).toBeNull();
+      expect(bySubmission.get('sub-3')).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('is idempotent: a second confirm keeps the first timestamp and writes nothing', async () => {
+    const FIRST = new Date('2026-03-12T04:00:00Z');
+    const db = fakeDb({
+      bookingFindFirst: BOOKING,
+      bookingStarters: [
+        seat('st-1', 'sub-1', 'Marlee Okonkwo', FIRST),
+        seat('st-2', 'sub-2', 'Rowan Fletcher', FIRST),
+      ],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/inductions/bookings/booking-1/confirm`, confirmRequest());
+      expect(res.status).toBe(200);
+      const body = await jsonBody(res);
+      expect(body.newlyConfirmed).toEqual([]);
+      expect(body.alreadyConfirmed).toEqual(['sub-1', 'sub-2']);
+      for (const s of body.starters) expect(s.confirmedAt).toBe(FIRST.toISOString());
+      expect(db.__updateValues).not.toHaveBeenCalled();
+      // No state changed, so no audit entry either.
+      expect(db.__insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a viewer, and 404s a booking outside the caller org', async () => {
+    const db = fakeDb({ bookingFindFirst: BOOKING, bookingStarters: [seat('st-1', 'sub-1', 'M')] });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const forbidden = await fetch(
+        `${base}/inductions/bookings/booking-1/confirm`,
+        confirmRequest({}, VIEWER),
+      );
+      expect(forbidden.status).toBe(403);
+      expect(db.__updateValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+
+    // The org filter lives in the WHERE clause, so a foreign id simply misses.
+    mockDbValue = fakeDb({ bookingFindFirst: undefined });
+    const second = startApp();
+    try {
+      const res = await fetch(
+        `${second.base}/inductions/bookings/booking-elsewhere/confirm`,
+        confirmRequest(),
+      );
+      expect(res.status).toBe(404);
+      expect(await jsonBody(res)).toEqual({ error: 'not_found' });
+    } finally {
+      second.server.close();
+    }
+  });
+
+  it('writes an audit entry naming the booking date and the starters confirmed', async () => {
+    const db = fakeDb({
+      bookingFindFirst: BOOKING,
+      bookingStarters: [
+        seat('st-1', 'sub-1', 'Marlee Okonkwo'),
+        seat('st-2', 'sub-2', 'Rowan Fletcher'),
+      ],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/inductions/bookings/booking-1/confirm`, confirmRequest());
+      const audit = db.__insertValues.mock.calls
+        .map(([, v]) => v as Record<string, unknown>)
+        .find((v) => typeof v?.action === 'string');
+      expect(audit!.action).toBe('Confirmed induction booking');
+      expect(String(audit!.target)).toContain(VALID_MONDAY);
+      expect(String(audit!.target)).toContain('Marlee Okonkwo');
+      expect(String(audit!.target)).toContain('Rowan Fletcher');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s naming the strays when a submission is not on the booking', async () => {
+    const db = fakeDb({
+      bookingFindFirst: BOOKING,
+      bookingStarters: [seat('st-1', 'sub-1', 'Marlee Okonkwo')],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(
+        `${base}/inductions/bookings/booking-1/confirm`,
+        confirmRequest({ submissionIds: ['sub-1', 'sub-stray'] }),
+      );
+      expect(res.status).toBe(400);
+      expect(await jsonBody(res)).toEqual({ error: 'not_on_booking', submissionIds: ['sub-stray'] });
+      expect(db.__updateValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records the API key when an agent confirms', async () => {
+    const minted = mintApiKey();
+    const db = fakeDb({
+      bookingFindFirst: BOOKING,
+      bookingStarters: [seat('st-1', 'sub-1', 'Marlee Okonkwo')],
+      apiKey: {
+        id: 'key-1',
+        orgId: 'org-1',
+        role: 'reviewer',
+        prefix: minted.prefix,
+        hash: minted.hash,
+        createdByUserId: 'u-owner',
+        revokedAt: null,
+      },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/inductions/bookings/booking-1/confirm`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${minted.plaintext}`, 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(200);
+      // The key auth path itself updates `lastUsedAt`, so find the confirm
+      // write by its shape rather than by position.
+      const updated = db.__updateValues.mock.calls
+        .map(([, v]) => v as Record<string, unknown>)
+        .find((v) => 'confirmedAt' in v);
+      expect(updated).toMatchObject({ confirmedByApiKeyId: 'key-1' });
+      const audit = db.__insertValues.mock.calls
+        .map(([, v]) => v as Record<string, unknown>)
+        .find((v) => typeof v?.action === 'string');
+      expect(audit!.action).toBe('Confirmed induction booking via API key');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('confirmation on the read surfaces', () => {
+  it('lists per-seat confirmedAt and the derived booking confirmed flag', async () => {
+    const CONFIRMED = new Date('2026-03-12T04:00:00Z');
+    mockDbValue = fakeDb({
+      bookings: [
+        {
+          id: 'booking-1',
+          orgId: 'org-1',
+          inductionDate: VALID_MONDAY,
+          seats: 2,
+          externalReference: '',
+          note: '',
+          noticeOverrideReason: '',
+          bookedByUserId: 'u-owner',
+          bookedByApiKeyId: null,
+          createdAt: new Date('2026-03-11T02:00:00Z'),
+        },
+      ],
+      bookingStarters: [
+        { id: 'st-1', bookingId: 'booking-1', submissionId: 'sub-1', starterName: 'Marlee Okonkwo', confirmedAt: CONFIRMED },
+        { id: 'st-2', bookingId: 'booking-1', submissionId: 'sub-2', starterName: 'Rowan Fletcher', confirmedAt: null },
+      ],
+    });
+    const { server, base } = startApp();
+    try {
+      const body = await jsonBody(
+        await fetch(`${base}/inductions/bookings`, { headers: authHeader(OWNER) }),
+      );
+      const booking = body.bookings[0];
+      // One seat still unconfirmed, so the booking as a whole is not.
+      expect(booking.confirmed).toBe(false);
+      expect(booking.starters).toEqual([
+        { submissionId: 'sub-1', starterName: 'Marlee Okonkwo', confirmedAt: CONFIRMED.toISOString() },
+        { submissionId: 'sub-2', starterName: 'Rowan Fletcher', confirmedAt: null },
+      ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('derives bookingConfirmed on booked candidates and omits it on unbooked ones', async () => {
+    mockDbValue = fakeDb({
+      submissions: [
+        submission('sub-confirmed', starterValues()),
+        submission('sub-tentative', starterValues()),
+        submission('sub-unbooked', starterValues()),
+      ],
+      bookingStarters: [
+        {
+          id: 'st-1',
+          bookingId: 'booking-1',
+          submissionId: 'sub-confirmed',
+          starterName: 'Marlee Okonkwo',
+          confirmedAt: new Date('2026-03-12T04:00:00Z'),
+        },
+        {
+          id: 'st-2',
+          bookingId: 'booking-1',
+          submissionId: 'sub-tentative',
+          starterName: 'Rowan Fletcher',
+          confirmedAt: null,
+        },
+      ],
+    });
+    const { server, base } = startApp();
+    try {
+      const body = await jsonBody(
+        await fetch(`${base}/inductions/candidates`, { headers: authHeader(OWNER) }),
+      );
+      const byId = new Map(
+        body.candidates.map((c: { submissionId: string; bookingConfirmed?: boolean }) => [
+          c.submissionId,
+          c,
+        ]),
+      );
+      expect((byId.get('sub-confirmed') as { bookingConfirmed?: boolean }).bookingConfirmed).toBe(true);
+      expect((byId.get('sub-tentative') as { bookingConfirmed?: boolean }).bookingConfirmed).toBe(false);
+      expect('bookingConfirmed' in (byId.get('sub-unbooked') as object)).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('carries bookingConfirmed through the candidate detail read', async () => {
+    mockDbValue = fakeDb({
+      submissionFindFirst: submission('sub-1', starterValues()),
+      bookingStarters: [
+        {
+          id: 'st-1',
+          bookingId: 'booking-1',
+          submissionId: 'sub-1',
+          starterName: 'Marlee Okonkwo',
+          confirmedAt: null,
+        },
+      ],
+    });
+    const { server, base } = startApp();
+    try {
+      const body = await jsonBody(
+        await fetch(`${base}/inductions/candidates/sub-1`, { headers: authHeader(OWNER) }),
+      );
+      expect(body.bookingConfirmed).toBe(false);
     } finally {
       server.close();
     }

@@ -14,7 +14,10 @@ import {
 } from '@tanstack/react-query';
 import type {
   AssessmentPathway,
+  AssessmentToolManifest,
+  AssessmentWorkflow,
   BrandingKit,
+  FormBrandInput,
   FormContainer,
   FormField,
   SessionInfo,
@@ -38,7 +41,9 @@ import type {
   RoleName,
   SubmissionDetail,
   SubmissionRow,
+  TaxonomySettings,
 } from './types.js';
+import type { TaxonomyStatus } from '@formai/shared';
 
 /**
  * A 401 from any request means the `fai_session` cookie has expired or gone
@@ -86,7 +91,27 @@ const keys = {
    */
   competencyHolders: (id: string) => ['competencies', id, 'holders'] as const,
   assessmentTools: ['assessmentTools'] as const,
+  /** A Role's required-assessment list (U10). Keyed by role so each editor caches apart. */
+  roleRequiredAssessments: (roleId: string) => ['roleRequiredAssessments', roleId] as const,
+  /** The people a Department tightening still has to resolve (U17). Keyed by department. */
+  tighteningReview: (departmentId: string) => ['tighteningReview', departmentId] as const,
+  /** The people still holding any retired value (U18). */
+  retirementReview: ['retirementReview'] as const,
+  /** The org's pending voluntary training requests (U22). */
+  trainingRequests: ['trainingRequests'] as const,
+  /** The caller's own expiry notices (U21). */
+  myNotices: ['myNotices'] as const,
+  /** Everything waiting on an Admin, from all sources (U19). */
+  workingList: ['workingList'] as const,
+  /** How the workforce stands, for compliance reporting (U20). */
+  compliance: ['compliance'] as const,
   assessmentCases: ['assessmentCases'] as const,
+  /**
+   * The shared assessor queue (U13). A SIBLING of assessmentCases — it shares no
+   * key prefix, so invalidating assessmentCases does NOT reach it; every
+   * case-mutating hook invalidates this key explicitly alongside.
+   */
+  assessorQueue: ['assessorQueue'] as const,
   /**
    * Deliberately NOT `['assessmentCases', 'progress']`: that shape is
    * `assessmentCase('progress')`, so invalidating one case would sweep the
@@ -102,6 +127,17 @@ const keys = {
   fillLinks: (formId: string) => ['fillLinks', formId] as const,
   invite: (token: string) => ['invite', token] as const,
   apiKeys: ['apiKeys'] as const,
+  taxonomy: ['taxonomy'] as const,
+  formBrands: ['formBrands'] as const,
+  memberPlacement: (id: string) => ['members', id, 'placement'] as const,
+  /** One member's profile, keyed on the MEMBERSHIP the record belongs to (R1). */
+  profile: (membershipId: string) => ['profiles', membershipId] as const,
+  /** The caller's own membership id, for the fixed own-record read (R49). */
+  myProfileMembership: ['profiles', 'mine'] as const,
+  /** What an induction submission would seed onto a profile (U40). */
+  profileSeed: (submissionId: string) => ['profiles', 'seed', submissionId] as const,
+  /** One person's held competencies, keyed on the USER the grants belong to. */
+  heldCompetencies: (userId: string) => ['competencies', 'held', userId] as const,
 };
 
 /**
@@ -272,6 +308,37 @@ export function useCreateVersionFromImport() {
   });
 }
 
+/**
+ * Create the builder's draft form + version.
+ *
+ * Called once, when the builder first needs somewhere to place geometry. From
+ * that point the VERSION owns the fields — the builder draft owns the structure,
+ * the answer keys and the manifest that sit on top of them — so there is exactly
+ * one copy of the field list and it is the one the exporter reads.
+ */
+export function useCreateDraftForm() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { name: string; fields: FormField[]; sourcePdfAssetId?: string }) =>
+      store.createDraftForm(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.forms });
+    },
+  });
+}
+
+/** Create the assessment tool once its template version has published. */
+export function useCreateAssessmentTool() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { templateId: string; name: string; manifest: AssessmentToolManifest }) =>
+      store.createAssessmentTool(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.forms });
+    },
+  });
+}
+
 /** Publish an existing draft version from version history — flips live fill links to it immediately. */
 /** One version's own fields — the geometry editor's read. */
 export function useFormVersion(formId: string | undefined, versionId: string | undefined) {
@@ -326,6 +393,93 @@ export function useSetFormVoiceInput() {
   return useMutation({
     mutationFn: (input: { formId: string; voiceInput: boolean | null }) =>
       store.setFormVoiceInput(input),
+    onSuccess: (_void, input) => {
+      qc.invalidateQueries({ queryKey: keys.form(input.formId) });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/**
+ * The brands a form can be presented in — usually clients', not the org's own.
+ *
+ * A workspace-wide list rather than per-form: a subcontractor holds a handful
+ * of brands and dozens of forms, so this is fetched once and every picker
+ * reads the same cache entry.
+ */
+export function useFormBrands() {
+  return useQuery({ queryKey: keys.formBrands, queryFn: () => store.listFormBrands() });
+}
+
+export function useCreateFormBrand() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: FormBrandInput) => store.createFormBrand(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.formBrands });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+export function useUpdateFormBrand() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { id: string } & Partial<FormBrandInput>) => store.updateFormBrand(input),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.formBrands });
+      /*
+        Every form that uses the brand renders differently now, and neither this
+        hook nor the cache knows which ones those are — so the whole form list
+        and every open form detail go stale together. Editing a brand is a rare
+        act; a targeted invalidation would trade a real risk of a stale colour
+        for a refetch nobody notices.
+      */
+      qc.invalidateQueries({ queryKey: keys.forms });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/**
+ * Propose a brand from a client's document. Read-only on the server — the
+ * result is a draft the author confirms, so there is nothing to invalidate.
+ */
+export function useScanBrandFromPdf() {
+  return useMutation({
+    mutationFn: (input: { assetId?: string; pdfBase64?: string }) => store.scanBrandFromPdf(input),
+  });
+}
+
+/**
+ * Describe a change to a brand. Read-only on the server — the proposal is a
+ * draft the author confirms, so there is nothing to invalidate.
+ */
+export function useEditFormBrandByChat() {
+  return useMutation({
+    mutationFn: (input: { id: string; instruction: string }) => store.editFormBrandByChat(input),
+  });
+}
+
+export function useDeleteFormBrand() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => store.deleteFormBrand(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.formBrands });
+      // Forms that used it are NOT deleted — they fall back to the org's
+      // theme, so they need refetching for the same reason as an edit.
+      qc.invalidateQueries({ queryKey: keys.forms });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** Point a form at a brand, or clear it back to the org's own theme. */
+export function useSetFormBrand() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { formId: string; brandId: string | null }) => store.setFormBrand(input),
     onSuccess: (_void, input) => {
       qc.invalidateQueries({ queryKey: keys.form(input.formId) });
       qc.invalidateQueries({ queryKey: keys.auditLog });
@@ -622,8 +776,11 @@ export function useTogglePermission() {
  */
 export function useUploadOrgLogo() {
   return useMutation({
-    mutationFn: async (input: { imageBase64: string; mimeType: string }) =>
-      store.uploadOrgLogo(input),
+    mutationFn: async (input: {
+      imageBase64: string;
+      mimeType: string;
+      usage?: 'org' | 'brand';
+    }) => store.uploadOrgLogo(input),
   });
 }
 
@@ -836,8 +993,49 @@ export function useAssessmentTools() {
   return useQuery({ queryKey: keys.assessmentTools, queryFn: () => assessmentsApi.listTools() });
 }
 
+/** One tool, with its workflow and the current version's fields. */
+export function useAssessmentTool(toolId: string) {
+  return useQuery({
+    queryKey: [...keys.assessmentTools, toolId] as const,
+    queryFn: () => assessmentsApi.getTool(toolId),
+  });
+}
+
+/** Save a workflow. Resolves with whatever warnings the server raised. */
+export function useSaveWorkflow(toolId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (workflow: AssessmentWorkflow) => assessmentsApi.saveWorkflow(toolId, workflow),
+    onSuccess: () => {
+      // Prefix invalidation, so the detail AND the list refresh: the list
+      // carries each tool's parts, and a workflow change can alter what a
+      // candidate is shown.
+      qc.invalidateQueries({ queryKey: keys.assessmentTools });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** Declare which parts apply at each Location (U9). Admin-gated server-side. */
+export function useSetLocationParts(toolId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (locationPartKeys: Record<string, string[]>) =>
+      assessmentsApi.setLocationParts(toolId, locationPartKeys),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.assessmentTools });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
 export function useAssessmentCases() {
   return useQuery({ queryKey: keys.assessmentCases, queryFn: () => assessmentsApi.listCases() });
+}
+
+/** The shared assessor queue — unowned cases the reader is eligible for (U13). */
+export function useAssessorQueue() {
+  return useQuery({ queryKey: keys.assessorQueue, queryFn: () => assessmentsApi.listQueue() });
 }
 
 /**
@@ -879,6 +1077,7 @@ export function useCreateAssessmentCase() {
     mutationFn: (input: CreateCaseInput) => assessmentsApi.createCase(input),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
       void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
@@ -931,6 +1130,7 @@ export function useRecordOutcome(caseId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
       void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
@@ -945,6 +1145,7 @@ export function useSignOffCase(caseId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
       void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
   });
@@ -958,7 +1159,347 @@ export function useChangePathway(caseId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });
       void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
       void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     },
+  });
+}
+
+/* ── Taxonomy (Locations, Departments, Roles) ─────────────────────────────── */
+
+export function useTaxonomy() {
+  return useQuery({ queryKey: keys.taxonomy, queryFn: () => store.getTaxonomy() });
+}
+
+/** Every taxonomy mutation re-reads the whole taxonomy and refreshes the audit feed. */
+function useTaxonomyMutation<TArgs>(fn: (args: TArgs) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.taxonomy });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+export function useCreateLocation() {
+  return useTaxonomyMutation((name: string) => store.createLocation(name));
+}
+export function useUpdateLocation() {
+  return useTaxonomyMutation((input: { id: string; name?: string; status?: TaxonomyStatus }) =>
+    store.updateLocation(input.id, { name: input.name, status: input.status }),
+  );
+}
+export function useCreateDepartment() {
+  return useTaxonomyMutation((input: { name: string; allowsMultipleRoles?: boolean }) =>
+    store.createDepartment(input),
+  );
+}
+export function useUpdateDepartment() {
+  return useTaxonomyMutation(
+    (input: { id: string; name?: string; allowsMultipleRoles?: boolean; status?: TaxonomyStatus }) =>
+      store.updateDepartment(input.id, {
+        name: input.name,
+        allowsMultipleRoles: input.allowsMultipleRoles,
+        status: input.status,
+      }),
+  );
+}
+export function useCreateRole() {
+  return useTaxonomyMutation((input: { departmentId: string; name: string }) =>
+    store.createRole(input.departmentId, input.name),
+  );
+}
+export function useUpdateRole() {
+  return useTaxonomyMutation((input: { id: string; name?: string; status?: TaxonomyStatus }) =>
+    store.updateRole(input.id, { name: input.name, status: input.status }),
+  );
+}
+
+/**
+ * Stop offering a Role (U17, R52): retire it AND withdraw it from every holder.
+ * Distinct from retiring, which leaves holders in place. Refreshes the taxonomy
+ * and audit feed; competency reads change too, since a withdrawn Role's
+ * competencies may demote to optional through the standing derivation.
+ */
+export function useStopOfferingRole() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (roleId: string) => store.stopOfferingRole(roleId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.taxonomy });
+      void qc.invalidateQueries({ queryKey: keys.competencies });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** The people a Department tightening still has to resolve (U17, R112). */
+export function useTighteningReview(departmentId: string | undefined) {
+  return useQuery({
+    queryKey: keys.tighteningReview(departmentId ?? ''),
+    queryFn: () => store.getTighteningReview(departmentId!),
+    enabled: Boolean(departmentId),
+  });
+}
+
+/**
+ * Apply one person's tightening choice (U17, R113). On success the review is
+ * re-read so the resolved person drops off it, and competency reads refresh
+ * because a withdrawn Role's competencies may demote to optional.
+ */
+export function useResolveTightening(departmentId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { membershipId: string; survivingRoleId: string }) =>
+      store.resolveTightening(departmentId, input.membershipId, input.survivingRoleId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.tighteningReview(departmentId) });
+      void qc.invalidateQueries({ queryKey: keys.competencies });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** The people still holding any retired value (U18). */
+export function useRetirementReview() {
+  return useQuery({
+    queryKey: keys.retirementReview,
+    queryFn: () => store.getRetirementReview(),
+  });
+}
+
+/** What a Location transfer would move, before committing (U18, R132). */
+export function usePreviewLocationTransfer() {
+  return useMutation({
+    mutationFn: (input: { locationId: string; replacementLocationId: string }) =>
+      store.previewLocationTransfer(input.locationId, input.replacementLocationId),
+  });
+}
+
+/** Shared invalidation after a retirement transfer — the review shrinks and standing may shift. */
+function useTransferMutation<TArgs>(fn: (args: TArgs) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.retirementReview });
+      void qc.invalidateQueries({ queryKey: keys.taxonomy });
+      void qc.invalidateQueries({ queryKey: keys.competencies });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** Move everyone off a retired Location, carrying or rewriting their cases (U18, R133). */
+export function useTransferLocation() {
+  return useTransferMutation(
+    (input: { locationId: string; replacementLocationId: string; caseOutcome: 'carry' | 'rewrite' }) =>
+      store.transferLocation(input.locationId, input.replacementLocationId, input.caseOutcome),
+  );
+}
+
+/** Move everyone off a retired Role to a replacement; cases untouched (U18, R135). */
+export function useTransferRole() {
+  return useTransferMutation((input: { roleId: string; replacementRoleId: string }) =>
+    store.transferRole(input.roleId, input.replacementRoleId),
+  );
+}
+
+/** Everything waiting on an Admin, from all sources, on one list (U19). */
+export function useWorkingList() {
+  return useQuery({ queryKey: keys.workingList, queryFn: () => store.getWorkingList() });
+}
+
+/** How the workforce stands — expired, never-held, unreachable (U20). */
+export function useComplianceReport() {
+  return useQuery({ queryKey: keys.compliance, queryFn: () => store.getComplianceReport() });
+}
+
+/** The caller's own expiry notices — the login delivery route (U21, R98). */
+export function useMyNotices() {
+  return useQuery({ queryKey: keys.myNotices, queryFn: () => store.listMyNotices() });
+}
+
+/** Request voluntary training for a tool — own-scope (U22, R37). */
+export function useRequestTraining() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (toolId: string) => store.requestTraining(toolId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.trainingRequests });
+      void qc.invalidateQueries({ queryKey: keys.workingList });
+    },
+  });
+}
+
+/** The org's pending training requests, for the Admin approval surface (U22). */
+export function useTrainingRequests() {
+  return useQuery({ queryKey: keys.trainingRequests, queryFn: () => store.listTrainingRequests() });
+}
+
+/** Shared invalidation after deciding a request — it leaves the pending list and the working list. */
+function useDecideTrainingRequest(fn: (id: string) => Promise<unknown>) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: fn,
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.trainingRequests });
+      void qc.invalidateQueries({ queryKey: keys.workingList });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** Approve a request — assigns the tool through the ordinary path (U22, R94). */
+export function useApproveTrainingRequest() {
+  return useDecideTrainingRequest((id: string) => store.approveTrainingRequest(id));
+}
+
+/** Decline a request — nothing assigned (U22). */
+export function useDeclineTrainingRequest() {
+  return useDecideTrainingRequest((id: string) => store.declineTrainingRequest(id));
+}
+
+/** Move everyone off a retired Department to a replacement; cases untouched (U18, R135). */
+export function useTransferDepartment() {
+  return useTransferMutation(
+    (input: { departmentId: string; replacementDepartmentId: string }) =>
+      store.transferDepartment(input.departmentId, input.replacementDepartmentId),
+  );
+}
+export function useUpdateTaxonomySettings() {
+  return useTaxonomyMutation((patch: Partial<TaxonomySettings>) =>
+    store.updateTaxonomySettings(patch),
+  );
+}
+
+/** A Role's required assessments (U10). `configured` distinguishes never-set from emptied. */
+export function useRoleRequiredAssessments(roleId: string | undefined) {
+  return useQuery({
+    queryKey: keys.roleRequiredAssessments(roleId ?? ''),
+    queryFn: () => store.getRoleRequiredAssessments(roleId!),
+    enabled: Boolean(roleId),
+  });
+}
+
+/** Project a proposed change's blast radius without committing it (U12). */
+export function usePreviewRoleRequiredAssessments(roleId: string) {
+  return useMutation({
+    mutationFn: (toolIds: string[]) => store.previewRoleRequiredAssessments(roleId, toolIds),
+  });
+}
+
+export function useSetRoleRequiredAssessments(roleId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (toolIds: string[]) => store.setRoleRequiredAssessments(roleId, toolIds),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.roleRequiredAssessments(roleId) });
+      // The taxonomy read carries each Role's configured flag; a new case can
+      // reach the case list AND the progress dashboard (a deliberate sibling key,
+      // so it must be swept explicitly); the audit feed logs the change.
+      void qc.invalidateQueries({ queryKey: keys.taxonomy });
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
+      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+export function useMemberPlacement(membershipId: string | undefined) {
+  return useQuery({
+    queryKey: keys.memberPlacement(membershipId ?? ''),
+    queryFn: () => store.getMemberPlacement(membershipId!),
+    enabled: !!membershipId,
+  });
+}
+
+export function useSetMemberPlacement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      membershipId: string;
+      locationIds: string[];
+      departmentIds: string[];
+      roleIds: string[];
+    }) =>
+      store.setMemberPlacement(input.membershipId, {
+        locationIds: input.locationIds,
+        departmentIds: input.departmentIds,
+        roleIds: input.roleIds,
+      }),
+    onSuccess: (_data, input) => {
+      void qc.invalidateQueries({ queryKey: keys.memberPlacement(input.membershipId) });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/* ── Member profile (U29, U38) ────────────────────────────────────────────── */
+
+/**
+ * One member's record, with what THIS reader may do with it.
+ *
+ * The access block comes back from the same call rather than being inferred
+ * here, so the screen renders the sections it is admitted to instead of
+ * guessing and 403ing on click (R44).
+ */
+export function useProfile(membershipId: string | undefined) {
+  return useQuery({
+    queryKey: keys.profile(membershipId ?? ''),
+    queryFn: () => store.getProfile(membershipId!),
+    enabled: !!membershipId,
+    // A record the caller may not read is a settled answer, not a blip.
+    retry: false,
+  });
+}
+
+/** The caller's own membership id — the candidate's fixed own-record path (R49). */
+export function useMyProfileMembership() {
+  return useQuery({
+    queryKey: keys.myProfileMembership,
+    queryFn: () => store.getMyProfileMembership(),
+  });
+}
+
+export function useSaveProfile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { membershipId: string; values: Record<string, string>; create?: boolean }) =>
+      input.create
+        ? store.createProfile(input.membershipId, input.values)
+        : store.updateProfile(input.membershipId, input.values),
+    onSuccess: (_data, input) => {
+      void qc.invalidateQueries({ queryKey: keys.profile(input.membershipId) });
+      // A profile edit can clear an owed-file item and always writes an audit
+      // entry, so both surfaces are stale the moment this returns.
+      void qc.invalidateQueries({ queryKey: keys.workingList });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** One person's held competencies, with standing beside currency (U38, R37). */
+export function useHeldCompetencies(userId: string | undefined) {
+  return useQuery({
+    queryKey: keys.heldCompetencies(userId ?? ''),
+    queryFn: () => store.getHeldCompetencies(userId!),
+    enabled: !!userId,
+  });
+}
+
+/** What an induction submission would seed, and whether it may (U40, R89). */
+export function useProfileSeed(submissionId: string | undefined) {
+  return useQuery({
+    queryKey: keys.profileSeed(submissionId ?? ''),
+    queryFn: () => store.getProfileSeed(submissionId!),
+    enabled: !!submissionId,
+    retry: false,
   });
 }

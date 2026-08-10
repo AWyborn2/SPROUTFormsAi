@@ -1,7 +1,17 @@
 import { relations, sql } from 'drizzle-orm';
-import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core';
 import type { BrandingKit } from '@formai/shared';
-import { membershipStatusEnum, roleEnum } from './enums.ts';
+import { displayIdentifierEnum, membershipStatusEnum, roleEnum } from './enums.ts';
 
 /**
  * DB-level default for the branding column. Mirrors `DEFAULT_BRANDING` in
@@ -53,6 +63,35 @@ export const organizations = pgTable('organizations', {
    * API (see `maskWebhookUrl`) and never written to a log line.
    */
   inductionWebhookUrl: text('induction_webhook_url').notNull().default(''),
+  /**
+   * Whether a person may be placed at several Locations, and separately in
+   * several Departments (R24). Neither caps how many (R25). Both default off,
+   * matching the one-Location-one-Department starting point every membership
+   * carries today.
+   */
+  allowMultipleLocations: boolean('allow_multiple_locations').notNull().default(false),
+  allowMultipleDepartments: boolean('allow_multiple_departments').notNull().default(false),
+  /**
+   * Which of the two workforce numbers identifies a person on screen (R40).
+   * Defaults to the employee number; the swipe card number is the alternative.
+   * The numbers themselves are profile fields owned by the candidate profile
+   * artifact — this is only the organisation's choice between them.
+   */
+  displayIdentifier: displayIdentifierEnum('display_identifier').notNull().default('employee_number'),
+  /**
+   * How many days a POOLED (unowned) case may sit before it reads as overdue
+   * (U13, R63). Overdue is DERIVED — compared against a case's age on read, never
+   * stored on the case — so changing this re-dates every pooled case at once with
+   * no per-case write. Default fourteen.
+   */
+  pooledCaseOverdueDays: integer('pooled_case_overdue_days').notNull().default(14),
+  /**
+   * How many days AHEAD of an expiry the sweep notifies a competency's holder
+   * (U21, KTD12). Read on every sweep, never stamped — changing it notifies a
+   * different set on the next run with no per-record write. Default thirty, the
+   * candidate-facing warning window `EXPIRY_WARNING_DAYS` already ships.
+   */
+  notificationLeadDays: integer('notification_lead_days').notNull().default(30),
 });
 
 export const users = pgTable('users', {
@@ -60,6 +99,22 @@ export const users = pgTable('users', {
   clerkUserId: text('clerk_user_id').unique(),
   name: text().notNull(),
   email: text().notNull().unique(),
+  /**
+   * The generated sign-in identity (R21) — first initial, surname, a random
+   * suffix. A person signs in with this OR their email address (R22).
+   *
+   * HERE rather than on the profile because sign-in is product-wide while a
+   * profile is per organisation: somebody working for two customers signs in
+   * once. It is what makes an email address correctable without moving who the
+   * person is to the system (R23) — correcting the address retires it as a
+   * credential and leaves this untouched.
+   *
+   * NULLABLE only for rows written before it existed. The backfill fills them
+   * and every insert path issues one, so a null is a legacy row rather than a
+   * person without an identity. Issuance lives in `apps/api/src/lib/username.ts`
+   * and re-rolls its suffix against this index rather than pre-checking.
+   */
+  username: text().unique(),
   passwordHash: text('password_hash'),
   createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
 });

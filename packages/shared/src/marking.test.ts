@@ -6,9 +6,15 @@
  * Covers AE1 (multi-answer marking) and AE2 (the 100% mandatory-section rule).
  */
 import { describe, expect, it } from 'vitest';
+import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
-import { markTheory, stripMarkingSecrets } from './marking.js';
+import {
+  incorrectQuestionsNote,
+  isSelfMarking,
+  markTheory,
+  stripMarkingSecrets,
+} from './marking.js';
 
 const header = (id: string, over: Partial<FormField> = {}): FormField => ({
   id,
@@ -53,6 +59,64 @@ const part = { mandatoryFieldIds: ['g1', 'g2'] };
 
 const run = (fields: FormField[], values: Record<string, SubmissionValue>) =>
   markTheory({ fields, values, part });
+
+/** A checkbox_group question with no answer key — reaches an assessor. */
+const unkeyed = (id: string, over: Partial<FormField> = {}): FormField => ({
+  id,
+  type: 'checkbox_group',
+  label: id,
+  required: true,
+  source: 'imported',
+  options: ['a', 'b', 'c', 'd'],
+  ...over,
+});
+
+const signature = (id: string): FormField => ({
+  id,
+  type: 'signature',
+  label: id,
+  required: false,
+  source: 'imported',
+});
+
+describe('isSelfMarking (U15)', () => {
+  // A one-part manifest anchored at the first field, so `fieldsInPart` returns
+  // the whole array as the part's slice.
+  const selfMarks = (fields: FormField[]) => {
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        { key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'], startFieldId: fields[0]!.id },
+      ],
+    };
+    return isSelfMarking(fields, manifest, 'p1');
+  };
+
+  it('is true when every real question carries a key — the interleaved outcome cells are furniture (R66)', () => {
+    // generalFields interleaves each keyed question with its check_cross cell,
+    // exactly as the real authored tool does — the case the literal predicate fails.
+    expect(selfMarks(generalFields)).toBe(true);
+  });
+
+  it('ignores a section header and a signature box (R66)', () => {
+    expect(selfMarks([header('h'), q('g1', ['a']), outcome('g1-out'), signature('sig')])).toBe(true);
+  });
+
+  it('is false when one question of several carries no key — routes to an assessor (R67)', () => {
+    expect(selfMarks([header('h'), q('g1', ['a']), outcome('g1-out'), unkeyed('g2')])).toBe(false);
+  });
+
+  it('is false when no question carries a key, not satisfactory-with-nothing-checked (R68)', () => {
+    expect(selfMarks([header('h'), unkeyed('g1'), unkeyed('g2')])).toBe(false);
+  });
+
+  it('is false for a part carrying no real question at all (R68)', () => {
+    expect(selfMarks([header('h'), signature('sig')])).toBe(false);
+  });
+
+  it('is false for a practical demonstration — its criteria carry no key (R69)', () => {
+    expect(selfMarks([header('prac'), unkeyed('c1'), unkeyed('c2'), unkeyed('c3')])).toBe(false);
+  });
+});
 
 describe('exact set match', () => {
   it('marks an exact single-option answer correct', () => {
@@ -293,5 +357,166 @@ describe('stripMarkingSecrets', () => {
     stripMarkingSecrets(fields);
 
     expect(fields[0]?.answerKey).toEqual(['a', 'b']);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * The part's own verdict, and what goes in "Detail further action"
+ * ------------------------------------------------------------------ */
+
+/**
+ * A keyed theory part decides its own verdict, so the boxes that state it
+ * should be written from the same arithmetic — not transcribed.
+ *
+ * "The Candidate's responses were: ☐ Satisfactory ☐ Not Satisfactory" is
+ * printed at the end of every part of this paper, and on a fully-keyed part it
+ * restates a sum the marking already did. An assessor ticking it by hand after
+ * thirty questions is doing the slowest and least reliable step of marking for
+ * no information gain.
+ */
+describe('markTheory — the part verdict box', () => {
+  const verdictPart = {
+    mandatoryFieldIds: ['g1', 'g2'],
+    outcomeSatisfactory: { fieldId: 'verdict', value: true },
+    outcomeNotSatisfactory: { fieldId: 'verdict', value: false },
+  };
+
+  const mark = (values: Record<string, SubmissionValue>, over = {}) =>
+    markTheory({ fields: generalFields, values, part: { ...verdictPart, ...over } });
+
+  it('TICKS SATISFACTORY WHEN EVERY MANDATORY QUESTION IS RIGHT', () => {
+    const res = mark({ g1: ['a'], g2: ['b', 'c'] });
+
+    expect(res.outcome).toBe('satisfactory');
+    expect(res.derivedValues.verdict).toBe(true);
+  });
+
+  it('crosses it when one is wrong', () => {
+    const res = mark({ g1: ['a'], g2: ['c'] });
+
+    expect(res.outcome).toBe('not_satisfactory');
+    expect(res.derivedValues.verdict).toBe(false);
+  });
+
+  it('crosses it when one is unanswered', () => {
+    // A blank is not a question that did not happen.
+    const res = mark({ g1: ['a'] });
+
+    expect(res.derivedValues.verdict).toBe(false);
+  });
+
+  it('WRITES EXACTLY ONE HALF WHEN THE PAIR IS TWO SEPARATE BOXES', () => {
+    /*
+      A form may print two boxes rather than one ✓/✗ cell. Ticking both, or
+      deriving one from the other's absence, would leave the record saying two
+      things or nothing.
+    */
+    const res = mark({ g1: ['a'], g2: ['b', 'c'] }, {
+      outcomeSatisfactory: { fieldId: 'sat', value: true },
+      outcomeNotSatisfactory: { fieldId: 'notSat', value: true },
+    });
+
+    expect(res.derivedValues.sat).toBe(true);
+    expect(res.derivedValues.notSat).toBeUndefined();
+  });
+
+  it('WRITES NOTHING EXTRA FOR A PART THAT DECLARES NO VERDICT BOX', () => {
+    /*
+      The property that makes this safe to add to a file that marks competency
+      records: every tool authored before these fields existed marks exactly as
+      it did, the per-question ✓/✗ and nothing else.
+    */
+    const before = markTheory({ fields: generalFields, values: { g1: ['a'], g2: ['b', 'c'] }, part });
+    const after = mark({ g1: ['a'], g2: ['b', 'c'] }, { outcomeSatisfactory: undefined, outcomeNotSatisfactory: undefined });
+
+    expect(after.derivedValues).toEqual(before.derivedValues);
+  });
+});
+
+describe('markTheory — Detail further action', () => {
+  const withAction = {
+    mandatoryFieldIds: ['g1', 'g2'],
+    outcomeSatisfactory: { fieldId: 'verdict', value: true },
+    outcomeNotSatisfactory: { fieldId: 'verdict', value: false },
+    furtherActionFieldId: 'action',
+  };
+
+  const mark = (values: Record<string, SubmissionValue>) =>
+    markTheory({ fields: generalFields, values, part: withAction });
+
+  it('LISTS THE QUESTIONS THE CANDIDATE GOT WRONG', () => {
+    const res = mark({ g1: ['a'], g2: ['c'] });
+
+    expect(res.derivedValues.action).toContain('Answered incorrectly');
+    expect(res.derivedValues.action).toContain('g2');
+    expect(res.derivedValues.action).not.toContain('g1');
+  });
+
+  it('TELLS A WRONG ANSWER FROM A BLANK ONE', () => {
+    /*
+      They call for different coaching — a wrong answer is a misunderstanding to
+      correct, a blank is a question the candidate never reached — and this is
+      the one document that records which happened.
+    */
+    const res = mark({ g1: ['c'] });
+
+    expect(res.derivedValues.action).toContain('Answered incorrectly: g1.');
+    expect(res.derivedValues.action).toContain('Not answered: g2.');
+  });
+
+  it('writes nothing on a satisfactory part', () => {
+    // An empty box beside a passed assessment is correct; "None" is a sentence
+    // nobody wrote.
+    const res = mark({ g1: ['a'], g2: ['b', 'c'] });
+
+    expect(res.derivedValues.action).toBeUndefined();
+  });
+
+  it('NEVER OVERWRITES WHAT AN ASSESSOR ALREADY TYPED', () => {
+    /*
+      A person who has written in that box has said something this cannot
+      improve on. Overwriting their words on a competency record is not a thing
+      an automatic mark may do.
+    */
+    const res = mark({ g1: ['a'], g2: ['c'], action: 'Refer to supervisor before retry.' });
+
+    expect(res.derivedValues.action).toBe('Refer to supervisor before retry.');
+  });
+});
+
+describe('incorrectQuestionsNote', () => {
+  const fields: FormField[] = [
+    q('short', ['a'], 'short-out', { label: '7. Which sign means STOP?' }),
+    q('long', ['a'], 'long-out', {
+      label:
+        'Identify every one of the principal mining hazards that are relevant to the operation of a track dozer on this site',
+    }),
+  ];
+
+  const marksFor = (values: Record<string, SubmissionValue>) =>
+    markTheory({ fields, values, part: { mandatoryFieldIds: ['short', 'long'] } }).marks;
+
+  it('names a question by its printed label, which carries the number', () => {
+    const note = incorrectQuestionsNote(marksFor({ short: ['b'], long: ['a'] }), fields);
+
+    expect(note).toBe('Answered incorrectly: 7. Which sign means STOP?.');
+  });
+
+  it('CUTS A LONG LABEL AT A WORD BOUNDARY', () => {
+    // This lands in a printed box a couple of lines high, and an overrun draws
+    // over whatever is beneath it.
+    const note = incorrectQuestionsNote(marksFor({ short: ['a'], long: ['b'] }), fields);
+
+    expect(note.length).toBeLessThan(100);
+    const kept = note.slice('Answered incorrectly: '.length, note.indexOf('…'));
+    const label = fields[1]!.label;
+    // A prefix of the real label, ending where the label has a space — a
+    // mid-word cut would leave half a hazard name on a competency record.
+    expect(label.startsWith(kept)).toBe(true);
+    expect(label[kept.length]).toBe(' ');
+  });
+
+  it('is empty when nothing was missed, so the caller writes nothing', () => {
+    expect(incorrectQuestionsNote(marksFor({ short: ['a'], long: ['a'] }), fields)).toBe('');
   });
 });

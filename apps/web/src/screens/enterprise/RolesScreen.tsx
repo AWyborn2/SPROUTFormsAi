@@ -19,7 +19,7 @@ export function RolesScreen() {
       acc[r] = members.filter((m) => m.role === r).length;
       return acc;
     },
-    { Owner: 0, Admin: 0, Builder: 0, Reviewer: 0, Viewer: 0 },
+    { Owner: 0, Admin: 0, Builder: 0, Reviewer: 0, Viewer: 0, Assessor: 0, Candidate: 0 },
   );
 
   const rolePerms = perms?.[selected] ?? {};
@@ -83,18 +83,31 @@ export function RolesScreen() {
               </div>
               <div className="flex flex-wrap gap-x-[18px] gap-y-3">
                 {cat.actions.map(([action, label]) => {
-                  const on = !!rolePerms[cat.key]?.[action];
+                  // The value is boolean | 'own' | undefined. A scoped ('own')
+                  // grant — a candidate confined to their own records — must not
+                  // read as a plain ON switch that a toggle would collapse to
+                  // full access. Show it as a distinct read-only "Own only"
+                  // marker instead; the server refuses toggling it anyway.
+                  const raw = rolePerms[cat.key]?.[action];
+                  const scoped = raw === 'own';
+                  const on = raw === true;
                   return (
                     <div key={action} className="inline-flex items-center gap-2.5">
                       <span className="text-[13px] text-text-secondary">{label}</span>
-                      <Switch
-                        checked={on}
-                        disabled={locked}
-                        aria-label={`${cat.label} · ${label} for ${selected}`}
-                        onChange={() =>
-                          toggle.mutate({ role: selected, category: cat.key, action: action as PermAction })
-                        }
-                      />
+                      {scoped ? (
+                        <Badge variant="info" aria-label={`${cat.label} · ${label} for ${selected}: own records only`}>
+                          Own only
+                        </Badge>
+                      ) : (
+                        <Switch
+                          checked={on}
+                          disabled={locked}
+                          aria-label={`${cat.label} · ${label} for ${selected}`}
+                          onChange={() =>
+                            toggle.mutate({ role: selected, category: cat.key, action: action as PermAction })
+                          }
+                        />
+                      )}
                     </div>
                   );
                 })}

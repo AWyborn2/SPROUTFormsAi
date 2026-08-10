@@ -12,7 +12,13 @@
  */
 import { useMemo, useState } from 'react';
 import { Button, Icon, Switch } from '@formai/ui';
-import { isChoiceField, linkOutcomeTargets } from '@formai/shared';
+import {
+  GLYPH_KINDS,
+  GLYPH_LABELS,
+  isChoiceField,
+  linkOutcomeTargets,
+  type GlyphKind,
+} from '@formai/shared';
 import type { GeometryBand, PageBox } from '@formai/shared';
 import type { TextPage } from '../../../lib/pdf-geometry.js';
 import { proposeFromExemplar, proposeScalarCell } from '../../../lib/pdf-geometry.js';
@@ -492,6 +498,7 @@ export function GeometryInspector({ field, textPages, fields, activeDrawSlot = n
 
           <BandNudger fieldId={field.id} segment={state.segment} />
           <RowNudger fieldId={field.id} segment={state.segment} />
+          <GlyphPicker fieldId={field.id} segment={state.segment} />
 
           {drawButton}
 
@@ -524,6 +531,72 @@ export function GeometryInspector({ field, textPages, fields, activeDrawSlot = n
  * page. A drag over a scaled preview cannot reliably resolve that, and an
  * overshoot here silently moves where a competency mark lands.
  */
+/**
+ * Choose what this box PRINTS, and say plainly which choices reach the page.
+ *
+ * EVERY STYLE OFFERED IS A STYLE THAT PRINTS. That was not always so — the
+ * exporter used to draw seven of the twelve, and this picker labelled the rest
+ * as authorable-but-not-drawn, because letting an author pick a style that
+ * never prints would put a mark on a competency record that does not exist.
+ * All twelve are drawn now, so there is nothing left to caveat.
+ *
+ * The guard did not go with the caveat, it got stronger: `DRAWN_BY_GLYPH` in
+ * `round-trip.ts` is a total `Record<GlyphKind, DrawnGlyph>`, so a glyph added
+ * without a renderer is a compile error there rather than a label here.
+ */
+function GlyphPicker({ fieldId, segment }: { fieldId: string; segment: PageBox }) {
+  const current = segment.markStyle?.glyph;
+
+  const choose = (glyph: GlyphKind | undefined) => {
+    // Clearing writes NO markStyle rather than an empty one: absent is what
+    // every placement authored before this existed carries, and it is the value
+    // the exporter treats as "today's behaviour".
+    const { markStyle: _drop, ...rest } = segment;
+    proposeGeometry(fieldId, glyph ? { ...rest, markStyle: { ...segment.markStyle, glyph } } : rest);
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5 rounded-[10px] border border-border-subtle p-2.5">
+      <span className="text-[11.5px] font-semibold text-text-secondary">What this box prints</span>
+      <div className="flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          onClick={() => choose(undefined)}
+          aria-pressed={!current}
+          className={`rounded-lg border px-2 py-1 text-[10.5px] ${
+            !current
+              ? 'border-accent bg-surface-accent-soft font-semibold text-text-accent'
+              : 'border-border text-text-secondary hover:bg-surface-hover'
+          }`}
+        >
+          Default
+        </button>
+        {GLYPH_KINDS.map((glyph) => (
+          <button
+            key={glyph}
+            type="button"
+            onClick={() => choose(glyph)}
+            aria-pressed={current === glyph}
+            className={`rounded-lg border px-2 py-1 text-[10.5px] ${
+              current === glyph
+                ? 'border-accent bg-surface-accent-soft font-semibold text-text-accent'
+                : 'border-border text-text-secondary hover:bg-surface-hover'
+            }`}
+          >
+            {GLYPH_LABELS[glyph]}
+          </button>
+        ))}
+      </div>
+      {current === 'match_line' && (
+        <p className="rounded-[8px] border border-border-subtle bg-surface-sunken p-[6px_8px] text-[10.5px] text-text-secondary">
+          Draws a connector across this box, end to end. Place the box spanning the gap between the
+          two printed columns.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function BandNudger({ fieldId, segment }: { fieldId: string; segment: PageBox }) {
   const columns = segment.columnBands ?? [];
   if (columns.length === 0) return null;

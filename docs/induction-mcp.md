@@ -75,7 +75,7 @@ able to reach the API over the network.
 ### Hosted client (Cowork, or anything not on your machine) — HTTP
 
 A hosted client cannot spawn a local process, so stdio is not an option. The
-same six tools are served over Streamable HTTP at `/mcp` on the API itself:
+same tools are served over Streamable HTTP at `/mcp` on the API itself:
 
 ```
 https://your-formai-host/api/mcp
@@ -199,6 +199,33 @@ forgetting a permission check.
 4. `record_induction_booking` — record what was booked, with the BISTrainer
    reference. Those starters then show as `already_booked`, so a second run
    cannot book them again.
+5. `confirm_induction_booking` — after the human's pre-induction check, record
+   that the booking stands. See below.
+
+## Confirming a booking
+
+A recorded booking is **tentative**. The seat exists in BISTrainer, but whether
+the starter will actually be ready on the day is settled by a human check close
+to the induction — at CHC, the 2pm Thursday gate check before the Monday. The
+product stores the *result* of that check, never its substance: what gets
+verified is the operator's own checklist, outside this system.
+
+- Each starter seat carries `confirmedAt` (and who confirmed it, in the audit
+  log). A booking's `confirmed` flag is true only when **every** seat on it is
+  confirmed — a cohort can be partially ready, and the flag will say so.
+- `confirm_induction_booking` takes the booking id, and optionally
+  `submissionIds` to confirm a subset of seats.
+- It is **idempotent**: confirming an already-confirmed seat keeps the first
+  timestamp and reports the seat under `alreadyConfirmed`, so a retried call is
+  a no-op rather than an error.
+- Every confirmation writes an audit entry naming the booking date and the
+  starters confirmed, in the same shape as the booking-write entry.
+
+One rule matters more than the mechanics: **confirmation records a human
+decision.** An agent must never call the tool because a booking looks ready or
+to tidy a list. If no human has said "confirmed", the booking stays
+unconfirmed — and that is the accurate record, which is exactly what lets a
+watchdog chase the check before the deadline instead of after it.
 
 ## Overriding the notice rule
 
@@ -217,6 +244,38 @@ The override is narrow on purpose. It waives *lead time*, nothing else. A date
 that is not a Monday, or is a public holiday, stays blocked no matter what
 flag you pass: those are days on which no induction runs, and no authority
 makes one appear.
+
+## When the form never asked
+
+The intake ships as an ordinary editable template, so an administrator can add,
+rename or re-create its questions in the builder. Two consequences reach this
+server, and both are now reported rather than silent:
+
+- **A re-created question keeps working.** The builder assigns its own id to a
+  question you add or delete-and-recreate, so the preset's id is gone. Choice
+  questions are recognised by their option list instead, which is the part you
+  reproduce exactly when you rebuild one. This is what stops a re-created
+  **Ethnicity** dropdown reading as blank, and a re-created **Department**
+  dropping the starter from these tools altogether.
+
+- **A question the version does not ask is named, not blanked.** Anything the
+  starter's form version never carried is listed in `starter.notCollected`, and
+  the candidate carries an `intake_incomplete` warning. Those fields come back
+  empty because nobody was asked — not because the starter skipped them.
+
+The distinction matters at registration time. An empty ethnicity that was never
+asked must not be carried into BISTrainer as `Unknown` or anything else: that
+records a fact about a person that nobody stated. Add the question to the intake
+form and have the starter answer it.
+
+The warning never blocks a booking. A seat needs a name, a mobile and an email;
+it is the profile built afterwards that needs the rest.
+
+Two edits the fallback deliberately does **not** absorb, because guessing would
+be worse than reporting the gap: changing a question's option list (it is then a
+different question, and its answers are not BISTrainer's vocabulary), and having
+two questions with identical options (nothing says which one the answer belongs
+to). Both surface as `notCollected`.
 
 ## Known limitation: the public-holiday list
 

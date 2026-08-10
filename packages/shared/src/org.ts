@@ -36,6 +36,24 @@ export interface TenantContext {
   userId: string;
   orgId: string;
   role: Role;
+  /**
+   * The name an audit entry carries INSTEAD of resolving the user's own.
+   *
+   * Set only on a machine call whose issuing Admin has since been deactivated.
+   * An API key is the ORGANISATION's credential — its own role, its own
+   * lifecycle, revoked by any Admin — so it keeps working when the person who
+   * issued it leaves. But naming that person as the actor on every write it
+   * makes afterwards would have the audit trail claim somebody who cannot sign
+   * in is still working, which is a different and worse defect than the access
+   * itself.
+   *
+   * `actorId` still points at the issuer, so the entry stays traceable to whoever
+   * authorised the key. Only the displayed name changes.
+   *
+   * NEVER SEALED into a session cookie: a human session leaves this unset and
+   * `recordAudit` falls back to the user's own name.
+   */
+  actorLabel?: string;
 }
 
 /** `GET /auth/me` response — the sealed session plus display fields the client needs. */
@@ -51,4 +69,29 @@ export interface SessionInfo extends TenantContext {
   teamSize: string | null;
   /** ISO timestamp of onboarding wizard completion; null while the wizard is pending. */
   onboardingCompletedAt: string | null;
+  /**
+   * What the organisation's plan includes, RESOLVED SERVER-SIDE.
+   *
+   * Sent on the session rather than left for the web to derive, for two
+   * reasons. The tier-to-feature mapping lives in `packages/db/src/plans.ts`
+   * and the web cannot import it, so deriving there would mean a hand-copied
+   * mirror — and the one the web already keeps for the billing screen has
+   * drifted twice. And the nav needs this on first paint: reading it from a
+   * separate billing call would leave every gated entry flickering in or out
+   * once that call returned.
+   *
+   * Null only where the org row could not be resolved, which the nav treats as
+   * "show nothing gated" — the API is the real boundary either way.
+   */
+  features: PlanFeatureFlags | null;
 }
+
+/**
+ * The plan-feature flags a session carries.
+ *
+ * Structurally the same as `PlanFeatures` in `packages/db/src/plans.ts`, stated
+ * here as an index signature rather than a field list so it CANNOT drift: a
+ * feature added there flows through without an edit, and the nav's
+ * `requiresFeature` is checked against the keys actually present.
+ */
+export type PlanFeatureFlags = Readonly<Record<string, boolean>>;

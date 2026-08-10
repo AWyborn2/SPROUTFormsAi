@@ -3,7 +3,13 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { PERMISSION_CATEGORIES, ROLES, type PermissionMatrix, type Role } from '@formai/shared';
+import {
+  DEFAULT_ROLE_PERMISSIONS,
+  PERMISSION_CATEGORIES,
+  ROLES,
+  type PermissionMatrix,
+  type Role,
+} from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
@@ -11,12 +17,28 @@ import { isUniqueViolation } from '../lib/db-errors.js';
 import { recordAudit } from '../audit/record.js';
 import { sendInviteEmail } from '../email/resend.js';
 import { env } from '../env.js';
-import { checkSeatAvailability, seatLimitError } from '../lib/seats.js';
+import { checkSeatAvailability, lockOrgForSeats, poolFor, seatLimitError } from '../lib/seats.js';
+import { recordExpansion, seatOrExpand, type SeatExpansion } from '../lib/seat-blocks.js';
+import { readPlacement, writePlacement } from '../lib/membership-placement.js';
+import { assignForMembership } from '../lib/assignment.js';
+import { identifyMember, loadDisplayIdentities } from '../lib/display-identity.js';
+import { deactivateMember, reactivateMember } from '../lib/deactivation.js';
 import { db } from '../db.js';
 
 export const teamRouter: Router = Router();
 
-const permissionActions = ['view', 'create', 'edit', 'delete', 'export', 'invite', 'manage'] as const;
+const canViewTeam = (tenant: { orgId: string; role: string }) => hasPermission(tenant, 'team', 'view');
+
+const permissionActions = [
+  'view',
+  'create',
+  'edit',
+  'delete',
+  'export',
+  'invite',
+  'manage',
+  'approve',
+] as const;
 
 const canManageTeam = (tenant: { orgId: string; role: string }) => hasPermission(tenant, 'team', 'manage');
 
@@ -40,10 +62,18 @@ teamRouter.get(
       ? await db.query.users.findMany({ where: inArray(schema.users.id, userIds) })
       : [];
     const userById = new Map(users.map((u) => [u.id, u]));
+    /*
+      R24: a name alone is not an identification. Resolved live from the profile
+      rather than stored on the membership, so a corrected number corrects itself
+      here without a write (R61). Members with no profile yet keep the name this
+      list already showed.
+    */
+    const identities = await loadDisplayIdentities(db, tenant.orgId, userIds);
 
     res.json([
       ...memberships.map((m) => {
         const u = userById.get(m.userId);
+        const identified = identifyMember(identities, m.userId, u?.name ?? '');
         return {
           id: m.id,
           /*
@@ -54,7 +84,9 @@ teamRouter.get(
             database by hand. A pending invite has no user yet, hence null.
           */
           userId: m.userId,
-          name: u?.name ?? '',
+          name: identified.name,
+          /** The organisation-assigned number shown beside the name; null until one is issued (R24). */
+          identifier: identified.identifier,
           email: u?.email ?? '',
           role: m.role,
           status: m.status,
@@ -69,6 +101,12 @@ teamRouter.get(
         // A QR-delivered invite has no email at all, so the recorded name is
         // the only way to tell pending rows apart.
         name: i.inviteeName || nameFromEmail(i.email ?? '') || i.email || 'Pending invite',
+        /*
+          Always null here: nobody has accepted, so there is no membership to
+          carry a profile and no number to resolve. The key is present anyway so
+          every row in this list has one shape for the caller to read.
+        */
+        identifier: null,
         email: i.email ?? '',
         role: i.role,
         status: 'invited' as const,
@@ -131,18 +169,29 @@ teamRouter.post(
     const displayName =
       name ?? (normalizedEmail ? nameFromEmail(normalizedEmail) || normalizedEmail : 'Invited');
 
-    // Seat limit check — staff and candidates draw on separate pools. The
-    // resolution rules live in lib/seats.ts alongside the acceptance-time
-    // check, so both ends of an invite cannot drift apart.
+    /*
+      NO SEAT CHECK REFUSES HERE (U37, R79, R80).
+
+      A pending invitation reserves nothing — creating one is not taking a seat,
+      and an organisation may hold far more outstanding invitations than it has
+      free seats. Refusing to ISSUE one on a full pool therefore blocked an
+      action that costs nothing, and the seat is genuinely settled at acceptance,
+      where the check holds the row lock.
+
+      For the candidate pool the refusal is gone entirely: a full pool expands at
+      acceptance rather than stranding whoever holds the link (R86). For the
+      STAFF pool the seat is still finite and acceptance will still refuse, so
+      the check is kept as a non-blocking WARNING — the dialog can say the pool
+      is full without preventing an invitation somebody may well intend to send
+      before freeing a seat.
+    */
     const org = await db.query.organizations.findFirst({
       where: eq(schema.organizations.id, tenant.orgId),
     });
-    if (org) {
+    let seatWarning: ReturnType<typeof seatLimitError> | null = null;
+    if (org && poolFor(role) === 'staff') {
       const check = await checkSeatAvailability(db, org, role);
-      if (!check.ok) {
-        res.status(403).json(seatLimitError(check, org.planTier));
-        return;
-      }
+      if (!check.ok) seatWarning = seatLimitError(check, org.planTier);
     }
 
     // Duplicate check: already a member of this org. Only possible when an
@@ -228,6 +277,13 @@ teamRouter.post(
        * why only a team manager reaches this route at all.
        */
       acceptPath: `/invite/${invite.token}`,
+      /**
+       * Present only where the STAFF pool is full (R80). The invitation was
+       * issued regardless — this tells the Admin that acceptance will be refused
+       * until a seat frees, which is a thing to know rather than a thing to be
+       * stopped by. The candidate pool never sets this: it expands instead.
+       */
+      ...(seatWarning ? { seatWarning } : {}),
     });
   }),
 );
@@ -299,6 +355,82 @@ teamRouter.post(
 /** Long enough to hand a printed code over on site, short enough to expire. */
 const PASSWORD_RESET_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+// ── Placement (R21, R22) — the same act for every member, whatever level ─────
+
+const placementBody = z.object({
+  locationIds: z.array(z.string().uuid()),
+  departmentIds: z.array(z.string().uuid()),
+  roleIds: z.array(z.string().uuid()),
+});
+
+teamRouter.get(
+  '/members/:id/placement',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await canViewTeam(tenant))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const membership = await db.query.memberships.findFirst({
+      where: and(eq(schema.memberships.id, req.params.id!), eq(schema.memberships.orgId, tenant.orgId)),
+    });
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    res.json(await readPlacement(db, membership.id));
+  }),
+);
+
+teamRouter.put(
+  '/members/:id/placement',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await canManageTeam(tenant))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = placementBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const membership = await db.query.memberships.findFirst({
+      where: and(eq(schema.memberships.id, req.params.id!), eq(schema.memberships.orgId, tenant.orgId)),
+    });
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const result = await writePlacement(db, tenant.orgId, membership.id, parsed.data);
+    if (!result.ok) {
+      res.status(400).json({ error: 'invalid_placement', code: result.error.code, subjectId: result.error.subjectId });
+      return;
+    }
+    await recordAudit(db, tenant, {
+      action: 'Placed member',
+      target: membership.id,
+      category: 'team',
+      icon: 'map-pin',
+    });
+    // Placement is one of the four triggers that assign (U11, R47, R51):
+    // changing the Roles a person holds gives them their new Roles' required
+    // assessments, and the run is idempotent so no case is duplicated.
+    await assignForMembership(db, tenant.orgId, membership.id);
+    res.json(await readPlacement(db, membership.id));
+  }),
+);
+
 const patchMemberBody = z.object({ role: z.enum(ROLES) });
 
 teamRouter.patch(
@@ -335,6 +467,17 @@ teamRouter.patch(
         return;
       }
       const nextInviteRole = parsed.data.role;
+
+      /*
+        NO SEAT CHECK ON A PENDING INVITATION (U37, R80).
+
+        This check existed to stop "create a viewer invite, then PATCH it to
+        candidate" walking around the creation-time check. That check is gone
+        too, and for the same reason: a pending invitation reserves nothing, so
+        neither one was guarding a seat. The seat is settled at acceptance, under
+        the row lock, where a full candidate pool expands and a full staff pool
+        refuses.
+      */
       await db.update(schema.invites).set({ role: nextInviteRole }).where(eq(schema.invites.id, invite.id));
       if (invite.role !== nextInviteRole) {
         await recordAudit(db, tenant, {
@@ -357,7 +500,59 @@ teamRouter.patch(
     const previousRole = membership.role;
     const nextRole = parsed.data.role;
 
-    await db.update(schema.memberships).set({ role: nextRole }).where(eq(schema.memberships.id, membership.id));
+    // ── Seat limit check ──────────────────────────────────────────────────
+    // A role change only consumes a seat when it CROSSES pools. Promoting an
+    // operator who now runs their own inductions (candidate → assessor) moves
+    // them out of the candidate pool and into the staff one, which is a new
+    // staff seat; viewer → builder moves nobody and can never breach a limit,
+    // so a full pool it is not joining must not refuse it. Crossing the other
+    // way frees a seat and is always allowed.
+    //
+    // The member is not in the target pool yet, so the plain `used < limit`
+    // asks the right question. A non-active membership is in NEITHER pool —
+    // the count is of active rows — so re-roling a suspended member consumes
+    // nothing and is not gated.
+    //
+    // Transaction and row lock for the same reason invite acceptance has
+    // them: the count and the UPDATE it guards must be one indivisible step,
+    // or two admins promoting two candidates at once both pass a count that
+    // neither of them has changed yet. See lib/seats.ts.
+    const consumesSeat = membership.status === 'active' && poolFor(previousRole) !== poolFor(nextRole);
+    const outcome = await db.transaction(async (tx) => {
+      let expansion: SeatExpansion | null = null;
+      if (consumesSeat) {
+        const org = await lockOrgForSeats(tx, tenant.orgId);
+        if (org) {
+          const check = await checkSeatAvailability(tx, org, nextRole);
+          /*
+            THE ONE CHECK IN THIS FILE THAT STAYS (U37, R81, R86). It guards a
+            real seat: this membership is active, so the change moves a person
+            between two pools that are both being counted.
+
+            A full CANDIDATE pool now expands rather than refusing — moving
+            somebody to Candidate takes a candidate seat and releases a staff
+            one, and R81 says that goes through. A full staff pool still refuses,
+            because no rule has been written for expanding it.
+
+            The expansion happens INSIDE this transaction, holding the lock the
+            count was taken under. Outside it, two admins promoting two people at
+            once would each see a full pool and each buy a block.
+          */
+          const resolved = await seatOrExpand(tx, org, check);
+          expansion = resolved.expansion;
+          if (!check.ok && !expansion) return { refusal: seatLimitError(check, org.planTier) };
+        }
+      }
+      await tx.update(schema.memberships).set({ role: nextRole }).where(eq(schema.memberships.id, membership.id));
+      return { expansion };
+    });
+    if (outcome.refusal) {
+      res.status(403).json(outcome.refusal);
+      return;
+    }
+    if (outcome.expansion) {
+      await recordExpansion(db, tenant, outcome.expansion, `access level changed to ${nextRole}`);
+    }
 
     if (previousRole !== nextRole) {
       await recordAudit(db, tenant, {
@@ -411,26 +606,38 @@ teamRouter.delete(
       return;
     }
     if (membership.role === 'owner') {
+      // Count only owners who can still act. A suspended owner cannot sign in
+      // (R65), so counting them would let an org deactivate its one remaining
+      // ACTIVE owner and lose all owner-level control — the guard must see the
+      // same live set the front door does.
       const owners = await db.query.memberships.findMany({
-        where: and(eq(schema.memberships.orgId, tenant.orgId), eq(schema.memberships.role, 'owner')),
+        where: and(
+          eq(schema.memberships.orgId, tenant.orgId),
+          eq(schema.memberships.role, 'owner'),
+          eq(schema.memberships.status, 'active'),
+        ),
       });
       if (owners.length <= 1) {
         res.status(403).json({ error: 'cannot_remove_last_owner' });
         return;
       }
     }
-    const user = await db.query.users.findFirst({ where: eq(schema.users.id, membership.userId) });
+    /*
+      DEACTIVATION, NOT DELETION (R62, R63).
 
-    await db.delete(schema.memberships).where(eq(schema.memberships.id, membership.id));
+      This route used to `DELETE` the membership row, which took the person's
+      placement with it on cascade and left the competency evidence that
+      certified them pointing at a membership that no longer existed. R62 makes
+      leaving a deactivation and R63 retains every record indefinitely and with
+      no expiry — which is the whole reason a returning worker keeps
+      competencies that are still in date (R69).
 
-    await recordAudit(db, tenant, {
-      action: 'Removed member',
-      target: user?.email ?? '',
-      category: 'team',
-      icon: 'user-minus',
-    });
+      What it ends instead is REACH: the live session, the front door, and an
+      invitation they never accepted. See `lib/deactivation.ts`.
+    */
+    const outcome = await deactivateMember(db, tenant, membership);
 
-    res.status(204).end();
+    res.status(200).json(outcome);
   }),
 );
 
@@ -446,8 +653,15 @@ teamRouter.get(
     const rows = await db.query.rolePermissions.findMany({
       where: eq(schema.rolePermissions.orgId, tenant.orgId),
     });
+    const stored = new Map(rows.map((r) => [r.role, r.matrix]));
+    // Return EVERY access level (R28), falling back to the product default for
+    // one the org never customised — so Assessor and Candidate show the
+    // capabilities they already hold rather than reading as all-off, matching
+    // what the enforcement side (permissions.ts matrixFor) resolves.
     const result: Partial<Record<Role, PermissionMatrix>> = {};
-    for (const r of rows) result[r.role] = r.matrix;
+    for (const role of ROLES) {
+      result[role] = stored.get(role) ?? DEFAULT_ROLE_PERMISSIONS[role];
+    }
     res.json(result);
   }),
 );
@@ -483,34 +697,48 @@ teamRouter.patch(
       const row = await db.query.rolePermissions.findFirst({
         where: and(eq(schema.rolePermissions.orgId, tenant.orgId), eq(schema.rolePermissions.role, role)),
       });
+      // The matrix this change applies to: the stored one, or the product
+      // default when the org never customised this level. Assessor and Candidate
+      // are exactly the levels most likely to have no stored row, so without
+      // this a toggle on either wrote nothing and returned 200 unchanged.
+      const baseMatrix = row?.matrix ?? DEFAULT_ROLE_PERMISSIONS[role];
+
+      // A scoped ('own') grant cannot be represented by this two-state control,
+      // and the toggle below would read it as truthy and collapse it to `false`
+      // — silently destroying the scope that keeps a candidate confined to their
+      // own records. Refuse instead.
+      if (baseMatrix[category]?.[action] === 'own') {
+        res.status(409).json({
+          error: 'scoped_permission',
+          message: `${role}: ${category}.${action} is scoped to own records and cannot be toggled here.`,
+        });
+        return;
+      }
+
+      const nextAllowed = allowed ?? !(baseMatrix[category]?.[action] ?? false);
+      const nextMatrix: PermissionMatrix = {
+        ...baseMatrix,
+        [category]: { ...baseMatrix[category], [action]: nextAllowed },
+      };
       if (row) {
-        // A scoped ('own') grant cannot be represented by this two-state
-        // control, and the toggle below would read it as truthy and collapse it
-        // to `false` — silently destroying the scope that keeps a candidate
-        // confined to their own records. Refuse instead.
-        if (row.matrix[category]?.[action] === 'own') {
-          res.status(409).json({
-            error: 'scoped_permission',
-            message: `${role}: ${category}.${action} is scoped to own records and cannot be toggled here.`,
-          });
-          return;
-        }
-        const nextAllowed = allowed ?? !(row.matrix[category]?.[action] ?? false);
-        const nextMatrix: PermissionMatrix = {
-          ...row.matrix,
-          [category]: { ...row.matrix[category], [action]: nextAllowed },
-        };
         await db
           .update(schema.rolePermissions)
           .set({ matrix: nextMatrix })
           .where(eq(schema.rolePermissions.id, row.id));
-        await recordAudit(db, tenant, {
-          action: 'Updated permissions',
-          target: `${role}: ${category}.${action} → ${nextAllowed ? 'allowed' : 'denied'}`,
-          category: 'settings',
-          icon: 'shield',
-        });
+      } else {
+        // Materialise the level's row from its default and insert (upsert), so
+        // the write side and the read-side fallback in permissions.ts cannot
+        // disagree.
+        await db
+          .insert(schema.rolePermissions)
+          .values({ orgId: tenant.orgId, role, matrix: nextMatrix });
       }
+      await recordAudit(db, tenant, {
+        action: 'Updated permissions',
+        target: `${role}: ${category}.${action} → ${nextAllowed ? 'allowed' : 'denied'}`,
+        category: 'settings',
+        icon: 'shield',
+      });
     }
 
     const rows = await db.query.rolePermissions.findMany({
@@ -519,5 +747,86 @@ teamRouter.patch(
     const result: Partial<Record<Role, PermissionMatrix>> = {};
     for (const r of rows) result[r.role] = r.matrix;
     res.json(result);
+  }),
+);
+
+/**
+ * Bring a returner back (R68).
+ *
+ * Separate from the role PATCH because it is a different act: that one changes
+ * what somebody may do, this one changes whether they are here at all. It
+ * consumes a seat from the pool their access level draws on (R78) and proceeds
+ * even where none is free — refusing a returning worker at the allocation
+ * boundary would stop work on a site to settle a billing question, which is what
+ * U37's automatic expansion exists to prevent.
+ */
+teamRouter.post(
+  '/members/:id/reactivate',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!(await canManageTeam(tenant))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const membership = await db.query.memberships.findFirst({
+      where: and(eq(schema.memberships.id, req.params.id!), eq(schema.memberships.orgId, tenant.orgId)),
+    });
+    if (!membership) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (membership.status === 'active') {
+      // Idempotent rather than an error: a retried click is not a mistake.
+      res.status(200).json({ needsFreshInvitation: false, seatConsumed: membership.role === 'candidate' ? 'candidate' : 'staff' });
+      return;
+    }
+
+    /*
+      R78 + R86: the returner takes a seat, and a full CANDIDATE pool buys a
+      block rather than turning them away. Locked, because the count and the
+      status write have to be one step — two reactivations arriving together
+      against one free seat must buy one block between them, not two.
+
+      A full STAFF pool still refuses: no rule has been written for expanding it,
+      and quietly overrunning a finite allocation would be worse than saying so.
+    */
+    const seat = await db.transaction(async (tx) => {
+      const org = await lockOrgForSeats(tx, tenant.orgId);
+      if (org) {
+        const check = await checkSeatAvailability(tx, org, membership.role as Role);
+        const resolved = await seatOrExpand(tx, org, check);
+        // Nothing has been written when this refuses — `seatOrExpand` writes
+        // only where it expands — so returning here leaves the org untouched.
+        if (!check.ok && !resolved.expansion) return { refusal: seatLimitError(check, org.planTier) };
+        // The status write lives INSIDE the lock the count was taken under, so
+        // the seat this returner just claimed is truly consumed before the lock
+        // releases. Two returners racing one free seat must not both pass a
+        // count neither has changed yet — the same reason the role PATCH above
+        // writes inside its transaction. `reactivateMember` settles the rest.
+        await tx.update(schema.memberships).set({ status: 'active' }).where(eq(schema.memberships.id, membership.id));
+        return { expansion: resolved.expansion };
+      }
+      // No seat accounting configured: no gate, but the activation still lands.
+      await tx.update(schema.memberships).set({ status: 'active' }).where(eq(schema.memberships.id, membership.id));
+      return {};
+    });
+    if (seat.refusal) {
+      res.status(403).json(seat.refusal);
+      return;
+    }
+
+    const outcome = await reactivateMember(db, tenant, membership);
+    if (seat.expansion) {
+      await recordExpansion(db, tenant, seat.expansion, 'member reactivated');
+    }
+    res.status(200).json({
+      ...outcome,
+      ...(seat.expansion ? { seatsAdded: seat.expansion.seatsAdded } : {}),
+    });
   }),
 );

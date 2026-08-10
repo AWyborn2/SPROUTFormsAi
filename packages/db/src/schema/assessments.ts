@@ -14,11 +14,13 @@ import type { AssessmentToolManifest, SubmissionValue } from '@formai/shared';
 import {
   assessmentCaseStateEnum,
   assessmentPathwayEnum,
+  attemptMarkerKindEnum,
   nsDispositionEnum,
   partOutcomeEnum,
 } from './enums.ts';
 import { organizations, users } from './organizations.ts';
 import { formTemplates, formTemplateVersions } from './forms.ts';
+import { departments, jobRoles, locations } from './taxonomy.ts';
 
 /**
  * An assessment tool — the part structure laid over a form template.
@@ -39,6 +41,19 @@ export const assessmentTools = pgTable(
       .notNull()
       .references(() => formTemplates.id, { onDelete: 'cascade' }),
     name: text().notNull(),
+    /*
+      The Department that classifies this tool (R9), or null for UNCLASSIFIED
+      (R10). Null is not "every Department" — it is "no Department yet", and R11
+      makes an unclassified tool appear in every Department filter so it cannot be
+      silently missed. At most one: a tool carries one Department or none.
+
+      `set null` rather than `restrict`: a Department is retired, not deleted, so
+      this never fires in normal use, but if one were force-removed the tool
+      falling back to unclassified beats blocking the Department operation. A
+      RETIRED Department stays on the tool (R117's precondition) — the pointer is
+      by id and does not read status.
+    */
+    departmentId: uuid('department_id').references(() => departments.id, { onDelete: 'set null' }),
     /** Ordered parts, their kinds, pathways and start fields. */
     manifest: jsonb().$type<AssessmentToolManifest>().notNull(),
     /** Competency ids a CANDIDATE must hold. Warned on, never blocking. */
@@ -82,6 +97,25 @@ export const assessmentTools = pgTable(
       .notNull()
       .default({}),
     /*
+      WHICH PARTS APPLY WHERE (U9). A map from Location id to the part keys that
+      Location requires, sitting beside the assessor rule above because both
+      answer a per-location question about this one tool, and a location-centric
+      home would force every Location to know about every tool.
+
+      Keyed by Location id, not name, for the same reason R79 keys the assessor
+      rule by id: a rule keyed by a name whose Location was later renamed would
+      silently stop applying. A Location ABSENT from this map requires every part
+      the manifest declares — whether no rule was ever set or the Location
+      postdates the tool (R75) — so the safe direction is the default and the
+      worst case of a missing rule is a longer assessment, never a skipped part.
+
+      Empty on every tool that does not vary its parts by location.
+    */
+    locationPartKeys: jsonb('location_part_keys')
+      .$type<Record<string, string[]>>()
+      .notNull()
+      .default({}),
+    /*
       Competency ids this tool AWARDS on sign-off. The tool declared what a
       candidate must bring and what an assessor must hold, but never what
       passing it confers — so a competent case updated its own state and the
@@ -104,6 +138,45 @@ export const assessmentTools = pgTable(
     /** One tool per template — the manifest describes that template's parts. */
     uniqueIndex('assessment_tools_template_uq').on(t.templateId),
     index('assessment_tools_org_idx').on(t.orgId),
+    index('assessment_tools_department_idx').on(t.departmentId),
+  ],
+);
+
+/**
+ * The assessments a Role requires (U10, R43) — the minimum for anyone holding it.
+ *
+ * A real join table rather than a jsonb list on the Role, because the competency
+ * lists on the tool (jsonb, no FK) answer a different question: those degrade
+ * gracefully when a competency is tidied up, while a Role's requirement is the
+ * blast radius R82 has to count and a Role's own deletion is already restricted
+ * by the placements that reference it. Rows here are the thing an assignment run
+ * reads, so they are queryable by Role and by tool.
+ *
+ * The DISTINCTION R50 needs — a Role never configured versus one configured
+ * empty — is the presence or absence of rows, which the API reports as a
+ * `configured` boolean rather than leaving a caller to infer it from `[]`.
+ */
+export const roleRequiredAssessments = pgTable(
+  'role_required_assessments',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    roleId: uuid('role_id')
+      .notNull()
+      .references(() => jobRoles.id, { onDelete: 'cascade' }),
+    toolId: uuid('tool_id')
+      .notNull()
+      .references(() => assessmentTools.id, { onDelete: 'cascade' }),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // A Role requires a tool once.
+    uniqueIndex('role_required_assessments_uq').on(t.roleId, t.toolId),
+    index('role_required_assessments_org_idx').on(t.orgId),
+    index('role_required_assessments_role_idx').on(t.roleId),
+    index('role_required_assessments_tool_idx').on(t.toolId),
   ],
 );
 
@@ -130,8 +203,19 @@ export const assessmentCases = pgTable(
       .references(() => users.id, { onDelete: 'restrict' }),
     assessorUserId: uuid().references(() => users.id, { onDelete: 'set null' }),
     pathway: assessmentPathwayEnum().notNull(),
-    /** Which location-specific content applies, e.g. 'mining'. */
-    locationStream: text('location_stream'),
+    /**
+     * Where this case is assessed — a pointer at the organisation's managed
+     * Location list (R77, R78), replacing the free-text location stream (U8).
+     * One value serves three jobs: it is where the case is assessed, it is what
+     * the per-Location assessor rule is matched against (by id now, R79), and
+     * its name is the answer the assessment document reads for its own stream
+     * question. Null when the tool has no location-specific content.
+     *
+     * `set null` rather than `restrict`: a Location is retired, never deleted,
+     * so this never fires — but if one were force-removed, a case losing its
+     * pointer beats a Location operation being blocked.
+     */
+    locationId: uuid('location_id').references(() => locations.id, { onDelete: 'set null' }),
     state: assessmentCaseStateEnum().notNull().default('open'),
     currentVersionId: uuid('current_version_id')
       .notNull()
@@ -172,6 +256,13 @@ export const assessmentCases = pgTable(
     }),
     /** The assessor's printed name, as they signed it. */
     signedOffName: text('signed_off_name').notNull().default(''),
+    /**
+     * The Location's name captured at sign-off (R138). A settled case asserts
+     * what was true when it was signed, so a later rename of the Location does
+     * not change what the certificate reads — the one place the location pointer
+     * is captured as words rather than followed, mirroring `signedOffName`.
+     */
+    signedOffLocationName: text('signed_off_location_name').notNull().default(''),
     /** PNG data URL, as SignaturePad emits. One per case; 5-40KB. */
     signedOffSignature: text('signed_off_signature').notNull().default(''),
   },
@@ -239,6 +330,29 @@ export const assessmentPartAttempts = pgTable(
     }),
     /** Printed name as signed, kept even if the user record later changes. */
     assessorName: text('assessor_name').notNull().default(''),
+    /**
+     * Who marked this attempt (U15, R70). `automatic` — an answer-key mark no
+     * person made — leaves `assessorUserId`/`assessorName` null/empty; `person`
+     * carries them. Distinct from the assessor columns so a reader can tell an
+     * automatic mark from a person's, which the bare name columns could not.
+     *
+     * `default('person')` is truthful history: every attempt that existed before
+     * this column was entered by an assessor. An unmarked attempt reads `person`
+     * too, which is harmless — its `outcome` is null, so it plainly is not marked.
+     */
+    markerKind: attemptMarkerKindEnum('marker_kind').notNull().default('person'),
+    /**
+     * Composed warnings if the PERSON who marked this attempt fell short of the
+     * tool's assessor requirements for the case's Location (U14, R65). Warn, never
+     * block — the mark still stands. Empty for an automatic mark (nobody's
+     * eligibility is at stake) and for a tool with no assessor requirement. Stored
+     * as finished prose, like the case's `prerequisiteWarnings`, so a reader never
+     * has to reconstruct it.
+     */
+    markingEligibilityWarnings: jsonb('marking_eligibility_warnings')
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     signedAt: timestamp('signed_at', { withTimezone: true }),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
@@ -262,7 +376,27 @@ export const assessmentToolsRelations = relations(assessmentTools, ({ one, many 
     fields: [assessmentTools.templateId],
     references: [formTemplates.id],
   }),
+  department: one(departments, {
+    fields: [assessmentTools.departmentId],
+    references: [departments.id],
+  }),
   cases: many(assessmentCases),
+  requiredByRoles: many(roleRequiredAssessments),
+}));
+
+export const roleRequiredAssessmentsRelations = relations(roleRequiredAssessments, ({ one }) => ({
+  org: one(organizations, {
+    fields: [roleRequiredAssessments.orgId],
+    references: [organizations.id],
+  }),
+  role: one(jobRoles, {
+    fields: [roleRequiredAssessments.roleId],
+    references: [jobRoles.id],
+  }),
+  tool: one(assessmentTools, {
+    fields: [roleRequiredAssessments.toolId],
+    references: [assessmentTools.id],
+  }),
 }));
 
 export const assessmentCasesRelations = relations(assessmentCases, ({ one, many }) => ({

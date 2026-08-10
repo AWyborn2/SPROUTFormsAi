@@ -1,0 +1,5 @@
+ALTER TABLE "induction_booking_starters" ADD COLUMN "confirmed_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "induction_booking_starters" ADD COLUMN "confirmed_by_user_id" uuid;--> statement-breakpoint
+ALTER TABLE "induction_booking_starters" ADD COLUMN "confirmed_by_api_key_id" uuid;--> statement-breakpoint
+ALTER TABLE "induction_booking_starters" ADD CONSTRAINT "induction_booking_starters_confirmed_by_user_id_users_id_fk" FOREIGN KEY ("confirmed_by_user_id") REFERENCES "public"."users"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "induction_booking_starters" ADD CONSTRAINT "induction_booking_starters_confirmed_by_api_key_id_api_keys_id_fk" FOREIGN KEY ("confirmed_by_api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE set null ON UPDATE no action;

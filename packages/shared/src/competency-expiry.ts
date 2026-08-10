@@ -65,14 +65,35 @@ export interface HeldCompetency {
 }
 
 /**
- * What a held competency currently is.
+ * The DATED state of a held competency — four states, all derived from the grant
+ * date and the competency's validity (R104). Revocation is NOT among them: it is
+ * a deliberate act carried BESIDE the dated state (`CompetencyCurrency.revoked`).
+ * A five-member union with `revoked` mixed in forced every surface reporting a
+ * date to also special-case an act, and two exhaustive maps — `URGENCY` and
+ * `STATUS_STYLE` — to carry a key that is not a date at all.
  *
  * `expiring` and `grace` both still COUNT — they are eligible states carrying a
- * flag. Only `expired` and `revoked` stop counting. Keeping them as distinct
- * names rather than a boolean plus a reason is deliberate: every surface that
- * reports one has to say which, and an enum makes forgetting hard.
+ * flag. Only `expired` stops counting on dates alone; revocation stops it
+ * regardless. Keeping them as distinct names rather than a boolean plus a reason
+ * is deliberate: every surface that reports one has to say which.
  */
-export type CompetencyStatus = 'held' | 'expiring' | 'grace' | 'expired' | 'revoked';
+export type CompetencyStatus = 'held' | 'expiring' | 'grace' | 'expired';
+
+/**
+ * A held competency resolved at an instant: its dated state, and whether it has
+ * been revoked.
+ *
+ * Revocation is decisive over the date wherever currency is READ (R106, R107) —
+ * `countsAsHeld` folds it in, so no eligibility check can forget it — but the two
+ * travel as SEPARATE fields so a surface can show "Expired" or "In grace" and a
+ * revoked mark independently, which is what R104 asks for.
+ */
+export interface CompetencyCurrency {
+  /** The dated state, computed even when revoked (a revoked ticket still has a date). */
+  status: CompetencyStatus;
+  /** Set once an appeal or an admin took it away. Beats every date. */
+  revoked: boolean;
+}
 
 /** How near an expiry has to be to be worth mentioning, per audience. */
 export const EXPIRY_WARNING_DAYS = {
@@ -117,7 +138,13 @@ export function expiryOf(held: HeldCompetency, validity: CompetencyValidity): Da
 }
 
 /**
- * The state of one held competency at a moment in time.
+ * The DATED state of one held competency at a moment in time — pure date logic.
+ *
+ * Revocation is NOT considered here (R104): this answers only "where does this
+ * grant sit against its date", so a revoked-but-in-date ticket still reads
+ * `held` from this function. Whether it COUNTS is `countsAsHeld`, which reads the
+ * revoked flag beside the dated state. Use `competencyCurrency` to get both at
+ * once.
  *
  * `now` is a parameter rather than read from the clock so this stays pure and
  * testable — every caller passes the same instant, which also stops two fields
@@ -129,9 +156,6 @@ export function competencyStatus(
   now: Date,
   audience: ExpiryAudience = 'assessor',
 ): CompetencyStatus {
-  // Revocation is a deliberate act and outranks any date.
-  if (held.revokedAt) return 'revoked';
-
   const expiry = expiryOf(held, validity);
   if (!expiry) return 'held';
 
@@ -147,13 +171,33 @@ export function competencyStatus(
 }
 
 /**
- * Whether this status still satisfies a requirement.
+ * A held competency's full currency: its dated state, and whether it is revoked.
  *
- * `expiring` and `grace` both do. An assessment must not be blocked by a ticket
- * that is merely close to its date, nor by one inside the window the authority
- * deliberately allows for requalifying.
+ * This is what an eligibility surface should reach for — the dated state to show
+ * and the revoked flag `countsAsHeld` needs, resolved from the same instant so
+ * they cannot disagree.
  */
-export function countsAsHeld(status: CompetencyStatus): boolean {
+export function competencyCurrency(
+  held: HeldCompetency,
+  validity: CompetencyValidity,
+  now: Date,
+  audience: ExpiryAudience = 'assessor',
+): CompetencyCurrency {
+  return { status: competencyStatus(held, validity, now, audience), revoked: Boolean(held.revokedAt) };
+}
+
+/**
+ * Whether a resolved competency still satisfies a requirement.
+ *
+ * `expiring` and `grace` both do — an assessment must not be blocked by a ticket
+ * merely close to its date, nor by one inside the window the authority allows for
+ * requalifying. Revocation stops it whatever the date (R106, R107), and this is
+ * the ONE place that fold happens: taking the `{ status, revoked }` struct rather
+ * than a bare status means no caller can check the date and forget the act.
+ */
+export function countsAsHeld(currency: CompetencyCurrency): boolean {
+  if (currency.revoked) return false;
+  const { status } = currency;
   return status === 'held' || status === 'expiring' || status === 'grace';
 }
 

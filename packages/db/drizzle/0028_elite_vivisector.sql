@@ -1,0 +1,3 @@
+ALTER TABLE "assessment_cases" ADD COLUMN "location_id" uuid;--> statement-breakpoint
+ALTER TABLE "assessment_cases" ADD COLUMN "signed_off_location_name" text DEFAULT '' NOT NULL;--> statement-breakpoint
+ALTER TABLE "assessment_cases" ADD CONSTRAINT "assessment_cases_location_id_locations_id_fk" FOREIGN KEY ("location_id") REFERENCES "public"."locations"("id") ON DELETE set null ON UPDATE no action;

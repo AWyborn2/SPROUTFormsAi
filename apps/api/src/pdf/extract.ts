@@ -29,6 +29,7 @@ import {
 } from 'pdf-lib';
 import type {
   AnswerSet,
+  CoverSection,
   DocumentType,
   ExtractedField,
   ExtractionResult,
@@ -36,7 +37,7 @@ import type {
   RepeatingColumn,
   SourcePosition,
 } from '@formai/shared';
-import { resolveAnswerSets } from '@formai/shared';
+import { COVER_SECTIONS, resolveAnswerSets } from '@formai/shared';
 import { EXTRACT_TOOL_NAME, extractFormFieldsTool } from './tool-schema.js';
 import { profileFor } from './document-profiles.js';
 
@@ -361,6 +362,20 @@ function toAnswerSets(raw: unknown): AnswerSet[] | undefined {
   return sets.length > 0 ? sets : undefined;
 }
 
+/** A non-empty list of strings, trimmed of blanks; anything else → absent. */
+function toStringList(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw.map(String).map((s) => s.trim()).filter(Boolean);
+  return out.length > 0 ? out : undefined;
+}
+
+/** One of the three declared cover sections, or nothing. Never a guess. */
+function toCoverSection(raw: unknown): CoverSection | undefined {
+  return typeof raw === 'string' && (COVER_SECTIONS as readonly string[]).includes(raw)
+    ? (raw as CoverSection)
+    : undefined;
+}
+
 function normalizeField(raw: Record<string, unknown>, index: number): ExtractedField {
   const fixedRows = toFixedRows(raw.fixedRows);
   // Only a checklist with more items than groups can actually split into that
@@ -392,6 +407,9 @@ function normalizeField(raw: Record<string, unknown>, index: number): ExtractedF
   // simply publishes ungrouped and the reviewer can regroup it. Validation is
   // delegated to `resolveAnswerSets` so extraction, the fill view, and the
   // validator all agree on exactly which sets are legal.
+  const coverSection = toCoverSection(raw.coverSection);
+  const matchLeft = toStringList(raw.matchLeft);
+  const matchRight = toStringList(raw.matchRight);
   const proposedSets = toAnswerSets(raw.answerSets);
   const resolved = proposedSets
     ? resolveAnswerSets({ columns, answerSets: proposedSets }).sets
@@ -415,6 +433,40 @@ function normalizeField(raw: Record<string, unknown>, index: number): ExtractedF
     ...(answerSets ? { answerSets } : {}),
     ...(fixedRows ? { fixedRows } : {}),
     ...(columnGroups ? { columnGroups } : {}),
+    /*
+      `questionRef` WAS BEING DROPPED HERE.
+
+      The tool schema asks for it, the assessment profile explains at length
+      that it is what pairs a question with its outcome box, the review UI
+      renders the nesting it produces, `linkOutcomeTargets` resolves against it
+      and `pairQuestionsWithOutcomes` counts how many pairs came from it rather
+      than from adjacency — but this function, the single point where every
+      AI-extracted field is built, never copied it off the model's response. So
+      no field produced by the AI path could ever carry one, every outcome cell
+      stayed unlinked, and the authoring script fell back to inferring pairs
+      from document order on every run.
+
+      The runbook tells the operator to stop and report exactly this symptom
+      ("if every outcome cell is still a separate top-level row, the references
+      did not come through"), which is how far the effect reached without the
+      cause being visible: it looks like a model failure and it was a missing
+      line of plumbing.
+    */
+    ...(typeof raw.questionRef === 'string' && raw.questionRef.trim()
+      ? { questionRef: raw.questionRef.trim() }
+      : {}),
+    ...(coverSection ? { coverSection } : {}),
+    /*
+      BOTH SIDES OR NEITHER.
+
+      A matching question needs its prompts AND its answers to become options
+      and a key (`buildMatchingQuestion`). Carrying one side alone would let a
+      question look authorable when it is not — the pair builder can seed from
+      a single side, but that is a different, explicitly-flagged state, and the
+      distinction has to survive extraction to be shown.
+    */
+    ...(matchLeft ? { matchLeft } : {}),
+    ...(matchRight ? { matchRight } : {}),
     ...(typeof raw.note === 'string' ? { note: raw.note } : {}),
   };
 }
@@ -434,6 +486,7 @@ async function extractBatch(
   pdfBytes: Uint8Array,
   anthropic: AnthropicLike,
   opts: ExtractOptions,
+  pages?: { from: number; to: number; total: number },
 ): Promise<BatchResult> {
   const base64 = Buffer.from(pdfBytes).toString('base64');
   const message = await anthropic.messages.create({
@@ -449,7 +502,21 @@ async function extractBatch(
             type: 'document',
             source: { type: 'base64', media_type: 'application/pdf', data: base64 },
           },
-          { type: 'text', text: promptFor(opts.documentType) },
+          {
+            type: 'text',
+            /*
+              THE MODEL IS TOLD WHICH PAGES IT HOLDS, because it cannot work it
+              out. A long paper is extracted a few pages at a time and the
+              running footer is the only in-document clue — which the profile's
+              own rules then lean on for a part it cannot see the heading of.
+              Stating the range costs one line and turns "guess nothing you
+              cannot see" into an instruction with a reference point.
+            */
+            text: pages
+              ? `You are reading pages ${pages.from}-${pages.to} of a ${pages.total}-page document. ` +
+                `Anything printed outside that range is not yours to describe.\n\n${promptFor(opts.documentType)}`
+              : promptFor(opts.documentType),
+          },
         ],
       },
     ],
@@ -457,7 +524,17 @@ async function extractBatch(
 
   const parsed = parseExtractionResponse(message);
   const rawFields = Array.isArray(parsed.fields) ? parsed.fields : [];
-  const fields = rawFields.map(normalizeField);
+  /*
+    The page range is STAMPED, not asked for. The splitter knows which pages
+    went into this call, so this is a fact the pipeline already holds — and on a
+    document whose practical parts are printed three times character for
+    character, it is the one disambiguator that cannot be argued with. Asking
+    the model for it would put a hallucinable number in its place.
+  */
+  const fields = rawFields.map((raw, i) => {
+    const field = normalizeField(raw, i);
+    return pages ? { ...field, sourcePages: { from: pages.from, to: pages.to } } : field;
+  });
   const modelNotes = Array.isArray(parsed.designNotes) ? parsed.designNotes.map(String) : [];
   return { fields, modelNotes };
 }
@@ -539,12 +616,12 @@ async function extractWithAI(
       batches,
       EXTRACTION_BATCH_CONCURRENCY,
       async (bytes, i) => {
+        const from = i * batchSize + 1;
+        const to = Math.min((i + 1) * batchSize, pageCount);
         try {
-          const out = await extractBatch(bytes, anthropic, opts);
+          const out = await extractBatch(bytes, anthropic, opts, { from, to, total: pageCount });
           return { ok: true as const, ...out };
         } catch (err) {
-          const from = i * batchSize + 1;
-          const to = Math.min((i + 1) * batchSize, pageCount);
           return {
             ok: false as const,
             note: `Pages ${from}–${to} could not be extracted and were skipped — re-run the import or add those fields by hand.`,

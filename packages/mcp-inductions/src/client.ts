@@ -64,7 +64,9 @@ export interface Booking {
   bookedByUserId: string | null;
   bookedByApiKeyId: string | null;
   createdAt: string;
-  starters: { submissionId: string; starterName: string }[];
+  /** True only when every seat on the booking has been confirmed. */
+  confirmed: boolean;
+  starters: { submissionId: string; starterName: string; confirmedAt: string | null }[];
 }
 
 export class InductionsClient {
@@ -132,8 +134,10 @@ export class InductionsClient {
    * A short-lived link to one stored identity document.
    *
    * The API answers with a PATH, because it sits behind a proxy that adds a
-   * prefix it knows nothing about. The absolute URL is composed here, from the
-   * base this client was configured with — the one address known to work.
+   * prefix it knows nothing about. The absolute URL is composed here — from
+   * `publicApiUrl` when this client serves a remote caller (the HTTP mount,
+   * whose `apiUrl` is a loopback address the caller cannot reach), otherwise
+   * from the base this client was configured with.
    */
   async documentLink(submissionId: string, kind: 'photo' | 'driversLicence') {
     const body = await this.request<{
@@ -143,7 +147,7 @@ export class InductionsClient {
       contentType: string;
       size: number;
     }>(`/inductions/candidates/${encodeURIComponent(submissionId)}/documents/${kind}`);
-    return { ...body, url: `${this.config.apiUrl}${body.path}` };
+    return { ...body, url: `${this.config.publicApiUrl ?? this.config.apiUrl}${body.path}` };
   }
 
   nextDates(count?: number) {
@@ -175,6 +179,21 @@ export class InductionsClient {
 
   listBookings(date?: string) {
     return this.request<{ bookings: Booking[] }>('/inductions/bookings', { date });
+  }
+
+  /**
+   * Records the human's pre-induction confirmation for a booking's seats.
+   *
+   * Omitting `submissionIds` confirms every starter on the booking. Idempotent:
+   * a seat already confirmed keeps its first timestamp and actor, and comes
+   * back under `alreadyConfirmed` rather than as an error.
+   */
+  confirmBooking(bookingId: string, submissionIds?: string[]) {
+    return this.request<Booking & { newlyConfirmed: string[]; alreadyConfirmed: string[] }>(
+      `/inductions/bookings/${encodeURIComponent(bookingId)}/confirm`,
+      {},
+      { method: 'POST', body: JSON.stringify(submissionIds ? { submissionIds } : {}) },
+    );
   }
 }
 

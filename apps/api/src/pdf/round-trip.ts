@@ -8,7 +8,7 @@
  * units/inch) — the same space pdf-lib's `drawText` uses — so values land
  * exactly where the source field was, at any DPI the original was authored in.
  */
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb, type PDFFont } from 'pdf-lib';
 import {
   MARK_INSET,
   MARK_SIZE_CEIL,
@@ -18,12 +18,123 @@ import {
   isChoiceField,
   isFileRef,
   isMatchingQuestion,
+  isSelfAnswering,
   markPlacement,
+  matchAnchorsFor,
+  matchSides,
   resolveAnswerSets,
   selectedOption,
   visibleFields,
 } from '@formai/shared';
-import type { FormField, PageBox, RepeatingRowValue, SubmissionValue } from '@formai/shared';
+import type {
+  FormField,
+  GlyphKind,
+  PageBox,
+  RepeatingRowValue,
+  SubmissionValue,
+} from '@formai/shared';
+
+/**
+ * What the exporter can actually draw.
+ *
+ * Deliberately SMALLER than `GlyphKind`. The builder lets an author choose from
+ * twelve styles because the design prototype offered twelve; this names the
+ * five the export really produces, and everything else resolves to the field
+ * type's own default rather than being silently dropped. A mark that never
+ * prints is indistinguishable, on a competency record, from an assessment
+ * nobody made — so the honest failure is to draw the default, and the
+ * inspector says which styles reach the page.
+ */
+export type DrawnGlyph =
+  | 'tick'
+  | 'cross'
+  | 'ring'
+  | 'text'
+  | 'signature'
+  /** A fixed word — PASS, N/A — rather than the recorded value. */
+  | 'stamp'
+  /** The recorded value reduced to its initials. */
+  | 'initials'
+  /** A translucent wash over the box, leaving the printed text readable. */
+  | 'highlight'
+  /** A connector drawn ACROSS the box, for a matching question. */
+  | 'match_line';
+
+/**
+ * Authored glyph → what the exporter draws for it.
+ *
+ * `tick_hand` and `tick_block` both resolve to the one vector tick this file
+ * draws: the export honours the CATEGORY, not the stylistic variant, and
+ * pretending otherwise would put a difference on screen that never reaches the
+ * paper. `stamp_date` is text because a date stamp is a date, drawn through the
+ * same scalar path.
+ *
+ * EVERY GLYPH NOW DRAWS. There is no longer an authorable-but-ignored tier:
+ * `MARK_STYLES_DRAWN` in `builder.ts` lists all of them, and the test that
+ * walks it is what keeps this table and that list from drifting. A style the
+ * exporter silently ignored was a mark an author believed was on a competency
+ * record and was not.
+ */
+const DRAWN_BY_GLYPH: Record<GlyphKind, DrawnGlyph> = {
+  tick_hand: 'tick',
+  tick_block: 'tick',
+  cross_hand: 'cross',
+  ring: 'ring',
+  typed: 'text',
+  stamp_date: 'text',
+  signature: 'signature',
+  stamp_pass: 'stamp',
+  stamp_na: 'stamp',
+  initials: 'initials',
+  highlight: 'highlight',
+  match_line: 'match_line',
+};
+
+/** The word a stamp glyph prints. Fixed text, not the recorded value. */
+const STAMP_WORD: Partial<Record<GlyphKind, string>> = {
+  stamp_pass: 'PASS',
+  stamp_na: 'N/A',
+};
+
+/**
+ * Which glyph a segment draws — the authored one, or the caller's default.
+ *
+ * ABSENT IS THE DEFAULT AND THE DEFAULT IS TODAY'S BEHAVIOUR. Every placement
+ * authored before mark styles existed carries no `markStyle`, and this returns
+ * the fallback unchanged for all of them, so their exports are byte-identical.
+ * That property is what makes this seam safe to add to a file that draws
+ * competency records, and it is pinned by a characterization test rather than
+ * asserted here.
+ *
+ * A glyph this exporter does not draw ALSO returns the fallback. The author is
+ * told in the inspector; the page gets the field's own mark rather than
+ * nothing, because a blank cell on this document class reads as unassessed.
+ */
+export function resolveMarkStyle(segment: PageBox | undefined, fallback: DrawnGlyph): DrawnGlyph {
+  const glyph = segment?.markStyle?.glyph;
+  if (!glyph) return fallback;
+  return DRAWN_BY_GLYPH[glyph] ?? fallback;
+}
+
+/**
+ * A person's initials from whatever their name was recorded as.
+ *
+ * First letter of each word, capped — an assessor signing "Ash Wyborn" initials
+ * "AW". Capped at four because past that it is not an initialling, and a long
+ * value would run out of the cell it is drawn in.
+ *
+ * A value that yields nothing draws NOTHING rather than a placeholder: an
+ * invented mark on a competency record is the failure this whole file is
+ * arranged against.
+ */
+export function initialsOf(value: string): string {
+  return value
+    .split(/[^A-Za-z]+/)
+    .filter(Boolean)
+    .slice(0, 4)
+    .map((w) => w[0]!.toUpperCase())
+    .join('');
+}
 
 const INK = rgb(0.094, 0.106, 0.098); // #181b19
 
@@ -36,22 +147,26 @@ const INK = rgb(0.094, 0.106, 0.098); // #181b19
  */
 const CORRECT_INK = rgb(0.05, 0.42, 0.16);
 const INCORRECT_INK = rgb(0.70, 0.10, 0.10);
+/**
+ * Highlighter amber. Survives a photocopier as a visible tint rather than
+ * vanishing, which is the whole point of marking something for attention on a
+ * record that travels by fax.
+ */
+const HIGHLIGHT_INK = rgb(0.98, 0.80, 0.20);
 
 /** How far a ring is drawn OUTSIDE the box it encircles, in points. */
 const RING_PAD = 1.6;
 /** A ring below this radius reads as a blob rather than a circle. */
 const RING_MIN_RADIUS = 4;
 
-/**
- * Field and column types whose `false` is a RECORDED answer rather than an empty
- * cell — read by both the repeating-column path and the scalar one.
- *
- * A plain `checkbox` that is false is simply unticked, and drawing anything
- * would invent an answer. A `check_cross` that is false is an assessor saying
- * "I checked this and it failed" — exporting that as blank made it identical
- * to never-assessed on the one artefact an investigation actually reads.
- */
-const SELF_ANSWERING = new Set(['check_cross', 'boolean_yes_no']);
+/*
+  WHICH TYPES SELF-ANSWER is `isSelfAnswering` in `@formai/shared`, read here by
+  both the repeating-column path and the scalar one. The list used to be written
+  out in this file and again in the web app, and the builder's outcome-box
+  picker was about to write it a third time — a picker offering a target THIS
+  file would not draw in is a mark an author believes is on a competency record
+  and is not.
+*/
 
 /**
  * Draw a tick or a cross as vector strokes.
@@ -273,28 +388,37 @@ export async function roundTripExport({
     // geometry also falls through (a legacy single box, or none).
     if (isChoiceField(field.type) && !field.printSelectedValue) {
       const optionSegments = segments.filter((s) => s.optionKey !== undefined);
+
+      /*
+        A MATCHING QUESTION IS DRAWN AS LINES, NOT AS MARKS IN BOXES, and it has
+        to be checked BEFORE the per-option path — its geometry also carries
+        `optionKey`s, so `drawCheckboxOptions` would happily ring the anchors
+        and produce a page full of circles round individual statements instead
+        of the connectors a person draws with a pen.
+
+        The anchors name the printed ENTRIES (`l0`, `r2`), so a three-by-three
+        question needs six of them rather than nine boxes — and each of those
+        nine described a correspondence the page never printed anywhere.
+      */
+      if (isMatchingQuestion(field.options)) {
+        /*
+          A MATCHING ANSWER IS NEVER SCALAR TEXT, so this continues either way.
+
+          Its value is a SET of pairings, and `scalarText` joins them — falling
+          through would draw roughly 230 characters into whatever single box the
+          field happens to carry. `drawText` bounds the width but NOT the
+          height, so the wrapped remainder runs downward across whatever is
+          printed beneath it, on a certified competency record, with nothing
+          raised.
+        */
+        if (optionSegments.length > 0) drawMatchConnectors(pages, field, value, optionSegments);
+        continue;
+      }
+
       if (optionSegments.length > 0) {
         drawCheckboxOptions(pages, value, optionSegments, field.answerKey);
         continue;
       }
-
-      /*
-        A MATCHING ANSWER IS NEVER SCALAR TEXT.
-
-        Its value is a SET of pairings — nine options for a three-by-three
-        question — and `scalarText` joins them, so falling through here draws
-        roughly 230 characters into whatever single box the field happens to
-        carry. `drawText` below bounds the width but NOT the height, so the
-        wrapped remainder runs downward across whatever is printed beneath it,
-        on a certified competency record, with nothing raised.
-
-        And it would say nothing worth saying even if it fitted: the printed
-        page already carries the statements and the signs, and the verdict
-        reaches the margin through the separate outcome box. A matching field
-        should carry no geometry at all — this is the guard for when one
-        arrives anyway, which is a mis-authored field rather than a rare one.
-      */
-      if (isMatchingQuestion(field.options)) continue;
     }
 
     // A scalar field occupies one box; if geometry ever gives it several, the
@@ -318,11 +442,50 @@ export async function roundTripExport({
       must not draw, because a glyph there asserts an assessment that never
       happened.
     */
-    if (SELF_ANSWERING.has(field.type)) {
+    if (isSelfAnswering(field.type)) {
       const verdict = verdictOf(value);
       if (verdict === undefined) continue;
+      /*
+        The VERDICT decides the default; an authored style may override which
+        glyph carries it. A ring is the one alternative that says the same
+        thing — "this is the cell I mean" — without asserting a different
+        finding, so tick/cross/ring are honoured here and anything else falls
+        back to the verdict's own mark. Drawing a date stamp or a signature in
+        a pass/fail cell would state something the assessment never recorded.
+      */
+      const fallback: DrawnGlyph = verdict ? 'tick' : 'cross';
+      const glyph = resolveMarkStyle(pos, fallback);
+      const verdictInk = verdict ? CORRECT_INK : INCORRECT_INK;
+
+      if (glyph === 'ring') {
+        drawRing(page, pos, verdictInk);
+        continue;
+      }
+      if (glyph === 'highlight') {
+        drawHighlight(page, pos);
+        continue;
+      }
+      if (glyph === 'match_line') {
+        drawMatchLine(page, pos, verdictInk);
+        continue;
+      }
+      /*
+        A STAMP IN A VERDICT CELL MUST NOT CONTRADICT THE VERDICT. "PASS" over a
+        recorded failure is not a style choice, it is a false record — so the
+        word is drawn only where it agrees with what was recorded, and the
+        verdict's own mark is drawn where it does not. `N/A` is exempt: it
+        asserts no finding either way.
+      */
+      const stampWord = STAMP_WORD[pos?.markStyle?.glyph ?? 'typed'];
+      if (glyph === 'stamp' && stampWord) {
+        const contradicts = stampWord === 'PASS' && !verdict;
+        if (!contradicts) {
+          drawStampText(page, pos, stampWord, font, verdictInk);
+          continue;
+        }
+      }
       const { x, y, size } = boxMarkPlacement(pos);
-      drawMark(page, verdict ? 'tick' : 'cross', x, y, size);
+      drawMark(page, glyph === 'cross' ? 'cross' : glyph === 'tick' ? 'tick' : fallback, x, y, size);
       continue;
     }
 
@@ -356,7 +519,47 @@ export async function roundTripExport({
       continue;
     }
 
-    const text = scalarText(value);
+    /*
+      The authored glyph can change WHAT a scalar box prints, not whether it
+      prints. `typed` and `stamp_date` are the recorded value; a stamp is a
+      fixed word; `initials` reduces the value to letters. Anything shaped like
+      a mark rather than text — a tick, a ring, a highlight, a connector — is
+      drawn here too, because a scalar box is a legitimate place to want one.
+    */
+    const scalarGlyph = pos.markStyle?.glyph;
+    const drawn = resolveMarkStyle(pos, 'text');
+
+    if (drawn === 'highlight') {
+      drawHighlight(page, pos);
+      continue;
+    }
+    if (drawn === 'match_line') {
+      drawMatchLine(page, pos, INK);
+      continue;
+    }
+    if (drawn === 'ring') {
+      drawRing(page, pos, INK);
+      continue;
+    }
+    if (drawn === 'tick' || drawn === 'cross') {
+      const mark = boxMarkPlacement(pos);
+      drawMark(page, drawn, mark.x, mark.y, mark.size);
+      continue;
+    }
+
+    const stamp = scalarGlyph ? STAMP_WORD[scalarGlyph] : undefined;
+    if (drawn === 'stamp' && stamp) {
+      drawStampText(page, pos, stamp, font, INK);
+      continue;
+    }
+
+    const recorded = scalarText(value);
+    /*
+      Initials still need something recorded to initial. A box whose value is
+      empty draws NOTHING — inventing initials would put a person's mark on a
+      record they never signed.
+    */
+    const text = drawn === 'initials' ? initialsOf(recorded) : recorded;
     if (!text) continue;
 
     const size = Math.min(11, Math.max(8, pos.height - 4));
@@ -411,6 +614,172 @@ function boxMarkPlacement(box: PageBox): { x: number; y: number; size: number } 
  * letter, so an inset mark would strike through the very glyph the ring is meant
  * to identify.
  */
+/**
+ * A translucent wash over the box.
+ *
+ * Drawn with opacity rather than as a solid fill so the PRINTED TEXT UNDERNEATH
+ * STAYS READABLE — a highlight that hides the question it marks has destroyed
+ * the evidence it was meant to draw attention to. Amber rather than the verdict
+ * inks: a highlight says "look here", not "this is correct".
+ */
+function drawHighlight(
+  page: ReturnType<PDFDocument['getPages']>[number],
+  box: PageBox,
+): void {
+  page.drawRectangle({
+    x: box.x,
+    y: box.y,
+    width: box.width,
+    height: box.height,
+    color: HIGHLIGHT_INK,
+    opacity: 0.35,
+  });
+}
+
+/**
+ * A connector drawn across one box.
+ *
+ * THE BOX IS THE CONNECTOR'S EXTENT here, and that is the fallback rather than
+ * the model. It is what an author gets when they choose the `match_line` glyph
+ * for an ordinary box: a line through it, left edge to right edge at the
+ * vertical centre. Every placement authored before matching anchors existed
+ * draws exactly this, unchanged.
+ *
+ * A real matching question does NOT come through here — `drawMatchConnectors`
+ * runs between two anchors and knows both endpoints. This one cannot: a single
+ * `PageBox` has one rectangle and no far end.
+ *
+ * The end dots are what make it read as a drawn connector rather than a rule or
+ * a strikethrough — the same two marks a person makes with a pen.
+ */
+function drawMatchLine(
+  page: ReturnType<PDFDocument['getPages']>[number],
+  box: PageBox,
+  color: ReturnType<typeof rgb>,
+): void {
+  const midY = box.y + box.height / 2;
+  const thickness = Math.max(0.9, Math.min(1.8, box.height / 8));
+  page.drawLine({
+    start: { x: box.x, y: midY },
+    end: { x: box.x + box.width, y: midY },
+    thickness,
+    color,
+  });
+  const dot = Math.max(1.2, thickness * 1.4);
+  for (const x of [box.x, box.x + box.width]) {
+    page.drawEllipse({ x, y: midY, xScale: dot, yScale: dot, color });
+  }
+}
+
+/** The point on an anchor a connector attaches to — its facing edge, mid-height. */
+function anchorPoint(box: PageBox, facing: 'right' | 'left'): { x: number; y: number } {
+  return {
+    x: facing === 'right' ? box.x + box.width : box.x,
+    y: box.y + box.height / 2,
+  };
+}
+
+/**
+ * Draw one line per pairing the candidate chose, between the two printed things
+ * it names.
+ *
+ * THIS IS WHAT A MATCHING ANSWER LOOKS LIKE ON PAPER. A person doing this
+ * question with a pen draws a line from the statement to the sign; the evidence
+ * export has to show the same thing, or the exported page and the filled page
+ * are different documents.
+ *
+ * ANCHORS, NOT PAIRINGS. The geometry names the printed ENTRIES — `l0`, `r2` —
+ * so a three-by-three question needs six anchors rather than nine boxes, and a
+ * five-by-five needs ten rather than twenty-five. That is not only less work:
+ * eight of those nine boxes described a correspondence the page never printed
+ * anywhere, so there was nothing on the paper to place them against.
+ *
+ * EVERY CHOSEN PAIRING IS DRAWN, RIGHT OR WRONG. Green for a pairing in the
+ * key, red for one that is not, and plain ink where the question carries no key
+ * at all. Drawing only the correct ones would leave a candidate who paired
+ * badly with a blank matching question on their record — indistinguishable from
+ * one nobody assessed, which is the failure this whole file is arranged
+ * against.
+ *
+ * A pairing whose anchors are not both placed draws NOTHING. It is the same
+ * refusal `drawRepeatingGroup` makes for a cell it cannot place from real
+ * geometry: an invented endpoint is a line across a competency record asserting
+ * a correspondence nobody can check.
+ */
+function drawMatchConnectors(
+  pages: import('pdf-lib').PDFPage[],
+  field: FormField,
+  value: SubmissionValue | undefined,
+  segments: PageBox[],
+): void {
+  const chosen = Array.isArray(value) ? (value as unknown[]).map(String) : [];
+  if (chosen.length === 0) return;
+
+  const byKey = new Map(segments.filter((s) => s.optionKey !== undefined).map((s) => [s.optionKey!, s]));
+  const sides = matchSides(field.options ?? []);
+  const key = field.answerKey;
+  const marked = key !== undefined && key.length > 0;
+
+  for (const option of chosen) {
+    const anchors = matchAnchorsFor(option, sides);
+    if (!anchors) continue;
+    const from = byKey.get(anchors.left);
+    const to = byKey.get(anchors.right);
+    // Both ends, on one page. A connector spanning a page break has no
+    // meaningful line to draw, and a matching question printed across two
+    // sheets is not a shape this document class uses.
+    if (!from || !to || from.page !== to.page) continue;
+    const page = pages[from.page];
+    if (!page) continue;
+
+    const color = marked ? (key.includes(option) ? CORRECT_INK : INCORRECT_INK) : INK;
+    /*
+      Which edges face each other is read off the geometry, not assumed. The
+      prompt column is usually left of the answer column — but a paper that
+      prints the signs first is the same question, and attaching to the wrong
+      edges would run each line back through the text it starts from.
+    */
+    const leftIsFirst = from.x + from.width / 2 <= to.x + to.width / 2;
+    const start = anchorPoint(from, leftIsFirst ? 'right' : 'left');
+    const end = anchorPoint(to, leftIsFirst ? 'left' : 'right');
+
+    const thickness = Math.max(0.9, Math.min(1.8, Math.min(from.height, to.height) / 8));
+    page.drawLine({ start, end, thickness, color });
+    const dot = Math.max(1.2, thickness * 1.4);
+    for (const point of [start, end]) {
+      page.drawEllipse({ x: point.x, y: point.y, xScale: dot, yScale: dot, color });
+    }
+  }
+}
+
+/**
+ * A fixed word, centred in the box and shrunk to fit it.
+ *
+ * Sized off the box rather than at a constant, because these land in printed
+ * cells that range from a margin tick-box to a full-width comment row, and a
+ * stamp that overruns its cell obscures the printed text beside it.
+ */
+function drawStampText(
+  page: ReturnType<PDFDocument['getPages']>[number],
+  box: PageBox,
+  word: string,
+  font: PDFFont,
+  color: ReturnType<typeof rgb>,
+): void {
+  let size = Math.min(11, Math.max(6, box.height - 3));
+  // Shrink until it fits the width, with a floor: below 5pt it is unreadable
+  // and a mark nobody can read is not a record.
+  while (size > 5 && font.widthOfTextAtSize(word, size) > box.width - 2) size -= 0.5;
+  const width = font.widthOfTextAtSize(word, size);
+  page.drawText(winAnsiSafe(word), {
+    x: box.x + Math.max(1, (box.width - width) / 2),
+    y: box.y + Math.max(1, (box.height - size) / 2 + size * 0.12),
+    size,
+    font,
+    color,
+  });
+}
+
 function drawRing(
   page: ReturnType<PDFDocument['getPages']>[number],
   box: PageBox,
@@ -560,7 +929,7 @@ function drawRepeatingGroup(
         if (groupedKeys.has(col.key)) continue; // already handled by its answer set
         const raw = row[col.key];
 
-        if (SELF_ANSWERING.has(col.type)) {
+        if (isSelfAnswering(col.type)) {
           // Only a real boolean is an answer here; null/'' is untouched and must
           // stay blank. `false` is a recorded fail and MUST leave a mark.
           if (typeof raw !== 'boolean') continue;

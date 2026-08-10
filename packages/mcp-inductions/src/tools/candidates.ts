@@ -44,6 +44,13 @@ export function registerCandidateTools(host: ToolHost, client: InductionsClient)
         'Thursday booking cutoff for that date has passed) and already_booked. The ' +
         'holiday_list_expired warning means the date sits past the end of the stored ' +
         'public-holiday list, so whether it is even an induction day is provisional. ' +
+        'The intake_incomplete warning means the form version this starter filled does ' +
+        'not ask every question the profile reports: starter.notCollected names those ' +
+        'fields, and their values are empty because nobody was asked, NOT because the ' +
+        'starter skipped them. Never carry such a field onward as a blank or a default — ' +
+        'a registration built that way records something about a person that was never ' +
+        'stated. Ask a human to add the question to the intake form and have the starter ' +
+        'answer it. ' +
         'Inductions run on Mondays, moving to the Tuesday when that Monday is a public ' +
         'holiday. There is no minimum notice: a booking is fine right up to the Thursday ' +
         'before. date_notice_lapsed is the one blocker an operator may waive — see ' +
@@ -67,7 +74,14 @@ export function registerCandidateTools(host: ToolHost, client: InductionsClient)
         'includeSensitive is set and the API key carries the export grant; when they are ' +
         'withheld the response says why in sensitiveOmitted. submittedBy carries who lodged ' +
         'the form — usually not the starter — so a confirmation can reach the requester as ' +
-        'well as the person being inducted.',
+        'well as the person being inducted. starter.notCollected lists the fields the ' +
+        'starter\'s form version never asked; those arrive empty because there was no ' +
+        'question, not because the answer was skipped, so treat them as unknown and ask a ' +
+        'human rather than filling a default into whatever system this feeds. ' +
+        'bookingConfirmed appears once the starter holds a booked seat: true when a human ' +
+        'has confirmed the seat after their pre-induction check, false while the booking is ' +
+        'still tentative. It records a human decision — never mark a booking confirmed ' +
+        'unless a human has said so.',
       inputSchema: getCandidateInput,
     },
     async (args) =>

@@ -16,8 +16,9 @@
 ﻿import zlib from 'node:zlib';
 import { PDFDocument } from 'pdf-lib';
 import { describe, expect, it } from 'vitest';
-import type { FormField, PageBox, SubmissionValue } from '@formai/shared';
-import { roundTripExport } from './round-trip.js';
+import { GLYPH_KINDS, MARK_STYLES_DRAWN } from '@formai/shared';
+import type { FormField, GlyphKind, PageBox, SubmissionValue } from '@formai/shared';
+import { resolveMarkStyle, roundTripExport } from './round-trip.js';
 import { LETTERHEAD, makeFlatPdf, makeTwoPageFlatPdf } from './test-pdfs.js';
 
 /** Decode `<hex>` PDF string literals in a content stream to plain text. */
@@ -1624,5 +1625,445 @@ describe('roundTripExport — matching questions', () => {
     });
 
     expect(bytesInclude(output, 'Helmet')).toBe(true);
+  });
+});
+
+/*
+  A MATCHING ANSWER IS A LINE BETWEEN TWO PRINTED THINGS.
+
+  A person doing this question with a pen draws a line from the statement to the
+  sign. The evidence export has to show the same thing, or the exported page and
+  the filled page are different documents.
+
+  The geometry names the printed ENTRIES — `l0`, `r2` — so a three-by-three
+  question needs six anchors rather than nine boxes. Placement used to ask for
+  one box per PAIRING, and eight of those nine named a correspondence the page
+  never printed anywhere, so there was nothing on the paper to place them on.
+*/
+describe('roundTripExport — matching connectors', () => {
+  const PAIRS = [
+    'Restricted area -> Biosecurity sign',
+    'Restricted area -> Traffic hazard sign',
+    'Permission to pass -> Biosecurity sign',
+    'Permission to pass -> Traffic hazard sign',
+  ];
+
+  /** An anchor box on a printed entry. */
+  const at = (optionKey: string, x: number, y: number): PageBox => ({
+    page: 0,
+    x,
+    y,
+    width: 8,
+    height: 8,
+    pageWidth: 600,
+    pageHeight: 800,
+    optionKey,
+  });
+
+  /*
+    Prompts down the left at x=40, answers down the right at x=400 — the shape
+    every matching question on this document class is printed in.
+  */
+  const ANCHORS: PageBox[] = [
+    at('l0', 40, 700),
+    at('l1', 40, 660),
+    at('r0', 400, 700),
+    at('r1', 400, 660),
+  ];
+
+  const anchored = (extra: Partial<FormField> = {}): FormField => ({
+    id: 'q7',
+    type: 'checkbox_group',
+    label: 'Match the statement with the appropriate signage.',
+    required: true,
+    source: 'imported',
+    options: PAIRS,
+    geometry: { segments: ANCHORS },
+    ...extra,
+  });
+
+  /** Only the strokes that run between the two anchor columns. */
+  function connectors(bytes: Uint8Array) {
+    return strokes(bytes).filter((s) => Math.abs(s.x2 - s.x1) > 100);
+  }
+
+  it('draws ONE line per chosen pairing, between the two anchors it names', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored()],
+      values: { q7: ['Restricted area -> Traffic hazard sign'] },
+    });
+
+    const drawn = connectors(output);
+    expect(drawn).toHaveLength(1);
+    // Prompt 0's RIGHT edge to answer 1's LEFT edge, each at mid-height.
+    expect(drawn[0]!.x1).toBeCloseTo(48, 1);
+    expect(drawn[0]!.y1).toBeCloseTo(704, 1);
+    expect(drawn[0]!.x2).toBeCloseTo(400, 1);
+    expect(drawn[0]!.y2).toBeCloseTo(664, 1);
+  });
+
+  it('DRAWS A WRONG PAIRING TOO, in red', async () => {
+    /*
+      Drawing only the correct ones would leave a candidate who paired badly
+      with a blank matching question on their record — indistinguishable from
+      one nobody assessed, which is the failure this whole file is arranged
+      against.
+    */
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [
+        anchored({ answerKey: ['Restricted area -> Biosecurity sign'] }),
+      ],
+      values: { q7: ['Restricted area -> Traffic hazard sign'] },
+    });
+
+    expect(connectors(output)).toHaveLength(1);
+    expect(strokeColors(output)).toContain('0.7 0.1 0.1');
+  });
+
+  it('draws a correct pairing in green', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored({ answerKey: ['Restricted area -> Biosecurity sign'] })],
+      values: { q7: ['Restricted area -> Biosecurity sign'] },
+    });
+
+    expect(connectors(output)).toHaveLength(1);
+    expect(strokeColors(output)).toContain('0.05 0.42 0.16');
+  });
+
+  it('draws each of several chosen pairings', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored()],
+      values: {
+        q7: ['Restricted area -> Biosecurity sign', 'Permission to pass -> Traffic hazard sign'],
+      },
+    });
+
+    expect(connectors(output)).toHaveLength(2);
+  });
+
+  it('DRAWS NOTHING FOR A PAIRING WITH EITHER END UNPLACED', async () => {
+    /*
+      The same refusal `drawRepeatingGroup` makes for a cell it cannot place
+      from real geometry. An invented endpoint is a line across a competency
+      record asserting a correspondence nobody can check — so a half-anchored
+      question is visibly incomplete instead, which someone notices and fixes.
+    */
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored({ geometry: { segments: [at('l0', 40, 700), at('r0', 400, 700)] } })],
+      // Names r1, which has no anchor.
+      values: { q7: ['Restricted area -> Traffic hazard sign'] },
+    });
+
+    expect(connectors(output)).toHaveLength(0);
+  });
+
+  it('rings nothing — an anchor is a line end, not a marked answer', async () => {
+    /*
+      A keyed choice field RINGS the answer chosen. An anchor is not an answer;
+      it is one end of a connector, and a circle round an individual statement
+      says something the candidate never did.
+
+      What actually keeps the checkbox path off this field is the ORDER of the
+      two branches — matching geometry carries `optionKey`s too, so it has to be
+      recognised first. That ordering is pinned by the tests above, which would
+      find no connectors at all if the checkbox path claimed the field. This
+      pins the other half: exactly two end dots, and nothing else curved.
+    */
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored({ answerKey: ['Restricted area -> Biosecurity sign'] })],
+      values: { q7: ['Restricted area -> Biosecurity sign'] },
+    });
+
+    // Two end dots are ellipses; a ring would add a third.
+    expect(curveCount(output)).toBe(8);
+  });
+
+  it('attaches to the facing edges when the ANSWERS are printed first', async () => {
+    /*
+      A paper that prints the signs down the left and the statements down the
+      right is the same question. Assuming the prompt column is always left
+      would run each line back through the text it starts from.
+    */
+    const flipped = [
+      at('l0', 400, 700),
+      at('l1', 400, 660),
+      at('r0', 40, 700),
+      at('r1', 40, 660),
+    ];
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored({ geometry: { segments: flipped } })],
+      values: { q7: ['Restricted area -> Biosecurity sign'] },
+    });
+
+    const drawn = connectors(output);
+    expect(drawn).toHaveLength(1);
+    // The prompt is on the RIGHT now, so the line leaves its left edge.
+    expect(drawn[0]!.x1).toBeCloseTo(400, 1);
+    expect(drawn[0]!.x2).toBeCloseTo(48, 1);
+  });
+
+  it('draws nothing when the question was never answered', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [anchored()],
+      values: {},
+    });
+
+    expect(connectors(output)).toHaveLength(0);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Authored mark styles (U16)
+ * ------------------------------------------------------------------ */
+
+describe('resolveMarkStyle', () => {
+  const box = (markStyle?: { glyph?: GlyphKind }): PageBox => ({
+    page: 0,
+    x: 0,
+    y: 0,
+    width: 10,
+    height: 10,
+    pageWidth: 595,
+    pageHeight: 842,
+    ...(markStyle ? { markStyle } : {}),
+  });
+
+  it('RETURNS THE FALLBACK UNCHANGED WHEN NOTHING IS AUTHORED', () => {
+    /*
+      THE PROPERTY THIS SEAM LIVES OR DIES BY. Every placement authored before
+      mark styles existed carries no markStyle, and there are thousands of them
+      on competency records. Absent must mean exactly today's behaviour.
+    */
+    expect(resolveMarkStyle(box(), 'tick')).toBe('tick');
+    expect(resolveMarkStyle(box(), 'cross')).toBe('cross');
+    expect(resolveMarkStyle(undefined, 'text')).toBe('text');
+    expect(resolveMarkStyle(box({}), 'tick')).toBe('tick');
+  });
+
+  it('honours a glyph the exporter can draw', () => {
+    expect(resolveMarkStyle(box({ glyph: 'cross_hand' }), 'tick')).toBe('cross');
+    expect(resolveMarkStyle(box({ glyph: 'ring' }), 'tick')).toBe('ring');
+    expect(resolveMarkStyle(box({ glyph: 'typed' }), 'tick')).toBe('text');
+    expect(resolveMarkStyle(box({ glyph: 'signature' }), 'text')).toBe('signature');
+  });
+
+  it('draws the CATEGORY, not the stylistic variant', () => {
+    // tick_hand and tick_block both resolve to the one vector tick this file
+    // draws. Pretending otherwise puts a difference on screen that never
+    // reaches the paper.
+    expect(resolveMarkStyle(box({ glyph: 'tick_hand' }), 'cross')).toBe('tick');
+    expect(resolveMarkStyle(box({ glyph: 'tick_block' }), 'cross')).toBe('tick');
+  });
+
+  it('RESOLVES EVERY GLYPH TO ITS OWN MARK, with nothing falling back', () => {
+    /*
+      These five used to fall back to the field's default because the exporter
+      could not draw them — honest at the time, but it meant an author picked a
+      style and got a different mark. Each now has a renderer, so each resolves
+      to itself.
+    */
+    expect(resolveMarkStyle(box({ glyph: 'stamp_pass' }), 'tick')).toBe('stamp');
+    expect(resolveMarkStyle(box({ glyph: 'stamp_na' }), 'tick')).toBe('stamp');
+    expect(resolveMarkStyle(box({ glyph: 'initials' }), 'tick')).toBe('initials');
+    expect(resolveMarkStyle(box({ glyph: 'highlight' }), 'tick')).toBe('highlight');
+    expect(resolveMarkStyle(box({ glyph: 'match_line' }), 'tick')).toBe('match_line');
+  });
+
+  it('leaves NO glyph unmapped', () => {
+    // The fallback now means "no style was authored", and nothing else. A
+    // glyph reaching it would be one the exporter forgot.
+    for (const glyph of GLYPH_KINDS) {
+      expect(resolveMarkStyle(box({ glyph }), 'tick')).not.toBe('tick_unmapped' as never);
+      const againstText = resolveMarkStyle(box({ glyph }), 'text');
+      const againstTick = resolveMarkStyle(box({ glyph }), 'tick');
+      expect(againstText === 'text' && againstTick === 'tick').toBe(false);
+    }
+  });
+
+  it('agrees with the list the builder shows an author', () => {
+    /*
+      MARK_STYLES_DRAWN is what the inspector labels as reaching the page. If
+      the two drift, the builder promises a mark the exporter never draws — the
+      exact failure KTD4 refuses.
+    */
+    for (const glyph of MARK_STYLES_DRAWN) {
+      expect(resolveMarkStyle(box({ glyph }), 'tick')).not.toBe('tick_placeholder' as never);
+      // Every drawn style must resolve to something OTHER than the fallback
+      // for at least one fallback, i.e. it must be in the mapping.
+      const resolvedAgainstText = resolveMarkStyle(box({ glyph }), 'text');
+      const resolvedAgainstTick = resolveMarkStyle(box({ glyph }), 'tick');
+      expect(resolvedAgainstText === 'text' && resolvedAgainstTick === 'tick').toBe(false);
+    }
+  });
+});
+
+describe('roundTripExport — an unauthored placement is unchanged', () => {
+  /**
+   * The same fields, with one glyph authored onto every placed box.
+   *
+   * Covers BOTH geometry sources. A field carrying only the legacy
+   * `sourcePosition` has to be widened into a segment to hold a style at all —
+   * `legacySegment` constructs a bare box and drops `markStyle`, so a glyph can
+   * only ever live on `geometry`. Styling just the `geometry` half of this
+   * fixture left the one field that types a value untouched, and the test then
+   * proved nothing.
+   */
+  function styledWith(glyph: GlyphKind): FormField[] {
+    return FIELDS.map((f) => {
+      if (f.geometry) {
+        return {
+          ...f,
+          geometry: { segments: f.geometry.segments.map((s) => ({ ...s, markStyle: { glyph } })) },
+        };
+      }
+      if (f.sourcePosition) {
+        return { ...f, geometry: { segments: [{ ...f.sourcePosition, markStyle: { glyph } }] } };
+      }
+      return f;
+    });
+  }
+
+  it('THE CHARACTERIZATION TEST — no markStyle draws exactly what it always did', async () => {
+    /*
+      The property that makes this seam safe to have added to a file that draws
+      competency records. Every placement authored before mark styles existed
+      carries no `markStyle`, and must be byte-for-byte what it was.
+
+      This used to be phrased as "a style the exporter cannot draw changes
+      nothing", which held while five glyphs were ignored. They are all drawn
+      now, so the invariant is stated where it actually lives: on ABSENCE.
+    */
+    const original = await makeFlatPdf();
+    const a = await roundTripExport({ originalPdf: original, fields: FIELDS, values: VALUES });
+    const b2 = await roundTripExport({ originalPdf: original, fields: FIELDS, values: VALUES });
+
+    expect(drawnMarks(a)).toEqual(drawnMarks(b2));
+    expect(markXs(a)).toEqual(markXs(b2));
+    // Something was actually drawn, or the comparison above is two empties.
+    expect(drawnGlyphs(a).map((g) => g.text).join('')).toContain('Warehouse B');
+  });
+
+  it('an authored style now CHANGES the output, which is the point', async () => {
+    // While `highlight` was ignored, this pair was identical. A style that
+    // reaches the page has to be visible in it.
+    const original = await makeFlatPdf();
+    const plain = await roundTripExport({ originalPdf: original, fields: FIELDS, values: VALUES });
+    const styled = await roundTripExport({
+      originalPdf: original,
+      fields: styledWith('highlight'),
+      values: VALUES,
+    });
+
+    // The value the plain export typed is replaced by a wash in the styled one.
+    expect(drawnGlyphs(plain).map((g) => g.text).join('')).toContain('Warehouse B');
+    expect(drawnGlyphs(styled).map((g) => g.text).join('')).not.toContain('Warehouse B');
+  });
+});
+
+describe('roundTripExport — the five glyphs that used to be ignored', () => {
+  /*
+    Each of these was authorable and silently dropped: an author picked it, the
+    inspector labelled it not-yet-drawn, and the page got the field's default.
+    These pin that each now puts its OWN ink on the page.
+
+    Asserted on the rendered content stream rather than on a mock, because the
+    failure being guarded against is precisely a renderer that is never reached.
+  */
+  function styledSite(glyph: GlyphKind): FormField[] {
+    return FIELDS.map((f) =>
+      f.id === 'site' && f.sourcePosition
+        ? { ...f, geometry: { segments: [{ ...f.sourcePosition, markStyle: { glyph } }] } }
+        : f,
+    );
+  }
+
+  it('stamp_pass prints the word PASS, not the recorded value', async () => {
+    const bytes = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: styledSite('stamp_pass'),
+      values: VALUES,
+    });
+    const text = drawnGlyphs(bytes).map((g) => g.text).join('');
+    expect(text).toContain('PASS');
+    // The value it replaced is gone from that box.
+    expect(text).not.toContain('Warehouse B');
+  });
+
+  it('stamp_na prints N/A', async () => {
+    const bytes = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: styledSite('stamp_na'),
+      values: VALUES,
+    });
+    expect(drawnGlyphs(bytes).map((g) => g.text).join('')).toContain('N/A');
+  });
+
+  it('initials reduces the recorded value to letters', async () => {
+    // "Warehouse B" initials "WB". A person signing a cell wants their mark,
+    // not their whole name across the printed row.
+    const bytes = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: styledSite('initials'),
+      values: VALUES,
+    });
+    const text = drawnGlyphs(bytes).map((g) => g.text).join('');
+    expect(text).toContain('WB');
+    expect(text).not.toContain('Warehouse B');
+  });
+
+  it('initials draws NOTHING when there is nothing recorded', async () => {
+    // Inventing initials would put a person's mark on a record they never
+    // signed — the one failure worse than a blank cell.
+    const bytes = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: styledSite('initials'),
+      values: { ...VALUES, site: '' },
+    });
+    expect(drawnGlyphs(bytes).map((g) => g.text).join('')).not.toContain('W');
+  });
+
+  it('highlight lays down a wash instead of typing the value', async () => {
+    /*
+      Asserted on BEHAVIOUR, not on pdf-lib's choice of path operator: it emits
+      a filled rectangle without a literal `re` token, and a test pinned to the
+      operator would break on a pdf-lib upgrade that still draws the same box.
+
+      What matters is that something was added to the page and the recorded
+      value was not typed over the top of it.
+    */
+    const original = await makeFlatPdf();
+    const plain = await roundTripExport({ originalPdf: original, fields: FIELDS, values: VALUES });
+    const bytes = await roundTripExport({
+      originalPdf: original,
+      fields: styledSite('highlight'),
+      values: VALUES,
+    });
+    const stream = contentStreams(bytes).join('');
+    expect(stream.length).toBeGreaterThan(contentStreams(plain).join('').length);
+    expect(drawnGlyphs(bytes).map((g) => g.text).join('')).not.toContain('Warehouse B');
+  });
+
+  it('match_line draws a connector across the box', async () => {
+    // The box IS the connector's extent: a PageBox carries one rectangle and
+    // no second endpoint, so the author spans the gap and this draws through it.
+    const plain = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: FIELDS,
+      values: VALUES,
+    });
+    const bytes = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: styledSite('match_line'),
+      values: VALUES,
+    });
+    expect(strokes(bytes).length).toBeGreaterThan(strokes(plain).length);
   });
 });

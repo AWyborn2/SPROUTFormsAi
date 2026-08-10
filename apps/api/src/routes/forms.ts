@@ -239,6 +239,12 @@ formsRouter.get('/:id', requireTenant, withErrorHandling(async (req, res) => {
     container: current?.container,
     /** Sparse per-form patch over the org theme; null when never restyled. */
     themeOverride: template.themeOverride ?? null,
+    /**
+     * The brand this form is presented in — usually a client's. Null means the
+     * org's own theme, which is the fallback for a form nobody has assigned,
+     * NOT a claim that the form is ours.
+     */
+    brandId: template.brandId ?? null,
     /** Per-form voice override; null means inherit the workspace default. */
     voiceInput: template.voiceInput ?? null,
     versions: versions.map((v) => ({
@@ -553,6 +559,77 @@ formsRouter.patch('/:id/theme', requireTenant, withErrorHandling(async (req, res
   });
 
   res.json({ id: template.id, themeOverride: parsed.data.themeOverride });
+}));
+
+/**
+ * The brand a form is presented in. Same shape and same reasoning as the theme
+ * override above — on the mutable template so a rebrand reaches live fill links
+ * without a republish — with one addition: the brand must belong to THIS org.
+ *
+ * That check is the whole reason this is a route of its own rather than another
+ * key on the theme body. A brand id is a foreign key an attacker supplies, and
+ * without the check a caller could point their form at another org's brand and
+ * read that org's client colours and logo straight off their own fill page.
+ * `set null` on delete makes the column forgiving; it does not make it open.
+ */
+const brandBody = z.object({
+  brandId: z.string().uuid().nullable(),
+});
+
+formsRouter.patch('/:id/brand', requireTenant, withErrorHandling(async (req, res) => {
+  if (!db) {
+    res.status(503).json({ error: 'db_unavailable' });
+    return;
+  }
+  const tenant = req.tenant!;
+  if (!(await hasPermission(tenant, 'forms', 'edit'))) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  const parsed = brandBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return;
+  }
+  const template = await db.query.formTemplates.findFirst({
+    where: and(eq(schema.formTemplates.id, req.params.id!), eq(schema.formTemplates.orgId, tenant.orgId)),
+  });
+  if (!template) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+
+  let brandName: string | null = null;
+  if (parsed.data.brandId) {
+    const brand = await db.query.formBrands.findFirst({
+      where: and(
+        eq(schema.formBrands.id, parsed.data.brandId),
+        eq(schema.formBrands.orgId, tenant.orgId),
+      ),
+    });
+    if (!brand) {
+      // Deliberately the same 404 an unknown id gets: another org's brand and
+      // a brand that does not exist must be indistinguishable from here, or
+      // this endpoint becomes a way to enumerate who else uses the product.
+      res.status(404).json({ error: 'brand_not_found' });
+      return;
+    }
+    brandName = brand.name;
+  }
+
+  await db
+    .update(schema.formTemplates)
+    .set({ brandId: parsed.data.brandId, updatedAt: new Date() })
+    .where(eq(schema.formTemplates.id, template.id));
+
+  await recordAudit(db, tenant, {
+    action: brandName ? `Set form brand to ${brandName}` : 'Cleared form brand',
+    target: template.name,
+    category: 'forms',
+    icon: 'palette',
+  });
+
+  res.json({ id: template.id, brandId: parsed.data.brandId });
 }));
 
 /**

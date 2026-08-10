@@ -9,15 +9,18 @@
 import { describe, expect, it } from 'vitest';
 import type { FormField, GroupOrdinal, PageBox } from '@formai/shared';
 import { markPlacement, resolveGeometry } from '@formai/shared';
-import type { PositionedText, TextPage } from '../../../lib/pdf-geometry.js';
+import type { FieldProposal, PositionedText, TableProposal, TextPage } from '../../../lib/pdf-geometry.js';
 import {
   NEAR_EQUAL_CONFIDENCE,
   NUDGE_POINTS,
   SNAP_RANGE,
   DRAW_SNAP_RANGE,
   appendRowBelow,
+  applyFieldChanges,
   applyMatrix,
+  classifyProposalTier,
   columnHandles,
+  type FieldChange,
   deleteRowBand,
   type DerivableField,
   deriveAcrossPages,
@@ -27,6 +30,8 @@ import {
   handleAdjustment,
   itemsInBox,
   matrixMultiply,
+  moveBand,
+  moveBoundary,
   nudgedEdge,
   panelState,
   previewMarks,
@@ -40,6 +45,13 @@ import {
   splitRowBand,
   subdivideBox,
   unsupportedReason,
+  moveSegment,
+  keyMove,
+  isDeleteKey,
+  removeSegment,
+  NUDGE_POINTS_COARSE,
+  clampDelta,
+  nudgeStep,
 } from './geometry-actions.js';
 
 const A4 = { width: 595, height: 842 };
@@ -308,6 +320,40 @@ describe('panelState', () => {
     const state = panelState(tableField(), proposal.segment, true, proposal);
 
     if (state.kind === 'proposed') expect(state.confirmed).toBe(true);
+  });
+});
+
+describe('classifyProposalTier', () => {
+  // A minimal box — its geometry is irrelevant here, only `confidence` is under
+  // test — reused for both proposal shapes so the fixtures stay tiny.
+  const box: PageBox = { page: 0, x: 0, y: 0, width: 10, height: 10, pageWidth: 595, pageHeight: 842 };
+  const tableProposal = (confidence: number): TableProposal => ({
+    segment: box,
+    confidence,
+    anchorsLocated: 2,
+    anchorsInferred: 0,
+    notes: [],
+  });
+  const fieldProposal = (confidence: number): FieldProposal => ({
+    segments: [box],
+    confidence,
+    notes: [],
+  });
+
+  it('classifies a null proposal as no-match', () => {
+    expect(classifyProposalTier(null)).toBe('no-match');
+  });
+
+  it('classifies confidence 1 as auto-confirm, for both proposal shapes', () => {
+    expect(classifyProposalTier(tableProposal(1))).toBe('auto-confirm');
+    expect(classifyProposalTier(fieldProposal(1))).toBe('auto-confirm');
+  });
+
+  it('classifies anything below 1 as needs-review, for both proposal shapes', () => {
+    expect(classifyProposalTier(tableProposal(0.6))).toBe('needs-review');
+    expect(classifyProposalTier(tableProposal(0.99))).toBe('needs-review');
+    expect(classifyProposalTier(fieldProposal(0.6))).toBe('needs-review');
+    expect(classifyProposalTier(fieldProposal(0.99))).toBe('needs-review');
   });
 });
 
@@ -1202,5 +1248,425 @@ describe('deriveOptionCellsAcrossPages — routing between the two shapes', () =
     if (res) {
       expect(res.segments.map((s) => s.x)).toEqual([430, 480]);
     }
+  });
+});
+
+/**
+ * `applyFieldChanges` (U2/KTD3).
+ *
+ * `GeometryEditorScreen`'s `mutate()` used to compute `fields.map(...)` fresh
+ * off the same pre-click `fields` snapshot on every call, so more than one
+ * synchronous `mutate()` call in a single handler — the "Place all N" button
+ * already loops once per segment — left only the LAST call's result in state.
+ * This is the pure-function regression coverage for the fold-over-one-snapshot
+ * fix; `GeometryEditorScreen` itself now only calls this via a functional
+ * `setState` updater, so proving the fold is correct here is what proves the
+ * bug cannot recur regardless of how the component wires it up.
+ */
+describe('applyFieldChanges', () => {
+  function choiceField(id: string, options: string[]): FormField {
+    return { id, type: 'checkbox_group', label: id, required: false, source: 'imported', options };
+  }
+
+  function box(optionKey: string): PageBox {
+    return { page: 0, x: 0, y: 0, width: 10, height: 10, pageWidth: 595, pageHeight: 842, optionKey };
+  }
+
+  /**
+   * Mirrors `GeometryEditorScreen`'s `setOptionBox` change body exactly: drop
+   * any existing box for this option, then append the new one. Reused so the
+   * regression tests exercise the real shape of change a caller passes, not a
+   * toy replacement function.
+   */
+  function setOptionBoxChange(optionKey: string): (f: FormField) => FormField {
+    return (f) => {
+      const kept = (f.geometry?.segments ?? []).filter((s) => s.optionKey !== optionKey);
+      return { ...f, geometry: { segments: [...kept, box(optionKey)] } };
+    };
+  }
+
+  it('applies two changes to the SAME field — both option boxes land, not just the last (KTD3 regression)', () => {
+    // This is the direct regression test: it MUST fail if `applyFieldChanges`
+    // recomputes each change from the original `fields` snapshot instead of
+    // folding over the accumulating result (verified by temporarily reverting
+    // the implementation to that pattern and re-running — see report).
+    const field = choiceField('f1', ['Yes', 'No']);
+    const changes: FieldChange[] = [
+      { fieldId: 'f1', change: setOptionBoxChange('Yes') },
+      { fieldId: 'f1', change: setOptionBoxChange('No') },
+    ];
+
+    const result = applyFieldChanges([field], changes);
+
+    const optionKeys = (result[0]!.geometry?.segments ?? []).map((s) => s.optionKey);
+    expect(optionKeys).toEqual(['Yes', 'No']);
+  });
+
+  it('applies changes to two DIFFERENT fields, independent of call order', () => {
+    const a = choiceField('a', ['Yes']);
+    const b = choiceField('b', ['No']);
+    const changesInOrder: FieldChange[] = [
+      { fieldId: 'a', change: setOptionBoxChange('Yes') },
+      { fieldId: 'b', change: setOptionBoxChange('No') },
+    ];
+    const changesReversed: FieldChange[] = [...changesInOrder].reverse();
+
+    for (const changes of [changesInOrder, changesReversed]) {
+      const result = applyFieldChanges([a, b], changes);
+      expect(result.find((f) => f.id === 'a')?.geometry?.segments?.[0]?.optionKey).toBe('Yes');
+      expect(result.find((f) => f.id === 'b')?.geometry?.segments?.[0]?.optionKey).toBe('No');
+    }
+  });
+
+  it('returns the input unchanged for an empty changes array', () => {
+    const fields = [choiceField('a', ['Yes']), choiceField('b', ['No'])];
+
+    expect(applyFieldChanges(fields, [])).toEqual(fields);
+  });
+
+  it('characterizes the "Place all N" loop: N option-box changes for ONE field in one pass all land', () => {
+    // Mirrors the loop in `PlacementPanel`'s "Place all N" button exactly: one
+    // change per proposed segment, all for the same field, applied in one
+    // batch. Before U2 this was N separate `mutate()` calls each recomputing
+    // from the same pre-click snapshot — only the last one survived.
+    const field = choiceField('f1', ['Yes', 'No', 'Maybe']);
+    const changes: FieldChange[] = ['Yes', 'No', 'Maybe'].map((optionKey) => ({
+      fieldId: 'f1',
+      change: setOptionBoxChange(optionKey),
+    }));
+
+    const result = applyFieldChanges([field], changes);
+
+    const optionKeys = (result[0]!.geometry?.segments ?? []).map((s) => s.optionKey);
+    expect(optionKeys).toEqual(['Yes', 'No', 'Maybe']);
+  });
+
+  it('documents why this is a real regression test: the OLD per-call-from-original-snapshot pattern drops all but the last change', () => {
+    /*
+      This does not call `applyFieldChanges` — it reproduces the OLD `mutate()`
+      shape directly: every call maps from the SAME captured `fields`, exactly
+      as `GeometryEditorScreen` did before U2. Calling `setEdited(value)` more
+      than once synchronously with a plain (non-functional) value means only
+      the LAST call's value ends up as state — earlier calls' results are
+      simply overwritten, never merged. This is why two changes to one field,
+      like the "Place all N" loop makes, used to lose everything but the last.
+    */
+    const original = [choiceField('f1', ['Yes', 'No'])];
+    const oldMutate = (fields: FormField[], fieldId: string, change: (f: FormField) => FormField) =>
+      fields.map((f) => (f.id === fieldId ? change(f) : f));
+
+    const pendingStates = [
+      oldMutate(original, 'f1', setOptionBoxChange('Yes')),
+      oldMutate(original, 'f1', setOptionBoxChange('No')),
+    ];
+    const survivingState = pendingStates[pendingStates.length - 1]!; // only the last setEdited(...) call wins
+
+    const optionKeys = (survivingState[0]!.geometry?.segments ?? []).map((s) => s.optionKey);
+    expect(optionKeys).toEqual(['No']);
+    expect(optionKeys).not.toContain('Yes');
+  });
+});
+
+describe('moveBand / moveBoundary (U6, R7/R8) — pure core of import-session.ts adjustGeometryBand/Boundary', () => {
+  /**
+   * The exact fixture `import-session.test.ts`'s "geometry review (U4, R8)"
+   * suite uses for `adjustGeometryBand`/`adjustGeometryBoundary`, so every
+   * case below can be cross-checked input-for-input against what that suite
+   * already asserts for `adjustGeometryBand('f1', ...)` /
+   * `adjustGeometryBoundary('f1', ...)` against the same starting segment.
+   */
+  const SEGMENT: PageBox = {
+    page: 6,
+    x: 37.5,
+    y: 570,
+    width: 520,
+    height: 80,
+    pageWidth: 595,
+    pageHeight: 842,
+    columnBands: [
+      { key: 'tick', start: 496, end: 511.7 },
+      { key: 'cross', start: 511.7, end: 531.9 },
+      { key: 'na', start: 531.9, end: 556.7 },
+    ],
+    rowBands: [
+      { key: 'r0', start: 620, end: 640 },
+      { key: 'r1', start: 600, end: 620 },
+    ],
+  };
+
+  it('Covers AE5. moves a column band edge, matching adjustGeometryBand("f1", "column", "na", "end", 560)', () => {
+    const next = moveBand(SEGMENT, 'column', 'na', 'end', 560);
+
+    expect(next?.columnBands?.find((b) => b.key === 'na')?.end).toBe(560);
+  });
+
+  it('Covers AE5. grows the segment box to contain a band dragged past its edge', () => {
+    // 560 sits beyond the box's right edge of 557.5 — matches
+    // import-session.test.ts's "grows the segment box to contain a band
+    // dragged past its edge".
+    const next = moveBand(SEGMENT, 'column', 'na', 'end', 560);
+
+    expect(next).not.toBeNull();
+    expect(next!.x + next!.width).toBeGreaterThanOrEqual(560);
+    expect(resolveGeometry({ geometry: { segments: [next!] } }).dropped).toEqual([]);
+  });
+
+  it('never grows the box beyond the page — matches adjustGeometryBand("f1", "column", "na", "end", 900)', () => {
+    // 900 exceeds the 595pt page, so the shipped validator refuses the whole
+    // edit rather than producing a box that runs off the paper.
+    expect(moveBand(SEGMENT, 'column', 'na', 'end', 900)).toBeNull();
+  });
+
+  it('refuses an adjustment that would overlap a neighbouring band — matches adjustGeometryBand("f1", "column", "tick", "end", 540)', () => {
+    expect(moveBand(SEGMENT, 'column', 'tick', 'end', 540)).toBeNull();
+  });
+
+  it('refuses an inverted adjustment — matches adjustGeometryBand("f1", "column", "cross", "end", 400)', () => {
+    expect(moveBand(SEGMENT, 'column', 'cross', 'end', 400)).toBeNull();
+  });
+
+  it('moves a row band as well as a column band — matches adjustGeometryBand("f1", "row", "r1", "start", 595)', () => {
+    const next = moveBand(SEGMENT, 'row', 'r1', 'start', 595);
+
+    expect(next?.rowBands?.find((b) => b.key === 'r1')?.start).toBe(595);
+  });
+
+  it('refuses a band key that does not exist on the given axis', () => {
+    expect(moveBand(SEGMENT, 'column', 'nope', 'end', 505)).toBeNull();
+  });
+
+  it('Covers AE5. moves both bands sharing an interior boundary, leaving no gap — matches adjustGeometryBoundary("f1", "column", "tick", "cross", 505)', () => {
+    const next = moveBoundary(SEGMENT, 'column', 'tick', 'cross', 505);
+
+    const bands = next?.columnBands!;
+    expect(bands.find((b) => b.key === 'tick')!.end).toBe(505);
+    expect(bands.find((b) => b.key === 'cross')!.start).toBe(505);
+  });
+
+  it('refuses a boundary drag past either neighbour rather than inverting a band — matches adjustGeometryBoundary("f1", "column", "tick", "cross", 490 / 540)', () => {
+    // left of tick.start
+    expect(moveBoundary(SEGMENT, 'column', 'tick', 'cross', 490)).toBeNull();
+    // right of cross.end
+    expect(moveBoundary(SEGMENT, 'column', 'tick', 'cross', 540)).toBeNull();
+  });
+
+  it('publishes a boundary-adjusted grid the shipped validator accepts — matches adjustGeometryBoundary("f1", "column", "cross", "na", 528)', () => {
+    const next = moveBoundary(SEGMENT, 'column', 'cross', 'na', 528);
+
+    expect(next).not.toBeNull();
+    expect(resolveGeometry({ geometry: { segments: [next!] } }).dropped).toEqual([]);
+  });
+
+  it('ignores a boundary between bands that do not exist — matches adjustGeometryBoundary("f1", "column", "tick", "nope", 505)', () => {
+    expect(moveBoundary(SEGMENT, 'column', 'tick', 'nope', 505)).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Whole-box movement
+ * ------------------------------------------------------------------ */
+
+describe('moveSegment', () => {
+  function box(over: Partial<PageBox> = {}): PageBox {
+    return {
+      page: 0,
+      x: 100,
+      y: 200,
+      width: 60,
+      height: 40,
+      pageWidth: 595,
+      pageHeight: 842,
+      ...over,
+    };
+  }
+
+  it('MOVES THE BANDS WITH THE BOX', () => {
+    /*
+      THE FAILURE THIS EXISTS FOR. GeometryBand.start/end are absolute PDF
+      points in the same space as PageBox.x/y — `markPlacement` reads
+      columnBand.start directly as the mark's x. Moving the outline without the
+      bands leaves every mark where it was: the box lands where the author put
+      it and the export draws ticks in the old cells.
+    */
+    const moved = moveSegment(
+      box({
+        columnBands: [{ key: 'a', start: 100, end: 130 }],
+        rowBands: [{ key: 'r1', start: 200, end: 220 }],
+      }),
+      10,
+      -5,
+    );
+
+    expect(moved.x).toBe(110);
+    expect(moved.y).toBe(195);
+    expect(moved.columnBands).toEqual([{ key: 'a', start: 110, end: 140 }]);
+    expect(moved.rowBands).toEqual([{ key: 'r1', start: 195, end: 215 }]);
+  });
+
+  it('moves column bands on x only and row bands on y only', () => {
+    const moved = moveSegment(
+      box({
+        columnBands: [{ key: 'a', start: 100, end: 130 }],
+        rowBands: [{ key: 'r1', start: 200, end: 220 }],
+      }),
+      10,
+      0,
+    );
+    expect(moved.columnBands![0]!.start).toBe(110);
+    expect(moved.rowBands![0]!.start).toBe(200);
+  });
+
+  it('keeps a scalar box with no bands intact', () => {
+    const moved = moveSegment(box(), 5, 5);
+    expect(moved.columnBands).toBeUndefined();
+    expect(moved.rowBands).toBeUndefined();
+    expect([moved.x, moved.y]).toEqual([105, 205]);
+  });
+
+  it('will not let a box leave the page', () => {
+    // A mark outside the media box does not appear on the printed page at all,
+    // which on a competency record reads as a mark nobody made.
+    const atLeft = moveSegment(box({ x: 4 }), -50, 0);
+    expect(atLeft.x).toBe(0);
+
+    const atRight = moveSegment(box({ x: 500 }), 200, 0);
+    expect(atRight.x).toBe(595 - 60);
+
+    const atBottom = moveSegment(box({ y: 3 }), 0, -50);
+    expect(atBottom.y).toBe(0);
+
+    const atTop = moveSegment(box({ y: 800 }), 0, 200);
+    expect(atTop.y).toBe(842 - 40);
+  });
+
+  it('slides along an edge rather than stopping dead', () => {
+    // Clamping the DELTA rather than the result means the axis with room keeps
+    // moving — a drag along the page edge still tracks the pointer.
+    const moved = moveSegment(box({ x: 0, y: 400 }), -20, 30);
+    expect(moved.x).toBe(0);
+    expect(moved.y).toBe(430);
+  });
+
+  it('returns the SAME segment when the clamped delta is zero', () => {
+    // A drag held against the edge produces no re-render, and a nudge at the
+    // boundary is a no-op rather than a churn of identical states.
+    const at = box({ x: 0, y: 0 });
+    expect(moveSegment(at, -10, -10)).toBe(at);
+    expect(moveSegment(at, 0, 0)).toBe(at);
+  });
+});
+
+describe('keyMove', () => {
+  it('steps 1pt, and 10pt with the coarse modifier', () => {
+    expect(keyMove('ArrowRight', false)).toEqual({ dx: 1, dy: 0 });
+    expect(keyMove('ArrowRight', true)).toEqual({ dx: 10, dy: 0 });
+  });
+
+  it('sends ArrowUp UP THE PRINTED PAGE', () => {
+    // PDF y grows upward and the screen's grows downward. Getting this
+    // backwards sends every box the wrong way and reads as a broken control.
+    expect(keyMove('ArrowUp', false)!.dy).toBe(1);
+    expect(keyMove('ArrowDown', false)!.dy).toBe(-1);
+  });
+
+  it('makes ten fine steps land where one coarse step does', () => {
+    // A coarse step that is not a multiple of the fine one makes the two
+    // disagree about where a box ends up.
+    expect(NUDGE_POINTS_COARSE).toBe(NUDGE_POINTS * 10);
+  });
+
+  it('returns null for a key it does not own', () => {
+    // So a caller can leave the event unhandled — swallowing every keystroke
+    // would stop an author typing in the filter box.
+    expect(keyMove('a', false)).toBeNull();
+    expect(keyMove('Enter', false)).toBeNull();
+  });
+});
+
+describe('isDeleteKey', () => {
+  it('accepts both keys a reviewer will reach for', () => {
+    expect(isDeleteKey('Delete')).toBe(true);
+    expect(isDeleteKey('Backspace')).toBe(true);
+    expect(isDeleteKey('x')).toBe(false);
+  });
+});
+
+describe('removeSegment', () => {
+  const a: PageBox = { page: 0, x: 1, y: 1, width: 1, height: 1, pageWidth: 595, pageHeight: 842 };
+  const b: PageBox = { ...a, page: 1 };
+
+  it('drops the named page’s box', () => {
+    expect(removeSegment([a, b], 0)).toEqual([b]);
+  });
+
+  it('drops one option’s box without touching its siblings', () => {
+    // A multi-option field carries one segment per option; deleting the box for
+    // "b" must not take "a" with it.
+    const oa = { ...a, optionKey: 'a' };
+    const ob = { ...a, optionKey: 'b' };
+    expect(removeSegment([oa, ob], 0, 'b')).toEqual([oa]);
+  });
+
+  it('returns undefined when the last segment goes', () => {
+    // geometry.ts treats an absent footprint as "not placed"; a geometry with
+    // zero segments is a third state nothing reads — it passes a "has geometry"
+    // check and then draws nothing.
+    expect(removeSegment([a], 0)).toBeUndefined();
+  });
+
+  it('returns the SAME array when nothing matched', () => {
+    const segments = [a, b];
+    expect(removeSegment(segments, 7)).toBe(segments);
+  });
+});
+
+import { deriveMatchAnchorsAcrossPages } from './geometry-actions.js';
+
+/**
+ * A matching question, across the whole document.
+ *
+ * The same document-wide ambiguity refusal `deriveOptionCellsAcrossPages`
+ * makes, and for the same reason: a question claimed by two pages is a question
+ * the document does not place, and anchoring the wrong page's copy draws every
+ * one of the candidate's lines onto text they never read.
+ */
+describe('deriveMatchAnchorsAcrossPages', () => {
+  const A4_PAGE = { width: 595, height: 842 };
+
+  const signItems: PositionedText[] = [
+    { text: 'Restricted area', x: 60, y: 700, width: 78 },
+    { text: 'Biosecurity sign', x: 380, y: 700, width: 80 },
+    { text: 'Permission to pass', x: 60, y: 670, width: 92 },
+    { text: 'Traffic hazard sign', x: 380, y: 670, width: 92 },
+  ];
+
+  const ANCHORS = [
+    { key: 'l0', side: 'l' as const, text: 'Restricted area' },
+    { key: 'l1', side: 'l' as const, text: 'Permission to pass' },
+    { key: 'r0', side: 'r' as const, text: 'Biosecurity sign' },
+    { key: 'r1', side: 'r' as const, text: 'Traffic hazard sign' },
+  ];
+
+  const blank: TextPage = { ...A4_PAGE, items: [] };
+  const signs: TextPage = { ...A4_PAGE, items: signItems };
+
+  it('finds the question on whichever page prints it, and says which', () => {
+    const res = deriveMatchAnchorsAcrossPages(ANCHORS, [blank, blank, signs]);
+
+    expect(res).not.toBeNull();
+    expect(res!.segments).toHaveLength(4);
+    expect(new Set(res!.segments.map((s) => s.page))).toEqual(new Set([2]));
+  });
+
+  it('REFUSES WHEN TWO PAGES BOTH CLAIM IT', () => {
+    expect(deriveMatchAnchorsAcrossPages(ANCHORS, [signs, blank, signs])).toBeNull();
+  });
+
+  it('refuses when no page carries it', () => {
+    expect(deriveMatchAnchorsAcrossPages(ANCHORS, [blank, blank])).toBeNull();
+  });
+
+  it('refuses a question with fewer than two entries before reading a page', () => {
+    expect(deriveMatchAnchorsAcrossPages([ANCHORS[0]!], [signs])).toBeNull();
   });
 });

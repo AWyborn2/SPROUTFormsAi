@@ -43,6 +43,7 @@ const WITH_MARKS: AssessmentToolManifest = {
     assessorSignatureFieldId: 'sign-sig',
     signedDateFieldId: 'sign-date',
     overallSatisfactory: { fieldId: 'overall-yes', value: true },
+    overallNotSatisfactory: { fieldId: 'overall-no', value: true },
     moreCoachingRequiredYes: { fieldId: 'coach-yes', value: true },
     moreCoachingRequiredNo: { fieldId: 'coach-no', value: true },
   },
@@ -373,5 +374,72 @@ describe('assembleCaseValues — the candidate', () => {
     });
 
     expect(values['cover-name']).toBe('Dale Rivers');
+  });
+});
+
+/**
+ * The Assessment Result pair — and the asymmetry between its halves.
+ *
+ * `overallSatisfactory` is the CERTIFICATION and waits for a signature: a
+ * competency claim on a record nobody signed is the one thing this export must
+ * never manufacture. "Not yet competent" certifies nothing — it is the absence
+ * of a claim — and a failed case very often ends with no sign-off at all, so
+ * gating it the same way would leave the box permanently blank on exactly the
+ * records that need it.
+ */
+describe('assembleCaseValues — Candidate not yet Competent', () => {
+  const failed = (partKey: string): CaseAttemptRecord => ({
+    partKey,
+    attemptNumber: 1,
+    outcome: 'not_satisfactory',
+    values: {},
+  });
+
+  it('TICKS IT ON A RESOLVED CASE THAT NOBODY SIGNED', () => {
+    const { values } = assembleCaseValues({
+      manifest: WITH_MARKS,
+      pathway: 'experienced',
+      attempts: [passed('p1'), failed('p2')],
+      resolved: true,
+    });
+
+    expect(values['overall-no']).toBe(true);
+    expect(values['overall-yes']).toBeUndefined();
+  });
+
+  it('LEAVES IT BLANK ON A CASE STILL IN PROGRESS', () => {
+    // An unfinished form is not a finding of "not yet competent" any more than
+    // it is a finding of "no coaching required".
+    const { values } = assembleCaseValues({
+      manifest: WITH_MARKS,
+      pathway: 'experienced',
+      attempts: [passed('p1')],
+    });
+
+    expect(values['overall-no']).toBeUndefined();
+  });
+
+  it('does not tick it on a competent case', () => {
+    const { values } = assembleCaseValues({
+      manifest: WITH_MARKS,
+      pathway: 'experienced',
+      attempts: bothParts,
+      signOff: SIGNED,
+      resolved: true,
+    });
+
+    expect(values['overall-no']).toBeUndefined();
+    expect(values['overall-yes']).toBe(true);
+  });
+
+  it('writes nothing when the manifest does not name the box', () => {
+    const { values } = assembleCaseValues({
+      manifest: BASE,
+      pathway: 'experienced',
+      attempts: [passed('p1'), failed('p2')],
+      resolved: true,
+    });
+
+    expect(values['overall-no']).toBeUndefined();
   });
 });

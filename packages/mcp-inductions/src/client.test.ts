@@ -85,6 +85,50 @@ describe('InductionsClient', () => {
     expect(JSON.parse(init.body as string).submissionIds).toEqual(['s1', 's2']);
   });
 
+  it('composes document links from the public base when one is configured', async () => {
+    // The HTTP mount's own base is loopback — right for its API calls, wrong
+    // for a link a remote caller will fetch. Without publicApiUrl a hosted
+    // agent receives http://127.0.0.1:8000/... and every download is refused.
+    const fetchImpl = vi.fn(async () =>
+      respond(200, {
+        path: '/inductions/documents/tok',
+        expiresAt: '2026-03-10T09:05:00.000Z',
+        fileName: 'marlee.jpg',
+        contentType: 'image/jpeg',
+        size: 2048,
+      }),
+    );
+    const loopback = new InductionsClient(
+      {
+        apiUrl: 'http://127.0.0.1:8000',
+        publicApiUrl: 'https://forms.example.com/api',
+        apiKey: 'fai_abc_secret',
+      },
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    const link = await loopback.documentLink('sub-1', 'photo');
+    // The CALL still goes over loopback…
+    expect((fetchImpl.mock.calls[0] as unknown as string[])[0]).toContain('http://127.0.0.1:8000/');
+    // …but the URL handed back is the one the caller can reach.
+    expect(link.url).toBe('https://forms.example.com/api/inductions/documents/tok');
+  });
+
+  it('posts a confirmation to the booking path, with the subset only when given', async () => {
+    const all = vi.fn(async () => respond(200, { id: 'b1', confirmed: true }));
+    const subset = vi.fn(async () => respond(200, { id: 'b1', confirmed: false }));
+    await client(all as unknown as typeof fetch).confirmBooking('b/1');
+    await client(subset as unknown as typeof fetch).confirmBooking('b1', ['s1', 's2']);
+
+    const [allUrl, allInit] = all.mock.calls[0] as unknown as [string, RequestInit];
+    expect(allUrl).toContain('/inductions/bookings/b%2F1/confirm');
+    expect(allInit.method).toBe('POST');
+    expect(JSON.parse(allInit.body as string)).toEqual({});
+
+    const [, subsetInit] = subset.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(subsetInit.body as string)).toEqual({ submissionIds: ['s1', 's2'] });
+  });
+
   it('raises the API error code rather than returning an empty result', async () => {
     const fetchImpl = vi.fn(async () => respond(401, { error: 'unauthenticated' }));
     await expect(client(fetchImpl as unknown as typeof fetch).listCandidates({})).rejects.toMatchObject({

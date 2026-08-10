@@ -1,9 +1,10 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Db } from '@formai/db';
+import { DEFAULT_ROLE_PERMISSIONS, type PermissionMatrix } from '@formai/shared';
 
 const tenant = { userId: 'u1', orgId: 'org-1', role: 'admin' as const };
-let sealSession: (t: typeof tenant) => string;
+let sealSession: (t: { userId: string; orgId: string; role: string }) => string;
 
 let mockDbValue: Db | null = null;
 vi.mock('../db.js', () => ({
@@ -48,8 +49,15 @@ function fakeDb(opts: {
   /** Result of the SQL aggregate syncHolderCount runs. */
   holderCount?: number;
   membershipsFindFirst?: unknown;
+  /** Standing derivation (U16) reads these — membership → held Roles → required tools → awards. */
+  membershipsFindMany?: unknown[];
+  membershipRolesFindMany?: unknown[];
+  roleRequiredAssessmentsFindMany?: unknown[];
+  assessmentToolsFindMany?: unknown[];
   /** Every route is gated by requirePlanFeature('competencyGating'). */
   planTier?: string;
+  /** The caller's stored permission matrix; absent falls back to the role default. */
+  matrix?: PermissionMatrix;
 }) {
   const deleteWhere = vi.fn();
   const updateSet = vi.fn();
@@ -59,6 +67,9 @@ function fakeDb(opts: {
     query: {
       organizations: {
         findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: opts.planTier ?? 'enterprise' }),
+      },
+      rolePermissions: {
+        findFirst: vi.fn().mockResolvedValue(opts.matrix ? { matrix: opts.matrix } : undefined),
       },
       competencies: {
         findFirst: vi.fn().mockResolvedValue(opts.competenciesFindFirst),
@@ -82,6 +93,16 @@ function fakeDb(opts: {
       },
       memberships: {
         findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst),
+        findMany: vi.fn().mockResolvedValue(opts.membershipsFindMany ?? []),
+      },
+      membershipRoles: {
+        findMany: vi.fn().mockResolvedValue(opts.membershipRolesFindMany ?? []),
+      },
+      roleRequiredAssessments: {
+        findMany: vi.fn().mockResolvedValue(opts.roleRequiredAssessmentsFindMany ?? []),
+      },
+      assessmentTools: {
+        findMany: vi.fn().mockResolvedValue(opts.assessmentToolsFindMany ?? []),
       },
     },
     select: vi.fn(() => ({
@@ -543,6 +564,103 @@ describe('competency holders', () => {
     }
   });
 
+  it('records a licence as a competency, carrying its class, number and expiry (R33, R34)', async () => {
+    /*
+      F3: the licence goes on the GRANT, not on the profile. Recorded here it
+      inherits expiry dates, grace periods, revocation and a place in every
+      prerequisite and compliance check for free (R35, R36) — recorded as three
+      flat fields on a form answer, which is where it lives today, it inherits
+      none of that and expires silently.
+    */
+    const f = fakeDb({
+      competenciesFindFirst: { ...competency, name: 'Driver Licence' },
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+      competencyHoldersFindFirst: undefined,
+      holderCount: 1,
+    });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({
+          userId: HOLDER_ID,
+          licenceClass: 'HR',
+          licenceNumber: 'WA1234567',
+          expiresAt: '2028-06-30T00:00:00.000Z',
+        }),
+      });
+      expect(res.status).toBe(201);
+      expect(f.insertValues).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({
+          licenceClass: 'HR',
+          licenceNumber: 'WA1234567',
+          expiresAt: new Date('2028-06-30T00:00:00.000Z'),
+        }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('leaves the licence columns null on an ordinary competency', async () => {
+    const f = fakeDb({
+      competenciesFindFirst: competency,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+      competencyHoldersFindFirst: undefined,
+      holderCount: 1,
+    });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+      expect(f.insertValues).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ licenceClass: null, licenceNumber: null }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('carries the licence class and number forward on a re-grant (R34)', async () => {
+    // Renewing a ticket rarely changes either; supplying neither must not blank
+    // them, the way a stale explicit expiry deliberately IS cleared.
+    const f = fakeDb({
+      competenciesFindFirst: competency,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+      competencyHoldersFindFirst: {
+        id: 'h1',
+        competencyId: 'c1',
+        userId: HOLDER_ID,
+        licenceClass: 'HR',
+        licenceNumber: 'WA1234567',
+      },
+      holderCount: 1,
+    });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+      expect(f.updateSet).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ licenceClass: 'HR', licenceNumber: 'WA1234567' }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
   it('is idempotent — re-granting inserts nothing and still reports the count', async () => {
     const f = fakeDb({
       competenciesFindFirst: competency,
@@ -715,6 +833,58 @@ describe('competency holders', () => {
     }
   });
 
+  describe('licence numbers are gated by profiles.view_competencies (R34)', () => {
+    const withLicence = {
+      competencyHoldersFindMany: [
+        { competencyId: 'c1', evidenceRef: 'L', grantedAt: daysAgo(10), licenceClass: 'HR', licenceNumber: 'WA1234567' },
+      ],
+      competenciesFindMany: [{ id: 'c1', name: 'Driver Licence', validForMonths: 36 }],
+    };
+    const candidateCaller = { userId: 'u-cand', orgId: 'org-1', role: 'candidate' as const };
+
+    it('hides them from a caller reading someone else without the grant', async () => {
+      mockDbValue = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate, ...withLicence }).db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, {
+          headers: { cookie: `fai_session=${sealSession(candidateCaller)}` },
+        });
+        const [row] = (await res.json()) as { licenceNumber: string | null; licenceClass: string | null }[];
+        expect(row!.licenceNumber).toBeNull();
+        expect(row!.licenceClass).toBeNull();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('shows them to a caller granted view_competencies org-wide', async () => {
+      mockDbValue = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.admin, ...withLicence }).db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+        const [row] = (await res.json()) as { licenceNumber: string | null }[];
+        expect(row!.licenceNumber).toBe('WA1234567');
+      } finally {
+        server.close();
+      }
+    });
+
+    it('shows a candidate their OWN licence even without the grant (R49)', async () => {
+      const self = { userId: HOLDER_ID, orgId: 'org-1', role: 'candidate' as const };
+      mockDbValue = fakeDb({ matrix: DEFAULT_ROLE_PERMISSIONS.candidate, ...withLicence }).db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, {
+          headers: { cookie: `fai_session=${sealSession(self)}` },
+        });
+        const [row] = (await res.json()) as { licenceNumber: string | null }[];
+        expect(row!.licenceNumber).toBe('WA1234567');
+      } finally {
+        server.close();
+      }
+    });
+  });
+
   it('reports a lapsed ticket as expired, and NOT current', async () => {
     // Five years on a three-year ticket. Before this it read exactly like one
     // earned this morning, and satisfied every prerequisite check.
@@ -849,6 +1019,51 @@ describe('competency holders', () => {
 
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports standing beside currency — required when a held Role requires it (R108)', async () => {
+    // The same held ticket reads required or optional purely by whether a held
+    // Role requires the tool that awards it — standing never touches the date.
+    mockDbValue = fakeDb({
+      competencyHoldersFindMany: [{ competencyId: 'c1', grantedAt: daysAgo(365) }],
+      competenciesFindMany: [{ id: 'c1', name: 'ATO - Track Dozer', validForMonths: 36 }],
+      membershipsFindMany: [{ id: 'm1', userId: HOLDER_ID }],
+      membershipRolesFindMany: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
+      roleRequiredAssessmentsFindMany: [{ roleId: 'r1', toolId: 't1' }],
+      assessmentToolsFindMany: [{ id: 't1', awardedCompetencyIds: ['c1'] }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { status: string; current: boolean; standing: string }[];
+      expect(row!.status).toBe('held');
+      expect(row!.current).toBe(true);
+      expect(row!.standing).toBe('required');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports a held ticket no Role requires as optional but still current (R91, R105)', async () => {
+    // Standing optional, currency current — the two answers stay independent: an
+    // optional ticket that is in date still satisfies a prerequisite on its
+    // currency alone.
+    mockDbValue = fakeDb({
+      competencyHoldersFindMany: [{ competencyId: 'c1', grantedAt: daysAgo(365) }],
+      competenciesFindMany: [{ id: 'c1', name: 'ATO - Track Dozer', validForMonths: 36 }],
+      // No membership rows → no required tools → optional.
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { current: boolean; standing: string }[];
+      expect(row!.standing).toBe('optional');
+      expect(row!.current).toBe(true);
     } finally {
       server.close();
     }
@@ -1074,6 +1289,108 @@ describe('GET /competencies/:id/holders', () => {
 
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('keeps a revoked grant on the register, marked and not current (R108)', async () => {
+    // The grant's date says it is fine, but it was revoked — an admin auditing
+    // this competency should see the holder marked revoked, not vanished.
+    mockDbValue = fakeDb({
+      competenciesFindFirst: TRACK_DOZER,
+      competencyHoldersFindMany: [
+        { userId: 'u-current', grantedAt: ago(200), revokedAt: ago(5) },
+      ],
+      usersFindMany: PEOPLE,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as {
+        revoked: boolean;
+        current: boolean;
+        status: string;
+        note: string | null;
+      }[];
+      expect(row!.revoked).toBe(true);
+      expect(row!.current).toBe(false);
+      // The dated state travels beside the mark, it is not replaced by it.
+      expect(row!.status).toBe('held');
+      // A revoked grant's date is moot — no expiry note competes with the mark.
+      expect(row!.note).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('sorts a revoked holder last, below even a current one', async () => {
+    mockDbValue = fakeDb({
+      competenciesFindFirst: TRACK_DOZER,
+      competencyHoldersFindMany: [
+        { userId: 'u-lapsed', grantedAt: ago(200), revokedAt: ago(5) }, // in date, but revoked
+        { userId: 'u-current', grantedAt: ago(200), revokedAt: null }, // held
+        { userId: 'u-soon', grantedAt: ago(3 * 365 - 40), revokedAt: null }, // expiring
+      ],
+      usersFindMany: PEOPLE,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+
+      const rows = (await res.json()) as { name: string; revoked: boolean }[];
+      // Expiring first (needs booking), then current, then the revoked one last.
+      expect(rows.map((r) => r.name)).toEqual(['Cy Soon', 'Ada Current', 'Bo Lapsed']);
+      expect(rows.map((r) => r.revoked)).toEqual([false, false, true]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('marks a holder required when their held Role requires a tool awarding it (R108)', async () => {
+    mockDbValue = fakeDb({
+      competenciesFindFirst: TRACK_DOZER,
+      competencyHoldersFindMany: [
+        { userId: 'u-current', grantedAt: ago(200), revokedAt: null },
+      ],
+      usersFindMany: PEOPLE,
+      // Ada's Role requires a tool that awards this very competency.
+      membershipsFindMany: [{ id: 'm-current', userId: 'u-current' }],
+      membershipRolesFindMany: [{ membershipId: 'm-current', roleId: 'r1', withdrawnAt: null }],
+      roleRequiredAssessmentsFindMany: [{ roleId: 'r1', toolId: 't1' }],
+      assessmentToolsFindMany: [{ id: 't1', awardedCompetencyIds: ['c1'] }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { standing: string }[];
+      expect(row!.standing).toBe('required');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('marks a holder optional when no held Role requires it (R91, R108)', async () => {
+    mockDbValue = fakeDb({
+      competenciesFindFirst: TRACK_DOZER,
+      competencyHoldersFindMany: [
+        { userId: 'u-current', grantedAt: ago(200), revokedAt: null },
+      ],
+      usersFindMany: PEOPLE,
+      // A held Role, but its required tool awards a DIFFERENT competency.
+      membershipsFindMany: [{ id: 'm-current', userId: 'u-current' }],
+      membershipRolesFindMany: [{ membershipId: 'm-current', roleId: 'r1', withdrawnAt: null }],
+      roleRequiredAssessmentsFindMany: [{ roleId: 'r1', toolId: 't1' }],
+      assessmentToolsFindMany: [{ id: 't1', awardedCompetencyIds: ['c-other'] }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { standing: string }[];
+      expect(row!.standing).toBe('optional');
     } finally {
       server.close();
     }

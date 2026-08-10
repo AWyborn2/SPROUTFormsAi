@@ -62,9 +62,25 @@ function fakeDb(opts: {
   usersFindFirst?: unknown;
   usersFindMany?: unknown[];
   insertedSubmission?: unknown;
+  /** Makes the audit write fail, to prove it takes the submission down with it. */
+  failAuditInsert?: boolean;
 }) {
   const insertValues = vi.fn();
   const updateSet = vi.fn();
+  const rolledBack = vi.fn();
+
+  /** The insert surface, parameterised by where its calls are recorded. */
+  const makeInsert = (record: (table: unknown, v: unknown) => void) =>
+    vi.fn((table: unknown) => ({
+      values: (v: unknown) => {
+        if (opts.failAuditInsert && table === schema.auditLogEntries) {
+          throw new Error('audit insert failed');
+        }
+        record(table, v);
+        if (table === schema.submissions) return insertResult([opts.insertedSubmission]);
+        return insertResult([]);
+      },
+    }));
 
   const db = {
     query: {
@@ -87,22 +103,32 @@ function fakeDb(opts: {
         findMany: vi.fn().mockResolvedValue(opts.usersFindMany ?? []),
       },
     },
-    insert: vi.fn((table: unknown) => ({
-      values: (v: unknown) => {
-        insertValues(table, v);
-        if (table === schema.submissions) return insertResult([opts.insertedSubmission]);
-        return insertResult([]);
-      },
-    })),
+    insert: makeInsert(insertValues),
     update: vi.fn((table: unknown) => ({
       set: (v: unknown) => {
         updateSet(table, v);
         return { where: vi.fn().mockResolvedValue(undefined) };
       },
     })),
+    // Inserts inside the callback are BUFFERED and only replayed into
+    // `insertValues` once it resolves — a throw discards the buffer and records
+    // `rolledBack`, which is what lets a test assert the submission did not
+    // survive a failed audit write. Mirrors the fill-links fake.
+    transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
+      const buffered: [unknown, unknown][] = [];
+      const tx = { query: db.query, insert: makeInsert((table, v) => buffered.push([table, v])) };
+      try {
+        const result = await fn(tx);
+        for (const [table, v] of buffered) insertValues(table, v);
+        return result;
+      } catch (err) {
+        rolledBack();
+        throw err;
+      }
+    }),
   } as unknown as Db;
 
-  return { db, insertValues, updateSet };
+  return { db, insertValues, updateSet, rolledBack };
 }
 
 afterEach(() => {
@@ -1030,8 +1056,9 @@ describe('POST /submissions — hidden fields (U11)', () => {
     },
   ];
 
-  function conditionalDb() {
+  function conditionalDb(extra: { failAuditInsert?: boolean } = {}) {
     return fakeDb({
+      ...extra,
       formTemplatesFindFirst: { id: 't1', name: 'Site audit', currentVersionId: 'v1' },
       formTemplateVersionsFindFirst: {
         id: 'v1',
@@ -1095,6 +1122,55 @@ describe('POST /submissions — hidden fields (U11)', () => {
       expect(res.status).toBe(201);
       const insert = insertValues.mock.calls.find(([table]) => table === schema.submissions);
       expect(insert?.[1].values).toEqual({ has_plant: true, plant_reg: 'REG-9' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('records what was discarded, as the public door already does', async () => {
+    // A strip and an unanswered question both leave an absence, and only a
+    // written record tells them apart afterwards. A screen posting against a
+    // version that has moved on can lose an entire section this way.
+    const { db, insertValues } = conditionalDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      await post(base, { has_plant: false, plant_reg: 'SNEAKY' });
+      const audit = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(audit?.[1].target).toContain('plant_reg');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not commit the submission when that record cannot be written', async () => {
+    // Both or neither. A submission committed beside a failed audit would answer
+    // 500, and the client's retry would then record the SAME submission twice —
+    // the hazard fill-links.ts solves with the same transaction.
+    const { db, insertValues, rolledBack } = conditionalDb({ failAuditInsert: true });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { has_plant: false, plant_reg: 'SNEAKY' });
+      expect(res.status).toBe(500);
+      expect(rolledBack).toHaveBeenCalledTimes(1);
+      expect(
+        insertValues.mock.calls.find(([table]) => table === schema.submissions),
+      ).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes no such entry when nothing was discarded', async () => {
+    const { db, insertValues } = conditionalDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      await post(base, { has_plant: true, plant_reg: 'REG-9' });
+      expect(
+        insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries),
+      ).toBeUndefined();
     } finally {
       server.close();
     }

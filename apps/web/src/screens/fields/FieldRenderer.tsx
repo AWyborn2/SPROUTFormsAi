@@ -37,6 +37,7 @@ import type { RepeatingRowValue } from '@formai/shared';
 import { ApiError, uploadAttachment } from '../../lib/data/api-client.js';
 import { resolveRepeatingRows } from '../../lib/fixed-rows.js';
 import { coerceSpokenValue, isDictatable, useDictation } from '../../lib/voice/index.js';
+import { MatchingField } from './MatchingField.js';
 
 export interface FieldInputProps {
   field: FormField;
@@ -80,11 +81,14 @@ export interface FieldInputProps {
 /**
  * Types this renderer both draws a control for and can read speech into.
  *
- * `check_cross` is dictatable in principle but has no case in the switch below
- * yet, so it falls through to the unsupported-type placeholder. A mic beside a
- * field with nothing to type into would make speaking the only way to answer
- * it, which voice is never allowed to be. Exported because Smart Fill has to
- * refuse to write the same fields for the same reason.
+ * `check_cross` is excluded, and the reason has changed. It used to be that the
+ * switch below had no case for it, so there was nothing for speech to write
+ * into. It has one now — and the exclusion stands on the stronger ground that
+ * was always underneath it: this type is a VERDICT on a competency record,
+ * where a tick and a cross are opposite findings about whether a person is safe
+ * to operate a machine. A transcription confidence of 0.7 is not a basis for
+ * either. It is two buttons; an assessor presses one. Exported because Smart
+ * Fill has to refuse to write the same fields for the same reason.
  *
  * A MATCHING QUESTION IS EXCLUDED FOR A DIFFERENT REASON, and a stronger one.
  * Its options are pairings, so speech would have to be coerced into a set of
@@ -124,6 +128,15 @@ export function FieldInput({
   dictation = false,
   uploadPath,
 }: FieldInputProps) {
+  /*
+    ABOVE THE SECTION-HEADER RETURN BELOW, because every hook must run on every
+    render. A field's type is not fixed for the life of this component: the
+    builder's preview lets an author RETYPE a field, and the row keeps its key
+    across that change — so an instance that rendered as a header and then as a
+    question (or the reverse) would change its hook count mid-life.
+  */
+  const controlId = useId();
+
   if (field.type === 'section_header') {
     return (
       <div className="border-b border-border-subtle pb-2 pt-2">
@@ -140,7 +153,6 @@ export function FieldInput({
   // element; their container gets a role + `aria-labelledby` pointing at the
   // caption instead. Everything else keeps the caption as a styled div
   // (signature and the time row already label themselves via `aria-label`).
-  const controlId = useId();
   const labelId = `${controlId}-label`;
   const labelable = LABELABLE_TYPES.has(field.type);
   const groupRole =
@@ -283,6 +295,59 @@ export function FieldInput({
             ))}
           </div>
         );
+      /*
+        AN OUTCOME BOX IS A VERDICT, AND BOTH OF ITS ANSWERS ARE FINDINGS.
+
+        `check_cross` had no case here at all, so it fell through to the
+        unsupported-type placeholder below and rendered as a grey chip printing
+        the literal string "check_cross". On a competency assessment that is not
+        an obscure corner: it is the type of every theory question's outcome
+        box, and of the satisfactory / not-yet-competent boxes on every part's
+        sign-off — the fields an assessor spends the whole session in.
+
+        THREE STATES, NOT TWO. Unlike `checkbox`, whose false is simply
+        unticked, a cross here means "I checked this and it failed" — the
+        distinction the exporter draws when it prints a tick for true, a cross
+        for false, and NOTHING for null (`round-trip.ts`, SELF_ANSWERING). So
+        the control has to offer a way back to unanswered, or an assessor who
+        mis-clicks can never restore a box to the one state that means nobody
+        has assessed this.
+
+        Clicking the chosen verdict again is that way back, which is also why
+        these are buttons rather than radios: a radio group cannot be un-chosen.
+      */
+      case 'check_cross': {
+        const verdicts = [
+          { on: true, label: 'Satisfactory', icon: 'check' },
+          { on: false, label: 'Not satisfactory', icon: 'x' },
+        ] as const;
+        return (
+          <div className="flex flex-wrap gap-2" role="group" aria-labelledby={labelId}>
+            {verdicts.map((v) => {
+              const selected = value === v.on;
+              return (
+                <button
+                  key={v.label}
+                  type="button"
+                  disabled={disabled}
+                  aria-pressed={selected}
+                  onClick={() => onChange(selected ? null : v.on)}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${
+                    selected
+                      ? v.on
+                        ? 'border-border-accent bg-success-soft text-success-text'
+                        : 'border-danger bg-danger-soft text-danger-text'
+                      : 'border-border bg-surface-card text-text-secondary'
+                  }`}
+                >
+                  <Icon name={v.icon} size={14} />
+                  {v.label}
+                </button>
+              );
+            })}
+          </div>
+        );
+      }
       case 'checkbox':
         return (
           <Checkbox
@@ -313,6 +378,29 @@ export function FieldInput({
           Presentation only.
         */
         if (isMatchingQuestion(field.options)) {
+          /*
+            AN AUTHORED PRESENTATION WINS; THE GROUPED LIST IS THE FALLBACK.
+
+            `matchPresentation` is set by the pair builder and is render-only by
+            type — `markTheory` reads `answerKey` and nothing else — so choosing
+            between these two changes what a candidate manipulates and nothing
+            about what is stored or how it is marked. A question authored before
+            presentations existed has none, and renders exactly as it always
+            has.
+          */
+          if (field.matchPresentation) {
+            return (
+              <MatchingField
+                options={field.options ?? []}
+                value={selected}
+                presentation={field.matchPresentation}
+                disabled={disabled}
+                labelId={labelId}
+                onChange={onChange}
+              />
+            );
+          }
+
           return (
             <div className="flex flex-col gap-3.5" role="group" aria-labelledby={labelId}>
               {groupPairingOptions(field.options ?? []).map((group, index) => {

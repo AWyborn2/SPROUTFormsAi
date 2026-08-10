@@ -62,8 +62,24 @@ export function AssessmentCasesScreen() {
             {isCandidate ? 'My progress' : 'Progress'}
           </Link>
           {!isCandidate && (
-            <Button leadingIcon="plus" onClick={() => setCreating(true)} disabled={!tools?.length}>
+            <Button
+              variant="secondary"
+              leadingIcon="plus"
+              onClick={() => setCreating(true)}
+              disabled={!tools?.length}
+            >
               New case
+            </Button>
+          )}
+          {/*
+            The way a tool comes into existence at all. Until this screen
+            offered it, authoring one meant a node script run against the
+            database with the answer key on somebody's laptop — so the entry
+            point sat outside the product entirely.
+          */}
+          {!isCandidate && (
+            <Button leadingIcon="sparkles" onClick={() => navigate('/app/assessments/builder')}>
+              Assessment builder
             </Button>
           )}
         </div>
@@ -77,6 +93,35 @@ export function AssessmentCasesScreen() {
         <div className="rounded-md border border-border bg-surface-card p-5 text-[13.5px] text-text-tertiary">
           No assessment tools yet. An assessment tool is a published form with its parts, pathways and
           answer key declared — import the assessment PDF, then author its tool.
+        </div>
+      )}
+
+      {/*
+        The way into the workflow builder. On the case list rather than buried
+        in settings, because "who fills what" is a question that comes up while
+        looking at cases — and until this link existed the screen was reachable
+        only by typing its URL.
+      */}
+      {!isCandidate && tools && tools.length > 0 && (
+        <div className="flex flex-col gap-1.5 rounded-md border border-border bg-surface-card p-4">
+          <span className="font-mono text-[10.5px] uppercase tracking-wide text-text-tertiary">
+            Assessment workflows
+          </span>
+          <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+            {tools.map((t) => (
+              <Link
+                key={t.id}
+                to={`/app/assessments/tools/${t.id}/workflow`}
+                className="inline-flex items-center gap-1.5 text-[13px] font-medium text-text-accent hover:underline"
+              >
+                <Icon name="workflow" size={13} />
+                {t.name}
+              </Link>
+            ))}
+          </div>
+          <span className="text-[11.5px] text-text-tertiary">
+            Set who fills each section, and the order the work happens in.
+          </span>
         </div>
       )}
 
@@ -174,12 +219,12 @@ function NewCaseForm({
   const [toolId, setToolId] = useState(tools[0]?.id ?? '');
   const [candidateUserId, setCandidateUserId] = useState('');
   const [pathway, setPathway] = useState<AssessmentPathway>('new');
-  const [locationStream, setLocationStream] = useState('');
+  const [locationId, setLocationId] = useState('');
   const [rplJustification, setRplJustification] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  /** Streams the SELECTED tool distinguishes. Empty when its rule is flat. */
-  const streams = tools.find((t) => t.id === toolId)?.locationStreams ?? [];
+  /** The organisation's Locations, offered as a closed list (R77). */
+  const locations = tools.find((t) => t.id === toolId)?.locations ?? [];
 
   async function submit() {
     setError(null);
@@ -196,7 +241,7 @@ function NewCaseForm({
         toolId,
         candidateUserId: candidateUserId.trim(),
         pathway,
-        ...(locationStream ? { locationStream } : {}),
+        ...(locationId ? { locationId } : {}),
         ...(pathway === 'rpl' ? { rplJustification: rplJustification.trim() } : {}),
       });
       onCreated(res.id);
@@ -265,44 +310,39 @@ function NewCaseForm({
         </div>
 
         {/*
-          THE STREAM DECIDES WHO MAY ASSESS THIS.
+          THE LOCATION DECIDES WHO MAY ASSESS THIS.
 
           Q50071833 authorises mine assessments and Q50073293 authorises raw
           materials, so a tool that distinguishes them cannot check its assessor
-          without knowing which site this is. When it does, the choices come
-          from the tool itself rather than a placeholder somebody has to read
-          and retype: matching is case-insensitive, but an unrecognised stream
-          contributes no requirement at all, so a near-miss spelling skips the
-          check silently instead of failing loudly.
-
-          Still free text underneath, because the same value answers the
-          document's own stream question during filling, and a tool may carry
-          location content without varying its assessor rule.
+          without knowing which site this is. The Location is chosen from the
+          organisation's managed list, never typed (R77), so it cannot be a
+          near-miss of the site the assessor rule checks (R79). It stays optional
+          — a tool may carry no location-specific rule, and a case left with no
+          Location has that half of the assessor check skipped, and says so.
         */}
         <div>
-          <label htmlFor="nc-stream" className={label}>
-            Location stream {streams.length > 0 ? '' : '(optional)'}
+          <label htmlFor="nc-location" className={label}>
+            Location (optional)
           </label>
-          <input
-            id="nc-stream"
-            list={streams.length > 0 ? 'nc-stream-options' : undefined}
-            value={locationStream}
-            onChange={(e) => setLocationStream(e.target.value)}
-            placeholder={streams.length > 0 ? streams.join(' / ') : 'mining / raw_materials'}
+          <select
+            id="nc-location"
+            value={locationId}
+            onChange={(e) => setLocationId(e.target.value)}
             className={`${field} mt-1`}
-          />
-          {streams.length > 0 && (
-            <>
-              <datalist id="nc-stream-options">
-                {streams.map((s) => (
-                  <option key={s} value={s} />
-                ))}
-              </datalist>
-              <p className="mt-1 text-xs text-text-tertiary">
-                This assessment has different assessor requirements per site. Leave it blank and
-                that half of the check is skipped — the case still opens, and says so.
-              </p>
-            </>
+          >
+            <option value="">Not set</option>
+            {locations.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name}
+              </option>
+            ))}
+          </select>
+          {locations.length === 0 && (
+            <p className="mt-1 text-xs text-text-tertiary">
+              No Locations yet — add them in Locations &amp; roles. The
+              location-specific half of the assessor check is not applied when no
+              Location is chosen.
+            </p>
           )}
         </div>
 

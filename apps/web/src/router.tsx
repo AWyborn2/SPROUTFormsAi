@@ -20,14 +20,22 @@ import { GeometryEditorScreen } from './screens/import/GeometryEditorScreen.js';
 import { ResetPasswordScreen } from './screens/invite/ResetPasswordScreen.js';
 import { ApiKeysScreen } from './screens/enterprise/ApiKeysScreen.js';
 import { TeamScreen } from './screens/enterprise/TeamScreen.js';
+import { TaxonomyScreen } from './screens/enterprise/TaxonomyScreen.js';
 import { RolesScreen } from './screens/enterprise/RolesScreen.js';
 import { AuditScreen } from './screens/enterprise/AuditScreen.js';
 import { BillingScreen } from './screens/enterprise/BillingScreen.js';
+import { ClientBrandsScreen } from './screens/enterprise/ClientBrandsScreen.js';
 import { WhiteLabelScreen } from './screens/enterprise/WhiteLabelScreen.js';
 import { CompetencyScreen } from './screens/enterprise/CompetencyScreen.js';
+import { WorkingListScreen } from './screens/enterprise/WorkingListScreen.js';
+import { ProfileScreen } from './screens/enterprise/ProfileScreen.js';
+import { ComplianceScreen } from './screens/enterprise/ComplianceScreen.js';
 import { AssessmentCasesScreen } from './screens/assessments/AssessmentCasesScreen.js';
+import { AssessorQueueScreen } from './screens/assessments/AssessorQueueScreen.js';
 import { AssessmentCaseScreen } from './screens/assessments/AssessmentCaseScreen.js';
 import { AssessmentDashboard } from './screens/assessments/AssessmentDashboard.js';
+import { WorkflowBuilderScreen } from './screens/assessments/WorkflowBuilderScreen.js';
+import { BuilderScreen as AssessmentBuilderScreen } from './screens/assessments/builder/BuilderScreen.js';
 import { CasePartFillScreen } from './screens/assessments/CasePartFillScreen.js';
 import { MobileScreen } from './screens/mobile/MobileScreen.js';
 import { ChcIntakeScreen } from './screens/chc/ChcIntakeScreen.js';
@@ -50,14 +58,24 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   invite: <InviteScreen />,
   'reset-password': <ResetPasswordScreen />,
   team: <TeamScreen />,
+  taxonomy: <TaxonomyScreen />,
   'api-keys': <ApiKeysScreen />,
   roles: <RolesScreen />,
   audit: <AuditScreen />,
   billing: <BillingScreen />,
   whitelabel: <WhiteLabelScreen />,
+  'client-brands': <ClientBrandsScreen />,
   competency: <CompetencyScreen />,
+  'working-list': <WorkingListScreen />,
+  compliance: <ComplianceScreen />,
+  profile: <ProfileScreen />,
+  'my-profile': <ProfileScreen />,
   assessments: <AssessmentCasesScreen />,
+  'assessment-queue': <AssessorQueueScreen />,
   'assessment-progress': <AssessmentDashboard />,
+  'workflow-builder': <WorkflowBuilderScreen />,
+  'assessment-builder': <AssessmentBuilderScreen />,
+  'assessment-builder-draft': <AssessmentBuilderScreen />,
   'assessment-case': <AssessmentCaseScreen />,
   'assessment-part-fill': <CasePartFillScreen />,
   'geometry-editor': <GeometryEditorScreen />,

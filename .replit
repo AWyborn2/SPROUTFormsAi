@@ -86,7 +86,7 @@ NODE_ENV = "development"
 STORAGE_PROVIDER = "replit"
 
 [userenv.production]
-WEB_ORIGIN = "https://sproutformsai.replit.app"
+WEB_ORIGIN = "https://sproutonlineforms.replit.app"
 
 [userenv.development]
 

@@ -19,6 +19,12 @@ interface LogoUploadControlProps {
    * cosmetic, so a failure there must never surface as an upload error.
    */
   onUploaded?: (file: File) => void | Promise<void>;
+  /**
+   * What the logo is for. Drives the AUDIT WORDING and nothing else — a
+   * client's logo is an image in this org's namespace like any other, so the
+   * bytes, the storage key and the public URL are identical either way.
+   */
+  uploadUsage?: 'org' | 'brand';
 }
 
 /**
@@ -35,6 +41,7 @@ export function LogoUploadControl({
   swatchColor,
   onChange,
   onUploaded,
+  uploadUsage,
 }: LogoUploadControlProps) {
   const uploadLogo = useUploadOrgLogo();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -46,7 +53,7 @@ export function LogoUploadControl({
     setError(null);
     try {
       const prepared = await prepareLogoUpload(file);
-      const { url } = await uploadLogo.mutateAsync(prepared);
+      const { url } = await uploadLogo.mutateAsync({ ...prepared, usage: uploadUsage });
       onChange(url);
       setFileName(file.name);
     } catch (err) {
@@ -90,7 +97,11 @@ export function LogoUploadControl({
             <span className="block truncate font-ui text-[13.5px] font-semibold text-text-primary">
               {fileName ?? 'Your logo'}
             </span>
-            <span className="block text-xs text-text-tertiary">Shown on every branded form</span>
+            <span className="block text-xs text-text-tertiary">
+              {uploadUsage === 'brand'
+                ? 'Shown on this client’s forms'
+                : 'Shown on every branded form'}
+            </span>
           </div>
           <button
             onClick={() => fileInputRef.current?.click()}
@@ -123,7 +134,11 @@ export function LogoUploadControl({
           </span>
           <span className="flex-1">
             <span className="block font-ui text-[13.5px] font-semibold text-text-primary">
-              {uploadLogo.isPending ? 'Uploading…' : 'Upload your logo'}
+              {uploadLogo.isPending
+                ? 'Uploading…'
+                : uploadUsage === 'brand'
+                  ? 'Upload their logo'
+                  : 'Upload your logo'}
             </span>
             <span className="block text-xs text-text-tertiary">
               SVG, PNG, JPEG or WebP · up to 2 MB

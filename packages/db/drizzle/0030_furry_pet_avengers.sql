@@ -1,0 +1,1 @@
+ALTER TABLE "assessment_tools" ADD COLUMN "location_part_keys" jsonb DEFAULT '{}'::jsonb NOT NULL;

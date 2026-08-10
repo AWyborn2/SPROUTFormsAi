@@ -12,6 +12,7 @@ import { authRouter } from './routes/auth.js';
 import { competenciesRouter, competencyRulesRouter } from './routes/competencies.js';
 import { dashboardRouter } from './routes/dashboard.js';
 import { formFillLinksRouter, publicFillRouter } from './routes/fill-links.js';
+import { formBrandsRouter } from './routes/form-brands.js';
 import { formsRouter } from './routes/forms.js';
 import { healthRouter } from './routes/health.js';
 import { inductionMcpRouter } from '@formai/mcp-inductions/express';
@@ -20,9 +21,19 @@ import { invitesRouter, publicInvitesRouter } from './routes/invites.js';
 import { passwordResetRouter } from './routes/password-reset.js';
 import { orgRouter } from './routes/org.js';
 import { importDraftsRouter } from './routes/import-drafts.js';
+import { builderDraftsRouter } from './routes/builder-drafts.js';
+import { answerGuidesRouter } from './routes/answer-guides.js';
 import { pdfRouter } from './routes/pdf.js';
 import { submissionsRouter } from './routes/submissions.js';
+import { taxonomyRouter } from './routes/taxonomy.js';
 import { teamRouter } from './routes/team.js';
+import { trainingRequestsRouter } from './routes/training-requests.js';
+import { internalRouter } from './routes/internal.js';
+import { noticesRouter } from './routes/notices.js';
+import { workingListRouter } from './routes/working-list.js';
+import { complianceRouter } from './routes/compliance.js';
+import { profilesRouter } from './routes/profiles.js';
+import { competencyDocumentsRouter } from './routes/competency-documents.js';
 import { uploadsRouter } from './routes/uploads.js';
 import { voiceRouter } from './routes/voice.js';
 
@@ -67,6 +78,29 @@ export function createApp(): Express {
   */
   app.use('/import-drafts', express.json({ limit: '40mb' }), importDraftsRouter);
 
+  /*
+    Once more, and for MORE than the import draft carries: a builder draft holds
+    everything an import draft does plus the part manifest, every answer key and
+    the workflow. Same registration-order reason, same scoped limit.
+  */
+  app.use('/assessment-tool-drafts', express.json({ limit: '40mb' }), builderDraftsRouter);
+
+  /*
+    An answer guide is a PDF and arrives as base64, so it needs the same raised
+    limit the other document routes get. Registered before the default json
+    body parser for the same reason they are.
+  */
+  app.use('/answer-guides', express.json({ limit: '40mb' }), answerGuidesRouter);
+
+  /*
+    Same registration-order reason as the routes above, for one path only: a
+    brand scan carries a client's whole PDF. The rest of /form-brands keeps the
+    tighter global limit, since a brand itself is a name and a few colours —
+    this mounts the PARSER only, and the route stays with its siblings in
+    routes/form-brands.ts.
+  */
+  app.use('/form-brands/scan', express.json({ limit: '40mb' }));
+
   app.use(express.json({ limit: '2mb' }));
 
   app.use('/health', healthRouter);
@@ -74,6 +108,10 @@ export function createApp(): Express {
   app.use('/account', accountRouter);
   app.use('/org', orgRouter);
   app.use('/forms', formsRouter);
+  // The brands a form can be presented in — usually clients', not the org's
+  // own. Mounted beside /forms rather than under it because a brand outlives
+  // and is shared by many forms; see routes/form-brands.ts.
+  app.use('/form-brands', formBrandsRouter);
   app.use('/assessment-tools', assessmentToolsRouter);
   app.use('/assessment-cases', assessmentCasesRouter);
   // Authed fill-link management (/forms/:id/fill-links…) — separate router
@@ -110,6 +148,12 @@ export function createApp(): Express {
   // loopback with the caller's own key — see the router's docstring for why
   // that hop is deliberate.
   const mcpApiUrl = `http://127.0.0.1:${env.API_PORT}`;
+  // Links the tools hand BACK to a caller must not be composed from the
+  // loopback base above — a document link pointing at 127.0.0.1 is fetchable
+  // by nobody but this host. The web origin proxies `/api` through to this
+  // process, so this is the address the caller can actually reach (the same
+  // base invite emails are composed from).
+  const mcpPublicApiUrl = `${env.WEB_ORIGIN}/api`;
   // URL-credentialed door, mounted BEFORE the header one so the more specific
   // path wins (`app.use('/mcp', …)` would otherwise swallow it). It exists
   // because Claude's custom-connector dialog takes a URL and OAuth fields with
@@ -118,13 +162,30 @@ export function createApp(): Express {
   app.use(
     '/mcp/key/:key',
     requireMachineKeyFromPath('key'),
-    inductionMcpRouter({ apiUrl: mcpApiUrl, apiKeyFor: (req) => req.machineApiKey ?? null }),
+    inductionMcpRouter({
+      apiUrl: mcpApiUrl,
+      publicApiUrl: mcpPublicApiUrl,
+      apiKeyFor: (req) => req.machineApiKey ?? null,
+    }),
   );
-  app.use('/mcp', requireMachineOrTenant, inductionMcpRouter({ apiUrl: mcpApiUrl }));
+  app.use(
+    '/mcp',
+    requireMachineOrTenant,
+    inductionMcpRouter({ apiUrl: mcpApiUrl, publicApiUrl: mcpPublicApiUrl }),
+  );
   app.use('/audit', auditRouter);
   app.use('/dashboard', dashboardRouter);
   app.use('/competencies', competenciesRouter);
   app.use('/competency-rules', competencyRulesRouter);
+  app.use('/taxonomy', taxonomyRouter);
+  app.use('/training-requests', trainingRequestsRouter);
+  app.use('/notices', noticesRouter);
+  app.use('/working-list', workingListRouter);
+  app.use('/compliance', complianceRouter);
+  app.use('/profiles', profilesRouter);
+  app.use('/competency-documents', attachmentJson, competencyDocumentsRouter);
+  // The only routes not behind a session or API key — guarded by a shared secret.
+  app.use('/internal', internalRouter);
   // Smart Fill for authed surfaces. The public respondent's door is
   // POST /fill/:token/smart-fill, mounted with the rest of publicFillRouter.
   app.use('/voice', voiceRouter);

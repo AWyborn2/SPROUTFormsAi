@@ -57,6 +57,32 @@ export function isChoiceField(type: FormFieldType): boolean {
   return CHOICE_FIELD_TYPES.includes(type);
 }
 
+/**
+ * Types whose `false` is a RECORDED finding rather than an empty cell — the
+ * only types a derived ✓/✗ can actually land in.
+ *
+ * A plain `checkbox` that is false is simply unticked, and drawing anything
+ * would invent an answer. A `check_cross` that is false is an assessor saying
+ * "I checked this and it failed" — which on the one artefact an investigation
+ * reads must not be identical to never-assessed.
+ *
+ * THIS LIST WAS ALREADY WRITTEN TWICE — once in the PDF exporter, once in the
+ * web app's mark description — and a third copy was about to be written by the
+ * outcome-box picker. The exporter's copy is the one that decides whether a
+ * mark reaches paper, so a picker offering a target the exporter would not draw
+ * in is a mark an author believes is on a competency record and is not. One
+ * list makes that divergence unexpressible.
+ *
+ * `string` rather than `FormFieldType` because repeating-group COLUMN types are
+ * checked against the same rule, and a column's type is not a `FormFieldType`.
+ */
+export const SELF_ANSWERING_TYPES: readonly string[] = ['check_cross', 'boolean_yes_no'];
+
+/** Is this type's `false` a finding in its own right? */
+export function isSelfAnswering(type: string): boolean {
+  return SELF_ANSWERING_TYPES.includes(type);
+}
+
 /** Field source — how it got into the template. */
 export type FieldSource = 'built' | 'imported';
 
@@ -120,6 +146,89 @@ export interface PageBox {
    * Absent on a scalar or table segment, which targets the field as a whole.
    */
   optionKey?: string;
+  /**
+   * What this box draws, when an author has said.
+   *
+   * ABSENT IS THE DEFAULT AND THE DEFAULT IS TODAY'S BEHAVIOUR: the exporter
+   * derives the mark from the field's type, exactly as it always has. That is
+   * what keeps every placement authored before this existed byte-identical on
+   * export — a stored geometry segment does not change meaning by gaining an
+   * optional property nobody set.
+   */
+  markStyle?: MarkStyle;
+}
+
+/**
+ * What a placed box draws, when an author overrides the type default.
+ *
+ * The vocabulary lives HERE, beside the geometry it hangs off, because this
+ * file holds the shapes and imports nothing; `builder.ts` holds the authoring
+ * layer and `geometry.ts` the resolvers, which is the same split `AnswerSet`
+ * and `VisibilityCondition` already follow.
+ *
+ * NOT EVERY GLYPH DRAWS YET — `MARK_STYLES_DRAWN` in `builder.ts` is the honest
+ * list, and the placement inspector says so beside the ones that do not. A
+ * style the exporter silently ignored would be a mark an author believes is on
+ * a competency record and is not.
+ */
+export const GLYPH_KINDS = [
+  'tick_hand',
+  'tick_block',
+  'cross_hand',
+  'ring',
+  'typed',
+  'signature',
+  'stamp_pass',
+  'stamp_na',
+  'stamp_date',
+  'initials',
+  'highlight',
+  'match_line',
+] as const;
+export type GlyphKind = (typeof GLYPH_KINDS)[number];
+
+/** Ink a mark is drawn in. Three, because a competency record is not a palette. */
+export const MARK_INKS = ['default', 'assessor_blue', 'ink_black'] as const;
+export type MarkInk = (typeof MARK_INKS)[number];
+
+export const MARK_SIZES = ['s', 'm', 'l'] as const;
+export type MarkSize = (typeof MARK_SIZES)[number];
+
+/** Every property optional; an absent `MarkStyle` is the field type's default. */
+export interface MarkStyle {
+  glyph?: GlyphKind;
+  ink?: MarkInk;
+  size?: MarkSize;
+}
+
+/**
+ * How a matching question is PRESENTED. Never how it is marked.
+ *
+ * A matching question is stored as a choice field whose options are the
+ * pairings (`matching.ts`), and `markTheory` reads `answerKey` and nothing
+ * else. This decides only what the candidate manipulates on screen: dots and
+ * connecting lines, or a tray of answers dragged into slots.
+ *
+ * Separate from the field's data for one reason: if presentation could reach
+ * marking, there would be two places a question's verdict comes from.
+ */
+export const MATCH_MODES = ['line', 'drag'] as const;
+export type MatchMode = (typeof MATCH_MODES)[number];
+
+export interface MatchPresentation {
+  mode: MatchMode;
+  /** Render the prompt side as pictures. */
+  leftImages?: boolean;
+  /** Render the answer side as pictures. */
+  rightImages?: boolean;
+  /**
+   * Uploaded picture per entry, by side and printed index — `l0`, `r2`.
+   *
+   * Asset ids, not data URLs. A data URL here would put a few hundred kilobytes
+   * of base64 into every copy of the field, including the one served to a fill
+   * surface and the one an export reads.
+   */
+  images?: Record<string, string>;
 }
 
 /**
@@ -300,12 +409,49 @@ export interface FormField {
   answerKey?: string[];
 
   /**
+   * A choice the ASSESSOR makes, recording a judgement — not a question with a
+   * right answer.
+   *
+   * An assessment paper is full of these: "Assessment Result — Candidate
+   * Competent / Candidate not yet Competent", "More coaching required? Yes /
+   * No", "The Candidate's responses were: Satisfactory / Not Satisfactory".
+   * Extraction reads each as an ordinary choice question, because on the page
+   * that is exactly what it looks like — a prompt with two printed options.
+   *
+   * WITHOUT THIS THEY SIT IN THE ANSWER-KEY LIST FOREVER. There is no correct
+   * answer to key, so the author cannot clear them, the "N of M keyed" counter
+   * can never complete, and a genuinely unkeyed question is hidden among a
+   * dozen that were never keyable.
+   *
+   * NOT A TYPE CHANGE, deliberately. Retyping to `check_cross` would drop the
+   * printed option labels and put a bare ✓/✗ where the paper says "Candidate
+   * Competent" — the online form would stop matching the document at exactly
+   * the cell an auditor reads first. The field stays what it is; this says how
+   * it is JUDGED.
+   *
+   * A verdict field never carries an `answerKey`: `markTheory` skips a field
+   * without one, so marking already does the right thing, and the authoring
+   * layer clears any key when the flag is set rather than storing both.
+   */
+  assessorVerdict?: boolean;
+
+  /**
    * Where this question's derived ✓/✗ is written. Required whenever
    * `answerKey` is set — a key with nowhere to land would compute a mark that
    * never reaches the page, which on an evidence document reads as an
    * unanswered question rather than a marked one.
    */
   outcomeTarget?: OutcomeTarget;
+
+  /**
+   * For a matching question — how it is drawn on a fill surface.
+   *
+   * Render-only. Marking reads `answerKey`, the exporter reads the geometry,
+   * and neither looks at this. Absent means the grouped pairing list that
+   * `FieldRenderer` already renders, which stays the correct fallback for a
+   * question nobody has chosen a presentation for.
+   */
+  matchPresentation?: MatchPresentation;
 }
 
 /**

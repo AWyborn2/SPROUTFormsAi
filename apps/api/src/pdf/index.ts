@@ -9,7 +9,12 @@ export {
   type AnthropicMessage,
   type ExtractOptions,
 } from './extract.js';
-export { roundTripExport, type RoundTripInput } from './round-trip.js';
+export {
+  roundTripExport,
+  resolveMarkStyle,
+  type DrawnGlyph,
+  type RoundTripInput,
+} from './round-trip.js';
 export {
   assembleCaseValues,
   exportCasePdf,
@@ -20,3 +25,11 @@ export {
   type ExportCaseInput,
 } from './case-export.js';
 export { extractFormFieldsTool, EXTRACT_TOOL_NAME } from './tool-schema.js';
+export {
+  matchAnswerGuide,
+  resolveOption,
+  matchGuideAnswersTool,
+  MATCH_TOOL_NAME,
+  type GuideQuestion,
+  type GuideMatchResult,
+} from './answer-guide.js';

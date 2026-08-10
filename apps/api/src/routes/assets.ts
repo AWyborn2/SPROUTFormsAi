@@ -132,6 +132,15 @@ export async function deleteSupersededLogo(
 const uploadLogoBody = z.object({
   imageBase64: z.string().min(1),
   mimeType: z.string().min(1),
+  /**
+   * What the logo is FOR. Drives the audit wording and nothing else — the
+   * bytes, the key namespace and the public URL are identical either way,
+   * because a brand's logo is an image in the org's namespace like any other.
+   *
+   * An enum rather than free text: this writes an audit line, and audit lines
+   * a caller can compose are audit lines a caller can forge.
+   */
+  usage: z.enum(['org', 'brand']).optional(),
 });
 
 orgLogoRouter.post(
@@ -185,9 +194,10 @@ orgLogoRouter.post(
     const key = await client.uploadImage(tenant.orgId, bytes, mimeType, ext);
 
     if (db) {
+      const forBrand = parsed.data.usage === 'brand';
       await recordAudit(db, tenant, {
-        action: 'Uploaded organisation logo',
-        target: 'Branding kit',
+        action: forBrand ? 'Uploaded brand logo' : 'Uploaded organisation logo',
+        target: forBrand ? 'Form brand' : 'Branding kit',
         category: 'settings',
         icon: 'settings',
       });

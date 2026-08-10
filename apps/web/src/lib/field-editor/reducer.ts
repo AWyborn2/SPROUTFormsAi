@@ -78,15 +78,23 @@ export const FIELD_META: Record<string, { icon: string; label: string }> = {
  * needs options that mean something — so conjuring one from a scalar field
  * produces a field that renders nothing and, if required, can never be
  * satisfied.
+ *
+ * `check_cross` USED TO BE ON THIS LIST and should not have been. It was added
+ * as "a table CELL affordance, offered by `ColumnInspector`'s own list" — true
+ * of a repeating-group column, and false of the field type, which is what an
+ * assessment paper's printed outcome box is extracted as. It carries no payload
+ * extraction has to supply: it is a bare ✓/✗ cell and nothing else.
+ *
+ * The cost was concrete. Extraction misses outcome boxes on a dense paper, and
+ * a missed one is exactly the case `addField` exists for — but the field it
+ * added could never BE an outcome box, because the only type that draws a
+ * verdict was the one type the palette refused to offer. The author was left
+ * with a text box where a tick belongs, on the cell an auditor reads first.
  */
 const STRUCTURAL_TYPES: ReadonlySet<FormFieldType> = new Set([
   'repeating_group',
   'checkbox_group',
   'boolean_yes_no',
-  // A table CELL affordance, offered by `ColumnInspector`'s own list. It is
-  // not a standalone question, so it stays out of the field-type dropdown for
-  // the same reason `boolean_yes_no` does.
-  'check_cross',
 ]);
 
 /**
@@ -136,8 +144,13 @@ export function typeOptionsFor(type: FormFieldType): Array<{ label: string; valu
  * already accepted, now attached to a table whose columns were cleared from
  * under it. Clearing on the way out makes a retype reversible without being
  * resurrective.
+ *
+ * Exported for the same reason `typeOptionsFor` is: a third editor — the
+ * assessment builder's structure panel — retypes fields too, and a second
+ * implementation of this reconciliation would drift from this one exactly the
+ * way the type dropdowns already did once.
  */
-function retypeField(f: FormField, type: FormFieldType): FormField {
+export function retypeField(f: FormField, type: FormFieldType): FormField {
   const nf: FormField = { ...f, type };
 
   if (isChoiceField(type)) {

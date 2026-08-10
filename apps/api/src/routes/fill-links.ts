@@ -13,6 +13,7 @@ import { db } from '../db.js';
 import {
   incompleteRowsByField,
   missingRequiredFields,
+  resolveBrandKit,
   resolveTheme,
   resolveVoiceInput,
   stripHiddenValues,
@@ -337,10 +338,35 @@ publicFillRouter.get('/:token', withErrorHandling(async (req, res) => {
   // contract change on the most-hit anonymous route in the product.
   const orgTheme = org?.branding?.theme;
   const formOverride = template.themeOverride;
+  /*
+    THE FORM'S BRAND SITS BETWEEN THE ORG AND THE OVERRIDE.
+
+    A subcontractor's forms mostly carry a CLIENT's brand, not their own, so the
+    org's kit is the fallback for a form nobody assigned — not a baseline
+    everything deviates from. The per-form override still wins, for a genuine
+    one-off inside a client's brand.
+
+    Looked up only when the form actually names one: this is the most-hit
+    anonymous route in the product, and an unconditional query on it would be a
+    real cost for the majority of forms that have no brand at all.
+  */
+  const brand = template.brandId
+    ? await db.query.formBrands.findFirst({
+        where: and(
+          eq(schema.formBrands.id, template.brandId),
+          eq(schema.formBrands.orgId, template.orgId),
+        ),
+      })
+    : null;
+
   const orgBranding = org?.branding
-    ? orgTheme || formOverride
-      ? { ...org.branding, theme: resolveTheme(orgTheme, formOverride) }
-      : org.branding
+    ? brand
+      ? // `resolveBrandKit` owns the whole layering — logo, colours, font and
+        // theme — so the payload the page receives is already the client's.
+        resolveBrandKit(org.branding, brand.branding, formOverride)
+      : orgTheme || formOverride
+        ? { ...org.branding, theme: resolveTheme(orgTheme, formOverride) }
+        : org.branding
     : null;
 
   res.json({

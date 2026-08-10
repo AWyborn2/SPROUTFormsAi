@@ -14,6 +14,13 @@
  * the note beside KEY_PATH. Optional: --template-id <uuid> when name matching
  * finds the wrong template.
  *
+ * The cover page's boxes are found by label, and this document prints several
+ * of each. Where more than one matches, the run says which and declares none —
+ * settle it with --candidate-name <id>, --assessor-signature <id> or
+ * --assessor-name <id>. Until one is declared the certificate exports with that
+ * box BLANK, which on the assessor's signature means a certificate nobody
+ * appears to have signed.
+ *
  * DRY RUN BY DEFAULT. Everything here is heuristic — imported field ids and
  * labels come from AI extraction, so this script's job is to propose a
  * mapping, show its work, and refuse to write anything that does not survive
@@ -415,18 +422,59 @@ async function main() {
      NOTHING about the front page and a blank certificate was the first news of
      it.
   */
-  const findOne = (what, re, types) => {
+  /*
+     AND A WAY TO SETTLE IT, which this had no answer for.
+
+     Refusing on ambiguity is right. But with no override, a document printing
+     "Name of Assessor" once per part AND once on the cover could never declare
+     the cover one — so the certificate exported with no assessor signature on
+     it, permanently. The refusal was a dead end rather than a prompt.
+
+     An id supplied by the operator is not a guess: they have the document open
+     and the warning lists the candidates. It is checked against the version, so
+     a typo or an id left over from an older import stops the run rather than
+     declaring nothing — which is the same failure with an extra step.
+  */
+  const findOne = (what, re, types, override) => {
+    const flagName = `--${what.replace(/ /g, '-')}`;
+    if (override) {
+      const named = fields.find((f) => f.id === override);
+      if (!named) {
+        problems.push(
+          `${flagName} names field "${override}", which is not in this version. A stale id declares ` +
+            'nothing and reads exactly like success, so nothing is written.',
+        );
+        return undefined;
+      }
+      console.log(`  ${what} → ${named.id} "${(named.label ?? '').slice(0, 48)}" (declared by ${flagName})`);
+      return named;
+    }
+    /*
+       SEARCHED ON THE COVER SLICE, NOT THE WHOLE DOCUMENT.
+
+       This paper reprints its certification block verbatim at the end of every
+       part — seven copies of "Name of Assessor", "Date" and the competent tick.
+       A whole-document search matched all seven, the guard above refused all
+       seven (correctly), and the manifest was authored with an empty `signOff`:
+       a signed, competent case exported a certificate with no name, no date and
+       no tick, and the paper was the first anyone knew.
+
+       The per-part block already scoped itself for exactly this reason. The
+       override above stays as the answer for a cover that is still ambiguous.
+    */
     const hits = coverFields.filter((f) => types.includes(f.type) && re.test(norm(f.label)));
     if (hits.length === 1) return hits[0];
     if (hits.length === 0) {
       warnings.push(
         `${what}: nothing on the cover page matches, so that box will print BLANK on every ` +
-          `certificate. Check the field exists and is typed as one of: ${types.join(', ')}.`,
+          `certificate. Check the field exists and is typed as one of: ${types.join(', ')}, ` +
+          `or name it with ${flagName} <id>.`,
       );
     } else {
       warnings.push(
         `${what}: ${hits.length} cover-page fields match (${hits.map((f) => f.id).join(', ')}) — ` +
-          `none declared, because printing it in the wrong one is worse than leaving the box blank.`,
+          `none declared, because printing it in the wrong one is worse than leaving the box blank. ` +
+          `Pick one with ${flagName} <id>.`,
       );
     }
     return undefined;
@@ -443,12 +491,19 @@ async function main() {
     'candidate name',
     /candidate.*name|name.*candidate/,
     SCALARS,
+    flag('--candidate-name'),
   );
-  const sigField = findOne('assessor signature', /assessor.*signature|signature.*assessor/, SCALARS);
+  const sigField = findOne(
+    'assessor signature',
+    /assessor.*signature|signature.*assessor/,
+    SCALARS,
+    flag('--assessor-signature'),
+  );
   const assessorNameField = findOne(
     'assessor name',
     /name of assessor|assessor.*name|assessor.*print/,
     SCALARS,
+    flag('--assessor-name'),
   );
   /*
      Anchored to the assessor block rather than to "date" alone, because this

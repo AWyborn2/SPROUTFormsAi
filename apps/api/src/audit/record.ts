@@ -7,6 +7,15 @@ export interface AuditInput {
   target?: string;
   category: AuditCategory;
   icon?: string;
+  /**
+   * The profile inventory's key for the field this entry covers (R57, R58).
+   *
+   * Set only by a per-field write. R58's filter compares it against the
+   * inventory's sensitive marks, which is why it is a column rather than
+   * something parsed out of `target` — a filter over free text would have to
+   * pattern-match the very prose holding the values it is hiding.
+   */
+  field?: string | null;
 }
 
 /**
@@ -19,10 +28,17 @@ export async function recordAudit(db: Db, tenant: TenantContext, input: AuditInp
   await db.insert(schema.auditLogEntries).values({
     orgId: tenant.orgId,
     actorId: tenant.userId,
-    actorName: actor?.name ?? 'System',
+    /*
+      `actorLabel` wins where the caller set it — a machine call whose issuing
+      Admin has been deactivated names the KEY rather than a person who cannot
+      sign in. The id below is unchanged either way, so the entry stays
+      traceable to whoever authorised that key.
+    */
+    actorName: tenant.actorLabel ?? actor?.name ?? 'System',
     action: input.action,
     target: input.target ?? '',
     category: input.category,
+    field: input.field ?? null,
     icon: input.icon ?? 'activity',
   });
 }
@@ -35,6 +51,8 @@ export function auditEntryDto(r: typeof schema.auditLogEntries.$inferSelect) {
     action: r.action,
     target: r.target,
     category: r.category,
+    /** Null on every entry that is not about one profile field (R57). */
+    field: r.field,
     icon: r.icon,
     createdAt: r.createdAt.toISOString(),
   };

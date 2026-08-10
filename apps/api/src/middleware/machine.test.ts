@@ -21,6 +21,8 @@ function fakeDb(opts: {
   issuer?: unknown;
   updateThrows?: boolean;
   findThrows?: boolean;
+  /** The membership the cookie-path revalidation reads (omit to leave it unresolved). */
+  membership?: { status: string; role?: string };
 }) {
   const updateSet = vi.fn();
   return {
@@ -34,6 +36,7 @@ function fakeDb(opts: {
           }),
         },
         users: { findFirst: vi.fn().mockResolvedValue('issuer' in opts ? opts.issuer : ISSUER) },
+        memberships: { findFirst: vi.fn(async () => opts.membership) },
       },
       update: vi.fn(() => ({
         set: (v: unknown) => {
@@ -188,7 +191,7 @@ describe('requireMachineOrTenant — acceptance', () => {
   });
 
   it('still accepts a session cookie, so the web app can call the same routes', async () => {
-    const { db } = fakeDb({});
+    const { db } = fakeDb({ membership: { status: 'active', role: 'owner' } });
     mockDbValue = db;
     const tenant = { userId: 'u1', orgId: 'org-9', role: 'owner' as const };
     const req = fakeReq({}, { fai_session: sealSession(tenant) });
@@ -198,6 +201,21 @@ describe('requireMachineOrTenant — acceptance', () => {
     expect(next).toHaveBeenCalledOnce();
     expect(req.tenant).toEqual(tenant);
     expect(req.apiKeyId).toBeUndefined();
+  });
+
+  it('refuses a session cookie whose membership has been deactivated (R65)', async () => {
+    // The cookie door must revalidate exactly as requireTenant does: a leaver's
+    // still-valid cookie is refused here too, or /inductions and /mcp would go
+    // on honouring a session every other route now rejects.
+    const { db } = fakeDb({ membership: { status: 'suspended' } });
+    mockDbValue = db;
+    const req = fakeReq({}, { fai_session: sealSession({ userId: 'u1', orgId: 'org-9', role: 'owner' }) });
+    const res = fakeRes();
+    const next = vi.fn();
+    await requireMachineOrTenant(req, res, next as unknown as NextFunction);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(401);
   });
 
   it('lets a downstream throw propagate rather than answering 401 for it', async () => {
@@ -232,5 +250,75 @@ describe('requireMachineOrTenant — acceptance', () => {
     );
     await requireMachineOrTenant(req, fakeRes(), vi.fn() as unknown as NextFunction);
     expect(req.tenant?.orgId).toBe('org-1');
+  });
+});
+
+describe('a key whose issuer has been deactivated (R65)', () => {
+  it('KEEPS AUTHENTICATING, because the key is the organisation\u2019s', async () => {
+    /*
+      An API key is scoped to the org, carries its OWN role rather than the
+      issuer's, and any Admin holding `team.manage` can revoke it.
+      `created_by_user_id` records who authorised it so an agent's writes name a
+      real actor — it is an attribution device, not an authorisation source.
+
+      So cutting the key here would not be containing a leaver's access; it
+      would be taking down whatever integration the organisation runs, the
+      moment an unrelated HR event happened, with no warning. The leaver holds a
+      copy of the plaintext, and the remedy for that is rotation — an Admin
+      decision, prompted through the working list and the keys screen.
+    */
+    const { minted, row } = liveKey();
+    const { db } = fakeDb({ apiKey: row, membership: { status: 'suspended' } });
+    mockDbValue = db;
+    const req = fakeReq({ authorization: `Bearer ${minted.plaintext}` });
+    const next = vi.fn();
+    await requireMachineOrTenant(req, fakeRes(), next as unknown as NextFunction);
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(req.tenant?.orgId).toBe('org-1');
+    expect(req.tenant?.role).toBe('reviewer');
+  });
+
+  it('stops naming the deactivated person as the actor on what it writes', async () => {
+    /*
+      The defect that outlives the access question. Left alone, every audit
+      entry the key produced would name somebody who cannot sign in, for as long
+      as the key ran — an auditor reading the log would see a deactivated member
+      still working. `actorId` keeps pointing at them, because the key really was
+      theirs to authorise; only the displayed name changes.
+    */
+    const { minted, row } = liveKey();
+    const { db } = fakeDb({ apiKey: row, membership: { status: 'suspended' } });
+    mockDbValue = db;
+    const req = fakeReq({ authorization: `Bearer ${minted.plaintext}` });
+    await requireMachineOrTenant(req, fakeRes(), vi.fn() as unknown as NextFunction);
+
+    expect(req.tenant?.actorLabel).toBe('Induction agent (API key)');
+    expect(req.tenant?.userId).toBe(ISSUER.id);
+  });
+
+  it('leaves the label unset while the issuer is still a member', async () => {
+    const { minted, row } = liveKey();
+    const { db } = fakeDb({ apiKey: row, membership: { status: 'active' } });
+    mockDbValue = db;
+    const req = fakeReq({ authorization: `Bearer ${minted.plaintext}` });
+    await requireMachineOrTenant(req, fakeRes(), vi.fn() as unknown as NextFunction);
+
+    expect(req.tenant?.actorLabel).toBeUndefined();
+  });
+
+  it('leaves the label unset when the membership read fails', async () => {
+    // Fail-open on unknown: this decides a display label, not access, and a
+    // database hiccup must not start renaming actors on audit entries.
+    const { minted, row } = liveKey();
+    const { db } = fakeDb({ apiKey: row });
+    (db.query.memberships.findFirst as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('db down'));
+    mockDbValue = db;
+    const req = fakeReq({ authorization: `Bearer ${minted.plaintext}` });
+    const next = vi.fn();
+    await requireMachineOrTenant(req, fakeRes(), next as unknown as NextFunction);
+
+    expect(next).toHaveBeenCalledOnce();
+    expect(req.tenant?.actorLabel).toBeUndefined();
   });
 });
