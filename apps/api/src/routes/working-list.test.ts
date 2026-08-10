@@ -46,6 +46,8 @@ interface Opts {
   documents?: unknown[];
   competencies?: unknown[];
   users?: unknown[];
+  /** Live API keys, for the issuer-deactivated source (R65). Empty by default. */
+  apiKeys?: unknown[];
 }
 function fakeDb(opts: Opts) {
   return {
@@ -87,6 +89,12 @@ function fakeDb(opts: Opts) {
       competencyDocuments: { findMany: vi.fn().mockResolvedValue(opts.documents ?? []) },
       competencies: { findMany: vi.fn().mockResolvedValue(opts.competencies ?? []) },
       users: { findMany: vi.fn().mockResolvedValue(opts.users ?? []) },
+      /*
+        The issuer-deactivated key source (R65). Empty by default: an
+        organisation with no keys has nothing to review, which is the state
+        every pre-existing case in this file runs in.
+      */
+      apiKeys: { findMany: vi.fn().mockResolvedValue(opts.apiKeys ?? []) },
       assessmentCases: { findMany: vi.fn().mockResolvedValue(opts.pooledCases ?? []) },
     },
   } as unknown as Db;
@@ -429,5 +437,68 @@ describe('GET /working-list (U19, R95)', () => {
     const res = await fetch(`${base}/working-list`, { headers: authHeader(candidate) });
     expect(res.status).toBe(403);
     server.close();
+  });
+
+  describe('the API-key review source (R65)', () => {
+    const MEMBER = { id: 'm-1', orgId: 'org-1', userId: 'u-gone', status: 'active' };
+
+    it('lists a live key whose issuer has been deactivated', async () => {
+      /*
+        The key keeps working — it is the organisation's, and revoking it on
+        somebody's departure would take down whatever integration it drives with
+        no warning. So the product's obligation is to TELL an Admin, here, where
+        they come to see what needs doing. It clears by being acted upon like
+        every other source: the item leaves when the key is revoked or the member
+        comes back.
+      */
+      mockDbValue = fakeDb({
+        memberships: [MEMBER],
+        apiKeys: [
+          {
+            id: 'k-1',
+            name: 'Induction agent',
+            role: 'reviewer',
+            prefix: 'abc123',
+            createdAt: daysAgo(40),
+            lastUsedAt: null,
+            createdByUserId: 'u-gone',
+            revokedAt: null,
+          },
+        ],
+        users: [{ id: 'u-gone', name: 'Dale Rivers' }],
+      });
+      // The membership double filters to active, so the deactivated issuer is
+      // supplied through the second read the source makes.
+      (mockDbValue!.query.memberships.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { ...MEMBER, status: 'suspended' },
+      ]);
+
+      const { server, base } = startApp();
+      const items = (await (await fetch(`${base}/working-list`, { headers: authHeader(admin) })).json()) as Array<{
+        kind: string;
+        subject: string;
+        id: string;
+      }>;
+      const row = items.find((i) => i.kind === 'api_key_review');
+      expect(row).toBeDefined();
+      expect(row!.id).toBe('k-1');
+      expect(row!.subject).toContain('Induction agent');
+      expect(row!.subject).toContain('Dale Rivers');
+      server.close();
+    });
+
+    it('lists nothing where every issuer is still a member', async () => {
+      mockDbValue = fakeDb({
+        memberships: [MEMBER],
+        apiKeys: [{ id: 'k-1', name: 'Agent', createdByUserId: 'u-gone', revokedAt: null, createdAt: daysAgo(2) }],
+        users: [{ id: 'u-gone', name: 'Dale Rivers' }],
+      });
+      const { server, base } = startApp();
+      const items = (await (await fetch(`${base}/working-list`, { headers: authHeader(admin) })).json()) as Array<{
+        kind: string;
+      }>;
+      expect(items.filter((i) => i.kind === 'api_key_review')).toHaveLength(0);
+      server.close();
+    });
   });
 });

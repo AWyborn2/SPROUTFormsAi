@@ -4,6 +4,7 @@ import type { TenantContext } from '@formai/shared';
 import { DEACTIVATED_STATUS } from '../middleware/tenant.js';
 import { notifyPoolOfInvalidatedCase } from './pool-notify.js';
 import { recordAudit } from '../audit/record.js';
+import { liveKeysIssuedBy } from './orphaned-keys.js';
 
 /**
  * Leaving is DEACTIVATION — not deletion, and not revocation (R62–R78).
@@ -38,6 +39,16 @@ export interface DeactivationOutcome {
   casesInvalidated: number;
   /** The pool the released seat returned to (R77). */
   seatReleased: 'staff' | 'candidate';
+  /**
+   * API keys this person issued that are STILL LIVE (R65).
+   *
+   * Deliberately not revoked. A key is the organisation's credential — its own
+   * role, revocable by any Admin — so cutting it here would turn somebody
+   * leaving into an unannounced outage of whatever integration it drives. What
+   * the leaver has is a copy of the plaintext, and the remedy for that is
+   * rotation, which is an Admin decision. Reported so it can be made.
+   */
+  apiKeysLeftLive: number;
 }
 
 /**
@@ -144,6 +155,22 @@ export async function deactivateMember(
     }
   }
 
+  /*
+    Counted AFTER the transaction, because it is a fact about the state the
+    decision left behind rather than part of the transition. Recorded whether or
+    not it is zero would be noise; the entry below fires only when doors were
+    knowingly left open.
+  */
+  const apiKeysLeftLive = await liveKeysIssuedBy(db, membership.orgId, membership.userId);
+  if (apiKeysLeftLive > 0) {
+    await recordAudit(db, tenant, {
+      action: 'Left API keys live on deactivation',
+      target: `${apiKeysLeftLive} key${apiKeysLeftLive === 1 ? '' : 's'} issued by this member remain active`,
+      category: 'security',
+      icon: 'key-round',
+    });
+  }
+
   await recordAudit(db, tenant, {
     action: 'Deactivated member',
     target: membership.userId,
@@ -156,6 +183,7 @@ export async function deactivateMember(
     casesInvalidated: invalidated.length,
     // R77: the pool the membership's access level drew on.
     seatReleased: membership.role === 'candidate' ? 'candidate' : 'staff',
+    apiKeysLeftLive,
   };
 }
 

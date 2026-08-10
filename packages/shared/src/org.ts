@@ -36,6 +36,24 @@ export interface TenantContext {
   userId: string;
   orgId: string;
   role: Role;
+  /**
+   * The name an audit entry carries INSTEAD of resolving the user's own.
+   *
+   * Set only on a machine call whose issuing Admin has since been deactivated.
+   * An API key is the ORGANISATION's credential — its own role, its own
+   * lifecycle, revoked by any Admin — so it keeps working when the person who
+   * issued it leaves. But naming that person as the actor on every write it
+   * makes afterwards would have the audit trail claim somebody who cannot sign
+   * in is still working, which is a different and worse defect than the access
+   * itself.
+   *
+   * `actorId` still points at the issuer, so the entry stays traceable to whoever
+   * authorised the key. Only the displayed name changes.
+   *
+   * NEVER SEALED into a session cookie: a human session leaves this unset and
+   * `recordAudit` falls back to the user's own name.
+   */
+  actorLabel?: string;
 }
 
 /** `GET /auth/me` response — the sealed session plus display fields the client needs. */

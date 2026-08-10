@@ -25,6 +25,8 @@ function fakeDb(opts: {
   openInvites?: unknown[];
   acceptedInvites?: unknown[];
   openCases?: unknown[];
+  /** Live keys this member issued, for the R65 notice. */
+  apiKeys?: unknown[];
 }) {
   const writes: Array<{ table: unknown; values: unknown }> = [];
   const inserts: Array<{ table: unknown; values: unknown }> = [];
@@ -40,6 +42,8 @@ function fakeDb(opts: {
     */
     invites: { findMany: vi.fn(async () => opts.openInvites ?? opts.acceptedInvites ?? []) },
     assessmentCases: { findMany: vi.fn(async () => opts.openCases ?? []) },
+    // The R65 key notice. Empty by default: most members issued none.
+    apiKeys: { findMany: vi.fn(async () => opts.apiKeys ?? []) },
   };
 
   const surface = {
@@ -243,5 +247,63 @@ describe('the clock keeps running through an absence (R69, R70)', () => {
     // Past it, expired — the clock did not pause for them either.
     const dayForty = new Date('2026-02-19T00:00:00Z');
     expect(competencyCurrency({ grantedAt: GRANTED }, VALIDITY, dayForty).status).toBe('expired');
+  });
+});
+
+describe('API keys the leaver issued (R65)', () => {
+  it('does NOT revoke them, and reports how many were left live', async () => {
+    /*
+      A key is the organisation's credential — its own role, revocable by any
+      Admin — so cutting it on somebody's departure would turn an HR event into
+      an unannounced outage of whatever integration it drives. What the leaver
+      holds is a copy of the plaintext, and rotating it is an Admin decision.
+      Deactivation's job is to make sure somebody is told.
+    */
+    notifyMock.notifyPoolOfInvalidatedCase.mockClear().mockResolvedValue({ notifiedUserIds: [] });
+    const { db, writes, inserts } = fakeDb({
+      user: { id: 'u-2', name: 'Dale', email: 'dale@x.io' },
+      apiKeys: [{ id: 'k-1' }, { id: 'k-2' }],
+    });
+
+    const out = await deactivateMember(db, TENANT, MEMBER);
+
+    expect(out.apiKeysLeftLive).toBe(2);
+    // Nothing was revoked — the keys table is untouched.
+    expect(writes.map((w) => w.table)).not.toContain(schema.apiKeys);
+
+    const entries = inserts
+      .filter((i) => i.table === schema.auditLogEntries)
+      .map((i) => i.values as { action: string; target: string; category: string });
+    const left = entries.find((e) => e.action === 'Left API keys live on deactivation');
+    expect(left).toBeDefined();
+    expect(left!.category).toBe('security');
+    expect(left!.target).toContain('2 keys');
+  });
+
+  it('writes no notice where the member issued none', async () => {
+    // An audit trail of no-ops is noise over the entries that matter.
+    const { db, inserts } = fakeDb({ user: { id: 'u-2', name: 'Dale', email: 'dale@x.io' } });
+    const out = await deactivateMember(db, TENANT, MEMBER);
+
+    expect(out.apiKeysLeftLive).toBe(0);
+    const entries = inserts
+      .filter((i) => i.table === schema.auditLogEntries)
+      .map((i) => (i.values as { action: string }).action);
+    expect(entries).not.toContain('Left API keys live on deactivation');
+    // The deactivation itself is still recorded.
+    expect(entries).toContain('Deactivated member');
+  });
+
+  it('says "1 key" rather than "1 keys"', async () => {
+    const { db, inserts } = fakeDb({
+      user: { id: 'u-2', name: 'Dale', email: 'dale@x.io' },
+      apiKeys: [{ id: 'k-1' }],
+    });
+    await deactivateMember(db, TENANT, MEMBER);
+    const left = inserts
+      .filter((i) => i.table === schema.auditLogEntries)
+      .map((i) => i.values as { action: string; target: string })
+      .find((e) => e.action === 'Left API keys live on deactivation');
+    expect(left!.target).toContain('1 key ');
   });
 });

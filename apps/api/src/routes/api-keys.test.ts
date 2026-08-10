@@ -50,7 +50,16 @@ function insertResult(rows: unknown[]) {
   return awaitable;
 }
 
-function fakeDb(opts: { keyFindFirst?: unknown; keyFindMany?: unknown[] } = {}) {
+function fakeDb(
+  opts: {
+    keyFindFirst?: unknown;
+    keyFindMany?: unknown[];
+    /** Memberships of the key issuers, for the deactivated-issuer badge (R65). */
+    memberships?: unknown[];
+    /** The issuer user rows the badge names. */
+    issuers?: unknown[];
+  } = {},
+) {
   const insertValues = vi.fn();
   const updateSet = vi.fn();
 
@@ -62,7 +71,16 @@ function fakeDb(opts: { keyFindFirst?: unknown; keyFindMany?: unknown[] } = {}) 
       },
       // Unset so `hasPermission` falls back to the shipped default matrix.
       rolePermissions: { findFirst: vi.fn().mockResolvedValue(undefined) },
-      users: { findFirst: vi.fn().mockResolvedValue({ id: 'u-owner', name: 'Ash Wyborn' }) },
+      users: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'u-owner', name: 'Ash Wyborn' }),
+        findMany: vi.fn().mockResolvedValue(opts.issuers ?? []),
+      },
+      /*
+        The issuer-deactivated badge (R65). Empty by default, which reads as
+        every issuer still being a member — the state every pre-existing case in
+        this file runs in.
+      */
+      memberships: { findMany: vi.fn().mockResolvedValue(opts.memberships ?? []) },
     },
     insert: vi.fn((table: unknown) => ({
       values: (v: Record<string, unknown>) => {
@@ -240,6 +258,30 @@ describe('POST /api-keys', () => {
 });
 
 describe('GET /api-keys', () => {
+  it('names the issuer on a key whose issuer has been deactivated (R65)', async () => {
+    /*
+      The key is the organisation's and keeps working — cutting it on somebody's
+      departure would take down whatever integration it drives, unannounced. But
+      the leaver holds a copy of the plaintext, so an Admin needs to see WHICH
+      keys are worth rotating, here where they already come to manage them.
+    */
+    const { db } = fakeDb({
+      keyFindMany: [EXISTING_KEY],
+      memberships: [{ userId: 'u-owner', status: 'suspended' }],
+      issuers: [{ id: 'u-owner', name: 'Dale Rivers' }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const body = (await (await fetch(`${base}/api-keys`, { headers: authHeader(OWNER) })).json()) as Array<{
+        issuerDeactivatedName: string | null;
+      }>;
+      expect(body[0]!.issuerDeactivatedName).toBe('Dale Rivers');
+    } finally {
+      server.close();
+    }
+  });
+
   it('lists keys without their plaintext or hash', async () => {
     const { db } = fakeDb({ keyFindMany: [EXISTING_KEY] });
     mockDbValue = db;
@@ -259,6 +301,9 @@ describe('GET /api-keys', () => {
           createdAt: '2026-07-01T00:00:00.000Z',
           lastUsedAt: '2026-07-20T00:00:00.000Z',
           revokedAt: null,
+          // Null while the issuer is still a member (R65) — the badge only
+          // appears once they have been deactivated.
+          issuerDeactivatedName: null,
         },
       ]);
     } finally {

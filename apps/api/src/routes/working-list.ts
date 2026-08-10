@@ -5,6 +5,7 @@ import { owedProfileFiles } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
+import { orphanedApiKeys } from '../lib/orphaned-keys.js';
 import { db } from '../db.js';
 
 /**
@@ -34,7 +35,9 @@ export type WorkingListKind =
   /** A profile picture or a competency certificate that has not arrived (R18). */
   | 'owed_file'
   /** An address an Admin flagged as reaching nobody (R16, R20). */
-  | 'unreachable';
+  | 'unreachable'
+  /** A live API key whose issuing Admin has been deactivated (R65). */
+  | 'api_key_review';
 
 export interface WorkingListItem {
   kind: WorkingListKind;
@@ -124,6 +127,9 @@ workingListRouter.get(
 
     // ── Source: an address that reaches nobody (U36, R16, R20) ───────────────
     for (const item of await unreachableItems(orgId)) items.push(item);
+
+    // ── Source: a live key whose issuer was deactivated (R65) ────────────────
+    for (const item of await apiKeyReviewItems(orgId)) items.push(item);
 
     // Default ordering by age — oldest first; a dateless item sorts last.
     items.sort((a, b) => {
@@ -278,6 +284,31 @@ async function unreachableItems(orgId: string): Promise<WorkingListItem[]> {
     // When the flag was raised, not when the profile was created — the age that
     // matters here is how long somebody has gone unchased.
     createdAt: profile.emailUnreachableAt!.toISOString(),
+  }));
+}
+
+/**
+ * Live API keys whose issuing Admin has been deactivated (R65).
+ *
+ * A key is the ORGANISATION's credential — its own role, revocable by any Admin
+ * — so it keeps working when the person who issued it leaves, and cutting it
+ * automatically would turn an HR event into an unannounced outage. What the
+ * product owes instead is TELLING somebody: a leaver holds a copy of the
+ * plaintext, and rotating it is an Admin decision nobody can make unprompted.
+ *
+ * Clears by being acted upon, like every other source here — the item leaves
+ * when the key is revoked or the member is reactivated, not when anyone ticks
+ * it off.
+ */
+async function apiKeyReviewItems(orgId: string): Promise<WorkingListItem[]> {
+  const keys = await orphanedApiKeys(db!, orgId);
+  return keys.map((k) => ({
+    kind: 'api_key_review' as const,
+    id: k.id,
+    subject: `API key still live: ${k.name} — issued by ${k.issuerName}, since deactivated`,
+    // The age that matters is how long it has stood unreviewed, which starts
+    // when it was issued; the deactivation has no timestamp on the key itself.
+    createdAt: k.createdAt.toISOString(),
   }));
 }
 

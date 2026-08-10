@@ -8,6 +8,7 @@ import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission } from '../lib/permissions.js';
 import { recordAudit } from '../audit/record.js';
 import { mintApiKey } from '../auth/api-key.js';
+import { orphanedApiKeys } from '../lib/orphaned-keys.js';
 import { db } from '../db.js';
 
 /**
@@ -68,10 +69,25 @@ apiKeysRouter.get('/', requireTenant, withErrorHandling(async (req, res) => {
     where: eq(schema.apiKeys.orgId, tenant.orgId),
     orderBy: (k, { desc }) => [desc(k.createdAt)],
   });
+  /*
+    Which of these were issued by somebody since deactivated (R65). The key is
+    the organisation's and keeps working — cutting it would turn an HR event
+    into an unannounced outage — but the person holds a copy of the plaintext,
+    so an Admin needs to see WHICH keys to consider rotating, here where they
+    already go to manage them.
+  */
+  const orphaned = new Map((await orphanedApiKeys(db, tenant.orgId)).map((k) => [k.id, k.issuerName]));
+
   // Neither the plaintext nor the hash appears in this list — the hash is a
   // verifier, and handing it out would let anyone who reads the response
   // confirm guesses offline.
-  res.json(rows.map(keyDto));
+  res.json(
+    rows.map((row) => ({
+      ...keyDto(row),
+      /** Null unless the issuer has been deactivated; then their name (R65). */
+      issuerDeactivatedName: orphaned.get(row.id) ?? null,
+    })),
+  );
 }));
 
 const createKeyBody = z.object({
