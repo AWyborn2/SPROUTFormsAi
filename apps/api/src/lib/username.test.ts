@@ -154,16 +154,28 @@ describe('insertUserWithUsername', () => {
 });
 
 describe('backfillUsername', () => {
-  function updatingDb(failures: string[] = []) {
+  /**
+   * A db double over the real chain, which now ends in `.returning()` because
+   * the claim is atomic: the UPDATE carries `username IS NULL` and reports what
+   * it actually claimed.
+   *
+   * `claimed: false` models the concurrent loss — the row stopped being null
+   * between the caller's read and this write, so the statement matches nothing.
+   */
+  function updatingDb(opts: { failures?: string[]; claimed?: boolean } = {}) {
     const attempted: string[] = [];
+    const failures = [...(opts.failures ?? [])];
     const db = {
       update: () => ({
         set: (v: { username: string }) => ({
-          where: async () => {
-            attempted.push(v.username);
-            const constraint = failures.shift();
-            if (constraint) throw uniqueViolation(constraint);
-          },
+          where: () => ({
+            returning: async () => {
+              attempted.push(v.username);
+              const constraint = failures.shift();
+              if (constraint) throw uniqueViolation(constraint);
+              return opts.claimed === false ? [] : [{ id: 'u-1' }];
+            },
+          }),
         }),
       }),
     } as unknown as UserDb;
@@ -185,9 +197,27 @@ describe('backfillUsername', () => {
   });
 
   it('re-rolls on collision', async () => {
-    const { db, attempted } = updatingDb(['users_username_unique']);
+    const { db, attempted } = updatingDb({ failures: ['users_username_unique'] });
     await backfillUsername(db, { id: 'u-1', name: 'Jane Smith', username: null });
     expect(attempted).toHaveLength(2);
+  });
+
+  it('does NOT overwrite a username a concurrent run already issued', async () => {
+    /*
+      The early return reads the row the CALLER fetched, which is a snapshot —
+      two overlapping backfills both see the same null usernames. The guard that
+      matters is `username IS NULL` in the UPDATE itself: claiming nothing means
+      somebody else got there first, and that row is done.
+
+      Overwriting would replace a username that may already have been shown to
+      the person, which is the one outcome a backfill must never produce.
+    */
+    const { db, attempted } = updatingDb({ claimed: false });
+    const issued = await backfillUsername(db, { id: 'u-1', name: 'Jane Smith', username: null });
+
+    expect(issued).toBeNull();
+    // One attempt, then it stops — a lost race is settled, not retried.
+    expect(attempted).toHaveLength(1);
   });
 
   it('issues to a person whose stored name is a single word', async () => {
