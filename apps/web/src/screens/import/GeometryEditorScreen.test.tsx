@@ -1239,3 +1239,65 @@ describe('GeometryEditorScreen — drawing a matching connector', () => {
     expect(lastViewerProps().drawLine).toBe(false);
   });
 });
+
+/*
+  AN OUTCOME BOX IS HIDDEN ONLY WHERE ITS QUESTION IS SHOWN.
+
+  A question and its ✓/✗ cell are one unit of authoring work, so the cell has
+  no row of its own — it is reachable through the question's "Outcome" chip.
+  That justification holds only while the question is on screen. Behind the
+  search filter it was reachable through NOTHING and vanished from the session,
+  with the header still counting it, so the list read as having fewer boxes left
+  than it had.
+*/
+describe('GeometryEditorScreen — reaching an outcome box', () => {
+  const question = (id: string, label: string, outcomeId: string): FormField => ({
+    id,
+    type: 'radio',
+    label,
+    required: false,
+    source: 'imported',
+    options: ['Yes', 'No'],
+    outcomeTarget: { fieldId: outcomeId },
+  });
+
+  const cell = (id: string, label: string): FormField => ({
+    id,
+    type: 'check_cross',
+    label,
+    required: false,
+    source: 'imported',
+  });
+
+  const PAIR = [
+    question('q1', 'Assessment Result outcome', 'verdict'),
+    cell('verdict', 'The Candidate’s responses were'),
+  ];
+
+  it('gives the cell no row of its own while the question is listed', () => {
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(null);
+    renderWithFields(PAIR);
+
+    // One row, the pair. The cell has no row and no label of its own — it is
+    // reached through the question's "Outcome" chip.
+    expect(screen.getByText('Assessment Result outcome')).toBeDefined();
+    expect(screen.queryByText('The Candidate’s responses were')).toBeNull();
+  });
+
+  it('GIVES IT A ROW WHEN THE FILTER HIDES ITS QUESTION', () => {
+    /*
+      The case that made a printed box unplaceable. Searching for the cell by
+      its own name filtered out the question that owned it, and the cell was
+      then reachable through nothing at all.
+    */
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(null);
+    renderWithFields(PAIR);
+
+    fireEvent.change(screen.getByPlaceholderText(/filter|search/i), {
+      target: { value: 'responses were' },
+    });
+
+    expect(screen.queryByText('Assessment Result outcome')).toBeNull();
+    expect(screen.getByText('The Candidate’s responses were')).toBeDefined();
+  });
+});
