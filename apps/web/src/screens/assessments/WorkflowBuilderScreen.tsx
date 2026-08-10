@@ -11,6 +11,7 @@ import {
   orderedParts,
   orderedSections,
   valueSource,
+  workflowFromFields,
   type AccessLevel,
   type AssessmentWorkflow,
   type FieldAccess,
@@ -229,9 +230,35 @@ export function WorkflowBuilderScreen() {
             document — that stays as the paper prints it.
           </p>
         </div>
-        <Button onClick={onSave} disabled={!dirty || save.isPending}>
-          {dirty ? 'Save workflow' : 'Saved'}
-        </Button>
+        <div className="flex items-center gap-2">
+          {/*
+            THE ESCAPE HATCH FOR TOOLS PUBLISHED BEFORE THE BUILDER EMITTED
+            WORKFLOWS. Their editor opens on the synthesised per-part default —
+            the author's sections collapsed into part slices, the cover with no
+            card at all — and the builder cannot republish over a published
+            version to fix them. The published fields still carry the author's
+            grouping (the structure editor writes a header per section), so the
+            sections can be rebuilt from what this screen already holds.
+
+            It lands in the UNSAVED draft: the author reviews what came back
+            and saves it themselves. Access resets to everyone-fills — the same
+            default as ever — so rebuilding never quietly changes who may
+            write; it changes what the sections ARE.
+          */}
+          <Button
+            variant="outline"
+            disabled={save.isPending}
+            onClick={() => {
+              setDraft(workflowFromFields(tool.fields, tool.manifest));
+              setPrefillDraft(undefined);
+            }}
+          >
+            Rebuild sections from the form
+          </Button>
+          <Button onClick={onSave} disabled={!dirty || save.isPending}>
+            {dirty ? 'Save workflow' : 'Saved'}
+          </Button>
+        </div>
       </header>
 
       {tool.workflowIsDefault && !dirty && (

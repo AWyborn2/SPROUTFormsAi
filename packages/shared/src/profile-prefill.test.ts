@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import { profilePrefillValues, validateProfilePrefill } from './assessment.js';
-import { sectionForPart, workflowOf, canWrite } from './workflow.js';
+import { canWrite, sectionForPart, workflowFromFields, workflowOf } from './workflow.js';
 
 const field = (id: string, type: FormField['type'] = 'text', label = id): FormField => ({
   id,
@@ -119,5 +119,69 @@ describe('a mapped field inside a part is locked for everyone', () => {
     const section = sectionForPart(workflowOf(manifest, fields), 'p1')!;
 
     expect(canWrite(section, 'anchor', 'candidate')).toBe(true);
+  });
+});
+
+describe('workflowFromFields', () => {
+  /*
+    The rebuild path for tools published BEFORE the builder emitted workflows:
+    the published fields still carry the author's grouping, because the
+    structure editor writes a section_header per section and orders the fields
+    beneath it.
+  */
+  const header = (id: string, label: string): FormField => ({
+    id,
+    type: 'section_header',
+    label,
+    required: false,
+    source: 'built',
+  });
+  const published: FormField[] = [
+    header('h-details', 'Candidate Details'),
+    field('name'),
+    field('swipe'),
+    header('h-theory', 'Theory'),
+    { ...field('q1', 'checkbox_group'), answerKey: ['a'], outcomeTarget: { fieldId: 'q1-out' } },
+    field('q1-out', 'check_cross'),
+    header('h-prereq', 'Prerequisites'),
+    field('prereq', 'check_cross'),
+  ];
+  const manifest: AssessmentToolManifest = {
+    parts: [
+      { key: 'p_theory', ordinal: 1, label: 'Theory', kind: 'theory', pathways: ['new'], startFieldId: 'q1' },
+    ],
+    profilePrefill: { name: 'candidate_name', swipe: 'swipe_card' },
+  };
+  const rebuilt = workflowFromFields(published, manifest);
+
+  it('reconstructs one section per printed header, in order', () => {
+    expect(rebuilt.sections.map((s) => s.label)).toEqual([
+      'Candidate Details',
+      'Theory',
+      'Prerequisites',
+    ]);
+  });
+
+  it('ties the section containing a part anchor to that part', () => {
+    const theory = rebuilt.sections.find((s) => s.label === 'Theory')!;
+
+    expect(theory.partKey).toBe('p_theory');
+    // And the outcome cell comes out locked — a stored workflow bypasses the
+    // derived default, so the rebuild must lock it itself.
+    expect(canWrite(theory, 'q1-out', 'candidate')).toBe(false);
+  });
+
+  it('gives cover sections their fields and locks the mapped ones', () => {
+    const details = rebuilt.sections.find((s) => s.label === 'Candidate Details')!;
+
+    expect(details.fieldIds).toEqual(['name', 'swipe']);
+    expect(canWrite(details, 'name', 'candidate')).toBe(false);
+  });
+
+  it('puts fields before any header into a Front page section', () => {
+    const w = workflowFromFields([field('loose'), ...published], manifest);
+
+    expect(w.sections[0]!.label).toBe('Front page');
+    expect(w.sections[0]!.fieldIds).toEqual(['loose']);
   });
 });

@@ -250,6 +250,79 @@ export function partFieldAccess(
 }
 
 /**
+ * Reconstruct the author's sections FROM THE PUBLISHED FIELDS.
+ *
+ * The builder's structure editor writes a `section_header` for every section
+ * and orders the fields beneath it, so a published version carries the
+ * author's grouping even when no workflow was ever stored. This walks that
+ * order: each header starts a section, fields until the next header belong to
+ * it, and a section whose span contains a part's anchor carries that
+ * `partKey`.
+ *
+ * WHY IT EXISTS. Tools published before the builder emitted workflows show the
+ * synthesised per-part default — the author's seven sections collapsed to
+ * four cards, the cover with no card at all — and the builder cannot republish
+ * over a published version to fix them. The editor's "rebuild" action calls
+ * this against the fields it already holds, so every existing tool can adopt
+ * its own structure without touching the version.
+ *
+ * Same guarantees as the builder's emission: everyone-fills access (changing
+ * who may write is the author's act, not a rebuild's), outcome cells locked
+ * `auto` through `autoSourcesFor`, profile-mapped fields locked `prefill`.
+ */
+export function workflowFromFields(
+  fields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+): AssessmentWorkflow {
+  interface Draft {
+    key: string;
+    label: string;
+    ids: string[];
+  }
+  const drafts: Draft[] = [];
+  let current: Draft | null = null;
+  for (const field of fields) {
+    if (field.type === 'section_header') {
+      current = { key: field.id, label: field.label, ids: [] };
+      drafts.push(current);
+      continue;
+    }
+    if (!current) {
+      // Fields before any header — a version not written by the structure
+      // editor. They still need a card, or the rebuild would hide them.
+      current = { key: 'front', label: 'Front page', ids: [] };
+      drafts.push(current);
+    }
+    current.ids.push(field.id);
+  }
+
+  const sections: WorkflowSection[] = drafts.map((draft, index) => {
+    const span = new Set(draft.ids);
+    const part = manifest.parts.find((p) => span.has(p.startFieldId));
+    const base: WorkflowSection = {
+      key: draft.key,
+      ordinal: index + 1,
+      label: draft.label,
+      access: { candidate: 'fill', assessor: 'fill' },
+    };
+    if (part) {
+      return { ...base, partKey: part.key, fieldSource: autoSourcesFor(manifest, part, fields) };
+    }
+    const fieldSource: Record<string, ValueSource> = {};
+    for (const id of draft.ids) {
+      if (manifest.profilePrefill?.[id]) fieldSource[id] = 'prefill';
+    }
+    return {
+      ...base,
+      fieldIds: draft.ids,
+      ...(Object.keys(fieldSource).length > 0 ? { fieldSource } : {}),
+    };
+  });
+
+  return { roles: ['candidate', 'assessor'], sections };
+}
+
+/**
  * The workflow a tool has when nobody has configured one.
  *
  * Synthesised on read and never stored, so an unconfigured tool keeps behaving
