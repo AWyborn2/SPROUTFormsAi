@@ -303,6 +303,71 @@ describe('mandatory section gate', () => {
     expect(res.outcome).toBe('satisfactory');
   });
 
+  /*
+    AN EMPTY MUST-PASS SET USED TO PASS EVERYBODY, because `[].every(...)` is
+    `true`. A theory part naming no mandatory questions — or naming some that
+    were all hidden by the location stream, or all unkeyed — returned
+    SATISFACTORY for a candidate who got every question on the paper wrong.
+    Automatically, on a competency record, with no validator refusing the
+    manifest and the printed verdict box ticked by the same code path as a
+    genuine pass.
+  */
+  describe('when the must-pass set is empty', () => {
+    const noMandatory = (values: Record<string, SubmissionValue>) =>
+      markTheory({ fields: generalFields, values, part: {} });
+
+    it('does NOT pass a candidate who got everything wrong', () => {
+      const res = noMandatory({ g1: ['d'], g2: ['a'] });
+
+      expect(res.correctCount).toBe(0);
+      expect(res.outcome).toBe('not_satisfactory');
+    });
+
+    it('does not pass a candidate who answered nothing', () => {
+      expect(noMandatory({}).outcome).toBe('not_satisfactory');
+    });
+
+    it('the whole part becomes the gate — one wrong answer fails it', () => {
+      expect(noMandatory({ g1: ['a'], g2: ['a'] }).outcome).toBe('not_satisfactory');
+    });
+
+    it('still passes a perfect paper', () => {
+      /*
+        The fix must not become "always fail". An author who never narrowed the
+        must-pass set has not said nothing matters — the natural reading of
+        "every question in the must-pass set" when nobody narrowed it is every
+        question. A blanket not_satisfactory would fail a candidate who got the
+        whole paper right, which is its own way of being wrong.
+      */
+      expect(noMandatory({ g1: ['a'], g2: ['b', 'c'] }).outcome).toBe('satisfactory');
+    });
+
+    it('is not satisfactory when the part carries nothing to mark at all', () => {
+      // "Satisfactory" here would be a claim about an assessment that did not
+      // happen, and on this document that claim is a certificate.
+      const res = markTheory({ fields: [header('h'), unkeyed('g1')], values: {}, part: {} });
+
+      expect(res.marks).toHaveLength(0);
+      expect(res.outcome).toBe('not_satisfactory');
+    });
+
+    it('applies equally when the named mandatory questions produced no marks', () => {
+      /*
+        The author DID declare a gate; none of it reached marking, because the
+        ids name questions that are unkeyed. Treating that as "all mandatory
+        questions correct" passes a candidate against a gate that never ran.
+      */
+      const res = markTheory({
+        fields: generalFields,
+        values: { g1: ['d'], g2: ['a'] },
+        part: { mandatoryFieldIds: ['ghost'] },
+      });
+
+      expect(res.marks.some((m) => m.mandatory)).toBe(false);
+      expect(res.outcome).toBe('not_satisfactory');
+    });
+  });
+
   it('marks location questions without treating them as mandatory', () => {
     const res = run(withLocation, { g1: ['a'], g2: ['b', 'c'], m1: ['d'] });
 
@@ -310,10 +375,23 @@ describe('mandatory section gate', () => {
     expect(res.marks.find((m) => m.fieldId === 'g1')?.mandatory).toBe(true);
   });
 
-  it('gates on nothing when the part declares no mandatory section', () => {
+  /*
+    THIS TEST USED TO ASSERT THE OPPOSITE, and it was pinning the bug.
+
+    It read "gates on nothing when the part declares no mandatory section" and
+    expected SATISFACTORY from `{ g1: ['z'] }` — one question answered wrongly,
+    one not answered at all. Its title described what the code did rather than
+    what the rule should be, and there was no reasoning attached to it, so
+    `[].every(...) === true` went unchallenged: on a competency record, a part
+    with no must-pass set passed everybody.
+
+    The behaviour it pinned is now the one case the gate must not allow. See
+    "when the must-pass set is empty" above.
+  */
+  it('does not pass a wrong answer just because no mandatory section was named', () => {
     const res = markTheory({ fields: generalFields, values: { g1: ['z'] }, part: {} });
 
-    expect(res.outcome).toBe('satisfactory');
+    expect(res.outcome).toBe('not_satisfactory');
   });
 });
 
