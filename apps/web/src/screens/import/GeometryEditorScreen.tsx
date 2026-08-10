@@ -1523,6 +1523,25 @@ function PlacementPanel({
 
       <p className="text-[11px] leading-snug text-text-tertiary">{markSentence(field)}</p>
 
+      {/*
+        THE NUDGE HAS ALWAYS WORKED AND NOTHING SAID SO.
+
+        Arrow keys move the placed box by 1pt and Shift+arrow by 10pt, carrying
+        its bands with it — the one control that turns a roughly-right box into
+        an exactly-right one. It was announced only in the canvas's
+        `aria-label`, which a sighted author never reads, so the feature was
+        invisible and the screen looked as though it offered no fine
+        adjustment at all.
+
+        Placed here rather than on the canvas because this panel is where an
+        author is already looking when they decide a box is slightly off.
+      */}
+      <p className="text-[11px] leading-snug text-text-tertiary">
+        Click the page, then <strong className="font-semibold">arrow keys</strong> nudge the box
+        1pt — <strong className="font-semibold">Shift</strong> for 10pt. Rows and columns move
+        with it.
+      </p>
+
       <p className="text-[11px] leading-snug text-text-tertiary">
         A field with no box exports as recorded data instead of a mark on the page — visibly
         incomplete, which is the safe way to be wrong.
