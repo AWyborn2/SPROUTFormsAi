@@ -583,7 +583,7 @@ assessmentToolsRouter.get(
       ? await fieldsForVersion(db, template.currentVersionId)
       : [];
 
-    const workflow = workflowOf(tool.manifest);
+    const workflow = workflowOf(tool.manifest, fields);
     const { problems, warnings } = validateWorkflow(workflow, tool.manifest, fields);
 
     res.json({
@@ -670,7 +670,7 @@ assessmentToolsRouter.patch(
       ? await fieldsForVersion(db, template.currentVersionId)
       : [];
 
-    const { problems, warnings } = validateWorkflow(workflowOf(manifest), manifest, fields);
+    const { problems, warnings } = validateWorkflow(workflowOf(manifest, fields), manifest, fields);
     if (problems.length > 0) {
       // Nothing written. A half-applied workflow is worse than a rejected one:
       // it decides who may write a competency record.
@@ -693,7 +693,7 @@ assessmentToolsRouter.patch(
       icon: 'clipboard-check',
     });
 
-    res.json({ id: tool.id, workflow: workflowOf(manifest), warnings });
+    res.json({ id: tool.id, workflow: workflowOf(manifest, fields), warnings });
   }),
 );
 
@@ -1714,7 +1714,10 @@ assessmentCasesRouter.get(
       person sign a logbook.
     */
     const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
-    const section = sectionForPart(workflowOf(manifest), attempt.partKey);
+    // The FIELDS matter here: a question's ✓/✗ cell is declared on the question,
+    // not in the manifest, so `workflowOf` cannot mark it `auto` without them —
+    // and an unmarked cell is one the candidate can press.
+    const section = sectionForPart(workflowOf(manifest, allFields), attempt.partKey);
     const partFields = fieldsInPart(allFields, manifest, attempt.partKey);
     const hidden = new Set(hiddenFieldIds(section, partFields, party));
     const visibleFields = partFields.filter((f) => !hidden.has(f.id));
@@ -1980,15 +1983,18 @@ assessmentCasesRouter.patch(
       not be typed over.
     */
     const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
+    /*
+      Read ONCE and passed to both, because `workflowOf` needs the fields too:
+      a question's ✓/✗ cell is declared on the question rather than in the
+      manifest, so without them the derived workflow cannot mark it `auto` and
+      a candidate's typed outcome would be accepted here.
+    */
+    const versionFields = tool ? await fieldsForVersion(db, attempt.templateVersionId) : [];
     const allowed = tool
       ? new Set(
           writableFieldIds(
-            sectionForPart(workflowOf(tool.manifest), attempt.partKey),
-            fieldsInPart(
-              await fieldsForVersion(db, attempt.templateVersionId),
-              tool.manifest,
-              attempt.partKey,
-            ),
+            sectionForPart(workflowOf(tool.manifest, versionFields), attempt.partKey),
+            fieldsInPart(versionFields, tool.manifest, attempt.partKey),
             party,
           ),
         )

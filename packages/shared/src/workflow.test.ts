@@ -365,3 +365,100 @@ describe('validateWorkflow', () => {
     expect(validateWorkflow(derivedWorkflow(MANIFEST), MANIFEST, FIELDS).problems).toEqual([]);
   });
 });
+
+/**
+ * A DERIVED CELL IS NOBODY'S TO FILL.
+ *
+ * The unconfigured default gave candidate and assessor `fill` on every field of
+ * a part — and a part's fields include the ✓/✗ OUTCOME CELLS. A published
+ * assessment therefore showed the candidate "Outcome for Q5: [Satisfactory]
+ * [Not satisfactory]" as two live buttons and let them press one. A person
+ * could mark their own competency assessment, on the surface built to stop
+ * exactly that.
+ *
+ * `auto` was already the mechanism for it — `canWrite` refuses a non-`entry`
+ * field for every role — and the default simply never set it.
+ */
+describe('derivedWorkflow — a derived cell is nobody’s to fill', () => {
+  const outcomeFields: FormField[] = [
+    field('q1'),
+    field('q1-out'),
+    field('crit1'),
+    field('verdict'),
+  ];
+  const withOutcome: FormField[] = outcomeFields.map((f) =>
+    f.id === 'q1' ? { ...f, outcomeTarget: { fieldId: 'q1-out' } } : f,
+  );
+
+  const marked: AssessmentToolManifest = {
+    ...MANIFEST,
+    parts: [
+      { ...MANIFEST.parts[0]!, outcomeSatisfactory: { fieldId: 'verdict', value: true } },
+      MANIFEST.parts[1]!,
+    ],
+    signOff: { overallSatisfactory: { fieldId: 'competent', value: true } },
+  };
+
+  const sectionOf = (workflow: ReturnType<typeof derivedWorkflow>, key: string) =>
+    workflow.sections.find((s) => s.partKey === key)!;
+
+  it('REFUSES A CANDIDATE THE ✓/✗ CELL OF THEIR OWN QUESTION', () => {
+    const s = sectionOf(derivedWorkflow(marked, withOutcome), 'p1-theory');
+
+    expect(canWrite(s, 'q1-out', 'candidate')).toBe(false);
+    // The question itself is still theirs to answer.
+    expect(canWrite(s, 'q1', 'candidate')).toBe(true);
+  });
+
+  it('refuses the ASSESSOR too, because marking overwrites it either way', () => {
+    // A typed outcome was never going to survive `markTheory`; refusing the
+    // keystroke loses nothing and stops the value looking authored.
+    const s = sectionOf(derivedWorkflow(marked, withOutcome), 'p1-theory');
+
+    expect(canWrite(s, 'q1-out', 'assessor')).toBe(false);
+  });
+
+  it('refuses the part’s own verdict box', () => {
+    const s = sectionOf(derivedWorkflow(marked, withOutcome), 'p1-theory');
+
+    expect(canWrite(s, 'verdict', 'candidate')).toBe(false);
+  });
+
+  it('REFUSES THE FRONT-PAGE CERTIFICATION TO A CANDIDATE', () => {
+    // Pressing "Candidate Competent" on the fill surface would be certifying
+    // yourself.
+    const s = sectionOf(derivedWorkflow(marked, withOutcome), 'p1-theory');
+
+    expect(canWrite(s, 'competent', 'candidate')).toBe(false);
+  });
+
+  it('scopes a cell to the part it is printed in', () => {
+    // Part 2 declares no marks, so nothing of its own is locked.
+    const s = sectionOf(derivedWorkflow(marked, withOutcome), 'p2-prac');
+
+    expect(canWrite(s, 'crit1', 'candidate')).toBe(true);
+  });
+
+  it('LEAVES A TOOL THAT DECLARES NONE OF THIS EXACTLY AS IT WAS', () => {
+    // The property that makes this safe as a default: an existing tool with no
+    // outcome targets and no declared marks behaves byte-identically.
+    const before = derivedWorkflow(MANIFEST);
+    const after = derivedWorkflow(MANIFEST, FIELDS);
+
+    expect(after).toEqual(before);
+    expect(canWrite(sectionOf(after, 'p1-theory'), 'q1', 'candidate')).toBe(true);
+  });
+
+  it('cannot lock a cell it was never given the fields to see', () => {
+    /*
+      Honest about the limit. `outcomeTarget` lives on the QUESTION, so a caller
+      that passes no fields gets the old behaviour for those cells — which is
+      why every fill and save path now passes them.
+    */
+    const s = sectionOf(derivedWorkflow(marked), 'p1-theory');
+
+    expect(canWrite(s, 'q1-out', 'candidate')).toBe(true);
+    // The manifest-declared ones are locked regardless.
+    expect(canWrite(s, 'verdict', 'candidate')).toBe(false);
+  });
+});
