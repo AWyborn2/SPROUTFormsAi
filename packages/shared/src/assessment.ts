@@ -465,6 +465,18 @@ export interface AssessmentToolManifest {
    * `PrerequisiteCheck`. Evaluated on read, gated at sign-off, never typed.
    */
   prerequisiteChecks?: PrerequisiteCheck[];
+
+  /**
+   * Tool-declared DEFAULT answers, by field id — applied wherever no answer
+   * exists yet, and only there.
+   *
+   * What "Assessment Methods" needs: a theory-only tool always uses
+   * Written/Verbal Questions, so the author presets that row ticked and the
+   * assessor adjusts it if the day differed. Unlike `profilePrefill` this is a
+   * DEFAULT, not a derived fact — the field stays writable, a stored answer
+   * always wins over it, and it never overwrites anything.
+   */
+  fieldDefaults?: Record<string, SubmissionValue>;
   /**
    * Who does what, and in what order — see `workflow.ts`.
    *
@@ -1013,6 +1025,11 @@ export function validateManifest(
   */
   problems.push(...validateProfilePrefill(manifest.profilePrefill, fields));
   problems.push(...validatePrerequisiteChecks(manifest.prerequisiteChecks, fields));
+  for (const id of Object.keys(manifest.fieldDefaults ?? {})) {
+    if (!fieldIds.has(id)) {
+      problems.push(`Default answer names field "${id}", which is not in this version.`);
+    }
+  }
 
   if (manifest.candidateNameFieldId && !fieldIds.has(manifest.candidateNameFieldId)) {
     problems.push(

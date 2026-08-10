@@ -201,7 +201,14 @@ export function assembleCaseValues({
     );
   }
 
-  const values: Record<string, SubmissionValue> = {};
+  /*
+    Tool-declared DEFAULTS seed the map FIRST, so every later merge — attempt
+    values, identity prefill, prerequisite verdicts, the sign-off block — wins
+    over them. A default is what the paper says when nobody said otherwise:
+    the theory-only tool's "Written/Verbal Questions" method prints ticked
+    unless an assessor recorded something else.
+  */
+  const values: Record<string, SubmissionValue> = { ...(manifest.fieldDefaults ?? {}) };
   const rendered: string[] = [];
   const blank: string[] = [];
 

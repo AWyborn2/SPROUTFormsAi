@@ -1098,12 +1098,14 @@ export function useSaveWorkflow(toolId: string) {
       workflow: AssessmentWorkflow;
       profilePrefill?: Record<string, ProfilePrefillKey> | null;
       prerequisiteChecks?: PrerequisiteCheck[] | null;
+      fieldDefaults?: Record<string, SubmissionValue> | null;
     }) =>
       assessmentsApi.saveWorkflow(
         toolId,
         input.workflow,
         input.profilePrefill,
         input.prerequisiteChecks,
+        input.fieldDefaults,
       ),
     onSuccess: () => {
       // Prefix invalidation, so the detail AND the list refresh: the list

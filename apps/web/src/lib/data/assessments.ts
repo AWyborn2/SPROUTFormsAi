@@ -276,6 +276,7 @@ export const assessmentsApi = {
     workflow: AssessmentWorkflow,
     profilePrefill?: Record<string, ProfilePrefillKey> | null,
     prerequisiteChecks?: PrerequisiteCheck[] | null,
+    fieldDefaults?: Record<string, SubmissionValue> | null,
   ) =>
     apiClient.patch<{ id: string; workflow: AssessmentWorkflow; warnings: string[] }>(
       `/assessment-tools/${id}`,
@@ -285,6 +286,7 @@ export const assessmentsApi = {
         workflow,
         ...(profilePrefill !== undefined ? { profilePrefill } : {}),
         ...(prerequisiteChecks !== undefined ? { prerequisiteChecks } : {}),
+        ...(fieldDefaults !== undefined ? { fieldDefaults } : {}),
       },
     ),
 

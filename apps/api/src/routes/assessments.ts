@@ -470,6 +470,19 @@ async function evaluatePrerequisites(
   });
 }
 
+/** The tool's declared defaults for these fields — served under stored values. */
+function defaultsFor(
+  manifest: AssessmentToolManifest,
+  fields: readonly FormField[],
+): Record<string, SubmissionValue> {
+  const out: Record<string, SubmissionValue> = {};
+  for (const field of fields) {
+    const value = manifest.fieldDefaults?.[field.id];
+    if (value !== undefined) out[field.id] = value;
+  }
+  return out;
+}
+
 const updateToolBody = z.object({
   name: z.string().min(1).optional(),
   workflow: workflowSchema.optional(),
@@ -484,6 +497,8 @@ const updateToolBody = z.object({
     .array(z.object({ fieldId: z.string().min(1), competencyId: z.string().min(1) }))
     .nullable()
     .optional(),
+  /** Tool-declared default answers. Same tri-state; values stored opaque. */
+  fieldDefaults: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 
 const toolBody = z.object({
@@ -787,7 +802,8 @@ assessmentToolsRouter.patch(
     const manifestChanged =
       parsed.data.workflow !== undefined ||
       parsed.data.profilePrefill !== undefined ||
-      parsed.data.prerequisiteChecks !== undefined;
+      parsed.data.prerequisiteChecks !== undefined ||
+      parsed.data.fieldDefaults !== undefined;
     let manifest: AssessmentToolManifest = tool.manifest;
     if (parsed.data.workflow) manifest = { ...manifest, workflow: parsed.data.workflow };
     if (parsed.data.profilePrefill !== undefined) {
@@ -802,6 +818,12 @@ assessmentToolsRouter.patch(
       const { prerequisiteChecks: _dropped, ...rest } = manifest;
       manifest = parsed.data.prerequisiteChecks
         ? { ...rest, prerequisiteChecks: parsed.data.prerequisiteChecks }
+        : rest;
+    }
+    if (parsed.data.fieldDefaults !== undefined) {
+      const { fieldDefaults: _dropped, ...rest } = manifest;
+      manifest = parsed.data.fieldDefaults
+        ? { ...rest, fieldDefaults: parsed.data.fieldDefaults as Record<string, SubmissionValue> }
         : rest;
     }
 
@@ -1994,9 +2016,18 @@ assessmentCasesRouter.get(
       writableFieldIds: access.writable.filter(
         (id) => !hidden.has(id) && !prefillMap[id] && !prereqIds.has(id),
       ),
-      // Prefill LAST: it is authoritative over anything stored, so a value that
-      // slipped in before the field was mapped cannot shadow the profile.
-      values: { ...(attempt.values ?? {}), ...prefill, ...prereqValues },
+      /*
+        Layering, least to most authoritative: tool DEFAULTS under everything —
+        a default fills only where nothing exists, and the field stays
+        writable — then the candidate's stored answers, then the derived
+        prefill and prerequisite verdicts, which nothing may shadow.
+      */
+      values: {
+        ...defaultsFor(manifest, visibleFields),
+        ...(attempt.values ?? {}),
+        ...prefill,
+        ...prereqValues,
+      },
     });
   }),
 );

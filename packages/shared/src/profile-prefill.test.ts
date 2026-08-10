@@ -14,6 +14,7 @@ import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import {
   profilePrefillValues,
+  validateManifest,
   validatePrerequisiteChecks,
   validateProfilePrefill,
 } from './assessment.js';
@@ -232,5 +233,24 @@ describe('validatePrerequisiteChecks', () => {
         fields,
       ),
     ).toHaveLength(1);
+  });
+});
+
+describe('manifest.fieldDefaults validation', () => {
+  it('refuses a default naming a field the version lacks', () => {
+    /*
+      Checked in validateManifest with the other pointer checks: a default onto
+      a ghost id would be carried forever and applied to nothing, and the
+      author who mistyped it would never learn why the preset does not show.
+    */
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        { key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'], startFieldId: 'a' },
+      ],
+      fieldDefaults: { ghost: 'x' },
+    };
+    const problems = validateManifest(manifest, [field('a')]);
+
+    expect(problems.some((p) => p.includes('Default answer names field "ghost"'))).toBe(true);
   });
 });

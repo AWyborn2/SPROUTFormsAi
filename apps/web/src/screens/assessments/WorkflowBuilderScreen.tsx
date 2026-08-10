@@ -18,6 +18,7 @@ import {
   type FormField,
   type PrerequisiteCheck,
   type ProfilePrefillKey,
+  type SubmissionValue,
   type ValueSource,
   type WorkflowRole,
   type WorkflowSection,
@@ -132,6 +133,10 @@ export function WorkflowBuilderScreen() {
    * until touched, same tri-state as the prefill map and for the same reason.
    */
   const [prereqDraft, setPrereqDraft] = useState<PrerequisiteCheck[] | undefined>(undefined);
+  /** Tool-declared default answers — the Assessment Methods preset. Tri-state. */
+  const [defaultsDraft, setDefaultsDraft] = useState<
+    Record<string, SubmissionValue> | undefined
+  >(undefined);
   const competencies = useCompetencies();
 
   // The parts rule is an Admin act (R73). Reads for everyone, edits for admins.
@@ -154,7 +159,11 @@ export function WorkflowBuilderScreen() {
     workflow draft, so a prefill-only or prerequisite-only change could not be
     saved at all — the one button that commits them stayed disabled.
   */
-  const dirty = draft !== null || prefillDraft !== undefined || prereqDraft !== undefined;
+  const dirty =
+    draft !== null ||
+    prefillDraft !== undefined ||
+    prereqDraft !== undefined ||
+    defaultsDraft !== undefined;
 
   /** A part's fields, grouped by printed heading. Computed once per tool load. */
   const groupsForPart = useMemo(() => {
@@ -200,6 +209,9 @@ export function WorkflowBuilderScreen() {
     const touched = prefillDraft !== undefined;
     const map = touched && Object.keys(prefillDraft!).length > 0 ? prefillDraft! : null;
     const prereqTouched = prereqDraft !== undefined;
+    const defaultsTouched = defaultsDraft !== undefined;
+    const defaults =
+      defaultsTouched && Object.keys(defaultsDraft!).length > 0 ? defaultsDraft! : null;
     const checks =
       prereqTouched && prereqDraft!.filter((c) => c.fieldId && c.competencyId).length > 0
         ? prereqDraft!.filter((c) => c.fieldId && c.competencyId)
@@ -209,12 +221,14 @@ export function WorkflowBuilderScreen() {
         workflow,
         ...(touched ? { profilePrefill: map } : {}),
         ...(prereqTouched ? { prerequisiteChecks: checks } : {}),
+        ...(defaultsTouched ? { fieldDefaults: defaults } : {}),
       },
       {
       onSuccess: (result) => {
         setDraft(null);
         setPrefillDraft(undefined);
         setPrereqDraft(undefined);
+        setDefaultsDraft(undefined);
         toast({
           variant: result.warnings.length > 0 ? 'warning' : 'success',
           message:
@@ -552,6 +566,17 @@ export function WorkflowBuilderScreen() {
                                     prefillKey={
                                       (prefillDraft ?? tool.manifest.profilePrefill ?? {})[field.id]
                                     }
+                                    defaultValue={
+                                      (defaultsDraft ?? tool.manifest.fieldDefaults ?? {})[field.id]
+                                    }
+                                    onDefaultValue={(value) =>
+                                      setDefaultsDraft((prev) => {
+                                        const base = { ...(prev ?? tool.manifest.fieldDefaults ?? {}) };
+                                        if (value === null) delete base[field.id];
+                                        else base[field.id] = value;
+                                        return base;
+                                      })
+                                    }
                                     onPrefillKey={(key) =>
                                       setPrefillDraft((prev) => {
                                         const base = { ...(prev ?? tool.manifest.profilePrefill ?? {}) };
@@ -768,6 +793,8 @@ function FieldRow({
   onSource,
   prefillKey,
   onPrefillKey,
+  defaultValue,
+  onDefaultValue,
 }: {
   field: FormField;
   section: WorkflowSection;
@@ -777,6 +804,9 @@ function FieldRow({
   /** Which profile attribute fills this field, when its source is prefill. */
   prefillKey?: ProfilePrefillKey;
   onPrefillKey?: (key: ProfilePrefillKey | null) => void;
+  /** The tool's preset answer for this field, when one is declared. */
+  defaultValue?: SubmissionValue;
+  onDefaultValue?: (value: SubmissionValue | null) => void;
 }) {
   const source = valueSource(section, field.id);
   return (
@@ -836,6 +866,46 @@ function FieldRow({
         fields only: the values these keys resolve to are strings, and
         `validateProfilePrefill` refuses anything else at save.
       */}
+      {/*
+        THE METHODS PRESET. A repeating table whose rows are fixed and whose one
+        answer column is a tick — "Methods used to assess competence" — can
+        carry a tool-level DEFAULT: the rows that come pre-ticked on every
+        case. A default, not a derived fact: the section stays writable and an
+        assessor's recorded answer always wins. Rows are written by INDEX,
+        which is the same alignment the exporter's row cursor uses.
+      */}
+      {field.type === 'repeating_group' &&
+        (field.fixedRows?.length ?? 0) > 0 &&
+        (field.columns?.length ?? 0) === 2 &&
+        onDefaultValue && (
+          <div className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 pl-1">
+            <span className="font-mono text-[9px] uppercase text-text-tertiary">Preset</span>
+            {field.fixedRows!.map((row, index) => {
+              const columnKey = field.columns![1]!.key;
+              const rows = Array.isArray(defaultValue)
+                ? (defaultValue as Record<string, boolean>[])
+                : [];
+              const ticked = rows[index]?.[columnKey] === true;
+              return (
+                <label key={row} className="flex items-center gap-1 text-[11px] text-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={ticked}
+                    onChange={(e) => {
+                      const next = field.fixedRows!.map((_, i) => ({
+                        [columnKey]: i === index ? e.target.checked : rows[i]?.[columnKey] === true,
+                      }));
+                      const any = next.some((r) => r[columnKey]);
+                      onDefaultValue(any ? next : null);
+                    }}
+                  />
+                  {row}
+                </label>
+              );
+            })}
+          </div>
+        )}
+
       {source === 'prefill' && field.type === 'text' && onPrefillKey && (
         <div className="flex flex-none items-center gap-1.5">
           <span className="font-mono text-[9px] uppercase text-text-tertiary">From</span>
