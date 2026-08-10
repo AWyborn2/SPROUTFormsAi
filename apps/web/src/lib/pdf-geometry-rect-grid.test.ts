@@ -139,6 +139,56 @@ describe('proposeRectGrid', () => {
     expect(bands[0]!.end - bands[0]!.start).toBeCloseTo(9, 5);
   });
 
+  it('takes a checkbox the drag ran THROUGH rather than around', () => {
+    /*
+      FULL ENCLOSURE WAS UNUSABLE AT THIS SCALE. A checkbox is 9pt, and a
+      hand-drawn box around a column of them clips one by a fraction of a point
+      almost every time — each clipped box silently dropped out, and the
+      reported result was "Only 0 printed boxes sit fully inside what you drew"
+      from a drag visibly covering five of them.
+    */
+    // Runs THROUGH the squares on every side: 2pt inside their left and right
+    // edges, and ending between the top and bottom rows' outer edges. Under
+    // full enclosure this selected nothing at all.
+    const tight: PageBox = { page: 0, x: 1233, y: 648, width: 5, height: 118, ...PAGE };
+
+    expect(propose(methodBoxes, tight)?.segment.rowBands).toHaveLength(5);
+  });
+
+  it('still scopes to the drag — a table further down is not swept in', () => {
+    // The centre test keeps what enclosure was there for: a checkbox belonging
+    // to the next table has its centre well outside this drag.
+    const below: PrintedRect[] = [0, 1, 2].map((i) => ({
+      x: 1231,
+      y: 400 - i * 28.4,
+      width: 9,
+      height: 9,
+    }));
+
+    expect(propose([...methodBoxes, ...below])?.segment.rowBands).toHaveLength(5);
+  });
+
+  it('picks the checkboxes over the cells when both columns are the same length', () => {
+    /*
+      A bordered table yields two columns of EXACTLY the same length — the
+      checkboxes and the ruled cells around each row. Tie-breaking by document
+      order picks whichever has the lower x, which is the cell, so every mark
+      would be centred in the whole row instead of in the printed square: a grid
+      that looks right and is wrong by an inch.
+    */
+    const cells: PrintedRect[] = [0, 1, 2, 3, 4].map((i) => ({
+      x: 438,
+      y: 748 - i * 28.4,
+      width: 839,
+      height: 26,
+    }));
+
+    const bands = propose([...cells, ...methodBoxes])!.segment.rowBands!;
+
+    expect(bands).toHaveLength(5);
+    expect(bands[0]!.end - bands[0]!.start).toBeCloseTo(9, 5);
+  });
+
   it('refuses a stray box on the far side of the page', () => {
     // Only the column is taken, so a lone rectangle elsewhere cannot drag the
     // band across the row. Here it is simply not in the winning group.

@@ -856,20 +856,31 @@ export function proposeRectGrid(input: RectGridProposeInput): RectGridOutcome {
   const right = within.x + within.width;
   const top = within.y + within.height;
 
-  // Fully inside, not merely touching. A checkbox clipped by the edge of the
-  // drag belongs to whatever is outside it, and taking it would put a row band
-  // on a row the author did not include.
-  const inside = input.rects.filter(
-    (r) =>
-      r.x >= within.x &&
-      r.x + r.width <= right &&
-      r.y >= within.y &&
-      r.y + r.height <= top,
-  );
+  /*
+    A BOX BELONGS TO THE DRAG WHEN ITS CENTRE DOES.
+
+    This was full enclosure, and full enclosure is unusable at this scale. A
+    checkbox is 9pt; a hand-drawn box around a column of them clips the first
+    or last by a fraction of a point almost every time, and each clipped box
+    silently drops out. The reported result was "Only 0 printed boxes sit fully
+    inside what you drew" from a drag visibly covering five of them — the drag
+    ran just inside the squares rather than around them.
+
+    The centre test keeps the scoping the enclosure test was there for
+    (KTD4/R7): a checkbox belonging to the next table down has its centre well
+    outside this drag, so two structurally identical tables still cannot bleed
+    into each other. What it stops doing is punishing a trace for being a few
+    tenths of a point tight.
+  */
+  const inside = input.rects.filter((r) => {
+    const cx = r.x + r.width / 2;
+    const cy = r.y + r.height / 2;
+    return cx >= within.x && cx <= right && cy >= within.y && cy <= top;
+  });
   if (inside.length < RECT_COLUMN_MIN) {
     return refuse(
       'too-few-boxes',
-      `Only ${inside.length} printed box${inside.length === 1 ? '' : 'es'} sit fully inside what you drew, and ${RECT_COLUMN_MIN} in a line are needed before that is a column rather than a coincidence. Check the drag encloses every checkbox completely.`,
+      `Only ${inside.length} printed box${inside.length === 1 ? '' : 'es'} fall inside what you drew, and ${RECT_COLUMN_MIN} in a line are needed before that is a column rather than a coincidence. Draw around the checkboxes rather than through them.`,
     );
   }
 
@@ -881,18 +892,37 @@ export function proposeRectGrid(input: RectGridProposeInput): RectGridOutcome {
     separates them and the size test below rejects the cell group outright.
   */
   const byX = [...inside].sort((a, b) => a.x - b.x);
-  let best: PrintedRect[] = [];
+  const groups: PrintedRect[][] = [];
   let run: PrintedRect[] = [];
   for (const rect of byX) {
     const head = run[0];
     if (head && Math.abs(rect.x - head.x) <= RECT_COLUMN_X_TOLERANCE) {
       run.push(rect);
     } else {
-      if (run.length > best.length) best = run;
+      if (run.length > 0) groups.push(run);
       run = [rect];
     }
   }
-  if (run.length > best.length) best = run;
+  if (run.length > 0) groups.push(run);
+
+  /*
+    LONGEST COLUMN, AND ON A TIE THE SMALLEST BOXES.
+
+    A bordered table yields two columns of exactly the same length: the
+    checkboxes, and the ruled cells around each row. Tie-breaking by document
+    order picks whichever has the lower x, which is the CELL — so every mark
+    would be centred in the whole row instead of in the printed square, and the
+    grid would look right while being wrong by an inch.
+
+    Smallest wins because a mark belongs in the innermost box that could hold
+    it. The cell is furniture around the control; the control is the square.
+  */
+  const area = (g: PrintedRect[]) => (g[0] ? g[0].width * g[0].height : Infinity);
+  let best: PrintedRect[] = [];
+  for (const group of groups) {
+    if (group.length > best.length) best = group;
+    else if (group.length === best.length && area(group) < area(best)) best = group;
+  }
   if (best.length < RECT_COLUMN_MIN) {
     return refuse(
       'boxes-not-in-a-column',
@@ -931,16 +961,36 @@ export function proposeRectGrid(input: RectGridProposeInput): RectGridOutcome {
   const columnStart = Math.min(...column.map((r) => r.x));
   const columnEnd = Math.max(...column.map((r) => r.x + r.width));
 
+  /*
+    THE SEGMENT IS THE UNION OF THE DRAG AND EVERY BAND IT MEASURED.
+
+    A box must contain its own bands — the shared validator drops a segment
+    whose bands fall outside it, which reaches the author as a silent
+    `validator-rejected` and no grid.
+
+    That is not hypothetical now that a drag can run THROUGH the squares rather
+    than around them: draw a thin line down the middle of a checkbox column and
+    the measured column band is wider than the drag on both sides, so the box
+    the author drew cannot hold the grid measured from it.
+
+    The author's own extent is still part of the union rather than being
+    replaced, because the label text is part of the table they drew and
+    narrowing to the checkbox column alone would leave the bands floating
+    beside the rows they belong to, unreadable on screen.
+  */
+  const bandBottom = Math.min(...rowBands.map((b) => b.start));
+  const bandTop = Math.max(...rowBands.map((b) => b.end));
+  const left = Math.min(within.x, columnStart);
+  const segRight = Math.max(right, columnEnd);
+  const segBottom = Math.min(within.y, bandBottom);
+  const segTop = Math.max(top, bandTop);
+
   const segment: PageBox = {
     page: input.page,
-    // The author's own left edge is kept: the label text is part of the table
-    // they drew, and narrowing the box to the checkbox column would lose the
-    // rows' identity on screen.
-    x: within.x,
-    y: Math.min(...rowBands.map((b) => b.start)),
-    width: Math.max(columnEnd, right) - within.x,
-    height:
-      Math.max(...rowBands.map((b) => b.end)) - Math.min(...rowBands.map((b) => b.start)),
+    x: left,
+    y: segBottom,
+    width: segRight - left,
+    height: segTop - segBottom,
     pageWidth: input.pageWidth,
     pageHeight: input.pageHeight,
     columnBands: [{ key: columnKey, start: columnStart, end: columnEnd }],
