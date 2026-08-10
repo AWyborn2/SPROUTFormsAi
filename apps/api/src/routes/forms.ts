@@ -790,19 +790,47 @@ formsRouter.delete('/:id', requireTenant, withErrorHandling(async (req, res) => 
     res.status(404).json({ error: 'not_found' });
     return;
   }
-  if (template.status !== 'draft') {
-    res.status(409).json({ error: 'form_not_draft' });
-    return;
-  }
-  // Drafts CAN have submissions (authed members may fill pre-publish), and
-  // submissions.templateId is ON DELETE RESTRICT — pre-check so the caller
-  // gets a typed 409 instead of a raw FK error.
+  /*
+    WHAT MAKES A FORM UNDELETABLE IS ITS RECORDS, NOT ITS STATUS.
+
+    This used to refuse anything that was not a draft. That was stricter than
+    the danger warrants and it had no way out: a published form could only be
+    archived, and an ARCHIVED form offered only Restore — so a form published
+    once was permanent, and a workspace doing repeated end-to-end runs
+    accumulated test forms it could never clear.
+
+    The real hazards are the two below, and both are already enforced by the
+    database — `submissions.templateId` and `assessmentCases.toolId` are each
+    ON DELETE RESTRICT. They are pre-checked here only so the caller gets a
+    sentence instead of a foreign-key violation.
+
+    What is LOST rather than refused: a fill link stops resolving, because
+    `formFillLinks` cascades. That is visible before the fact (the library
+    shows a form's fill count) and the confirm dialog says so, which is the
+    right trade for a form nobody has filled. Archive remains for keeping one.
+  */
   const [submissionsCount] = await db
     .select({ count: count() })
     .from(schema.submissions)
     .where(eq(schema.submissions.templateId, template.id));
   if ((submissionsCount?.count ?? 0) > 0) {
     res.status(409).json({ error: 'form_has_submissions' });
+    return;
+  }
+
+  /*
+    An assessment CASE is a competency record — attempts, marks, sign-offs.
+    `assessmentTools.templateId` cascades from this row, so deleting the
+    template would take the tool, and the case's `restrict` would abort the
+    whole statement. Refusing here names the reason instead.
+  */
+  const [casesCount] = await db
+    .select({ count: count() })
+    .from(schema.assessmentCases)
+    .innerJoin(schema.assessmentTools, eq(schema.assessmentCases.toolId, schema.assessmentTools.id))
+    .where(eq(schema.assessmentTools.templateId, template.id));
+  if ((casesCount?.count ?? 0) > 0) {
+    res.status(409).json({ error: 'form_has_assessment_cases' });
     return;
   }
 
@@ -816,7 +844,7 @@ formsRouter.delete('/:id', requireTenant, withErrorHandling(async (req, res) => 
       orgId: tenant.orgId,
       actorId: tenant.userId,
       actorName: actor?.name ?? 'System',
-      action: 'Deleted form',
+      action: template.status === 'draft' ? 'Deleted draft form' : 'Deleted form',
       target: template.name,
       category: 'forms',
       icon: 'trash-2',

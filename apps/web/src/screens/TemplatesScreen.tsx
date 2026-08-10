@@ -272,7 +272,7 @@ export function TemplatesScreen() {
       onSuccess: () => {
         setDeleteOpen(false);
         setSelectedId(undefined);
-        toast({ variant: 'success', message: 'Draft deleted.' });
+        toast({ variant: 'success', message: 'Form deleted.' });
       },
       onError: (err) => {
         const code = apiErrorCode(err);
@@ -285,7 +285,7 @@ export function TemplatesScreen() {
           toast({ variant: 'warning', message: "You don't have permission to delete forms." });
         } else {
           setDeleteOpen(false);
-          toast({ variant: 'danger', message: 'Could not delete the draft — try again.' });
+          toast({ variant: 'danger', message: 'Could not delete the form — try again.' });
         }
       },
     });
@@ -489,7 +489,14 @@ export function TemplatesScreen() {
                   Restore
                 </Button>
               )}
-              {selected?.status === 'draft' && (
+              {/*
+                OFFERED WHATEVER THE STATUS. It used to appear only on a draft,
+                which left a published form deletable by nobody — archive was
+                the only exit and an archived form offers only Restore, so a
+                form published once was permanent. What actually makes a form
+                undeletable is its RECORDS, and the server checks those.
+              */}
+              {selected && (
                 <Button
                   size="sm"
                   block
@@ -501,7 +508,7 @@ export function TemplatesScreen() {
                     setDeleteOpen(true);
                   }}
                 >
-                  Delete draft
+                  {selected.status === 'draft' ? 'Delete draft' : 'Delete form'}
                 </Button>
               )}
               {selected && (
@@ -691,13 +698,19 @@ export function TemplatesScreen() {
       <Dialog
         open={deleteOpen}
         onClose={() => !deleteForm.isPending && setDeleteOpen(false)}
-        title="Delete this draft?"
+        title={selected?.status === 'draft' ? 'Delete this draft?' : 'Delete this form?'}
         description={
           deleteError === 'form_has_submissions'
-            ? 'This draft already has fills, so it can’t be deleted — deleting it would destroy submission data. Archive it instead to take it out of the list while keeping its fills.'
-            : deleteError === 'form_not_draft'
-              ? 'This form is no longer a draft, so it can’t be deleted. Archive it instead to take it out of circulation.'
-              : `"${selected?.name ?? ''}" and its version history will be permanently deleted. This can’t be undone.`
+            ? 'This form already has fills, so it can’t be deleted — deleting it would destroy submission data. Archive it instead to take it out of the list while keeping its fills.'
+            : deleteError === 'form_has_assessment_cases'
+              ? 'Assessments have been run against this form, so it can’t be deleted — its cases are competency records. Archive it instead to take it out of circulation while keeping them.'
+              : selected?.status === 'draft'
+                ? `"${selected?.name ?? ''}" and its version history will be permanently deleted. This can’t be undone.`
+                : /*
+                    The one consequence a published form has that a draft does
+                    not, said before the click rather than discovered after it.
+                  */
+                  `"${selected?.name ?? ''}", its version history and any fill link will be permanently deleted — anyone holding that link will get a dead page. This can’t be undone. Archive it instead to keep the link working.`
         }
         size="sm"
         footer={
@@ -730,7 +743,7 @@ export function TemplatesScreen() {
                 disabled={deleteForm.isPending}
                 onClick={onConfirmDelete}
               >
-                Delete draft
+                {selected?.status === 'draft' ? 'Delete draft' : 'Delete form'}
               </Button>
             </>
           )
