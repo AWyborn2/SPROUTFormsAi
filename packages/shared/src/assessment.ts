@@ -372,6 +372,68 @@ export interface AssessmentToolManifest {
  * yields nothing rather than the remainder of the document: a stale anchor
  * must produce an empty part, never silently swallow every field after it.
  */
+/**
+ * Every field the MANIFEST declares as a destination for a derived mark.
+ *
+ * THE FIELDS MARKING WRITES ARE NOT FIELDS MARKING READS, and conflating the
+ * two broke self-marking on every part that declares its own verdict.
+ *
+ * "The Candidate's responses were: ☐ Satisfactory ☐ Not Satisfactory" is
+ * printed at the end of a part, so it falls inside that part's slice. It
+ * carries no answer key, because nobody keys it — `markTheory` WRITES it from
+ * the arithmetic. But `isSelfMarking` asks whether every question in the slice
+ * is keyed, saw an unkeyed field, and concluded a person had to judge the
+ * part. The result: declare the verdict pair the workflow needs and the tool
+ * silently stops marking itself.
+ *
+ * Same for "Detail further action", written on a not-satisfactory part, and
+ * for the cover's sign-off boxes when they fall inside a slice.
+ *
+ * DECLARATIONS ONLY — nothing is inferred from a field's type or a part's
+ * kind. A part declaring none of this returns an empty set and behaves exactly
+ * as it did. The per-question `outcomeTarget` cells are NOT here: they are
+ * read off the fields rather than the manifest, and each caller already has
+ * the field list to do it.
+ */
+export function partMarkFieldIds(
+  part?: Pick<
+    AssessmentPart,
+    'outcomeSatisfactory' | 'outcomeNotSatisfactory' | 'furtherActionFieldId' | 'checklistMark'
+  >,
+): Set<string> {
+  const out = new Set<string>();
+  const add = (id: string | undefined) => {
+    if (id) out.add(id);
+  };
+  add(part?.outcomeSatisfactory?.fieldId);
+  add(part?.outcomeNotSatisfactory?.fieldId);
+  add(part?.checklistMark?.fieldId);
+  add(part?.furtherActionFieldId);
+  return out;
+}
+
+/**
+ * The cover's sign-off boxes, which the EXPORT writes from the case's state.
+ *
+ * Separate from the part's own because the two are scoped differently: a
+ * part's verdict belongs to that part, while the front page belongs to no part
+ * at all. `derivedWorkflow` attaches these to the first section only — the one
+ * that reliably exists — and locking them in every section instead would be a
+ * different claim about a document that prints them once.
+ */
+export function signOffMarkFieldIds(manifest: AssessmentToolManifest): Set<string> {
+  const out = new Set<string>();
+  const add = (id: string | undefined) => {
+    if (id) out.add(id);
+  };
+  const signOff = manifest.signOff;
+  add(signOff?.overallSatisfactory?.fieldId);
+  add(signOff?.overallNotSatisfactory?.fieldId);
+  add(signOff?.moreCoachingRequiredYes?.fieldId);
+  add(signOff?.moreCoachingRequiredNo?.fieldId);
+  return out;
+}
+
 export function fieldsInPart(
   fields: readonly FormField[],
   manifest: AssessmentToolManifest,

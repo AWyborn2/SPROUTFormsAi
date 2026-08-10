@@ -24,7 +24,7 @@
  * questions. This reuses `visibility.ts` rather than reimplementing the rule.
  */
 
-import { fieldsInPart } from './assessment.js';
+import { fieldsInPart, partMarkFieldIds, signOffMarkFieldIds } from './assessment.js';
 import type {
   AssessmentPart,
   AssessmentToolManifest,
@@ -83,6 +83,21 @@ export function isSelfMarking(
   // answered but carries no answer key, so it is not a question to mark.
   if (manifest.locationStreamFieldId) furniture.add(manifest.locationStreamFieldId);
   for (const f of partFields) if (f.outcomeTarget) furniture.add(f.outcomeTarget.fieldId);
+  /*
+    AND THE BOXES MARKING ITSELF WRITES — the part's verdict pair, its "detail
+    further action", the cover's sign-off.
+
+    Without these a part that declares a verdict pair stops self-marking. "The
+    Candidate's responses were: ☐ Satisfactory ☐ Not Satisfactory" prints at the
+    END of a part, so it lands inside the slice; it carries no answer key
+    because nobody keys it — `markTheory` writes it from the arithmetic. The
+    test below then saw an unkeyed field and concluded a person had to judge the
+    part, which is the exact opposite of what declaring the pair was for.
+  */
+  for (const id of partMarkFieldIds(part)) furniture.add(id);
+  // The cover's boxes too, for the tools that print the certification block
+  // inside a part's slice rather than only on the front page.
+  for (const id of signOffMarkFieldIds(manifest)) furniture.add(id);
 
   const questions = partFields.filter(
     (f) => !STRUCTURAL_FIELD_TYPES.has(f.type) && !furniture.has(f.id),
