@@ -1,5 +1,5 @@
 import { randomInt } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { schema, type Db } from '@formai/db';
 import { isUniqueViolationOn } from './db-errors.js';
 
@@ -168,18 +168,37 @@ export async function insertUserWithUsername(
 /**
  * Give an existing `users` row a username, for the one-shot backfill (KTD21).
  *
- * Idempotent by construction: a row that already holds one is skipped, so a
- * partial run is repeated rather than reconciled. Returns the username the row
- * ends up with, or null when it already had one.
+ * Idempotent, and idempotent under CONCURRENCY — which the early-return alone
+ * did not achieve. That check reads the row the caller fetched, which is a
+ * snapshot: two overlapping runs both see the same null usernames, and an UPDATE
+ * keyed on the id alone would let the second overwrite a username the first had
+ * already committed and possibly already shown to the person.
+ *
+ * So the guard is IN THE STATEMENT. `username IS NULL` in the WHERE makes the
+ * claim atomic, and an empty `returning()` means somebody else got there first —
+ * reported as null, exactly as a row that already held one.
+ *
+ * Returns the username the row ends up with, or null when it already had one.
  */
 export async function backfillUsername(db: UserDb, user: { id: string; name: string; username: string | null }): Promise<string | null> {
+  // Cheap short-circuit on the snapshot. Not the guard — the WHERE below is.
   if (user.username) return null;
   const { firstName, lastName } = splitStoredName(user.name);
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const candidate = usernameCandidate(firstName, lastName);
     try {
-      await db.update(schema.users).set({ username: candidate }).where(eq(schema.users.id, user.id));
+      const claimed = await db
+        .update(schema.users)
+        .set({ username: candidate })
+        .where(and(eq(schema.users.id, user.id), isNull(schema.users.username)))
+        .returning({ id: schema.users.id });
+      /*
+        No row claimed means the username stopped being null between the read
+        and the write — a concurrent run issued one. Nothing to do and nothing
+        to report: this row is done, by somebody else.
+      */
+      if (claimed.length === 0) return null;
       return candidate;
     } catch (err) {
       if (isUniqueViolationOn(err, USERNAME_INDEX)) continue;
