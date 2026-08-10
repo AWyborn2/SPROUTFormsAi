@@ -71,11 +71,27 @@ export const queryClient = new QueryClient({
   mutationCache: new MutationCache({ onError: handleUnauthorized }),
 });
 
-const keys = {
+export const keys = {
   session: ['session'] as const,
   forms: ['forms'] as const,
   builderDrafts: ['builderDrafts'] as const,
-  builderDraft: (id: string) => ['builderDrafts', id] as const,
+  /*
+    DELIBERATELY NOT NESTED UNDER `builderDrafts`, which is the one place in
+    this file that breaks the convention.
+
+    Nesting a detail under its list is normally what you want — invalidating
+    the list refreshes the rows too. Here it is actively harmful. Autosave
+    invalidates the list on every write, `invalidateQueries` matches by PREFIX,
+    and `['builderDrafts', id]` is a prefix match — so a mounted builder would
+    refetch its own draft every two seconds while the author works. That
+    payload is a whole extraction plus every field and every key: megabytes,
+    pulled down repeatedly, for a value the builder already holds a newer
+    version of in React state.
+
+    `staleTime: Infinity` does not prevent this. An explicit invalidation
+    overrides staleness by design.
+  */
+  builderDraft: (id: string) => ['builderDraft', id] as const,
   form: (id: string) => ['forms', id] as const,
   submissions: ['submissions'] as const,
   submission: (id: string) => ['submissions', id] as const,
