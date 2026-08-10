@@ -18,6 +18,7 @@
  * array, not a schema change and not a new column in every access map.
  */
 
+import { fieldsInPart } from './assessment.js';
 import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 
@@ -216,7 +217,19 @@ export function hiddenFieldIds(
  * a default. The builder's "no role set" warning is what moves an author to
  * decide, and increment 1's part-scoping is what closes the hole meanwhile.
  */
-export function derivedWorkflow(manifest: AssessmentToolManifest): AssessmentWorkflow {
+export function derivedWorkflow(
+  manifest: AssessmentToolManifest,
+  /**
+   * The version's fields, so each question's own outcome cell can be found.
+   *
+   * OPTIONAL, and its absence is why the cells stayed writable. A manifest does
+   * not list them — `outcomeTarget` lives on the QUESTION — so a signature
+   * taking the manifest alone cannot see them at all. Callers that have the
+   * fields should pass them; one that does not gets the old behaviour for those
+   * cells rather than a wrong guess.
+   */
+  fields: readonly FormField[] = [],
+): AssessmentWorkflow {
   const sections = [...manifest.parts]
     .sort((a, b) => a.ordinal - b.ordinal)
     .map((part) => ({
@@ -225,13 +238,93 @@ export function derivedWorkflow(manifest: AssessmentToolManifest): AssessmentWor
       label: part.label,
       partKey: part.key,
       access: { candidate: 'fill' as AccessLevel, assessor: 'fill' as AccessLevel },
+      /*
+        A DERIVED CELL IS NOBODY'S TO FILL, and until now it was everybody's.
+
+        This default gave candidate and assessor `fill` on every field of the
+        part — which includes the ✓/✗ OUTCOME CELLS. So a published assessment
+        showed the candidate "Outcome for Q5: [Satisfactory] [Not satisfactory]"
+        as two live buttons and let them press one. A person could mark their
+        own competency assessment, on the surface built to stop exactly that.
+
+        `auto` is the mechanism that was already here for it: `canWrite` refuses
+        a non-`entry` field for EVERY role, so the value can only come from
+        marking. The comment above this function conceded the hole ("including
+        the hole it leaves open") and this closes it without guessing at
+        anything — every id comes from a declaration the tool already made,
+        never from a part's kind.
+
+        Marking overwrites these at resolve time regardless, so nothing is lost
+        by refusing the keystroke: a typed outcome was never going to survive.
+      */
+      fieldSource: autoSourcesFor(manifest, part, fields),
     }));
   return { roles: ['candidate', 'assessor'], sections };
 }
 
+/**
+ * Every field of one part whose value the SYSTEM writes, as a `fieldSource`
+ * map.
+ *
+ * DECLARATIONS ONLY. Each id here is one the tool itself names — a question's
+ * `outcomeTarget`, the part's verdict pair, its checklist tick. Nothing is
+ * inferred from a field's type or a part's kind, which is the same line
+ * `derivedWorkflow` draws about access: quietly changing who may write a safety
+ * assessment on a guess is not something to do on a default.
+ *
+ * The per-question outcome cells are found from the FIELDS of the part, which
+ * the manifest does not carry — so they are read off `outcomeTarget`, which is
+ * the same declaration `markTheory` writes through. A tool declaring none of
+ * this produces an empty map and behaves exactly as it did.
+ */
+function autoSourcesFor(
+  manifest: AssessmentToolManifest,
+  part: AssessmentToolManifest['parts'][number],
+  fields: readonly FormField[],
+): Record<string, ValueSource> {
+  const out: Record<string, ValueSource> = {};
+  const auto = (id: string | undefined) => {
+    if (id) out[id] = 'auto';
+  };
+
+  auto(part.outcomeSatisfactory?.fieldId);
+  auto(part.outcomeNotSatisfactory?.fieldId);
+  auto(part.checklistMark?.fieldId);
+
+  /*
+    EVERY QUESTION'S OWN ✓/✗ CELL — the ones the candidate could press.
+
+    Scoped to this part's fields, so a section covers only the cells printed
+    inside it. Read off `outcomeTarget`, which is the same declaration
+    `markTheory` writes through: if marking will write it, nobody types it.
+  */
+  for (const field of fieldsInPart(fields, manifest, part.key)) {
+    auto(field.outcomeTarget?.fieldId);
+  }
+
+  /*
+    The front page belongs to no part, so it is attached to the FIRST — the
+    only section that reliably exists. Its boxes are written by the export from
+    the case's own state, and a candidate pressing "Candidate Competent" on the
+    fill surface would be certifying themselves.
+  */
+  if (part.ordinal === Math.min(...manifest.parts.map((p) => p.ordinal))) {
+    const signOff = manifest.signOff;
+    auto(signOff?.overallSatisfactory?.fieldId);
+    auto(signOff?.overallNotSatisfactory?.fieldId);
+    auto(signOff?.moreCoachingRequiredYes?.fieldId);
+    auto(signOff?.moreCoachingRequiredNo?.fieldId);
+  }
+
+  return out;
+}
+
 /** The tool's workflow, configured or synthesised. */
-export function workflowOf(manifest: AssessmentToolManifest): AssessmentWorkflow {
-  return manifest.workflow ?? derivedWorkflow(manifest);
+export function workflowOf(
+  manifest: AssessmentToolManifest,
+  fields: readonly FormField[] = [],
+): AssessmentWorkflow {
+  return manifest.workflow ?? derivedWorkflow(manifest, fields);
 }
 
 export interface WorkflowValidation {
