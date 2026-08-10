@@ -303,6 +303,13 @@ function autoSourcesFor(
   */
   for (const field of fieldsInPart(fields, manifest, part.key)) {
     auto(field.outcomeTarget?.fieldId);
+    /*
+      A PROFILE-MAPPED FIELD IS PREFILLED, NOT TYPED — same doctrine, different
+      source. The id comes from `manifest.profilePrefill`, a declaration the
+      tool makes, never from a guess about the field; `canWrite` refuses every
+      non-`entry` field, so mapping a field is what locks it.
+    */
+    if (manifest.profilePrefill?.[field.id]) out[field.id] = 'prefill';
   }
 
   /*
