@@ -346,7 +346,15 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                   }
                   className="h-[26px] max-w-[260px] rounded-lg border border-border bg-surface-page px-2 text-[11px] text-text-secondary"
                 >
-                  <option value="">Automatic — from the printed reference</option>
+                  {/*
+                    NAMED FOR WHAT IT ACTUALLY DOES. It used to read "from the
+                    printed reference", which in this builder resolved nothing
+                    at all — the reference lives on the extracted field and
+                    never reaches a `FormField`. The fallback that does the work
+                    is document order, and the label has to say so or an author
+                    cannot tell an inferred link from a read one.
+                  */}
+                  <option value="">Automatic — the ✓/✗ box printed after it</option>
                   {outcomeBoxes.map((box) => (
                     <option key={box.id} value={box.id}>
                       {box.label || box.id}

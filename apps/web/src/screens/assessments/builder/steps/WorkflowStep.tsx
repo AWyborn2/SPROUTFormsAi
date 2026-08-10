@@ -170,6 +170,30 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         </div>
       )}
 
+      {/*
+        INFERRED LINKS ARE NOT A PROBLEM, AND NOT SILENT EITHER.
+
+        Where a question named no outcome box, the one printed immediately after
+        it is used. That is right on every paper of this shape — and it is a
+        guess: one question whose box the extraction missed re-pairs every
+        question after it, and the result still looks like a complete mapping.
+        Saying how many were inferred is what gives an author something to
+        spot-check before a mark lands on the wrong certificate.
+      */}
+      {check.inferred.length > 0 && (
+        <div className="rounded-[14px] border border-border bg-surface-sunken p-3">
+          <span className="text-[11.5px] font-semibold">
+            {check.inferred.length} mark{check.inferred.length === 1 ? '' : 's'} will land in the
+            ✓/✗ box printed straight after the question
+          </span>
+          <p className="mt-1 text-[11.5px] leading-snug text-text-secondary">
+            Read from document order, because those questions name no box themselves. Correct on a
+            paper that prints each question above its own cell — spot-check two or three against
+            the document, and set any exception from the dropdown on the answer-key step.
+          </p>
+        </div>
+      )}
+
       {failure && (
         <p role="alert" className="rounded-[10px] border border-danger bg-danger-soft p-[8px_10px] text-[11.5px] text-danger-text">
           {failure}
