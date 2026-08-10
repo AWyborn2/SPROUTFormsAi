@@ -747,6 +747,74 @@ export interface ProfileSeedResponse {
   membershipId: string | null;
 }
 
+/* ── Workforce import (U23, U24) ──────────────────────────────────────────── */
+
+/** One row the validator refused, with the reason an Admin fixes the file by. */
+export interface WorkforceImportRejection {
+  rowNumber: number;
+  subject: string;
+  reason: string;
+  detail?: string;
+}
+
+/** One pool's share of what a file costs (R144). */
+export interface WorkforceSeatCost {
+  needed: number;
+  /** Seats the allocation still has free; null when the pool is unlimited. */
+  available: number | null;
+  covered: number;
+  overflow: number;
+}
+
+/**
+ * What a filled file would cost, before anything is written (R144).
+ *
+ * Both pools are reported separately because each row names its own access
+ * level, and one figure would cover only part of what the file spends.
+ */
+export interface WorkforceImportPreview {
+  validRows: number;
+  competencyLines: number;
+  rejected: WorkforceImportRejection[];
+  preview: {
+    candidate: WorkforceSeatCost;
+    staff: WorkforceSeatCost;
+    /** Blocks the candidate overflow would buy (R84, R86). */
+    blocks: Array<{ size: number; count: number; seats: number; discount: number }>;
+    /** Rows the run will refuse for want of a seat — always the staff pool now. */
+    refusedForSeats: number;
+  };
+}
+
+/** What a completed run did — every figure derived from its recorded rows (R171). */
+export interface WorkforceImportRun {
+  runId: string;
+  startedAt: string;
+  completedAt: string | null;
+  rowsTotal: number;
+  rowsProcessed: number;
+  profilesCreated: number;
+  membershipsAdded: number;
+  membershipsReactivated: number;
+  peopleMerged: number;
+  duplicateRows: number;
+  candidateSeats: number;
+  staffSeats: number;
+  competenciesRecorded: number;
+  linesFlaggedNoDate: number;
+  assessmentsAssigned: number;
+  profilesFlaggedIncomplete: number;
+  differencesReported: number;
+  rejected: Array<{ rowNumber: number; subject: string; reason: string; detail: string | null }>;
+  flagged: Array<{ rowNumber: number; subject: string; missing: string[] }>;
+  differences: Array<{
+    rowNumber: number;
+    subject: string;
+    membershipId: string | null;
+    items: Array<{ field: string; existing: string; fromFile: string }>;
+  }>;
+}
+
 export interface ProfileResponse {
   profile: MemberProfile;
   /**

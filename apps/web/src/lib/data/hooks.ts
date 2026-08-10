@@ -134,6 +134,8 @@ const keys = {
   profile: (membershipId: string) => ['profiles', membershipId] as const,
   /** The caller's own membership id, for the fixed own-record read (R49). */
   myProfileMembership: ['profiles', 'mine'] as const,
+  /** One import run's report, addressable long after the page closed (U24). */
+  importRun: (runId: string) => ['workforceImport', 'run', runId] as const,
   /** What an induction submission would seed onto a profile (U40). */
   profileSeed: (submissionId: string) => ['profiles', 'seed', submissionId] as const,
   /** One person's held competencies, keyed on the USER the grants belong to. */
@@ -1501,5 +1503,46 @@ export function useProfileSeed(submissionId: string | undefined) {
     queryFn: () => store.getProfileSeed(submissionId!),
     enabled: !!submissionId,
     retry: false,
+  });
+}
+
+/* ── Workforce import (U23, U24) ──────────────────────────────────────────── */
+
+/** Price a filled file. A mutation because it POSTs, but it writes nothing (R144). */
+export function useValidateWorkforceImport() {
+  return useMutation({ mutationFn: (csv: string) => store.validateWorkforceImport(csv) });
+}
+
+/**
+ * Confirm and run the import.
+ *
+ * Invalidates the team list and the working list: a run creates members and can
+ * leave rows flagged, so both are stale the moment it returns.
+ */
+export function useRunWorkforceImport() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (csv: string) => store.runWorkforceImport(csv),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.members });
+      void qc.invalidateQueries({ queryKey: keys.workingList });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/**
+ * One run's report.
+ *
+ * Polls while the run is in progress — `completedAt` is null until it finishes —
+ * and stops the moment it is done, so a finished report costs nothing to keep on
+ * screen.
+ */
+export function useWorkforceImportRun(runId: string | undefined) {
+  return useQuery({
+    queryKey: keys.importRun(runId ?? ''),
+    queryFn: () => store.getWorkforceImportRun(runId!),
+    enabled: !!runId,
+    refetchInterval: (query) => (query.state.data?.completedAt ? false : 1000),
   });
 }

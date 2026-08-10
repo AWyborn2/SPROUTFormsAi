@@ -11,7 +11,12 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import type { PermissionMatrix } from '@formai/shared';
-import { auditCategoryEnum, roleEnum, trainingRequestStateEnum } from './enums.ts';
+import {
+  auditCategoryEnum,
+  importRowOutcomeEnum,
+  roleEnum,
+  trainingRequestStateEnum,
+} from './enums.ts';
 import { organizations, users } from './organizations.ts';
 import { formTemplates } from './forms.ts';
 import { submissions } from './submissions.ts';
@@ -524,5 +529,110 @@ export const competencyRulesRelations = relations(competencyRules, ({ one }) => 
   competency: one(competencies, {
     fields: [competencyRules.competencyId],
     references: [competencies.id],
+  }),
+}));
+
+/**
+ * One workforce-import run (U24, R171).
+ *
+ * PERSISTED because the rejection list is the artifact an Admin needs to correct
+ * the source file and re-import, and a report that lived only in the page would
+ * die with the tab. Addressable by id afterwards for exactly that reason.
+ *
+ * Carries no counters. Every figure the report names — profiles created, people
+ * merged, seats per pool, competencies recorded, rows rejected — is DERIVED from
+ * `import_run_rows`, because a stored tally and the rows it counts can disagree
+ * and the rows are what an Admin acts on anyway.
+ */
+export const importRuns = pgTable(
+  'import_runs',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** The Admin who confirmed the run. A run is never automatic (R144). */
+    startedByUserId: uuid().references(() => users.id, { onDelete: 'set null' }),
+    startedAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+    /** Null while the run is in progress — what the screen polls against. */
+    completedAt: timestamp({ withTimezone: true }),
+    /** Rows the file carried, so progress reads as processed-against-total. */
+    rowsTotal: integer().notNull().default(0),
+  },
+  (t) => [index('import_runs_org_idx').on(t.orgId)],
+);
+
+/**
+ * What one row of the file did (U24, R154, R171).
+ *
+ * ONE ROW PER PROFILE ROW, whatever happened to it — landed, merged,
+ * reactivated, repeated, or rejected with its reason. The rejected ones are
+ * what an Admin re-exports to fix the file; the flagged ones are what R154
+ * marks incomplete; the differences are what an Admin settles on the team
+ * screen. All three read this table.
+ */
+export const importRunRows = pgTable(
+  'import_run_rows',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    runId: uuid()
+      .notNull()
+      .references(() => importRuns.id, { onDelete: 'cascade' }),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** The row's line in the source file, so a rejection points at what to fix. */
+    rowNumber: integer().notNull(),
+    /** Name or address, for a report a person can read without the file open. */
+    subject: text().notNull(),
+    outcome: importRowOutcomeEnum().notNull(),
+    /**
+     * Why it was rejected — the validator's own reason, or a run-time one
+     * (`seat_limit_reached`, `placement_invalid`). Null on anything that landed.
+     */
+    reason: text(),
+    /** Free-text detail beside the reason, e.g. the value that was not recognised. */
+    detail: text(),
+    /** Set where the row produced or matched one. */
+    userId: uuid().references(() => users.id, { onDelete: 'set null' }),
+    membershipId: uuid(),
+    /**
+     * Inventory keys the row left empty (R154). A landed row is FLAGGED naming
+     * exactly what is missing rather than having whoever ran the import invent
+     * demographic answers for somebody they may never speak to.
+     */
+    flagged: jsonb().$type<string[]>().notNull().default([]),
+    /**
+     * Values the file carries that an existing ACTIVE membership does not
+     * (R149) — reported for an Admin to settle, never written over. An import
+     * must not be able to demote an administrator on the strength of a column.
+     */
+    differences: jsonb()
+      .$type<Array<{ field: string; existing: string; fromFile: string }>>()
+      .notNull()
+      .default([]),
+    /** Competencies this row's lines recorded, and lines skipped for want of a date (R153). */
+    competenciesRecorded: integer().notNull().default(0),
+    competenciesSkipped: integer().notNull().default(0),
+    /** Assessments assignment created for this person after their competencies landed (R163). */
+    assessmentsAssigned: integer().notNull().default(0),
+    /** Which pool the row's seat came from, or null where it cost none (R143). */
+    seatPool: text(),
+  },
+  (t) => [index('import_run_rows_run_idx').on(t.runId)],
+);
+
+export const importRunsRelations = relations(importRuns, ({ one, many }) => ({
+  org: one(organizations, {
+    fields: [importRuns.orgId],
+    references: [organizations.id],
+  }),
+  rows: many(importRunRows),
+}));
+
+export const importRunRowsRelations = relations(importRunRows, ({ one }) => ({
+  run: one(importRuns, {
+    fields: [importRunRows.runId],
+    references: [importRuns.id],
   }),
 }));

@@ -66,6 +66,8 @@ import type {
   MemberPlacement,
   ProfileResponse,
   ProfileSeedResponse,
+  WorkforceImportPreview,
+  WorkforceImportRun,
   HeldCompetencyRow,
   Taxonomy,
   ExpiryNotice,
@@ -1078,6 +1080,22 @@ export const store = {
    */
   getProfileSeed(submissionId: string): Promise<ProfileSeedResponse> {
     return apiClient.get<ProfileSeedResponse>(`/inductions/candidates/${submissionId}/profile-seed`);
+  },
+  /** The blank two-section import template (U23, R141). */
+  getWorkforceImportTemplate(): Promise<string> {
+    return apiClient.getText('/workforce-import/template');
+  },
+  /** Price a filled file without writing anything (U23, R144). */
+  validateWorkforceImport(csv: string): Promise<WorkforceImportPreview> {
+    return apiClient.post<WorkforceImportPreview>('/workforce-import/validate', { csv });
+  },
+  /** Confirm and run it. The file is re-validated server-side (U24). */
+  runWorkforceImport(csv: string): Promise<{ runId: string }> {
+    return apiClient.post<{ runId: string }>('/workforce-import/run', { csv });
+  },
+  /** The run report, readable long after the page was closed (U24, R171). */
+  getWorkforceImportRun(runId: string): Promise<WorkforceImportRun> {
+    return apiClient.get<WorkforceImportRun>(`/workforce-import/runs/${runId}`);
   },
   /** A member's record as this reader is admitted to it (U29, U38). */
   getProfile(membershipId: string): Promise<ProfileResponse> {
