@@ -898,6 +898,7 @@ export function PdfViewer({
           width: natural.width,
           height: natural.height,
           rules: rules.spans,
+          rects: rules.rects,
         });
 
         const viewport = page.getViewport({ scale: RENDER_SCALE });

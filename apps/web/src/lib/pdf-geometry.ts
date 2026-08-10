@@ -21,7 +21,7 @@
  */
 import { resolveGeometry } from '@formai/shared';
 import type { FormFieldType, GeometryBand, PageBox, RepeatingColumn } from '@formai/shared';
-import type { RuleSpan } from '../screens/import/inspector/geometry-actions.js';
+import type { PrintedRect, RuleSpan } from '../screens/import/inspector/geometry-actions.js';
 
 /**
  * One positioned text run, in PDF point space (origin bottom-left).
@@ -63,6 +63,19 @@ export interface TextPage {
    * keeps this module a pure function over positioned geometry.
    */
   rules?: readonly RuleSpan[];
+  /**
+   * Closed axis-aligned rectangles printed on this page — every checkbox
+   * square, and every ruled cell.
+   *
+   * `rules` cannot carry these: it keeps only segments 18pt or longer, and a
+   * checkbox is 8–10pt a side. That threshold is right for deciding what is a
+   * grid line and wrong for everything else, which is why the two are separate
+   * readings of the same page rather than one list with a looser filter.
+   *
+   * Optional with the same meaning as `rules` — absent is NOT MEASURED, and a
+   * rule reading it must refuse rather than invent a box.
+   */
+  rects?: readonly PrintedRect[];
 }
 
 export interface TableProposal {
@@ -699,6 +712,162 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
   }
 
   return proposals;
+}
+
+/* ── A grid measured from printed checkboxes ──────────────────────────────── */
+
+/**
+ * How far apart two checkboxes' left edges may sit and still be one column.
+ *
+ * A column of printed checkboxes is drawn from one x, so the spread is
+ * rounding, not layout. Kept tight because the whole value of this derivation
+ * is that it MEASURED the boxes rather than inferring a column from where text
+ * stops — a loose test would let a stray box on the far side of the page join
+ * the column and drag the band across the row.
+ */
+const RECT_COLUMN_X_TOLERANCE = 2.5;
+
+/** Checkboxes differing in size by more than this are not the same control. */
+const RECT_SIZE_TOLERANCE = 2;
+
+/**
+ * The fewest boxes that can establish a column.
+ *
+ * Two is a coincidence — any pair of rectangles shares an x to within a couple
+ * of points somewhere on a dense page. Three in a line is a printed column.
+ */
+const RECT_COLUMN_MIN = 3;
+
+export interface RectGridProposeInput {
+  page: number;
+  pageWidth: number;
+  pageHeight: number;
+  /** The rectangles printed on this page (`TextPage.rects`). */
+  rects: readonly PrintedRect[];
+  /** The author's drawn box, which SCOPES the derivation to one table. */
+  within: PageBox;
+  /** The column key every derived row band writes into. */
+  columnKey: string;
+}
+
+/**
+ * A repeating table's grid, measured from the checkboxes printed inside the
+ * author's drawn box.
+ *
+ * WHY TEXT CANNOT DO THIS. `proposeTableSegments` finds columns by reading
+ * header glyphs and rows by reading label baselines. A checkbox column has no
+ * header and no text of its own — "Observation/Practical Demonstration ☐" puts
+ * every glyph on the left and nothing whatever in the answer column. So the
+ * derivation that exists finds the labels, places a band where the words stop,
+ * and produces a grid whose answer column is wherever the longest label
+ * happened to end. On the Mine Site SME cover that is the reported symptom:
+ * five methods, one tall box, and no way to know whether a mark will land in a
+ * printed square or beside it.
+ *
+ * The squares themselves are the measurement. One band per checkbox, at that
+ * checkbox's own extent, is not an inference at all — it is where the box is.
+ *
+ * SCOPED TO THE DRAWN BOX, for the reason bounded subdivision exists (KTD4/R7):
+ * two structurally identical tables on a page cannot bleed into each other when
+ * detection only ever sees the rectangles the author's box encloses.
+ *
+ * Returns null rather than guessing whenever the printed evidence is not a
+ * column: fewer than three boxes, boxes of different sizes, or boxes that do
+ * not share an x.
+ */
+export function proposeRectGrid(input: RectGridProposeInput): TableProposal | null {
+  const { within } = input;
+  const right = within.x + within.width;
+  const top = within.y + within.height;
+
+  // Fully inside, not merely touching. A checkbox clipped by the edge of the
+  // drag belongs to whatever is outside it, and taking it would put a row band
+  // on a row the author did not include.
+  const inside = input.rects.filter(
+    (r) =>
+      r.x >= within.x &&
+      r.x + r.width <= right &&
+      r.y >= within.y &&
+      r.y + r.height <= top,
+  );
+  if (inside.length < RECT_COLUMN_MIN) return null;
+
+  /*
+    THE LARGEST COLUMN WINS, and it is found by grouping on x rather than by
+    taking the whole set. A drawn box over a methods table encloses the five
+    checkboxes AND, often, the ruled cell rectangles around each row. Those
+    cells share no x with the checkboxes and are a different size, so grouping
+    separates them and the size test below rejects the cell group outright.
+  */
+  const byX = [...inside].sort((a, b) => a.x - b.x);
+  let best: PrintedRect[] = [];
+  let run: PrintedRect[] = [];
+  for (const rect of byX) {
+    const head = run[0];
+    if (head && Math.abs(rect.x - head.x) <= RECT_COLUMN_X_TOLERANCE) {
+      run.push(rect);
+    } else {
+      if (run.length > best.length) best = run;
+      run = [rect];
+    }
+  }
+  if (run.length > best.length) best = run;
+  if (best.length < RECT_COLUMN_MIN) return null;
+
+  /*
+    ONE CONTROL REPEATED, not a column of different things. A checkbox and the
+    cell it sits in can share a left edge on a tightly-set table; only the size
+    test tells them apart, and mixing the two would put half the row bands on
+    cells and half on squares.
+  */
+  const widths = best.map((r) => r.width);
+  const heights = best.map((r) => r.height);
+  if (Math.max(...widths) - Math.min(...widths) > RECT_SIZE_TOLERANCE) return null;
+  if (Math.max(...heights) - Math.min(...heights) > RECT_SIZE_TOLERANCE) return null;
+
+  // Top-down, because that is the order a reader assigns rows in and the order
+  // the extracted rows are already in. PDF y grows upward.
+  const column = [...best].sort((a, b) => b.y - a.y);
+
+  const rowBands: GeometryBand[] = column.map((r, index) => ({
+    key: `r${index + 1}`,
+    start: r.y,
+    end: r.y + r.height,
+  }));
+
+  const columnStart = Math.min(...column.map((r) => r.x));
+  const columnEnd = Math.max(...column.map((r) => r.x + r.width));
+
+  const segment: PageBox = {
+    page: input.page,
+    // The author's own left edge is kept: the label text is part of the table
+    // they drew, and narrowing the box to the checkbox column would lose the
+    // rows' identity on screen.
+    x: within.x,
+    y: Math.min(...rowBands.map((b) => b.start)),
+    width: Math.max(columnEnd, right) - within.x,
+    height:
+      Math.max(...rowBands.map((b) => b.end)) - Math.min(...rowBands.map((b) => b.start)),
+    pageWidth: input.pageWidth,
+    pageHeight: input.pageHeight,
+    columnBands: [{ key: input.columnKey, start: columnStart, end: columnEnd }],
+    rowBands,
+  };
+
+  // R15: a proposal the shipped validator rejects is dropped silently
+  // downstream, leaving an empty grid and no stated reason. Check it here,
+  // where the reason is still known.
+  if (resolveGeometry({ geometry: { segments: [segment] } }).segments.length !== 1) return null;
+
+  return {
+    segment,
+    // Nothing here was inferred. Every band is the extent of a rectangle the
+    // page prints, which is the strongest evidence this module ever has.
+    confidence: 1,
+    anchorsLocated: column.length,
+    anchorsInferred: 0,
+    notes: [],
+  };
 }
 
 /* ── Non-table fields ─────────────────────────────────────────────────────── */
