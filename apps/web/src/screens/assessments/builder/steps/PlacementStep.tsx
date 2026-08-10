@@ -1,7 +1,12 @@
-import { useEffect, useRef } from 'react';
-import { useCreateDraftForm } from '../../../../lib/data/hooks.js';
+import { useEffect, useMemo, useRef } from 'react';
+import {
+  useCreateDraftForm,
+  useFormVersion,
+  useSaveVersionFields,
+} from '../../../../lib/data/hooks.js';
 import { GeometryEditorScreen } from '../../../import/GeometryEditorScreen.js';
 import type { BuilderDraftState } from '../use-builder-draft.js';
+import type { FormField } from '@formai/shared';
 
 /**
  * Step 6 — map each field onto the printed page.
@@ -27,6 +32,30 @@ import type { BuilderDraftState } from '../use-builder-draft.js';
  */
 export interface PlacementStepProps {
   draft: BuilderDraftState;
+}
+
+/**
+ * The field list a draft version should carry, given what the author has since
+ * included — or null when it already carries it and nothing need be written.
+ *
+ * ADD ONLY, NEVER REMOVE, and the order of the spread is the reason: the
+ * version's own copy of a field is the one holding the geometry drawn onto it,
+ * so it always wins over the builder's copy. A field the author excluded AFTER
+ * placing a box keeps that box rather than having it silently destroyed —
+ * publish decides what ships, and an un-drawn box is recoverable where a
+ * deleted one is not.
+ *
+ * Returning null rather than an unchanged list is what stops the reconcile
+ * effect from writing on every render: the caller saves only when there is a
+ * difference, and after one save there is none.
+ */
+export function reconciledVersionFields(
+  onVersion: readonly FormField[],
+  included: readonly FormField[],
+): FormField[] | null {
+  const have = new Set(onVersion.map((f) => f.id));
+  const missing = included.filter((f) => !have.has(f.id));
+  return missing.length > 0 ? [...onVersion, ...missing] : null;
 }
 
 export function PlacementStep({ draft }: PlacementStepProps) {
@@ -66,6 +95,48 @@ export function PlacementStep({ draft }: PlacementStepProps) {
         started.current = false;
       });
   }, [formId, fields, excluded, assetId, title, createDraftForm, setVersionIds]);
+
+  /*
+    RE-TICKING A FIELD USED TO BE A DEAD END.
+
+    The version is created ONCE, from the fields minus the excluded ones. Go
+    back to the upload step afterwards, re-include a question, and nothing
+    reaches the version — so the field never appears in the placement list and
+    can never be given a box. There was no error and no way back short of
+    starting the whole build again.
+
+    That is how an author loses the two boxes this paper's whole workflow turns
+    on. "More coaching and/or training required?" and "Candidate Competent /
+    not yet Competent" read as marking furniture at the upload step, get
+    unticked, and only become unreachable four steps later — at which point the
+    answer keys, the matching pairs and every box already placed are the cost of
+    going back.
+
+    So the step RECONCILES rather than assuming. Whatever the author has since
+    included that the version does not carry is appended to it.
+
+    What that costs and what it keeps is `reconciledVersionFields`.
+  */
+  const version = useFormVersion(formId, versionId);
+  const saveVersionFields = useSaveVersionFields(formId ?? '', versionId ?? '');
+  const reconciling = useRef(false);
+
+  const included = useMemo(() => fields.filter((f) => !excluded.has(f.id)), [fields, excluded]);
+
+  useEffect(() => {
+    const onVersion = version.data?.fields;
+    if (!formId || !versionId || !onVersion || reconciling.current) return;
+
+    const next = reconciledVersionFields(onVersion, included);
+    if (!next) return;
+
+    reconciling.current = true;
+    void saveVersionFields.mutateAsync(next).finally(() => {
+      // Cleared either way: a failed write should be retried when the author
+      // returns, not latched off for the life of the screen.
+      reconciling.current = false;
+    });
+  }, [formId, versionId, version.data, included, saveVersionFields]);
 
   if (fields.length === 0) {
     return (
