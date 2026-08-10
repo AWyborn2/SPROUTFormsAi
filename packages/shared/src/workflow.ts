@@ -202,6 +202,54 @@ export function hiddenFieldIds(
 }
 
 /**
+ * The section that COVERS one field, for a given part's attempt.
+ *
+ * A section listing the field in `fieldIds` wins over the section covering the
+ * part's slice. That is what makes an authored cover-section real: the
+ * builder's "Prerequisites" and "More Coaching Required" print INSIDE the
+ * declaration part's contiguous slice, and without this rule their own
+ * sections would be display furniture while the slice's section quietly
+ * governed their fields.
+ */
+export function sectionCoveringField(
+  workflow: AssessmentWorkflow,
+  fieldId: string,
+  partKey: string,
+): WorkflowSection | null {
+  const direct = workflow.sections.find((s) => s.fieldIds?.includes(fieldId));
+  return direct ?? sectionForPart(workflow, partKey);
+}
+
+/**
+ * Hidden and writable ids for one part's fields, resolved PER FIELD.
+ *
+ * The single-section `writableFieldIds`/`hiddenFieldIds` pair stays for
+ * callers that already resolved a section; this is the coverage-aware form the
+ * attempt routes use, so a field claimed by a `fieldIds` section obeys that
+ * section rather than the slice it happens to print inside.
+ */
+export function partFieldAccess(
+  workflow: AssessmentWorkflow,
+  partKey: string,
+  fields: readonly FormField[],
+  role: WorkflowRole,
+): { hidden: string[]; writable: string[] } {
+  const hidden: string[] = [];
+  const writable: string[] = [];
+  for (const field of fields) {
+    const section = sectionCoveringField(workflow, field.id, partKey);
+    if (!section) {
+      // Nothing configured anywhere: pre-workflow behaviour stands.
+      writable.push(field.id);
+      continue;
+    }
+    if (effectiveAccess(section, field.id, role) === 'hidden') hidden.push(field.id);
+    if (canWrite(section, field.id, role)) writable.push(field.id);
+  }
+  return { hidden, writable };
+}
+
+/**
  * The workflow a tool has when nobody has configured one.
  *
  * Synthesised on read and never stored, so an unconfigured tool keeps behaving
@@ -277,7 +325,7 @@ export function derivedWorkflow(
  * the same declaration `markTheory` writes through. A tool declaring none of
  * this produces an empty map and behaves exactly as it did.
  */
-function autoSourcesFor(
+export function autoSourcesFor(
   manifest: AssessmentToolManifest,
   part: AssessmentToolManifest['parts'][number],
   fields: readonly FormField[],

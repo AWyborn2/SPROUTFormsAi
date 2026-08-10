@@ -25,7 +25,7 @@ import {
   requiredParts,
   resolveAssessorRequirements,
   validateWorkflow,
-  hiddenFieldIds,
+  partFieldAccess,
   PROFILE_PREFILL_KEYS,
   profilePrefillValues,
   validateProfilePrefill,
@@ -1789,9 +1789,17 @@ assessmentCasesRouter.get(
     // The FIELDS matter here: a question's ✓/✗ cell is declared on the question,
     // not in the manifest, so `workflowOf` cannot mark it `auto` without them —
     // and an unmarked cell is one the candidate can press.
-    const section = sectionForPart(workflowOf(manifest, allFields), attempt.partKey);
+    /*
+      Resolved PER FIELD, not per slice. An authored cover-section
+      ("Prerequisites", "More Coaching Required") lists its fields directly
+      while printing INSIDE another part's contiguous slice — coverage-aware
+      resolution is what makes that section govern its own fields instead of
+      being display furniture.
+    */
+    const workflow = workflowOf(manifest, allFields);
     const partFields = fieldsInPart(allFields, manifest, attempt.partKey);
-    const hidden = new Set(hiddenFieldIds(section, partFields, party));
+    const access = partFieldAccess(workflow, attempt.partKey, partFields, party);
+    const hidden = new Set(access.hidden);
     const visibleFields = partFields.filter((f) => !hidden.has(f.id));
 
     // The document's own stream question is answered with the Location's NAME
@@ -1882,9 +1890,7 @@ assessmentCasesRouter.get(
         over the candidate's identity must not depend on an author remembering
         to lock the box twice.
       */
-      writableFieldIds: writableFieldIds(section, visibleFields, party).filter(
-        (id) => !prefillMap[id],
-      ),
+      writableFieldIds: access.writable.filter((id) => !hidden.has(id) && !prefillMap[id]),
       // Prefill LAST: it is authoritative over anything stored, so a value that
       // slipped in before the field was mapped cannot shadow the profile.
       values: { ...(attempt.values ?? {}), ...prefill },
@@ -2094,11 +2100,12 @@ assessmentCasesRouter.patch(
     const versionFields = tool ? await fieldsForVersion(db, attempt.templateVersionId) : [];
     const allowed = tool
       ? new Set(
-          writableFieldIds(
-            sectionForPart(workflowOf(tool.manifest, versionFields), attempt.partKey),
+          partFieldAccess(
+            workflowOf(tool.manifest, versionFields),
+            attempt.partKey,
             fieldsInPart(versionFields, tool.manifest, attempt.partKey),
             party,
-          ),
+          ).writable,
         )
       : null;
 

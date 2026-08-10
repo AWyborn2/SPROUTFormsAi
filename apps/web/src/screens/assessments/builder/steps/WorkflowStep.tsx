@@ -7,6 +7,7 @@ import {
   useSaveVersionFields,
 } from '../../../../lib/data/hooks.js';
 import { checkPublish, publishSummary } from '../builder-publish.js';
+import { workflowFromStructure } from '../builder-workflow.js';
 import type { BuilderDraftState } from '../use-builder-draft.js';
 
 /**
@@ -38,7 +39,7 @@ export interface WorkflowStepProps {
 }
 
 export function WorkflowStep({ draft }: WorkflowStepProps) {
-  const { fields, keys, manifest, structure, formId, versionId, title } = draft;
+  const { fields, keys, manifest, structure, parts, formId, versionId, title } = draft;
   const [done, setDone] = useState<{ toolId: string } | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
 
@@ -71,7 +72,17 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
       const tool = await createTool.mutateAsync({
         templateId: formId,
         name: title || 'Assessment',
-        manifest,
+        /*
+          THE AUTHOR'S SECTIONS BECOME THE WORKFLOW. Published against the same
+          resolved field list the version stores, so a `fieldIds` section can
+          never reference an excluded question. Without this the editor opened
+          on the synthesised per-part default and the author's structure was
+          invisible — cover sections had no card at all.
+        */
+        manifest: {
+          ...manifest,
+          workflow: workflowFromStructure(structure, parts, manifest, check.fields),
+        },
       });
       setDone({ toolId: tool.id });
     } catch (err) {
