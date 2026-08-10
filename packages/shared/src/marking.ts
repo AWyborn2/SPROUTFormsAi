@@ -129,7 +129,16 @@ export interface TheoryMarkingResult {
   /** Correct / total across the marked (visible, keyed) questions. */
   correctCount: number;
   totalCount: number;
-  /** False when any question in the mandatory section is not correct. */
+  /**
+   * Whether the part's GATE was cleared — the same boolean `outcome` is derived
+   * from.
+   *
+   * Normally that gate is the mandatory section. When a part names none, the
+   * whole part is the gate instead, and when nothing was marked at all this is
+   * false rather than vacuously true. See the reasoning at the computation:
+   * `[].every(...)` returning `true` is what used to pass a candidate who got
+   * every question wrong.
+   */
   mandatoryAllCorrect: boolean;
   outcome: PartOutcome;
 }
@@ -332,7 +341,39 @@ export function markTheory({ fields, values, part }: MarkTheoryInput): TheoryMar
 
   const correctCount = marks.filter((m) => m.correct).length;
   const mandatoryMarks = marks.filter((m) => m.mandatory);
-  const mandatoryAllCorrect = mandatoryMarks.every((m) => m.correct);
+
+  /*
+    AN EMPTY MUST-PASS SET USED TO PASS EVERYBODY.
+
+    `[].every(...)` is `true`. So a theory part that named no mandatory
+    questions — or named some that were all hidden by the location stream, or
+    all unkeyed — computed `mandatoryAllCorrect === true` and returned
+    SATISFACTORY. A candidate who got every question on the paper wrong was
+    marked satisfactory, automatically, on a competency record. Nothing
+    anywhere said so: no validator refused the manifest, and the printed
+    verdict box was ticked by the same code path as a genuine pass.
+
+    The gate that did not run is the whole problem, so the fix is to say what
+    happens when there is nothing in it rather than to let `every` answer for
+    us. Three cases, and only one of them is the old behaviour:
+
+    1. THE SET HAS MARKS — unchanged. Every mandatory question must be correct;
+       questions outside the set are marked and reported but do not gate.
+
+    2. THE SET IS EMPTY AND THE PART HAS MARKS — the WHOLE PART is the gate.
+       An author who never narrowed the must-pass set has not said "nothing
+       matters"; the natural reading of "every question in the must-pass set"
+       when nobody narrowed it is every question. This neither passes a
+       candidate who got things wrong nor fails one who got everything right,
+       which a blanket `not_satisfactory` would have done to a perfect paper.
+
+    3. NOTHING WAS MARKED AT ALL — not satisfactory. "Satisfactory" would be a
+       claim about an assessment that did not happen, and on this document that
+       claim is a certificate. Failing here is recoverable — the candidate is
+       coached and sits it again — where passing is not.
+  */
+  const gate = mandatoryMarks.length > 0 ? mandatoryMarks : marks;
+  const mandatoryAllCorrect = gate.length > 0 && gate.every((m) => m.correct);
   const outcome: PartOutcome = mandatoryAllCorrect ? 'satisfactory' : 'not_satisfactory';
 
   const derivedValues = applyMarks(marks, answers);
