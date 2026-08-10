@@ -80,6 +80,7 @@ function fakeDb(opts: {
   insertedVersion?: unknown;
   submissionsCountRows?: unknown[];
   versionsCountRows?: unknown[];
+  assessmentCasesCountRows?: unknown[];
 }) {
   const insertValues = vi.fn();
   const updateSet = vi.fn();
@@ -139,14 +140,20 @@ function fakeDb(opts: {
     })),
     delete: makeDelete(),
     select: vi.fn(() => ({
-      from: vi.fn((table: unknown) => ({
-        where: vi.fn(() => {
+      from: vi.fn((table: unknown) => {
+        const where = vi.fn(() => {
           if (table === schema.formTemplateVersions) {
             return whereResult(opts.versionsCountRows ?? [{ count: 0 }]);
           }
+          if (table === schema.assessmentCases) {
+            return whereResult(opts.assessmentCasesCountRows ?? [{ count: 0 }]);
+          }
           return whereResult(opts.submissionsCountRows ?? [{ count: 0 }]);
-        }),
-      })),
+        });
+        // The cases count joins through assessmentTools; the join is keyed on
+        // the FROM table, so it just hands the same builder back.
+        return { where, innerJoin: vi.fn(() => ({ where })) };
+      }),
     })),
     transaction,
   } as unknown as Db;
@@ -986,7 +993,12 @@ describe('DELETE /forms/:id', () => {
       const deletedTables = deleteWhere.mock.calls.map(([table]) => table);
       expect(deletedTables).toContain(schema.formTemplates);
       const auditInsert = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
-      expect(auditInsert?.[1]).toMatchObject({ action: 'Deleted form', target: 'Old draft', category: 'forms' });
+      /*
+        The audit names WHICH KIND was deleted, now that a published form can
+        be. "Deleted form" on its own no longer tells a reader whether
+        something live was removed or a half-finished import was tidied away.
+      */
+      expect(auditInsert?.[1]).toMatchObject({ action: 'Deleted draft form', target: 'Old draft', category: 'forms' });
     } finally {
       server.close();
     }
@@ -1010,30 +1022,95 @@ describe('DELETE /forms/:id', () => {
     }
   });
 
-  it('409s form_not_draft for a published form', async () => {
-    mockDbValue = fakeDb({
+  /*
+    STATUS NO LONGER DECIDES THIS, and these two tests used to say it did.
+
+    Refusing anything that was not a draft was stricter than the danger
+    warrants and had no way out: a published form could only be archived, and
+    an archived form offers only Restore — so a form published once could never
+    be removed, and a workspace doing repeated end-to-end runs accumulated test
+    forms permanently. What makes a form undeletable is its RECORDS, which the
+    two refusals below cover.
+  */
+  it('DELETES A PUBLISHED FORM THAT HAS NO RECORDS', async () => {
+    const { db, deleteWhere } = fakeDb({
       formTemplatesFindFirst: { ...draft, status: 'published' },
       rolePermissionsFindFirst: EDITOR_PERMS,
-    }).db;
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+      submissionsCountRows: [{ count: 0 }],
+      assessmentCasesCountRows: [{ count: 0 }],
+    });
+    mockDbValue = db;
     const { server, base } = startApp();
     try {
       const res = await fetch(`${base}/forms/t1`, { method: 'DELETE', headers: authHeader() });
-      expect(res.status).toBe(409);
-      expect(await res.json()).toEqual({ error: 'form_not_draft' });
+      expect(res.status).toBe(204);
+      expect(deleteWhere.mock.calls.map(([table]) => table)).toContain(schema.formTemplates);
     } finally {
       server.close();
     }
   });
 
-  it('409s form_not_draft for an archived form', async () => {
-    mockDbValue = fakeDb({
+  it('records a PUBLISHED deletion distinctly in the audit log', async () => {
+    // "Deleted form" on its own would not tell a reader whether something live
+    // was removed or a half-finished import was tidied away.
+    const { db, insertValues } = fakeDb({
+      formTemplatesFindFirst: { ...draft, name: 'Live form', status: 'published' },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+      submissionsCountRows: [{ count: 0 }],
+      assessmentCasesCountRows: [{ count: 0 }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      await fetch(`${base}/forms/t1`, { method: 'DELETE', headers: authHeader() });
+      const audit = insertValues.mock.calls.find(([table]) => table === schema.auditLogEntries);
+      expect(audit?.[1]).toMatchObject({ action: 'Deleted form', target: 'Live form' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('deletes an archived form too, which had no exit at all before', async () => {
+    const { db, deleteWhere } = fakeDb({
       formTemplatesFindFirst: { ...draft, status: 'archived' },
       rolePermissionsFindFirst: EDITOR_PERMS,
-    }).db;
+      usersFindFirst: { id: 'u1', name: 'Ash' },
+      submissionsCountRows: [{ count: 0 }],
+      assessmentCasesCountRows: [{ count: 0 }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/forms/t1`, { method: 'DELETE', headers: authHeader() });
+      expect(res.status).toBe(204);
+      expect(deleteWhere.mock.calls.map(([table]) => table)).toContain(schema.formTemplates);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s form_has_assessment_cases — a case is a competency record', async () => {
+    /*
+      `assessmentTools.templateId` cascades from the template, so deleting it
+      would take the tool — and `assessmentCases.toolId` is ON DELETE RESTRICT,
+      which would abort the whole statement with a foreign-key error. This
+      names the reason instead, and the database still backstops it.
+    */
+    const { db, deleteWhere } = fakeDb({
+      formTemplatesFindFirst: { ...draft, status: 'published' },
+      rolePermissionsFindFirst: EDITOR_PERMS,
+      submissionsCountRows: [{ count: 0 }],
+      assessmentCasesCountRows: [{ count: 2 }],
+    });
+    mockDbValue = db;
     const { server, base } = startApp();
     try {
       const res = await fetch(`${base}/forms/t1`, { method: 'DELETE', headers: authHeader() });
       expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'form_has_assessment_cases' });
+      expect(deleteWhere).not.toHaveBeenCalled();
     } finally {
       server.close();
     }
