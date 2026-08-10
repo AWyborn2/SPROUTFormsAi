@@ -885,3 +885,25 @@ export interface BuilderDraftSummary {
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * A single draft read, which is the summary plus the thing resuming needs.
+ *
+ * `state` is typed `unknown` rather than `BuilderDraft` on purpose: the column
+ * is written by whichever build of the client last saved it, and the route
+ * stores it opaque so the builder can add state without a migration. Claiming a
+ * shape here would be claiming today's build wrote every row.
+ */
+export interface BuilderDraftDetail extends BuilderDraftSummary {
+  state: unknown;
+}
+
+/** The body `POST /assessment-tool-drafts` accepts. Upserts on (org, name). */
+export interface SaveBuilderDraftInput {
+  name: string;
+  assetId: string;
+  step?: string;
+  state: Record<string, unknown>;
+  formId?: string | null;
+  versionId?: string | null;
+}
