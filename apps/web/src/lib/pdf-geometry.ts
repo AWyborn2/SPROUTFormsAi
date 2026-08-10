@@ -738,16 +738,52 @@ const RECT_SIZE_TOLERANCE = 2;
  */
 const RECT_COLUMN_MIN = 3;
 
+/**
+ * Why a grid could not be measured from the printed checkboxes.
+ *
+ * A REFUSAL AND A SUCCESS USED TO LOOK IDENTICAL. Both left a box on the page —
+ * one subdivided, one not — and nothing said which had happened or why. "Draw
+ * the box and you get bands" is only trustworthy if "you got no bands" comes
+ * with a reason, otherwise an author redraws the same box repeatedly and
+ * concludes the feature is broken.
+ *
+ * Mirrors `ScalarRefusalCode`, which exists for the same reason on the same
+ * screen.
+ */
+export type RectGridRefusalCode =
+  | 'no-answer-column'
+  | 'ambiguous-answer-column'
+  | 'page-not-measured'
+  | 'too-few-boxes'
+  | 'boxes-differ-in-size'
+  | 'boxes-not-in-a-column'
+  | 'validator-rejected';
+
+/** Measured, or refused WITH A STATED REASON. */
+export type RectGridOutcome =
+  | { ok: true; proposal: TableProposal }
+  | { ok: false; code: RectGridRefusalCode; detail: string };
+
 export interface RectGridProposeInput {
   page: number;
   pageWidth: number;
   pageHeight: number;
-  /** The rectangles printed on this page (`TextPage.rects`). */
-  rects: readonly PrintedRect[];
+  /**
+   * The rectangles printed on this page (`TextPage.rects`).
+   *
+   * `undefined` means NOT MEASURED — the page's vector paths were never read —
+   * which is a different answer from "measured, found none" and gets its own
+   * refusal code.
+   */
+  rects: readonly PrintedRect[] | undefined;
   /** The author's drawn box, which SCOPES the derivation to one table. */
   within: PageBox;
-  /** The column key every derived row band writes into. */
-  columnKey: string;
+  /**
+   * The field's own columns. The answer column is `columns[1]` onwards, the
+   * same slice `proposeTableSegments` treats as option columns — the first is
+   * the row's label.
+   */
+  columns: readonly RepeatingColumn[] | undefined;
 }
 
 /**
@@ -775,7 +811,47 @@ export interface RectGridProposeInput {
  * column: fewer than three boxes, boxes of different sizes, or boxes that do
  * not share an x.
  */
-export function proposeRectGrid(input: RectGridProposeInput): TableProposal | null {
+export function proposeRectGrid(input: RectGridProposeInput): RectGridOutcome {
+  const refuse = (code: RectGridRefusalCode, detail: string): RectGridOutcome => ({
+    ok: false,
+    code,
+    detail,
+  });
+
+  /*
+    THE ANSWER COLUMN HAS TO EXIST BEFORE ITS GEOMETRY CAN MEAN ANYTHING.
+
+    The exporter writes a row's mark with `columnBandFor(segment, columnKey)`
+    and draws nothing when that lookup misses, so a band keyed to a column the
+    field does not declare is a band no mark will ever land in — placed,
+    plausible on screen, and silently absent from the exported page.
+
+    Refused separately from the geometry checks because the fix is somewhere
+    else entirely: the table's COLUMNS are wrong, not the author's drawing, and
+    no amount of redrawing will help.
+  */
+  const optionColumns = (input.columns ?? []).slice(1);
+  if (optionColumns.length === 0) {
+    return refuse(
+      'no-answer-column',
+      'This table declares no answer column — only a label column — so there is nowhere for a tick to be recorded. Add the answer column on the structure step, then draw the box again.',
+    );
+  }
+  if (optionColumns.length > 1) {
+    return refuse(
+      'ambiguous-answer-column',
+      `This table has ${optionColumns.length} answer columns, so which one the printed boxes belong to cannot be read off the page. Place its bands by hand.`,
+    );
+  }
+  const columnKey = optionColumns[0]!.key;
+
+  if (!input.rects) {
+    return refuse(
+      'page-not-measured',
+      'This page\u2019s printed shapes were not read, so there is nothing to measure a grid from.',
+    );
+  }
+
   const { within } = input;
   const right = within.x + within.width;
   const top = within.y + within.height;
@@ -790,11 +866,16 @@ export function proposeRectGrid(input: RectGridProposeInput): TableProposal | nu
       r.y >= within.y &&
       r.y + r.height <= top,
   );
-  if (inside.length < RECT_COLUMN_MIN) return null;
+  if (inside.length < RECT_COLUMN_MIN) {
+    return refuse(
+      'too-few-boxes',
+      `Only ${inside.length} printed box${inside.length === 1 ? '' : 'es'} sit fully inside what you drew, and ${RECT_COLUMN_MIN} in a line are needed before that is a column rather than a coincidence. Check the drag encloses every checkbox completely.`,
+    );
+  }
 
   /*
     THE LARGEST COLUMN WINS, and it is found by grouping on x rather than by
-    taking the whole set. A drawn box over a methods table encloses the five
+    taking the whole set. A drawn box over a methods table encloses the
     checkboxes AND, often, the ruled cell rectangles around each row. Those
     cells share no x with the checkboxes and are a different size, so grouping
     separates them and the size test below rejects the cell group outright.
@@ -812,7 +893,12 @@ export function proposeRectGrid(input: RectGridProposeInput): TableProposal | nu
     }
   }
   if (run.length > best.length) best = run;
-  if (best.length < RECT_COLUMN_MIN) return null;
+  if (best.length < RECT_COLUMN_MIN) {
+    return refuse(
+      'boxes-not-in-a-column',
+      `The ${inside.length} boxes inside your drag do not share a left edge, so they are not one printed column. The largest group that lines up has ${best.length}.`,
+    );
+  }
 
   /*
     ONE CONTROL REPEATED, not a column of different things. A checkbox and the
@@ -822,8 +908,15 @@ export function proposeRectGrid(input: RectGridProposeInput): TableProposal | nu
   */
   const widths = best.map((r) => r.width);
   const heights = best.map((r) => r.height);
-  if (Math.max(...widths) - Math.min(...widths) > RECT_SIZE_TOLERANCE) return null;
-  if (Math.max(...heights) - Math.min(...heights) > RECT_SIZE_TOLERANCE) return null;
+  if (
+    Math.max(...widths) - Math.min(...widths) > RECT_SIZE_TOLERANCE ||
+    Math.max(...heights) - Math.min(...heights) > RECT_SIZE_TOLERANCE
+  ) {
+    return refuse(
+      'boxes-differ-in-size',
+      'The boxes that line up are not all the same size, so they are not one repeated control. A checkbox and the cell around it can share a left edge; only their size tells them apart.',
+    );
+  }
 
   // Top-down, because that is the order a reader assigns rows in and the order
   // the extracted rows are already in. PDF y grows upward.
@@ -850,23 +943,31 @@ export function proposeRectGrid(input: RectGridProposeInput): TableProposal | nu
       Math.max(...rowBands.map((b) => b.end)) - Math.min(...rowBands.map((b) => b.start)),
     pageWidth: input.pageWidth,
     pageHeight: input.pageHeight,
-    columnBands: [{ key: input.columnKey, start: columnStart, end: columnEnd }],
+    columnBands: [{ key: columnKey, start: columnStart, end: columnEnd }],
     rowBands,
   };
 
   // R15: a proposal the shipped validator rejects is dropped silently
   // downstream, leaving an empty grid and no stated reason. Check it here,
   // where the reason is still known.
-  if (resolveGeometry({ geometry: { segments: [segment] } }).segments.length !== 1) return null;
+  if (resolveGeometry({ geometry: { segments: [segment] } }).segments.length !== 1) {
+    return refuse(
+      'validator-rejected',
+      'The grid measured from those boxes was refused by the geometry validator, so it was not applied.',
+    );
+  }
 
   return {
-    segment,
-    // Nothing here was inferred. Every band is the extent of a rectangle the
-    // page prints, which is the strongest evidence this module ever has.
-    confidence: 1,
-    anchorsLocated: column.length,
-    anchorsInferred: 0,
-    notes: [],
+    ok: true,
+    proposal: {
+      segment,
+      // Nothing here was inferred. Every band is the extent of a rectangle the
+      // page prints, which is the strongest evidence this module ever has.
+      confidence: 1,
+      anchorsLocated: column.length,
+      anchorsInferred: 0,
+      notes: [],
+    },
   };
 }
 
