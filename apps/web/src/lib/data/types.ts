@@ -865,3 +865,23 @@ export interface BrandEditProposal {
   summary: string;
   notes: string[];
 }
+
+/**
+ * One saved assessment-builder draft, as the picker lists it.
+ *
+ * Mirrors the server's `summarise` exactly — no `state`. That field carries the
+ * whole extraction and every answer key, and the list is only choosing which
+ * draft to reopen.
+ */
+export interface BuilderDraftSummary {
+  id: string;
+  name: string;
+  assetId: string | null;
+  /** Where the author stopped. A retired step resolves on load, not here. */
+  step: string;
+  formId: string | null;
+  versionId: string | null;
+  savedByUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}

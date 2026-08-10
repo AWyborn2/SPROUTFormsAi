@@ -35,6 +35,7 @@ import { geometrySegments, ROLE_LABELS } from '@formai/shared';
 import { ApiError, apiClient } from './api-client.js';
 import { ROLE_NAMES } from './types.js';
 import type {
+  BuilderDraftSummary,
   ApiKey,
   AuditCategory,
   AuditEntry,
@@ -665,6 +666,21 @@ export const store = {
 
   deleteFormBrand(id: string): Promise<void> {
     return apiClient.delete<void>(`/form-brands/${id}`).then(() => undefined);
+  },
+
+  /**
+   * Every saved assessment-builder draft, newest first.
+   *
+   * Summaries only — the server deliberately withholds each draft's `state`,
+   * which carries an entire extraction and every answer key. Choosing which
+   * draft to reopen needs none of that; resuming loads it.
+   */
+  listBuilderDrafts(): Promise<BuilderDraftSummary[]> {
+    return apiClient.get<BuilderDraftSummary[]>('/builder-drafts');
+  },
+
+  discardBuilderDraft(id: string): Promise<void> {
+    return apiClient.delete<void>(`/builder-drafts/${id}`).then(() => undefined);
   },
 
   archiveForm(id: string): Promise<FormSummary> {

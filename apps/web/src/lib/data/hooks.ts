@@ -73,6 +73,7 @@ export const queryClient = new QueryClient({
 const keys = {
   session: ['session'] as const,
   forms: ['forms'] as const,
+  builderDrafts: ['builderDrafts'] as const,
   form: (id: string) => ['forms', id] as const,
   submissions: ['submissions'] as const,
   submission: (id: string) => ['submissions', id] as const,
@@ -485,6 +486,35 @@ export function useSetFormBrand() {
     onSuccess: (_void, input) => {
       qc.invalidateQueries({ queryKey: keys.form(input.formId) });
       qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/**
+ * Every saved assessment-builder draft.
+ *
+ * WHAT THIS UNBLOCKS. `/app/assessments/builder/:draftId` resumes a draft and
+ * has since it was written; the list route and the delete route exist too. What
+ * did not exist was anything that LINKED to them — so an author who left the
+ * builder half-way had no route back in, and every abandoned run stayed in the
+ * form library as an undeletable-looking draft with no way to finish it either.
+ */
+export function useBuilderDrafts() {
+  return useQuery({
+    queryKey: keys.builderDrafts,
+    queryFn: async () => store.listBuilderDrafts(),
+  });
+}
+
+export function useDiscardBuilderDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => store.discardBuilderDraft(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.builderDrafts });
+      // Discarding a draft does not remove the draft FORM it created, which is
+      // the form library's own delete — but the library's counts move.
+      qc.invalidateQueries({ queryKey: keys.forms });
     },
   });
 }

@@ -216,3 +216,19 @@ describe('version placement editing', () => {
     expect(body.fields.map((f) => f.id)).toEqual(['ai_137']);
   });
 });
+
+describe('assessment-builder drafts', () => {
+  /*
+    The routes have existed since the draft table did; nothing in the UI called
+    them, so an author who left the builder half-way had no route back in.
+  */
+  it('listBuilderDrafts GETs /builder-drafts', async () => {
+    await store.listBuilderDrafts();
+    expect(vi.mocked(apiClient.get)).toHaveBeenCalledWith('/builder-drafts');
+  });
+
+  it('discardBuilderDraft DELETEs /builder-drafts/:id', async () => {
+    await store.discardBuilderDraft('draft-1');
+    expect(deleteMock).toHaveBeenCalledWith('/builder-drafts/draft-1');
+  });
+});
