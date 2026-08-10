@@ -120,6 +120,17 @@ export function GeometryEditorScreen({
   const [edited, setEdited] = useState<FormField[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [textPages, setTextPages] = useState<readonly TextPage[]>([]);
+  /**
+   * Why the last drawn table box could not be subdivided, and for which field.
+   *
+   * Held rather than derived because it is a fact about ONE GESTURE, not about
+   * the field's current state: the box is on the page either way, so nothing
+   * in the saved geometry can be inspected afterwards to recover why it has no
+   * bands.
+   */
+  const [gridRefusal, setGridRefusal] = useState<{ fieldId: string; detail: string } | null>(
+    null,
+  );
   /** Which box the next drag fills, or null when drawing is not armed. */
   const [drawTarget, setDrawTarget] = useState<DrawTarget | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -578,23 +589,25 @@ export function GeometryEditorScreen({
    * wrong place is the failure this whole screen is built to prevent.
    */
   function setTableBox(field: FormField, box: PageBox) {
-    const optionColumns = (field.columns ?? []).slice(1);
-    const columnKey = optionColumns.length === 1 ? optionColumns[0]!.key : null;
-    const rects = textPages[box.page]?.rects;
+    const result = proposeRectGrid({
+      page: box.page,
+      pageWidth: box.pageWidth,
+      pageHeight: box.pageHeight,
+      rects: textPages[box.page]?.rects,
+      within: box,
+      columns: field.columns,
+    });
 
-    const proposal =
-      columnKey && rects
-        ? proposeRectGrid({
-            page: box.page,
-            pageWidth: box.pageWidth,
-            pageHeight: box.pageHeight,
-            rects,
-            within: box,
-            columnKey,
-          })
-        : null;
-
-    setScalarBox(field.id, proposal?.segment ?? box);
+    /*
+      THE REFUSAL IS SHOWN, NOT SWALLOWED. Both outcomes leave a box on the
+      page — one subdivided, one not — so without this an author cannot tell
+      "I drew it wrong" from "this table declares no answer column", and
+      redraws the same box until they conclude the feature is broken. The
+      plain box still stands either way: a wrong grid is worse than an honest
+      undivided one.
+    */
+    setGridRefusal(result.ok ? null : { fieldId: field.id, detail: result.detail });
+    setScalarBox(field.id, result.ok ? result.proposal.segment : box);
   }
 
   if (isLoading) {
@@ -953,6 +966,22 @@ export function GeometryEditorScreen({
         </div>
 
         <aside className="w-[320px] shrink-0 overflow-y-auto border-l border-border p-[14px_16px]">
+          {selected && gridRefusal?.fieldId === selected.id && (
+            /*
+              Sits ABOVE the panel so it is read before the controls it
+              explains. A refusal is not an error state — the box was placed,
+              it just has no bands — so it reads as a warning rather than a
+              failure, and it clears itself the next time this field is drawn.
+            */
+            <div className="mb-3 rounded-lg border border-warning bg-warning-soft p-[10px_12px]">
+              <span className="block text-[12px] font-semibold text-warning-text">
+                Placed, but its rows were not measured
+              </span>
+              <p className="mt-1 text-[11.5px] leading-relaxed text-text-secondary">
+                {gridRefusal.detail}
+              </p>
+            </div>
+          )}
           {selected ? (
             <PlacementPanel
               field={selected}

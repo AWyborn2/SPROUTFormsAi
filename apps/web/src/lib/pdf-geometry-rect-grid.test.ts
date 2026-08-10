@@ -20,7 +20,7 @@
  * x≈438 to x≈1277.
  */
 import { describe, expect, it } from 'vitest';
-import type { PageBox } from '@formai/shared';
+import type { PageBox, RepeatingColumn } from '@formai/shared';
 import { proposeRectGrid } from './pdf-geometry.js';
 import type { PrintedRect } from '../screens/import/inspector/geometry-actions.js';
 
@@ -44,8 +44,33 @@ const drawn: PageBox = {
   ...PAGE,
 };
 
-const propose = (rects: readonly PrintedRect[], within: PageBox = drawn) =>
-  proposeRectGrid({ page: 0, ...PAGE, rects, within, columnKey: 'used' });
+/** The table as extracted: a label column and one answer column. */
+const COLUMNS: RepeatingColumn[] = [
+  { key: 'method', label: 'Method', type: 'text' },
+  { key: 'used', label: 'Used', type: 'check_cross' },
+];
+
+const outcome = (
+  rects: readonly PrintedRect[] | undefined,
+  within: PageBox = drawn,
+  columns: readonly RepeatingColumn[] | undefined = COLUMNS,
+) => proposeRectGrid({ page: 0, ...PAGE, rects, within, columns });
+
+/** The measured grid, or `null` when it refused — for the happy-path tests. */
+const propose = (rects: readonly PrintedRect[], within: PageBox = drawn) => {
+  const result = outcome(rects, within);
+  return result.ok ? result.proposal : null;
+};
+
+/** The refusal code, or `null` when it measured a grid. */
+const refusal = (
+  rects: readonly PrintedRect[] | undefined,
+  within: PageBox = drawn,
+  columns: readonly RepeatingColumn[] | undefined = COLUMNS,
+) => {
+  const result = outcome(rects, within, columns);
+  return result.ok ? null : result.code;
+};
 
 describe('proposeRectGrid', () => {
   it('gives one row band per printed checkbox', () => {
@@ -124,7 +149,7 @@ describe('proposeRectGrid', () => {
   });
 
   it('refuses two checkboxes — a pair is a coincidence, not a column', () => {
-    expect(propose(methodBoxes.slice(0, 2))).toBeNull();
+    expect(refusal(methodBoxes.slice(0, 2))).toBe('too-few-boxes');
   });
 
   it('refuses boxes of different sizes', () => {
@@ -136,7 +161,7 @@ describe('proposeRectGrid', () => {
       { x: 1231, y: 703, width: 40, height: 20 },
     ];
 
-    expect(propose(mixed)).toBeNull();
+    expect(refusal(mixed)).toBe('boxes-differ-in-size');
   });
 
   it('refuses boxes that do not share an x', () => {
@@ -146,7 +171,7 @@ describe('proposeRectGrid', () => {
       { x: 900, y: 703, width: 9, height: 9 },
     ];
 
-    expect(propose(scattered)).toBeNull();
+    expect(refusal(scattered)).toBe('boxes-not-in-a-column');
   });
 
   it('takes only what the drawn box fully encloses', () => {
@@ -169,6 +194,65 @@ describe('proposeRectGrid', () => {
   it('refuses when the page carried no rectangles', () => {
     // Absent is NOT MEASURED. Refusing is what leaves the plain drawn box in
     // place rather than inventing a grid over it.
-    expect(propose([])).toBeNull();
+    expect(refusal([])).toBe('too-few-boxes');
+  });
+
+  /*
+    EVERY REFUSAL NAMES ITSELF, because a refusal and a success used to look
+    identical: both left a box on the page, one subdivided and one not, with
+    nothing saying which had happened. An author who cannot tell "I drew it
+    wrong" from "this table's columns are wrong" redraws the same box until
+    they conclude the feature is broken.
+  */
+  describe('refusals say what is wrong', () => {
+    it('names a table with no answer column, which no redrawing can fix', () => {
+      /*
+        The exporter writes a row's mark with `columnBandFor(segment, columnKey)`
+        and draws NOTHING when that misses. A band keyed to a column the field
+        does not declare is a band no mark ever lands in — placed, plausible on
+        screen, silently absent from the exported page. The fix is the table's
+        columns, not the drawing, so it is its own code.
+      */
+      expect(refusal(methodBoxes, drawn, [{ key: 'method', label: 'Method', type: 'text' }])).toBe(
+        'no-answer-column',
+      );
+      expect(refusal(methodBoxes, drawn, [])).toBe('no-answer-column');
+      // Called directly: a DEFAULT PARAMETER swallows an explicit `undefined`,
+      // so routing this through the helper would silently test `COLUMNS` again
+      // and pass without ever exercising the undefined path.
+      const noColumns = proposeRectGrid({
+        page: 0,
+        ...PAGE,
+        rects: methodBoxes,
+        within: drawn,
+        columns: undefined,
+      });
+      expect(noColumns.ok).toBe(false);
+      if (!noColumns.ok) expect(noColumns.code).toBe('no-answer-column');
+    });
+
+    it('refuses rather than guessing which of several answer columns is meant', () => {
+      const three: RepeatingColumn[] = [
+        { key: 'method', label: 'Method', type: 'text' },
+        { key: 'yes', label: 'Yes', type: 'check_cross' },
+        { key: 'no', label: 'No', type: 'check_cross' },
+      ];
+
+      expect(refusal(methodBoxes, drawn, three)).toBe('ambiguous-answer-column');
+    });
+
+    it('distinguishes a page that was never measured from one with no boxes', () => {
+      // Absent is NOT MEASURED. Reporting it as "no boxes found" would send an
+      // author looking at their drag for a fault that is in the page read.
+      expect(refusal(undefined)).toBe('page-not-measured');
+      expect(refusal([])).toBe('too-few-boxes');
+    });
+
+    it('carries a sentence an author can act on, not just a code', () => {
+      const result = outcome(methodBoxes, drawn, [{ key: 'method', label: 'Method', type: 'text' }]);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.detail).toMatch(/structure step/i);
+    });
   });
 });
