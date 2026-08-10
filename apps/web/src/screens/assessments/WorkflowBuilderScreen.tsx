@@ -277,7 +277,20 @@ export function WorkflowBuilderScreen() {
       <div className="flex flex-col gap-2.5">
         {sections.map((section, index) => {
           const open = openSections.has(section.key);
-          const groups = section.partKey ? groupsForPart(section.partKey) : [];
+          /*
+            A section covers a part's slice OR lists its fields directly — the
+            builder emits `fieldIds` sections for cover fields that belong to
+            no part (Candidate Details, Prerequisites…). Before this branch,
+            such a section rendered as an empty card: the field lookup only
+            knew how to slice by part.
+          */
+          const groups = section.partKey
+            ? groupsForPart(section.partKey)
+            : groupFieldsByHeading(
+                (section.fieldIds ?? [])
+                  .map((id) => tool.fields.find((f) => f.id === id))
+                  .filter((f): f is FormField => f !== undefined),
+              );
           const fieldCount = totalFields(groups);
 
           return (
