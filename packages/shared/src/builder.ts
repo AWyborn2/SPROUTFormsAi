@@ -385,6 +385,30 @@ export interface BuilderDraft {
   /** The form this draft publishes into, once one exists. */
   formId?: string;
   versionId?: string;
+  /*
+    THE UNITS STEP'S EDITS, which nothing else here can reconstruct.
+
+    Parts are derived from structure on every render and these hold only what
+    the author changed on top — a renamed part, a reordered one, a hand-picked
+    mandatory set. Saving the derived parts instead would freeze the manifest;
+    saving neither, which is what happened before, loses every unit edit while
+    the structure they sit on comes back intact, so a resumed draft looks
+    complete and quietly is not.
+
+    Optional because drafts written before this existed have neither, and a
+    missing override is exactly "the author changed nothing".
+  */
+  partOverrides?: Record<string, unknown>;
+  partOrder?: string[];
+  /**
+   * The counter behind grouped section keys.
+   *
+   * Monotonic so a grouped section's key cannot collide with an earlier one.
+   * Restoring it matters: resuming at 1 lets the next group reuse a key the
+   * structure is already using, and two sections with one key is a structure
+   * whose fields belong to whichever the map read last.
+   */
+  groupCount?: number;
   createdAt: string;
   updatedAt: string;
 }

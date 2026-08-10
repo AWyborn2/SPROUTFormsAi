@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Button, Icon } from '@formai/ui';
 import {
@@ -16,6 +16,7 @@ import { PlacementStep } from './steps/PlacementStep.js';
 import { WorkflowStep } from './steps/WorkflowStep.js';
 import { StepPlaceholder } from './steps/StepPlaceholder.js';
 import { useBuilderDraftState } from './use-builder-draft.js';
+import { useBuilderAutosave, useBuilderResume } from './use-builder-persistence.js';
 
 /**
  * The assessment builder — seven steps from a printed competency PDF to a
@@ -41,8 +42,16 @@ import { useBuilderDraftState } from './use-builder-draft.js';
 export function BuilderScreen() {
   const navigate = useNavigate();
   const { draftId } = useParams<{ draftId?: string }>();
-  const draft = useBuilderDraftState(draftId);
   const [step, setStep] = useState<BuilderStep>('upload');
+  /*
+    THE LOAD AND THE SAVE LIVE OUTSIDE THE STATE HOOK, which keeps
+    `useBuilderDraftState` free of requests and providers. The composition runs
+    load → state → save: the snapshot the persistence hook writes is the one the
+    state hook just produced, and the snapshot it read is handed back in.
+  */
+  const resume = useBuilderResume(draftId);
+  const draft = useBuilderDraftState({ hydrateFrom: resume.hydrateFrom ?? null });
+  const persisted = useBuilderAutosave(draft.snapshot, step, resume.ready, draftId);
   const [hintDismissed, setHintDismissed] = useState(false);
 
   /*
@@ -63,6 +72,37 @@ export function BuilderScreen() {
     [blocked],
   );
 
+  /*
+    OPEN A RESUMED DRAFT WHERE IT WAS LEFT.
+
+    Once — a ref rather than a comparison, because the author is free to
+    navigate away from the resumed step immediately, and re-applying it would
+    drag them back every time the draft object changed identity.
+  */
+  const restoredStep = useRef(false);
+  useEffect(() => {
+    if (restoredStep.current || !resume.resumedStep) return;
+    restoredStep.current = true;
+    setStep(resume.resumedStep);
+  }, [resume.resumedStep]);
+
+  /*
+    PUT THE DRAFT'S ID IN THE URL AS SOON AS ONE EXISTS.
+
+    This is what makes the CURRENT tab survivable. Autosave alone protects the
+    work but not the session: refresh a builder sitting on `/builder` and it
+    opens empty, with the saved draft reachable only by going back to the upload
+    step and finding it in the resume list — which is not where anyone looks
+    after an accidental reload.
+
+    `replace` so the browser's Back button still leaves the builder rather than
+    stepping through a URL the author never navigated to.
+  */
+  useEffect(() => {
+    if (!persisted.savedDraftId || draftId === persisted.savedDraftId) return;
+    navigate(`/app/assessments/builder/${persisted.savedDraftId}`, { replace: true });
+  }, [persisted.savedDraftId, draftId, navigate]);
+
   const at = stepIndex(step);
   const canAdvance = draft.hasDocument;
   /*
@@ -73,6 +113,23 @@ export function BuilderScreen() {
   const compactChrome = step === 'generate';
 
   const body = (() => {
+    /*
+      A RESUME IN FLIGHT IS NOT AN EMPTY BUILDER. Without this the upload step
+      renders while the draft loads, so an author who reopens their work is
+      shown a dropzone — and the obvious reaction to that is to upload the PDF
+      again, which starts a second draft under the same name and overwrites the
+      one that was loading.
+    */
+    if (resume.resuming) {
+      return (
+        <div className="mx-auto max-w-[1080px] rounded-[14px] border border-border bg-surface-card p-4">
+          <span className="block text-[14.5px] font-semibold">Reopening your draft…</span>
+          <p className="mt-1 text-[12.5px] leading-relaxed text-text-secondary">
+            Loading the document, the fields and the answer key you saved.
+          </p>
+        </div>
+      );
+    }
     switch (step) {
       case 'upload':
         return <UploadStep draft={draft} />;
@@ -132,6 +189,23 @@ export function BuilderScreen() {
             </div>
             {draft.hasDocument && (
               <div className="flex flex-none items-center gap-2 pb-0.5">
+                {/*
+                  THE HINT ABOVE PROMISES "your work saves as you go", which was
+                  untrue until autosave existed. Showing when the last write
+                  landed is what makes the promise checkable rather than
+                  something an author has to take on faith — and it is the only
+                  signal that a save is failing, since a failed autosave is
+                  deliberately silent so it cannot interrupt authoring.
+                */}
+                {persisted.savedAt && (
+                  <span className="rounded-full bg-surface-sunken px-2.5 py-1 text-[12px] font-medium text-text-tertiary">
+                    Saved{' '}
+                    {persisted.savedAt.toLocaleTimeString(undefined, {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                )}
                 <span className="rounded-full bg-surface-sunken px-2.5 py-1 text-[12px] font-medium text-text-secondary">
                   {draft.pageCount} pages
                 </span>

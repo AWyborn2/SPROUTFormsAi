@@ -221,14 +221,32 @@ describe('assessment-builder drafts', () => {
   /*
     The routes have existed since the draft table did; nothing in the UI called
     them, so an author who left the builder half-way had no route back in.
+
+    THESE TWO TESTS USED TO ASSERT `/builder-drafts` — the source FILE's name,
+    not the mount path, which `app.ts` sets to `/assessment-tool-drafts`. They
+    passed because the store had the same mistake, so the pair agreed with each
+    other and disagreed with the server. Every list 404'd, `rows.length === 0`
+    was always true, and "Pick up where you left off" rendered nothing on a
+    workspace that had drafts to resume.
   */
-  it('listBuilderDrafts GETs /builder-drafts', async () => {
+  it('listBuilderDrafts GETs the mounted path', async () => {
     await store.listBuilderDrafts();
-    expect(vi.mocked(apiClient.get)).toHaveBeenCalledWith('/builder-drafts');
+    expect(vi.mocked(apiClient.get)).toHaveBeenCalledWith('/assessment-tool-drafts');
   });
 
-  it('discardBuilderDraft DELETEs /builder-drafts/:id', async () => {
+  it('getBuilderDraft GETs one draft, which is the read that carries state', async () => {
+    await store.getBuilderDraft('draft-1');
+    expect(vi.mocked(apiClient.get)).toHaveBeenCalledWith('/assessment-tool-drafts/draft-1');
+  });
+
+  it('saveBuilderDraft POSTs to the mounted path', async () => {
+    const input = { name: 'Mine Site SME Theory', assetId: 'asset-1', state: {} };
+    await store.saveBuilderDraft(input);
+    expect(vi.mocked(apiClient.post)).toHaveBeenCalledWith('/assessment-tool-drafts', input);
+  });
+
+  it('discardBuilderDraft DELETEs the mounted path', async () => {
     await store.discardBuilderDraft('draft-1');
-    expect(deleteMock).toHaveBeenCalledWith('/builder-drafts/draft-1');
+    expect(deleteMock).toHaveBeenCalledWith('/assessment-tool-drafts/draft-1');
   });
 });

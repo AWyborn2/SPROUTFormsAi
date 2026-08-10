@@ -35,7 +35,9 @@ import { geometrySegments, ROLE_LABELS } from '@formai/shared';
 import { ApiError, apiClient } from './api-client.js';
 import { ROLE_NAMES } from './types.js';
 import type {
+  BuilderDraftDetail,
   BuilderDraftSummary,
+  SaveBuilderDraftInput,
   ApiKey,
   AuditCategory,
   AuditEntry,
@@ -88,6 +90,17 @@ import type {
   RequiredAssessmentsChangeEffects,
   TaxonomyStatus,
 } from '@formai/shared';
+
+/**
+ * The assessment-builder drafts route, as the API actually mounts it.
+ *
+ * Spelled once because it was wrong twice. The store fetched `/builder-drafts`
+ * — the source FILE's name — while `app.ts` mounts the router at
+ * `/assessment-tool-drafts`. Every list 404'd, so `rows.length === 0` was
+ * always true and "Pick up where you left off" rendered nothing on a workspace
+ * that had drafts to resume.
+ */
+const BUILDER_DRAFTS = '/assessment-tool-drafts';
 
 /** Shape returned by `PATCH /org` (see apps/api routes/org.ts). */
 export interface OrgSettingsDto {
@@ -676,11 +689,31 @@ export const store = {
    * draft to reopen needs none of that; resuming loads it.
    */
   listBuilderDrafts(): Promise<BuilderDraftSummary[]> {
-    return apiClient.get<BuilderDraftSummary[]>('/builder-drafts');
+    return apiClient.get<BuilderDraftSummary[]>(BUILDER_DRAFTS);
+  },
+
+  /**
+   * One draft WITH its state — what resuming actually loads.
+   *
+   * The list deliberately withholds every state, because each carries a whole
+   * extraction and every answer key and none of it is needed to choose a row.
+   */
+  getBuilderDraft(id: string): Promise<BuilderDraftDetail> {
+    return apiClient.get<BuilderDraftDetail>(`${BUILDER_DRAFTS}/${id}`);
+  },
+
+  /**
+   * Save, or overwrite the draft already using this name.
+   *
+   * The route upserts on (org, name), which is what lets the builder autosave
+   * without laying down a row every couple of seconds.
+   */
+  saveBuilderDraft(input: SaveBuilderDraftInput): Promise<BuilderDraftSummary> {
+    return apiClient.post<BuilderDraftSummary>(BUILDER_DRAFTS, input);
   },
 
   discardBuilderDraft(id: string): Promise<void> {
-    return apiClient.delete<void>(`/builder-drafts/${id}`).then(() => undefined);
+    return apiClient.delete<void>(`${BUILDER_DRAFTS}/${id}`).then(() => undefined);
   },
 
   archiveForm(id: string): Promise<FormSummary> {

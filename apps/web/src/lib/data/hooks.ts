@@ -39,6 +39,7 @@ import type {
   PlanTier,
   PublishImportInput,
   RoleName,
+  SaveBuilderDraftInput,
   SubmissionDetail,
   SubmissionRow,
   TaxonomySettings,
@@ -74,6 +75,7 @@ const keys = {
   session: ['session'] as const,
   forms: ['forms'] as const,
   builderDrafts: ['builderDrafts'] as const,
+  builderDraft: (id: string) => ['builderDrafts', id] as const,
   form: (id: string) => ['forms', id] as const,
   submissions: ['submissions'] as const,
   submission: (id: string) => ['submissions', id] as const,
@@ -503,6 +505,43 @@ export function useBuilderDrafts() {
   return useQuery({
     queryKey: keys.builderDrafts,
     queryFn: async () => store.listBuilderDrafts(),
+  });
+}
+
+/**
+ * One draft with its state — the read that resuming is built on.
+ *
+ * `staleTime: Infinity` because this is a HANDOVER, not a live view. The
+ * builder takes the state into its own React state and is then the authority;
+ * a refetch would hand back the version on the server, which is by definition
+ * older than what the author is currently editing, and overwrite it.
+ */
+export function useBuilderDraft(id: string | undefined) {
+  return useQuery({
+    queryKey: keys.builderDraft(id ?? ''),
+    queryFn: async () => store.getBuilderDraft(id!),
+    enabled: Boolean(id),
+    staleTime: Infinity,
+    // A draft that 404s is gone; asking three more times does not bring it
+    // back and only delays the builder giving up and opening empty.
+    retry: false,
+  });
+}
+
+/**
+ * Save the draft. Upserts on (org, name), so autosave overwrites its own row.
+ *
+ * The draft LIST is invalidated but the draft itself is not: the author's
+ * browser holds the newest state by definition, and refetching what was just
+ * written would replace live edits with a snapshot of them.
+ */
+export function useSaveBuilderDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: SaveBuilderDraftInput) => store.saveBuilderDraft(input),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.builderDrafts });
+    },
   });
 }
 

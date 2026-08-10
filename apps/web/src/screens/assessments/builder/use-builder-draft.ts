@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DEFAULT_SETUP_ANSWERS,
   hasAnyMatchSide,
@@ -7,6 +7,7 @@ import {
   validateManifest,
   type AssessmentPathway,
   type AssessmentToolManifest,
+  type BuilderStep,
   type BuiltMatchingQuestion,
   type BuilderStructure,
   type DraftAnswerKey,
@@ -38,6 +39,7 @@ import {
   type DerivedPart,
 } from './builder-manifest.js';
 import { structureFromExtraction } from './builder-structure.js';
+import type { BuilderSnapshot } from './builder-draft-state.js';
 
 /**
  * The builder's working state for one tool.
@@ -164,6 +166,15 @@ export interface BuilderDraftState {
   fieldOps: FieldOps;
   /** Unit / part edits. */
   partOps: PartOps;
+  /**
+   * Everything worth persisting, recomputed as the author works.
+   *
+   * Exposed rather than saved from in here: this hook stays state and pure
+   * reducers, and `use-builder-persistence.ts` does the writing. A consumer
+   * that only wants builder state — every test of one — needs no provider and
+   * makes no request.
+   */
+  snapshot: BuilderSnapshot;
 }
 
 export interface FieldOps {
@@ -306,7 +317,21 @@ function seedFields(extraction: ExtractionResult): FormField[] {
   }));
 }
 
-export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
+/** What a resumed draft hands the builder to start from. */
+export interface BuilderDraftStateOptions {
+  /**
+   * A saved snapshot to restore, once it has been read.
+   *
+   * Plain data, applied exactly once. Reading it is `use-builder-persistence`'s
+   * job — keeping the request out of here is what lets a test of builder state
+   * render without a `QueryClientProvider`.
+   */
+  hydrateFrom?: BuilderSnapshot | null;
+}
+
+export function useBuilderDraftState({
+  hydrateFrom,
+}: BuilderDraftStateOptions = {}): BuilderDraftState {
   const [phase, setPhase] = useState<BuilderPhase>('idle');
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
@@ -365,6 +390,97 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     Record<string, Partial<Omit<DerivedPart, 'key' | 'ordinal' | 'sectionKey'>>>
   >({});
   const [partOrder, setPartOrder] = useState<string[]>([]);
+
+  /*
+    ── Resuming ────────────────────────────────────────────────────────────
+
+    Everything above used to live and die with the browser tab: the hook took a
+    `draftId` and ignored it, and nothing ever saved. A refresh discarded the
+    extraction, the corrected types, the structure, every answer key and every
+    unit edit, with no warning and no way back.
+
+    THE I/O IS NOT HERE, and that is deliberate — this hook's contract is state
+    and pure reducers. Pulling react-query into it made every consumer need a
+    `QueryClientProvider` to hold a field list, which is exactly what the note
+    on `setVersionIds` says not to do; three test files went red the moment it
+    was tried. `use-builder-persistence.ts` owns the reading and writing, and
+    hands the result in as plain data.
+  */
+
+  /*
+    HYDRATE ONCE. A re-render that re-ran this would overwrite the author's
+    live edits with the snapshot they started from — worse than not persisting
+    at all.
+  */
+  const hydrated = useRef(false);
+  useEffect(() => {
+    if (hydrated.current || !hydrateFrom) return;
+    hydrated.current = true;
+
+    setFileName(hydrateFrom.fileName);
+    setExtraction(hydrateFrom.extraction);
+    setFields(hydrateFrom.fields);
+    setStructure(hydrateFrom.structure);
+    setGroupCount(hydrateFrom.groupCount);
+    setSetupState(hydrateFrom.setup);
+    setExcluded(hydrateFrom.excluded);
+    setKeys(hydrateFrom.keys);
+    setPartOverrides(
+      hydrateFrom.partOverrides as Record<
+        string,
+        Partial<Omit<DerivedPart, 'key' | 'ordinal' | 'sectionKey'>>
+      >,
+    );
+    setPartOrder(hydrateFrom.partOrder);
+    setAssetId(hydrateFrom.assetId);
+    setFormId(hydrateFrom.formId);
+    setVersionId(hydrateFrom.versionId);
+    /*
+      `ready` SPECIFICALLY, because `hasDocument` is
+      `phase === 'ready' && extraction !== null` and every step past upload is
+      blocked on it. Any other phase resumes a complete draft into a builder
+      where the whole stepper is disabled — the document is there, the fields
+      are there, and nothing can be opened.
+
+      A draft with no extraction never got past upload, so it stays idle and
+      the author lands on the dropzone, which is correct.
+    */
+    setPhase(hydrateFrom.extraction ? 'ready' : 'idle');
+  }, [hydrateFrom]);
+
+  /** Everything worth saving, for the persistence hook to write. */
+  const snapshot: BuilderSnapshot = useMemo(
+    () => ({
+      fileName,
+      extraction,
+      fields,
+      structure,
+      groupCount,
+      setup,
+      excluded,
+      keys,
+      partOverrides,
+      partOrder,
+      ...(assetId ? { assetId } : {}),
+      ...(formId ? { formId } : {}),
+      ...(versionId ? { versionId } : {}),
+    }),
+    [
+      fileName,
+      extraction,
+      fields,
+      structure,
+      groupCount,
+      setup,
+      excluded,
+      keys,
+      partOverrides,
+      partOrder,
+      assetId,
+      formId,
+      versionId,
+    ],
+  );
 
   const ingest = useCallback(async (file: File) => {
     setError(null);
@@ -772,5 +888,6 @@ export function useBuilderDraftState(_draftId?: string): BuilderDraftState {
     keyOps,
     fieldOps,
     partOps,
+    snapshot,
   };
 }
