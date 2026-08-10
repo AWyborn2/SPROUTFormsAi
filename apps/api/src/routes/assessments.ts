@@ -33,6 +33,7 @@ import {
   streamCheckWarning,
   totalLoggedHours,
   stripMarkingSecrets,
+  theoryRenderingOf,
   validateAnswerKeys,
   validateManifest,
   type AssessmentPart,
@@ -1738,7 +1739,9 @@ assessmentCasesRouter.get(
         survive to every candidate who opens the assessment. Absent means
         `stacked`, which is what every theory part rendered as before.
       */
-      theoryRendering: manifest.theoryRendering ?? null,
+      // Resolved, never raw: a manifest naming nothing means the default,
+      // and `?? null` here spelled that as "stacked" on the fill surface.
+      theoryRendering: theoryRenderingOf(manifest),
       attemptNumber: attempt.attemptNumber,
       outcome: attempt.outcome,
       submittedAt: attempt.submittedAt,

@@ -195,3 +195,74 @@ describe('publishSummary', () => {
     expect(summary.questionsVerified).toBe(0);
   });
 });
+
+/**
+ * THE STRUCTURE EDITOR DID NOT REACH THE PUBLISHED FORM.
+ *
+ * Step 2 is the only place in the product where somebody sees the whole shape
+ * of the form and moves it — and publish wrote the draft's flat field list,
+ * which is extraction order. Every reorder was visible in the preview beside
+ * the editor and absent from the thing a candidate filled in.
+ */
+describe('checkPublish — the author’s arrangement is the published order', () => {
+  const f = (id: string): FormField => ({
+    id,
+    type: 'text',
+    label: id,
+    required: false,
+    source: 'imported',
+  });
+
+  const FLAT = [f('a'), f('b'), f('c')];
+
+  const section = (key: string, ids: string[]) => ({
+    key,
+    label: key,
+    cols: 1 as const,
+    fields: ids.map((id) => ({ id })),
+  });
+
+  const manifestWith = () => ({
+    parts: [
+      {
+        key: 's2',
+        ordinal: 1,
+        label: 's2',
+        kind: 'theory' as const,
+        pathways: ['new' as const],
+        startFieldId: 'c',
+      },
+    ],
+  });
+
+  it('PUBLISHES IN THE ARRANGED ORDER, NOT EXTRACTION ORDER', () => {
+    // Sections reversed and a field moved: c, then b and a.
+    const structure = [section('s2', ['c']), section('s1', ['b', 'a'])];
+
+    const check = checkPublish(FLAT, [], manifestWith(), structure);
+
+    expect(check.fields.map((x) => x.id)).toEqual(['s2_header', 'c', 's1_header', 'b', 'a']);
+  });
+
+  it('keeps the flat list when no arrangement is supplied', () => {
+    // Every existing caller and test.
+    const check = checkPublish(FLAT, [], manifestWith());
+
+    expect(check.fields.map((x) => x.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('REFUSES A FIELD THE ARRANGEMENT NEVER PLACED, rather than dropping it', () => {
+    /*
+      Publishing the arrangement silently deletes anything in no section. Step 2
+      already warns those "would not be published"; this is the half that makes
+      the warning true without making it destructive — a field that vanishes is
+      one nobody will fill in and nobody will notice is missing.
+    */
+    const structure = [section('s2', ['c'])];
+
+    const check = checkPublish(FLAT, [], manifestWith(), structure);
+
+    expect(check.problems.some((p) => p.includes('sits in no section'))).toBe(true);
+    expect(check.problems.filter((p) => p.includes('sits in no section'))).toHaveLength(2);
+  });
+});

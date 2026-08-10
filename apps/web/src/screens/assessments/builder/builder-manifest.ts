@@ -469,9 +469,10 @@ export function buildManifest(
       nowhere to live past publish: SetupAnswers is draft state, and the draft is
       gone by the time a candidate opens the assessment. `stacked` is the
       default and is what every theory part rendered as before, so only a
-      deliberate one_per_screen is worth storing.
+      deliberate `stacked` is worth storing — `one_per_screen` is now the
+      default a manifest naming nothing resolves to.
     */
-    ...(setup?.theoryRendering === 'one_per_screen' ? { theoryRendering: 'one_per_screen' as const } : {}),
+    ...(setup?.theoryRendering === 'stacked' ? { theoryRendering: 'stacked' as const } : {}),
   };
 }
 

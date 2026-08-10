@@ -38,7 +38,7 @@ export interface WorkflowStepProps {
 }
 
 export function WorkflowStep({ draft }: WorkflowStepProps) {
-  const { fields, keys, manifest, formId, versionId, title } = draft;
+  const { fields, keys, manifest, structure, formId, versionId, title } = draft;
   const [done, setDone] = useState<{ toolId: string } | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
 
@@ -46,7 +46,12 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
   const publishVersion = usePublishFormVersion();
   const createTool = useCreateAssessmentTool();
 
-  const check = useMemo(() => checkPublish(fields, keys, manifest), [fields, keys, manifest]);
+  // The STRUCTURE carries the order. Without it publish writes extraction
+  // order and the whole of step 2 is cosmetic.
+  const check = useMemo(
+    () => checkPublish(fields, keys, manifest, structure),
+    [fields, keys, manifest, structure],
+  );
   const summary = useMemo(() => publishSummary(fields, keys, manifest), [fields, keys, manifest]);
 
   const busy = saveFields.isPending || publishVersion.isPending || createTool.isPending;
