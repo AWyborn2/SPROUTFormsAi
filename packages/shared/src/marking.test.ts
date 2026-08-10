@@ -6,7 +6,7 @@
  * Covers AE1 (multi-answer marking) and AE2 (the 100% mandatory-section rule).
  */
 import { describe, expect, it } from 'vitest';
-import type { AssessmentToolManifest } from './assessment.js';
+import type { AssessmentPart, AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 import {
@@ -115,6 +115,88 @@ describe('isSelfMarking (U15)', () => {
 
   it('is false for a practical demonstration — its criteria carry no key (R69)', () => {
     expect(selfMarks([header('prac'), unkeyed('c1'), unkeyed('c2'), unkeyed('c3')])).toBe(false);
+  });
+
+  /*
+    DECLARING A PART'S VERDICT PAIR USED TO SWITCH OFF ITS AUTO-MARKING.
+
+    "The Candidate's responses were: ☐ Satisfactory ☐ Not Satisfactory" prints
+    at the END of a part, so it lands inside that part's slice. It carries no
+    answer key because nobody keys it — `markTheory` WRITES it from the same
+    arithmetic that produced the ✓/✗ above. But this test asked whether every
+    question in the slice was keyed, saw an unkeyed field, and concluded a
+    person had to judge the part.
+
+    So the moment an author declared the pair the workflow needs, a fully-keyed
+    30-question theory paper stopped marking itself and started demanding a
+    manual verdict — the exact opposite of what declaring it was for, and
+    silent.
+  */
+  const withVerdict = (fields: FormField[], part: Partial<AssessmentPart>) => {
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        {
+          key: 'p1',
+          ordinal: 1,
+          label: 'P1',
+          kind: 'theory',
+          pathways: ['new'],
+          startFieldId: fields[0]!.id,
+          ...part,
+        },
+      ],
+    };
+    return isSelfMarking(fields, manifest, 'p1');
+  };
+
+  it('still self-marks when the part declares its own verdict pair', () => {
+    const fields = [header('h'), q('g1', ['a']), outcome('g1-out'), unkeyed('verdict')];
+
+    expect(
+      withVerdict(fields, {
+        outcomeSatisfactory: { fieldId: 'verdict', value: 'Satisfactory' },
+        outcomeNotSatisfactory: { fieldId: 'verdict', value: 'Not Satisfactory' },
+      }),
+    ).toBe(true);
+  });
+
+  it('still self-marks when the part declares a further-action box', () => {
+    // Written only on a not-satisfactory part, and never keyed.
+    const fields = [header('h'), q('g1', ['a']), outcome('g1-out'), unkeyed('further')];
+
+    expect(withVerdict(fields, { furtherActionFieldId: 'further' })).toBe(true);
+  });
+
+  it('still self-marks when the cover’s sign-off falls inside the slice', () => {
+    const fields = [header('h'), q('g1', ['a']), outcome('g1-out'), unkeyed('result')];
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        { key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'], startFieldId: 'h' },
+      ],
+      signOff: {
+        overallSatisfactory: { fieldId: 'result', value: 'Candidate Competent' },
+        overallNotSatisfactory: { fieldId: 'result', value: 'Candidate not yet Competent' },
+      },
+    };
+
+    expect(isSelfMarking(fields, manifest, 'p1')).toBe(true);
+  });
+
+  it('is STILL false for a genuinely unkeyed question beside a declared verdict', () => {
+    /*
+      The fix must not become a blanket exemption. A real question nobody keyed
+      still routes the part to an assessor — otherwise declaring a verdict pair
+      would buy a tool the right to mark itself against the keys it happens to
+      hold, which is the R67 failure this whole predicate exists to prevent.
+    */
+    const fields = [header('h'), q('g1', ['a']), outcome('g1-out'), unkeyed('g2'), unkeyed('verdict')];
+
+    expect(
+      withVerdict(fields, {
+        outcomeSatisfactory: { fieldId: 'verdict', value: 'Satisfactory' },
+        outcomeNotSatisfactory: { fieldId: 'verdict', value: 'Not Satisfactory' },
+      }),
+    ).toBe(false);
   });
 });
 

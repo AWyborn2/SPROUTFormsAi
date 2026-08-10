@@ -18,7 +18,7 @@
  * array, not a schema change and not a new column in every access map.
  */
 
-import { fieldsInPart } from './assessment.js';
+import { fieldsInPart, partMarkFieldIds, signOffMarkFieldIds } from './assessment.js';
 import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 
@@ -287,9 +287,12 @@ function autoSourcesFor(
     if (id) out[id] = 'auto';
   };
 
-  auto(part.outcomeSatisfactory?.fieldId);
-  auto(part.outcomeNotSatisfactory?.fieldId);
-  auto(part.checklistMark?.fieldId);
+  /*
+    Shared with `isSelfMarking`, which must IGNORE exactly the fields this must
+    LOCK. One list — "what marking writes" — and two copies of it drifting
+    apart is how a box ends up both hand-fillable and machine-written.
+  */
+  for (const id of partMarkFieldIds(part)) auto(id);
 
   /*
     EVERY QUESTION'S OWN ✓/✗ CELL — the ones the candidate could press.
@@ -309,11 +312,7 @@ function autoSourcesFor(
     fill surface would be certifying themselves.
   */
   if (part.ordinal === Math.min(...manifest.parts.map((p) => p.ordinal))) {
-    const signOff = manifest.signOff;
-    auto(signOff?.overallSatisfactory?.fieldId);
-    auto(signOff?.overallNotSatisfactory?.fieldId);
-    auto(signOff?.moreCoachingRequiredYes?.fieldId);
-    auto(signOff?.moreCoachingRequiredNo?.fieldId);
+    for (const id of signOffMarkFieldIds(manifest)) auto(id);
   }
 
   return out;
