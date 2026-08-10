@@ -1,7 +1,10 @@
 import { useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Button, FileDropzone, Icon } from '@formai/ui';
 import {
   ASSESSMENT_PATHWAYS,
+  BUILDER_STEP_LABELS,
+  resolveBuilderStep,
   isChoiceField,
   hasAnyMatchSide,
   hasBothMatchSides,
@@ -9,6 +12,7 @@ import {
   type ExtractedField,
 } from '@formai/shared';
 import { validateUploadFile } from '../../../import/upload-validation.js';
+import { useBuilderDrafts, useDiscardBuilderDraft } from '../../../../lib/data/hooks.js';
 import { BUILDER_PHASES, type BuilderDraftState } from '../use-builder-draft.js';
 
 /**
@@ -129,6 +133,8 @@ export function UploadStep({ draft }: { draft: BuilderDraftState }) {
             {draft.error}
           </div>
         )}
+
+        <ResumeDrafts />
 
         <FileDropzone
           accept="application/pdf"
@@ -431,6 +437,86 @@ export function UploadStep({ draft }: { draft: BuilderDraftState }) {
           can be corrected in the answer-key step
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Saved drafts, and the way back into one.
+ *
+ * WHAT THIS UNBLOCKS. `/app/assessments/builder/:draftId` resumes a draft, and
+ * the list, load and discard routes have all existed since the draft table did.
+ * What never existed was anything that LINKED to them — so an author who left
+ * the builder half-way had no route back in, and had to start from the PDF
+ * again. Every abandoned run also leaves a draft FORM behind (the placement
+ * step creates its version up front, because geometry lives on a version's
+ * fields), which is why the form library fills with them.
+ *
+ * Shown only before an upload, and only when there is something to resume: on
+ * the first run of a fresh workspace this renders nothing at all, and it must
+ * never sit between an author and the dropzone they came here for.
+ *
+ * DISCARDING A DRAFT IS NOT DELETING ITS FORM. The two are separate records and
+ * the form library owns the second — saying so here stops "discard" reading as
+ * a cleanup it is not.
+ */
+function ResumeDrafts() {
+  const navigate = useNavigate();
+  const drafts = useBuilderDrafts();
+  const discard = useDiscardBuilderDraft();
+
+  const rows = drafts.data ?? [];
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="mb-5 rounded-[14px] border border-border bg-surface-card p-4">
+      <div className="mb-2.5">
+        <span className="block text-[14px] font-semibold">Pick up where you left off</span>
+        <span className="mt-0.5 block text-[11.5px] text-text-tertiary">
+          {rows.length} saved draft{rows.length === 1 ? '' : 's'} · discarding one leaves any form
+          it already created in the form library, where it can be deleted
+        </span>
+      </div>
+
+      <ul className="flex flex-col gap-1.5">
+        {rows.map((d) => (
+          <li
+            key={d.id}
+            className="flex flex-wrap items-center gap-2 rounded-lg border border-border-subtle p-[8px_10px]"
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[12.5px] font-semibold">
+                {d.name || 'Untitled assessment'}
+              </span>
+              <span className="mt-0.5 block text-[11px] text-text-tertiary">
+                {/*
+                  The step is resolved, not printed raw: a draft parked on a
+                  RETIRED step would otherwise show a name no screen answers to.
+                */}
+                Stopped at {BUILDER_STEP_LABELS[resolveBuilderStep(d.step)]} ·{' '}
+                {d.updatedAt.slice(0, 10)}
+              </span>
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              leadingIcon="play"
+              onClick={() => navigate(`/app/assessments/builder/${d.id}`)}
+            >
+              Resume
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              leadingIcon="trash-2"
+              disabled={discard.isPending}
+              onClick={() => discard.mutate(d.id)}
+            >
+              Discard
+            </Button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
