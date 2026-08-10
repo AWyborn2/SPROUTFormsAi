@@ -14,6 +14,7 @@ import {
 } from '@tanstack/react-query';
 import type {
   AssessmentPathway,
+  PrerequisiteCheck,
   ProfilePrefillKey,
   AssessmentToolManifest,
   AssessmentWorkflow,
@@ -1096,7 +1097,14 @@ export function useSaveWorkflow(toolId: string) {
     mutationFn: async (input: {
       workflow: AssessmentWorkflow;
       profilePrefill?: Record<string, ProfilePrefillKey> | null;
-    }) => assessmentsApi.saveWorkflow(toolId, input.workflow, input.profilePrefill),
+      prerequisiteChecks?: PrerequisiteCheck[] | null;
+    }) =>
+      assessmentsApi.saveWorkflow(
+        toolId,
+        input.workflow,
+        input.profilePrefill,
+        input.prerequisiteChecks,
+      ),
     onSuccess: () => {
       // Prefix invalidation, so the detail AND the list refresh: the list
       // carries each tool's parts, and a workflow change can alter what a

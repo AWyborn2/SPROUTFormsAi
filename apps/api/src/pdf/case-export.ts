@@ -81,6 +81,11 @@ export interface AssembleCaseInput {
    * matches what the fill surface showed. The route resolves; this only draws.
    */
   prefillValues?: Record<string, string> | null;
+  /**
+   * `manifest.prerequisiteChecks`, answered from the register at export time —
+   * field id to the ✓ (true) or ✗ (false) the box prints.
+   */
+  prerequisiteValues?: Record<string, boolean> | null;
   attempts: readonly CaseAttemptRecord[];
   /**
    * Null until the assessor signs. The whole certification block is gated on
@@ -182,6 +187,7 @@ export function assembleCaseValues({
   locationStream,
   candidateName,
   prefillValues,
+  prerequisiteValues,
   attempts,
   signOff,
   resolved,
@@ -249,6 +255,9 @@ export function assembleCaseValues({
     against, so it is what the evidence document has to say.
   */
   for (const [fieldId, value] of Object.entries(prefillValues ?? {})) {
+    values[fieldId] = value;
+  }
+  for (const [fieldId, value] of Object.entries(prerequisiteValues ?? {})) {
     values[fieldId] = value;
   }
   if (manifest.candidateNameFieldId && candidateName) {

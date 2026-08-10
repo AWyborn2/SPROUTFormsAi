@@ -16,6 +16,7 @@ import {
   type AssessmentWorkflow,
   type FieldAccess,
   type FormField,
+  type PrerequisiteCheck,
   type ProfilePrefillKey,
   type ValueSource,
   type WorkflowRole,
@@ -23,6 +24,7 @@ import {
 } from '@formai/shared';
 import {
   useAssessmentTool,
+  useCompetencies,
   useSaveWorkflow,
   useSetLocationParts,
   useSession,
@@ -125,6 +127,12 @@ export function WorkflowBuilderScreen() {
   const [prefillDraft, setPrefillDraft] = useState<
     Record<string, ProfilePrefillKey> | undefined
   >(undefined);
+  /**
+   * Printed prerequisites mapped to the competency register — `undefined`
+   * until touched, same tri-state as the prefill map and for the same reason.
+   */
+  const [prereqDraft, setPrereqDraft] = useState<PrerequisiteCheck[] | undefined>(undefined);
+  const competencies = useCompetencies();
 
   // The parts rule is an Admin act (R73). Reads for everyone, edits for admins.
   const canEditParts = session?.role === 'admin' || session?.role === 'owner';
@@ -141,7 +149,12 @@ export function WorkflowBuilderScreen() {
   const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(new Set());
 
   const workflow = draft ?? tool?.workflow ?? null;
-  const dirty = draft !== null;
+  /*
+    Dirty means ANY unsaved edit. The save button used to watch only the
+    workflow draft, so a prefill-only or prerequisite-only change could not be
+    saved at all — the one button that commits them stayed disabled.
+  */
+  const dirty = draft !== null || prefillDraft !== undefined || prereqDraft !== undefined;
 
   /** A part's fields, grouped by printed heading. Computed once per tool load. */
   const groupsForPart = useMemo(() => {
@@ -186,9 +199,22 @@ export function WorkflowBuilderScreen() {
     if (!workflow) return;
     const touched = prefillDraft !== undefined;
     const map = touched && Object.keys(prefillDraft!).length > 0 ? prefillDraft! : null;
-    save.mutate({ workflow, ...(touched ? { profilePrefill: map } : {}) }, {
+    const prereqTouched = prereqDraft !== undefined;
+    const checks =
+      prereqTouched && prereqDraft!.filter((c) => c.fieldId && c.competencyId).length > 0
+        ? prereqDraft!.filter((c) => c.fieldId && c.competencyId)
+        : null;
+    save.mutate(
+      {
+        workflow,
+        ...(touched ? { profilePrefill: map } : {}),
+        ...(prereqTouched ? { prerequisiteChecks: checks } : {}),
+      },
+      {
       onSuccess: (result) => {
         setDraft(null);
+        setPrefillDraft(undefined);
+        setPrereqDraft(undefined);
         toast({
           variant: result.warnings.length > 0 ? 'warning' : 'success',
           message:
@@ -260,6 +286,89 @@ export function WorkflowBuilderScreen() {
           </Button>
         </div>
       </header>
+
+      {/*
+        PREREQUISITES, ANSWERED FROM THE REGISTER. "Drivers Licence C or
+        higher" is a claim about the candidate, not a question for them — a
+        licence is a competency with an expiry, so the register already knows.
+        Mapping the printed box to the competency makes the box fill itself,
+        re-checked on every read; an unsatisfied prerequisite never blocks the
+        assessment, and always blocks the sign-off.
+      */}
+      <div className="rounded-md border border-border bg-surface-card p-[13px_15px]">
+        <span className="block text-[13px] font-semibold">Prerequisite checks</span>
+        <p className="mt-0.5 mb-2 text-[11.5px] text-text-tertiary">
+          Answered from the candidate&rsquo;s competency register — the box ticks itself, the
+          candidate sits the assessment either way, and an unsatisfied prerequisite blocks the
+          final sign-off.
+        </p>
+        {(prereqDraft ?? tool.manifest.prerequisiteChecks ?? []).map((check, index) => {
+          const update = (patch: Partial<PrerequisiteCheck>) =>
+            setPrereqDraft((prev) => {
+              const base = [...(prev ?? tool.manifest.prerequisiteChecks ?? [])];
+              base[index] = { ...base[index]!, ...patch };
+              return base;
+            });
+          return (
+            <div key={index} className="mb-1.5 flex flex-wrap items-center gap-2">
+              <select
+                aria-label="Printed prerequisite box"
+                value={check.fieldId}
+                onChange={(e) => update({ fieldId: e.target.value })}
+                className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+              >
+                <option value="">— printed box —</option>
+                {tool.fields
+                  .filter((f) => f.type === 'check_cross' || f.type === 'boolean_yes_no')
+                  .map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.label || f.id}
+                    </option>
+                  ))}
+              </select>
+              <span className="text-[11px] text-text-tertiary">answers from</span>
+              <select
+                aria-label="Competency that answers it"
+                value={check.competencyId}
+                onChange={(e) => update({ competencyId: e.target.value })}
+                className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+              >
+                <option value="">— competency —</option>
+                {(competencies.data ?? []).map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() =>
+                  setPrereqDraft((prev) => {
+                    const base = [...(prev ?? tool.manifest.prerequisiteChecks ?? [])];
+                    base.splice(index, 1);
+                    return base;
+                  })
+                }
+              >
+                Remove
+              </Button>
+            </div>
+          );
+        })}
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            setPrereqDraft((prev) => [
+              ...(prev ?? tool.manifest.prerequisiteChecks ?? []),
+              { fieldId: '', competencyId: '' },
+            ])
+          }
+        >
+          Add a prerequisite check
+        </Button>
+      </div>
 
       {tool.workflowIsDefault && !dirty && (
         <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[11px_13px] text-[12.5px] text-text-secondary">

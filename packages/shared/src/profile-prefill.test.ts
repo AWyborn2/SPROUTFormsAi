@@ -12,7 +12,11 @@
 import { describe, expect, it } from 'vitest';
 import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
-import { profilePrefillValues, validateProfilePrefill } from './assessment.js';
+import {
+  profilePrefillValues,
+  validatePrerequisiteChecks,
+  validateProfilePrefill,
+} from './assessment.js';
 import { canWrite, sectionForPart, workflowFromFields, workflowOf } from './workflow.js';
 
 const field = (id: string, type: FormField['type'] = 'text', label = id): FormField => ({
@@ -183,5 +187,50 @@ describe('workflowFromFields', () => {
 
     expect(w.sections[0]!.label).toBe('Front page');
     expect(w.sections[0]!.fieldIds).toEqual(['loose']);
+  });
+});
+
+describe('validatePrerequisiteChecks', () => {
+  /*
+    A prerequisite maps a printed ✓/✗ box to a competency in the register.
+    The box must exist and must be able to CARRY a verdict — mapping a text
+    field would print the register's answer as nothing at all.
+  */
+  const fields = [field('prereq', 'check_cross'), field('name'), field('yn', 'boolean_yes_no')];
+
+  it('accepts a check_cross and a boolean_yes_no', () => {
+    expect(
+      validatePrerequisiteChecks(
+        [
+          { fieldId: 'prereq', competencyId: 'c1' },
+          { fieldId: 'yn', competencyId: 'c2' },
+        ],
+        fields,
+      ),
+    ).toEqual([]);
+  });
+
+  it('refuses a field not in the version', () => {
+    expect(validatePrerequisiteChecks([{ fieldId: 'ghost', competencyId: 'c1' }], fields)).toHaveLength(1);
+  });
+
+  it('refuses a text field — the verdict needs a box to land in', () => {
+    expect(validatePrerequisiteChecks([{ fieldId: 'name', competencyId: 'c1' }], fields)).toHaveLength(1);
+  });
+
+  it('refuses a check with no competency', () => {
+    expect(validatePrerequisiteChecks([{ fieldId: 'prereq', competencyId: '' }], fields)).toHaveLength(1);
+  });
+
+  it('refuses two checks on one box — one box answers one claim', () => {
+    expect(
+      validatePrerequisiteChecks(
+        [
+          { fieldId: 'prereq', competencyId: 'c1' },
+          { fieldId: 'prereq', competencyId: 'c2' },
+        ],
+        fields,
+      ),
+    ).toHaveLength(1);
   });
 });

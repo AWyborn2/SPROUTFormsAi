@@ -253,6 +253,59 @@ export function validateProfilePrefill(
   return problems;
 }
 
+/**
+ * A printed prerequisite tied to the candidate's COMPETENCY REGISTER.
+ *
+ * "Q50001782 Drivers Licence C or higher" is a claim about the candidate, not
+ * a question for them — the register already knows the answer, because a
+ * licence is a competency with a class and an expiry (R33). Mapping the
+ * printed box to the competency is what lets the system answer it: the box
+ * fills itself from the register, nobody types it, and the check re-runs on
+ * every read so a licence that expires mid-programme shows expired.
+ *
+ * DELIBERATELY NON-BLOCKING DURING THE ASSESSMENT. An unsatisfied prerequisite
+ * must not stop a candidate sitting theory — practice is that the paperwork
+ * catches up — but it MUST stop the sign-off: certifying somebody whose
+ * prerequisite lapsed is exactly the certificate an auditor pulls. Soft
+ * warning on the way through, hard gate at `competent`.
+ */
+export interface PrerequisiteCheck {
+  /** The printed ✓/✗ box the verdict lands in. */
+  fieldId: string;
+  /** The competency whose currency answers it. */
+  competencyId: string;
+}
+
+/** Problems with prerequisite mappings — shared by publish and the tool PATCH. */
+export function validatePrerequisiteChecks(
+  checks: readonly PrerequisiteCheck[] | undefined,
+  fields: readonly FormField[],
+): string[] {
+  const problems: string[] = [];
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  const seen = new Set<string>();
+  for (const check of checks ?? []) {
+    const field = byId.get(check.fieldId);
+    if (!field) {
+      problems.push(`Prerequisite names field "${check.fieldId}", which is not in this version.`);
+      continue;
+    }
+    if (field.type !== 'check_cross' && field.type !== 'boolean_yes_no') {
+      problems.push(
+        `Prerequisite maps "${field.label}" (${field.type}), but the verdict needs a ✓/✗ or yes/no box to land in.`,
+      );
+    }
+    if (seen.has(check.fieldId)) {
+      problems.push(`Field "${field.label}" carries two prerequisite checks; one box answers one claim.`);
+    }
+    seen.add(check.fieldId);
+    if (!check.competencyId) {
+      problems.push(`Prerequisite on "${field.label}" names no competency.`);
+    }
+  }
+  return problems;
+}
+
 /** One part of an assessment tool. */
 export interface AssessmentPart {
   /** Stable key, referenced by attempts. Survives relabelling. */
@@ -406,6 +459,12 @@ export interface AssessmentToolManifest {
    * record, is exactly the edit nobody should be able to make.
    */
   profilePrefill?: Record<string, ProfilePrefillKey>;
+
+  /**
+   * Printed prerequisites answered from the competency register — see
+   * `PrerequisiteCheck`. Evaluated on read, gated at sign-off, never typed.
+   */
+  prerequisiteChecks?: PrerequisiteCheck[];
   /**
    * Who does what, and in what order — see `workflow.ts`.
    *
@@ -953,6 +1012,7 @@ export function validateManifest(
     tool, which is the point.
   */
   problems.push(...validateProfilePrefill(manifest.profilePrefill, fields));
+  problems.push(...validatePrerequisiteChecks(manifest.prerequisiteChecks, fields));
 
   if (manifest.candidateNameFieldId && !fieldIds.has(manifest.candidateNameFieldId)) {
     problems.push(
