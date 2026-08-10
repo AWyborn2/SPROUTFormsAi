@@ -17,7 +17,6 @@ import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../
 import type { FieldProposal, TableProposal, TextPage } from '../../lib/pdf-geometry.js';
 import {
   groupFields,
-  outcomeFieldIds,
   overallCounts,
   pairsFor,
   type PlacementPair,
@@ -184,8 +183,27 @@ export function GeometryEditorScreen({
     An outcome box does not ALSO get a row of its own — it is reachable through
     its question's chip. A second row for it is exactly the split this unit
     exists to close.
+
+    BUT ONLY WHERE THE QUESTION IS ACTUALLY SHOWN, and that qualifier was
+    missing. The justification for hiding the box is that it is reachable
+    somewhere else; when the question is behind the search filter, the box was
+    reachable through NOTHING and simply vanished from the placement session —
+    with the header still counting it, so the list read as having fewer boxes
+    left than it had. An author hunting for a cell they could see on the page
+    and not in the list had no way to place it.
+
+    Reachability is computed from the RENDERED groups rather than from the
+    field list, because the filter is what decides which questions are on
+    screen. A box whose question is filtered out gets its own row again.
   */
-  const pairedOutcomeIds = useMemo(() => outcomeFieldIds(fields), [fields]);
+  const pairedOutcomeIds = useMemo(() => {
+    const shownQuestions = new Set(groups.flatMap((g) => g.fields.map((f) => f.id)));
+    const reachable = new Set<string>();
+    for (const pair of pairsFor(fields)) {
+      if (pair.outcome && shownQuestions.has(pair.question.id)) reachable.add(pair.outcome.id);
+    }
+    return reachable;
+  }, [fields, groups]);
 
   const onTextLayer = useCallback((pages: TextPage[]) => setTextPages(pages), []);
 

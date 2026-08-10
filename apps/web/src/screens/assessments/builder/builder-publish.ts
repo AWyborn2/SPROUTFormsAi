@@ -26,11 +26,13 @@
  * no tool attached, which is a worse state than either end of the operation.
  */
 
+import { resolveStructure } from './builder-structure.js';
 import {
   linkOutcomeTargets,
   validateAnswerKeys,
   validateManifest,
   type AssessmentToolManifest,
+  type BuilderStructure,
   type DraftAnswerKey,
   type FormField,
 } from '@formai/shared';
@@ -104,10 +106,45 @@ export function checkPublish(
   fields: readonly FormField[],
   keys: readonly DraftAnswerKey[],
   manifest: AssessmentToolManifest | null,
+  /**
+   * The author's arrangement, whose ORDER is the published document's order.
+   *
+   * THE STRUCTURE EDITOR DID NOT REACH THE PUBLISHED FORM. Step 2 is the only
+   * place in the product where somebody sees the whole shape of the form and
+   * moves it — and publish wrote the draft's flat field list, which is
+   * extraction order. Every section reorder, every field moved between
+   * sections, every renamed heading was visible in the preview beside the
+   * editor and absent from the thing a candidate filled in.
+   *
+   * `ResolvedStructure.fields` has been documented as "the publishable field
+   * list, in the author's order" since it was written; nothing published it.
+   *
+   * Optional so a caller with no arrangement (and every existing test) keeps
+   * the flat list.
+   */
+  structure?: BuilderStructure,
 ): PublishCheck {
-  const resolved = resolvePublishFields(fields, keys);
+  const arranged = structure && structure.length > 0 ? resolveStructure(structure, fields) : null;
+  const ordered = arranged ? arranged.fields : fields;
+  const resolved = resolvePublishFields(ordered, keys);
 
   const problems: string[] = [];
+
+  /*
+    A FIELD THE ARRANGEMENT NEVER PLACED IS REFUSED, not dropped.
+
+    `resolveStructure` returns only what the sections contain, so publishing it
+    silently deletes anything sitting in no section. Step 2 already warns that
+    those "would not be published" — this is the half that makes the warning
+    true without making it destructive, because a field that vanishes is one
+    nobody will fill in and nobody will notice is missing.
+  */
+  for (const id of arranged?.orphanIds ?? []) {
+    const label = fields.find((f) => f.id === id)?.label ?? id;
+    problems.push(
+      `"${label}" sits in no section, so it would not be published. Drag it into one in Generate, or delete it.`,
+    );
+  }
   if (!manifest || manifest.parts.length === 0) {
     problems.push('This tool declares no parts. Every non-cover section becomes a part in Units & gating.');
   } else {

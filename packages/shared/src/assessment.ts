@@ -54,11 +54,40 @@ export type PartKind = (typeof PART_KINDS)[number];
  *
  * Lives here rather than with the builder's own setup answers because it
  * outlives the draft: the fill surface reads it off the published tool, long
- * after the builder session that chose it is gone. A tool that names none gets
- * `stacked`, which is what every theory part has always rendered as.
+ * after the builder session that chose it is gone. A tool that names none is
+ * resolved by `theoryRenderingOf` below — never by a local fallback.
  */
 export const THEORY_RENDERINGS = ['one_per_screen', 'stacked'] as const;
 export type TheoryRendering = (typeof THEORY_RENDERINGS)[number];
+
+/**
+ * How a tool that names no rendering presents its theory.
+ *
+ * `one_per_screen`, and this reverses the previous answer. Two defaults
+ * disagreed: the builder's setup answers have always started at
+ * `one_per_screen`, while a stored manifest naming nothing resolved to
+ * `stacked` — "what every theory part has always rendered as". So an author
+ * who never touched the toggle chose paged and shipped stacked, and the only
+ * way to get the product's own default was to toggle it off and on again.
+ *
+ * `stacked` remains authorable and is now the value worth STORING, since it is
+ * the one that differs from the default.
+ */
+export const DEFAULT_THEORY_RENDERING: TheoryRendering = 'one_per_screen';
+
+/**
+ * A tool's theory rendering, resolved.
+ *
+ * One rule, because the API serves this to the fill surface and the builder
+ * previews it: two `?? 'stacked'` fallbacks in different files is how a
+ * candidate's screen and an author's preview come to disagree about the same
+ * assessment.
+ */
+export function theoryRenderingOf(
+  manifest: Pick<AssessmentToolManifest, 'theoryRendering'>,
+): TheoryRendering {
+  return manifest.theoryRendering ?? DEFAULT_THEORY_RENDERING;
+}
 
 /** The two outcomes the printed paper offers. There is no third. */
 export const PART_OUTCOMES = ['satisfactory', 'not_satisfactory'] as const;
