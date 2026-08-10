@@ -34,6 +34,7 @@ vi.mock('react-router-dom', () => ({
 
 vi.mock('../../lib/data/hooks.js', () => ({
   useAssessmentTool: () => toolResult,
+  useCompetencies: () => ({ data: [{ id: 'comp-1', name: 'Drivers Licence C or higher' }] }),
   useSaveWorkflow: () => ({ mutate: saveMutate, isPending: false }),
   useSetLocationParts: () => ({ mutate: setLocationPartsMutate, isPending: false }),
   useSession: () => sessionResult,

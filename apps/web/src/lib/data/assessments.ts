@@ -12,6 +12,7 @@
  * had ever been sent the rest.
  */
 import type {
+  PrerequisiteCheck,
   ProfilePrefillKey,
   TheoryRendering,
   AssessmentPathway,
@@ -274,12 +275,19 @@ export const assessmentsApi = {
     id: string,
     workflow: AssessmentWorkflow,
     profilePrefill?: Record<string, ProfilePrefillKey> | null,
+    prerequisiteChecks?: PrerequisiteCheck[] | null,
+    fieldDefaults?: Record<string, SubmissionValue> | null,
   ) =>
     apiClient.patch<{ id: string; workflow: AssessmentWorkflow; warnings: string[] }>(
       `/assessment-tools/${id}`,
       // Absent leaves the stored map alone; null clears it. Sent only when the
       // editor actually touched it, so a plain workflow save cannot erase it.
-      { workflow, ...(profilePrefill !== undefined ? { profilePrefill } : {}) },
+      {
+        workflow,
+        ...(profilePrefill !== undefined ? { profilePrefill } : {}),
+        ...(prerequisiteChecks !== undefined ? { prerequisiteChecks } : {}),
+        ...(fieldDefaults !== undefined ? { fieldDefaults } : {}),
+      },
     ),
 
   /**

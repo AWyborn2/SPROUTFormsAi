@@ -81,6 +81,11 @@ export interface AssembleCaseInput {
    * matches what the fill surface showed. The route resolves; this only draws.
    */
   prefillValues?: Record<string, string> | null;
+  /**
+   * `manifest.prerequisiteChecks`, answered from the register at export time —
+   * field id to the ✓ (true) or ✗ (false) the box prints.
+   */
+  prerequisiteValues?: Record<string, boolean> | null;
   attempts: readonly CaseAttemptRecord[];
   /**
    * Null until the assessor signs. The whole certification block is gated on
@@ -182,6 +187,7 @@ export function assembleCaseValues({
   locationStream,
   candidateName,
   prefillValues,
+  prerequisiteValues,
   attempts,
   signOff,
   resolved,
@@ -195,7 +201,14 @@ export function assembleCaseValues({
     );
   }
 
-  const values: Record<string, SubmissionValue> = {};
+  /*
+    Tool-declared DEFAULTS seed the map FIRST, so every later merge — attempt
+    values, identity prefill, prerequisite verdicts, the sign-off block — wins
+    over them. A default is what the paper says when nobody said otherwise:
+    the theory-only tool's "Written/Verbal Questions" method prints ticked
+    unless an assessor recorded something else.
+  */
+  const values: Record<string, SubmissionValue> = { ...(manifest.fieldDefaults ?? {}) };
   const rendered: string[] = [];
   const blank: string[] = [];
 
@@ -249,6 +262,9 @@ export function assembleCaseValues({
     against, so it is what the evidence document has to say.
   */
   for (const [fieldId, value] of Object.entries(prefillValues ?? {})) {
+    values[fieldId] = value;
+  }
+  for (const [fieldId, value] of Object.entries(prerequisiteValues ?? {})) {
     values[fieldId] = value;
   }
   if (manifest.candidateNameFieldId && candidateName) {
