@@ -84,6 +84,7 @@ function base(): Taxonomy {
       displayIdentifier: 'employee_number',
       pooledCaseOverdueDays: 14,
       notificationLeadDays: 30,
+      dateFormat: 'dmy',
     },
   };
 }
@@ -189,6 +190,20 @@ describe('TaxonomyScreen', () => {
     fireEvent.change(select, { target: { value: 'swipe_card_number' } });
     expect(updateSettings).toHaveBeenCalledWith(
       expect.objectContaining({ displayIdentifier: 'swipe_card_number' }),
+      expect.anything(),
+    );
+  });
+
+  it('offers the two date conventions and persists the date-format choice', () => {
+    taxonomy.data = base();
+    render(<TaxonomyScreen />);
+    const select = screen.getByLabelText('Date format') as HTMLSelectElement;
+    const values = Array.from(select.options).map((o) => o.value);
+    expect(values).toContain('dmy');
+    expect(values).toContain('mdy');
+    fireEvent.change(select, { target: { value: 'mdy' } });
+    expect(updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ dateFormat: 'mdy' }),
       expect.anything(),
     );
   });

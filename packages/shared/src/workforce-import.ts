@@ -240,6 +240,14 @@ export interface ImportContext {
    */
   heldEmployeeNumbers?: ReadonlySet<string>;
   heldSwipeCardNumbers?: ReadonlySet<string>;
+  /**
+   * How to read a slash-separated `grant_date` cell — the organisation's
+   * `dateFormat` setting. Required rather than defaulted here: guessing a
+   * format silently is exactly the bug this field exists to close, so a
+   * caller must say which convention applies. Does not affect an ISO
+   * (`YYYY-MM-DD`) cell, which is unambiguous regardless.
+   */
+  dateFormat: 'dmy' | 'mdy';
 }
 
 /** Access-level label (any case) → the Role it names, e.g. "Assessor" → 'assessor'. */
@@ -247,13 +255,49 @@ const ROLE_BY_LABEL = new Map<string, Role>(
   (Object.entries(ROLE_LABELS) as [Role, string][]).map(([role, label]) => [label.toLowerCase(), role]),
 );
 
-/** Read a `YYYY-MM-DD` (or any Date-parseable) grant date, or null when unreadable. */
-function parseGrantDate(value: string): Date | null {
+/**
+ * Build a UTC date from parts, rejecting anything that isn't a real calendar
+ * date — `new Date(Date.UTC(...))` silently ROLLS an out-of-range day into
+ * the next month (31 February becomes 2/3 March) rather than failing, so the
+ * round-trip below is the actual validity check.
+ */
+function dateFromParts(year: number, month: number, day: number): Date | null {
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null;
+  }
+  return date;
+}
+
+/**
+ * Read a grant date, or null when unreadable.
+ *
+ * TWO SHAPES ONLY — deliberately narrower than the free-form parse this
+ * replaced. An ISO cell (`YYYY-MM-DD`) is unambiguous and always read that
+ * way. A slash- or hyphen-separated numeric cell (`D/M/YYYY` or `M/D/YYYY`)
+ * is ambiguous on its own — which of the first two numbers is the day is
+ * exactly the question `dateFormat` answers, per the organisation's
+ * convention. Anything else (a month name, a timestamp, free text) is
+ * refused rather than guessed via `Date.parse`, which is the bug this
+ * replaces: `Date.parse` reads a day-first date month-first whenever the day
+ * is 12 or under, silently.
+ */
+function parseGrantDate(value: string, dateFormat: 'dmy' | 'mdy'): Date | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
-  const ms = Date.parse(trimmed);
-  if (Number.isNaN(ms)) return null;
-  return new Date(ms);
+
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (iso) return dateFromParts(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+
+  const numeric = /^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/.exec(trimmed);
+  if (numeric) {
+    const [, a, b, year] = numeric;
+    const [day, month] = dateFormat === 'mdy' ? [Number(b), Number(a)] : [Number(a), Number(b)];
+    return dateFromParts(Number(year), month, day);
+  }
+
+  return null;
 }
 
 /**
@@ -425,7 +469,7 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
       rejected.push({ rowNumber: row.rowNumber, subject, reason: 'unknown_competency', detail: row.competency });
       continue;
     }
-    const grantedAt = parseGrantDate(row.grantDate);
+    const grantedAt = parseGrantDate(row.grantDate, ctx.dateFormat);
     if (!grantedAt) {
       rejected.push({ rowNumber: row.rowNumber, subject, reason: 'bad_grant_date', detail: row.grantDate });
       continue;

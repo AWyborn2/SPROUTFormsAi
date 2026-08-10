@@ -9,6 +9,7 @@ import type {
   BrandingKit,
   FormBrandKit,
   CompetencyStatus,
+  DateFormat,
   DisplayIdentifier,
   ExtractionResult,
   FormContainer,
@@ -638,6 +639,8 @@ export interface TaxonomySettings {
   pooledCaseOverdueDays: number;
   /** Days ahead of an expiry the sweep notifies a holder (U21, KTD12). */
   notificationLeadDays: number;
+  /** How the organisation writes an ambiguous slash-separated date. */
+  dateFormat: DateFormat;
 }
 
 /** The whole taxonomy in one read, for the settings screen. */

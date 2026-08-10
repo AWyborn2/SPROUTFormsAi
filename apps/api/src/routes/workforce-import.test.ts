@@ -43,6 +43,7 @@ const ORG = {
   planTier: 'business',
   seatLimit: 15,
   candidateSeatLimit: 100,
+  dateFormat: 'dmy' as const,
 };
 
 /**

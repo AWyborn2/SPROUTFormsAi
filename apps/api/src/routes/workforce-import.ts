@@ -59,7 +59,11 @@ const fileBody = z.object({
  * in the map. The import creates no taxonomy under any circumstance (R169), so
  * an unknown name has nowhere to go but the rejection list.
  */
-async function loadImportContext(orgId: string, planTier: string): Promise<ImportContext> {
+async function loadImportContext(
+  orgId: string,
+  planTier: string,
+  dateFormat: 'dmy' | 'mdy',
+): Promise<ImportContext> {
   const database = db!;
   const [locations, departments, jobRoles, competencies, tools] = await Promise.all([
     database.query.locations.findMany({ where: eq(schema.locations.orgId, orgId) }),
@@ -103,6 +107,7 @@ async function loadImportContext(orgId: string, planTier: string): Promise<Impor
     candidateSeatsAllowed: (PLAN_CONFIG[planTier as PlanTier]?.candidateSeatLimit ?? 0) !== 0,
     heldEmployeeNumbers: held.employeeNumbers,
     heldSwipeCardNumbers: held.swipeCardNumbers,
+    dateFormat,
   };
 }
 
@@ -115,7 +120,7 @@ async function validateSubmitted(
     where: eq(schema.organizations.id, orgId),
   });
   if (!org) return null;
-  const ctx = await loadImportContext(orgId, org.planTier);
+  const ctx = await loadImportContext(orgId, org.planTier, org.dateFormat);
   return { validated: validateWorkforceImport(parseWorkforceCsv(csv), ctx), org };
 }
 

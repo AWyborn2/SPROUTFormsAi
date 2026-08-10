@@ -38,6 +38,7 @@ function makeCtx(over: Partial<ImportContext> = {}): ImportContext {
     awardedCompetenciesByName: new Map([['ato - track dozer', COMP]]),
     placement,
     candidateSeatsAllowed: true,
+    dateFormat: 'dmy',
     ...over,
   };
 }
@@ -296,5 +297,52 @@ describe('validateWorkforceImport — deliberate non-rejections and volume', () 
     expect(validCompetencies).toHaveLength(1);
     expect(validCompetencies[0]).toMatchObject({ competencyId: COMP, evidence: 'CERT-9' });
     expect(validCompetencies[0]!.grantedAt.toISOString().slice(0, 10)).toBe('2021-06-30');
+  });
+});
+
+describe('validateWorkforceImport — grant date reads by the organisation\'s dateFormat', () => {
+  const fileWithDate = (grantDate: string) =>
+    [
+      profileFile(),
+      '#competencies',
+      'email,competency,grant_date,evidence',
+      `ada@example.com,ATO - Track Dozer,${grantDate},`,
+    ].join('\n');
+
+  it('reads a slash date DAY-FIRST on dmy — the ambiguous case Date.parse got wrong', () => {
+    // 07/08/2027 is 7 August on dmy, NOT 8 July — the exact misread this
+    // replaces `Date.parse` to close.
+    const ctx = makeCtx({ dateFormat: 'dmy' });
+    const { validCompetencies } = validateFile(fileWithDate('07/08/2027'), ctx);
+    expect(validCompetencies[0]!.grantedAt.toISOString().slice(0, 10)).toBe('2027-08-07');
+  });
+
+  it('reads the SAME slash date MONTH-FIRST on mdy', () => {
+    const ctx = makeCtx({ dateFormat: 'mdy' });
+    const { validCompetencies } = validateFile(fileWithDate('07/08/2027'), ctx);
+    expect(validCompetencies[0]!.grantedAt.toISOString().slice(0, 10)).toBe('2027-07-08');
+  });
+
+  it('reads a hyphenated numeric date the same way as a slash one', () => {
+    const ctx = makeCtx({ dateFormat: 'dmy' });
+    const { validCompetencies } = validateFile(fileWithDate('07-08-2027'), ctx);
+    expect(validCompetencies[0]!.grantedAt.toISOString().slice(0, 10)).toBe('2027-08-07');
+  });
+
+  it('reads an ISO date the same way regardless of dateFormat', () => {
+    // The whole point of ISO: no organisation setting can change what it means.
+    const dmy = validateFile(fileWithDate('2027-08-07'), makeCtx({ dateFormat: 'dmy' }));
+    const mdy = validateFile(fileWithDate('2027-08-07'), makeCtx({ dateFormat: 'mdy' }));
+    expect(dmy.validCompetencies[0]!.grantedAt.toISOString().slice(0, 10)).toBe('2027-08-07');
+    expect(mdy.validCompetencies[0]!.grantedAt.toISOString().slice(0, 10)).toBe('2027-08-07');
+  });
+
+  it('rejects a day beyond the month it names rather than rolling into the next month', () => {
+    // 31/02/2024 must not silently become 2 or 3 March.
+    expect(reasons(fileWithDate('31/02/2024'))).toEqual(['bad_grant_date']);
+  });
+
+  it('rejects a month name or free text — no longer guessed via Date.parse', () => {
+    expect(reasons(fileWithDate('August 7, 2027'))).toEqual(['bad_grant_date']);
   });
 });

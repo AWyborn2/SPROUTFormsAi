@@ -1,7 +1,9 @@
 import { useState, type ReactNode } from 'react';
 import { Badge, Button, Card, Icon, Input, Select, Switch, useToast } from '@formai/ui';
 import {
+  DATE_FORMAT_LABELS,
   DISPLAY_IDENTIFIER_LABELS,
+  type DateFormat,
   type DisplayIdentifier,
   type RequiredAssessmentsChangeEffects,
 } from '@formai/shared';
@@ -358,6 +360,7 @@ function SettingsPanel({
     displayIdentifier: DisplayIdentifier;
     pooledCaseOverdueDays: number;
     notificationLeadDays: number;
+    dateFormat: DateFormat;
   };
   onError: (e: unknown) => void;
 }) {
@@ -407,6 +410,25 @@ function SettingsPanel({
                   { onError },
                 )
               }
+            />
+          </div>
+        </label>
+        <label className="flex items-center justify-between gap-4">
+          <span className="text-sm">
+            Read an ambiguous date as
+            <span className="block text-[12px] text-text-tertiary">
+              Applies to a slash-separated date, such as an imported grant date.
+            </span>
+          </span>
+          <div className="w-56">
+            <Select
+              aria-label="Date format"
+              value={settings.dateFormat}
+              options={(Object.keys(DATE_FORMAT_LABELS) as DateFormat[]).map((format) => ({
+                value: format,
+                label: DATE_FORMAT_LABELS[format],
+              }))}
+              onChange={(e) => update.mutate({ dateFormat: e.target.value as DateFormat }, { onError })}
             />
           </div>
         </label>
