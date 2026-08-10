@@ -266,3 +266,106 @@ describe('checkPublish — the author’s arrangement is the published order', (
     expect(check.problems.filter((p) => p.includes('sits in no section'))).toHaveLength(2);
   });
 });
+
+/**
+ * THE PRINTED-REFERENCE ROUTE CANNOT FIRE IN THIS BUILDER.
+ *
+ * `linkOutcomeTargets` pairs a question with its ✓/✗ box by the `questionRef`
+ * both carry — and that lives on the EXTRACTED field. `FormField` has no such
+ * property and `seedFields` does not copy it, so every question is skipped and
+ * the automatic route resolved nothing at all. A thirty-question paper failed
+ * publish thirty times over, and the only way through was thirty hand-picks
+ * from a list of thirty near-identical box names.
+ */
+describe('resolvePublishFields — the outcome box a question’s mark lands in', () => {
+  const q = (id: string, over: Partial<FormField> = {}): FormField => ({
+    id,
+    type: 'radio',
+    label: id,
+    required: false,
+    source: 'imported',
+    options: ['a', 'b'],
+    ...over,
+  });
+  const cell = (id: string): FormField => ({
+    id,
+    type: 'check_cross',
+    label: id,
+    required: false,
+    source: 'imported',
+  });
+  const keyed = (fieldId: string): DraftAnswerKey => ({
+    fieldId,
+    answerKey: ['a'],
+    source: 'manual',
+  });
+
+  it('FALLS BACK TO THE BOX PRINTED IMMEDIATELY AFTER THE QUESTION', () => {
+    const { fields, inferred, unlinked } = resolvePublishFields(
+      [q('q1'), cell('q1-out'), q('q2'), cell('q2-out')],
+      [keyed('q1'), keyed('q2')],
+    );
+
+    expect(fields[0]!.outcomeTarget).toEqual({ fieldId: 'q1-out' });
+    expect(fields[2]!.outcomeTarget).toEqual({ fieldId: 'q2-out' });
+    expect(inferred).toEqual(['q1', 'q2']);
+    expect(unlinked).toEqual([]);
+  });
+
+  it('REPORTS THE INFERENCE RATHER THAN MAKING IT SILENTLY', () => {
+    /*
+      Adjacency shifts. One question whose box the extraction missed re-pairs
+      every question after it, and the result still looks like a complete
+      mapping — so the count is what gives an author something to spot-check.
+    */
+    const { inferred } = resolvePublishFields([q('q1'), cell('q1-out')], [keyed('q1')]);
+
+    expect(inferred).toEqual(['q1']);
+  });
+
+  it('AN EXPLICIT CHOICE STILL WINS OUTRIGHT', () => {
+    // The picker exists because adjacency is wrong on some papers. A fallback
+    // that overrode a person's decision would make the picker pointless.
+    const { fields, inferred } = resolvePublishFields(
+      [q('q1', { outcomeTarget: { fieldId: 'chosen' } }), cell('q1-out'), cell('chosen')],
+      [keyed('q1')],
+    );
+
+    expect(fields[0]!.outcomeTarget).toEqual({ fieldId: 'chosen' });
+    expect(inferred).toEqual([]);
+  });
+
+  it('NEVER SCANS PAST THE NEXT FIELD', () => {
+    /*
+      Only the immediately-next field is considered. Scanning forward is what
+      would let a question whose own cell is missing reach across and claim the
+      NEXT question's cell — putting one candidate's mark against another
+      question, with nothing to notice it.
+    */
+    const { fields, unlinked, inferred } = resolvePublishFields(
+      [q('q1'), q('q2'), cell('q2-out')],
+      [keyed('q1')],
+    );
+
+    expect(fields[0]!.outcomeTarget).toBeUndefined();
+    expect(unlinked).toEqual(['q1']);
+    expect(inferred).toEqual([]);
+  });
+
+  it('will not land a mark in a box the exporter would not draw in', () => {
+    // A text box passes `validateAnswerKeys` and then prints nothing.
+    const notes: FormField = { id: 'notes', type: 'text', label: 'Notes', required: false, source: 'imported' };
+
+    const { unlinked, inferred } = resolvePublishFields([q('q1'), notes], [keyed('q1')]);
+
+    expect(unlinked).toEqual(['q1']);
+    expect(inferred).toEqual([]);
+  });
+
+  it('leaves an unkeyed question alone — no key, no mark, no target', () => {
+    const { fields, inferred } = resolvePublishFields([q('q1'), cell('q1-out')], []);
+
+    expect(fields[0]!.outcomeTarget).toBeUndefined();
+    expect(inferred).toEqual([]);
+  });
+});

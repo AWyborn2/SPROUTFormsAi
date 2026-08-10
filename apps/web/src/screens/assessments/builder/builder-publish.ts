@@ -28,12 +28,14 @@
 
 import { resolveStructure } from './builder-structure.js';
 import {
+  isSelfAnswering,
   linkOutcomeTargets,
   validateAnswerKeys,
   validateManifest,
   type AssessmentToolManifest,
   type BuilderStructure,
   type DraftAnswerKey,
+  type OutcomeTarget,
   type FormField,
 } from '@formai/shared';
 
@@ -56,19 +58,59 @@ import {
 export function resolvePublishFields(
   fields: readonly FormField[],
   keys: readonly DraftAnswerKey[],
-): { fields: FormField[]; unlinked: string[] } {
+): { fields: FormField[]; unlinked: string[]; inferred: string[] } {
   const linked = linkOutcomeTargets(fields);
   const targetByQuestion = new Map(linked.links.map((l) => [l.questionId, l.outcomeId]));
   const keyById = new Map(keys.map((k) => [k.fieldId, k]));
   const unlinked: string[] = [];
+  const inferred: string[] = [];
 
-  const next = fields.map((field) => {
+  /*
+    THE PRINTED-REFERENCE ROUTE CANNOT FIRE IN THIS BUILDER, and that is why a
+    third tier exists.
+
+    `linkOutcomeTargets` pairs a question with its ✓/✗ box by the `questionRef`
+    both carry. That reference lives on the EXTRACTED field — `FormField` has no
+    such property, and `seedFields` does not copy it — so every question is
+    skipped and the map above is always empty here. The import-review screen
+    keeps the reference in its own side-table and resolves links there; the
+    assessment builder never had an equivalent.
+
+    The visible consequence was that "Automatic — from the printed reference"
+    resolved nothing, on every question, and a thirty-question paper failed
+    publish thirty times over with "no outcome box to write its mark into". The
+    only way through was to pick all thirty by hand from a list of thirty
+    near-identical box names — thirty chances to put a candidate's mark against
+    a different question, silently, on a certificate.
+
+    ADJACENCY IS A GUESS AND IS REPORTED AS ONE. `outcome-links.ts` is explicit
+    about why it is not the primary rule: one question whose box the model
+    missed re-pairs every question after it, and the result still looks like a
+    complete mapping. So it runs last, it takes only the IMMEDIATELY next field
+    (never scanning forward, which is what would let a gap reach across into the
+    next question's cell), and every link it makes is returned in `inferred` for
+    the publish step to show. An author who disagrees overrides it with the
+    picker, and their choice wins outright.
+  */
+  const adjacentOutcome = (index: number): string | undefined => {
+    const next = fields[index + 1];
+    return next && isSelfAnswering(next.type) ? next.id : undefined;
+  };
+
+  const next = fields.map((field, index) => {
     const key = keyById.get(field.id);
     if (!key || key.answerKey.length === 0) return field;
 
     // An existing outcomeTarget on the field wins: it may have been authored
     // explicitly, and a resolved link should not overwrite a decision.
-    const target = field.outcomeTarget ?? targetByQuestion.get(field.id);
+    let target: OutcomeTarget | string | undefined = field.outcomeTarget ?? targetByQuestion.get(field.id);
+    if (!target) {
+      const adjacent = adjacentOutcome(index);
+      if (adjacent) {
+        target = adjacent;
+        inferred.push(field.id);
+      }
+    }
     if (!target) {
       unlinked.push(field.id);
       return field;
@@ -81,7 +123,7 @@ export function resolvePublishFields(
     };
   });
 
-  return { fields: next, unlinked };
+  return { fields: next, unlinked, inferred };
 }
 
 export interface PublishCheck {
@@ -89,6 +131,17 @@ export interface PublishCheck {
   problems: string[];
   /** Keyed questions with no outcome box to write their mark into. */
   unlinked: string[];
+  /**
+   * Questions whose outcome box was inferred from DOCUMENT ORDER rather than
+   * chosen or read off a printed reference.
+   *
+   * Not a problem — it is right on every paper that prints a question and then
+   * its cell — but never silent either. Adjacency shifts: one question whose
+   * box the model missed re-pairs every question after it, and the result still
+   * looks like a complete mapping. The count is what tells an author there is
+   * something to spot-check.
+   */
+  inferred: string[];
   fields: FormField[];
 }
 
@@ -159,7 +212,12 @@ export function checkPublish(
     );
   }
 
-  return { problems, unlinked: resolved.unlinked, fields: resolved.fields };
+  return {
+    problems,
+    unlinked: resolved.unlinked,
+    inferred: resolved.inferred,
+    fields: resolved.fields,
+  };
 }
 
 /** What the publish summary reports back, once it has worked. */
