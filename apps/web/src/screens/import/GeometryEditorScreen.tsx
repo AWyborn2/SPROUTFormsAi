@@ -15,6 +15,7 @@ import {
 } from '@formai/shared';
 import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../../lib/data/hooks.js';
 import type { FieldProposal, TableProposal, TextPage } from '../../lib/pdf-geometry.js';
+import { proposeRectGrid } from '../../lib/pdf-geometry.js';
 import {
   groupFields,
   overallCounts,
@@ -556,6 +557,46 @@ export function GeometryEditorScreen({
     mutate(fieldId, (f) => (box ? { ...f, geometry: { segments: [box] } } : stripGeometry(f)));
   }
 
+  /**
+   * A box drawn on a repeating table, subdivided from the checkboxes printed
+   * inside it (bounded subdivision, U4).
+   *
+   * A drawn box alone is one undivided rectangle, and the exporter draws a mark
+   * "in the answered column of each row" — so with no bands there are no rows
+   * and no column, and nothing anywhere says whether a mark will land in a
+   * printed square or on the words beside it. That is the reported gap on the
+   * methods table: five checkboxes, one tall box, no way to check it.
+   *
+   * The existing text derivation cannot close it. It finds columns from header
+   * glyphs and rows from label baselines, and a checkbox column has neither —
+   * every glyph on those rows is in the label. The squares themselves are the
+   * only measurement of where the answer column is.
+   *
+   * Falls back to the plain box whenever the printed evidence is not a column,
+   * because a wrong grid is worse than an honest undivided box: bands are what
+   * the reviewer reads to confirm placement, and confident-looking bands in the
+   * wrong place is the failure this whole screen is built to prevent.
+   */
+  function setTableBox(field: FormField, box: PageBox) {
+    const optionColumns = (field.columns ?? []).slice(1);
+    const columnKey = optionColumns.length === 1 ? optionColumns[0]!.key : null;
+    const rects = textPages[box.page]?.rects;
+
+    const proposal =
+      columnKey && rects
+        ? proposeRectGrid({
+            page: box.page,
+            pageWidth: box.pageWidth,
+            pageHeight: box.pageHeight,
+            rects,
+            within: box,
+            columnKey,
+          })
+        : null;
+
+    setScalarBox(field.id, proposal?.segment ?? box);
+  }
+
   if (isLoading) {
     return <div className="p-[30px_28px] text-sm text-text-tertiary">Loading version…</div>;
   }
@@ -876,8 +917,10 @@ export function GeometryEditorScreen({
             onDrawBox={(box) => {
               if (!drawTarget) return;
               const { fieldId, optionKey } = drawTarget;
-              if (optionKey === null) setScalarBox(fieldId, box);
-              else setOptionBox(fieldId, optionKey, box);
+              const target = fields.find((f) => f.id === fieldId);
+              if (optionKey !== null) setOptionBox(fieldId, optionKey, box);
+              else if (target?.type === 'repeating_group') setTableBox(target, box);
+              else setScalarBox(fieldId, box);
               setDrawTarget(null);
             }}
             /*

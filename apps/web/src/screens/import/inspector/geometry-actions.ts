@@ -304,6 +304,36 @@ export const DRAW_SNAP_RANGE = 4;
  */
 export const RULE_SNAP_RANGE = 8;
 
+/**
+ * The largest share of a drawn edge-to-edge span that a single snap may move
+ * one of its edges.
+ *
+ * A fixed catch is the wrong shape of rule because it means something different
+ * at different sizes. 8pt off a 200pt table box is a rounding correction; 8pt
+ * off a 10pt checkbox is most of the shape. The bug this fixes is exactly that:
+ * a traced checkbox in a 28pt row sits ~9pt from each row border, so a wobble
+ * of a point brings an edge inside the catch and the box inflates to the full
+ * row — a rectangle where a square was drawn.
+ *
+ * At 0.35 a trace can be tidied by about a third of its size and no more, which
+ * is generous for the alignment snapping exists to do and far short of reaching
+ * the surrounding cell.
+ */
+export const SNAP_MAX_DRAG_FRACTION = 0.35;
+
+/**
+ * The snap catch for one axis, given how long the drag was on that axis.
+ *
+ * Never above the caller's range — this only ever tightens — and never below
+ * `DRAW_SNAP_RANGE`, so a deliberately thin box (a write-on line, a signature
+ * strip) keeps the modest catch that has always aligned it. Between those two
+ * it scales with the drag, which is the part that protects small shapes.
+ */
+export function axisSnapRange(extent: number, range: number): number {
+  if (!Number.isFinite(extent) || extent <= 0) return range;
+  return Math.min(range, Math.max(DRAW_SNAP_RANGE, extent * SNAP_MAX_DRAG_FRACTION));
+}
+
 /** A 2-D affine transform, as pdf.js reports it: [a, b, c, d, e, f]. */
 export type Matrix = readonly [number, number, number, number, number, number];
 
@@ -354,22 +384,44 @@ const DRAW_OP = { moveTo: 0, lineTo: 1, curveTo: 2, quadraticCurveTo: 3, closePa
  * fourth side.
  */
 export function segmentsFromDrawOps(ops: ArrayLike<number>): DrawSegment[] {
-  const segments: DrawSegment[] = [];
+  return subpathsFromDrawOps(ops).flat();
+}
+
+/**
+ * The same walk as `segmentsFromDrawOps`, but keeping each SUBPATH separate.
+ *
+ * A `constructPath` operand holds a whole path, which is often several closed
+ * shapes — a `moveTo` starts a new one. Flattening loses the only signal that
+ * says which four segments belong to the same printed shape, and that grouping
+ * is what lets a checkbox be recognised as a checkbox rather than as four
+ * unrelated strokes too short to be rules (see `rectFromSubpath`).
+ *
+ * `segmentsFromDrawOps` is this function flattened, so the two can never drift.
+ */
+export function subpathsFromDrawOps(ops: ArrayLike<number>): DrawSegment[][] {
+  const subpaths: DrawSegment[][] = [];
+  let current: DrawSegment[] = [];
   let startX = 0;
   let startY = 0;
   let curX = 0;
   let curY = 0;
   let i = 0;
 
+  const flush = () => {
+    if (current.length > 0) subpaths.push(current);
+    current = [];
+  };
+
   while (i < ops.length) {
     const op = ops[i++];
     if (op === DRAW_OP.moveTo) {
+      flush();
       curX = startX = ops[i++]!;
       curY = startY = ops[i++]!;
     } else if (op === DRAW_OP.lineTo) {
       const x = ops[i++]!;
       const y = ops[i++]!;
-      segments.push({ x1: curX, y1: curY, x2: x, y2: y });
+      current.push({ x1: curX, y1: curY, x2: x, y2: y });
       curX = x;
       curY = y;
     } else if (op === DRAW_OP.curveTo) {
@@ -382,7 +434,7 @@ export function segmentsFromDrawOps(ops: ArrayLike<number>): DrawSegment[] {
       curY = ops[i++]!;
     } else if (op === DRAW_OP.closePath) {
       if (curX !== startX || curY !== startY) {
-        segments.push({ x1: curX, y1: curY, x2: startX, y2: startY });
+        current.push({ x1: curX, y1: curY, x2: startX, y2: startY });
       }
       curX = startX;
       curY = startY;
@@ -390,7 +442,143 @@ export function segmentsFromDrawOps(ops: ArrayLike<number>): DrawSegment[] {
       break; // an opcode we do not model — stop rather than mis-read coords
     }
   }
-  return segments;
+  flush();
+  return subpaths;
+}
+
+/** One closed axis-aligned rectangle printed on the page, in PDF points. */
+export interface PrintedRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The rectangle a closed subpath draws, or null if it draws something else.
+ *
+ * WHY THIS EXISTS AT ALL. Rule-line extraction keeps only segments at least
+ * 18pt long, on the reasoning that "nothing a glyph stroke or a checkbox tick
+ * could reach". That reasoning is about the ✓ someone writes IN the box. It
+ * also, silently, discards the BOX — a printed checkbox is 8–10pt a side, so
+ * all four of its edges fail the length test and the one thing an author is
+ * trying to trace is invisible to the snapper.
+ *
+ * The visible consequence: trace a checkbox inside a 28pt table row and both
+ * horizontal edges snap out to the row's borders, because those are the only
+ * surviving targets within range. A perfect square goes in and a full-height
+ * rectangle comes out.
+ *
+ * LENGTH IS THE WRONG TEST; CLOSURE IS THE RIGHT ONE. A letter stroke is part
+ * of a curve-heavy subpath that closes on nothing; a checkbox is four straight
+ * axis-aligned segments that close on themselves. Asking "does this subpath
+ * form a rectangle" admits the 9pt checkbox and still refuses the 9pt cap of a
+ * T, which no length threshold can do.
+ *
+ * Size is deliberately NOT judged here. A traced table cell is as valid a
+ * target as a traced checkbox, and the caller decides by overlap with what the
+ * author actually drew — which is a better question than any size cutoff.
+ */
+export function rectFromSubpath(
+  segments: readonly DrawSegment[],
+  { tolerance = 0.5 }: { tolerance?: number } = {},
+): PrintedRect | null {
+  // A rectangle is four sides. A producer that emits an explicit closing
+  // `lineTo` and then a `closePath` leaves a fifth, zero-length one — real, and
+  // not a reason to refuse — so degenerate segments are dropped before counting
+  // rather than counted and rejected.
+  const sides = segments.filter(
+    (s) =>
+      [s.x1, s.y1, s.x2, s.y2].every(Number.isFinite) &&
+      (Math.abs(s.x2 - s.x1) > tolerance || Math.abs(s.y2 - s.y1) > tolerance),
+  );
+  if (sides.length !== 4) return null;
+
+  let horizontals = 0;
+  let verticals = 0;
+  for (const s of sides) {
+    const dx = Math.abs(s.x2 - s.x1);
+    const dy = Math.abs(s.y2 - s.y1);
+    if (dy <= tolerance && dx > tolerance) horizontals++;
+    else if (dx <= tolerance && dy > tolerance) verticals++;
+    else return null; // a diagonal — this subpath is not axis-aligned
+  }
+  if (horizontals !== 2 || verticals !== 2) return null;
+
+  const xs = sides.flatMap((s) => [s.x1, s.x2]);
+  const ys = sides.flatMap((s) => [s.y1, s.y2]);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  if (maxX - minX <= tolerance || maxY - minY <= tolerance) return null;
+
+  /*
+    EVERY CORNER MUST BE ON THE BOUNDING BOX. Four axis-aligned sides, two of
+    each orientation, still describe an open U or a Z — shapes whose bounding
+    box is nothing anyone drew. Requiring each endpoint to sit on an edge of the
+    bbox is what makes this a rectangle rather than a bounding box around a
+    scribble.
+  */
+  const onEdge = (v: number, lo: number, hi: number) =>
+    Math.abs(v - lo) <= tolerance || Math.abs(v - hi) <= tolerance;
+  for (const s of sides) {
+    if (!onEdge(s.x1, minX, maxX) || !onEdge(s.x2, minX, maxX)) return null;
+    if (!onEdge(s.y1, minY, maxY) || !onEdge(s.y2, minY, maxY)) return null;
+  }
+
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+/**
+ * How much of the author's drag a printed rectangle must account for before the
+ * drag is treated as tracing THAT rectangle.
+ *
+ * Intersection over union, so it penalises both a rect that misses part of the
+ * drag and one that extends well past it. Measured against the shapes actually
+ * in play: a hand trace of a 10pt checkbox scores ~0.7–0.9 against the checkbox
+ * and ~0.15 against the table cell containing it, because the cell is several
+ * times the area. 0.35 sits in the gap with room on both sides — comfortably
+ * above every containing-cell score, comfortably below every real trace.
+ */
+export const RECT_TRACE_MIN_OVERLAP = 0.35;
+
+/**
+ * The printed rectangle an author was tracing, if they were tracing one.
+ *
+ * Snapping four edges INDEPENDENTLY is what deforms a traced checkbox: each
+ * edge asks "what is nearest me" with no knowledge that the other three exist,
+ * so two of them can settle on a different shape's borders and the result is a
+ * rectangle nobody drew. Matching the drag against whole printed rectangles
+ * asks the question the author was answering — *which box did you mean* — and
+ * returns that box exactly, at its printed size, with no accumulated error.
+ *
+ * Returns null when nothing clears `RECT_TRACE_MIN_OVERLAP`, which is the
+ * common case on an unruled page and leaves per-edge snapping to handle it.
+ */
+export function rectTraced(
+  drawn: { x: number; y: number; width: number; height: number },
+  rects: readonly PrintedRect[],
+  minOverlap: number = RECT_TRACE_MIN_OVERLAP,
+): PrintedRect | null {
+  const area = drawn.width * drawn.height;
+  if (!(area > 0)) return null;
+
+  let best: PrintedRect | null = null;
+  let bestScore = 0;
+  for (const r of rects) {
+    const ix = Math.min(drawn.x + drawn.width, r.x + r.width) - Math.max(drawn.x, r.x);
+    const iy = Math.min(drawn.y + drawn.height, r.y + r.height) - Math.max(drawn.y, r.y);
+    if (ix <= 0 || iy <= 0) continue;
+    const intersection = ix * iy;
+    const union = area + r.width * r.height - intersection;
+    const score = union > 0 ? intersection / union : 0;
+    if (score > bestScore) {
+      bestScore = score;
+      best = r;
+    }
+  }
+  return bestScore >= minOverlap ? best : null;
 }
 
 /** Axis-aligned rule-lines pulled out of a set of path segments. */
@@ -882,6 +1070,9 @@ export function snapTargetsY(items: readonly PositionedText[]): number[] {
  * A snap is applied per axis only when it keeps the box non-degenerate —
  * snapping both edges of an axis onto one target would collapse it, so that
  * axis keeps the raw drag instead.
+ *
+ * The catch is also scaled to the drag (`axisSnapRange`), so a small trace can
+ * never be stretched into a shape the author did not draw.
  */
 export function snapDrawnBox(
   a: { x: number; y: number },
@@ -897,14 +1088,17 @@ export function snapDrawnBox(
   let bottom = clamp(Math.min(a.y, b.y), page.pageHeight);
   let top = clamp(Math.max(a.y, b.y), page.pageHeight);
 
-  const sLeft = snapEdge(left, xTargets, range);
-  const sRight = snapEdge(right, xTargets, range);
+  const xRange = axisSnapRange(right - left, range);
+  const yRange = axisSnapRange(top - bottom, range);
+
+  const sLeft = snapEdge(left, xTargets, xRange);
+  const sRight = snapEdge(right, xTargets, xRange);
   if (sRight - sLeft >= 1) {
     left = sLeft;
     right = sRight;
   }
-  const sBottom = snapEdge(bottom, yTargets, range);
-  const sTop = snapEdge(top, yTargets, range);
+  const sBottom = snapEdge(bottom, yTargets, yRange);
+  const sTop = snapEdge(top, yTargets, yRange);
   if (sTop - sBottom >= 1) {
     bottom = sBottom;
     top = sTop;

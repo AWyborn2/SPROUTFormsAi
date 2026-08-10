@@ -17,7 +17,10 @@ import {
   rulesFromSegments,
   horizontalRuleSpans,
   type RuleSpan,
-  segmentsFromDrawOps,
+  rectFromSubpath,
+  rectTraced,
+  type PrintedRect,
+  subpathsFromDrawOps,
   snapDrawnBox,
   snapEdge,
   snapTargets,
@@ -66,6 +69,14 @@ interface PageRender {
   ruleXs: number[];
   /** y of every horizontal printed rule-line. */
   ruleYs: number[];
+  /**
+   * Every closed axis-aligned rectangle printed on the page — checkbox squares
+   * included, which the rule-line arrays cannot carry because their 18pt floor
+   * discards anything that small. A drag that traces one of these takes it
+   * exactly, instead of snapping four edges independently onto whatever each
+   * happens to be nearest.
+   */
+  rects: PrintedRect[];
 }
 
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
@@ -123,10 +134,11 @@ function drawOpsOf(args: unknown): ArrayLike<number>[] {
  */
 async function extractRuleLines(
   page: pdfjs.PDFPageProxy,
-): Promise<{ xs: number[]; ys: number[]; spans: RuleSpan[] }> {
+): Promise<{ xs: number[]; ys: number[]; spans: RuleSpan[]; rects: PrintedRect[] }> {
   try {
     const { fnArray, argsArray } = await page.getOperatorList();
     const segments: DrawSegment[] = [];
+    const rects: PrintedRect[] = [];
     let ctm: Matrix = IDENTITY;
     const stack: Matrix[] = [];
 
@@ -141,10 +153,24 @@ async function extractRuleLines(
         if (a && a.length >= 6) ctm = matrixMultiply(ctm, [a[0]!, a[1]!, a[2]!, a[3]!, a[4]!, a[5]!]);
       } else if (fn === pdfjs.OPS.constructPath) {
         for (const ops of drawOpsOf(argsArray[i])) {
-          for (const s of segmentsFromDrawOps(ops)) {
-            const [x1, y1] = applyMatrix(ctm, s.x1, s.y1);
-            const [x2, y2] = applyMatrix(ctm, s.x2, s.y2);
-            segments.push({ x1, y1, x2, y2 });
+          /*
+            SUBPATH BY SUBPATH, so a closed shape stays recognisable as one.
+            Rules only ever needed a flat list of segments, but a rectangle is
+            defined by which four segments belong together — flattening first
+            would throw that away, and with it every checkbox on the page.
+          */
+          for (const subpath of subpathsFromDrawOps(ops)) {
+            const placed = subpath.map((s) => {
+              const [x1, y1] = applyMatrix(ctm, s.x1, s.y1);
+              const [x2, y2] = applyMatrix(ctm, s.x2, s.y2);
+              return { x1, y1, x2, y2 };
+            });
+            for (const s of placed) segments.push(s);
+            // Tested AFTER the transform: a rotated or skewed CTM turns a
+            // rectangle in path space into something that is not one on the
+            // page, and the page is where the author is drawing.
+            const rect = rectFromSubpath(placed);
+            if (rect) rects.push(rect);
           }
         }
       }
@@ -152,6 +178,8 @@ async function extractRuleLines(
 
     // 18pt floor: real table rules run tens to hundreds of points; nothing a
     // glyph stroke or a checkbox tick could reach, so only grid lines survive.
+    // `rects` is what carries the shapes this floor excludes — a checkbox
+    // square is recognised by closing on itself, not by being long enough.
     //
     // `spans` keeps the horizontal rules' ENDPOINTS, which xs/ys discard.
     // Snapping only needs a coordinate; placing a box on a printed write-on
@@ -159,9 +187,10 @@ async function extractRuleLines(
     return {
       ...rulesFromSegments(segments, { minLength: 18 }),
       spans: horizontalRuleSpans(segments, { minLength: 18 }),
+      rects,
     };
   } catch {
-    return { xs: [], ys: [], spans: [] };
+    return { xs: [], ys: [], spans: [], rects: [] };
   }
 }
 
@@ -568,6 +597,7 @@ function DrawSurface({
   items,
   ruleXs,
   ruleYs,
+  rects = [],
   onDrawBox,
   line = false,
   onDrawConnector,
@@ -584,6 +614,8 @@ function DrawSurface({
   /** Printed vertical/horizontal rule-lines — the preferred snap targets. */
   ruleXs: readonly number[];
   ruleYs: readonly number[];
+  /** Closed printed rectangles — checkboxes and cells — taken whole when traced. */
+  rects?: readonly PrintedRect[];
   onDrawBox?: (box: PageBox) => void;
   /** Rubber-band a CONNECTOR rather than a rectangle. */
   line?: boolean;
@@ -662,14 +694,54 @@ function DrawSurface({
       }
 
       if (!onDrawBox) return;
+      const a = toPoints(start.x, start.y);
+      const b = toPoints(endX, endY);
+
+      /*
+        A TRACED SHAPE IS TAKEN WHOLE, before any per-edge snapping runs.
+
+        Snapping edges independently is what deformed a traced checkbox: each
+        edge asks only "what is nearest me", so with the checkbox's own 9pt
+        sides below the 18pt rule floor, top and bottom both settled on the
+        table row's borders and a square came back a full-height rectangle.
+
+        Matching the drag against whole printed rectangles answers the question
+        the author was actually asking — WHICH BOX DID YOU MEAN — and returns
+        that box at its printed size. `rectTraced` refuses anything the drag
+        does not substantially cover, so the containing cell never wins over the
+        checkbox inside it, and an ordinary drag across open page falls through
+        to the edge snapping below exactly as before.
+      */
+      const traced = rectTraced(
+        {
+          x: Math.min(a.x, b.x),
+          y: Math.min(a.y, b.y),
+          width: Math.abs(b.x - a.x),
+          height: Math.abs(b.y - a.y),
+        },
+        rects,
+      );
+      if (traced) {
+        onDrawBox({
+          page: pageMeta.page,
+          x: traced.x,
+          y: traced.y,
+          width: traced.width,
+          height: traced.height,
+          pageWidth: pageMeta.pageWidth,
+          pageHeight: pageMeta.pageHeight,
+        });
+        return;
+      }
+
       // Prefer the printed rule-lines — the actual grid the reviewer is tracing —
       // and only fall back to text edges (tightly) when a page carried no rules,
       // so a drawn box no longer jumps to a nearby caption (draw-jump fix).
       const hasRules = ruleXs.length > 0 || ruleYs.length > 0;
       onDrawBox(
         snapDrawnBox(
-          toPoints(start.x, start.y),
-          toPoints(endX, endY),
+          a,
+          b,
           pageMeta,
           ruleXs.length > 0 ? ruleXs : snapTargets(items),
           ruleYs.length > 0 ? ruleYs : snapTargetsY(items),
@@ -826,6 +898,7 @@ export function PdfViewer({
           width: natural.width,
           height: natural.height,
           rules: rules.spans,
+          rects: rules.rects,
         });
 
         const viewport = page.getViewport({ scale: RENDER_SCALE });
@@ -840,6 +913,7 @@ export function PdfViewer({
           naturalHeight: natural.height,
           ruleXs: rules.xs,
           ruleYs: rules.ys,
+          rects: rules.rects,
         });
       }
       setPages(rendered);
@@ -1145,6 +1219,7 @@ export function PdfViewer({
                     items={textPagesRef.current[pageIndex]?.items ?? []}
                     ruleXs={page.ruleXs}
                     ruleYs={page.ruleYs}
+                    rects={page.rects}
                     onDrawBox={onDrawBox}
                     line={drawLine}
                     onDrawConnector={onDrawConnector}
