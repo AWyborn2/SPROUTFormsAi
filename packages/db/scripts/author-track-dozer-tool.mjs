@@ -382,10 +382,45 @@ async function main() {
      is what makes a text-typed box workable.
   */
   /*
+     THE COVER PAGE, AND ONLY THE COVER PAGE.
+
+     Every pointer below names a box on the front sheet, and this used to search
+     the WHOLE eighteen-page document for it. That cannot work on this form,
+     because the front sheet's certification block is printed again verbatim at
+     the end of every part:
+
+       The Candidate's overall performance meets the requirements … ?
+       [ ] Candidate not yet Competent   [ ] Candidate Competent
+       Name of Assessor [Print]   Assessor Signature   Date
+
+     Seven identical blocks — the cover plus six parts. So a global search for
+     the assessor's name, the sign-off date or the competent tick finds seven,
+     the ambiguity guard below refuses all of them, and the manifest is authored
+     with an EMPTY signOff. A manifest with an empty signOff is perfectly valid,
+     `exportCasePdf` raises nothing, and the API returns 200 — so a signed,
+     competent case exports a certificate with no assessor name, no date and no
+     competent tick, and nothing anywhere says why.
+
+     The per-part block already solved this for itself: `oneWithin` is scoped to
+     a part's own field range, and its comment says plainly that a global search
+     "would find six and refuse them all as ambiguous". This is that same fix
+     applied to the seventh — the cover page is the slice before part 1's
+     anchor, which the script already computes and never used.
+  */
+  const coverFields = anchors[0] ? fields.slice(0, fields.indexOf(anchors[0])) : fields;
+  console.log(`\nCover page: ${coverFields.length} field(s) before the PART 1 anchor`);
+
+  /*
      ONE match or none. Absence and ambiguity get the same answer, as everywhere
      else in this file that has to identify a field: two matches means we do not
      know which, and the cost of choosing wrong is an assessor's name or a
      satisfactory tick printed in the wrong place on a certificate.
+
+     BOTH outcomes warn. A zero-match used to return undefined in silence, and
+     the compensating report further down only ran `if (declared.length)` — so
+     in the worst case, where nothing resolved at all, the operator was shown
+     NOTHING about the front page and a blank certificate was the first news of
+     it.
   */
   /*
      AND A WAY TO SETTLE IT, which this had no answer for.
@@ -414,12 +449,31 @@ async function main() {
       console.log(`  ${what} → ${named.id} "${(named.label ?? '').slice(0, 48)}" (declared by ${flagName})`);
       return named;
     }
-    const hits = fields.filter((f) => types.includes(f.type) && re.test(norm(f.label)));
+    /*
+       SEARCHED ON THE COVER SLICE, NOT THE WHOLE DOCUMENT.
+
+       This paper reprints its certification block verbatim at the end of every
+       part — seven copies of "Name of Assessor", "Date" and the competent tick.
+       A whole-document search matched all seven, the guard above refused all
+       seven (correctly), and the manifest was authored with an empty `signOff`:
+       a signed, competent case exported a certificate with no name, no date and
+       no tick, and the paper was the first anyone knew.
+
+       The per-part block already scoped itself for exactly this reason. The
+       override above stays as the answer for a cover that is still ambiguous.
+    */
+    const hits = coverFields.filter((f) => types.includes(f.type) && re.test(norm(f.label)));
     if (hits.length === 1) return hits[0];
-    if (hits.length > 1) {
+    if (hits.length === 0) {
       warnings.push(
-        `${what}: ${hits.length} fields match (${hits.map((f) => f.id).join(', ')}) — none declared, ` +
-          `because printing it in the wrong one is worse than leaving the box blank. ` +
+        `${what}: nothing on the cover page matches, so that box will print BLANK on every ` +
+          `certificate. Check the field exists and is typed as one of: ${types.join(', ')}, ` +
+          `or name it with ${flagName} <id>.`,
+      );
+    } else {
+      warnings.push(
+        `${what}: ${hits.length} cover-page fields match (${hits.map((f) => f.id).join(', ')}) — ` +
+          `none declared, because printing it in the wrong one is worse than leaving the box blank. ` +
           `Pick one with ${flagName} <id>.`,
       );
     }
@@ -497,22 +551,45 @@ async function main() {
     signOff.moreCoachingRequiredNo = { fieldId: coachNoField.id, value: true };
   }
 
-  const declared = Object.keys(signOff);
-  if (declared.length) {
-    console.log(`\nFront-page certification block: ${declared.length} pointer(s) resolved`);
-    for (const [what, f] of [
-      ['candidate name', candidateNameField],
-      ['assessor signature', sigField],
-      ['assessor name', assessorNameField],
-      ['signed date', signedDateField],
-      ['overall satisfactory', overallField],
-      ['more coaching — Yes', coachYesField],
-      ['more coaching — No', coachNoField],
-    ]) {
-      console.log(
-        f ? `  ${what.padEnd(22)} → ${f.id} ("${(f.label ?? '').slice(0, 46)}")` : `  ${what.padEnd(22)} → NOT FOUND`,
-      );
-    }
+  /*
+     ALWAYS PRINTED, never gated on something having resolved.
+
+     This used to run only `if (declared.length)`. The case it therefore stayed
+     silent for is the worst one there is — nothing resolved, so every box on
+     the certificate prints blank — and the operator saw no mention of the front
+     page at all. A report that speaks only when there is good news is not a
+     report.
+
+     `candidateNameField` is listed but is NOT part of `declared`: it lives on
+     the manifest root rather than inside `signOff`, so a run with a resolved
+     name and nothing else would have printed "0 pointers resolved". Counted
+     here so the number matches the list under it.
+  */
+  const coverPointers = [
+    ['candidate name', candidateNameField],
+    ['assessor signature', sigField],
+    ['assessor name', assessorNameField],
+    ['signed date', signedDateField],
+    ['overall satisfactory', overallField],
+    ['more coaching — Yes', coachYesField],
+    ['more coaching — No', coachNoField],
+  ];
+  const resolved = coverPointers.filter(([, f]) => f).length;
+  console.log(
+    `\nFront-page certification block: ${resolved}/${coverPointers.length} pointer(s) resolved`,
+  );
+  for (const [what, f] of coverPointers) {
+    console.log(
+      f ? `  ${what.padEnd(22)} → ${f.id} ("${(f.label ?? '').slice(0, 46)}")` : `  ${what.padEnd(22)} → NOT FOUND`,
+    );
+  }
+  if (resolved === 0) {
+    warnings.push(
+      'NOTHING on the front page resolved. A signed, competent case will export a certificate ' +
+        'with no candidate name, no assessor name, no date and no competent tick — and the API ' +
+        'will return 200, because a manifest with an empty signOff is valid. Fix these before ' +
+        'anyone signs one off.',
+    );
   }
 
   if (!sigField) {
