@@ -75,6 +75,12 @@ export interface AssembleCaseInput {
    * verdict for an unnamed person.
    */
   candidateName?: string | null;
+  /**
+   * `manifest.profilePrefill`, resolved — field id to profile value. Merged
+   * onto the cover exactly as `candidateName` is, so the printed identity block
+   * matches what the fill surface showed. The route resolves; this only draws.
+   */
+  prefillValues?: Record<string, string> | null;
   attempts: readonly CaseAttemptRecord[];
   /**
    * Null until the assessor signs. The whole certification block is gated on
@@ -175,6 +181,7 @@ export function assembleCaseValues({
   pathway,
   locationStream,
   candidateName,
+  prefillValues,
   attempts,
   signOff,
   resolved,
@@ -241,6 +248,9 @@ export function assembleCaseValues({
     the location stream above — the case is what the assessment was conducted
     against, so it is what the evidence document has to say.
   */
+  for (const [fieldId, value] of Object.entries(prefillValues ?? {})) {
+    values[fieldId] = value;
+  }
   if (manifest.candidateNameFieldId && candidateName) {
     values[manifest.candidateNameFieldId] = candidateName;
   }

@@ -12,6 +12,7 @@
  * had ever been sent the rest.
  */
 import type {
+  ProfilePrefillKey,
   TheoryRendering,
   AssessmentPathway,
   AssessmentToolManifest,
@@ -269,10 +270,16 @@ export const assessmentsApi = {
    * written, because a half-applied workflow decides who may write a competency
    * record.
    */
-  saveWorkflow: (id: string, workflow: AssessmentWorkflow) =>
+  saveWorkflow: (
+    id: string,
+    workflow: AssessmentWorkflow,
+    profilePrefill?: Record<string, ProfilePrefillKey> | null,
+  ) =>
     apiClient.patch<{ id: string; workflow: AssessmentWorkflow; warnings: string[] }>(
       `/assessment-tools/${id}`,
-      { workflow },
+      // Absent leaves the stored map alone; null clears it. Sent only when the
+      // editor actually touched it, so a plain workflow save cannot erase it.
+      { workflow, ...(profilePrefill !== undefined ? { profilePrefill } : {}) },
     ),
 
   /**

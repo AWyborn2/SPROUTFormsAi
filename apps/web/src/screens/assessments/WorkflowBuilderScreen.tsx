@@ -3,6 +3,8 @@ import { useParams } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
 import {
   ACCESS_LEVELS,
+  PROFILE_PREFILL_KEYS,
+  PROFILE_PREFILL_LABELS,
   VALUE_SOURCES,
   effectiveAccess,
   fieldsInPart,
@@ -13,6 +15,7 @@ import {
   type AssessmentWorkflow,
   type FieldAccess,
   type FormField,
+  type ProfilePrefillKey,
   type ValueSource,
   type WorkflowRole,
   type WorkflowSection,
@@ -109,6 +112,18 @@ export function WorkflowBuilderScreen() {
   const { data: tool, isLoading, isError } = useAssessmentTool(toolId);
   const { data: session } = useSession();
   const save = useSaveWorkflow(toolId);
+  /*
+    WHERE EACH PREFILLED VALUE COMES FROM, held apart from the workflow draft.
+
+    The workflow says a field is `prefill`; this says FROM WHAT — the mapping
+    lives on the manifest root because the cover's identity boxes belong to no
+    part and so to no section. `undefined` means untouched, and an untouched
+    map is not sent, so saving a workflow cannot erase a mapping somebody else
+    made.
+  */
+  const [prefillDraft, setPrefillDraft] = useState<
+    Record<string, ProfilePrefillKey> | undefined
+  >(undefined);
 
   // The parts rule is an Admin act (R73). Reads for everyone, edits for admins.
   const canEditParts = session?.role === 'admin' || session?.role === 'owner';
@@ -168,7 +183,9 @@ export function WorkflowBuilderScreen() {
 
   function onSave() {
     if (!workflow) return;
-    save.mutate(workflow, {
+    const touched = prefillDraft !== undefined;
+    const map = touched && Object.keys(prefillDraft!).length > 0 ? prefillDraft! : null;
+    save.mutate({ workflow, ...(touched ? { profilePrefill: map } : {}) }, {
       onSuccess: (result) => {
         setDraft(null);
         toast({
@@ -383,6 +400,17 @@ export function WorkflowBuilderScreen() {
                                     field={field}
                                     section={section}
                                     roles={workflow.roles}
+                                    prefillKey={
+                                      (prefillDraft ?? tool.manifest.profilePrefill ?? {})[field.id]
+                                    }
+                                    onPrefillKey={(key) =>
+                                      setPrefillDraft((prev) => {
+                                        const base = { ...(prev ?? tool.manifest.profilePrefill ?? {}) };
+                                        if (key) base[field.id] = key;
+                                        else delete base[field.id];
+                                        return base;
+                                      })
+                                    }
                                     onAccess={(role, level) =>
                                       edit((w) => {
                                         const target = w.sections.find((s) => s.key === section.key)!;
@@ -589,12 +617,17 @@ function FieldRow({
   roles,
   onAccess,
   onSource,
+  prefillKey,
+  onPrefillKey,
 }: {
   field: FormField;
   section: WorkflowSection;
   roles: readonly WorkflowRole[];
   onAccess: (role: WorkflowRole, level: FieldAccess) => void;
   onSource: (source: ValueSource) => void;
+  /** Which profile attribute fills this field, when its source is prefill. */
+  prefillKey?: ProfilePrefillKey;
+  onPrefillKey?: (key: ProfilePrefillKey | null) => void;
 }) {
   const source = valueSource(section, field.id);
   return (
@@ -646,6 +679,34 @@ function FieldRow({
           onChange={onSource}
         />
       </div>
+
+      {/*
+        FROM WHAT. A field marked prefill with no mapping prints blank and
+        stays unwritable — locked AND empty, the worst of both — so the mapping
+        control sits beside the switch that creates the need for it. Text
+        fields only: the values these keys resolve to are strings, and
+        `validateProfilePrefill` refuses anything else at save.
+      */}
+      {source === 'prefill' && field.type === 'text' && onPrefillKey && (
+        <div className="flex flex-none items-center gap-1.5">
+          <span className="font-mono text-[9px] uppercase text-text-tertiary">From</span>
+          <select
+            aria-label={`Which profile attribute fills ${field.label}`}
+            value={prefillKey ?? ''}
+            onChange={(e) =>
+              onPrefillKey((e.target.value || null) as ProfilePrefillKey | null)
+            }
+            className="h-[24px] rounded-sm border border-border bg-surface-page px-1.5 text-[11px]"
+          >
+            <option value="">— not mapped —</option>
+            {PROFILE_PREFILL_KEYS.map((key) => (
+              <option key={key} value={key}>
+                {PROFILE_PREFILL_LABELS[key]}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
     </div>
   );
 }

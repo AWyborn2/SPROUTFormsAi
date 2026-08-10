@@ -26,6 +26,10 @@ import {
   resolveAssessorRequirements,
   validateWorkflow,
   hiddenFieldIds,
+  PROFILE_PREFILL_KEYS,
+  profilePrefillValues,
+  validateProfilePrefill,
+  type ProfilePrefillSource,
   sectionForPart,
   workflowOf,
   writableFieldIds,
@@ -354,9 +358,57 @@ const workflowSchema = z.object({
 });
 
 /** What may be changed on an existing tool. Everything optional — it is a patch. */
+/**
+ * What the candidate's profile supplies for `manifest.profilePrefill`.
+ *
+ * Resolved from the same rows the display-identity resolver reads: profile
+ * names win over the product-wide user name (an Admin corrects profiles, not
+ * accounts), and the company is the ORGANISATION's name — this workforce is a
+ * single subcontractor, and the org is who the candidate works for.
+ *
+ * Written once and shared by attempt open and case export, because two
+ * resolvers is how the screen and the printed record come to name the same
+ * person differently.
+ */
+async function resolveProfilePrefillSource(
+  database: NonNullable<typeof db>,
+  orgId: string,
+  candidateUserId: string,
+): Promise<ProfilePrefillSource> {
+  const [org, user, membership] = await Promise.all([
+    database.query.organizations.findFirst({ where: eq(schema.organizations.id, orgId) }),
+    database.query.users.findFirst({ where: eq(schema.users.id, candidateUserId) }),
+    database.query.memberships.findFirst({
+      where: and(
+        eq(schema.memberships.userId, candidateUserId),
+        eq(schema.memberships.orgId, orgId),
+      ),
+    }),
+  ]);
+  const profile = membership
+    ? await database.query.memberProfiles.findFirst({
+        where: eq(schema.memberProfiles.membershipId, membership.id),
+      })
+    : undefined;
+
+  const profileName = profile ? `${profile.firstName ?? ''} ${profile.lastName ?? ''}`.trim() : '';
+  return {
+    candidateName: profileName || user?.name || null,
+    companyName: org?.name ?? null,
+    swipeCard: profile?.swipeCardNumber ?? null,
+    employeeNumber: profile?.employeeNumber ?? null,
+  };
+}
+
 const updateToolBody = z.object({
   name: z.string().min(1).optional(),
   workflow: workflowSchema.optional(),
+  /**
+   * Which fields fill from the candidate's profile. `null` clears the map;
+   * absent leaves it as stored — the same tri-state every nullable PATCH field
+   * here uses, so saving a workflow does not silently erase the prefill.
+   */
+  profilePrefill: z.record(z.string(), z.enum(PROFILE_PREFILL_KEYS)).nullable().optional(),
 });
 
 const toolBody = z.object({
@@ -657,9 +709,18 @@ assessmentToolsRouter.patch(
       return;
     }
 
-    const manifest: AssessmentToolManifest = parsed.data.workflow
-      ? { ...tool.manifest, workflow: parsed.data.workflow }
-      : tool.manifest;
+    const manifestChanged =
+      parsed.data.workflow !== undefined || parsed.data.profilePrefill !== undefined;
+    let manifest: AssessmentToolManifest = tool.manifest;
+    if (parsed.data.workflow) manifest = { ...manifest, workflow: parsed.data.workflow };
+    if (parsed.data.profilePrefill !== undefined) {
+      // `null` CLEARS the map; a record replaces it. Absent leaves it alone —
+      // otherwise every workflow save would silently erase the prefill.
+      const { profilePrefill: _dropped, ...rest } = manifest;
+      manifest = parsed.data.profilePrefill
+        ? { ...rest, profilePrefill: parsed.data.profilePrefill }
+        : rest;
+    }
 
     const template = await db.query.formTemplates.findFirst({
       where: and(
@@ -671,7 +732,17 @@ assessmentToolsRouter.patch(
       ? await fieldsForVersion(db, template.currentVersionId)
       : [];
 
-    const { problems, warnings } = validateWorkflow(workflowOf(manifest, fields), manifest, fields);
+    const { problems: workflowProblems, warnings } = validateWorkflow(
+      workflowOf(manifest, fields),
+      manifest,
+      fields,
+    );
+    // The same check `validateManifest` runs at publish, so the map an editor
+    // can save and the map a manifest can carry are one set.
+    const problems = [
+      ...workflowProblems,
+      ...validateProfilePrefill(manifest.profilePrefill, fields),
+    ];
     if (problems.length > 0) {
       // Nothing written. A half-applied workflow is worse than a rejected one:
       // it decides who may write a competency record.
@@ -683,13 +754,13 @@ assessmentToolsRouter.patch(
       .update(schema.assessmentTools)
       .set({
         ...(parsed.data.name ? { name: parsed.data.name } : {}),
-        ...(parsed.data.workflow ? { manifest } : {}),
+        ...(manifestChanged ? { manifest } : {}),
       })
       .where(eq(schema.assessmentTools.id, tool.id));
 
     await recordAudit(db, tenant, {
       action: 'Updated assessment tool',
-      target: `${parsed.data.name ?? tool.name}${parsed.data.workflow ? ' (workflow)' : ''}`,
+      target: `${parsed.data.name ?? tool.name}${manifestChanged ? ' (workflow)' : ''}`,
       category: 'settings',
       icon: 'clipboard-check',
     });
@@ -1729,6 +1800,24 @@ assessmentCasesRouter.get(
       ? ((await locationNamesByIdFor(db, tenant.orgId, [row.locationId])).get(row.locationId) ?? null)
       : null;
 
+    /*
+      IDENTITY FILLS ITSELF (manifest.profilePrefill). Computed on read rather
+      than stored on the attempt, so a corrected profile shows corrected on the
+      next open instead of freezing a typo into the record — and no migration
+      backfills anything.
+
+      Resolved only when a mapped field is actually in this part's slice; most
+      attempts (every theory part) carry none and skip the three reads.
+    */
+    const prefillMap = manifest.profilePrefill ?? {};
+    const mappedHere = visibleFields.some((f) => prefillMap[f.id]);
+    const prefill = mappedHere
+      ? profilePrefillValues(
+          manifest,
+          await resolveProfilePrefillSource(db, tenant.orgId, row.candidateUserId),
+        )
+      : {};
+
     res.json({
       id: attempt.id,
       partKey: attempt.partKey,
@@ -1787,8 +1876,18 @@ assessmentCasesRouter.get(
         is the standard being applied to them — and never sees the assessor's
         private comments.
       */
-      writableFieldIds: writableFieldIds(section, visibleFields, party),
-      values: attempt.values ?? {},
+      /*
+        Mapped ids are dropped even under an AUTHORED workflow that never marked
+        them prefill — the mapping alone is the declaration, and a typed value
+        over the candidate's identity must not depend on an author remembering
+        to lock the box twice.
+      */
+      writableFieldIds: writableFieldIds(section, visibleFields, party).filter(
+        (id) => !prefillMap[id],
+      ),
+      // Prefill LAST: it is authoritative over anything stored, so a value that
+      // slipped in before the field was mapped cannot shadow the profile.
+      values: { ...(attempt.values ?? {}), ...prefill },
     });
   }),
 );
@@ -2178,6 +2277,12 @@ assessmentCasesRouter.post(
         pathway: row.pathway as AssessmentPathway,
         locationStream: exportLocationName,
         candidateName: candidate?.name ?? '',
+        // The same resolver the fill surface uses, so the printed identity
+        // block and the screen cannot name the same person differently.
+        prefillValues: profilePrefillValues(
+          tool.manifest,
+          await resolveProfilePrefillSource(db, tenant.orgId, row.candidateUserId),
+        ),
         attempts: attempts.map((a) => ({
           partKey: a.partKey,
           attemptNumber: a.attemptNumber,

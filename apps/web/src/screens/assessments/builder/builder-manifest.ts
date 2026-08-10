@@ -432,6 +432,50 @@ export function proposePartMarks(
 
 /** Assemble the manifest the publish step will validate and write. */
 /** The sign-off block, from the cover's assessor-declaration fields alone. */
+const CANDIDATE_NAME = /candidate'?s?\s+name/i;
+const COMPANY_NAME = /company\s+name/i;
+const SWIPE_CARD = /swipe\s*card/i;
+const EMPLOYEE_NUMBER = /employee\s+(no\.?|number)/i;
+
+/**
+ * Propose which cover fields fill themselves from the candidate's profile.
+ *
+ * Same doctrine as `proposeSignOff`: matched by label, exactly one or nothing,
+ * because two candidates for "Candidate's Name" means the labels do not say
+ * which box is meant and picking either writes identity data into a guess.
+ *
+ * `candidate_name` explicitly refuses a label carrying "assessor" — "Name of
+ * Assessor [Print]" contains the word "name" too, and mapping the CANDIDATE'S
+ * name into the assessor's box would print the person being assessed as the
+ * person certifying them.
+ *
+ * Text fields only, which `validateProfilePrefill` also enforces — proposing
+ * something the validator refuses would fail publish with a problem the author
+ * never chose.
+ */
+export function proposeProfilePrefill(
+  fields: readonly MarkingProposalField[],
+): AssessmentToolManifest['profilePrefill'] | undefined {
+  const one = (re: RegExp, exclude?: RegExp) => {
+    const hits = fields.filter(
+      (f) => f.type === 'text' && re.test(f.label) && !(exclude && exclude.test(f.label)),
+    );
+    return hits.length === 1 ? hits[0]! : undefined;
+  };
+
+  const out: NonNullable<AssessmentToolManifest['profilePrefill']> = {};
+  const name = one(CANDIDATE_NAME, /assessor/i);
+  if (name) out[name.id] = 'candidate_name';
+  const company = one(COMPANY_NAME);
+  if (company) out[company.id] = 'company_name';
+  const swipe = one(SWIPE_CARD);
+  if (swipe) out[swipe.id] = 'swipe_card';
+  const employee = one(EMPLOYEE_NUMBER);
+  if (employee) out[employee.id] = 'employee_number';
+
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 function signOffFrom(
   extracted: readonly Pick<ExtractedField, 'id' | 'label' | 'type' | 'options' | 'coverSection'>[],
 ): AssessmentToolManifest['signOff'] | undefined {
@@ -462,6 +506,16 @@ export function buildManifest(
       with nobody's name on it.
     */
     ...(signOffFrom(extracted) ? { signOff: signOffFrom(extracted) } : {}),
+    /*
+      IDENTITY FILLS ITSELF. The whole document search is safe here in a way it
+      is not for the sign-off block: "Candidate's Company Name" prints once,
+      and the one label that could collide — the assessor's name — is excluded
+      by the proposal itself.
+    */
+    ...(() => {
+      const prefill = proposeProfilePrefill(extracted);
+      return prefill ? { profilePrefill: prefill } : {};
+    })(),
     /*
       The setup answer follows the tool, not the draft.
 

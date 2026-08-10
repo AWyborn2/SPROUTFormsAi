@@ -30,6 +30,7 @@ import {
   movePart,
   proposeCoverPointers,
   proposePartMarks,
+  proposeProfilePrefill,
   proposeSignOff,
   setPathways,
   updatePart,
@@ -427,6 +428,50 @@ describe('logbookColumnsFor', () => {
  * this builder replaces — so every tool built here exported its certification
  * block blank, invisibly, because an empty `signOff` is perfectly valid.
  */
+describe('proposeProfilePrefill', () => {
+  const text = (id: string, label: string) => ({ id, label, type: 'text' as const });
+
+  it('maps the cover identity boxes by their printed labels', () => {
+    // The real cover page, verbatim. These three are the fields the whole
+    // "candidate details fill themselves" flow turns on.
+    expect(
+      proposeProfilePrefill([
+        text('name', "Candidate's Name"),
+        text('company', "Candidate's Company Name"),
+        text('swipe', 'Employee Swipe card Number'),
+      ]),
+    ).toEqual({ name: 'candidate_name', company: 'company_name', swipe: 'swipe_card' });
+  });
+
+  it('never maps the assessor’s name as the candidate’s', () => {
+    /*
+      "Name of Assessor [Print]" contains "name" too. Mapping the CANDIDATE'S
+      name into it would print the person being assessed as the person
+      certifying them — the one wrong box an auditor reads first.
+    */
+    const map = proposeProfilePrefill([text('assessor', 'Name of Assessor [Print]')]);
+
+    expect(map).toBeUndefined();
+  });
+
+  it('refuses an ambiguous label rather than picking one', () => {
+    expect(
+      proposeProfilePrefill([
+        text('a', "Candidate's Name"),
+        text('b', "Candidate's Name (print)"),
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('maps only text fields — the validator would refuse anything else', () => {
+    const map = proposeProfilePrefill([
+      { id: 'tick', label: "Candidate's Name", type: 'check_cross' as const },
+    ]);
+
+    expect(map).toBeUndefined();
+  });
+});
+
 describe('proposeSignOff', () => {
   const cover = (over: Partial<Parameters<typeof proposeSignOff>[0][number]> & { id: string; label: string }) => ({
     type: 'check_cross' as const,

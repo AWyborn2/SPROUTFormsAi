@@ -157,6 +157,102 @@ export function isTerminalCaseState(state: AssessmentCaseState): boolean {
   return TERMINAL_CASE_STATES.includes(state);
 }
 
+/**
+ * What a profile can prefill onto a form, named from the CANDIDATE's side.
+ *
+ * A closed list rather than free profile paths, because each key is a promise
+ * the API keeps: every consumer (attempt open, case export) must know how to
+ * resolve it, and an author must never be able to map a field to an attribute
+ * nothing supplies — that is a box that silently prints blank.
+ */
+export const PROFILE_PREFILL_KEYS = [
+  'candidate_name',
+  'company_name',
+  'swipe_card',
+  'employee_number',
+] as const;
+export type ProfilePrefillKey = (typeof PROFILE_PREFILL_KEYS)[number];
+
+export const PROFILE_PREFILL_LABELS: Record<ProfilePrefillKey, string> = {
+  candidate_name: "Candidate's name",
+  company_name: 'Company name',
+  swipe_card: 'Swipe card number',
+  employee_number: 'Employee number',
+};
+
+/** What the caller resolved from the profile, ready to map onto fields. */
+export interface ProfilePrefillSource {
+  candidateName?: string | null;
+  companyName?: string | null;
+  swipeCard?: string | null;
+  employeeNumber?: string | null;
+}
+
+/**
+ * The values a manifest's prefill map produces, keyed by field id.
+ *
+ * Blank attributes are SKIPPED rather than written as empty strings: an absent
+ * value leaves the field empty on screen and on paper, which reads as "not on
+ * file" — an empty string stored as an answer reads as "answered with nothing",
+ * and the two must stay distinguishable on an evidence document.
+ */
+export function profilePrefillValues(
+  manifest: Pick<AssessmentToolManifest, 'profilePrefill'>,
+  source: ProfilePrefillSource,
+): Record<string, string> {
+  const byKey: Record<ProfilePrefillKey, string | null | undefined> = {
+    candidate_name: source.candidateName,
+    company_name: source.companyName,
+    swipe_card: source.swipeCard,
+    employee_number: source.employeeNumber,
+  };
+  const out: Record<string, string> = {};
+  for (const [fieldId, key] of Object.entries(manifest.profilePrefill ?? {})) {
+    const value = byKey[key];
+    if (typeof value === 'string' && value.trim() !== '') out[fieldId] = value;
+  }
+  return out;
+}
+
+/**
+ * Problems with a prefill map, in the validators' own voice.
+ *
+ * Shared by `validateManifest` and the tool PATCH route, so the map an editor
+ * can save and the map a manifest can carry are the same set — two validators
+ * is how a workflow save starts refusing a manifest publish accepted.
+ */
+export function validateProfilePrefill(
+  map: Record<string, string> | undefined,
+  fields: readonly FormField[],
+): string[] {
+  const problems: string[] = [];
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  for (const [fieldId, key] of Object.entries(map ?? {})) {
+    if (!(PROFILE_PREFILL_KEYS as readonly string[]).includes(key)) {
+      problems.push(`Prefill for field "${fieldId}" names unknown profile attribute "${key}".`);
+      continue;
+    }
+    const field = byId.get(fieldId);
+    if (!field) {
+      problems.push(`Prefill names field "${fieldId}", which is not in this version.`);
+      continue;
+    }
+    /*
+      TEXT ONLY. The values these keys resolve to are strings, and the export
+      draws them as text. Mapped onto a check_cross or a signature the value
+      would misprint or vanish — and a signature box that "prefills" is a
+      person's attestation typed by a machine, which is not a bug class to
+      leave open.
+    */
+    if (field.type !== 'text') {
+      problems.push(
+        `Prefill maps "${field.label}" (${field.type}), but only a text field can carry a profile value.`,
+      );
+    }
+  }
+  return problems;
+}
+
 /** One part of an assessment tool. */
 export interface AssessmentPart {
   /** Stable key, referenced by attempts. Survives relabelling. */
@@ -293,6 +389,23 @@ export interface AssessmentToolManifest {
    * certifies a verdict for an unnamed person.
    */
   candidateNameFieldId?: string;
+
+  /**
+   * Fields filled FROM THE CANDIDATE'S PROFILE, by field id.
+   *
+   * `candidateNameFieldId`, generalised. That pointer seeds one box from the
+   * case; this seeds any text field from the profile the case names — name,
+   * company, swipe card, employee number — so "Candidate Details" fills itself
+   * when a case opens and nobody types identity data that the database already
+   * holds.
+   *
+   * A mapped field is unwritable by every role: `derivedWorkflow` marks it
+   * `prefill`, `canWrite` refuses non-`entry` fields, and the attempt route
+   * drops mapped ids from `writableFieldIds` even under an authored workflow.
+   * A typed value over a derived fact, on the identity line of a competency
+   * record, is exactly the edit nobody should be able to make.
+   */
+  profilePrefill?: Record<string, ProfilePrefillKey>;
   /**
    * Who does what, and in what order — see `workflow.ts`.
    *
@@ -839,6 +952,8 @@ export function validateManifest(
     nothing and reports nothing. This may surface a latent break on an existing
     tool, which is the point.
   */
+  problems.push(...validateProfilePrefill(manifest.profilePrefill, fields));
+
   if (manifest.candidateNameFieldId && !fieldIds.has(manifest.candidateNameFieldId)) {
     problems.push(
       `Manifest names candidateNameFieldId "${manifest.candidateNameFieldId}", which is not in this version.`,

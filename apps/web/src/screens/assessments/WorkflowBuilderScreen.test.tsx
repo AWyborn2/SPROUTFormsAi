@@ -161,7 +161,9 @@ describe('WorkflowBuilderScreen', () => {
     fireEvent.click(within(group).getByText('fill'));
     fireEvent.click(screen.getByText('Save workflow'));
 
-    const saved = saveMutate.mock.calls[0]![0] as AssessmentWorkflow;
+    // The mutation now carries `{ workflow, profilePrefill? }` — the map rides
+    // beside the workflow so saving one cannot erase the other.
+    const saved = (saveMutate.mock.calls[0]![0] as { workflow: AssessmentWorkflow }).workflow;
     expect(saved.sections.find((s) => s.key === 'p2')!.access.candidate).toBe('fill');
   });
 
@@ -177,7 +179,9 @@ describe('WorkflowBuilderScreen', () => {
     fireEvent.click(screen.getByLabelText('Move Part 2 — Practical earlier'));
     fireEvent.click(screen.getByText('Save workflow'));
 
-    const saved = saveMutate.mock.calls[0]![0] as AssessmentWorkflow;
+    // The mutation now carries `{ workflow, profilePrefill? }` — the map rides
+    // beside the workflow so saving one cannot erase the other.
+    const saved = (saveMutate.mock.calls[0]![0] as { workflow: AssessmentWorkflow }).workflow;
     expect(saved.sections.find((s) => s.key === 'p2')!.ordinal).toBe(1);
     expect(saved.sections.find((s) => s.key === 'p1')!.ordinal).toBe(2);
     // Nothing in the manifest moved — the screen never touches it.
