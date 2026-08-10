@@ -358,6 +358,13 @@
       "when": 1786327787414,
       "tag": "0050_thick_madame_hydra",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1786403354806,
+      "tag": "0051_broken_shriek",
+      "breakpoints": true
     }
   ]
 }

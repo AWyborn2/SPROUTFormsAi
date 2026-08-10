@@ -15,6 +15,13 @@ export type TaxonomyStatus = 'active' | 'retired';
 /** Which workforce number identifies a person on screen (R40). */
 export type DisplayIdentifier = 'employee_number' | 'swipe_card_number';
 
+/**
+ * How the organisation writes an ambiguous slash-separated date. See
+ * `packages/db/src/schema/enums.ts`'s `dateFormatEnum` for the full rationale
+ * — this is the app-side mirror of that same enum.
+ */
+export type DateFormat = 'dmy' | 'mdy';
+
 export interface Location {
   id: string;
   orgId: string;
@@ -69,4 +76,12 @@ export const DISPLAY_IDENTIFIERS: readonly DisplayIdentifier[] = [
 export const DISPLAY_IDENTIFIER_LABELS: Record<DisplayIdentifier, string> = {
   employee_number: 'Employee number',
   swipe_card_number: 'Swipe card number',
+};
+
+export const DATE_FORMATS: readonly DateFormat[] = ['dmy', 'mdy'];
+
+/** Human-facing labels for the date-format choice, each with a worked example. */
+export const DATE_FORMAT_LABELS: Record<DateFormat, string> = {
+  dmy: 'Day/Month/Year (31/12/2026)',
+  mdy: 'Month/Day/Year (12/31/2026)',
 };

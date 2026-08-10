@@ -102,6 +102,7 @@ taxonomyRouter.get(
         displayIdentifier: org?.displayIdentifier ?? 'employee_number',
         pooledCaseOverdueDays: org?.pooledCaseOverdueDays ?? 14,
         notificationLeadDays: org?.notificationLeadDays ?? 30,
+        dateFormat: org?.dateFormat ?? 'dmy',
       },
     });
   }),
@@ -1308,6 +1309,7 @@ const settingsBody = z.object({
   pooledCaseOverdueDays: z.number().int().min(1).max(365).optional(),
   // How far ahead of an expiry the sweep notifies (U21, KTD12).
   notificationLeadDays: z.number().int().min(1).max(365).optional(),
+  dateFormat: z.enum(['dmy', 'mdy']).optional(),
 });
 
 taxonomyRouter.patch(
@@ -1336,6 +1338,7 @@ taxonomyRouter.patch(
         ...(parsed.data.notificationLeadDays !== undefined
           ? { notificationLeadDays: parsed.data.notificationLeadDays }
           : {}),
+        ...(parsed.data.dateFormat ? { dateFormat: parsed.data.dateFormat } : {}),
       })
       .where(eq(schema.organizations.id, tenant.orgId))
       .returning();
@@ -1351,6 +1354,7 @@ taxonomyRouter.patch(
       displayIdentifier: row?.displayIdentifier ?? 'employee_number',
       pooledCaseOverdueDays: row?.pooledCaseOverdueDays ?? 14,
       notificationLeadDays: row?.notificationLeadDays ?? 30,
+      dateFormat: row?.dateFormat ?? 'dmy',
     });
   }),
 );

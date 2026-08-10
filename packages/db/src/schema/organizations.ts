@@ -11,7 +11,7 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import type { BrandingKit } from '@formai/shared';
-import { displayIdentifierEnum, membershipStatusEnum, roleEnum } from './enums.ts';
+import { dateFormatEnum, displayIdentifierEnum, membershipStatusEnum, roleEnum } from './enums.ts';
 
 /**
  * DB-level default for the branding column. Mirrors `DEFAULT_BRANDING` in
@@ -78,6 +78,13 @@ export const organizations = pgTable('organizations', {
    * artifact — this is only the organisation's choice between them.
    */
   displayIdentifier: displayIdentifierEnum('display_identifier').notNull().default('employee_number'),
+  /**
+   * How the organisation writes an ambiguous slash-separated date, read by
+   * anything that parses a date string a person typed (currently only the
+   * workforce import's `grant_date`/`expiry_date` columns). See
+   * `dateFormatEnum` for why this exists and what it does not affect.
+   */
+  dateFormat: dateFormatEnum('date_format').notNull().default('dmy'),
   /**
    * How many days a POOLED (unowned) case may sit before it reads as overdue
    * (U13, R63). Overdue is DERIVED — compared against a case's age on read, never
