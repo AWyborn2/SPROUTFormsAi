@@ -1,0 +1,264 @@
+import { Router } from 'express';
+import { z } from 'zod';
+import { eq } from 'drizzle-orm';
+import { PLAN_CONFIG, schema, type PlanTier } from '@formai/db';
+import {
+  WORKFORCE_IMPORT_TEMPLATE,
+  parseWorkforceCsv,
+  validateWorkforceImport,
+  type ImportContext,
+  type ValidatedImport,
+} from '@formai/shared';
+import { requireTenant } from '../middleware/tenant.js';
+import { requirePlanFeature } from '../middleware/plan.js';
+import { withErrorHandling } from '../lib/with-error-handling.js';
+import { loadHeldIdentifiers, previewImportCost } from '../lib/member-create.js';
+import { executeImportRun, readRunReport } from '../lib/workforce-import-run.js';
+import { db } from '../db.js';
+
+/**
+ * Bulk workforce import (U23 part 2, U24).
+ *
+ * THE ONE PATH INTO THE PRODUCT THAT DOES NOT GO THROUGH A SCREEN, which is why
+ * every row goes through the SAME validator the team screen calls rather than a
+ * second implementation. Two implementations of one rule disagree silently and
+ * at volume: an import could land a placement the screen refuses, or reject one
+ * it accepts.
+ *
+ * FOUR STEPS, and the separation is the design (R144). The template says what
+ * the file must look like; validation reads a filled one and prices it without
+ * writing anything; the run happens only once an Admin has seen that price and
+ * confirmed; and the report outlives the tab, because the rejection list is what
+ * an Admin needs to correct the source file and re-import.
+ *
+ * VALIDATION IS REDONE ON THE RUN. The client sends the same file back rather
+ * than a "this was already approved" payload — trusting a client-supplied list
+ * of valid rows would let anyone who can call this route land whatever they
+ * liked, and the taxonomy may have moved between the two calls anyway.
+ */
+export const workforceImportRouter: Router = Router();
+
+/** Admin-only, and Owner as the level holding everything Admin holds (R139). */
+function isAdmin(role: string): boolean {
+  return role === 'admin' || role === 'owner';
+}
+
+const GATE = [requireTenant, requirePlanFeature('assessments')] as const;
+
+const fileBody = z.object({
+  /** The filled template, as text. */
+  csv: z.string().min(1),
+});
+
+/**
+ * Everything the validator resolves names against — the organisation's ACTIVE
+ * taxonomy and the competencies some tool awards.
+ *
+ * Only ACTIVE values are loaded, which is what makes "names a retired
+ * Department" a rejection rather than a silent success: the name simply is not
+ * in the map. The import creates no taxonomy under any circumstance (R169), so
+ * an unknown name has nowhere to go but the rejection list.
+ */
+async function loadImportContext(orgId: string, planTier: string): Promise<ImportContext> {
+  const database = db!;
+  const [locations, departments, jobRoles, competencies, tools] = await Promise.all([
+    database.query.locations.findMany({ where: eq(schema.locations.orgId, orgId) }),
+    database.query.departments.findMany({ where: eq(schema.departments.orgId, orgId) }),
+    database.query.jobRoles.findMany({ where: eq(schema.jobRoles.orgId, orgId) }),
+    database.query.competencies.findMany({ where: eq(schema.competencies.orgId, orgId) }),
+    database.query.assessmentTools.findMany({ where: eq(schema.assessmentTools.orgId, orgId) }),
+  ]);
+
+  const active = <T extends { status?: string }>(rows: T[]) =>
+    rows.filter((r) => r.status !== 'retired');
+  const activeDepartments = active(departments);
+  const activeRoles = active(jobRoles);
+
+  /*
+    R167: a competency line names a competency SOME tool awards. One nothing
+    awards cannot be earned in the product either, so importing it would create
+    a holding nobody could ever renew.
+  */
+  const awarded = new Set(tools.flatMap((t) => t.awardedCompetencyIds ?? []));
+
+  const held = await loadHeldIdentifiers(database, orgId);
+
+  return {
+    locationsByName: new Map(active(locations).map((l) => [l.name.toLowerCase(), l.id])),
+    departmentsByName: new Map(activeDepartments.map((d) => [d.name.toLowerCase(), d.id])),
+    rolesByDeptAndName: new Map(
+      activeRoles.map((r) => [`${r.departmentId}|${r.name.toLowerCase()}`, r.id]),
+    ),
+    awardedCompetenciesByName: new Map(
+      competencies.filter((c) => awarded.has(c.id)).map((c) => [c.name.toLowerCase(), c.id]),
+    ),
+    placement: {
+      departments: activeDepartments.map((d) => ({
+        id: d.id,
+        allowsMultipleRoles: d.allowsMultipleRoles,
+      })),
+      roles: activeRoles.map((r) => ({ id: r.id, departmentId: r.departmentId })),
+    },
+    // R167: a Candidate row cannot land on a tier that allocates none.
+    candidateSeatsAllowed: (PLAN_CONFIG[planTier as PlanTier]?.candidateSeatLimit ?? 0) !== 0,
+    heldEmployeeNumbers: held.employeeNumbers,
+    heldSwipeCardNumbers: held.swipeCardNumbers,
+  };
+}
+
+/** Parse and validate one submitted file against the org's live taxonomy. */
+async function validateSubmitted(
+  orgId: string,
+  csv: string,
+): Promise<{ validated: ValidatedImport; org: typeof schema.organizations.$inferSelect } | null> {
+  const org = await db!.query.organizations.findFirst({
+    where: eq(schema.organizations.id, orgId),
+  });
+  if (!org) return null;
+  const ctx = await loadImportContext(orgId, org.planTier);
+  return { validated: validateWorkforceImport(parseWorkforceCsv(csv), ctx), org };
+}
+
+// ── GET /workforce-import/template ─────────────────────────────────────────
+
+/**
+ * The blank template (R141).
+ *
+ * Served as a file rather than described in prose, because the two-section shape
+ * is the part somebody gets wrong by hand — and the parser reads exactly this.
+ */
+workforceImportRouter.get(
+  '/template',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!isAdmin(req.tenant!.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="workforce-import-template.csv"');
+    res.send(WORKFORCE_IMPORT_TEMPLATE);
+  }),
+);
+
+// ── POST /workforce-import/validate ────────────────────────────────────────
+
+/**
+ * Read a filled file and price it. WRITES NOTHING (R144).
+ *
+ * The cost is stated against BOTH pools separately, because each row names its
+ * own access level and one figure would cover only part of what the file
+ * spends. It counts SEATS rather than rows: a row merging onto an already-active
+ * membership costs nothing, one matching a deactivated membership costs one, and
+ * the same address twice costs one in total. A customer whose assessors already
+ * hold logins is exactly the file this exists for, and a row count would
+ * over-state their bill on precisely that file.
+ */
+workforceImportRouter.post(
+  '/validate',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = fileBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request' });
+      return;
+    }
+
+    const outcome = await validateSubmitted(tenant.orgId, parsed.data.csv);
+    if (!outcome) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const { validated, org } = outcome;
+
+    const preview = await previewImportCost(db, org, validated.validProfiles);
+    res.json({
+      validRows: validated.validProfiles.length,
+      competencyLines: validated.validCompetencies.length,
+      rejected: validated.rejected,
+      preview,
+    });
+  }),
+);
+
+// ── POST /workforce-import/run ─────────────────────────────────────────────
+
+/**
+ * Execute the import (R144's confirmation step).
+ *
+ * Re-validates the file rather than trusting anything the client says was
+ * approved, and returns a run id immediately — the report is addressable
+ * afterwards, so closing the tab loses nothing.
+ */
+workforceImportRouter.post(
+  '/run',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = fileBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request' });
+      return;
+    }
+
+    const outcome = await validateSubmitted(tenant.orgId, parsed.data.csv);
+    if (!outcome) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const { runId } = await executeImportRun(db, tenant, {
+      validProfiles: outcome.validated.validProfiles,
+      validCompetencies: outcome.validated.validCompetencies,
+      rejected: outcome.validated.rejected,
+    });
+    res.status(201).json({ runId });
+  }),
+);
+
+// ── GET /workforce-import/runs/:id ─────────────────────────────────────────
+
+/**
+ * The run report (R171), readable long after the page was closed.
+ *
+ * Every figure is derived from the recorded rows rather than a tally kept beside
+ * them, so the report and the rows an Admin acts on cannot disagree.
+ */
+workforceImportRouter.get(
+  '/runs/:id',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const report = await readRunReport(db, tenant.orgId, req.params.id!);
+    if (!report) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    res.json(report);
+  }),
+);

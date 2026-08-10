@@ -156,4 +156,10 @@ export const apiClient = {
   /** POST to an endpoint that answers with a binary body (e.g. a PDF) instead of JSON. */
   postForBlob: (path: string, body?: unknown): Promise<Blob> =>
     send('POST', path, body).then((res) => res.blob()),
+  /**
+   * GET an endpoint that answers with text rather than JSON — the workforce
+   * import template, which is a CSV file the Admin fills in and sends back.
+   * Parsing it as JSON would throw on the first comma.
+   */
+  getText: (path: string): Promise<string> => send('GET', path).then((res) => res.text()),
 };

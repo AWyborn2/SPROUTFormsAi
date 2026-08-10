@@ -99,6 +99,10 @@ export const SCREENS: ScreenDef[] = [
   // floor would lock out the very reader R49 admits.
   { key: 'profile', path: '/app/profile/:id', group: 'Enterprise & org', label: 'Member record', icon: 'user', shell: 'app' , requiresFeature: 'assessments' },
   { key: 'my-profile', path: '/app/profile', group: 'Enterprise & org', label: 'My record', icon: 'user', shell: 'app', inNav: true , requiresFeature: 'assessments' },
+  // Bulk workforce import (U23, U24). Admin-only and behind the assessments
+  // tier, matching its routes: a row cannot be built without taxonomy the tier
+  // does not carry.
+  { key: 'workforce-import', path: '/app/workforce-import', group: 'Enterprise & org', label: 'Import workforce', icon: 'upload', shell: 'app', inNav: true, minAccessLevel: 'admin', requiresFeature: 'assessments' },
   { key: 'audit', path: '/app/audit', group: 'Enterprise & org', label: 'Audit log', icon: 'scroll-text', shell: 'app', inNav: true , requiresFeature: 'auditExport' },
   { key: 'billing', path: '/app/billing', group: 'Enterprise & org', label: 'Billing', icon: 'credit-card', shell: 'app', inNav: true },
   { key: 'competency', path: '/app/competency', group: 'Competency gating', label: 'Competency gating', icon: 'graduation-cap', shell: 'app', inNav: true , requiresFeature: 'competencyGating' },

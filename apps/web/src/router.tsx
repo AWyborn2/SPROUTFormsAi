@@ -29,6 +29,7 @@ import { WhiteLabelScreen } from './screens/enterprise/WhiteLabelScreen.js';
 import { CompetencyScreen } from './screens/enterprise/CompetencyScreen.js';
 import { WorkingListScreen } from './screens/enterprise/WorkingListScreen.js';
 import { ProfileScreen } from './screens/enterprise/ProfileScreen.js';
+import { WorkforceImportScreen } from './screens/enterprise/WorkforceImportScreen.js';
 import { ComplianceScreen } from './screens/enterprise/ComplianceScreen.js';
 import { AssessmentCasesScreen } from './screens/assessments/AssessmentCasesScreen.js';
 import { AssessorQueueScreen } from './screens/assessments/AssessorQueueScreen.js';
@@ -69,6 +70,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   'working-list': <WorkingListScreen />,
   compliance: <ComplianceScreen />,
   profile: <ProfileScreen />,
+  'workforce-import': <WorkforceImportScreen />,
   'my-profile': <ProfileScreen />,
   assessments: <AssessmentCasesScreen />,
   'assessment-queue': <AssessorQueueScreen />,

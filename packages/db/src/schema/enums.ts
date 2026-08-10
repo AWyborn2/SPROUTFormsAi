@@ -171,3 +171,24 @@ export const auditCategoryEnum = pgEnum('audit_category', [
   */
   'billing',
 ]);
+
+/**
+ * What one row of a workforce import DID (U24, R171).
+ *
+ * The run report is DERIVED from these rather than from counters kept beside
+ * the run: a stored tally and the rows it counts can disagree, and the rows are
+ * the artifact an Admin needs anyway to correct the source file and re-import.
+ *
+ * `duplicate` is a second row for an address an earlier row already handled —
+ * distinct from `merged`, which found an existing ACTIVE membership. The first
+ * wrote nothing because the file repeated itself; the second wrote nothing
+ * because the person was already here.
+ */
+export const importRowOutcomeEnum = pgEnum('import_row_outcome', [
+  'created',
+  'added_membership',
+  'reactivated',
+  'merged',
+  'duplicate',
+  'rejected',
+]);

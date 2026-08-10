@@ -30,6 +30,7 @@ import { teamRouter } from './routes/team.js';
 import { trainingRequestsRouter } from './routes/training-requests.js';
 import { internalRouter } from './routes/internal.js';
 import { noticesRouter } from './routes/notices.js';
+import { workforceImportRouter } from './routes/workforce-import.js';
 import { workingListRouter } from './routes/working-list.js';
 import { complianceRouter } from './routes/compliance.js';
 import { profilesRouter } from './routes/profiles.js';
@@ -180,6 +181,7 @@ export function createApp(): Express {
   app.use('/taxonomy', taxonomyRouter);
   app.use('/training-requests', trainingRequestsRouter);
   app.use('/notices', noticesRouter);
+  app.use('/workforce-import', workforceImportRouter);
   app.use('/working-list', workingListRouter);
   app.use('/compliance', complianceRouter);
   app.use('/profiles', profilesRouter);

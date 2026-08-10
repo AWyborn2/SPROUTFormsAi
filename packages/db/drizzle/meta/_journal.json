@@ -351,6 +351,13 @@
       "when": 1786006605682,
       "tag": "0049_loose_raza",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1786327787414,
+      "tag": "0050_thick_madame_hydra",
+      "breakpoints": true
     }
   ]
 }
