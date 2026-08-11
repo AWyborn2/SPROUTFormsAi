@@ -444,6 +444,15 @@ export interface AssessmentToolManifest {
   candidateNameFieldId?: string;
 
   /**
+   * The cover page's candidate-signature box.
+   *
+   * Extraction folds printed signature boxes into TEXT inputs, so the stored
+   * type is often `text`. The fill surface overrides it to `signature` when
+   * this pointer is set, so the candidate draws rather than types.
+   */
+  candidateSignatureFieldId?: string;
+
+  /**
    * Fields filled FROM THE CANDIDATE'S PROFILE, by field id.
    *
    * `candidateNameFieldId`, generalised. That pointer seeds one box from the
@@ -1034,6 +1043,12 @@ export function validateManifest(
   if (manifest.candidateNameFieldId && !fieldIds.has(manifest.candidateNameFieldId)) {
     problems.push(
       `Manifest names candidateNameFieldId "${manifest.candidateNameFieldId}", which is not in this version.`,
+    );
+  }
+
+  if (manifest.candidateSignatureFieldId && !fieldIds.has(manifest.candidateSignatureFieldId)) {
+    problems.push(
+      `Manifest names candidateSignatureFieldId "${manifest.candidateSignatureFieldId}", which is not in this version.`,
     );
   }
 

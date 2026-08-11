@@ -261,14 +261,22 @@ export function updatePart(
  * since are two different records, and this proposal is drawn from the first.
  */
 export function proposeCoverPointers(
-  extracted: readonly Pick<ExtractedField, 'id' | 'label' | 'coverSection'>[],
-): { candidateNameFieldId?: string } {
+  extracted: readonly Pick<ExtractedField, 'id' | 'label' | 'type' | 'coverSection'>[],
+): { candidateNameFieldId?: string; candidateSignatureFieldId?: string } {
+  const out: { candidateNameFieldId?: string; candidateSignatureFieldId?: string } = {};
   const candidate = extracted.find(
     (f) =>
       f.coverSection === 'candidate_declaration' &&
       /candidate.*name|name.*candidate|full name/i.test(f.label),
   );
-  return candidate ? { candidateNameFieldId: candidate.id } : {};
+  if (candidate) out.candidateNameFieldId = candidate.id;
+  const sig = extracted.find(
+    (f) =>
+      f.coverSection === 'candidate_declaration' &&
+      (f.type === 'signature' || /candidate'?s?\s+signature|signature\s+of\s+candidate/i.test(f.label)),
+  );
+  if (sig) out.candidateSignatureFieldId = sig.id;
+  return out;
 }
 
 /* ------------------------------------------------------------------ *
