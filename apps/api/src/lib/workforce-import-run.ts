@@ -54,7 +54,8 @@ interface RowResult {
   flagged: string[];
   differences: Array<{ field: string; existing: string; fromFile: string }>;
   competenciesRecorded: number;
-  competenciesSkipped: number;
+  /** Of those recorded, how many carry no grant date (R153, reversed). */
+  competenciesUndated: number;
   assessmentsAssigned: number;
   seatPool?: 'staff' | 'candidate';
 }
@@ -97,6 +98,15 @@ function competenciesByEmail(
  * derives from that real date and the competency's own validity exactly as an
  * earned one does, and a recorded expiry overrides it.
  *
+ * A LINE WITH NO GRANT DATE IS STILL RECORDED (R153, reversed). The person
+ * genuinely holds it; the source system just never dated it, or the record is
+ * one — like a driver's licence — that a formula could never derive an expiry
+ * for anyway. `grantedAt` is written NULL explicitly rather than left to the
+ * column default, because defaulting it would manufacture a "granted today"
+ * currency the person does not have, which is the one outcome worse than
+ * recording no date. `competencyStatus` treats that null as its own `undated`
+ * state, so it stays visibly flagged rather than reading as an ordinary grant.
+ *
  * `importedAt` is what marks these as migrated, which is what waives the
  * certificate they have no scan of (R162) — and it reaches only the records this
  * run created, so a competency recorded on the same person afterwards owes its
@@ -108,35 +118,33 @@ async function recordCompetencies(
   userId: string,
   lines: readonly ValidCompetencyRow[],
   now: Date,
-): Promise<{ recorded: number; skipped: number }> {
+): Promise<{ recorded: number; undated: number }> {
   let recorded = 0;
-  let skipped = 0;
+  let undated = 0;
   for (const line of lines) {
-    /*
-      A line with no readable grant date awards NOTHING and is flagged (R153).
-      Dating it to the day of the run would manufacture a currency the person
-      does not have — the one outcome worse than recording nothing.
-    */
-    if (!line.grantedAt || Number.isNaN(line.grantedAt.getTime())) {
-      skipped++;
-      continue;
-    }
     const result = await grantCompetency(db, tenant, {
       competencyId: line.competencyId,
       userId,
       evidenceRef: line.evidence || null,
       // R160: no case. A spreadsheet cannot produce an assessor's signature.
       sourceCaseId: null,
+      // The explicit override, where the file supplied one (a driver's
+      // licence's own recorded expiry, not a derived one).
+      expiresAt: line.expiresAt,
     });
-    if (!result.ok) {
-      skipped++;
-      continue;
-    }
     /*
-      The real grant date and the migration provenance, written after the grant
-      because `grantCompetency` is the product's own upsert and stamps today.
-      R157 wants who authorised the migration and when; R158 wants the date the
-      ticket was actually earned.
+      Cannot happen post-validation — the competency was resolved against THIS
+      org's awarded set and the person just landed as a real membership in the
+      same row — but `grantCompetency` stays the authority on both, so a
+      refusal is honoured rather than assumed away.
+    */
+    if (!result.ok) continue;
+    /*
+      The real grant date (or its deliberate absence) and the migration
+      provenance, written after the grant because `grantCompetency` is the
+      product's own upsert and stamps today. R157 wants who authorised the
+      migration and when; R158 wants the date the ticket was actually earned —
+      or the explicit acknowledgement that nobody supplied one.
     */
     await db
       .update(schema.competencyHolders)
@@ -152,8 +160,9 @@ async function recordCompetencies(
         ),
       );
     recorded++;
+    if (!line.grantedAt) undated++;
   }
-  return { recorded, skipped };
+  return { recorded, undated };
 }
 
 /**
@@ -178,7 +187,7 @@ async function runOneRow(
     flagged: [],
     differences: [],
     competenciesRecorded: 0,
-    competenciesSkipped: 0,
+    competenciesUndated: 0,
     assessmentsAssigned: 0,
   };
 
@@ -219,7 +228,7 @@ async function runOneRow(
   // R163: competencies BEFORE assignment, so assignment skips what they hold.
   const counts = await recordCompetencies(db, tenant, landed.userId, lines, now);
   result.competenciesRecorded = counts.recorded;
-  result.competenciesSkipped = counts.skipped;
+  result.competenciesUndated = counts.undated;
 
   /*
     Then only what those competencies leave unmet (R163, R47). Fail-soft: an
@@ -273,7 +282,7 @@ export async function executeImportRun(
       flagged: result.flagged,
       differences: result.differences,
       competenciesRecorded: result.competenciesRecorded,
-      competenciesSkipped: result.competenciesSkipped,
+      competenciesUndated: result.competenciesUndated,
       assessmentsAssigned: result.assessmentsAssigned,
       seatPool: result.seatPool ?? null,
     });
@@ -288,7 +297,7 @@ export async function executeImportRun(
       flagged: [],
       differences: [],
       competenciesRecorded: 0,
-      competenciesSkipped: 0,
+      competenciesUndated: 0,
       assessmentsAssigned: 0,
     });
   }
@@ -371,7 +380,8 @@ export async function readRunReport(db: Db, orgId: string, runId: string): Promi
     candidateSeats: count((r) => r.seatPool === 'candidate'),
     staffSeats: count((r) => r.seatPool === 'staff'),
     competenciesRecorded: rows.reduce((n, r) => n + r.competenciesRecorded, 0),
-    linesFlaggedNoDate: rows.reduce((n, r) => n + r.competenciesSkipped, 0),
+    // Recorded, not skipped (R153, reversed) — the count of grants awaiting a date.
+    linesFlaggedNoDate: rows.reduce((n, r) => n + r.competenciesUndated, 0),
     assessmentsAssigned: rows.reduce((n, r) => n + r.assessmentsAssigned, 0),
     profilesFlaggedIncomplete: count((r) => (r.flagged ?? []).length > 0),
     differencesReported: count((r) => (r.differences ?? []).length > 0),

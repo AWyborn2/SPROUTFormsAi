@@ -45,6 +45,7 @@ const line = (over: Partial<ValidCompetencyRow> = {}): ValidCompetencyRow => ({
   email: 'jane@x.io',
   competencyId: 'c-1',
   grantedAt: new Date('2022-03-01T00:00:00Z'),
+  expiresAt: null,
   evidence: 'cert-1',
   ...over,
 });
@@ -80,7 +81,7 @@ function fakeDb() {
             flagged: [],
             differences: [],
             competenciesRecorded: 0,
-            competenciesSkipped: 0,
+            competenciesUndated: 0,
             assessmentsAssigned: 0,
             seatPool: null,
             ...v,
@@ -230,8 +231,15 @@ describe('executeImportRun — ordering and refusals', () => {
     expect(dated!.importedAt).toEqual(new Date('2026-08-10T00:00:00Z'));
   });
 
-  it('awards nothing for a line with no readable date, and counts it skipped (R153)', async () => {
-    const { db, runRows } = fakeDb();
+  it('RECORDS a line with no date, undated rather than withheld (R153, reversed)', async () => {
+    /*
+      The old behaviour withheld the grant entirely and counted it skipped.
+      That is now backwards: the person genuinely holds this, the source system
+      simply never dated it, so it is granted with `grantedAt: null` and flagged
+      via `competenciesUndated` for someone to date later — never defaulted to
+      "today", which would manufacture a currency the person does not have.
+    */
+    const { db, runRows, updates } = fakeDb();
     mocks.resolveRows.mockResolvedValue([
       { row: row(), disposition: 'create', userId: null, membershipId: null, pool: 'candidate' },
     ]);
@@ -245,12 +253,20 @@ describe('executeImportRun — ordering and refusals', () => {
 
     await executeImportRun(db, TENANT, {
       validProfiles: [row()],
-      validCompetencies: [line({ grantedAt: new Date('nonsense') })],
+      validCompetencies: [line({ grantedAt: null })],
       rejected: [],
     });
 
-    expect(mocks.grantCompetency).not.toHaveBeenCalled();
-    expect(runRows[0]).toMatchObject({ competenciesRecorded: 0, competenciesSkipped: 1 });
+    expect(mocks.grantCompetency).toHaveBeenCalledWith(
+      db,
+      TENANT,
+      expect.objectContaining({ competencyId: 'c-1', expiresAt: null }),
+    );
+    // Written explicitly, never left to the column's default — a caller that
+    // forgot this line would silently stamp "granted today" instead.
+    const dated = updates.find((u) => 'grantedAt' in u);
+    expect(dated!.grantedAt).toBeNull();
+    expect(runRows[0]).toMatchObject({ competenciesRecorded: 1, competenciesUndated: 1 });
   });
 
   it('records a full pool as a rejected row and CONTINUES the run (R143, R170)', async () => {
@@ -304,10 +320,10 @@ describe('readRunReport — derived, never tallied', () => {
     */
     const { db, runRows } = fakeDb();
     runRows.push(
-      { rowNumber: 2, subject: 'A', outcome: 'created', seatPool: 'candidate', flagged: ['mobile'], differences: [], competenciesRecorded: 2, competenciesSkipped: 1, assessmentsAssigned: 1 },
-      { rowNumber: 3, subject: 'B', outcome: 'merged', seatPool: null, flagged: [], differences: [{ field: 'roles', existing: 'x', fromFile: 'y' }], competenciesRecorded: 0, competenciesSkipped: 0, assessmentsAssigned: 0 },
-      { rowNumber: 4, subject: 'C', outcome: 'reactivated', seatPool: 'staff', flagged: [], differences: [], competenciesRecorded: 1, competenciesSkipped: 0, assessmentsAssigned: 2 },
-      { rowNumber: 5, subject: 'D', outcome: 'rejected', reason: 'unknown_location', detail: 'Nowhere', flagged: [], differences: [], competenciesRecorded: 0, competenciesSkipped: 0, assessmentsAssigned: 0 },
+      { rowNumber: 2, subject: 'A', outcome: 'created', seatPool: 'candidate', flagged: ['mobile'], differences: [], competenciesRecorded: 2, competenciesUndated: 1, assessmentsAssigned: 1 },
+      { rowNumber: 3, subject: 'B', outcome: 'merged', seatPool: null, flagged: [], differences: [{ field: 'roles', existing: 'x', fromFile: 'y' }], competenciesRecorded: 0, competenciesUndated: 0, assessmentsAssigned: 0 },
+      { rowNumber: 4, subject: 'C', outcome: 'reactivated', seatPool: 'staff', flagged: [], differences: [], competenciesRecorded: 1, competenciesUndated: 0, assessmentsAssigned: 2 },
+      { rowNumber: 5, subject: 'D', outcome: 'rejected', reason: 'unknown_location', detail: 'Nowhere', flagged: [], differences: [], competenciesRecorded: 0, competenciesUndated: 0, assessmentsAssigned: 0 },
     );
 
     const report = (await readRunReport(db, 'org-1', 'run-1'))!;

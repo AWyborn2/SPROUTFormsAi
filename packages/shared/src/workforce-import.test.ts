@@ -100,8 +100,8 @@ describe('parseWorkforceCsv', () => {
       'name,email,access_level,locations,departments,roles,employee_number,swipe_card_number',
       'Ada Assessor,ada@example.com,Assessor,Raw Materials,Operations,Dozer Operator,E1,',
       '#competencies',
-      'email,competency,grant_date,evidence',
-      'ada@example.com,ATO - Track Dozer,2023-01-15,CERT-9',
+      'email,competency,grant_date,expiry_date,evidence',
+      'ada@example.com,ATO - Track Dozer,2023-01-15,,CERT-9',
     ].join('\n');
     const parsed = parseWorkforceCsv(filled);
     expect(parsed.profiles).toHaveLength(1);
@@ -165,8 +165,8 @@ describe('validateWorkforceImport — one test per rejection reason', () => {
     const file = [
       profileFile(),
       '#competencies',
-      'email,competency,grant_date,evidence',
-      'ada@example.com,Unawarded Ticket,2023-01-15,',
+      'email,competency,grant_date,expiry_date,evidence',
+      'ada@example.com,Unawarded Ticket,2023-01-15,,',
     ].join('\n');
     expect(reasons(file)).toEqual(['unknown_competency']);
   });
@@ -174,10 +174,21 @@ describe('validateWorkforceImport — one test per rejection reason', () => {
     const file = [
       profileFile(),
       '#competencies',
-      'email,competency,grant_date,evidence',
-      'ada@example.com,ATO - Track Dozer,not-a-date,',
+      'email,competency,grant_date,expiry_date,evidence',
+      'ada@example.com,ATO - Track Dozer,not-a-date,,',
     ].join('\n');
     expect(reasons(file)).toEqual(['bad_grant_date']);
+  });
+  it('a competency line whose expiry date cannot be read', () => {
+    // Present but unreadable is a rejection; BLANK is not — that is R153,
+    // reversed, and its own describe block below.
+    const file = [
+      profileFile(),
+      '#competencies',
+      'email,competency,grant_date,expiry_date,evidence',
+      'ada@example.com,ATO - Track Dozer,,not-a-date,',
+    ].join('\n');
+    expect(reasons(file)).toEqual(['bad_expiry_date']);
   });
   it('a competency line whose email names no profile row in the file (R170)', () => {
     // A typo naming nobody — dropping it silently would lose the grant with no
@@ -185,8 +196,8 @@ describe('validateWorkforceImport — one test per rejection reason', () => {
     const file = [
       profileFile(),
       '#competencies',
-      'email,competency,grant_date,evidence',
-      'typo@example.com,ATO - Track Dozer,2023-01-15,',
+      'email,competency,grant_date,expiry_date,evidence',
+      'typo@example.com,ATO - Track Dozer,2023-01-15,,',
     ].join('\n');
     expect(reasons(file)).toEqual(['unknown_profile_email']);
   });
@@ -208,8 +219,8 @@ describe('validateWorkforceImport — deliberate non-rejections and volume', () 
     const file = [
       profileFile({ access_level: '' }),
       '#competencies',
-      'email,competency,grant_date,evidence',
-      'ada@example.com,ATO - Track Dozer,2023-01-15,',
+      'email,competency,grant_date,expiry_date,evidence',
+      'ada@example.com,ATO - Track Dozer,2023-01-15,,',
     ].join('\n');
     expect(reasons(file)).toEqual(['missing_access_level']);
   });
@@ -289,12 +300,51 @@ describe('validateWorkforceImport — deliberate non-rejections and volume', () 
     const file = [
       profileFile(),
       '#competencies',
-      'email,competency,grant_date,evidence',
-      'ada@example.com,ATO - Track Dozer,2021-06-30,CERT-9',
+      'email,competency,grant_date,expiry_date,evidence',
+      'ada@example.com,ATO - Track Dozer,2021-06-30,,CERT-9',
     ].join('\n');
     const { validCompetencies } = validateFile(file);
     expect(validCompetencies).toHaveLength(1);
     expect(validCompetencies[0]).toMatchObject({ competencyId: COMP, evidence: 'CERT-9' });
-    expect(validCompetencies[0]!.grantedAt.toISOString().slice(0, 10)).toBe('2021-06-30');
+    expect(validCompetencies[0]!.grantedAt?.toISOString().slice(0, 10)).toBe('2021-06-30');
+  });
+});
+
+describe('validateWorkforceImport — a blank date means UNKNOWN, not a rejection (R153, reversed)', () => {
+  const fileWith = (grantDate: string, expiryDate: string) =>
+    [
+      profileFile(),
+      '#competencies',
+      'email,competency,grant_date,expiry_date,evidence',
+      `ada@example.com,ATO - Track Dozer,${grantDate},${expiryDate},CERT-9`,
+    ].join('\n');
+
+  it('accepts a blank grant date — the line is recorded, undated, not rejected', () => {
+    const { validCompetencies, rejected } = validateFile(fileWith('', ''));
+    expect(rejected).toEqual([]);
+    expect(validCompetencies).toHaveLength(1);
+    expect(validCompetencies[0]).toMatchObject({ competencyId: COMP, grantedAt: null, expiresAt: null });
+  });
+
+  it('accepts an expiry with no grant date at all — the driver’s-licence case', () => {
+    // The source system tracks the expiry directly; a grant date may never
+    // have been recorded, and none is required to use it.
+    const { validCompetencies, rejected } = validateFile(fileWith('', '2027-06-30'));
+    expect(rejected).toEqual([]);
+    expect(validCompetencies[0]!.grantedAt).toBeNull();
+    expect(validCompetencies[0]!.expiresAt?.toISOString().slice(0, 10)).toBe('2027-06-30');
+  });
+
+  it('accepts a grant date with no expiry — expiry derives from the competency’s validity as usual', () => {
+    const { validCompetencies, rejected } = validateFile(fileWith('2021-06-30', ''));
+    expect(rejected).toEqual([]);
+    expect(validCompetencies[0]!.grantedAt?.toISOString().slice(0, 10)).toBe('2021-06-30');
+    expect(validCompetencies[0]!.expiresAt).toBeNull();
+  });
+
+  it('accepts both dates supplied together — the explicit expiry is carried through, not derived', () => {
+    const { validCompetencies } = validateFile(fileWith('2021-06-30', '2027-06-30'));
+    expect(validCompetencies[0]!.grantedAt?.toISOString().slice(0, 10)).toBe('2021-06-30');
+    expect(validCompetencies[0]!.expiresAt?.toISOString().slice(0, 10)).toBe('2027-06-30');
   });
 });

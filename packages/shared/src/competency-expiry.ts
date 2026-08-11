@@ -31,6 +31,17 @@
  * period NEVER expires. That is the migration story — nothing changes the day
  * this ships, and each qualification starts expiring the moment an admin gives
  * it a validity.
+ *
+ * A FOURTH DECISION, added later (R153, reversed): a grant date is not always
+ * known. A migrated workforce's source system may record only an explicit
+ * expiry (a driver's licence, renewed on a schedule the formula cannot guess),
+ * or neither date at all. Rather than withholding the grant until someone
+ * supplies a date it may never get, an unknown grant date is its own DATED
+ * state — `undated` — distinct from `held` precisely so it stays visibly
+ * flagged rather than reading as an ordinary, fully-dated grant. It still
+ * COUNTS (`countsAsHeld`), for the same reason `expired` does not block: a
+ * record-keeping gap must not stand between a genuinely qualified person and
+ * an assessment.
  */
 
 /** How long a qualification stays valid, and how long past that it still counts. */
@@ -52,8 +63,12 @@ export interface HeldCompetency {
   /**
    * When it was last GRANTED — reset by requalification, so distinct from the
    * row's creation. A re-grant is a new three years, not a touched record.
+   *
+   * NULL when the source never recorded one — a migrated grant with only an
+   * explicit `expiresAt`, or with neither date at all. Never treat a null here
+   * as "now": that is exactly the fabrication R153 exists to prevent.
    */
-  grantedAt: Date;
+  grantedAt: Date | null;
   /**
    * An explicit end date that overrides the derived one. For a date imported
    * from the training system that does not match the formula — a ticket issued
@@ -65,19 +80,21 @@ export interface HeldCompetency {
 }
 
 /**
- * The DATED state of a held competency — four states, all derived from the grant
- * date and the competency's validity (R104). Revocation is NOT among them: it is
- * a deliberate act carried BESIDE the dated state (`CompetencyCurrency.revoked`).
- * A five-member union with `revoked` mixed in forced every surface reporting a
- * date to also special-case an act, and two exhaustive maps — `URGENCY` and
- * `STATUS_STYLE` — to carry a key that is not a date at all.
+ * The DATED state of a held competency — derived from the grant date and the
+ * competency's validity (R104). Revocation is NOT among them: it is a
+ * deliberate act carried BESIDE the dated state (`CompetencyCurrency.revoked`).
+ * A union with `revoked` mixed in forced every surface reporting a date to also
+ * special-case an act, and two exhaustive maps — `URGENCY` and `STATUS_STYLE` —
+ * to carry a key that is not a date at all.
  *
  * `expiring` and `grace` both still COUNT — they are eligible states carrying a
- * flag. Only `expired` stops counting on dates alone; revocation stops it
- * regardless. Keeping them as distinct names rather than a boolean plus a reason
- * is deliberate: every surface that reports one has to say which.
+ * flag. `undated` also counts, for the same reason (R153, reversed): the person
+ * genuinely holds it, the product just does not know when it was granted. Only
+ * `expired` stops counting on dates alone; revocation stops it regardless.
+ * Keeping them as distinct names rather than a boolean plus a reason is
+ * deliberate: every surface that reports one has to say which.
  */
-export type CompetencyStatus = 'held' | 'expiring' | 'grace' | 'expired';
+export type CompetencyStatus = 'held' | 'expiring' | 'grace' | 'expired' | 'undated';
 
 /**
  * A held competency resolved at an instant: its dated state, and whether it has
@@ -126,11 +143,18 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * granted on the 15th expires on the 15th. `setMonth` overflows correctly for
  * short months (31 January + 1 month lands in March), which is the standard
  * behaviour and matches how a person reads "valid for three years".
+ *
+ * A null `grantedAt` has nothing to add months to, so derivation is impossible
+ * — checked AFTER the explicit-`expiresAt` return above, because an explicit
+ * expiry needs no grant date to be useful (the driver's-licence case: the
+ * source system supplies the expiry directly and never recorded a grant date
+ * at all).
  */
 export function expiryOf(held: HeldCompetency, validity: CompetencyValidity): Date | null {
   if (held.expiresAt) return held.expiresAt;
   const months = validity.validForMonths;
   if (!months || months <= 0) return null;
+  if (!held.grantedAt) return null;
 
   const out = new Date(held.grantedAt.getTime());
   out.setMonth(out.getMonth() + months);
@@ -157,7 +181,16 @@ export function competencyStatus(
   audience: ExpiryAudience = 'assessor',
 ): CompetencyStatus {
   const expiry = expiryOf(held, validity);
-  if (!expiry) return 'held';
+  if (!expiry) {
+    /*
+      No expiry could be derived — either because the competency genuinely
+      never expires (a real grant date, no validity period), or because there
+      is no grant date to derive FROM even though the competency has one. Those
+      are different claims about the SAME missing expiry, so the grant date is
+      what decides which.
+    */
+    return held.grantedAt ? 'held' : 'undated';
+  }
 
   const msLeft = expiry.getTime() - now.getTime();
   if (msLeft > 0) {
@@ -191,14 +224,17 @@ export function competencyCurrency(
  *
  * `expiring` and `grace` both do — an assessment must not be blocked by a ticket
  * merely close to its date, nor by one inside the window the authority allows for
- * requalifying. Revocation stops it whatever the date (R106, R107), and this is
- * the ONE place that fold happens: taking the `{ status, revoked }` struct rather
- * than a bare status means no caller can check the date and forget the act.
+ * requalifying. `undated` does too, for the same reason (R153, reversed): a
+ * missing DATE is a record-keeping gap, not evidence the person is unqualified,
+ * and must not block them any more than an expired record does. Revocation stops
+ * it whatever the date (R106, R107), and this is the ONE place that fold happens:
+ * taking the `{ status, revoked }` struct rather than a bare status means no
+ * caller can check the date and forget the act.
  */
 export function countsAsHeld(currency: CompetencyCurrency): boolean {
   if (currency.revoked) return false;
   const { status } = currency;
-  return status === 'held' || status === 'expiring' || status === 'grace';
+  return status === 'held' || status === 'expiring' || status === 'grace' || status === 'undated';
 }
 
 /**

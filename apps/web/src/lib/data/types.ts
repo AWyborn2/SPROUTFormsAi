@@ -442,7 +442,8 @@ export interface CompetencyHolder {
   email: string | null;
   /** Free-text pointer at an external record. Display only; nothing resolves it. */
   evidenceRef: string | null;
-  grantedAt: string;
+  /** Null when the source never recorded one (R153, reversed) — held, but undated. */
+  grantedAt: string | null;
   /** ISO instant, or null when the competency has no validity period. */
   expiresAt: string | null;
   status: CompetencyStatus;

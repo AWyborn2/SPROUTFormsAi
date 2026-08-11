@@ -57,6 +57,18 @@ describe('expiryOf', () => {
 
     expect(out?.toISOString().slice(0, 10)).toBe('2027-06-30');
   });
+
+  it('an explicit date needs no grant date at all (R153, reversed)', () => {
+    // The driver's-licence case: the source system tracks the expiry directly
+    // and never recorded a grant date.
+    const out = expiryOf({ grantedAt: null, expiresAt: at('2027-06-30T00:00:00Z') }, TRACK_DOZER);
+
+    expect(out?.toISOString().slice(0, 10)).toBe('2027-06-30');
+  });
+
+  it('cannot derive an expiry with no grant date to add months to — null, not a crash', () => {
+    expect(expiryOf({ grantedAt: null }, TRACK_DOZER)).toBeNull();
+  });
 });
 
 describe('competencyStatus', () => {
@@ -115,7 +127,7 @@ describe('competencyStatus', () => {
     expect(competencyStatus({ grantedAt: GRANTED }, { ...TRACK_DOZER, gracePeriodDays: 0 }, day)).toBe('expired');
   });
 
-  it('reports only the four dated states, never revocation', () => {
+  it('reports only the dated states, never revocation', () => {
     // R104: `competencyStatus` is pure date logic now. A revoked-but-in-date
     // ticket still reads `held` here — revocation travels beside the date, not
     // among the states, and is folded in by `countsAsHeld`.
@@ -123,6 +135,23 @@ describe('competencyStatus', () => {
 
     expect(competencyStatus(revoked, TRACK_DOZER, at('2027-01-01'))).toBe('held');
     expect(competencyStatus(revoked, {}, at('2027-01-01'))).toBe('held');
+  });
+
+  it('is undated when there is no grant date and nothing to derive from either (R153, reversed)', () => {
+    expect(competencyStatus({ grantedAt: null }, TRACK_DOZER, at('2027-01-01'))).toBe('undated');
+    // Even a competency with no validity at all — "never expires" needs a real
+    // grant date to say so from; without one there is nothing to be sure of.
+    expect(competencyStatus({ grantedAt: null }, {}, at('2027-01-01'))).toBe('undated');
+  });
+
+  it('is NOT undated when an explicit expiry is set, however the dated state reads (R153, reversed)', () => {
+    // The driver's-licence case: no grant date, but the org knows exactly when
+    // it expires. That is an ordinary dated state, not a record-keeping gap.
+    const licence = { grantedAt: null, expiresAt: at('2027-06-30T00:00:00Z') };
+
+    expect(competencyStatus(licence, TRACK_DOZER, at('2027-01-01'))).toBe('held');
+    expect(competencyStatus(licence, TRACK_DOZER, at('2027-06-29'))).toBe('expiring');
+    expect(competencyStatus(licence, TRACK_DOZER, at('2027-07-01'))).toBe('expired');
   });
 });
 
@@ -161,6 +190,10 @@ describe('countsAsHeld', () => {
     expect(countsAsHeld({ status: 'grace', revoked: false })).toBe(true);
   });
 
+  it('counts undated too (R153, reversed) — a missing date is not evidence of a missing qualification', () => {
+    expect(countsAsHeld({ status: 'undated', revoked: false })).toBe(true);
+  });
+
   it('does not count an expired ticket', () => {
     expect(countsAsHeld({ status: 'expired', revoked: false })).toBe(false);
   });
@@ -172,6 +205,7 @@ describe('countsAsHeld', () => {
     expect(countsAsHeld({ status: 'expiring', revoked: true })).toBe(false);
     expect(countsAsHeld({ status: 'grace', revoked: true })).toBe(false);
     expect(countsAsHeld({ status: 'expired', revoked: true })).toBe(false);
+    expect(countsAsHeld({ status: 'undated', revoked: true })).toBe(false);
   });
 });
 
@@ -229,16 +263,16 @@ describe('the audience windows', () => {
   });
 });
 
-describe('currency is four DATED states, with revocation lifted out (R100, R101)', () => {
-  it('carries held, expiring, grace and expired — and no revoked state', () => {
+describe('currency is five DATED states, with revocation lifted out (R100, R101)', () => {
+  it('carries held, expiring, grace, expired and undated — and no revoked state', () => {
     /*
       R100 takes `revoked` out of the currency set and R101 carries it as a mark
       of its own beside currency and standing. Lifting it out is what makes the
       rule about it statable rather than implied: a revoked competency counts as
       NOT HELD wherever currency is read, however good its dates are.
     */
-    const statuses: CompetencyStatus[] = ['held', 'expiring', 'grace', 'expired'];
-    expect(statuses).toHaveLength(4);
+    const statuses: CompetencyStatus[] = ['held', 'expiring', 'grace', 'expired', 'undated'];
+    expect(statuses).toHaveLength(5);
     // @ts-expect-error — 'revoked' is deliberately not a currency status.
     const notAStatus: CompetencyStatus = 'revoked';
     expect(notAStatus).toBe('revoked');

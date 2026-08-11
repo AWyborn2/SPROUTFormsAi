@@ -6,10 +6,16 @@
  *
  * ONE FILE, TWO SECTIONS (KTD13). A `#profiles` block carries one row per person
  * with the Access level they land with and their placement by NAME; a
- * `#competencies` block carries one line per competency with its grant date. The
- * import references taxonomy by name because that is what a human fills in, and
- * the validator resolves each name against the organisation's ACTIVE taxonomy —
- * it creates nothing (R169).
+ * `#competencies` block carries one line per competency with its grant date and,
+ * optionally, an explicit expiry. The import references taxonomy by name because
+ * that is what a human fills in, and the validator resolves each name against
+ * the organisation's ACTIVE taxonomy — it creates nothing (R169).
+ *
+ * BOTH COMPETENCY DATES ARE OPTIONAL (R153, reversed). Blank is UNKNOWN, not a
+ * rejection: a migrated source system may record only an explicit expiry (a
+ * driver's licence renewed on a schedule no validity period can express), or
+ * neither date at all. Only a PRESENT but unreadable date rejects a line — that
+ * is a typo, not an absence.
  *
  * VALIDATION IS EXHAUSTIVE AND REUSES ONE RULE. Placement (which Roles a
  * Department offers, and how many) is checked by the very `validatePlacement`
@@ -26,7 +32,7 @@ export const WORKFORCE_IMPORT_TEMPLATE = [
   'name,email,access_level,locations,departments,roles,employee_number,swipe_card_number',
   '',
   '#competencies',
-  'email,competency,grant_date,evidence',
+  'email,competency,grant_date,expiry_date,evidence',
   '',
 ].join('\n');
 
@@ -50,7 +56,15 @@ export interface RawCompetencyRow {
   rowNumber: number;
   email: string;
   competency: string;
+  /** Blank is valid (R153, reversed) — the grant date may simply be unknown. */
   grantDate: string;
+  /**
+   * An explicit end date, overriding whatever the competency's validity would
+   * derive. For the record a migrated source system tracks directly rather
+   * than by formula — a driver's licence renewed on a schedule no validity
+   * period can express — where a grant date may never be supplied at all.
+   */
+  expiryDate: string;
   evidence: string;
 }
 
@@ -143,7 +157,8 @@ export function parseWorkforceCsv(text: string): ParsedImport {
         email: f[0] ?? '',
         competency: f[1] ?? '',
         grantDate: f[2] ?? '',
-        evidence: f[3] ?? '',
+        expiryDate: f[3] ?? '',
+        evidence: f[4] ?? '',
       });
     }
   }
@@ -165,7 +180,9 @@ export type ImportRejectionReason =
   | 'too_many_roles'
   | 'unknown_competency'
   | 'unknown_profile_email'
+  /** Present but unreadable — blank is not this; blank means "unknown" (R153, reversed). */
   | 'bad_grant_date'
+  | 'bad_expiry_date'
   /*
     R7: both workforce numbers are unique WITHIN the organisation, which is what
     lets either tell two people of the same name apart. A duplicate is a
@@ -200,12 +217,15 @@ export interface ValidProfileRow {
   swipeCardNumber: string;
 }
 
-/** A competency line that passed, with the competency resolved and the date parsed. */
+/** A competency line that passed, with the competency resolved and its dates parsed. */
 export interface ValidCompetencyRow {
   rowNumber: number;
   email: string;
   competencyId: string;
-  grantedAt: Date;
+  /** Null when the file left it blank (R153, reversed) — held, but undated. */
+  grantedAt: Date | null;
+  /** Null unless the file supplied one; overrides whatever the competency's validity would derive. */
+  expiresAt: Date | null;
   evidence: string;
 }
 
@@ -247,10 +267,15 @@ const ROLE_BY_LABEL = new Map<string, Role>(
   (Object.entries(ROLE_LABELS) as [Role, string][]).map(([role, label]) => [label.toLowerCase(), role]),
 );
 
-/** Read a `YYYY-MM-DD` (or any Date-parseable) grant date, or null when unreadable. */
-function parseGrantDate(value: string): Date | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
+/**
+ * Read a `YYYY-MM-DD` (or any Date-parseable) date cell. Takes an
+ * ALREADY-TRIMMED, NON-EMPTY string — blank is not this function's question,
+ * because blank and unreadable mean different things to a caller (R153,
+ * reversed: blank is a valid "unknown", unreadable is a rejection) and
+ * collapsing them here would lose that distinction. Shared by both
+ * `grant_date` and `expiry_date`, which read the same way.
+ */
+function parseDateCell(trimmed: string): Date | null {
   const ms = Date.parse(trimmed);
   if (Number.isNaN(ms)) return null;
   return new Date(ms);
@@ -425,16 +450,42 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
       rejected.push({ rowNumber: row.rowNumber, subject, reason: 'unknown_competency', detail: row.competency });
       continue;
     }
-    const grantedAt = parseGrantDate(row.grantDate);
-    if (!grantedAt) {
-      rejected.push({ rowNumber: row.rowNumber, subject, reason: 'bad_grant_date', detail: row.grantDate });
-      continue;
+
+    /*
+      BLANK IS "UNKNOWN", NOT A REJECTION (R153, reversed). A source system
+      that never recorded a grant date is exactly the case this line exists
+      for — awarding nothing until someone backfills a date it may never get
+      would lose the person's real qualification history. Only a PRESENT but
+      unreadable date is a rejection: that is a typo to fix, not an absence.
+    */
+    const grantDateRaw = row.grantDate.trim();
+    let grantedAt: Date | null = null;
+    if (grantDateRaw) {
+      grantedAt = parseDateCell(grantDateRaw);
+      if (!grantedAt) {
+        rejected.push({ rowNumber: row.rowNumber, subject, reason: 'bad_grant_date', detail: row.grantDate });
+        continue;
+      }
     }
+
+    // Same treatment for the explicit override — blank means "derive it
+    // instead", never a rejection.
+    const expiryDateRaw = row.expiryDate.trim();
+    let expiresAt: Date | null = null;
+    if (expiryDateRaw) {
+      expiresAt = parseDateCell(expiryDateRaw);
+      if (!expiresAt) {
+        rejected.push({ rowNumber: row.rowNumber, subject, reason: 'bad_expiry_date', detail: row.expiryDate });
+        continue;
+      }
+    }
+
     validCompetencies.push({
       rowNumber: row.rowNumber,
       email: row.email,
       competencyId,
       grantedAt,
+      expiresAt,
       evidence: row.evidence,
     });
   }
