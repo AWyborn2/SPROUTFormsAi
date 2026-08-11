@@ -37,3 +37,6 @@ TestPDFS/
 # vite / test
 apps/web/.vite/
 coverage/
+
+# workforce migration data — contains PII, never commit
+chc-*.csv
