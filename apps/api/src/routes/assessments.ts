@@ -190,6 +190,51 @@ async function carryForwardLogbook(
   return { values: { [toId]: rows }, thresholdNotifiedAt: last.thresholdNotifiedAt ?? null };
 }
 
+/**
+ * A THEORY RETRY KEEPS WHAT WAS RIGHT.
+ *
+ * "Sit it again" on a keyed paper means the questions that were missed, not the
+ * whole paper — coaching goes back over the wrong answers, and re-typing thirty
+ * correct ones proves nothing the record does not already hold. So the new
+ * attempt opens with the previous attempt's CORRECT answers in place and every
+ * wrong or unanswered question blank.
+ *
+ * Only the fully-keyed part carries: correctness is recomputed here from the
+ * stored answers and the version's own keys, so what carries is exactly what
+ * marking judged right — never the derived ✓/✗ cells, the verdict pair or the
+ * further-action note, which the next marking pass rewrites from scratch. A
+ * person-judged part (any unkeyed question) carries nothing: a fresh
+ * demonstration is the point, and pre-filling it would show marks nobody made
+ * on THIS attempt.
+ */
+async function carryForwardTheory(
+  database: Database,
+  input: {
+    manifest: AssessmentToolManifest;
+    part: AssessmentPart;
+    previous: readonly { attemptNumber: number; outcome: string | null; values: Record<string, SubmissionValue>; templateVersionId: string }[];
+    toVersionId: string;
+  },
+): Promise<{ values: Record<string, SubmissionValue> } | undefined> {
+  const last = [...input.previous].sort((a, b) => b.attemptNumber - a.attemptNumber)[0];
+  if (!last || last.outcome !== 'not_satisfactory') return undefined;
+
+  // The keys that judged the previous attempt are the ones that decide what was
+  // right, so correctness is computed against ITS version — values are then
+  // written under the same field ids, which are stable across versions here.
+  const fields = await fieldsForVersion(database, last.templateVersionId);
+  if (!isSelfMarking(fields, input.manifest, input.part.key)) return undefined;
+
+  const { marks } = markTheory({ fields, values: last.values, part: input.part });
+  const values: Record<string, SubmissionValue> = {};
+  for (const mark of marks) {
+    if (!mark.correct) continue;
+    const answer = last.values?.[mark.fieldId];
+    if (answer !== undefined) values[mark.fieldId] = answer;
+  }
+  return Object.keys(values).length > 0 ? { values } : undefined;
+}
+
 /** The fields of the version this attempt is pinned to. */
 async function fieldsForVersion(database: Database, versionId: string): Promise<FormField[]> {
   const version = await database.query.formTemplateVersions.findFirst({
@@ -1757,6 +1802,13 @@ assessmentCasesRouter.patch(
  * happen before the hours it depends on are logged. A part that already passed
  * is also refused: re-opening it would put a second satisfactory attempt on the
  * record with nothing to say which is authoritative.
+ *
+ * THE CANDIDATE MAY OPEN THEIR OWN NEXT STEP. `own`-scoped edit reaches this
+ * for the caller's own case, gated below on the workflow actually giving the
+ * candidate something to fill in the part. Waiting for an assessor to open
+ * every attempt made the assessor a turnstile: theory auto-marks at hand-in,
+ * the declaration unlocks — and then nothing could happen until someone else
+ * pressed a button the sequence had already authorised.
  */
 assessmentCasesRouter.post(
   '/:id/parts/:partKey/attempts',
@@ -1767,12 +1819,14 @@ assessmentCasesRouter.post(
       return;
     }
     const tenant = req.tenant!;
-    if (!(await hasPermission(tenant, 'assessments', 'edit'))) {
+    const scope = await permissionScope(tenant, 'assessments', 'edit');
+    if (scope === 'none') {
       res.status(403).json({ error: 'forbidden' });
       return;
     }
     const row = await loadCase(db, req.params.id!, tenant.orgId);
-    if (!row) {
+    // Same rule as everywhere else: someone else's work is 404, not 403.
+    if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
       res.status(404).json({ error: 'not_found' });
       return;
     }
@@ -1808,6 +1862,26 @@ assessmentCasesRouter.post(
     }
 
     /*
+      A candidate opens only what the workflow hands THEM. The section covering
+      the part must give the candidate role something to fill — at the section
+      level or on any field — or the attempt would be an empty row on someone
+      else's step. A tool with no authored workflow derives one that lets both
+      roles fill every part, which is exactly the pre-workflow behaviour.
+    */
+    if (scope === 'own') {
+      const fields = await fieldsForVersion(db, row.currentVersionId);
+      const section = sectionForPart(workflowOf(tool.manifest, fields), partKey);
+      const candidateMayFill = section
+        ? section.access.candidate === 'fill' ||
+          Object.values(section.fieldAccess ?? {}).some((per) => per.candidate === 'fill')
+        : true;
+      if (!candidateMayFill) {
+        res.status(403).json({ error: 'forbidden' });
+        return;
+      }
+    }
+
+    /*
       A LOGBOOK CARRIES ITS HOURS FORWARD. Every other kind of part starts a
       retry empty.
 
@@ -1835,6 +1909,15 @@ assessmentCasesRouter.post(
       previous: mine,
       toVersionId: row.currentVersionId,
     });
+    // A keyed theory retry keeps its correct answers — see carryForwardTheory.
+    const carriedTheory = carried
+      ? undefined
+      : await carryForwardTheory(db, {
+          manifest: tool.manifest,
+          part: target.part,
+          previous: mine,
+          toVersionId: row.currentVersionId,
+        });
 
     const [created] = await db
       .insert(schema.assessmentPartAttempts)
@@ -1845,6 +1928,7 @@ assessmentCasesRouter.post(
         attemptNumber: mine.length + 1,
         templateVersionId: row.currentVersionId,
         ...carried,
+        ...carriedTheory,
       })
       .returning();
     if (!created) throw new Error('attempt_create_failed: insert returned no row');
@@ -2114,18 +2198,25 @@ async function setSubmitted(
     res.status(404).json({ error: 'attempt_not_found' });
     return;
   }
+  // Idempotent, and checked FIRST. A double-tap must not restamp a later
+  // hand-in time — and now that a self-marking part resolves at hand-in, the
+  // second tap of the same gesture must not turn into an error about the mark
+  // the first tap earned. The outcome rides along so the repeat answers the
+  // same way the original did.
+  if (submitting && attempt.submittedAt) {
+    res.status(200).json({
+      id: attempt.id,
+      submittedAt: attempt.submittedAt,
+      ...(attempt.outcome !== null ? { outcome: attempt.outcome } : {}),
+    });
+    return;
+  }
+
   // Once marked, an attempt is evidence in both directions: handing it in again
   // is meaningless, and reopening it would let a candidate rewrite what an
   // assessor already judged.
   if (attempt.outcome !== null) {
     res.status(409).json({ error: 'attempt_resolved' });
-    return;
-  }
-
-  // Idempotent. A double-tap must not restamp a later hand-in time than the
-  // one the candidate actually made.
-  if (submitting && attempt.submittedAt) {
-    res.status(200).json({ id: attempt.id, submittedAt: attempt.submittedAt });
     return;
   }
 
@@ -2144,7 +2235,51 @@ async function setSubmitted(
     icon: submitting ? 'send' : 'undo-2',
   });
 
-  res.status(200).json({ id: attempt.id, submittedAt });
+  /*
+    A SELF-MARKING PART MARKS ITSELF AT HAND-IN.
+
+    The arithmetic needs no judgement, so making it wait for an assessor to
+    visit and press a button was pure queue time: the candidate could not sign
+    the sections that depend on a passed theory, and nobody could say why the
+    "automatic" mark had not happened. Marking here means the candidate learns
+    the result in the same breath as handing in, and everything gated on the
+    part unlocks the moment it is earned.
+
+    A computed fail keeps the case open as coaching-then-retry — the same
+    default the outcome route applies — and the assessor's outcome route still
+    stands for attempts submitted before this existed. A person-judged part is
+    untouched: hand-in still just parks it for marking.
+  */
+  let marked: Awaited<ReturnType<typeof resolveAttemptOutcome>> | null = null;
+  if (submitting) {
+    const tool = await loadTool(db, row.toolId, tenant.orgId);
+    const part = tool ? orderedParts(tool.manifest).find((p) => p.key === attempt.partKey) : undefined;
+    if (tool && part) {
+      // Unstripped on purpose — marking must see answerKey/outcomeTarget.
+      const fields = await fieldsForVersion(db, attempt.templateVersionId);
+      if (isSelfMarking(fields, tool.manifest, part.key)) {
+        const computed = markTheory({ fields, values: attempt.values, part });
+        marked = await resolveAttemptOutcome(db, tenant, {
+          row,
+          attempt,
+          manifest: tool.manifest,
+          outcome: computed.outcome,
+          derivedValues: computed.derivedValues,
+          disposition: computed.outcome === 'not_satisfactory' ? 'coaching_then_retry' : null,
+          reason: null,
+          belowThresholdReason: null,
+          markingEligibilityWarnings: [],
+          marker: { kind: 'automatic' },
+        });
+      }
+    }
+  }
+
+  res.status(200).json({
+    id: attempt.id,
+    submittedAt,
+    ...(marked ? { outcome: marked.outcome, caseState: marked.nextState } : {}),
+  });
 }
 
 assessmentCasesRouter.post(
@@ -2671,6 +2806,108 @@ const outcomeBody = z.object({
 });
 
 /**
+ * Write an attempt's resolution and let the case catch up — the one place an
+ * outcome lands on the rows.
+ *
+ * Two callers: the outcome route (a person's judgement, or an assessor
+ * triggering the computed mark) and hand-in (a self-marking part marks itself
+ * the moment the candidate submits). One copy, because the attempt update, the
+ * case-state recompute and the audit line must never disagree about what
+ * resolving an attempt means.
+ */
+async function resolveAttemptOutcome(
+  database: Database,
+  tenant: NonNullable<Parameters<typeof recordAudit>[1]>,
+  input: {
+    row: NonNullable<Awaited<ReturnType<typeof loadCase>>>;
+    attempt: { id: string; partKey: string; attemptNumber: number };
+    manifest: AssessmentToolManifest;
+    outcome: 'satisfactory' | 'not_satisfactory';
+    derivedValues: Record<string, SubmissionValue>;
+    disposition: (typeof NS_DISPOSITIONS)[number] | null;
+    reason: string | null;
+    belowThresholdReason: string | null;
+    markingEligibilityWarnings: string[];
+    /** A COMPUTED mark names nobody; a JUDGED one carries the person (U15). */
+    marker: { kind: 'automatic' } | { kind: 'person'; userId: string; name: string };
+  },
+) {
+  const { row, attempt, outcome, disposition, reason } = input;
+
+  await database
+    .update(schema.assessmentPartAttempts)
+    .set({
+      outcome,
+      values: input.derivedValues,
+      disposition: outcome === 'not_satisfactory' ? disposition : null,
+      dispositionReason: outcome === 'not_satisfactory' ? reason : null,
+      belowThresholdReason: input.belowThresholdReason,
+      // Empty for an automatic mark (R65); the person's gaps otherwise (U14).
+      markingEligibilityWarnings: input.markingEligibilityWarnings,
+      markerKind: input.marker.kind,
+      assessorUserId: input.marker.kind === 'person' ? input.marker.userId : null,
+      assessorName: input.marker.kind === 'person' ? input.marker.name : '',
+      signedAt: new Date(),
+    })
+    .where(eq(schema.assessmentPartAttempts.id, attempt.id));
+
+  // Recompute case state from the rows rather than incrementing a counter.
+  const attempts = await attemptsFor(database, row.id);
+  const progress = caseProgress(input.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+  const allPartsPassed = isCaseCompetent(progress);
+  // The RESOLVED disposition, not the requested one — a computed fail that
+  // defaulted to coaching keeps the case open, which is the whole point.
+  const closing = outcome === 'not_satisfactory' && disposition === 'not_yet_competent';
+
+  /*
+    MARKING THE LAST PART DOES NOT CERTIFY ANYONE.
+
+    Passing every part moves the case to `awaiting_sign_off`. Only the
+    assessor's manual approval reaches `competent`, because that is what the
+    printed record's name, signature and date attest to — and none of them
+    exist until a person supplies them.
+
+    `row.signedOffAt` is the conjunct that keeps this recompute honest. It runs
+    on every resolution and derives state purely from the attempt rows, so
+    without it, resolving any later attempt — an out-of-pathway part, an
+    appeal — would recompute a signed case back down and silently un-certify
+    someone who has already been certified.
+  */
+  const nextState: AssessmentCaseState = row.signedOffAt
+    ? 'competent'
+    : allPartsPassed
+      ? 'awaiting_sign_off'
+      : closing
+        ? 'closed'
+        : 'open';
+
+  if (nextState !== row.state) {
+    await database
+      .update(schema.assessmentCases)
+      .set({
+        state: nextState,
+        /*
+          Ask whether the state is TERMINAL, never whether it differs from
+          'open'. The old test dated everything that was not open, which
+          stamps a close time on a case merely waiting for a signature — a
+          finished date on an unfinished assessment.
+        */
+        ...(isTerminalCaseState(nextState) ? { closedAt: new Date() } : {}),
+      })
+      .where(eq(schema.assessmentCases.id, row.id));
+  }
+
+  await recordAudit(database, tenant, {
+    action: 'Recorded part outcome',
+    target: `${row.id} / ${attempt.partKey} #${attempt.attemptNumber}: ${outcome}`,
+    category: 'submissions',
+    icon: outcome === 'satisfactory' ? 'circle-check' : 'circle-x',
+  });
+
+  return { outcome, nextState, progress };
+}
+
+/**
  * Resolve an attempt.
  *
  * A theory attempt's outcome is COMPUTED from the answer key; every other
@@ -2818,87 +3055,32 @@ assessmentCasesRouter.post(
       ];
     }
 
-    await db
-      .update(schema.assessmentPartAttempts)
-      .set({
-        outcome,
-        values: derivedValues,
-        disposition: outcome === 'not_satisfactory' ? disposition : null,
-        dispositionReason: outcome === 'not_satisfactory' ? reason : null,
-        belowThresholdReason: parsed.data.belowThresholdReason ?? null,
-        // Empty for an automatic mark (R65); the person's gaps otherwise (U14).
-        markingEligibilityWarnings,
-        /*
-          Attribution (U15, R70). A COMPUTED mark was made by no person, so it
-          names nobody — `markerKind: 'automatic'` with the user and printed-name
-          columns left null/empty, even on a case that does name an assessor. A
-          JUDGED mark carries the person and the name they marked under.
-        */
-        markerKind: computed ? 'automatic' : 'person',
-        assessorUserId: computed ? null : tenant.userId,
-        assessorName: computed ? '' : (parsed.data.assessorName ?? ''),
-        signedAt: new Date(),
-      })
-      .where(eq(schema.assessmentPartAttempts.id, attempt.id));
-
-    // Recompute case state from the rows rather than incrementing a counter.
-    const attempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
-    const allPartsPassed = isCaseCompetent(progress);
-    // The RESOLVED disposition, not the requested one — a computed fail that
-    // defaulted to coaching keeps the case open, which is the whole point.
-    const closing = outcome === 'not_satisfactory' && disposition === 'not_yet_competent';
-
     /*
-      MARKING THE LAST PART DOES NOT CERTIFY ANYONE.
-
-      Passing every part moves the case to `awaiting_sign_off`. Only the
-      assessor's manual approval reaches `competent`, because that is what the
-      printed record's name, signature and date attest to — and none of them
-      exist until a person supplies them.
-
-      `row.signedOffAt` is the conjunct that keeps this recompute honest. It runs
-      on every outcome POST and derives state purely from the attempt rows, so
-      without it, resolving any later attempt — an out-of-pathway part, an
-      appeal — would recompute a signed case back down and silently un-certify
-      someone who has already been certified.
+      Attribution (U15, R70). A COMPUTED mark was made by no person, so it
+      names nobody — `markerKind: 'automatic'` with the user and printed-name
+      columns left null/empty, even on a case that does name an assessor. A
+      JUDGED mark carries the person and the name they marked under.
     */
-    const nextState: AssessmentCaseState = row.signedOffAt
-      ? 'competent'
-      : allPartsPassed
-        ? 'awaiting_sign_off'
-        : closing
-          ? 'closed'
-          : 'open';
-
-    if (nextState !== row.state) {
-      await db
-        .update(schema.assessmentCases)
-        .set({
-          state: nextState,
-          /*
-            Ask whether the state is TERMINAL, never whether it differs from
-            'open'. The old test dated everything that was not open, which
-            stamps a close time on a case merely waiting for a signature — a
-            finished date on an unfinished assessment.
-          */
-          ...(isTerminalCaseState(nextState) ? { closedAt: new Date() } : {}),
-        })
-        .where(eq(schema.assessmentCases.id, row.id));
-    }
-
-    await recordAudit(db, tenant, {
-      action: 'Recorded part outcome',
-      target: `${row.id} / ${attempt.partKey} #${attempt.attemptNumber}: ${outcome}`,
-      category: 'submissions',
-      icon: outcome === 'satisfactory' ? 'circle-check' : 'circle-x',
+    const resolved = await resolveAttemptOutcome(db, tenant, {
+      row,
+      attempt,
+      manifest: tool.manifest,
+      outcome,
+      derivedValues,
+      disposition,
+      reason,
+      belowThresholdReason: parsed.data.belowThresholdReason ?? null,
+      markingEligibilityWarnings,
+      marker: computed
+        ? { kind: 'automatic' }
+        : { kind: 'person', userId: tenant.userId, name: parsed.data.assessorName ?? '' },
     });
 
     res.json({
       id: attempt.id,
-      outcome,
-      caseState: nextState,
-      parts: progress.map((p) => ({ key: p.part.key, state: p.state })),
+      outcome: resolved.outcome,
+      caseState: resolved.nextState,
+      parts: resolved.progress.map((p) => ({ key: p.part.key, state: p.state })),
     });
   }),
 );

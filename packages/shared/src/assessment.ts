@@ -1101,6 +1101,19 @@ function attemptsForPart(attempts: readonly AttemptFact[], partKey: string): Att
  * ever passed stays `satisfactory` regardless of later attempts, because the
  * evidence document renders the passing attempt and the audit trail keeps the
  * rest.
+ *
+ * AN AUTHORED WORKFLOW CAN SAY OTHERWISE. When the covering section declares
+ * `requires`, those dependencies REPLACE the document-order rule for that part:
+ * it is locked until each named section's part has passed, and nothing else
+ * locks it. An empty list means "opens straight away". A section declaring
+ * nothing keeps the sequential rule, so every tool authored before this
+ * existed behaves exactly as it always has. Process order and printed order
+ * are different facts on purpose — a declaration prints on the cover page and
+ * is signed after the theory it vouches for.
+ *
+ * A dependency that cannot bite is waived rather than deadlocked: a required
+ * section with no part, or whose part this pathway does not include (RPL
+ * waives the logbooks), never blocks anything.
  */
 export function caseProgress(
   manifest: AssessmentToolManifest,
@@ -1108,18 +1121,46 @@ export function caseProgress(
   attempts: readonly AttemptFact[],
 ): PartProgress[] {
   const required = requiredParts(manifest, pathway);
+
+  // Pass/fail per part first: dependencies may point FORWARD in document
+  // order (the cover-page declaration depending on the theory printed after
+  // it), so lock states cannot be decided in one sequential sweep.
+  const passedByKey = new Map<string, boolean>();
+  for (const part of required) {
+    passedByKey.set(
+      part.key,
+      attemptsForPart(attempts, part.key).some((a) => a.outcome === 'satisfactory'),
+    );
+  }
+
+  // Only the AUTHORED workflow is consulted — a derived one declares nothing.
+  const sections = manifest.workflow?.sections ?? [];
+  const partKeyBySection = new Map(
+    sections.filter((s) => s.partKey).map((s) => [s.key, s.partKey!] as const),
+  );
+  const dependencySatisfied = (sectionKey: string): boolean => {
+    const partKey = partKeyBySection.get(sectionKey);
+    if (!partKey || !passedByKey.has(partKey)) return true;
+    return passedByKey.get(partKey)!;
+  };
+
   const out: PartProgress[] = [];
   let earlierAllSatisfied = true;
 
   for (const part of required) {
     const mine = attemptsForPart(attempts, part.key);
-    const passed = mine.some((a) => a.outcome === 'satisfactory');
+    const passed = passedByKey.get(part.key)!;
     const latestOutcome = mine.find((a) => a.outcome !== null)?.outcome ?? null;
+
+    const declared = sections.find((s) => s.partKey === part.key)?.requires;
+    const blocked = declared === undefined
+      ? !earlierAllSatisfied
+      : !declared.every(dependencySatisfied);
 
     let state: PartState;
     if (passed) {
       state = 'satisfactory';
-    } else if (!earlierAllSatisfied) {
+    } else if (blocked) {
       state = 'locked';
     } else {
       state = latestOutcome === 'not_satisfactory' ? 'not_satisfactory' : 'open';

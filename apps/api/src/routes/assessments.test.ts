@@ -2955,32 +2955,207 @@ describe('submitting an attempt', () => {
         body: JSON.stringify({ values: { q1: ['a'] } }),
       });
       // Otherwise "handed in" would mean nothing — the answers could keep
-      // moving while the assessor was reading them.
+      // moving while the assessor was reading them. On this fully-keyed part
+      // the hand-in also MARKED the attempt, so the refusal is the stronger
+      // one: resolved, not merely parked.
       expect(res.status).toBe(409);
-      expect(((await res.json()) as { error: string }).error).toBe('attempt_submitted');
+      expect(((await res.json()) as { error: string }).error).toBe('attempt_resolved');
     } finally {
       server.close();
     }
   });
 
-  it('lets the candidate take it back while it is still unmarked', async () => {
+  /** Pass p1 (fully keyed) so the person-judged p2 unlocks. */
+  async function passTheory(base: string, caseId: string, attemptId: string) {
+    await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+      method: 'PATCH',
+      headers: auth(candidate),
+      body: JSON.stringify({ values: { q1: ['a'] } }),
+    });
+    const res = await submit(base, caseId, attemptId);
+    expect(((await res.json()) as { outcome?: string }).outcome).toBe('satisfactory');
+  }
+
+  it('lets the candidate take a person-judged part back while it is still unmarked', async () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
       const { caseId, attemptId } = await openAttemptFor(base);
-      await submit(base, caseId, attemptId);
+      await passTheory(base, caseId, attemptId);
 
-      const res = await reopen(base, caseId, attemptId);
+      // The candidate opens the practical THEMSELVES — the sequence has
+      // authorised it, and waiting for an assessor to press the button was the
+      // turnstile this removes.
+      const opened = await fetch(`${base}/assessment-cases/${caseId}/parts/p2/attempts`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: '{}',
+      });
+      expect(opened.status).toBe(201);
+      const practical = (await opened.json()) as { id: string };
+
+      await submit(base, caseId, practical.id);
+      // Nobody judges a practical at hand-in, so the take-back window is real.
+      const res = await reopen(base, caseId, practical.id);
       expect(res.status).toBe(200);
       expect(((await res.json()) as { submittedAt: string | null }).submittedAt).toBeNull();
 
       // ...and answering works again. Nothing was assessed, so nothing is lost.
-      const save = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+      const save = await fetch(`${base}/assessment-cases/${caseId}/attempts/${practical.id}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: {} }),
+      });
+      expect(save.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  /*
+    HAND-IN IS THE MARKING MOMENT ON A FULLY-KEYED PART. The arithmetic needs
+    no judgement, so making it wait for an assessor to visit was pure queue
+    time — the candidate learns the result in the submit response, and
+    everything sequenced behind the part unlocks the moment it is earned.
+  */
+  it('marks a fully-keyed part at hand-in and tells the candidate the result', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await openAttemptFor(base);
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
         method: 'PATCH',
         headers: auth(candidate),
         body: JSON.stringify({ values: { q1: ['a'] } }),
       });
-      expect(save.status).toBe(200);
+
+      const res = await submit(base, caseId, attemptId);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { outcome?: string; caseState?: string };
+      expect(body.outcome).toBe('satisfactory');
+
+      // The mark was made by nobody — automatic attribution, no name (U15).
+      const row = rows(store, 'assessmentPartAttempts').find((a) => a.id === attemptId);
+      expect(row?.outcome).toBe('satisfactory');
+      expect(row?.markerKind).toBe('automatic');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('defaults a failed hand-in to coaching, and the candidate retries with their correct answers kept', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await openAttemptFor(base);
+      // Mining stream chosen; the mandatory q1 wrong, the stream question right.
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'stream-q': 'Mining', q1: ['b'], 'q-mining': ['a'] } }),
+      });
+
+      const res = await submit(base, caseId, attemptId);
+      expect(((await res.json()) as { outcome?: string }).outcome).toBe('not_satisfactory');
+
+      // The candidate opens their own retry — no assessor in the loop — and
+      // the question they got RIGHT is already answered on it, while the one
+      // they missed is blank.
+      const retry = await fetch(`${base}/assessment-cases/${caseId}/parts/p1/attempts`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: '{}',
+      });
+      expect(retry.status).toBe(201);
+      const created = (await retry.json()) as { id: string; attemptNumber: number };
+      expect(created.attemptNumber).toBe(2);
+
+      const view = await fetch(`${base}/assessment-cases/${caseId}/attempts/${created.id}`, {
+        headers: auth(candidate),
+      });
+      const values = ((await view.json()) as { values: Record<string, unknown> }).values;
+      expect(values['q-mining']).toEqual(['a']);
+      expect(values['q1']).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a candidate opening a part the workflow does not hand them', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base, {
+        ...MANIFEST,
+        workflow: {
+          roles: ['candidate', 'assessor'],
+          sections: [
+            { key: 's1', ordinal: 1, label: 'Theory', partKey: 'p1', access: { candidate: 'fill', assessor: 'view' } },
+            { key: 's2', ordinal: 2, label: 'Practical', partKey: 'p2', access: { candidate: 'view', assessor: 'fill' } },
+          ],
+        },
+      });
+      const caseRes = await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+      });
+      const kase = (await caseRes.json()) as { id: string };
+      const attemptRes = await fetch(`${base}/assessment-cases/${kase.id}/parts/p1/attempts`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: '{}',
+      });
+      const attempt = (await attemptRes.json()) as { id: string };
+      await passTheory(base, kase.id, attempt.id);
+
+      // p2 is unlocked, but the workflow says the ASSESSOR fills it — the
+      // candidate opening it would put an empty row on someone else's step.
+      const res = await fetch(`${base}/assessment-cases/${kase.id}/parts/p2/attempts`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: '{}',
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  /*
+    THE DECLARATION SHAPE (U-workflow): a workflow's `requires` replaces the
+    printed sequence. Here p2 declares no dependencies at all, so it is open
+    from the start — the candidate does not wait for p1 even though it prints
+    first.
+  */
+  it('lets requires override the printed order for what opens when', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base, {
+        ...MANIFEST,
+        workflow: {
+          roles: ['candidate', 'assessor'],
+          sections: [
+            { key: 's1', ordinal: 2, label: 'Theory', partKey: 'p1', access: { candidate: 'fill' } },
+            { key: 's2', ordinal: 1, label: 'Methods', partKey: 'p2', access: { candidate: 'fill' }, requires: [] },
+          ],
+        },
+      });
+      const caseRes = await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+      });
+      const kase = (await caseRes.json()) as { id: string };
+
+      const res = await fetch(`${base}/assessment-cases/${kase.id}/parts/p2/attempts`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: '{}',
+      });
+      expect(res.status).toBe(201);
     } finally {
       server.close();
     }

@@ -186,7 +186,20 @@ export function AssessmentCaseScreen() {
             part={part}
             readOnly={isCandidate}
             attempts={c.attempts.filter((a) => a.partKey === part.key)}
-            onOpen={() => openAttempt.mutate(part.key)}
+            onOpen={() =>
+              openAttempt.mutate(part.key, {
+                // The server authorises per workflow: a candidate may open the
+                // steps handed to THEM, and a part that is the assessor's says
+                // so instead of failing silently.
+                onError: () =>
+                  toast({
+                    variant: 'warning',
+                    message: isCandidate
+                      ? 'This step is opened by your assessor.'
+                      : 'Couldn’t open an attempt for this part.',
+                  }),
+              })
+            }
             opening={openAttempt.isPending}
           />
         ))}
@@ -412,28 +425,29 @@ function PartCard({
             <OutcomeForm caseId={caseId} attemptId={openAttempt.id} kind={part.kind} selfMarking={part.selfMarking} />
           )}
 
-          {!readOnly && !openAttempt && (
+          {/* Both sides get the button now: the server authorises per
+              workflow, so a candidate opening a step handed to them succeeds
+              and a step that is the assessor's answers with a message rather
+              than a control that lies. */}
+          {!openAttempt && (
             <Button onClick={onOpen} disabled={opening} leadingIcon="play">
-              {opening ? 'Opening…' : attempts.length > 0 ? 'Start another attempt' : 'Start this part'}
+              {opening
+                ? 'Opening…'
+                : attempts.length > 0
+                  ? readOnly
+                    ? 'Try again'
+                    : 'Start another attempt'
+                  : 'Start this part'}
             </Button>
-          )}
-
-          {/* A candidate cannot release a part to themselves — starting one is
-              the assessor's call, so say who they are waiting on rather than
-              showing a control that would 403. */}
-          {readOnly && !openAttempt && (
-            <p className="text-[12.5px] text-text-tertiary">
-              {attempts.length > 0
-                ? 'Your assessor will open another attempt if one is needed.'
-                : 'Your assessor will start this part when you’re ready.'}
-            </p>
           )}
         </div>
       )}
 
       {part.state === 'locked' && (
         <p className="mt-2.5 border-t border-border-subtle pt-2.5 text-[12.5px] text-text-tertiary">
-          Unlocks once the previous part is satisfactory.
+          {/* The gate may be the printed sequence or the workflow's own
+              dependencies — either way the server decided, so stay general. */}
+          Unlocks once the steps before it are satisfactory.
         </p>
       )}
     </div>
