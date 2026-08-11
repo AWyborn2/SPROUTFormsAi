@@ -45,6 +45,19 @@ export const displayIdentifierEnum = pgEnum('display_identifier', [
 ]);
 
 /**
+ * How the organisation writes an ambiguous numeric date (a slash-separated
+ * string with no month name, e.g. "07/08/2027"). `dmy` reads it
+ * day-first (Australian/most-of-the-world); `mdy` reads it month-first (US).
+ *
+ * Only slash-separated dates are ambiguous — an ISO date (`YYYY-MM-DD`) is
+ * unaffected by this setting because its field order cannot be misread.
+ * Default `dmy`: guessing via `Date.parse` silently misreads a day-first date
+ * whenever the day is 12 or under, which is exactly the failure this setting
+ * exists to close.
+ */
+export const dateFormatEnum = pgEnum('date_format', ['dmy', 'mdy']);
+
+/**
  * A competency document's place in its own history (KTD24, R31, R32, R52).
  *
  * `held` is the record's evidence — a competency may carry several (R28).

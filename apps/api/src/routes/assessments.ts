@@ -26,9 +26,12 @@ import {
   resolveAssessorRequirements,
   validateWorkflow,
   partFieldAccess,
+  competencyStatus,
+  type CompetencyStatus,
   PROFILE_PREFILL_KEYS,
   profilePrefillValues,
   validateProfilePrefill,
+  validatePrerequisiteChecks,
   type ProfilePrefillSource,
   sectionForPart,
   workflowOf,
@@ -400,6 +403,95 @@ async function resolveProfilePrefillSource(
   };
 }
 
+/** One prerequisite, answered from the competency register at read time. */
+interface PrerequisiteResult {
+  fieldId: string;
+  competencyId: string;
+  competencyName: string;
+  /**
+   * Current — held, expiring, in grace, or undated. Expired, revoked and
+   * missing are not.
+   */
+  satisfied: boolean;
+  /**
+   * Every DATED state, plus the two this surface adds for a grant that is not
+   * there at all. Derived from `CompetencyStatus` rather than re-listed, so a
+   * state added there (as `undated` was) cannot silently go unhandled here.
+   */
+  status: CompetencyStatus | 'revoked' | 'missing';
+  expiresAt: string | null;
+}
+
+/**
+ * Answer `manifest.prerequisiteChecks` from the register, at NOW.
+ *
+ * Evaluated on every read rather than stored, so a licence that expires
+ * mid-programme shows expired the next time anyone looks — a stored verdict is
+ * a verdict about the day it was written. Revocation is decisive over the date
+ * (R106): a revoked grant is not a current one whatever its expiry says.
+ */
+async function evaluatePrerequisites(
+  database: NonNullable<typeof db>,
+  orgId: string,
+  candidateUserId: string,
+  manifest: AssessmentToolManifest,
+): Promise<PrerequisiteResult[]> {
+  const checks = manifest.prerequisiteChecks ?? [];
+  if (checks.length === 0) return [];
+
+  const ids = [...new Set(checks.map((c) => c.competencyId))];
+  const [competencies, holders] = await Promise.all([
+    database.query.competencies.findMany({
+      where: and(eq(schema.competencies.orgId, orgId), inArray(schema.competencies.id, ids)),
+    }),
+    database.query.competencyHolders.findMany({
+      where: and(
+        eq(schema.competencyHolders.orgId, orgId),
+        eq(schema.competencyHolders.userId, candidateUserId),
+        inArray(schema.competencyHolders.competencyId, ids),
+      ),
+    }),
+  ]);
+  const byId = new Map(competencies.map((c) => [c.id, c]));
+  const now = new Date();
+
+  return checks.map((check) => {
+    const competency = byId.get(check.competencyId);
+    const held = holders.find((h) => h.competencyId === check.competencyId);
+    const base = {
+      fieldId: check.fieldId,
+      competencyId: check.competencyId,
+      competencyName: competency?.name ?? 'Unknown competency',
+    };
+    if (!held) return { ...base, satisfied: false, status: 'missing' as const, expiresAt: null };
+    if (held.revokedAt) return { ...base, satisfied: false, status: 'revoked' as const, expiresAt: null };
+    const status = competencyStatus(
+      { grantedAt: held.grantedAt, ...(held.expiresAt ? { expiresAt: held.expiresAt } : {}) },
+      { validForMonths: competency?.validForMonths, gracePeriodDays: competency?.gracePeriodDays },
+      now,
+    );
+    return {
+      ...base,
+      satisfied: status !== 'expired',
+      status,
+      expiresAt: held.expiresAt ? held.expiresAt.toISOString() : null,
+    };
+  });
+}
+
+/** The tool's declared defaults for these fields — served under stored values. */
+function defaultsFor(
+  manifest: AssessmentToolManifest,
+  fields: readonly FormField[],
+): Record<string, SubmissionValue> {
+  const out: Record<string, SubmissionValue> = {};
+  for (const field of fields) {
+    const value = manifest.fieldDefaults?.[field.id];
+    if (value !== undefined) out[field.id] = value;
+  }
+  return out;
+}
+
 const updateToolBody = z.object({
   name: z.string().min(1).optional(),
   workflow: workflowSchema.optional(),
@@ -409,6 +501,13 @@ const updateToolBody = z.object({
    * here uses, so saving a workflow does not silently erase the prefill.
    */
   profilePrefill: z.record(z.string(), z.enum(PROFILE_PREFILL_KEYS)).nullable().optional(),
+  /** Same tri-state as profilePrefill: absent keeps, null clears, array replaces. */
+  prerequisiteChecks: z
+    .array(z.object({ fieldId: z.string().min(1), competencyId: z.string().min(1) }))
+    .nullable()
+    .optional(),
+  /** Tool-declared default answers. Same tri-state; values stored opaque. */
+  fieldDefaults: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 
 const toolBody = z.object({
@@ -710,7 +809,10 @@ assessmentToolsRouter.patch(
     }
 
     const manifestChanged =
-      parsed.data.workflow !== undefined || parsed.data.profilePrefill !== undefined;
+      parsed.data.workflow !== undefined ||
+      parsed.data.profilePrefill !== undefined ||
+      parsed.data.prerequisiteChecks !== undefined ||
+      parsed.data.fieldDefaults !== undefined;
     let manifest: AssessmentToolManifest = tool.manifest;
     if (parsed.data.workflow) manifest = { ...manifest, workflow: parsed.data.workflow };
     if (parsed.data.profilePrefill !== undefined) {
@@ -719,6 +821,18 @@ assessmentToolsRouter.patch(
       const { profilePrefill: _dropped, ...rest } = manifest;
       manifest = parsed.data.profilePrefill
         ? { ...rest, profilePrefill: parsed.data.profilePrefill }
+        : rest;
+    }
+    if (parsed.data.prerequisiteChecks !== undefined) {
+      const { prerequisiteChecks: _dropped, ...rest } = manifest;
+      manifest = parsed.data.prerequisiteChecks
+        ? { ...rest, prerequisiteChecks: parsed.data.prerequisiteChecks }
+        : rest;
+    }
+    if (parsed.data.fieldDefaults !== undefined) {
+      const { fieldDefaults: _dropped, ...rest } = manifest;
+      manifest = parsed.data.fieldDefaults
+        ? { ...rest, fieldDefaults: parsed.data.fieldDefaults as Record<string, SubmissionValue> }
         : rest;
     }
 
@@ -742,6 +856,7 @@ assessmentToolsRouter.patch(
     const problems = [
       ...workflowProblems,
       ...validateProfilePrefill(manifest.profilePrefill, fields),
+      ...validatePrerequisiteChecks(manifest.prerequisiteChecks, fields),
     ];
     if (problems.length > 0) {
       // Nothing written. A half-applied workflow is worse than a rejected one:
@@ -1826,6 +1941,23 @@ assessmentCasesRouter.get(
         )
       : {};
 
+    /*
+      PREREQUISITES ANSWER THEMSELVES (manifest.prerequisiteChecks). The box's
+      ✓/✗ is the register's answer at now, served like any other value and
+      locked below — non-blocking here by design: an unsatisfied prerequisite
+      must not stop a candidate sitting theory. The sign-off route is the gate.
+    */
+    const prereqIds = new Set((manifest.prerequisiteChecks ?? []).map((c) => c.fieldId));
+    const prereqHere = visibleFields.some((f) => prereqIds.has(f.id));
+    const prereqValues: Record<string, boolean> = {};
+    if (prereqHere) {
+      for (const result of await evaluatePrerequisites(db, tenant.orgId, row.candidateUserId, manifest)) {
+        if (visibleFields.some((f) => f.id === result.fieldId)) {
+          prereqValues[result.fieldId] = result.satisfied;
+        }
+      }
+    }
+
     res.json({
       id: attempt.id,
       partKey: attempt.partKey,
@@ -1890,10 +2022,21 @@ assessmentCasesRouter.get(
         over the candidate's identity must not depend on an author remembering
         to lock the box twice.
       */
-      writableFieldIds: access.writable.filter((id) => !hidden.has(id) && !prefillMap[id]),
-      // Prefill LAST: it is authoritative over anything stored, so a value that
-      // slipped in before the field was mapped cannot shadow the profile.
-      values: { ...(attempt.values ?? {}), ...prefill },
+      writableFieldIds: access.writable.filter(
+        (id) => !hidden.has(id) && !prefillMap[id] && !prereqIds.has(id),
+      ),
+      /*
+        Layering, least to most authoritative: tool DEFAULTS under everything —
+        a default fills only where nothing exists, and the field stays
+        writable — then the candidate's stored answers, then the derived
+        prefill and prerequisite verdicts, which nothing may shadow.
+      */
+      values: {
+        ...defaultsFor(manifest, visibleFields),
+        ...(attempt.values ?? {}),
+        ...prefill,
+        ...prereqValues,
+      },
     });
   }),
 );
@@ -2289,6 +2432,12 @@ assessmentCasesRouter.post(
         prefillValues: profilePrefillValues(
           tool.manifest,
           await resolveProfilePrefillSource(db, tenant.orgId, row.candidateUserId),
+        ),
+        // The register's answer at export time, drawn as the box's ✓/✗.
+        prerequisiteValues: Object.fromEntries(
+          (await evaluatePrerequisites(db, tenant.orgId, row.candidateUserId, tool.manifest)).map(
+            (r) => [r.fieldId, r.satisfied],
+          ),
         ),
         attempts: attempts.map((a) => ({
           partKey: a.partKey,
@@ -2794,6 +2943,30 @@ assessmentCasesRouter.post(
         alreadySignedOff: true,
       });
       return;
+    }
+
+    /*
+      THE HARD GATE. Unsatisfied prerequisites never blocked the assessment —
+      the candidate sat it, the marks stand — but `competent` is a certificate,
+      and certifying somebody whose licence is expired or missing is exactly
+      the record an auditor pulls. Evaluated NOW, not from anything stored, so
+      a licence renewed five minutes ago passes.
+    */
+    if (db) {
+      const gateTool = await loadTool(db, row.toolId, tenant.orgId);
+      if (gateTool) {
+        const unmet = (
+          await evaluatePrerequisites(db, tenant.orgId, row.candidateUserId, gateTool.manifest)
+        ).filter((r) => !r.satisfied);
+        if (unmet.length > 0) {
+          res.status(409).json({
+            error: 'prerequisites_unsatisfied',
+            detail: unmet.map((r) => `${r.competencyName}: ${r.status}`).join('; '),
+            prerequisites: unmet,
+          });
+          return;
+        }
+      }
     }
 
     if (row.state === 'closed') {

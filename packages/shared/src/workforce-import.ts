@@ -114,11 +114,32 @@ const multi = (cell: string): string[] =>
  * Parse a filled template into raw profile and competency rows. Blank lines and
  * the two column-header lines are skipped; `rowNumber` is the 1-based source
  * line so a rejection points a human at the right row.
+ *
+ * THE COMPETENCY SECTION IS READ BY ITS OWN HEADER, not by fixed position.
+ * `expiry_date` was added between `grant_date` and `evidence`, so a file filled
+ * from the PREVIOUS template has evidence where expiry now sits — read
+ * positionally, that evidence string parses as a date, fails, and rejects a
+ * perfectly good line as `bad_expiry_date`. Naming the columns means both
+ * shapes read correctly, and a file whose columns were reordered by a
+ * spreadsheet does too. The header is the one line that says what the file
+ * means; using it is cheaper than any migration note nobody reads.
  */
 export function parseWorkforceCsv(text: string): ParsedImport {
   const profiles: RawProfileRow[] = [];
   const competencies: RawCompetencyRow[] = [];
   let section: 'none' | 'profiles' | 'competencies' = 'none';
+  /*
+    Competency column name → its index in this file. Defaults to the CURRENT
+    template's order, so a section with no header line at all still reads as
+    today's shape rather than as nothing.
+  */
+  let competencyColumns: Record<string, number> = {
+    email: 0,
+    competency: 1,
+    grant_date: 2,
+    expiry_date: 3,
+    evidence: 4,
+  };
 
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
@@ -136,7 +157,13 @@ export function parseWorkforceCsv(text: string): ParsedImport {
     }
     // The column-header line at the top of each section.
     if (section === 'profiles' && line.toLowerCase().startsWith('name,')) continue;
-    if (section === 'competencies' && line.toLowerCase().startsWith('email,')) continue;
+    if (section === 'competencies' && line.toLowerCase().startsWith('email,')) {
+      competencyColumns = {};
+      splitCsvLine(raw).forEach((name, index) => {
+        competencyColumns[name.trim().toLowerCase()] = index;
+      });
+      continue;
+    }
 
     const f = splitCsvLine(raw);
     if (section === 'profiles') {
@@ -152,13 +179,18 @@ export function parseWorkforceCsv(text: string): ParsedImport {
         swipeCardNumber: f[7] ?? '',
       });
     } else if (section === 'competencies') {
+      // A column the header never named reads as absent, not as field 0.
+      const cell = (name: string) => {
+        const index = competencyColumns[name];
+        return index === undefined ? '' : (f[index] ?? '');
+      };
       competencies.push({
         rowNumber,
-        email: f[0] ?? '',
-        competency: f[1] ?? '',
-        grantDate: f[2] ?? '',
-        expiryDate: f[3] ?? '',
-        evidence: f[4] ?? '',
+        email: cell('email'),
+        competency: cell('competency'),
+        grantDate: cell('grant_date'),
+        expiryDate: cell('expiry_date'),
+        evidence: cell('evidence'),
       });
     }
   }
@@ -260,6 +292,14 @@ export interface ImportContext {
    */
   heldEmployeeNumbers?: ReadonlySet<string>;
   heldSwipeCardNumbers?: ReadonlySet<string>;
+  /**
+   * How to read a slash-separated `grant_date` cell — the organisation's
+   * `dateFormat` setting. Required rather than defaulted here: guessing a
+   * format silently is exactly the bug this field exists to close, so a
+   * caller must say which convention applies. Does not affect an ISO
+   * (`YYYY-MM-DD`) cell, which is unambiguous regardless.
+   */
+  dateFormat: 'dmy' | 'mdy';
 }
 
 /** Access-level label (any case) → the Role it names, e.g. "Assessor" → 'assessor'. */
@@ -268,17 +308,51 @@ const ROLE_BY_LABEL = new Map<string, Role>(
 );
 
 /**
- * Read a `YYYY-MM-DD` (or any Date-parseable) date cell. Takes an
- * ALREADY-TRIMMED, NON-EMPTY string — blank is not this function's question,
- * because blank and unreadable mean different things to a caller (R153,
- * reversed: blank is a valid "unknown", unreadable is a rejection) and
+ * Build a UTC date from parts, rejecting anything that isn't a real calendar
+ * date — `new Date(Date.UTC(...))` silently ROLLS an out-of-range day into
+ * the next month (31 February becomes 2/3 March) rather than failing, so the
+ * round-trip below is the actual validity check.
+ */
+function dateFromParts(year: number, month: number, day: number): Date | null {
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return null;
+  }
+  return date;
+}
+
+/**
+ * Read one date cell, or null when unreadable.
+ *
+ * TAKES AN ALREADY-TRIMMED, NON-EMPTY STRING. Blank is not this function's
+ * question: blank and unreadable mean different things to a caller (R153,
+ * reversed — blank is a valid "unknown", unreadable is a rejection) and
  * collapsing them here would lose that distinction. Shared by both
  * `grant_date` and `expiry_date`, which read the same way.
+ *
+ * TWO SHAPES ONLY — deliberately narrower than the free-form parse this
+ * replaced. An ISO cell (`YYYY-MM-DD`) is unambiguous and always read that
+ * way. A slash- or hyphen-separated numeric cell (`D/M/YYYY` or `M/D/YYYY`)
+ * is ambiguous on its own — which of the first two numbers is the day is
+ * exactly the question `dateFormat` answers, per the organisation's
+ * convention. Anything else (a month name, a timestamp, free text) is
+ * refused rather than guessed via `Date.parse`, which is the bug this
+ * replaces: `Date.parse` reads a day-first date month-first whenever the day
+ * is 12 or under, silently.
  */
-function parseDateCell(trimmed: string): Date | null {
-  const ms = Date.parse(trimmed);
-  if (Number.isNaN(ms)) return null;
-  return new Date(ms);
+function parseDateCell(trimmed: string, dateFormat: 'dmy' | 'mdy'): Date | null {
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  if (iso) return dateFromParts(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+
+  const numeric = /^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/.exec(trimmed);
+  if (numeric) {
+    const [, a, b, year] = numeric;
+    const [day, month] = dateFormat === 'mdy' ? [Number(b), Number(a)] : [Number(a), Number(b)];
+    return dateFromParts(Number(year), month, day);
+  }
+
+  return null;
 }
 
 /**
@@ -461,7 +535,7 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
     const grantDateRaw = row.grantDate.trim();
     let grantedAt: Date | null = null;
     if (grantDateRaw) {
-      grantedAt = parseDateCell(grantDateRaw);
+      grantedAt = parseDateCell(grantDateRaw, ctx.dateFormat);
       if (!grantedAt) {
         rejected.push({ rowNumber: row.rowNumber, subject, reason: 'bad_grant_date', detail: row.grantDate });
         continue;
@@ -469,11 +543,12 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
     }
 
     // Same treatment for the explicit override — blank means "derive it
-    // instead", never a rejection.
+    // instead", never a rejection. Read by the organisation's own convention
+    // too: a day-first expiry must not be misread any more than a grant date.
     const expiryDateRaw = row.expiryDate.trim();
     let expiresAt: Date | null = null;
     if (expiryDateRaw) {
-      expiresAt = parseDateCell(expiryDateRaw);
+      expiresAt = parseDateCell(expiryDateRaw, ctx.dateFormat);
       if (!expiresAt) {
         rejected.push({ rowNumber: row.rowNumber, subject, reason: 'bad_expiry_date', detail: row.expiryDate });
         continue;

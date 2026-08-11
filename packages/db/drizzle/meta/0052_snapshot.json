@@ -1,6 +1,6 @@
 {
-  "id": "e6cdd104-fb30-42c4-94d9-57c30c03f4d9",
-  "prevId": "92bec631-5631-471c-8f3d-5ed9e05be9b4",
+  "id": "0e12732f-8084-47d3-802f-83494c9d1ffc",
+  "prevId": "e6cdd104-fb30-42c4-94d9-57c30c03f4d9",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1640,7 +1640,7 @@
           "name": "granted_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": true,
+          "notNull": false,
           "default": "now()"
         },
         "expires_at": {
@@ -2002,8 +2002,8 @@
           "notNull": true,
           "default": 0
         },
-        "competencies_skipped": {
-          "name": "competencies_skipped",
+        "competencies_undated": {
+          "name": "competencies_undated",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,

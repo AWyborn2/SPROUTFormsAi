@@ -38,6 +38,7 @@ function makeCtx(over: Partial<ImportContext> = {}): ImportContext {
     awardedCompetenciesByName: new Map([['ato - track dozer', COMP]]),
     placement,
     candidateSeatsAllowed: true,
+    dateFormat: 'dmy',
     ...over,
   };
 }
@@ -108,6 +109,44 @@ describe('parseWorkforceCsv', () => {
     expect(parsed.profiles[0]).toMatchObject({ name: 'Ada Assessor', email: 'ada@example.com' });
     expect(parsed.competencies).toHaveLength(1);
     expect(parsed.competencies[0]).toMatchObject({ competency: 'ATO - Track Dozer', grantDate: '2023-01-15' });
+  });
+
+  it('reads the competency section by its HEADER, so a file from the previous template still works', () => {
+    /*
+      `expiry_date` was added between `grant_date` and `evidence`. Read
+      positionally, a file filled from the OLD four-column template puts its
+      evidence string where expiry now sits — which then fails to parse as a
+      date and rejects a good line. The header is what disambiguates.
+    */
+    const oldFormat = [
+      profileFile(),
+      '#competencies',
+      'email,competency,grant_date,evidence',
+      'ada@example.com,ATO - Track Dozer,2023-01-15,CERT-9',
+    ].join('\n');
+    const parsed = parseWorkforceCsv(oldFormat);
+    expect(parsed.competencies[0]).toMatchObject({
+      grantDate: '2023-01-15',
+      // Landed as evidence, NOT as an expiry date it would have choked on.
+      expiryDate: '',
+      evidence: 'CERT-9',
+    });
+    // And it validates rather than rejecting as bad_expiry_date.
+    expect(reasons(oldFormat)).toEqual([]);
+  });
+
+  it('reads columns by name even when a spreadsheet reordered them', () => {
+    const reordered = [
+      profileFile(),
+      '#competencies',
+      'email,competency,evidence,expiry_date,grant_date',
+      'ada@example.com,ATO - Track Dozer,CERT-9,2027-06-30,2021-06-30',
+    ].join('\n');
+    expect(parseWorkforceCsv(reordered).competencies[0]).toMatchObject({
+      grantDate: '2021-06-30',
+      expiryDate: '2027-06-30',
+      evidence: 'CERT-9',
+    });
   });
 
   it('splits multi-value cells and honours quoted commas', () => {
@@ -346,5 +385,67 @@ describe('validateWorkforceImport — a blank date means UNKNOWN, not a rejectio
     const { validCompetencies } = validateFile(fileWith('2021-06-30', '2027-06-30'));
     expect(validCompetencies[0]!.grantedAt?.toISOString().slice(0, 10)).toBe('2021-06-30');
     expect(validCompetencies[0]!.expiresAt?.toISOString().slice(0, 10)).toBe('2027-06-30');
+  });
+});
+
+describe('validateWorkforceImport — grant date reads by the organisation\'s dateFormat', () => {
+  const fileWithDate = (grantDate: string) =>
+    [
+      profileFile(),
+      '#competencies',
+      'email,competency,grant_date,expiry_date,evidence',
+      `ada@example.com,ATO - Track Dozer,${grantDate},,`,
+    ].join('\n');
+
+  it('reads a slash date DAY-FIRST on dmy — the ambiguous case Date.parse got wrong', () => {
+    // 07/08/2027 is 7 August on dmy, NOT 8 July — the exact misread this
+    // replaces `Date.parse` to close.
+    const ctx = makeCtx({ dateFormat: 'dmy' });
+    const { validCompetencies } = validateFile(fileWithDate('07/08/2027'), ctx);
+    expect(validCompetencies[0]!.grantedAt?.toISOString().slice(0, 10)).toBe('2027-08-07');
+  });
+
+  it('reads the SAME slash date MONTH-FIRST on mdy', () => {
+    const ctx = makeCtx({ dateFormat: 'mdy' });
+    const { validCompetencies } = validateFile(fileWithDate('07/08/2027'), ctx);
+    expect(validCompetencies[0]!.grantedAt?.toISOString().slice(0, 10)).toBe('2027-07-08');
+  });
+
+  it('reads a hyphenated numeric date the same way as a slash one', () => {
+    const ctx = makeCtx({ dateFormat: 'dmy' });
+    const { validCompetencies } = validateFile(fileWithDate('07-08-2027'), ctx);
+    expect(validCompetencies[0]!.grantedAt?.toISOString().slice(0, 10)).toBe('2027-08-07');
+  });
+
+  it('reads an ISO date the same way regardless of dateFormat', () => {
+    // The whole point of ISO: no organisation setting can change what it means.
+    const dmy = validateFile(fileWithDate('2027-08-07'), makeCtx({ dateFormat: 'dmy' }));
+    const mdy = validateFile(fileWithDate('2027-08-07'), makeCtx({ dateFormat: 'mdy' }));
+    expect(dmy.validCompetencies[0]!.grantedAt?.toISOString().slice(0, 10)).toBe('2027-08-07');
+    expect(mdy.validCompetencies[0]!.grantedAt?.toISOString().slice(0, 10)).toBe('2027-08-07');
+  });
+
+  it('reads the EXPIRY column by the same convention, not just the grant date', () => {
+    // The column #180 added must not be the one place a day-first date is
+    // still guessed — a licence expiry misread by four weeks is the same bug.
+    const file = [
+      profileFile(),
+      '#competencies',
+      'email,competency,grant_date,expiry_date,evidence',
+      'ada@example.com,ATO - Track Dozer,,07/08/2027,',
+    ].join('\n');
+    const dmy = validateFile(file, makeCtx({ dateFormat: 'dmy' }));
+    const mdy = validateFile(file, makeCtx({ dateFormat: 'mdy' }));
+    expect(dmy.validCompetencies[0]!.expiresAt?.toISOString().slice(0, 10)).toBe('2027-08-07');
+    expect(mdy.validCompetencies[0]!.expiresAt?.toISOString().slice(0, 10)).toBe('2027-07-08');
+  });
+
+  it('rejects a day beyond the month it names rather than rolling into the next month', () => {
+    // 31/02/2024 must not silently become 2 or 3 March.
+    expect(reasons(fileWithDate('31/02/2024'))).toEqual(['bad_grant_date']);
+  });
+
+  it('rejects a month name or free text — no longer guessed via Date.parse', () => {
+    expect(reasons(fileWithDate('August 7, 2027'))).toEqual(['bad_grant_date']);
   });
 });

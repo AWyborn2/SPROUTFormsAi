@@ -580,6 +580,38 @@ describe('PATCH /taxonomy/settings (R24, R25, R40)', () => {
     );
     server.close();
   });
+
+  it('persists the date-format choice, and defaults to dmy when unset', async () => {
+    const { db, updateSet } = fakeDb({ updated: { dateFormat: 'mdy' } });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/settings`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ dateFormat: 'mdy' }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ dateFormat: 'mdy' });
+    expect(updateSet).toHaveBeenCalledWith(
+      schema.organizations,
+      expect.objectContaining({ dateFormat: 'mdy' }),
+    );
+    server.close();
+  });
+
+  it('refuses a value outside the enum rather than writing it through', async () => {
+    const { db, updateSet } = fakeDb({});
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/settings`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ dateFormat: 'ymd' }),
+    });
+    expect(res.status).toBe(400);
+    expect(updateSet).not.toHaveBeenCalled();
+    server.close();
+  });
 });
 
 // ── U17: Role withdrawal and demotion ────────────────────────────────────────

@@ -362,8 +362,15 @@
     {
       "idx": 51,
       "version": "7",
-      "when": 1786406501478,
-      "tag": "0051_natural_stellaris",
+      "when": 1786403354806,
+      "tag": "0051_broken_shriek",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1786412152902,
+      "tag": "0052_minor_silverclaw",
       "breakpoints": true
     }
   ]
