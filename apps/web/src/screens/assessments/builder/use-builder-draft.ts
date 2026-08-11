@@ -106,6 +106,39 @@ export function statsFor(extraction: ExtractionResult): ExtractionStats {
   };
 }
 
+/**
+ * Undo and redo over the author's edits.
+ *
+ * The history covers what the AUTHOR changes — fields, structure, keys,
+ * exclusions, setup answers, part edits — and deliberately not the document
+ * itself, the extraction, or the draft's storage ids: undoing past the upload
+ * would strand a builder whose form version still exists, and "undo" on a
+ * server-side fact is a lie the next autosave would expose.
+ */
+export interface BuilderHistory {
+  undo: () => void;
+  redo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
+/** The slices undo/redo travels over — exactly what the author edits. */
+interface EditableState {
+  fields: FormField[];
+  structure: BuilderStructure;
+  keys: DraftAnswerKey[];
+  excluded: Set<string>;
+  setup: SetupAnswers;
+  partOverrides: Record<string, Partial<Omit<DerivedPart, 'key' | 'ordinal' | 'sectionKey'>>>;
+  partOrder: string[];
+  groupCount: number;
+}
+
+/** Edits closer together than this undo as one step — a word, not a keystroke. */
+const HISTORY_COALESCE_MS = 800;
+/** Steps kept. Beyond this the oldest fall away rather than growing without bound. */
+const HISTORY_LIMIT = 100;
+
 export interface BuilderDraftState {
   phase: BuilderPhase;
   error: string | null;
@@ -166,6 +199,8 @@ export interface BuilderDraftState {
   fieldOps: FieldOps;
   /** Unit / part edits. */
   partOps: PartOps;
+  /** Undo/redo over every author edit, on every step. */
+  history: BuilderHistory;
   /**
    * Everything worth persisting, recomputed as the author works.
    *
@@ -392,6 +427,30 @@ export function useBuilderDraftState({
   const [partOrder, setPartOrder] = useState<string[]>([]);
 
   /*
+    ── Undo / redo ─────────────────────────────────────────────────────────
+
+    Snapshots of the EDITABLE state, recorded as it changes rather than by
+    instrumenting forty operations. The recording effect below watches the
+    assembled object; three flags tell it what a change meant:
+
+    - `historyBaseline`: hydrate, ingest and reset REPLACE the world. They
+      clear both stacks — undo must never carry an author back to the empty
+      builder that preceded their document.
+    - `historyRestoring`: an undo/redo landing. Recorded by the undo/redo
+      functions themselves; the effect only re-syncs its reference.
+    - Coalescing: edits within a short window collapse into one step, so a
+      rename typed letter by letter undoes as a word, not a keystroke.
+  */
+  const historyPast = useRef<EditableState[]>([]);
+  const historyFuture = useRef<EditableState[]>([]);
+  const historyPrev = useRef<EditableState | null>(null);
+  const historyBaseline = useRef(false);
+  const historyRestoring = useRef(false);
+  const historyLastEditAt = useRef(0);
+  /** Bumped whenever the stacks change, so canUndo/canRedo re-render. */
+  const [historyVersion, setHistoryVersion] = useState(0);
+
+  /*
     ── Resuming ────────────────────────────────────────────────────────────
 
     Everything above used to live and die with the browser tab: the hook took a
@@ -417,6 +476,7 @@ export function useBuilderDraftState({
     if (hydrated.current || !hydrateFrom) return;
     hydrated.current = true;
 
+    historyBaseline.current = true;
     setFileName(hydrateFrom.fileName);
     setExtraction(hydrateFrom.extraction);
     setFields(hydrateFrom.fields);
@@ -508,6 +568,7 @@ export function useBuilderDraftState({
       const usable = result.fields.filter((f) => f.type !== 'section_header');
       if (usable.length === 0) throw new Error('empty_extraction');
 
+      historyBaseline.current = true;
       setExtraction(result);
       setFields(seedFields(result));
       setStructure(structureFromExtraction(result));
@@ -538,6 +599,7 @@ export function useBuilderDraftState({
   }, []);
 
   const reset = useCallback(() => {
+    historyBaseline.current = true;
     setPhase('idle');
     setError(null);
     setFileName(null);
@@ -550,6 +612,100 @@ export function useBuilderDraftState({
     setPartOverrides({});
     setPartOrder([]);
   }, []);
+
+  /*
+    ── History recording ───────────────────────────────────────────────────
+
+    One assembled object so ONE effect sees every author edit, whichever of the
+    eight slices it landed in — an op that writes fields AND keys (delete,
+    matching) records as one step, because it committed as one render.
+  */
+  const editable = useMemo<EditableState>(
+    () => ({ fields, structure, keys, excluded, setup, partOverrides, partOrder, groupCount }),
+    [fields, structure, keys, excluded, setup, partOverrides, partOrder, groupCount],
+  );
+
+  useEffect(() => {
+    if (historyBaseline.current) {
+      historyBaseline.current = false;
+      historyPast.current = [];
+      historyFuture.current = [];
+      historyPrev.current = editable;
+      setHistoryVersion((v) => v + 1);
+      return;
+    }
+    if (historyRestoring.current) {
+      historyRestoring.current = false;
+      historyPrev.current = editable;
+      return;
+    }
+    if (historyPrev.current === null) {
+      historyPrev.current = editable;
+      return;
+    }
+    if (historyPrev.current === editable) return;
+
+    const now = Date.now();
+    // Within the window the stack already holds the pre-burst state; only the
+    // reference moves. A NEW edit always invalidates redo either way.
+    if (now - historyLastEditAt.current > HISTORY_COALESCE_MS) {
+      historyPast.current.push(historyPrev.current);
+      if (historyPast.current.length > HISTORY_LIMIT) historyPast.current.shift();
+    }
+    historyLastEditAt.current = now;
+    historyFuture.current = [];
+    historyPrev.current = editable;
+    setHistoryVersion((v) => v + 1);
+  }, [editable]);
+
+  const applyEditable = useCallback((s: EditableState) => {
+    setFields(s.fields);
+    setStructure(s.structure);
+    setKeys(s.keys);
+    setExcluded(s.excluded);
+    setSetupState(s.setup);
+    setPartOverrides(s.partOverrides);
+    setPartOrder(s.partOrder);
+    setGroupCount(s.groupCount);
+  }, []);
+
+  const undo = useCallback(() => {
+    const previous = historyPast.current.pop();
+    if (!previous || !historyPrev.current) return;
+    historyFuture.current.push(historyPrev.current);
+    historyRestoring.current = true;
+    // A fresh edit after this must not coalesce with the step just undone.
+    historyLastEditAt.current = 0;
+    applyEditable(previous);
+    setHistoryVersion((v) => v + 1);
+  }, [applyEditable]);
+
+  const redo = useCallback(() => {
+    const next = historyFuture.current.pop();
+    if (!next || !historyPrev.current) return;
+    historyPast.current.push(historyPrev.current);
+    historyRestoring.current = true;
+    historyLastEditAt.current = 0;
+    applyEditable(next);
+    setHistoryVersion((v) => v + 1);
+  }, [applyEditable]);
+
+  const history = useMemo<BuilderHistory>(
+    () => ({
+      undo,
+      redo,
+      canUndo: historyPast.current.length > 0,
+      canRedo: historyFuture.current.length > 0,
+    }),
+    /*
+      The stacks live in refs, pushed by the effect AFTER the render that
+      changed `editable` — so the memo keys on the version counter the effect
+      bumps, never on `editable` itself, which would recompute one commit too
+      early and read the stacks stale.
+    */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [undo, redo, historyVersion],
+  );
 
   /*
     Retyping a question CLEARS its key.
@@ -888,6 +1044,7 @@ export function useBuilderDraftState({
     keyOps,
     fieldOps,
     partOps,
+    history,
     snapshot,
   };
 }

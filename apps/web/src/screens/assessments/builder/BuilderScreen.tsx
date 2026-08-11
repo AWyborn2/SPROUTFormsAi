@@ -87,6 +87,63 @@ export function BuilderScreen() {
   }, [resume.resumedStep]);
 
   /*
+    UNDO / REDO, ON EVERY STEP. Ctrl/⌘+Z undoes, Ctrl/⌘+Shift+Z or Ctrl+Y
+    redoes. Typing surfaces are left alone — a text box's own undo belongs to
+    the browser, and stealing the stroke mid-word would revert a structural
+    edit while the author is looking at a rename.
+  */
+  const { undo, redo } = draft.history;
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      if (key !== 'z' && key !== 'y') return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+      if (key === 'y' || (key === 'z' && e.shiftKey)) redo();
+      else undo();
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [undo, redo]);
+
+  /** ⌘ on Mac platforms, Ctrl elsewhere — for the button tooltips. */
+  const modKey = /mac|iphone|ipad/i.test(navigator.platform) ? '⌘' : 'Ctrl+';
+  const undoRedoControls = draft.hasDocument && (
+    <div className="flex flex-none items-center gap-1">
+      <button
+        type="button"
+        onClick={draft.history.undo}
+        disabled={!draft.history.canUndo}
+        aria-label="Undo"
+        title={`Undo (${modKey}Z)`}
+        className="grid h-7 w-7 place-items-center rounded-lg border border-border text-text-secondary hover:bg-surface-hover disabled:opacity-35"
+      >
+        <Icon name="undo-2" size={14} />
+      </button>
+      <button
+        type="button"
+        onClick={draft.history.redo}
+        disabled={!draft.history.canRedo}
+        aria-label="Redo"
+        title={`Redo (${modKey}Shift+Z)`}
+        className="grid h-7 w-7 place-items-center rounded-lg border border-border text-text-secondary hover:bg-surface-hover disabled:opacity-35"
+      >
+        <Icon name="redo-2" size={14} />
+      </button>
+    </div>
+  );
+
+  /*
     PUT THE DRAFT'S ID IN THE URL AS SOON AS ONE EXISTS.
 
     This is what makes the CURRENT tab survivable. Autosave alone protects the
@@ -189,6 +246,7 @@ export function BuilderScreen() {
             </div>
             {draft.hasDocument && (
               <div className="flex flex-none items-center gap-2 pb-0.5">
+                {undoRedoControls}
                 {/*
                   THE HINT ABOVE PROMISES "your work saves as you go", which was
                   untrue until autosave existed. Showing when the last write
@@ -238,6 +296,7 @@ export function BuilderScreen() {
             <span className="h-[5px] w-[5px] rounded-full bg-warning" />
             Draft
           </span>
+          {undoRedoControls}
           <BuilderMiniSteps current={step} onGo={go} disabled={blocked} />
         </div>
       )}
