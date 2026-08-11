@@ -412,8 +412,12 @@ export interface BrandScanProposal {
 export interface Competency {
   id: string;
   name: string;
-  /** Nationally-recognised code, e.g. "RIIWHS204E". */
-  code: string;
+  /**
+   * Nationally-recognised code, e.g. "RIIWHS204E". Null where there genuinely
+   * is none — an internal competency such as a contractor endorsement form.
+   * Strongly preferred everywhere else, and rendered exactly as before when set.
+   */
+  code: string | null;
   /**
    * How many people have been granted it and not had it revoked. NOT how many
    * are currently in date — expiry moves with the calendar, and a stored count

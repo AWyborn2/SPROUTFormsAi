@@ -32,7 +32,21 @@ export const competencies = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: 'cascade' }),
     name: text().notNull(),
-    code: text().notNull(),
+    /*
+      THE NATIONALLY-RECOGNISED CODE, e.g. "RIIWHS204E" — and NULLABLE, which it
+      was not. The requirement was modelling accredited units, where a code is
+      the identifier people cross-reference against their external LMS. It does
+      not fit an internal competency: a contractor endorsement form or an
+      in-house equipment induction has no code and never had one, and the only
+      way to satisfy a NOT NULL was to invent one — an identifier that is wrong
+      quietly, permanently, and against a system that will never resolve it.
+
+      A code stays STRONGLY preferred and is stored, shown and validated exactly
+      as before wherever one exists. What is now expressible is its genuine
+      absence, and NULL is how that is said — never an empty string, which would
+      be a second spelling of the same fact.
+    */
+    code: text(),
     holders: integer().notNull().default(0),
     /*
       HOW LONG THIS QUALIFICATION LASTS, in months from the grant date. NULL

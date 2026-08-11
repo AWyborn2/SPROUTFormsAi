@@ -70,7 +70,10 @@ export async function findOwnedCompetency(database: Database, competencyId: stri
 
 export interface GrantOutcome {
   competencyId: string;
-  code: string;
+  /** Null on an internal competency that legitimately has no code. */
+  code: string | null;
+  /** Always present — what a caller names the grant by when there is no code. */
+  name: string;
   /** True when this call created the row rather than refreshing an existing one. */
   created: boolean;
   holders: number;
@@ -200,7 +203,9 @@ export async function grantCompetency(
 
   await recordAudit(database, tenant, {
     action: 'Granted competency',
-    target: `${competency.code} → ${input.userId}`,
+    // By code where there is one, by name where there is not: an internal
+    // competency has no code, and "null → <user>" names nobody's qualification.
+    target: `${competency.code ?? competency.name} → ${input.userId}`,
     category: 'settings',
     icon: 'award',
   });
@@ -210,6 +215,7 @@ export async function grantCompetency(
     outcome: {
       competencyId: competency.id,
       code: competency.code,
+      name: competency.name,
       created: !existing,
       holders: await syncHolderCount(database, competency.id),
     },

@@ -1,0 +1,1 @@
+ALTER TABLE "competencies" ALTER COLUMN "code" DROP NOT NULL;

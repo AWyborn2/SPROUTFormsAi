@@ -13,7 +13,7 @@ interface FakeCompetency {
   id: string;
   orgId: string;
   name: string;
-  code: string;
+  code: string | null;
   holders: number;
   validForMonths: number | null;
   gracePeriodDays: number | null;
@@ -34,7 +34,7 @@ function fakeDb(opts: { orgs?: string[]; competencies?: Partial<FakeCompetency>[
     id: c.id ?? `c-${i}`,
     orgId: c.orgId ?? ORG,
     name: c.name ?? '',
-    code: c.code ?? '',
+    code: c.code ?? null,
     holders: c.holders ?? 0,
     validForMonths: c.validForMonths ?? null,
     gracePeriodDays: c.gracePeriodDays ?? null,
@@ -104,6 +104,16 @@ describe('parseCompetencySeedCsv', () => {
     expect(rows).toEqual([]);
     expect(errors[0]?.rowNumber).toBe(2);
     expect(errors[0]?.error).toContain('not a number');
+  });
+
+  it('reads a blank code cell as a blank code rather than an error', () => {
+    const { rows, errors } = parseCompetencySeedCsv(
+      ['name,code,valid_for_months', 'Contractor Endorsement Form,,'].join('\n'),
+    );
+    expect(errors).toEqual([]);
+    expect(rows).toEqual([
+      { rowNumber: 2, name: 'Contractor Endorsement Form', code: '', validForMonths: null },
+    ]);
   });
 
   it('refuses a header that does not name name and code', () => {
@@ -210,6 +220,47 @@ describe('seedCompetencies', () => {
     expect(rows.map((r) => r.name)).toEqual(['Fine']);
   });
 
+  it('seeds a competency whose code column is blank, storing NULL rather than failing the row', async () => {
+    /*
+      Five of the 65 competencies in the first real migration are internal —
+      a contractor endorsement form, an in-house PAPR maintenance induction —
+      and have never had a nationally-recognised code. The loader used to reject
+      them with "code: String must contain at least 1 character(s)", and the only
+      way through was to invent codes. A fabricated code is wrong permanently
+      and against a system that will never resolve it, so the blank cell is the
+      truthful answer and NULL is how it is stored.
+    */
+    const { db, rows } = fakeDb({ competencies: [] });
+    const report = await seedCompetencies(db, {
+      orgId: ORG,
+      rows: [
+        row({ name: 'Contractor Endorsement Form', code: '', validForMonths: null }),
+        row({ rowNumber: 2, name: 'Dieback Management', code: '   ', validForMonths: null }),
+      ],
+    });
+
+    expect(report.failed).toEqual([]);
+    expect(report.created.map((c) => c.code)).toEqual([null, null]);
+    // NULL and not '' — one spelling of "no code" in the register, so no reader
+    // has to know both.
+    expect(rows.map((r) => [r.name, r.code])).toEqual([
+      ['Contractor Endorsement Form', null],
+      ['Dieback Management', null],
+    ]);
+  });
+
+  it('still stores a code exactly as given when the row has one', async () => {
+    // A code stays strongly preferred: nothing about it is weakened by the
+    // blank cell now being allowed.
+    const { db, rows } = fakeDb({ competencies: [] });
+    const report = await seedCompetencies(db, {
+      orgId: ORG,
+      rows: [row({ name: 'Working at Heights', code: 'RIIWHS204E', validForMonths: 24 })],
+    });
+    expect(report.failed).toEqual([]);
+    expect(rows.map((r) => r.code)).toEqual(['RIIWHS204E']);
+  });
+
   it('refuses a missing org rather than defaulting to one', async () => {
     const { db } = fakeDb({ competencies: [] });
     await expect(seedCompetencies(db, { orgId: '', rows: [row()] })).rejects.toThrow('org_required');
@@ -241,14 +292,30 @@ describe('formatCompetencySeedReport', () => {
       rows: [
         row(),
         row({ rowNumber: 2, name: 'First Aid', code: 'FA' }),
-        row({ rowNumber: 3, name: 'Site Induction', code: '', validForMonths: null }),
+        row({ rowNumber: 3, name: '', code: 'NO-NAME', validForMonths: null }),
       ],
     });
     const text = formatCompetencySeedReport(report);
 
     expect(text).toContain('Working at Heights (WAH) — 24 months');
     expect(text).toContain('First Aid — already exists as FA-OLD, left unchanged');
-    expect(text).toContain('row 3 Site Induction');
+    expect(text).toContain('row 3');
+  });
+
+  it('writes "no code" rather than an empty pair of brackets for a codeless competency', async () => {
+    /*
+      The report is what a human reads to check a migration landed. A line
+      reading "Contractor Endorsement Form () — never expires" looks like a
+      truncation bug; "(no code)" states the fact deliberately.
+    */
+    const { db } = fakeDb({ competencies: [] });
+    const report = await seedCompetencies(db, {
+      orgId: ORG,
+      rows: [row({ name: 'Contractor Endorsement Form', code: '', validForMonths: null })],
+    });
+    expect(formatCompetencySeedReport(report)).toContain(
+      'Contractor Endorsement Form (no code) — never expires',
+    );
   });
 
   it('says never expires for a null validity', async () => {

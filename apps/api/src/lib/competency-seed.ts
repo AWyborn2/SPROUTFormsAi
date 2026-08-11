@@ -28,6 +28,14 @@ export interface CompetencySeedRow {
   /** 1-based line number in the source file, so a failure points at a row. */
   rowNumber: number;
   name: string;
+  /**
+   * BLANK IS ALLOWED AND MEANS "no code". Five of the competencies in the first
+   * real migration are internal — a contractor endorsement form, an in-house
+   * equipment induction — and have never had a nationally-recognised code. The
+   * alternative to letting the cell be empty was inventing codes, which is a
+   * permanent wrong answer in the one column people cross-reference against
+   * their LMS. Carried through as `''` here and stored as NULL.
+   */
   code: string;
   /**
    * BLANK MEANS NEVER EXPIRES. Carried as `null`, never `0` — zero months would
@@ -38,9 +46,13 @@ export interface CompetencySeedRow {
 }
 
 export interface CompetencySeedReport {
-  created: { name: string; code: string; validForMonths: number | null }[];
+  created: { name: string; code: string | null; validForMonths: number | null }[];
   /** Already in the register under this name — left exactly as it was. */
-  skipped: { name: string; existingCode: string; reason: 'already_exists' | 'duplicate_in_file' }[];
+  skipped: {
+    name: string;
+    existingCode: string | null;
+    reason: 'already_exists' | 'duplicate_in_file';
+  }[];
   failed: { rowNumber: number; name: string; error: string }[];
   dryRun: boolean;
 }
@@ -188,7 +200,11 @@ export async function seedCompetencies(
         continue;
       }
       if (claimed.has(key)) {
-        report.skipped.push({ name: row.name, existingCode: row.code, reason: 'duplicate_in_file' });
+        report.skipped.push({
+          name: row.name,
+          existingCode: row.code.trim() || null,
+          reason: 'duplicate_in_file',
+        });
         continue;
       }
     }
@@ -239,12 +255,17 @@ export function formatCompetencySeedReport(report: CompetencySeedReport): string
   lines.push(`${prefix} ${report.created.length} competencies:`);
   for (const c of report.created) {
     const validity = c.validForMonths === null ? 'never expires' : `${c.validForMonths} months`;
-    lines.push(`  + ${c.name} (${c.code}) — ${validity}`);
+    // "(no code)" and not "()" or "(null)": the report is read to check a
+    // migration landed, and a blank pair of brackets reads as a bug.
+    lines.push(`  + ${c.name} (${c.code ?? 'no code'}) — ${validity}`);
   }
 
   lines.push(`Skipped ${report.skipped.length} already present:`);
   for (const s of report.skipped) {
-    const why = s.reason === 'duplicate_in_file' ? 'repeated in file' : `already exists as ${s.existingCode}`;
+    const why =
+      s.reason === 'duplicate_in_file'
+        ? 'repeated in file'
+        : `already exists as ${s.existingCode ?? 'no code'}`;
     lines.push(`  = ${s.name} — ${why}, left unchanged`);
   }
 
