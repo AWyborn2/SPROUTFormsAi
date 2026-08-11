@@ -18,6 +18,8 @@ const DEPT = 'dep-ops';
 const ROLE_DOZER = 'role-dozer';
 const ROLE_GRADER = 'role-grader';
 const COMP = 'comp-dozer';
+/** In the register, awarded by no tool — what R167's amendment admits. */
+const COMP_UNAWARDED = 'comp-hr-licence';
 
 /** Ops offers Dozer + Grader and allows a single Role; Raw Materials is the one Location. */
 function makeCtx(over: Partial<ImportContext> = {}): ImportContext {
@@ -35,7 +37,13 @@ function makeCtx(over: Partial<ImportContext> = {}): ImportContext {
       [`${DEPT}|dozer operator`, ROLE_DOZER],
       [`${DEPT}|grader operator`, ROLE_GRADER],
     ]),
-    awardedCompetenciesByName: new Map([['ato - track dozer', COMP]]),
+    // The REGISTER, not the awarded subset (R167, amended). The second entry
+    // stands for the migration case: a competency an Admin created by hand that
+    // no assessment tool awards yet.
+    competenciesByName: new Map([
+      ['ato - track dozer', COMP],
+      ['hr truck licence', COMP_UNAWARDED],
+    ]),
     placement,
     candidateSeatsAllowed: true,
     dateFormat: 'dmy',
@@ -200,12 +208,14 @@ describe('validateWorkforceImport — one test per rejection reason', () => {
     // Ops allows a single Role; naming two is too many.
     expect(reasons(profileFile({ roles: 'Dozer Operator;Grader Operator' }))).toEqual(['too_many_roles']);
   });
-  it('a competency no tool in the organisation awards (R167)', () => {
+  it('a competency that is not in the organisation register (R167, amended; R169)', () => {
+    // The rule the import still enforces: the register is READ, never written.
+    // A name nobody created has nowhere to go but the rejection list.
     const file = [
       profileFile(),
       '#competencies',
       'email,competency,grant_date,expiry_date,evidence',
-      'ada@example.com,Unawarded Ticket,2023-01-15,,',
+      'ada@example.com,Ticket Nobody Created,2023-01-15,,',
     ].join('\n');
     expect(reasons(file)).toEqual(['unknown_competency']);
   });
@@ -243,6 +253,27 @@ describe('validateWorkforceImport — one test per rejection reason', () => {
 });
 
 describe('validateWorkforceImport — deliberate non-rejections and volume', () => {
+  it('records a competency in the register that NO tool awards (R167, amended)', () => {
+    // The migration case. An HR truck licence is earned with a previous
+    // employer and renewed at a licensing centre — no assessment tool in the
+    // product will ever award it, and refusing the grant on that basis would
+    // lose real qualification history rather than protect anything. The line
+    // resolves against the register exactly as an awarded one does.
+    const file = [
+      profileFile(),
+      '#competencies',
+      'email,competency,grant_date,expiry_date,evidence',
+      'ada@example.com,HR Truck Licence,2021-06-30,,LIC-4471',
+    ].join('\n');
+    const { validCompetencies, rejected } = validateFile(file);
+    expect(rejected).toEqual([]);
+    expect(validCompetencies).toHaveLength(1);
+    expect(validCompetencies[0]).toMatchObject({
+      competencyId: COMP_UNAWARDED,
+      evidence: 'LIC-4471',
+    });
+  });
+
   it('does NOT reject a row whose email already belongs to someone — U24 merges it (R148, R149)', () => {
     // Uniqueness is not a rejection reason; the validator has no notion of
     // "already exists", so a known address simply validates.

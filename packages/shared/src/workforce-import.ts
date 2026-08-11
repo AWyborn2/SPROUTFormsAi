@@ -381,8 +381,13 @@ export interface ImportContext {
   departmentsByName: ReadonlyMap<string, string>;
   /** Active Role, keyed by `departmentId|lowercased-role-name` → role id (R5: a Role belongs to a Department). */
   rolesByDeptAndName: ReadonlyMap<string, string>;
-  /** Active competency name (lowercased) → id, for competencies SOME tool awards (R167). */
-  awardedCompetenciesByName: ReadonlyMap<string, string>;
+  /**
+   * Competency name (lowercased) → id, over the organisation's REGISTER (R167,
+   * amended — see `loadImportContext`). Every competency the org has created,
+   * not only those some assessment tool awards. A name absent here does not
+   * exist in the register, and the import creates nothing for it (R169).
+   */
+  competenciesByName: ReadonlyMap<string, string>;
   /** The placement offer-and-count rules — the SAME context the team screen validates against (R155). */
   placement: PlacementContext;
   /** Whether this tier carries candidate seats — a Candidate row is rejected otherwise (R167). */
@@ -632,8 +637,9 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
     });
   }
 
-  // Competency lines — the competency must be one a tool awards (R167) and the
-  // grant date must read (R167).
+  // Competency lines — the competency must EXIST in the organisation's register
+  // (R167, amended: it was "one a tool awards" — see `loadImportContext` for why
+  // that half was dropped) and the grant date must read (R167).
   //
   // A line whose email matches a profile row that was itself REJECTED is dropped
   // silently: that profile's own rejection already tells the Admin what to fix,
@@ -652,7 +658,7 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
       }
       continue;
     }
-    const competencyId = ctx.awardedCompetenciesByName.get(row.competency.trim().toLowerCase());
+    const competencyId = ctx.competenciesByName.get(row.competency.trim().toLowerCase());
     if (!competencyId) {
       rejected.push({ rowNumber: row.rowNumber, subject, reason: 'unknown_competency', detail: row.competency });
       continue;
