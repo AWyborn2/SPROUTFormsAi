@@ -4,6 +4,7 @@ import type { SubmissionValue } from '@formai/shared';
 import { Button, Icon, useToast } from '@formai/ui';
 import {
   useAssessmentAttempt,
+  useOpenAttempt,
   useSaveAttempt,
   useSetAttemptSubmitted,
 } from '../../lib/data/hooks.js';
@@ -37,19 +38,36 @@ export function CasePartFillScreen() {
   const { data: attempt, isLoading } = useAssessmentAttempt(caseId, attemptId);
   const save = useSaveAttempt(caseId ?? '');
   const setSubmitted = useSetAttemptSubmitted(caseId ?? '');
+  const openAttempt = useOpenAttempt(caseId ?? '');
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   const [dirty, setDirty] = useState(false);
   /**
-   * Seeded once. Re-seeding on every fetch would discard whatever the candidate
-   * had typed since — a background refetch mid-answer must not wipe the page.
+   * Seeded once PER ATTEMPT. Re-seeding on every fetch would discard whatever
+   * the candidate had typed since — a background refetch mid-answer must not
+   * wipe the page. Navigating to a different attempt (a retry) re-arms it, or
+   * the new attempt would render the old one's answers.
    */
   const seeded = useRef(false);
+
+  useEffect(() => {
+    seeded.current = false;
+  }, [attemptId]);
 
   useEffect(() => {
     if (!attempt || seeded.current) return;
     setValues(attempt.values ?? {});
     seeded.current = true;
+  }, [attempt]);
+
+  /*
+    A MARKED ATTEMPT SHOWS THE SERVER'S COPY. Hand-in can mark on the spot now,
+    and marking writes the per-question ✓/✗ and the further-action note into
+    the stored values — which the seeded-once local state predates. The screen
+    is read-only here, so adopting the refetch loses nobody's typing.
+  */
+  useEffect(() => {
+    if (attempt && attempt.outcome !== null) setValues(attempt.values ?? {});
   }, [attempt]);
 
   /**
@@ -185,10 +203,33 @@ export function CasePartFillScreen() {
       </header>
 
       {marked && (
-        <p className="mb-4 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-[13px] text-text-secondary">
-          This attempt has been marked, so it can no longer be changed. If you need another go, your
-          assessor can open a new attempt.
-        </p>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5">
+          <p className="text-[13px] text-text-secondary">
+            {attempt.outcome === 'satisfactory'
+              ? 'Marked satisfactory — this attempt is now a locked record.'
+              : attempt.outcome === 'not_satisfactory'
+                ? 'Marked not satisfactory. Your correct answers carry over to a new attempt — go back over the ones that were missed.'
+                : 'This attempt has been marked, so it can no longer be changed.'}
+          </p>
+          {attempt.outcome === 'not_satisfactory' && (
+            <Button
+              leadingIcon="rotate-ccw"
+              disabled={openAttempt.isPending}
+              onClick={() =>
+                openAttempt.mutate(attempt.partKey, {
+                  onSuccess: (r) => navigate(`/app/assessments/${caseId}/attempts/${r.id}`),
+                  onError: () =>
+                    toast({
+                      variant: 'warning',
+                      message: "Couldn't open another attempt — your assessor may need to.",
+                    }),
+                })
+              }
+            >
+              {openAttempt.isPending ? 'Opening…' : 'Try again'}
+            </Button>
+          )}
+        </div>
       )}
 
       {handedIn && !marked && (
@@ -315,9 +356,24 @@ export function CasePartFillScreen() {
                 setSubmitted.mutate(
                   { attemptId, submitted: true },
                   {
-                    onSuccess: () => {
+                    // A fully-keyed part marks itself at hand-in, and the
+                    // response says how it went — so say it here, not after a
+                    // trip back to the case screen.
+                    onSuccess: (r) => {
                       setDirty(false);
-                      toast({ variant: 'success', message: 'Handed in for marking.' });
+                      // Reopen shares this mutation and never marks, so the
+                      // union has to be narrowed before the outcome is read.
+                      const outcome = 'outcome' in r ? r.outcome : undefined;
+                      if (outcome === 'satisfactory') {
+                        toast({ variant: 'success', message: 'Marked satisfactory — this part is done.' });
+                      } else if (outcome === 'not_satisfactory') {
+                        toast({
+                          variant: 'warning',
+                          message: 'Marked — some answers need another look. You can try again.',
+                        });
+                      } else {
+                        toast({ variant: 'success', message: 'Handed in for marking.' });
+                      }
                     },
                     onError: () =>
                       toast({ variant: 'danger', message: "Couldn't hand in — try again." }),

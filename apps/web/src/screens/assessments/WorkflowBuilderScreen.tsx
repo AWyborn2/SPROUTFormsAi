@@ -74,6 +74,28 @@ const ACCESS_TONE: Record<AccessLevel, string> = {
   fill: 'bg-success-soft text-success-text',
 };
 
+/**
+ * When a section's part opens, as three spellable choices over one stored
+ * field. `requires` ABSENT keeps the engine's default — each part waits for
+ * everything printed before it — an EMPTY list opens it straight away, and a
+ * non-empty list waits for exactly the named steps. The distinction between
+ * absent and empty is the whole control, so the mode is derived rather than
+ * stored twice.
+ */
+const OPEN_MODES = ['printed order', 'straight away', 'after steps'] as const;
+type OpenMode = (typeof OPEN_MODES)[number];
+
+function openModeOf(section: WorkflowSection): OpenMode {
+  if (section.requires === undefined) return 'printed order';
+  return section.requires.length === 0 ? 'straight away' : 'after steps';
+}
+
+const OPEN_MODE_HINT: Record<OpenMode, string> = {
+  'printed order': 'Waits for every part printed before it to pass — the default sequence.',
+  'straight away': 'Available from the moment the case opens.',
+  'after steps': 'Waits for the ticked steps to pass, and nothing else.',
+};
+
 /** A segmented control. One row of options, one selected. */
 function Segmented<T extends string>({
   options,
@@ -256,6 +278,7 @@ export function WorkflowBuilderScreen() {
   }
 
   const sections = orderedSections(workflow);
+  const labelByKey = new Map(workflow.sections.map((s) => [s.key, s.label]));
 
   return (
     <div className="fai-rise mx-auto flex max-w-[1000px] flex-col gap-4 p-[30px_28px_60px]">
@@ -485,7 +508,11 @@ export function WorkflowBuilderScreen() {
                   <span className="text-[14px] font-semibold">{section.label}</span>
                   <span className="text-[11.5px] text-text-tertiary">
                     {section.partKey ? `${fieldCount} fields` : `${section.fieldIds?.length ?? 0} fields`}
-                    {section.requires?.length ? ` · after ${section.requires.join(', ')}` : ''}
+                    {section.requires === undefined
+                      ? ''
+                      : section.requires.length > 0
+                        ? ` · after ${section.requires.map((k) => labelByKey.get(k) ?? k).join(', ')}`
+                        : ' · opens straight away'}
                   </span>
                 </button>
 
@@ -516,6 +543,78 @@ export function WorkflowBuilderScreen() {
 
               {open && (
                 <div className="border-t border-border-subtle bg-surface-sunken px-[18px] py-3">
+                  {/*
+                    WHEN THIS STEP OPENS. Only a part-backed section gates
+                    anything — cover sections ride along inside part attempts —
+                    so only those get the control. Stored on `requires`: absent
+                    is the printed sequence, empty is straight away, names are
+                    exactly the steps that must pass first.
+                  */}
+                  {section.partKey && (
+                    <div className="mb-2.5 rounded-md border border-border bg-surface-card px-3 py-2">
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <span className="text-[11.5px] font-semibold text-text-secondary">Opens</span>
+                        <Segmented
+                          label={`When ${section.label} opens`}
+                          options={OPEN_MODES}
+                          value={openModeOf(section)}
+                          onChange={(mode) =>
+                            edit((w) => {
+                              const target = w.sections.find((s) => s.key === section.key)!;
+                              if (mode === 'printed order') {
+                                delete target.requires;
+                              } else if (mode === 'straight away') {
+                                target.requires = [];
+                              } else {
+                                // Seed with the step before this one in process
+                                // order — the common intent, and an empty pick
+                                // would render as "straight away" instead.
+                                const prior =
+                                  sections[index - 1] ?? sections.find((s) => s.key !== section.key);
+                                target.requires = prior ? [prior.key] : [];
+                              }
+                            })
+                          }
+                        />
+                        <span className="text-[11px] text-text-tertiary">
+                          {OPEN_MODE_HINT[openModeOf(section)]}
+                        </span>
+                      </div>
+                      {(section.requires?.length ?? 0) > 0 && (
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                          <span className="text-[11px] text-text-tertiary">After:</span>
+                          {sections
+                            .filter((s) => s.key !== section.key)
+                            .map((other) => {
+                              const ticked = section.requires!.includes(other.key);
+                              return (
+                                <button
+                                  key={other.key}
+                                  type="button"
+                                  aria-pressed={ticked}
+                                  onClick={() =>
+                                    edit((w) => {
+                                      const target = w.sections.find((s) => s.key === section.key)!;
+                                      const current = target.requires ?? [];
+                                      target.requires = ticked
+                                        ? current.filter((k) => k !== other.key)
+                                        : [...current, other.key];
+                                    })
+                                  }
+                                  className={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                                    ticked
+                                      ? 'border-border-accent bg-surface-accent-soft text-text-accent'
+                                      : 'border-border text-text-tertiary hover:text-text-secondary'
+                                  }`}
+                                >
+                                  {other.label}
+                                </button>
+                              );
+                            })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {groups.length === 0 ? (
                     <p className="text-[11.5px] text-text-tertiary">
                       This section covers no fields from the current version.

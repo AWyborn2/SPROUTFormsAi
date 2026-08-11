@@ -342,14 +342,19 @@ export const assessmentsApi = {
   /**
    * Hand a part in, or take it back.
    *
-   * Reversible by the candidate right up until an assessor marks it — nothing
-   * has been judged yet, so a mis-tap costs nobody anything.
+   * A person-judged part stays reversible until an assessor marks it — nothing
+   * has been judged yet, so a mis-tap costs nobody anything. A fully-keyed part
+   * MARKS ITSELF at hand-in, and the response says how it went: `outcome`
+   * arrives when marking ran, so the screen can tell the candidate the result
+   * in the same breath.
    */
   submitAttempt: (caseId: string, attemptId: string) =>
-    apiClient.post<{ id: string; submittedAt: string | null }>(
-      `/assessment-cases/${caseId}/attempts/${attemptId}/submit`,
-      {},
-    ),
+    apiClient.post<{
+      id: string;
+      submittedAt: string | null;
+      outcome?: PartOutcome;
+      caseState?: AssessmentCaseState;
+    }>(`/assessment-cases/${caseId}/attempts/${attemptId}/submit`, {}),
 
   reopenAttempt: (caseId: string, attemptId: string) =>
     apiClient.post<{ id: string; submittedAt: string | null }>(

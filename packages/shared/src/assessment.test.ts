@@ -417,6 +417,88 @@ describe('caseProgress', () => {
 
     expect(p.map((x) => x.part.key)).toEqual(['p1', 'p2']);
   });
+
+  /**
+   * An authored workflow's `requires` REPLACES the document-order rule for the
+   * sections that declare it. The shape pinned here is the real one: a
+   * declaration prints on the cover page (document-first) but is signed after
+   * the theory it vouches for — so the dependency points FORWARD in document
+   * order, which no sequential sweep can express.
+   */
+  describe('with authored requires', () => {
+    const declThenTheory: AssessmentToolManifest = {
+      parts: [
+        part({ key: 'decl', ordinal: 1 }),
+        part({ key: 'theory', ordinal: 2, kind: 'theory' }),
+      ],
+      workflow: {
+        roles: ['candidate', 'assessor'],
+        sections: [
+          { key: 's_theory', ordinal: 1, label: 'Theory', partKey: 'theory', access: { candidate: 'fill' }, requires: [] },
+          { key: 's_decl', ordinal: 2, label: 'Declaration', partKey: 'decl', access: { candidate: 'fill' }, requires: ['s_theory'] },
+        ],
+      },
+    };
+
+    it('opens a part with an empty requires straight away, wherever it prints', () => {
+      const p = caseProgress(declThenTheory, 'experienced', []);
+
+      // Sequential order would open the declaration (printed first) and lock
+      // the theory behind it — exactly backwards for how the work happens.
+      expect(p.map((x) => [x.part.key, x.state])).toEqual([
+        ['decl', 'locked'],
+        ['theory', 'open'],
+      ]);
+    });
+
+    it('unlocks a dependent part the moment its requirement passes', () => {
+      const p = caseProgress(declThenTheory, 'experienced', [at('theory', 1, 'satisfactory')]);
+
+      expect(p.find((x) => x.part.key === 'decl')?.state).toBe('open');
+    });
+
+    it('keeps the sequential rule for sections that declare nothing', () => {
+      const mixed: AssessmentToolManifest = {
+        ...declThenTheory,
+        workflow: {
+          roles: ['candidate'],
+          sections: [
+            { key: 's_decl', ordinal: 1, label: 'Declaration', partKey: 'decl', access: { candidate: 'fill' } },
+            { key: 's_theory', ordinal: 2, label: 'Theory', partKey: 'theory', access: { candidate: 'fill' } },
+          ],
+        },
+      };
+      const p = caseProgress(mixed, 'experienced', []);
+
+      expect(p.map((x) => x.state)).toEqual(['open', 'locked']);
+    });
+
+    it('waives a dependency on a section with no part, and on a part the pathway does not include', () => {
+      const waived: AssessmentToolManifest = {
+        parts: [
+          part({ key: 'log', ordinal: 1, kind: 'logbook', minimumHours: 10, pathways: ['new'] }),
+          part({ key: 'final', ordinal: 2 }),
+        ],
+        workflow: {
+          roles: ['candidate'],
+          sections: [
+            { key: 's_cover', ordinal: 1, label: 'Cover', fieldIds: ['x'], access: { candidate: 'view' } },
+            { key: 's_log', ordinal: 2, label: 'Logbook', partKey: 'log', access: { candidate: 'fill' }, requires: [] },
+            { key: 's_final', ordinal: 3, label: 'Final', partKey: 'final', access: { candidate: 'fill' }, requires: ['s_cover', 's_log'] },
+          ],
+        },
+      };
+
+      // RPL waives the logbook, so the dependency on it must waive too — a
+      // gate nobody can ever satisfy is a deadlock, not a safety rule.
+      const p = caseProgress(waived, 'rpl', []);
+      expect(p.map((x) => [x.part.key, x.state])).toEqual([['final', 'open']]);
+
+      // On the pathway that includes the logbook, the gate bites.
+      const gated = caseProgress(waived, 'new', []);
+      expect(gated.find((x) => x.part.key === 'final')?.state).toBe('locked');
+    });
+  });
 });
 
 describe('isCaseCompetent', () => {
