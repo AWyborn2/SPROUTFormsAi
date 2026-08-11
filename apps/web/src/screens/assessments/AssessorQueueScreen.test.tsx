@@ -20,6 +20,7 @@ const item = (over: Partial<AssessorQueueItem> = {}): AssessorQueueItem => ({
   id: 'case-1',
   toolName: 'Track Dozer',
   candidateUserId: 'cand-1',
+  candidateName: 'Priya Nair',
   pathway: 'new',
   locationId: 'loc-1',
   locationName: 'Mining',
