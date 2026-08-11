@@ -250,3 +250,36 @@ describe('assessment-builder drafts', () => {
     expect(deleteMock).toHaveBeenCalledWith('/assessment-tool-drafts/draft-1');
   });
 });
+
+describe('granting a competency by hand', () => {
+  /*
+    Same story as the drafts above: POST /competencies/:id/holders had existed
+    since the holders table did — shared with the sign-off auto-grant — and no
+    client code ever called it, so a competency nobody earns through an
+    assessment (a sighted driver's licence) could never be recorded at all.
+  */
+  it('grantCompetency POSTs the holder onto the competency', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({ competencyId: 'c1', holders: 1 });
+    await store.grantCompetency({ competencyId: 'c1', userId: 'u1' });
+
+    expect(vi.mocked(apiClient.post)).toHaveBeenLastCalledWith('/competencies/c1/holders', {
+      userId: 'u1',
+    });
+  });
+
+  it('sends expiry and evidence only when given — the zod body rejects nulls', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({ competencyId: 'c1', holders: 1 });
+    await store.grantCompetency({
+      competencyId: 'c1',
+      userId: 'u1',
+      evidenceRef: 'Licence sighted at induction',
+      expiresAt: '2027-03-15T23:59:59.000Z',
+    });
+
+    expect(vi.mocked(apiClient.post)).toHaveBeenLastCalledWith('/competencies/c1/holders', {
+      userId: 'u1',
+      evidenceRef: 'Licence sighted at induction',
+      expiresAt: '2027-03-15T23:59:59.000Z',
+    });
+  });
+});

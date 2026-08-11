@@ -1223,6 +1223,30 @@ export const store = {
     return apiClient.get<CompetencyHolder[]>(`/competencies/${competencyId}/holders`);
   },
 
+  /**
+   * Record that a person holds a competency — the manual half of granting.
+   *
+   * The route has existed since the holders table did, shared with the
+   * automatic grant a signed-off assessment performs; nothing in the client
+   * ever called it, so evidence held BEFORE any assessment — a driver's
+   * licence, an external ticket — could not be recorded at all, and every
+   * prerequisite reading the register honestly answered "missing".
+   */
+  grantCompetency(input: {
+    competencyId: string;
+    userId: string;
+    evidenceRef?: string;
+    expiresAt?: string | null;
+  }): Promise<void> {
+    return apiClient
+      .post<unknown>(`/competencies/${input.competencyId}/holders`, {
+        userId: input.userId,
+        ...(input.evidenceRef ? { evidenceRef: input.evidenceRef } : {}),
+        ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+      })
+      .then(() => undefined);
+  },
+
   /* ── Saved imports ─────────────────────────────────────────────────────── */
 
   /**
