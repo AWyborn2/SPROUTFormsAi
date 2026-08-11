@@ -52,7 +52,7 @@ const fileBody = z.object({
 
 /**
  * Everything the validator resolves names against — the organisation's ACTIVE
- * taxonomy and the competencies some tool awards.
+ * taxonomy and its competency register.
  *
  * Only ACTIVE values are loaded, which is what makes "names a retired
  * Department" a rejection rather than a silent success: the name simply is not
@@ -65,25 +65,17 @@ async function loadImportContext(
   dateFormat: 'dmy' | 'mdy',
 ): Promise<ImportContext> {
   const database = db!;
-  const [locations, departments, jobRoles, competencies, tools] = await Promise.all([
+  const [locations, departments, jobRoles, competencies] = await Promise.all([
     database.query.locations.findMany({ where: eq(schema.locations.orgId, orgId) }),
     database.query.departments.findMany({ where: eq(schema.departments.orgId, orgId) }),
     database.query.jobRoles.findMany({ where: eq(schema.jobRoles.orgId, orgId) }),
     database.query.competencies.findMany({ where: eq(schema.competencies.orgId, orgId) }),
-    database.query.assessmentTools.findMany({ where: eq(schema.assessmentTools.orgId, orgId) }),
   ]);
 
   const active = <T extends { status?: string }>(rows: T[]) =>
     rows.filter((r) => r.status !== 'retired');
   const activeDepartments = active(departments);
   const activeRoles = active(jobRoles);
-
-  /*
-    R167: a competency line names a competency SOME tool awards. One nothing
-    awards cannot be earned in the product either, so importing it would create
-    a holding nobody could ever renew.
-  */
-  const awarded = new Set(tools.flatMap((t) => t.awardedCompetencyIds ?? []));
 
   const held = await loadHeldIdentifiers(database, orgId);
 
@@ -93,9 +85,38 @@ async function loadImportContext(
     rolesByDeptAndName: new Map(
       activeRoles.map((r) => [`${r.departmentId}|${r.name.toLowerCase()}`, r.id]),
     ),
-    awardedCompetenciesByName: new Map(
-      competencies.filter((c) => awarded.has(c.id)).map((c) => [c.name.toLowerCase(), c.id]),
-    ),
+    /*
+      R167, AMENDED: a competency line names a competency that EXISTS in this
+      organisation's register. It previously had to be one SOME assessment tool
+      awards, on this reasoning:
+
+        "One nothing awards cannot be earned in the product either, so importing
+         it would create a holding nobody could ever renew."
+
+      That reasoning still describes the state accurately; what changed is that
+      the state is now accepted as TEMPORARY rather than refused. A customer
+      migrating a decade of tickets has them before it has the tools that will
+      one day renew them, and refusing the grant until the tool exists loses the
+      qualification history rather than protecting it — the same conclusion R153
+      reached for a grant with no date.
+
+      The awardedness half was also the ONE place this import was STRICTER than
+      the screen it is required to mirror. `grantCompetency` has never checked
+      awardedness, so an Admin could always record exactly these grants by hand,
+      one person at a time, through `POST /competencies/:id/holders` — the
+      control that exists precisely for a ticket earned with a previous
+      employer. A rule the manual path does not apply is not a safeguard the
+      bulk path should invent, and this file's own opening note is that two
+      implementations of one rule disagree silently and at volume.
+
+      NOTHING ELSE MOVED. The register is still read, never written: a name that
+      is not in it is still `unknown_competency` and still creates nothing, so
+      R169 is untouched and the curation stays a deliberate human act. Linking
+      the tool later needs no backfill — the skip rule and standing both read
+      grants by competency id, so adding the id to a tool's awarded list makes
+      every imported grant count at once.
+    */
+    competenciesByName: new Map(competencies.map((c) => [c.name.toLowerCase(), c.id])),
     placement: {
       departments: activeDepartments.map((d) => ({
         id: d.id,
