@@ -51,6 +51,23 @@ const fileBody = z.object({
 });
 
 /**
+ * Whether this tier carries candidate seats at all (R167).
+ *
+ * THREE STATES, and collapsing any two of them breaks a tier. `candidateSeatLimit`
+ * is `number | null`, where `null` is the UNLIMITED sentinel — the same sentinel
+ * `limitFor`/`checkSeatAvailability` read as "no cap". It is NOT a missing value,
+ * so it must not be defaulted with `??`: `(limit ?? 0) !== 0` reads Enterprise's
+ * unlimited null as zero seats and rejects EVERY Candidate row on the tier that
+ * has the most of them. A tier absent from `PLAN_CONFIG` is the genuinely missing
+ * case and is refused, because an unreadable config is not an unlimited one.
+ */
+export function tierAllowsCandidates(planTier: string): boolean {
+  const limit = PLAN_CONFIG[planTier as PlanTier]?.candidateSeatLimit;
+  if (limit === undefined) return false; // unknown tier — no config to allow it
+  return limit === null || limit > 0; // null = unlimited; 0 = none (R83)
+}
+
+/**
  * Everything the validator resolves names against — the organisation's ACTIVE
  * taxonomy and its competency register.
  *
@@ -125,7 +142,7 @@ async function loadImportContext(
       roles: activeRoles.map((r) => ({ id: r.id, departmentId: r.departmentId })),
     },
     // R167: a Candidate row cannot land on a tier that allocates none.
-    candidateSeatsAllowed: (PLAN_CONFIG[planTier as PlanTier]?.candidateSeatLimit ?? 0) !== 0,
+    candidateSeatsAllowed: tierAllowsCandidates(planTier),
     heldEmployeeNumbers: held.employeeNumbers,
     heldSwipeCardNumbers: held.swipeCardNumbers,
     dateFormat,

@@ -390,7 +390,15 @@ export interface ImportContext {
   competenciesByName: ReadonlyMap<string, string>;
   /** The placement offer-and-count rules — the SAME context the team screen validates against (R155). */
   placement: PlacementContext;
-  /** Whether this tier carries candidate seats — a Candidate row is rejected otherwise (R167). */
+  /**
+   * Whether this tier carries candidate seats — a Candidate row is rejected
+   * otherwise (R167).
+   *
+   * A BOOLEAN, resolved by the caller, because the underlying allocation is
+   * `number | null` where `null` means UNLIMITED. Whoever fills this in must not
+   * default that null away (`limit ?? 0`): the tier with the largest allocation
+   * of all carries null, and reading it as zero refuses every Candidate row.
+   */
   candidateSeatsAllowed: boolean;
   /**
    * Workforce numbers ALREADY issued in this organisation, lowercased (R7).

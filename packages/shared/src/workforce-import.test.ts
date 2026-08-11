@@ -173,6 +173,18 @@ describe('validateWorkforceImport — a valid row', () => {
     expect(validProfiles).toHaveLength(1);
     expect(validProfiles[0]).toMatchObject({ role: 'assessor', locationIds: [LOC], roleIds: [ROLE_DOZER] });
   });
+
+  it('lands a Candidate row wherever the tier carries candidate seats (R167)', () => {
+    /*
+      The other half of the candidate rule, and the half that broke: the
+      allocation is `number | null` with null meaning UNLIMITED, so a caller that
+      defaults the null away hands this flag in as false and every Candidate row
+      in the file joins the rejection list.
+    */
+    const { validProfiles, rejected } = validateFile(profileFile({ access_level: 'Candidate' }));
+    expect(rejected).toEqual([]);
+    expect(validProfiles[0]).toMatchObject({ role: 'candidate' });
+  });
 });
 
 describe('validateWorkforceImport — one test per rejection reason', () => {

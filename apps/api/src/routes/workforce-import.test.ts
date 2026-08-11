@@ -1,6 +1,6 @@
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Db } from '@formai/db';
+import { PLAN_CONFIG, type Db } from '@formai/db';
 
 const admin = { userId: 'u-admin', orgId: 'org-1', role: 'admin' as const };
 const viewer = { userId: 'u-viewer', orgId: 'org-1', role: 'viewer' as const };
@@ -26,6 +26,7 @@ const runMock = vi.hoisted(() => ({
 vi.mock('../lib/workforce-import-run.js', () => runMock);
 
 const { createApp } = await import('../app.js');
+const { tierAllowsCandidates } = await import('./workforce-import.js');
 ({ sealSession } = await import('../auth/workos.js'));
 
 function startApp() {
@@ -42,7 +43,8 @@ const ORG = {
   id: 'org-1',
   planTier: 'business',
   seatLimit: 15,
-  candidateSeatLimit: 100,
+  // Nullable, because null is the UNLIMITED sentinel an Enterprise org carries.
+  candidateSeatLimit: 100 as number | null,
   dateFormat: 'dmy' as const,
 };
 
@@ -55,11 +57,19 @@ const ORG = {
  * filter is exercised — a fixture that pre-filtered would let "names a retired
  * Department is rejected" pass against a route that never filtered at all.
  */
-function fakeDb(opts: { locations?: unknown[]; departments?: unknown[]; jobRoles?: unknown[] } = {}) {
+function fakeDb(
+  opts: {
+    locations?: unknown[];
+    departments?: unknown[];
+    jobRoles?: unknown[];
+    /** Override the organisation row — the plan tier is what gates Candidate rows. */
+    org?: Partial<typeof ORG>;
+  } = {},
+) {
   const inserted: unknown[] = [];
   const db = {
     query: {
-      organizations: { findFirst: vi.fn().mockResolvedValue(ORG) },
+      organizations: { findFirst: vi.fn().mockResolvedValue({ ...ORG, ...opts.org }) },
       locations: {
         findMany: vi
           .fn()
@@ -233,6 +243,89 @@ describe('POST /workforce-import/validate (R144)', () => {
     } finally {
       server.close();
     }
+  });
+});
+
+describe('candidate seats — null is UNLIMITED, not zero (R167, R83)', () => {
+  /*
+    `PlanConfig.candidateSeatLimit` is `number | null`, and the null is the
+    unlimited sentinel rather than a missing value. Defaulting it (`limit ?? 0`)
+    reads Enterprise as a tier with no candidate seats and rejects every
+    Candidate row on the tier that carries the most of them — a whole customer's
+    import returning nothing but `candidate_not_allowed`. One test per state of
+    that three-state field, because collapsing any two of them breaks a tier.
+  */
+  const ONE_CANDIDATE = [
+    '#profiles',
+    'name,email,access_level,locations,departments,roles,employee_number,swipe_card_number',
+    'Jane Smith,jane@x.io,Candidate,Boddington,Operations,Dozer Operator,E1,',
+    '',
+  ].join('\n');
+
+  const MIXED = [
+    '#profiles',
+    'name,email,access_level,locations,departments,roles,employee_number,swipe_card_number',
+    'Jane Smith,jane@x.io,Candidate,Boddington,Operations,Dozer Operator,E1,',
+    'Ada Assessor,ada@x.io,Assessor,Boddington,Operations,Dozer Operator,E2,',
+    '',
+  ].join('\n');
+
+  const validate = async (planTier: string, csv = ONE_CANDIDATE) => {
+    fakeDb({ org: { planTier, candidateSeatLimit: planTier === 'enterprise' ? null : 100 } });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/workforce-import/validate`, {
+        method: 'POST',
+        headers: authHeader(admin),
+        body: JSON.stringify({ csv }),
+      });
+      expect(res.status).toBe(200);
+      return (await res.json()) as { validRows: number; rejected: Array<{ reason: string }> };
+    } finally {
+      server.close();
+    }
+  };
+
+  it('Enterprise (unlimited, null) LANDS Candidate rows', async () => {
+    // The reported bug: every row of an Enterprise customer's file came back
+    // `candidate_not_allowed`, on the tier with the largest allocation there is.
+    const body = await validate('enterprise');
+    expect(body.rejected).toEqual([]);
+    expect(body.validRows).toBe(1);
+  });
+
+  it('Business (a real, finite allocation) lands Candidate rows', async () => {
+    const body = await validate('business');
+    expect(body.rejected).toEqual([]);
+    expect(body.validRows).toBe(1);
+  });
+
+  it('a Candidate row still lands beside staff rows on Enterprise', async () => {
+    const body = await validate('enterprise', MIXED);
+    expect(body.rejected).toEqual([]);
+    expect(body.validRows).toBe(2);
+  });
+
+  /*
+    The tiers allocated NO candidate seats cannot reach the route at all — the
+    import is gated on `assessments`, which is Business+ — so the refusal is
+    asserted on the rule itself rather than through a request that would 403
+    before ever reaching it.
+  */
+  it('the rule reads all three states of candidateSeatLimit', () => {
+    expect(PLAN_CONFIG.enterprise.candidateSeatLimit).toBeNull();
+    expect(tierAllowsCandidates('enterprise')).toBe(true); // null = unlimited
+
+    expect(PLAN_CONFIG.business.candidateSeatLimit).toBeGreaterThan(0);
+    expect(tierAllowsCandidates('business')).toBe(true); // a finite allocation
+
+    expect(PLAN_CONFIG.individual.candidateSeatLimit).toBe(0);
+    expect(tierAllowsCandidates('individual')).toBe(false); // 0 = none (R83)
+    expect(tierAllowsCandidates('team')).toBe(false);
+
+    // An absent config is a genuinely missing value, and failing open there
+    // would hand out seats nobody bought.
+    expect(tierAllowsCandidates('gold-plated')).toBe(false);
   });
 });
 
