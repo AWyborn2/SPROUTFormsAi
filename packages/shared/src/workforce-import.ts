@@ -6,10 +6,16 @@
  *
  * ONE FILE, TWO SECTIONS (KTD13). A `#profiles` block carries one row per person
  * with the Access level they land with and their placement by NAME; a
- * `#competencies` block carries one line per competency with its grant date. The
- * import references taxonomy by name because that is what a human fills in, and
- * the validator resolves each name against the organisation's ACTIVE taxonomy —
- * it creates nothing (R169).
+ * `#competencies` block carries one line per competency with its grant date and,
+ * optionally, an explicit expiry. The import references taxonomy by name because
+ * that is what a human fills in, and the validator resolves each name against
+ * the organisation's ACTIVE taxonomy — it creates nothing (R169).
+ *
+ * BOTH COMPETENCY DATES ARE OPTIONAL (R153, reversed). Blank is UNKNOWN, not a
+ * rejection: a migrated source system may record only an explicit expiry (a
+ * driver's licence renewed on a schedule no validity period can express), or
+ * neither date at all. Only a PRESENT but unreadable date rejects a line — that
+ * is a typo, not an absence.
  *
  * VALIDATION IS EXHAUSTIVE AND REUSES ONE RULE. Placement (which Roles a
  * Department offers, and how many) is checked by the very `validatePlacement`
@@ -26,7 +32,7 @@ export const WORKFORCE_IMPORT_TEMPLATE = [
   'name,email,access_level,locations,departments,roles,employee_number,swipe_card_number',
   '',
   '#competencies',
-  'email,competency,grant_date,evidence',
+  'email,competency,grant_date,expiry_date,evidence',
   '',
 ].join('\n');
 
@@ -50,7 +56,15 @@ export interface RawCompetencyRow {
   rowNumber: number;
   email: string;
   competency: string;
+  /** Blank is valid (R153, reversed) — the grant date may simply be unknown. */
   grantDate: string;
+  /**
+   * An explicit end date, overriding whatever the competency's validity would
+   * derive. For the record a migrated source system tracks directly rather
+   * than by formula — a driver's licence renewed on a schedule no validity
+   * period can express — where a grant date may never be supplied at all.
+   */
+  expiryDate: string;
   evidence: string;
 }
 
@@ -100,11 +114,32 @@ const multi = (cell: string): string[] =>
  * Parse a filled template into raw profile and competency rows. Blank lines and
  * the two column-header lines are skipped; `rowNumber` is the 1-based source
  * line so a rejection points a human at the right row.
+ *
+ * THE COMPETENCY SECTION IS READ BY ITS OWN HEADER, not by fixed position.
+ * `expiry_date` was added between `grant_date` and `evidence`, so a file filled
+ * from the PREVIOUS template has evidence where expiry now sits — read
+ * positionally, that evidence string parses as a date, fails, and rejects a
+ * perfectly good line as `bad_expiry_date`. Naming the columns means both
+ * shapes read correctly, and a file whose columns were reordered by a
+ * spreadsheet does too. The header is the one line that says what the file
+ * means; using it is cheaper than any migration note nobody reads.
  */
 export function parseWorkforceCsv(text: string): ParsedImport {
   const profiles: RawProfileRow[] = [];
   const competencies: RawCompetencyRow[] = [];
   let section: 'none' | 'profiles' | 'competencies' = 'none';
+  /*
+    Competency column name → its index in this file. Defaults to the CURRENT
+    template's order, so a section with no header line at all still reads as
+    today's shape rather than as nothing.
+  */
+  let competencyColumns: Record<string, number> = {
+    email: 0,
+    competency: 1,
+    grant_date: 2,
+    expiry_date: 3,
+    evidence: 4,
+  };
 
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
@@ -122,7 +157,13 @@ export function parseWorkforceCsv(text: string): ParsedImport {
     }
     // The column-header line at the top of each section.
     if (section === 'profiles' && line.toLowerCase().startsWith('name,')) continue;
-    if (section === 'competencies' && line.toLowerCase().startsWith('email,')) continue;
+    if (section === 'competencies' && line.toLowerCase().startsWith('email,')) {
+      competencyColumns = {};
+      splitCsvLine(raw).forEach((name, index) => {
+        competencyColumns[name.trim().toLowerCase()] = index;
+      });
+      continue;
+    }
 
     const f = splitCsvLine(raw);
     if (section === 'profiles') {
@@ -138,12 +179,18 @@ export function parseWorkforceCsv(text: string): ParsedImport {
         swipeCardNumber: f[7] ?? '',
       });
     } else if (section === 'competencies') {
+      // A column the header never named reads as absent, not as field 0.
+      const cell = (name: string) => {
+        const index = competencyColumns[name];
+        return index === undefined ? '' : (f[index] ?? '');
+      };
       competencies.push({
         rowNumber,
-        email: f[0] ?? '',
-        competency: f[1] ?? '',
-        grantDate: f[2] ?? '',
-        evidence: f[3] ?? '',
+        email: cell('email'),
+        competency: cell('competency'),
+        grantDate: cell('grant_date'),
+        expiryDate: cell('expiry_date'),
+        evidence: cell('evidence'),
       });
     }
   }
@@ -165,7 +212,9 @@ export type ImportRejectionReason =
   | 'too_many_roles'
   | 'unknown_competency'
   | 'unknown_profile_email'
+  /** Present but unreadable — blank is not this; blank means "unknown" (R153, reversed). */
   | 'bad_grant_date'
+  | 'bad_expiry_date'
   /*
     R7: both workforce numbers are unique WITHIN the organisation, which is what
     lets either tell two people of the same name apart. A duplicate is a
@@ -200,12 +249,15 @@ export interface ValidProfileRow {
   swipeCardNumber: string;
 }
 
-/** A competency line that passed, with the competency resolved and the date parsed. */
+/** A competency line that passed, with the competency resolved and its dates parsed. */
 export interface ValidCompetencyRow {
   rowNumber: number;
   email: string;
   competencyId: string;
-  grantedAt: Date;
+  /** Null when the file left it blank (R153, reversed) — held, but undated. */
+  grantedAt: Date | null;
+  /** Null unless the file supplied one; overrides whatever the competency's validity would derive. */
+  expiresAt: Date | null;
   evidence: string;
 }
 
@@ -271,7 +323,13 @@ function dateFromParts(year: number, month: number, day: number): Date | null {
 }
 
 /**
- * Read a grant date, or null when unreadable.
+ * Read one date cell, or null when unreadable.
+ *
+ * TAKES AN ALREADY-TRIMMED, NON-EMPTY STRING. Blank is not this function's
+ * question: blank and unreadable mean different things to a caller (R153,
+ * reversed — blank is a valid "unknown", unreadable is a rejection) and
+ * collapsing them here would lose that distinction. Shared by both
+ * `grant_date` and `expiry_date`, which read the same way.
  *
  * TWO SHAPES ONLY — deliberately narrower than the free-form parse this
  * replaced. An ISO cell (`YYYY-MM-DD`) is unambiguous and always read that
@@ -283,10 +341,7 @@ function dateFromParts(year: number, month: number, day: number): Date | null {
  * replaces: `Date.parse` reads a day-first date month-first whenever the day
  * is 12 or under, silently.
  */
-function parseGrantDate(value: string, dateFormat: 'dmy' | 'mdy'): Date | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
+function parseDateCell(trimmed: string, dateFormat: 'dmy' | 'mdy'): Date | null {
   const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
   if (iso) return dateFromParts(Number(iso[1]), Number(iso[2]), Number(iso[3]));
 
@@ -469,16 +524,43 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
       rejected.push({ rowNumber: row.rowNumber, subject, reason: 'unknown_competency', detail: row.competency });
       continue;
     }
-    const grantedAt = parseGrantDate(row.grantDate, ctx.dateFormat);
-    if (!grantedAt) {
-      rejected.push({ rowNumber: row.rowNumber, subject, reason: 'bad_grant_date', detail: row.grantDate });
-      continue;
+
+    /*
+      BLANK IS "UNKNOWN", NOT A REJECTION (R153, reversed). A source system
+      that never recorded a grant date is exactly the case this line exists
+      for — awarding nothing until someone backfills a date it may never get
+      would lose the person's real qualification history. Only a PRESENT but
+      unreadable date is a rejection: that is a typo to fix, not an absence.
+    */
+    const grantDateRaw = row.grantDate.trim();
+    let grantedAt: Date | null = null;
+    if (grantDateRaw) {
+      grantedAt = parseDateCell(grantDateRaw, ctx.dateFormat);
+      if (!grantedAt) {
+        rejected.push({ rowNumber: row.rowNumber, subject, reason: 'bad_grant_date', detail: row.grantDate });
+        continue;
+      }
     }
+
+    // Same treatment for the explicit override — blank means "derive it
+    // instead", never a rejection. Read by the organisation's own convention
+    // too: a day-first expiry must not be misread any more than a grant date.
+    const expiryDateRaw = row.expiryDate.trim();
+    let expiresAt: Date | null = null;
+    if (expiryDateRaw) {
+      expiresAt = parseDateCell(expiryDateRaw, ctx.dateFormat);
+      if (!expiresAt) {
+        rejected.push({ rowNumber: row.rowNumber, subject, reason: 'bad_expiry_date', detail: row.expiryDate });
+        continue;
+      }
+    }
+
     validCompetencies.push({
       rowNumber: row.rowNumber,
       email: row.email,
       competencyId,
       grantedAt,
+      expiresAt,
       evidence: row.evidence,
     });
   }

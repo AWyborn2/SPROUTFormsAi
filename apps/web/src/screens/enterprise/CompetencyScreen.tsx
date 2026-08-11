@@ -24,12 +24,18 @@ import {
  * colouring it like a lapse would send someone to stand a worker down who is
  * entitled to keep working. `expiring` is the same colour because it calls for
  * the same action — book them — just with more runway.
+ *
+ * `undated` is neutral, not a warning: the person genuinely holds this (they
+ * count, same as `held`), the record is just missing a date to derive currency
+ * from. Colouring it like a lapse would misread a record-keeping gap as a
+ * qualification problem.
  */
 const STATUS_STYLE: Record<CompetencyStatus, { label: string; variant: BadgeVariant }> = {
   held: { label: 'Current', variant: 'success' },
   expiring: { label: 'Expiring', variant: 'warning' },
   grace: { label: 'In grace', variant: 'warning' },
   expired: { label: 'Expired', variant: 'danger' },
+  undated: { label: 'Undated', variant: 'neutral' },
 };
 
 /** ISO instant → the date alone. Nobody schedules requalification by the hour. */
@@ -37,18 +43,6 @@ function onDate(iso: string | null): string {
   return iso ? iso.slice(0, 10) : '—';
 }
 
-/**
- * Who holds this competency, and who has let it lapse.
- *
- * `Competency.holders` can say "12 people hold this" but never which twelve,
- * and being a stored count of grants it cannot say how many are still in date.
- * So an admin could set a validity and then have no way to see who it had just
- * lapsed — this is the answer to that.
- *
- * The order comes from the API and is not re-sorted here: expired first, then
- * grace, then expiring, then current, nearest date leading within each group.
- * The reason to open this list is to find who needs booking.
- */
 /**
  * Record a grant by hand.
  *
@@ -153,6 +147,18 @@ function GrantControl({ competency }: { competency: Competency }) {
   );
 }
 
+/**
+ * Who holds this competency, and who has let it lapse.
+ *
+ * `Competency.holders` can say "12 people hold this" but never which twelve,
+ * and being a stored count of grants it cannot say how many are still in date.
+ * So an admin could set a validity and then have no way to see who it had just
+ * lapsed — this is the answer to that.
+ *
+ * The order comes from the API and is not re-sorted here: expired first, then
+ * grace, then expiring, then current, nearest date leading within each group.
+ * The reason to open this list is to find who needs booking.
+ */
 function HolderRegister({ competency }: { competency: Competency }) {
   const { data: holders, isLoading, isError } = useCompetencyHolders(competency.id);
 
@@ -209,6 +215,12 @@ function HolderRegister({ competency }: { competency: Competency }) {
                     was taken away regardless — so the sub-line names the act
                     rather than an expiry that no longer decides anything.
 
+                    UNDATED NEXT, and named for what it actually is — missing a
+                    grant date, not missing an expiry. Both end up with no
+                    `expiresAt`, but "No expiry set" on an undated record would
+                    read as "this never expires", which is a claim the product
+                    cannot make without a date to derive from.
+
                     Otherwise PAST TENSE FOR A DATE THAT HAS PASSED. "Expires
                     2025-01-15" against a lapsed ticket reads as a future event,
                     and the badge beside it having to correct that is one glance
@@ -219,9 +231,11 @@ function HolderRegister({ competency }: { competency: Competency }) {
                   */}
                   {h.revoked
                     ? 'Revoked'
-                    : !h.expiresAt
-                      ? 'No expiry set'
-                      : `${past ? 'Expired' : 'Expires'} ${onDate(h.expiresAt)}`}
+                    : h.status === 'undated'
+                      ? 'Not yet dated'
+                      : !h.expiresAt
+                        ? 'No expiry set'
+                        : `${past ? 'Expired' : 'Expires'} ${onDate(h.expiresAt)}`}
                 </div>
               </div>
               {/*

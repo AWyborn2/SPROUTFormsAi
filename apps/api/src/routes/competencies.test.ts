@@ -1152,6 +1152,58 @@ describe('GET /competencies/:id/holders', () => {
     }
   });
 
+  it('reads a holder with no grant date at all as its own status, not a crash (R153, reversed)', async () => {
+    // A migrated grant whose source never recorded a date. It still counts —
+    // the person genuinely holds it — but must not read as an ordinary `held`
+    // record, and must not throw computing an expiry with nothing to derive
+    // from.
+    mockDbValue = fakeDb({
+      competenciesFindFirst: TRACK_DOZER,
+      competencyHoldersFindMany: [{ userId: 'u-current', grantedAt: null, revokedAt: null }],
+      usersFindMany: PEOPLE,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+
+      expect(res.status).toBe(200);
+      const [row] = (await res.json()) as {
+        grantedAt: string | null;
+        expiresAt: string | null;
+        status: string;
+        current: boolean;
+      }[];
+      expect(row!.grantedAt).toBeNull();
+      expect(row!.expiresAt).toBeNull();
+      expect(row!.status).toBe('undated');
+      expect(row!.current).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets an explicit expiry resolve a holder with no grant date — not undated, an ordinary dated state', async () => {
+    // The driver's-licence case: the org knows exactly when it expires even
+    // though no grant date was ever recorded.
+    mockDbValue = fakeDb({
+      competenciesFindFirst: TRACK_DOZER,
+      competencyHoldersFindMany: [
+        { userId: 'u-current', grantedAt: null, expiresAt: new Date(Date.now() + 400 * 24 * 60 * 60 * 1000), revokedAt: null },
+      ],
+      usersFindMany: PEOPLE,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, { headers: authHeader() });
+      const [row] = (await res.json()) as { grantedAt: string | null; status: string; current: boolean }[];
+      expect(row!.grantedAt).toBeNull();
+      expect(row!.status).toBe('held');
+      expect(row!.current).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
   it('orders dated holders ahead of undated ones within a status group', async () => {
     /*
       A competency with no validity, where individual grants carry an imported
