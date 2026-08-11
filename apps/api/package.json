@@ -8,7 +8,8 @@
     "build": "rm -rf dist *.tsbuildinfo && tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "seed:competencies": "tsx --conditions=development src/scripts/seed-competencies.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.111.0",

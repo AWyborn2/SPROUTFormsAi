@@ -8,6 +8,12 @@ import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
 import { findOwnedCompetency, grantCompetency, syncHolderCount } from '../lib/competency-grant.js';
+import {
+  competencyDto,
+  competencyValidityFields,
+  createCompetency,
+  createCompetencyBody,
+} from '../lib/competency-create.js';
 import { requiredCompetencyIdsByUser, requiredCompetencyIdsFor } from '../lib/standing.js';
 import { permissionScope } from '../lib/permissions.js';
 import { db } from '../db.js';
@@ -51,28 +57,16 @@ competenciesRouter.get(
 );
 
 /*
-  `validForMonths` and `gracePeriodDays` are both optional and both default to
-  NULL — never expires. That is deliberate: a qualification does not start
-  lapsing because someone created it, only because someone stated how long it
-  lasts. 600 months is a sanity ceiling, not a policy.
+  `createCompetencyBody`, the validity bounds, and the insert itself live in
+  lib/competency-create.ts — the bulk seeder writes through the same schema and
+  the same defaults rather than hand-rolling an insert that would bypass them.
 */
-const validityFields = {
-  validForMonths: z.number().int().positive().max(600).nullable().optional(),
-  gracePeriodDays: z.number().int().nonnegative().max(365).nullable().optional(),
-};
-
-const createCompetencyBody = z.object({
-  name: z.string().min(1),
-  code: z.string().min(1),
-  holders: z.number().int().nonnegative().optional(),
-  ...validityFields,
-});
 
 /** Everything on a competency an admin may change after creating it. */
 const updateCompetencyBody = z.object({
   name: z.string().min(1).optional(),
   code: z.string().min(1).optional(),
-  ...validityFields,
+  ...competencyValidityFields,
 });
 
 competenciesRouter.post(
@@ -90,26 +84,8 @@ competenciesRouter.post(
       return;
     }
     const tenant = req.tenant!;
-    const [row] = await db
-      .insert(schema.competencies)
-      .values({
-        orgId: tenant.orgId,
-        name: parsed.data.name,
-        code: parsed.data.code,
-        holders: parsed.data.holders ?? 0,
-        validForMonths: parsed.data.validForMonths ?? null,
-        gracePeriodDays: parsed.data.gracePeriodDays ?? null,
-      })
-      .returning();
-    if (!row) throw new Error('competency_create_failed: insert returned no row');
-    res.status(201).json({
-      id: row.id,
-      name: row.name,
-      code: row.code,
-      holders: row.holders,
-      validForMonths: row.validForMonths,
-      gracePeriodDays: row.gracePeriodDays,
-    });
+    const row = await createCompetency(db, tenant.orgId, parsed.data);
+    res.status(201).json(competencyDto(row));
   }),
 );
 
@@ -169,14 +145,7 @@ competenciesRouter.patch(
       icon: 'award',
     });
 
-    res.json({
-      id: row.id,
-      name: row.name,
-      code: row.code,
-      holders: row.holders,
-      validForMonths: row.validForMonths,
-      gracePeriodDays: row.gracePeriodDays,
-    });
+    res.json(competencyDto(row));
   }),
 );
 
