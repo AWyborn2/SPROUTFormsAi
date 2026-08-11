@@ -27,6 +27,7 @@ import {
   validateWorkflow,
   partFieldAccess,
   competencyStatus,
+  type CompetencyStatus,
   PROFILE_PREFILL_KEYS,
   profilePrefillValues,
   validateProfilePrefill,
@@ -407,9 +408,17 @@ interface PrerequisiteResult {
   fieldId: string;
   competencyId: string;
   competencyName: string;
-  /** Current — held, expiring or in grace. Expired, revoked and missing are not. */
+  /**
+   * Current — held, expiring, in grace, or undated. Expired, revoked and
+   * missing are not.
+   */
   satisfied: boolean;
-  status: 'held' | 'expiring' | 'grace' | 'expired' | 'revoked' | 'missing';
+  /**
+   * Every DATED state, plus the two this surface adds for a grant that is not
+   * there at all. Derived from `CompetencyStatus` rather than re-listed, so a
+   * state added there (as `undated` was) cannot silently go unhandled here.
+   */
+  status: CompetencyStatus | 'revoked' | 'missing';
   expiresAt: string | null;
 }
 

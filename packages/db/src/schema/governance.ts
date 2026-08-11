@@ -125,9 +125,23 @@ export const competencyHolders = pgTable(
 
       Defaults to now so existing rows get a sane date, which is also what makes
       "backfill from the grant date" work: those rows already carry a creation
-      time, and this column adopts it.
+      time, and this column adopts it. The default is DEAD for every path that
+      actually inserts a row today — `grantCompetency` always stamps an explicit
+      `new Date()` — so it exists only as a floor under a future caller that
+      forgets to.
+
+      NULLABLE (reversing R153): a migrated competency whose source system never
+      recorded a grant date is real and held NOW, not "held once it is dated" —
+      withholding the grant entirely until someone backfills a date it may never
+      get would lose the person's actual qualification history for no reason.
+      Null is written EXPLICITLY by the workforce importer for exactly this case
+      (never left to the default, which would fabricate "granted today" — the one
+      outcome worse than recording no date, per R153's own reasoning). Downstream,
+      `competencyStatus` treats a null grant date as its own `'undated'` state
+      rather than folding it into `'held'`, so it stays visibly flagged rather
+      than reading as an ordinary, fully-dated grant.
     */
-    grantedAt: timestamp('granted_at', { withTimezone: true }).defaultNow().notNull(),
+    grantedAt: timestamp('granted_at', { withTimezone: true }).defaultNow(),
     /*
       An explicit end date that OVERRIDES the derived one. Null normally, so
       expiry follows the qualification's validity period.
@@ -611,9 +625,15 @@ export const importRunRows = pgTable(
       .$type<Array<{ field: string; existing: string; fromFile: string }>>()
       .notNull()
       .default([]),
-    /** Competencies this row's lines recorded, and lines skipped for want of a date (R153). */
+    /**
+     * Competencies this row's lines recorded, and — of those — how many carry
+     * no grant date (R153, reversed: an undated line is still RECORDED, just
+     * flagged for someone to date later, rather than withheld). Both count
+     * lines that landed; an undated one is a subset of recorded, never a
+     * separate "did not record" bucket.
+     */
     competenciesRecorded: integer().notNull().default(0),
-    competenciesSkipped: integer().notNull().default(0),
+    competenciesUndated: integer().notNull().default(0),
     /** Assessments assignment created for this person after their competencies landed (R163). */
     assessmentsAssigned: integer().notNull().default(0),
     /** Which pool the row's seat came from, or null where it cost none (R143). */

@@ -443,7 +443,7 @@ competenciesRouter.get(
         /** Null on an ordinary competency, or when the caller may not see it; set where this grant IS a licence (R34). */
         licenceClass: canSeeLicence(r.userId) ? r.licenceClass : null,
         licenceNumber: canSeeLicence(r.userId) ? r.licenceNumber : null,
-        grantedAt: r.grantedAt.toISOString(),
+        grantedAt: r.grantedAt ? r.grantedAt.toISOString() : null,
         expiresAt: expiry ? expiry.toISOString() : null,
         status: currency.status,
         revoked: currency.revoked,
@@ -462,9 +462,11 @@ competenciesRouter.get(
       one. A name-sorted register would bury the two people who need booking
       among two hundred who do not.
     */
-    const URGENCY = { expired: 0, grace: 1, expiring: 2, held: 3 } as const;
+    // Undated ranks below a fully-dated 'held': nothing is expiring, but the
+    // record itself needs finishing, so it should not read as identically settled.
+    const URGENCY = { expired: 0, grace: 1, expiring: 2, held: 3, undated: 4 } as const;
     const rankOf = (h: { status: keyof typeof URGENCY; revoked: boolean }) =>
-      h.revoked ? 4 : URGENCY[h.status];
+      h.revoked ? 5 : URGENCY[h.status];
     holders.sort((a, b) => {
       const byUrgency = rankOf(a) - rankOf(b);
       if (byUrgency !== 0) return byUrgency;

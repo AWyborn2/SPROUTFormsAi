@@ -22,12 +22,18 @@ import {
  * colouring it like a lapse would send someone to stand a worker down who is
  * entitled to keep working. `expiring` is the same colour because it calls for
  * the same action — book them — just with more runway.
+ *
+ * `undated` is neutral, not a warning: the person genuinely holds this (they
+ * count, same as `held`), the record is just missing a date to derive currency
+ * from. Colouring it like a lapse would misread a record-keeping gap as a
+ * qualification problem.
  */
 const STATUS_STYLE: Record<CompetencyStatus, { label: string; variant: BadgeVariant }> = {
   held: { label: 'Current', variant: 'success' },
   expiring: { label: 'Expiring', variant: 'warning' },
   grace: { label: 'In grace', variant: 'warning' },
   expired: { label: 'Expired', variant: 'danger' },
+  undated: { label: 'Undated', variant: 'neutral' },
 };
 
 /** ISO instant → the date alone. Nobody schedules requalification by the hour. */
@@ -95,6 +101,12 @@ function HolderRegister({ competencyId }: { competencyId: string }) {
                     was taken away regardless — so the sub-line names the act
                     rather than an expiry that no longer decides anything.
 
+                    UNDATED NEXT, and named for what it actually is — missing a
+                    grant date, not missing an expiry. Both end up with no
+                    `expiresAt`, but "No expiry set" on an undated record would
+                    read as "this never expires", which is a claim the product
+                    cannot make without a date to derive from.
+
                     Otherwise PAST TENSE FOR A DATE THAT HAS PASSED. "Expires
                     2025-01-15" against a lapsed ticket reads as a future event,
                     and the badge beside it having to correct that is one glance
@@ -105,9 +117,11 @@ function HolderRegister({ competencyId }: { competencyId: string }) {
                   */}
                   {h.revoked
                     ? 'Revoked'
-                    : !h.expiresAt
-                      ? 'No expiry set'
-                      : `${past ? 'Expired' : 'Expires'} ${onDate(h.expiresAt)}`}
+                    : h.status === 'undated'
+                      ? 'Not yet dated'
+                      : !h.expiresAt
+                        ? 'No expiry set'
+                        : `${past ? 'Expired' : 'Expires'} ${onDate(h.expiresAt)}`}
                 </div>
               </div>
               {/*

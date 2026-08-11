@@ -241,7 +241,12 @@ async function owedFileItems(orgId: string): Promise<WorkingListItem[]> {
       kind: 'owed_file',
       id: grant.id,
       subject: `Certificate owed: ${nameFor.get(grant.userId) ?? 'A member'} — ${competencyName.get(grant.competencyId) ?? 'a competency'}`,
-      createdAt: grant.grantedAt.toISOString(),
+      // `ownGrants` (above) is filtered to non-imported rows, and every path
+      // that creates one stamps a real grant date — this is never actually
+      // null today. The fallback is defensive: the column is nullable now
+      // (R153, reversed), and a missing date here should read as "when this
+      // was first seen" rather than crash the list.
+      createdAt: (grant.grantedAt ?? grant.createdAt).toISOString(),
     });
   }
 

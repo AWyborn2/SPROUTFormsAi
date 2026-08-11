@@ -287,6 +287,23 @@ describe('CompetencyScreen holder register', () => {
     expect(screen.getByText('No expiry set')).toBeDefined();
   });
 
+  it('marks an undated holder distinctly from a perpetual one (R153, reversed)', () => {
+    // Both end up with no expiresAt, but they are not the same claim: "No
+    // expiry set" says the competency never expires; an undated holder says
+    // the product does not know, because nobody supplied a grant date. Reading
+    // them the same way would misreport a record-keeping gap as settled.
+    competencies.data = [TRACK_DOZER];
+    holdersResult.data = [holder({ status: 'undated', current: true, grantedAt: null, expiresAt: null })];
+    render(<CompetencyScreen />);
+    openRegister();
+
+    expect(screen.getByText('Undated')).toBeDefined();
+    expect(screen.getByText('Not yet dated')).toBeDefined();
+    expect(screen.queryByText('No expiry set')).toBeNull();
+    // Counts as current — a missing date is not evidence of a lapsed person.
+    expect(screen.queryByText(/no longer current/)).toBeNull();
+  });
+
   it('says a passed date in the past tense', () => {
     // "Expires 2025-01-15" against a lapsed ticket reads as a future event, and
     // leaves the badge beside it to do the correcting.
