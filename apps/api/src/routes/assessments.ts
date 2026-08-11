@@ -529,6 +529,7 @@ const toolBody = z.object({
       around.
     */
     candidateNameFieldId: z.string().optional(),
+    candidateSignatureFieldId: z.string().optional(),
     /*
       Who does what, and when. The same trap this file warns about above: a
       manifest property this schema does not name is silently STRIPPED, so a
@@ -2022,7 +2023,11 @@ assessmentCasesRouter.get(
         : null,
       minimumHours: part.minimumHours ?? null,
       durationColumnKey: part.durationColumnKey ?? null,
-      fields: stripMarkingSecrets(visibleFields),
+      fields: stripMarkingSecrets(visibleFields).map((f) =>
+        f.id === manifest.candidateSignatureFieldId && f.type === 'text'
+          ? { ...f, type: 'signature' as const }
+          : f,
+      ),
       /*
         WHAT THIS CALLER MAY CHANGE, decided here rather than on the screen.
 

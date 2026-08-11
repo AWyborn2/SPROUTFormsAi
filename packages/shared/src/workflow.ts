@@ -547,7 +547,15 @@ export function validateWorkflow(
 
     const fillers = workflow.roles.filter((r) => section.access[r] === 'fill');
     if (fillers.length === 0) {
-      warnings.push(`Nobody fills "${section.label}" — no role is set to Fill, so it can never be completed.`);
+      const sectionFieldIds = fieldIdsInSection(section, (pk) =>
+        fieldsInPart(fields, manifest, pk).map((f) => f.id),
+      );
+      const allSystemSourced =
+        sectionFieldIds.length > 0 &&
+        sectionFieldIds.every((id) => valueSource(section, id) !== 'entry');
+      if (!allSystemSourced) {
+        warnings.push(`Nobody fills "${section.label}" — no role is set to Fill, so it can never be completed.`);
+      }
     }
   }
 
