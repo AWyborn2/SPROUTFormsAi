@@ -2,7 +2,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import { schema, type Db } from '@formai/db';
 import {
   blocksForOverflow,
-  emptyOptionalProfileFields,
+  incompleteProfileFields,
   type PlacementErrorCode,
   type SeatBlockPurchase,
   type Role,
@@ -291,9 +291,32 @@ export interface RowDifference {
   fromFile: string;
 }
 
+/**
+ * What a caller supplies for the profile behind a landed row.
+ *
+ * The two names are required because R3 derives a display name from them and a
+ * record with neither identifies nobody. EVERYTHING ELSE IS NULLABLE, and the
+ * nulls are what let a workforce import land a partial record: the import
+ * carries what its source system holds, `incompleteProfileFields` names what it
+ * did not, and nobody invents a demographic answer to satisfy a column.
+ *
+ * The index signature stays for the induction seeding path (U40), which passes
+ * the full intake answer set through by key.
+ */
 export interface ProfileSeed {
   firstName: string;
   lastName: string;
+  middleName?: string | null;
+  dateOfBirth?: string | null;
+  gender?: string | null;
+  ethnicity?: string | null;
+  addressStreet?: string | null;
+  suburb?: string | null;
+  postcode?: string | null;
+  mobile?: string | null;
+  emergencyContactName?: string | null;
+  emergencyContactPhone?: string | null;
+  starterType?: string | null;
   [key: string]: unknown;
 }
 
@@ -449,7 +472,7 @@ export async function landImportRow(
           exactly what it left empty, rather than having whoever ran the import
           invent demographic answers for a worker they may never speak to.
         */
-        incomplete: emptyOptionalProfileFields(values),
+        incomplete: incompleteProfileFields(values),
       } as const;
     });
 

@@ -29,7 +29,30 @@ import { ROLE_LABELS, type Role } from './roles.js';
 /** The header a filled file must carry, and the columns each section takes. */
 export const WORKFORCE_IMPORT_TEMPLATE = [
   '#profiles',
-  'name,email,access_level,locations,departments,roles,employee_number,swipe_card_number',
+  [
+    'name',
+    'email',
+    'access_level',
+    'locations',
+    'departments',
+    'roles',
+    'employee_number',
+    'swipe_card_number',
+    // The profile fields (R19, R154). EVERY ONE OPTIONAL IN THE FILE: a source
+    // system holds what it holds, and a column left blank lands the row flagged
+    // for that field rather than rejecting the person over it.
+    'middle_name',
+    'date_of_birth',
+    'gender',
+    'ethnicity',
+    'address_street',
+    'suburb',
+    'postcode',
+    'mobile',
+    'emergency_contact_name',
+    'emergency_contact_phone',
+    'starter_type',
+  ].join(','),
   '',
   '#competencies',
   'email,competency,grant_date,expiry_date,evidence',
@@ -50,6 +73,23 @@ export interface RawProfileRow {
   roles: string[];
   employeeNumber: string;
   swipeCardNumber: string;
+  /**
+   * The profile fields, ALL OPTIONAL and all carried as written (R19, R154).
+   * A file built from an older template supplies none of them and parses
+   * exactly as it did before — the header decides which columns are present,
+   * so an absent column and an empty cell are the same thing here.
+   */
+  middleName: string;
+  dateOfBirth: string;
+  gender: string;
+  ethnicity: string;
+  addressStreet: string;
+  suburb: string;
+  postcode: string;
+  mobile: string;
+  emergencyContactName: string;
+  emergencyContactPhone: string;
+  starterType: string;
 }
 
 export interface RawCompetencyRow {
@@ -140,6 +180,22 @@ export function parseWorkforceCsv(text: string): ParsedImport {
     expiry_date: 3,
     evidence: 4,
   };
+  /*
+    The same for the profiles section, and defaulting to the EIGHT columns the
+    template carried before the profile fields were added — which is what a file
+    with no header line is overwhelmingly likely to be. A name absent from this
+    map reads as an empty cell, so the added columns cost an older file nothing.
+  */
+  let profileColumns: Record<string, number> = {
+    name: 0,
+    email: 1,
+    access_level: 2,
+    locations: 3,
+    departments: 4,
+    roles: 5,
+    employee_number: 6,
+    swipe_card_number: 7,
+  };
 
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
@@ -156,7 +212,13 @@ export function parseWorkforceCsv(text: string): ParsedImport {
       continue;
     }
     // The column-header line at the top of each section.
-    if (section === 'profiles' && line.toLowerCase().startsWith('name,')) continue;
+    if (section === 'profiles' && line.toLowerCase().startsWith('name,')) {
+      profileColumns = {};
+      splitCsvLine(raw).forEach((name, index) => {
+        profileColumns[name.trim().toLowerCase()] = index;
+      });
+      continue;
+    }
     if (section === 'competencies' && line.toLowerCase().startsWith('email,')) {
       competencyColumns = {};
       splitCsvLine(raw).forEach((name, index) => {
@@ -167,16 +229,31 @@ export function parseWorkforceCsv(text: string): ParsedImport {
 
     const f = splitCsvLine(raw);
     if (section === 'profiles') {
+      const at = (name: string): string => {
+        const index = profileColumns[name];
+        return index === undefined ? '' : (f[index] ?? '');
+      };
       profiles.push({
         rowNumber,
-        name: f[0] ?? '',
-        email: f[1] ?? '',
-        accessLevel: f[2] ?? '',
-        locations: multi(f[3] ?? ''),
-        departments: multi(f[4] ?? ''),
-        roles: multi(f[5] ?? ''),
-        employeeNumber: f[6] ?? '',
-        swipeCardNumber: f[7] ?? '',
+        name: at('name'),
+        email: at('email'),
+        accessLevel: at('access_level'),
+        locations: multi(at('locations')),
+        departments: multi(at('departments')),
+        roles: multi(at('roles')),
+        employeeNumber: at('employee_number'),
+        swipeCardNumber: at('swipe_card_number'),
+        middleName: at('middle_name'),
+        dateOfBirth: at('date_of_birth'),
+        gender: at('gender'),
+        ethnicity: at('ethnicity'),
+        addressStreet: at('address_street'),
+        suburb: at('suburb'),
+        postcode: at('postcode'),
+        mobile: at('mobile'),
+        emergencyContactName: at('emergency_contact_name'),
+        emergencyContactPhone: at('emergency_contact_phone'),
+        starterType: at('starter_type'),
       });
     } else if (section === 'competencies') {
       // A column the header never named reads as absent, not as field 0.
@@ -216,6 +293,15 @@ export type ImportRejectionReason =
   | 'bad_grant_date'
   | 'bad_expiry_date'
   /*
+    A date of birth that is present but unreadable, on the same rule as the two
+    above: blank is a gap and lands flagged, a cell somebody filled in and got
+    wrong is an error worth showing them. Rejecting the person over it rather
+    than dropping the value is deliberate — this is the field an identity check
+    against a licence runs on, so a date silently discarded reads afterwards as
+    a date nobody ever had.
+  */
+  | 'bad_date_of_birth'
+  /*
     R7: both workforce numbers are unique WITHIN the organisation, which is what
     lets either tell two people of the same name apart. A duplicate is a
     rejection rather than a merge — unlike a known email address, which R149
@@ -247,6 +333,26 @@ export interface ValidProfileRow {
   roleIds: string[];
   employeeNumber: string;
   swipeCardNumber: string;
+  /**
+   * The profile fields as they will be stored (R19, R154). Empty means the file
+   * did not supply one — the row still lands, and `incompleteProfileFields`
+   * names what is missing on the way through.
+   *
+   * `dateOfBirth` is NORMALISED to ISO `YYYY-MM-DD` here, matching the column
+   * it lands in, so the organisation's day/month order is resolved once at the
+   * boundary rather than travelling further in as an ambiguous string.
+   */
+  middleName: string;
+  dateOfBirth: string;
+  gender: string;
+  ethnicity: string;
+  addressStreet: string;
+  suburb: string;
+  postcode: string;
+  mobile: string;
+  emergencyContactName: string;
+  emergencyContactPhone: string;
+  starterType: string;
 }
 
 /** A competency line that passed, with the competency resolved and its dates parsed. */
@@ -485,6 +591,22 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
     if (employee) claimedEmployee.add(employee);
     if (swipe) claimedSwipe.add(swipe);
 
+    /*
+      The date of birth, normalised to ISO before it goes any further. Blank
+      stays blank and lands flagged; unreadable is the operator's typo and is
+      worth showing rather than swallowing.
+    */
+    let dateOfBirth = '';
+    const dobRaw = row.dateOfBirth.trim();
+    if (dobRaw) {
+      const parsed = parseDateCell(dobRaw, ctx.dateFormat);
+      if (!parsed) {
+        reject('bad_date_of_birth', dobRaw);
+        continue;
+      }
+      dateOfBirth = parsed.toISOString().slice(0, 10);
+    }
+
     validEmails.add(row.email.toLowerCase());
     validProfiles.push({
       rowNumber: row.rowNumber,
@@ -496,6 +618,17 @@ export function validateWorkforceImport(parsed: ParsedImport, ctx: ImportContext
       roleIds,
       employeeNumber: row.employeeNumber,
       swipeCardNumber: row.swipeCardNumber,
+      middleName: row.middleName.trim(),
+      dateOfBirth,
+      gender: row.gender.trim(),
+      ethnicity: row.ethnicity.trim(),
+      addressStreet: row.addressStreet.trim(),
+      suburb: row.suburb.trim(),
+      postcode: row.postcode.trim(),
+      mobile: row.mobile.trim(),
+      emergencyContactName: row.emergencyContactName.trim(),
+      emergencyContactPhone: row.emergencyContactPhone.trim(),
+      starterType: row.starterType.trim(),
     });
   }
 

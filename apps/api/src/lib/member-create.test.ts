@@ -85,6 +85,17 @@ function row(over: Partial<ValidProfileRow> = {}): ValidProfileRow {
     roleIds: ['jr-1'],
     employeeNumber: '',
     swipeCardNumber: '',
+    middleName: '',
+    dateOfBirth: '',
+    gender: '',
+    ethnicity: '',
+    addressStreet: '',
+    suburb: '',
+    postcode: '',
+    mobile: '',
+    emergencyContactName: '',
+    emergencyContactPhone: '',
+    starterType: '',
     ...over,
   };
 }
