@@ -13,6 +13,7 @@ import {
   competencyValidityFields,
   createCompetency,
   createCompetencyBody,
+  optionalCompetencyCode,
 } from '../lib/competency-create.js';
 import { requiredCompetencyIdsByUser, requiredCompetencyIdsFor } from '../lib/standing.js';
 import { permissionScope } from '../lib/permissions.js';
@@ -65,7 +66,16 @@ competenciesRouter.get(
 /** Everything on a competency an admin may change after creating it. */
 const updateCompetencyBody = z.object({
   name: z.string().min(1).optional(),
-  code: z.string().min(1).optional(),
+  /*
+    Optional in two senses, and both are needed. Omitting `code` leaves it
+    alone; sending it blank or null CLEARS it, which is how a competency wrongly
+    given an invented code gets corrected. `optionalCompetencyCode` folds blank
+    to null so the cleared state has one spelling.
+
+    `.optional()` on the outside is what keeps "not sent" distinguishable from
+    "sent empty" — without it every PATCH would silently wipe the code.
+  */
+  code: optionalCompetencyCode.optional(),
   ...competencyValidityFields,
 });
 
@@ -140,7 +150,9 @@ competenciesRouter.patch(
 
     await recordAudit(db, tenant, {
       action: 'Updated competency',
-      target: `${row.code}: ${Object.keys(patch).join(', ') || 'no change'}`,
+      // Named by code where there is one, by name where there is not — an audit
+      // line reading "null: code" identifies nothing.
+      target: `${row.code ?? row.name}: ${Object.keys(patch).join(', ') || 'no change'}`,
       category: 'settings',
       icon: 'award',
     });
@@ -314,7 +326,7 @@ competenciesRouter.delete(
       );
     await recordAudit(db, tenant, {
       action: 'Revoked competency',
-      target: `${competency.code} → ${req.params.userId}`,
+      target: `${competency.code ?? competency.name} → ${req.params.userId}`,
       category: 'settings',
       icon: 'award',
     });

@@ -6,8 +6,11 @@
  *
  * The file is `name,code,valid_for_months` with a header line; a BLANK
  * `valid_for_months` means the qualification NEVER EXPIRES and is stored as
- * NULL, not zero. Re-running is safe: a name already in the org's register is
- * skipped and reported, never updated.
+ * NULL, not zero. A BLANK `code` is also allowed and also stored as NULL — an
+ * internal competency has no nationally-recognised code, and inventing one to
+ * satisfy the loader would put a permanently wrong identifier in the column
+ * people cross-reference against their LMS. Re-running is safe: a name already
+ * in the org's register is skipped and reported, never updated.
  *
  * This exists because a customer migration needs ~65 competencies to exist
  * before a competency import can resolve against them, and the import

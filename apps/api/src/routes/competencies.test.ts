@@ -171,6 +171,25 @@ describe('GET /competencies', () => {
       server.close();
     }
   });
+
+  it('serialises a codeless competency as an explicit null, not a dropped field', async () => {
+    // A dropped key would make the client guess. `null` says "there is no code"
+    // in the same word the register stores.
+    mockDbValue = fakeDb({
+      competenciesFindMany: [
+        { id: 'c1', name: 'Contractor Endorsement Form', code: null, holders: 191 },
+      ],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies`, { headers: authHeader() });
+      const body = (await res.json()) as { code: string | null }[];
+      expect(body[0]).toMatchObject({ name: 'Contractor Endorsement Form', code: null });
+      expect(Object.keys(body[0]!)).toContain('code');
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe('POST /competencies', () => {
@@ -238,6 +257,100 @@ describe('POST /competencies', () => {
         schema.competencies,
         expect.objectContaining({ validForMonths: null, gracePeriodDays: null }),
       );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('creates a competency with no code at all', async () => {
+    /*
+      A NATIONALLY-RECOGNISED CODE IS NOT UNIVERSAL. A contractor endorsement
+      form or an in-house equipment induction is an internal competency and has
+      never had one. Requiring a code forced whoever loaded the register to
+      invent an identifier in the very column people cross-reference against
+      their external LMS — wrong quietly and permanently. A code is still
+      strongly preferred; its absence is now sayable.
+    */
+    const { db, insertValues } = fakeDb({
+      insertedCompetency: {
+        id: 'c-new',
+        name: 'Contractor Endorsement Form',
+        code: null,
+        holders: 0,
+      },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Contractor Endorsement Form' }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(await res.json()).toMatchObject({ name: 'Contractor Endorsement Form', code: null });
+      expect(insertValues).toHaveBeenCalledWith(
+        schema.competencies,
+        expect.objectContaining({ code: null }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stores a blank or whitespace code as NULL, never as an empty string', async () => {
+    // One spelling of "no code" in the register. '' and null are two ways to
+    // state the same fact, and a reader would have to know both.
+    for (const sent of ['', '   ', null]) {
+      const { db, insertValues } = fakeDb({
+        insertedCompetency: { id: 'c-new', name: 'Bistrainer Basics', code: null, holders: 0 },
+      });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await fetch(`${base}/competencies`, {
+          method: 'POST',
+          headers: { ...authHeader(), 'content-type': 'application/json' },
+          body: JSON.stringify({ name: 'Bistrainer Basics', code: sent }),
+        });
+        expect(res.status).toBe(201);
+        expect(insertValues).toHaveBeenCalledWith(
+          schema.competencies,
+          expect.objectContaining({ code: null }),
+        );
+      } finally {
+        server.close();
+      }
+    }
+  });
+
+  it('still stores and trims a code when one is given, and still rejects a missing name', async () => {
+    const { db, insertValues } = fakeDb({
+      insertedCompetency: { id: 'c-new', name: 'Working at Heights', code: 'RIIWHS204E', holders: 0 },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const ok = await fetch(`${base}/competencies`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Working at Heights', code: '  RIIWHS204E  ' }),
+      });
+      expect(ok.status).toBe(201);
+      expect(insertValues).toHaveBeenCalledWith(
+        schema.competencies,
+        expect.objectContaining({ code: 'RIIWHS204E' }),
+      );
+
+      // The name is still required — the code becoming optional weakens nothing
+      // else about creating a competency.
+      const bad = await fetch(`${base}/competencies`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ code: 'RIIWHS204E' }),
+      });
+      expect(bad.status).toBe(400);
     } finally {
       server.close();
     }
@@ -316,6 +429,45 @@ describe('PATCH /competencies/:id', () => {
       expect(body.validForMonths).toBeNull();
     } finally {
       server.close();
+    }
+  });
+
+  it('clears a code to NULL when one is sent blank, and leaves it alone when omitted', async () => {
+    /*
+      Both halves matter. Clearing is how a competency that was given an
+      invented code — the only thing anyone could do while the column was
+      required — gets corrected. Omitting must still be a no-op, or every patch
+      of the validity fields would silently wipe the code.
+    */
+    const cleared = fakeDb({ competenciesFindFirst: EXISTING });
+    mockDbValue = cleared.db;
+    let app = startApp();
+    try {
+      const res = await fetch(`${app.base}/competencies/c1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ code: '  ' }),
+      });
+      expect(res.status).toBe(200);
+      expect(cleared.updateSet).toHaveBeenCalledWith(schema.competencies, { code: null });
+      expect(await res.json()).toMatchObject({ code: null });
+    } finally {
+      app.server.close();
+    }
+
+    const untouched = fakeDb({ competenciesFindFirst: EXISTING });
+    mockDbValue = untouched.db;
+    app = startApp();
+    try {
+      const res = await fetch(`${app.base}/competencies/c1`, {
+        method: 'PATCH',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ validForMonths: 36 }),
+      });
+      expect(untouched.updateSet).toHaveBeenCalledWith(schema.competencies, { validForMonths: 36 });
+      expect(await res.json()).toMatchObject({ code: 'Q34666893' });
+    } finally {
+      app.server.close();
     }
   });
 

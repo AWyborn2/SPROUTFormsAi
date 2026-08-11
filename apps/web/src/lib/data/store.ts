@@ -297,7 +297,8 @@ export interface ImportDraftSummary {
 interface CompetencyDto {
   id: string;
   name: string;
-  code: string;
+  /** Nullable: an internal competency legitimately has no code. */
+  code: string | null;
   holders: number;
   /** Optional: the column is nullable, and JSON drops an undefined. */
   validForMonths?: number | null;
@@ -396,7 +397,9 @@ function toCompetency(dto: CompetencyDto): Competency {
   return {
     id: dto.id,
     name: dto.name,
-    code: dto.code,
+    // `?? null` and not `?? ''`: an older payload omitting the field means "no
+    // code", and the register holds one spelling of that.
+    code: dto.code ?? null,
     holders: dto.holders,
     validForMonths: dto.validForMonths ?? null,
     gracePeriodDays: dto.gracePeriodDays ?? null,
@@ -1190,7 +1193,8 @@ export const store = {
    */
   createCompetency(input: {
     name: string;
-    code: string;
+    /** Null for an internal competency with no nationally-recognised code. */
+    code: string | null;
     validForMonths: number | null;
     gracePeriodDays: number | null;
   }): Promise<Competency> {

@@ -16,9 +16,27 @@ export const competencyValidityFields = {
   gracePeriodDays: z.number().int().nonnegative().max(365).nullable().optional(),
 };
 
+/*
+  A CODE IS OPTIONAL, AND STRONGLY PREFERRED. It is the identifier an operator
+  cross-references against their external LMS, so where one exists it is stored
+  and shown exactly as before. But an internal competency — a contractor
+  endorsement form, an in-house equipment induction — has none, and the only way
+  past a required field was to invent one. A fabricated code is wrong quietly
+  and permanently, so the rule changed rather than the data.
+
+  Absent, blank and whitespace all mean the same thing and all become NULL. The
+  register holds ONE spelling of "no code": an empty string in one row and a
+  null in the next is two ways to say it, and every reader would then have to
+  know both.
+*/
+export const optionalCompetencyCode = z
+  .string()
+  .nullish()
+  .transform((value) => value?.trim() || null);
+
 export const createCompetencyBody = z.object({
   name: z.string().min(1),
-  code: z.string().min(1),
+  code: optionalCompetencyCode,
   holders: z.number().int().nonnegative().optional(),
   ...competencyValidityFields,
 });
@@ -51,7 +69,8 @@ export async function createCompetency(
     .values({
       orgId,
       name: input.name,
-      code: input.code,
+      // Already normalised by the schema above — blank is NULL, never ''.
+      code: input.code ?? null,
       holders: input.holders ?? 0,
       validForMonths: input.validForMonths ?? null,
       gracePeriodDays: input.gracePeriodDays ?? null,

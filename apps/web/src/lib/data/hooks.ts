@@ -969,7 +969,7 @@ export function useCreateCompetency() {
   return useMutation({
     mutationFn: async (input: {
       name: string;
-      code: string;
+      code: string | null;
       validForMonths: number | null;
       gracePeriodDays: number | null;
     }) => store.createCompetency(input),

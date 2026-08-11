@@ -449,11 +449,19 @@ function NewCompetency({ existing }: { existing: Competency[] }) {
 
   function onCreate() {
     const trimmedName = name.trim();
-    const trimmedCode = code.trim();
-    if (!trimmedName || !trimmedCode) {
-      // The code is what the authoring script and every training-system export
-      // match on, so a competency without one is invisible to both.
-      toast({ variant: 'warning', message: 'A competency needs both a name and a code.' });
+    /*
+      A CODE IS OPTIONAL HERE, AND STILL STRONGLY PREFERRED. It is what the
+      authoring script and every training-system export match on, so a
+      competency without one is invisible to both — but some competencies
+      genuinely have none. A contractor endorsement form or an in-house
+      equipment induction is not a nationally-coded unit, and the only way past
+      a required field was to type an invented code into the column people
+      cross-reference against their LMS. The name is still required: a
+      competency with neither is nothing at all.
+    */
+    const trimmedCode = code.trim() || null;
+    if (!trimmedName) {
+      toast({ variant: 'warning', message: 'A competency needs a name.' });
       return;
     }
     /*
@@ -463,8 +471,14 @@ function NewCompetency({ existing }: { existing: Competency[] }) {
       duplicate makes which one an assessment awards depend on row order. This
       is a guard, not enforcement, but it catches the way it would actually
       happen: somebody adding the same ticket twice.
+
+      Skipped entirely when there is no code. Two competencies that both have
+      none are not a duplicate of anything — absence is not an identifier, and
+      matching on it would block the second internal competency an org adds.
     */
-    const clash = existing.find((c) => c.code.trim().toLowerCase() === trimmedCode.toLowerCase());
+    const clash = trimmedCode
+      ? existing.find((c) => c.code?.trim().toLowerCase() === trimmedCode.toLowerCase())
+      : undefined;
     if (clash) {
       toast({
         variant: 'warning',
@@ -488,7 +502,12 @@ function NewCompetency({ existing }: { existing: Competency[] }) {
       {
         onSuccess: (added) => {
           reset();
-          toast({ variant: 'success', message: `${added.name} (${added.code}) added to the register.` });
+          toast({
+            variant: 'success',
+            message: added.code
+              ? `${added.name} (${added.code}) added to the register.`
+              : `${added.name} added to the register.`,
+          });
         },
         /*
           Without this the failure is INVISIBLE. The global mutation handler
@@ -526,7 +545,7 @@ function NewCompetency({ existing }: { existing: Competency[] }) {
         onChange={(e) => setName(e.target.value)}
       />
       <Input
-        label="Code"
+        label="Code (optional)"
         placeholder="Q34666893"
         value={code}
         onChange={(e) => setCode(e.target.value)}
@@ -550,7 +569,8 @@ function NewCompetency({ existing }: { existing: Competency[] }) {
       </div>
       <p className="text-[11px] text-text-tertiary">
         The code must match the one your training system uses — it is what links an assessment to
-        the ticket it awards.
+        the ticket it awards. Leave it blank only for an internal competency that has no code;
+        inventing one puts a reference in your register that your training system cannot resolve.
       </p>
       <div className="flex gap-2">
         <Button size="sm" onClick={onCreate} disabled={create.isPending}>
@@ -643,7 +663,14 @@ export function CompetencyScreen() {
                   />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[13.5px] font-semibold">{c.name}</div>
-                    <div className="font-mono text-[11px] text-text-tertiary">{c.code}</div>
+                    {/*
+                      An em dash, the same absent-value mark this screen already
+                      uses for a missing date, rather than an empty line. A
+                      competency with no code must read as HAVING no code — a
+                      blank gap where a mono code normally sits looks like the
+                      row failed to load.
+                    */}
+                    <div className="font-mono text-[11px] text-text-tertiary">{c.code ?? '—'}</div>
                     <ValidityEditor competency={c} />
                   </div>
                   {/*

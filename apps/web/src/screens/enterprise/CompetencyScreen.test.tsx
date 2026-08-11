@@ -120,6 +120,20 @@ describe('CompetencyScreen validity', () => {
     expect(screen.getByText('Never expires')).toBeDefined();
   });
 
+  it('renders a missing code as absent, never as "null" or a blank line', () => {
+    // The em dash is what this screen already uses for a date it does not have.
+    // An empty line where a mono code normally sits reads as a row that failed
+    // to load; the literal string "null" reads as a bug.
+    competencies.data = [{ ...TRACK_DOZER, name: 'Contractor Endorsement Form', code: null }];
+    render(<CompetencyScreen />);
+
+    // More than one: the register row and the gating-rule picker both name it.
+    expect(screen.getAllByText('Contractor Endorsement Form').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+    expect(screen.queryByText('null')).toBeNull();
+    expect(screen.queryByText('undefined')).toBeNull();
+  });
+
   it('shows a set validity in years, with its grace period', () => {
     competencies.data = [{ ...TRACK_DOZER, validForMonths: 36, gracePeriodDays: 90 }];
     render(<CompetencyScreen />);
@@ -535,7 +549,7 @@ describe('CompetencyScreen add competency', () => {
     openForm();
 
     type('Name', 'ATO - Track Dozer');
-    type('Code', 'Q34666893');
+    type('Code (optional)', 'Q34666893');
     type('Valid for (years)', '3');
     fireEvent.click(screen.getByText('Add'));
 
@@ -549,18 +563,51 @@ describe('CompetencyScreen add competency', () => {
     );
   });
 
-  it('refuses a competency with no code', () => {
-    // The code is what the authoring script and every training-system export
-    // match on. A competency without one is invisible to both, so it would sit
-    // in the register looking fine and award nothing.
+  it('adds a competency with no code, sending null rather than an empty string', () => {
+    /*
+      A code is still STRONGLY preferred — it is what the authoring script and
+      every training-system export match on. But some competencies genuinely
+      have none: a contractor endorsement form is internal, not a nationally
+      coded unit, and requiring a code meant inventing one in the very column
+      people cross-reference against their LMS.
+    */
     render(<CompetencyScreen />);
     openForm();
 
-    type('Name', 'Site Induction');
+    type('Name', 'Contractor Endorsement Form');
+    fireEvent.click(screen.getByText('Add'));
+
+    expect(createMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Contractor Endorsement Form', code: null }),
+      expect.anything(),
+    );
+  });
+
+  it('refuses a competency with no name — the code is what became optional, not the name', () => {
+    render(<CompetencyScreen />);
+    openForm();
+
     fireEvent.click(screen.getByText('Add'));
 
     expect(createMutate).not.toHaveBeenCalled();
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'warning' }));
+  });
+
+  it('lets two codeless competencies coexist — absence is not a duplicate', () => {
+    // The duplicate-code guard matches on the code. Two competencies that both
+    // have none are not the same ticket twice, and matching on nothing would
+    // block the second internal competency an org ever adds.
+    competencies.data = [{ ...TRACK_DOZER, id: 'c-none', name: 'Bistrainer Basics', code: null }];
+    render(<CompetencyScreen />);
+    openForm();
+
+    type('Name', 'Dieback Management');
+    fireEvent.click(screen.getByText('Add'));
+
+    expect(createMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Dieback Management', code: null }),
+      expect.anything(),
+    );
   });
 
   it('refuses a name that is only whitespace', () => {
@@ -568,7 +615,7 @@ describe('CompetencyScreen add competency', () => {
     openForm();
 
     type('Name', '   ');
-    type('Code', 'Q1');
+    type('Code (optional)', 'Q1');
     fireEvent.click(screen.getByText('Add'));
 
     expect(createMutate).not.toHaveBeenCalled();
@@ -580,7 +627,7 @@ describe('CompetencyScreen add competency', () => {
     openForm();
 
     type('Name', 'Site Induction');
-    type('Code', 'SI-1');
+    type('Code (optional)', 'SI-1');
     fireEvent.click(screen.getByText('Add'));
 
     expect(createMutate).toHaveBeenCalledWith(
@@ -594,7 +641,7 @@ describe('CompetencyScreen add competency', () => {
     openForm();
 
     type('Name', 'Site Induction');
-    type('Code', 'SI-1');
+    type('Code (optional)', 'SI-1');
     type('Grace (days)', '30');
     fireEvent.click(screen.getByText('Add'));
 
@@ -609,7 +656,7 @@ describe('CompetencyScreen add competency', () => {
     openForm();
 
     type('Name', '  ATO - Track Dozer  ');
-    type('Code', ' Q34666893 ');
+    type('Code (optional)', ' Q34666893 ');
     fireEvent.click(screen.getByText('Add'));
 
     expect(createMutate).toHaveBeenCalledWith(
@@ -656,7 +703,7 @@ describe('CompetencyScreen add competency', () => {
     openForm();
 
     type('Name', 'Track Dozer (old ticket)');
-    type('Code', TRACK_DOZER.code);
+    type('Code (optional)', TRACK_DOZER.code!);
     fireEvent.click(screen.getByText('Add'));
 
     expect(createMutate).not.toHaveBeenCalled();
@@ -669,7 +716,7 @@ describe('CompetencyScreen add competency', () => {
     openForm();
 
     type('Name', 'Track Dozer (old ticket)');
-    type('Code', ' q34666893 ');
+    type('Code (optional)', ' q34666893 ');
     fireEvent.click(screen.getByText('Add'));
 
     expect(createMutate).not.toHaveBeenCalled();
@@ -687,7 +734,7 @@ describe('CompetencyScreen add competency', () => {
     openForm();
 
     type('Name', 'Site Induction');
-    type('Code', 'SI-1');
+    type('Code (optional)', 'SI-1');
     fireEvent.click(screen.getByText('Add'));
 
     expect(toast).toHaveBeenCalledWith(

@@ -3300,7 +3300,9 @@ assessmentCasesRouter.post(
         evidenceRef: `assessment-case:${row.id}`,
         sourceCaseId: row.id,
       });
-      if (result.ok) granted.push(result.outcome.code);
+      // The code where there is one — it is what the assessor recognises — and
+      // the name where there is not, rather than a null in a list of strings.
+      if (result.ok) granted.push(result.outcome.code ?? result.outcome.name);
       else grantProblems.push(`competency ${competencyId} not granted (${result.reason})`);
     }
 
