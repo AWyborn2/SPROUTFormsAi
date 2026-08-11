@@ -995,6 +995,20 @@ export function useCompetencyHolders(competencyId: string) {
   });
 }
 
+/** Grant a competency to a person by hand — external evidence, licences. */
+export function useGrantCompetency(competencyId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { userId: string; evidenceRef?: string; expiresAt?: string | null }) =>
+      store.grantCompetency({ competencyId, ...input }),
+    onSuccess: () => {
+      // The competencies prefix sweeps the holder register too — holders are
+      // nested under it for exactly this reason.
+      void qc.invalidateQueries({ queryKey: keys.competencies });
+    },
+  });
+}
+
 /** Set, change or clear how long a competency stays valid. */
 export function useSetCompetencyValidity() {
   const qc = useQueryClient();

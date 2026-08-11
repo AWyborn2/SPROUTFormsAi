@@ -2,13 +2,15 @@ import { useState } from 'react';
 import { describeValidity, type CompetencyStatus } from '@formai/shared';
 import { Badge, Button, Icon, Input, Select, Switch, useToast, type BadgeVariant } from '@formai/ui';
 import type { Competency } from '../../lib/data/types.js';
-import { useForms } from '../../lib/data/hooks.js';
+import { useForm, useForms } from '../../lib/data/hooks.js';
 import {
   useAddRule,
   useCompetencies,
   useCompetencyHolders,
   useCompetencyRules,
   useCreateCompetency,
+  useGrantCompetency,
+  useMembers,
   useRemoveRule,
   useSetCompetencyValidity,
   useToggleRule,
@@ -47,13 +49,122 @@ function onDate(iso: string | null): string {
  * grace, then expiring, then current, nearest date leading within each group.
  * The reason to open this list is to find who needs booking.
  */
-function HolderRegister({ competencyId }: { competencyId: string }) {
-  const { data: holders, isLoading, isError } = useCompetencyHolders(competencyId);
+/**
+ * Record a grant by hand.
+ *
+ * `POST /competencies/:id/holders` predates this control and had no client
+ * caller, so the only way anyone could come to hold a competency was signing
+ * off an assessment that awards it. A PREREQUISITE competency — a driver's
+ * licence sighted at induction, a ticket earned with a previous employer — is
+ * precisely the kind nobody ever earns here, which left every prerequisite
+ * check permanently unsatisfiable: the box read "missing" forever and sign-off
+ * refused forever. This is the missing entry point.
+ */
+function GrantControl({ competency }: { competency: Competency }) {
+  const { toast } = useToast();
+  const { data: members = [] } = useMembers();
+  const grant = useGrantCompetency(competency.id);
+  const [open, setOpen] = useState(false);
+  const [userId, setUserId] = useState('');
+  const [expires, setExpires] = useState('');
+
+  // A grant is recorded against the USER, and a pending invite has no user
+  // yet — there is nothing to attach one to until the invite is accepted.
+  const grantable = members.flatMap((m) => (m.userId ? [{ userId: m.userId, name: m.name }] : []));
+
+  function reset() {
+    setUserId('');
+    setExpires('');
+    setOpen(false);
+  }
+
+  function onGrant() {
+    if (!userId) {
+      toast({ variant: 'warning', message: 'Pick who holds it.' });
+      return;
+    }
+    const holder = grantable.find((m) => m.userId === userId);
+    grant.mutate(
+      {
+        userId,
+        // End of day, so a licence stays valid THROUGH its printed expiry date
+        // instead of lapsing the midnight that date begins.
+        ...(expires ? { expiresAt: `${expires}T23:59:59.000Z` } : {}),
+      },
+      {
+        onSuccess: () => {
+          toast({
+            variant: 'success',
+            message: holder
+              ? `${holder.name} now holds ${competency.name}.`
+              : `Granted ${competency.name}.`,
+          });
+          reset();
+        },
+        onError: () => {
+          toast({ variant: 'danger', message: 'Could not record the grant.' });
+        },
+      },
+    );
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="fai-chip-btn mt-2 inline-flex items-center gap-1 rounded-sm text-[11px] font-medium text-text-accent hover:underline"
+      >
+        <Icon name="plus" size={12} />
+        Record a holder by hand
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-2.5 flex flex-col gap-2 border-t border-border-subtle pt-2.5">
+      <Select
+        label="Person"
+        value={userId}
+        onChange={(e) => setUserId(e.target.value)}
+        options={[
+          { value: '', label: '— pick a person —' },
+          ...grantable.map((m) => ({ value: m.userId, label: m.name })),
+        ]}
+      />
+      <Input
+        label="Expires (optional)"
+        type="date"
+        value={expires}
+        onChange={(e) => setExpires(e.target.value)}
+      />
+      <p className="text-[11px] text-text-tertiary">
+        Leave the date blank to follow this competency's own validity. Set it when the record has
+        its own end date — a licence, a ticket earned elsewhere.
+      </p>
+      <div className="flex gap-2">
+        <Button size="sm" onClick={onGrant} disabled={grant.isPending}>
+          Grant
+        </Button>
+        <Button size="sm" variant="ghost" onClick={reset}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function HolderRegister({ competency }: { competency: Competency }) {
+  const { data: holders, isLoading, isError } = useCompetencyHolders(competency.id);
 
   if (isLoading) {
     return <div className="px-[18px] pb-3 text-[11px] text-text-tertiary">Loading holders…</div>;
   }
   if (isError) {
+    /*
+      No grant control on this branch: an errored fetch means the register
+      cannot say whether the person already holds it, and "grant into the
+      unknown" is how duplicate evidence references happen. Fix the load first.
+    */
     return (
       <div className="px-[18px] pb-3 text-[11px] text-danger-text">
         Could not load who holds this.
@@ -62,9 +173,12 @@ function HolderRegister({ competencyId }: { competencyId: string }) {
   }
   if (!holders || holders.length === 0) {
     return (
-      <div className="px-[18px] pb-3 text-[11px] text-text-tertiary">
-        Nobody holds this yet. It is granted automatically when an assessment that awards it is
-        signed off.
+      <div className="border-t border-border-subtle bg-surface-sunken px-[18px] py-2.5">
+        <div className="text-[11px] text-text-tertiary">
+          Nobody holds this yet. Signing off an assessment that awards it grants it automatically,
+          or record a holder by hand — a licence sighted at induction, a ticket earned elsewhere.
+        </div>
+        <GrantControl competency={competency} />
       </div>
     );
   }
@@ -143,6 +257,7 @@ function HolderRegister({ competencyId }: { competencyId: string }) {
           );
         })}
       </ul>
+      <GrantControl competency={competency} />
     </div>
   );
 }
@@ -450,8 +565,20 @@ export function CompetencyScreen() {
   const removeRule = useRemoveRule();
 
   const [ruleForm, setRuleForm] = useState('f3');
+
   const [ruleComp, setRuleComp] = useState('c1');
   const [ruleSection, setRuleSection] = useState('');
+  /*
+    The chosen form's own section headers, so "Section to gate" is picked from
+    what the form actually prints instead of typed from memory. A free-text
+    reference that matches no printed section is a rule that quietly gates
+    nothing — and the author who mistyped it has no way to notice.
+  */
+  const { data: ruleFormDetail } = useForm(ruleForm || undefined);
+  const ruleFormSections = (ruleFormDetail?.fields ?? [])
+    .filter((f) => f.type === 'section_header')
+    .map((f) => f.label)
+    .filter((label, i, all) => label.trim() !== '' && all.indexOf(label) === i);
   /**
    * Which register is open. One at a time, and none by default: each one is a
    * request, and a page of twenty competencies must not fire twenty of them to
@@ -522,7 +649,7 @@ export function CompetencyScreen() {
                     <Icon name={open ? 'chevron-up' : 'chevron-down'} size={13} />
                   </button>
                 </div>
-                {open && <HolderRegister competencyId={c.id} />}
+                {open && <HolderRegister competency={c} />}
               </div>
             );
           })}
@@ -573,15 +700,33 @@ export function CompetencyScreen() {
           </div>
           <div className="flex items-end gap-2.5">
             <div className="flex-1">
-              <Input
-                label="Section to gate"
-                placeholder="e.g. Roof access items"
-                value={ruleSection}
-                onChange={(e) => setRuleSection(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') onAdd();
-                }}
-              />
+              {/*
+                The form's own headers when it has them; free text only when it
+                does not. A built-from-scratch form with no headers still needs
+                a way to name its section, so the input is a fallback rather
+                than being removed.
+              */}
+              {ruleFormSections.length > 0 ? (
+                <Select
+                  label="Section to gate"
+                  value={ruleSection}
+                  onChange={(e) => setRuleSection(e.target.value)}
+                  options={[
+                    { value: '', label: '— pick a section —' },
+                    ...ruleFormSections.map((label) => ({ value: label, label })),
+                  ]}
+                />
+              ) : (
+                <Input
+                  label="Section to gate"
+                  placeholder="e.g. Roof access items"
+                  value={ruleSection}
+                  onChange={(e) => setRuleSection(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') onAdd();
+                  }}
+                />
+              )}
             </div>
             <Button leadingIcon="plus" onClick={onAdd}>
               Add rule
