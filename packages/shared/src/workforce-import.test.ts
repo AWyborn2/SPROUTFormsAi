@@ -449,3 +449,109 @@ describe('validateWorkforceImport — grant date reads by the organisation\'s da
     expect(reasons(fileWithDate('August 7, 2027'))).toEqual(['bad_grant_date']);
   });
 });
+
+/*
+  The profile fields on an import row (R19, R154).
+
+  These exist because the gap they cover was a REAL defect rather than a
+  hypothetical one: `member_profiles` held ten NOT NULL columns the import had
+  no column to fill, so every row would have failed its insert against a real
+  database — and no test caught it, because the suites that cover the run mock
+  the lander away and the doubles beneath it enforce no constraints.
+*/
+describe('validateWorkforceImport — the profile fields an import row carries', () => {
+  const withProfileColumns = (cells: string) =>
+    [
+      '#profiles',
+      'name,email,access_level,locations,departments,roles,employee_number,swipe_card_number,' +
+        'middle_name,date_of_birth,gender,ethnicity,address_street,suburb,postcode,mobile,' +
+        'emergency_contact_name,emergency_contact_phone,starter_type',
+      `Ada Assessor,ada@example.com,Assessor,Raw Materials,Operations,Dozer Operator,,,${cells}`,
+      '',
+    ].join('\n');
+
+  it('carries every supplied field through onto the validated row', () => {
+    const result = validateFile(
+      withProfileColumns(
+        'Mary,14/02/1990,Female,Prefer not to say,12 Example St,Baldivis,6171,0412345678,' +
+          'Kim Assessor,0498765432,New starter',
+      ),
+    );
+    expect(result.rejected).toEqual([]);
+    expect(result.validProfiles[0]).toMatchObject({
+      middleName: 'Mary',
+      dateOfBirth: '1990-02-14',
+      gender: 'Female',
+      ethnicity: 'Prefer not to say',
+      addressStreet: '12 Example St',
+      suburb: 'Baldivis',
+      postcode: '6171',
+      mobile: '0412345678',
+      emergencyContactName: 'Kim Assessor',
+      emergencyContactPhone: '0498765432',
+      starterType: 'New starter',
+    });
+  });
+
+  it('lands a row that supplies none of them, rather than rejecting the person', () => {
+    const result = validateFile(withProfileColumns(',,,,,,,,,,'));
+    expect(result.rejected).toEqual([]);
+    expect(result.validProfiles).toHaveLength(1);
+    expect(result.validProfiles[0]).toMatchObject({ email: 'ada@example.com', gender: '', mobile: '' });
+  });
+
+  /*
+    The date of birth resolves the organisation's day/month order HERE, so what
+    travels on is unambiguous. 02/03 is the 2nd of March to an Australian
+    organisation and the 3rd of February to an American one, and a date of
+    birth that moves by a month is a failed identity check against a licence.
+  */
+  it('reads the date of birth by the organisation dateFormat', () => {
+    const dmy = validateFile(withProfileColumns(',02/03/1990,,,,,,,,,'), makeCtx({ dateFormat: 'dmy' }));
+    const mdy = validateFile(withProfileColumns(',02/03/1990,,,,,,,,,'), makeCtx({ dateFormat: 'mdy' }));
+    expect(dmy.validProfiles[0]!.dateOfBirth).toBe('1990-03-02');
+    expect(mdy.validProfiles[0]!.dateOfBirth).toBe('1990-02-03');
+  });
+
+  it('rejects a date of birth that is present but unreadable, rather than dropping it', () => {
+    const result = validateFile(withProfileColumns(',not-a-date,,,,,,,,,'));
+    expect(result.rejected.map((r) => r.reason)).toEqual(['bad_date_of_birth']);
+    expect(result.validProfiles).toEqual([]);
+  });
+
+  /*
+    BACKWARD COMPATIBILITY, and the reason the profiles section reads by header
+    rather than by position. Every file built from the eight-column template —
+    including one already prepared for a migration — must keep parsing as it
+    did, with the added columns reading as absent rather than shifting the
+    meaning of the cells that ARE there.
+  */
+  it('parses a file built from the older eight-column template unchanged', () => {
+    const old = [
+      '#profiles',
+      'name,email,access_level,locations,departments,roles,employee_number,swipe_card_number',
+      'Ada Assessor,ada@example.com,Assessor,Raw Materials,Operations,Dozer Operator,E-1,S-1',
+      '',
+    ].join('\n');
+    const result = validateFile(old);
+    expect(result.rejected).toEqual([]);
+    expect(result.validProfiles[0]).toMatchObject({
+      email: 'ada@example.com',
+      employeeNumber: 'E-1',
+      swipeCardNumber: 'S-1',
+      dateOfBirth: '',
+      gender: '',
+    });
+  });
+
+  it('parses a headerless profiles section as the older eight columns', () => {
+    const headerless = [
+      '#profiles',
+      'Ada Assessor,ada@example.com,Assessor,Raw Materials,Operations,Dozer Operator,E-9,S-9',
+      '',
+    ].join('\n');
+    const result = validateFile(headerless);
+    expect(result.rejected).toEqual([]);
+    expect(result.validProfiles[0]).toMatchObject({ employeeNumber: 'E-9', swipeCardNumber: 'S-9' });
+  });
+});

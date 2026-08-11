@@ -5,6 +5,7 @@ import {
   PROFILE_GENDERS,
   PROFILE_STARTER_TYPES,
   candidateEditableFieldKeys,
+  incompleteProfileFields,
   canEditProfileField,
   displayIdentityOf,
   displayLabelOf,
@@ -284,5 +285,76 @@ describe('one list rather than two', () => {
     expect(PROFILE_GENDERS).toBe(CHC_GENDERS);
     expect(PROFILE_ETHNICITIES).toBe(CHC_ETHNICITIES);
     expect(PROFILE_STARTER_TYPES).toBe(CHC_STARTER_TYPES);
+  });
+});
+
+/*
+  The two gap reports, and why there are two (R19, R154).
+
+  `emptyOptionalProfileFields` describes a record made through the profile
+  screen, where a required field can never be absent because `validateProfile`
+  refuses the save. `incompleteProfileFields` describes a record made by a bulk
+  import, where a required field is absent routinely — the source system holds a
+  workforce it was never asked demographic questions about.
+*/
+describe('incompleteProfileFields', () => {
+  /** What a workforce import can actually supply: the names and the two numbers. */
+  const IMPORTED = {
+    firstName: 'Ada',
+    lastName: 'Assessor',
+    employeeNumber: 'E-1',
+    swipeCardNumber: 'S-1',
+  };
+
+  it('names the required fields an import row left empty', () => {
+    const missing = incompleteProfileFields(IMPORTED);
+    for (const key of [
+      'gender',
+      'ethnicity',
+      'dateOfBirth',
+      'addressStreet',
+      'suburb',
+      'postcode',
+      'mobile',
+      'emergencyContactName',
+      'emergencyContactPhone',
+      'starterType',
+    ]) {
+      expect(missing).toContain(key);
+    }
+  });
+
+  /*
+    The distinction that makes two functions worth having. The narrower report
+    calls this record complete — every OPTIONAL field is present — while the
+    wider one still has ten things to chase.
+  */
+  it('reports what the optional-only check cannot', () => {
+    expect(emptyOptionalProfileFields(IMPORTED)).not.toContain('gender');
+    expect(incompleteProfileFields(IMPORTED)).toContain('gender');
+  });
+
+  it('reports nothing for a complete record', () => {
+    const complete: Record<string, unknown> = {};
+    for (const field of PROFILE_FIELDS) {
+      if (field.storedOn === 'profile') complete[field.key] = 'supplied';
+    }
+    expect(incompleteProfileFields(complete)).toEqual([]);
+  });
+
+  /*
+    Derived and generated fields are never reported. Nobody can supply an
+    Indigenous status or a username, so listing them as outstanding would put
+    work on a follow-up list that no follow-up could ever clear.
+  */
+  it('never reports a derived or generated field', () => {
+    const missing = incompleteProfileFields({});
+    expect(missing).not.toContain('indigenousStatus');
+    expect(missing).not.toContain('displayName');
+    expect(missing).not.toContain('username');
+  });
+
+  it('treats whitespace as absent', () => {
+    expect(incompleteProfileFields({ ...IMPORTED, mobile: '   ' })).toContain('mobile');
   });
 });

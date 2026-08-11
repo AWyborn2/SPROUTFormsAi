@@ -192,16 +192,32 @@ async function runOneRow(
   };
 
   /*
-    The file carries ONE name column, so the split is first word / everything
-    else — a middle name lands in the surname rather than being invented into a
-    column the file never had. Only these two are seeded: the lander writes the
-    two workforce numbers from the ROW itself, and passing them here as well
-    would be a second source for one value.
+    The name column is still ONE cell, so the split stays first word /
+    everything else. What changed is that the file may now carry `middle_name`
+    separately, and when it does that column wins: the split cannot tell a
+    middle name from a two-part surname, and guessing wrong puts somebody's
+    surname in the wrong field of the record their licence is checked against.
+    Absent, the old behaviour stands and the remainder lands in the surname.
+
+    The two workforce numbers are still NOT passed here — the lander writes
+    those from the row itself, and sending them twice would make one value have
+    two sources.
   */
   const [firstName = '', ...rest] = row.name.trim().split(/\s+/);
   const landed = await landImportRow(db, tenant, resolved, {
     firstName,
     lastName: rest.join(' '),
+    middleName: row.middleName || null,
+    dateOfBirth: row.dateOfBirth || null,
+    gender: row.gender || null,
+    ethnicity: row.ethnicity || null,
+    addressStreet: row.addressStreet || null,
+    suburb: row.suburb || null,
+    postcode: row.postcode || null,
+    mobile: row.mobile || null,
+    emergencyContactName: row.emergencyContactName || null,
+    emergencyContactPhone: row.emergencyContactPhone || null,
+    starterType: row.starterType || null,
   });
 
   if (landed.kind === 'refused') {

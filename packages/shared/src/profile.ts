@@ -324,6 +324,31 @@ export function emptyOptionalProfileFields(values: Record<string, unknown>): str
     .map((f) => f.key);
 }
 
+/**
+ * Every profile field a landed record left empty, REQUIRED ONES INCLUDED, for
+ * the flag an import row raises (R19, R154).
+ *
+ * The distinction from `emptyOptionalProfileFields` above is the whole reason
+ * this exists, and it is a distinction about WHERE the record came from rather
+ * than about the fields. Through the profile screen a required field is never
+ * absent — `validateProfile` refuses the save — so reporting one would describe
+ * a state that cannot occur. Through a bulk import it is absent routinely: the
+ * source system holds a workforce it was never asked demographic questions
+ * about, and the import's whole purpose is to carry across what that system
+ * does hold.
+ *
+ * So the import reports the full gap and the interactive paths keep the
+ * narrower one. What the caller does with the list is name it — the row landed
+ * either way. Nothing here rejects, and nothing here invents a value to avoid
+ * reporting it: a field nobody has answered reads as unanswered.
+ */
+export function incompleteProfileFields(values: Record<string, unknown>): string[] {
+  return PROFILE_FIELDS.filter((f) => f.storedOn === 'profile')
+    .filter((f) => f.presence !== 'derived' && f.presence !== 'generated')
+    .filter((f) => isBlank(values[f.key]))
+    .map((f) => f.key);
+}
+
 const isBlank = (raw: unknown): boolean => {
   const value = typeof raw === 'string' ? raw.trim() : raw == null ? '' : String(raw);
   return value.length === 0;

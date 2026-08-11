@@ -67,13 +67,28 @@ export const memberProfiles = pgTable(
       — text keeps that answer a change to one shared module instead of a
       migration on live rows.
 
-      Both are REQUIRED and both carry an explicit decline value — Undisclosed on
-      gender, Unknown on ethnicity (R13). Choosing one records a decline rather
-      than leaving the field empty, so a required demographic question can still
-      be answered honestly by somebody who would rather not say.
+      Both carry an explicit decline value — Undisclosed on gender, Unknown on
+      ethnicity (R13). Choosing one records a decline rather than leaving the
+      field empty, so a demographic question can still be answered honestly by
+      somebody who would rather not say.
+
+      NULLABLE AT THE COLUMN, REQUIRED AT THE FORM (R19, R154). Interactive
+      creation still demands both — `validateProfile` is unchanged and the
+      profile screen refuses to save without them. What the null permits is the
+      ONE case the form cannot cover: a bulk import of an existing workforce,
+      where the source system holds an address and a phone number but was never
+      asked for a demographic answer.
+
+      The alternative was worse in a way that matters. A NOT NULL column forces
+      whoever runs the import to invent a gender and an ethnicity for hundreds
+      of people they may never speak to, and an invented Indigenous status is
+      not a gap in a report — it is a wrong answer in one, indistinguishable
+      from a real one ever after. A null says "nobody has been asked", the
+      landed row is FLAGGED naming exactly this field, and the answer arrives
+      from the person whose answer it is.
     */
-    gender: text().notNull(),
-    ethnicity: text().notNull(),
+    gender: text(),
+    ethnicity: text(),
     /*
       NO `indigenous_status` COLUMN, deliberately (R15, KTD19). It is derived
       from the ethnicity answer and entered by nobody, which is what makes it
@@ -88,19 +103,29 @@ export const memberProfiles = pgTable(
       timezone on the way to and from the client, and a date of birth that moves
       by a day depending on where the reader sits is a defect in a field used to
       verify identity against a licence.
+
+      Nullable for the same reason as the demographics above and under the same
+      guard: the form requires them, the column permits their absence so an
+      import of an existing workforce can land a partial record FLAGGED for
+      follow-up rather than refusing the person outright.
     */
-    dateOfBirth: text('date_of_birth').notNull(),
-    addressStreet: text('address_street').notNull(),
-    suburb: text().notNull(),
-    postcode: text().notNull(),
-    mobile: text().notNull(),
+    dateOfBirth: text('date_of_birth'),
+    addressStreet: text('address_street'),
+    suburb: text(),
+    postcode: text(),
+    mobile: text(),
     /*
       Next of kin. Deliberately NOT marked sensitive in the shared inventory,
       departing from the induction redaction pattern which withholds both: this
       is who an organisation needs to reach in the moment it matters most.
+
+      Which is also the argument for landing the record without them rather than
+      refusing it. A worker with no emergency contact recorded is a gap somebody
+      can chase; a worker with no record at all is invisible to the person doing
+      the chasing.
     */
-    emergencyContactName: text('emergency_contact_name').notNull(),
-    emergencyContactPhone: text('emergency_contact_phone').notNull(),
+    emergencyContactName: text('emergency_contact_name'),
+    emergencyContactPhone: text('emergency_contact_phone'),
 
     /*
       THE PROFILE PICTURE, as a storage key (R18).
@@ -135,7 +160,12 @@ export const memberProfiles = pgTable(
     swipeCardNumber: text('swipe_card_number'),
 
     // ── Employment ──────────────────────────────────────────────────────────
-    starterType: text('starter_type').notNull(),
+    /*
+      Nullable on the same import guard as the demographics. Its value lists are
+      an intake concept — how somebody came to be here — and a workforce migrated
+      out of another system predates the intake that would have asked.
+    */
+    starterType: text('starter_type'),
     /*
       Optional whatever the intake does with it (R12): it genuinely arrives after
       the person does, and refusing to create a profile until it exists would
