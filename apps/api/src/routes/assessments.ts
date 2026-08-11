@@ -330,6 +330,9 @@ const partSchema = z.object({
   assessorNameFieldId: z.string().optional(),
   signedDateFieldId: z.string().optional(),
   mandatoryFieldIds: z.array(z.string()).optional(),
+  outcomeSatisfactory: declaredMarkSchema.optional(),
+  outcomeNotSatisfactory: declaredMarkSchema.optional(),
+  furtherActionFieldId: z.string().optional(),
 });
 
 /**
@@ -1249,11 +1252,19 @@ assessmentCasesRouter.get(
       : [];
     const toolById = new Map(tools.map((t) => [t.id, t]));
 
+    const candidateIds = [...new Set(rows.map((r) => r.candidateUserId))];
+    const candidates = candidateIds.length
+      ? await db.query.users.findMany({ where: inArray(schema.users.id, candidateIds) })
+      : [];
+    const nameById = new Map(candidates.map((u) => [u.id, u.name]));
+    const caseIdentities = await loadDisplayIdentities(db, tenant.orgId, candidateIds);
+
     res.json(
       rows.map((c) => ({
         id: c.id,
         toolName: toolById.get(c.toolId)?.name ?? '',
         candidateUserId: c.candidateUserId,
+        candidateName: identifyMember(caseIdentities, c.candidateUserId, nameById.get(c.candidateUserId) ?? '').name,
         pathway: c.pathway,
         state: c.state,
         /** Null on a pooled case — the table shows it as unassigned (U13). */
@@ -1520,6 +1531,13 @@ assessmentCasesRouter.get(
     ];
     const locationNames = await locationNamesByIdFor(db, tenant.orgId, locationIds);
 
+    const candidateIds = [...new Set(pooled.map((c) => c.candidateUserId))];
+    const candidates = candidateIds.length
+      ? await db.query.users.findMany({ where: inArray(schema.users.id, candidateIds) })
+      : [];
+    const nameById = new Map(candidates.map((u) => [u.id, u.name]));
+    const queueIdentities = await loadDisplayIdentities(db, tenant.orgId, candidateIds);
+
     const now = Date.now();
     const items = pooled.flatMap((c) => {
       const tool = toolById.get(c.toolId);
@@ -1540,6 +1558,7 @@ assessmentCasesRouter.get(
           id: c.id,
           toolName: tool.name,
           candidateUserId: c.candidateUserId,
+          candidateName: identifyMember(queueIdentities, c.candidateUserId, nameById.get(c.candidateUserId) ?? '').name,
           pathway: c.pathway,
           locationId: c.locationId,
           locationName: c.locationId ? (locationNames.get(c.locationId) ?? null) : null,
@@ -1614,6 +1633,8 @@ assessmentCasesRouter.get(
       ? ((await locationNamesByIdFor(db, tenant.orgId, [row.locationId])).get(row.locationId) ?? null)
       : null;
 
+    const caseFields = await fieldsForVersion(db, row.currentVersionId);
+
     res.json({
       id: row.id,
       toolId: tool.id,
@@ -1640,6 +1661,7 @@ assessmentCasesRouter.get(
         state: p.state,
         attempts: p.attempts,
         latestOutcome: p.latestOutcome,
+        selfMarking: isSelfMarking(caseFields, tool.manifest, p.part.key),
       })),
       attempts: attempts.map((a) => ({
         id: a.id,

@@ -228,7 +228,7 @@ describe('MatchingField — the pictures the author uploaded', () => {
     // reader gets.
     setupWith(WITH_IMAGES);
 
-    expect(screen.getByText('Red triangle', { selector: 'span[draggable]' })).toBeDefined();
+    expect(screen.getByText('Red triangle')).toBeDefined();
   });
 
   it('renders nothing for an entry with no uploaded picture', () => {

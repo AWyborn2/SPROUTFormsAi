@@ -409,7 +409,7 @@ function PartCard({
           )}
 
           {!readOnly && openAttempt && (
-            <OutcomeForm caseId={caseId} attemptId={openAttempt.id} kind={part.kind} />
+            <OutcomeForm caseId={caseId} attemptId={openAttempt.id} kind={part.kind} selfMarking={part.selfMarking} />
           )}
 
           {!readOnly && !openAttempt && (
@@ -443,19 +443,13 @@ function PartCard({
 /**
  * Resolving an attempt.
  *
- * A theory attempt takes no outcome control at all: the API computes it from
- * the answer key and the assessor reviews the result. Offering a satisfactory /
- * not-satisfactory choice here would imply a judgement the assessor does not
- * actually make, and the API would ignore it.
- *
- * That reasoning is right, but it used to deadlock: the API demanded a
- * disposition and reason for the not-satisfactory case, and this form — having
- * no outcome control — never sent either, so a failed theory part 400'd and its
- * attempt stayed unresolved forever. The API now defaults a computed failure to
- * "more coaching required", so sending neither is correct. Do not add an
- * outcome control here to "fix" a failure being recorded without one.
+ * `selfMarking` comes from the API's `isSelfMarking()` — true when every
+ * question in the part has an answer key AND an outcome target. When true, the
+ * API computes the outcome from the answer key; no outcome selector is shown.
+ * When false (verbal questions, parts whose verdicts were stripped by a zod
+ * bug, etc.), the assessor must choose satisfactory/not-satisfactory manually.
  */
-function OutcomeForm({ caseId, attemptId, kind }: { caseId: string; attemptId: string; kind: string }) {
+function OutcomeForm({ caseId, attemptId, kind, selfMarking }: { caseId: string; attemptId: string; kind: string; selfMarking: boolean }) {
   const record = useRecordOutcome(caseId);
   const [outcome, setOutcome] = useState<'satisfactory' | 'not_satisfactory' | ''>('');
   const [disposition, setDisposition] = useState<NotSatisfactoryDisposition>('coaching_then_retry');
@@ -463,12 +457,11 @@ function OutcomeForm({ caseId, attemptId, kind }: { caseId: string; attemptId: s
   const [assessorName, setAssessorName] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  const isTheory = kind === 'theory';
   const needsReason = outcome === 'not_satisfactory';
 
   async function submit() {
     setError(null);
-    if (!isTheory && !outcome) {
+    if (!selfMarking && !outcome) {
       setError('Record the outcome of this demonstration.');
       return;
     }
@@ -479,7 +472,7 @@ function OutcomeForm({ caseId, attemptId, kind }: { caseId: string; attemptId: s
     try {
       await record.mutateAsync({
         attemptId,
-        ...(isTheory ? {} : { outcome: outcome as 'satisfactory' | 'not_satisfactory' }),
+        ...(selfMarking ? {} : { outcome: outcome as 'satisfactory' | 'not_satisfactory' }),
         ...(needsReason ? { disposition, reason: reason.trim() } : {}),
         ...(assessorName.trim() ? { assessorName: assessorName.trim() } : {}),
       });
@@ -492,7 +485,7 @@ function OutcomeForm({ caseId, attemptId, kind }: { caseId: string; attemptId: s
 
   return (
     <div className="flex flex-col gap-2.5">
-      {isTheory ? (
+      {selfMarking ? (
         <p className="text-[12.5px] text-text-tertiary">
           Marking is computed from the answer key once the candidate’s answers are saved. Recording the
           outcome marks every question and decides the part. Anything under 100% is recorded as more
@@ -552,7 +545,7 @@ function OutcomeForm({ caseId, attemptId, kind }: { caseId: string; attemptId: s
         </div>
       )}
 
-      {!isTheory && (
+      {!selfMarking && (
         <div>
           <label htmlFor={`name-${attemptId}`} className="block text-[12.5px] font-semibold text-text-secondary">
             Assessor name (as signed)

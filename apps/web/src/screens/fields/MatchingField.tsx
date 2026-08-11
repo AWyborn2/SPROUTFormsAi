@@ -60,29 +60,13 @@ function rightsOf(options: readonly string[]): string[] {
 /** Where an uploaded picture is served from — the same door every attachment uses. */
 const IMAGE_BASE = '/api/uploads/file/';
 
-/**
- * One entry's picture, where the author uploaded one and turned that side on.
- *
- * THE PICTURES WERE STORED AND NEVER SHOWN. `MatchPresentation` has carried
- * `leftImages`, `rightImages` and an asset id per entry since the pair builder
- * could upload them — and this component rendered none of it. On the question
- * that needs it most, "match the statement with the appropriate signage", the
- * candidate was shown the extraction's WORDS for each sign ("Sign photo — red
- * pyramid cone with 'LOCATION … JOB CO-ORDINATOR' placard") instead of the sign.
- * That is not a matching question about signage; it is a reading comprehension
- * question about a description of signage.
- *
- * The text stays underneath rather than being replaced by the picture: it is
- * what the stored answer is keyed on, it is what a screen reader gets, and a
- * photo that fails to load must not leave an unlabelled box.
- */
-function EntryImage({ src, alt }: { src: string | undefined; alt: string }) {
+function EntryImage({ src, alt, className }: { src: string | undefined; alt: string; className?: string }) {
   if (!src) return null;
   return (
     <img
       src={src}
       alt={alt}
-      className="mb-1 block max-h-24 w-auto max-w-full rounded-md border border-border-subtle object-contain"
+      className={className ?? 'mb-1 block max-h-24 w-auto max-w-full rounded-md border border-border-subtle object-contain'}
     />
   );
 }
@@ -99,7 +83,6 @@ export function MatchingField({
   const rights = useMemo(() => rightsOf(options), [options]);
   const [pickedLeft, setPickedLeft] = useState<string | null>(null);
 
-  /** The answer currently paired to each statement, where one is. */
   const chosen = useMemo(() => {
     const map = new Map<string, string>();
     for (const option of value) {
@@ -109,11 +92,6 @@ export function MatchingField({
     return map;
   }, [value]);
 
-  /*
-    Pairing REPLACES rather than accumulates, because a line from a dot and a
-    card in a slot are both singular by shape. Keeping the other statements'
-    pairings intact is what makes this an edit rather than a reset.
-  */
   const pair = (left: string, right: string | null) => {
     if (disabled) return;
     const kept = value.filter((option) => parsePairingOption(option)?.left !== left);
@@ -122,30 +100,16 @@ export function MatchingField({
   };
 
   const mode = presentation.mode;
-  const images = presentation.images ?? {};
+  const imgMap = presentation.images ?? {};
+  const hasImages = presentation.leftImages || presentation.rightImages;
 
-  /** A side entry's uploaded picture, by its printed index — `l0`, `r2`. */
   const pictureFor = (side: 'l' | 'r', index: number): string | undefined => {
     const on = side === 'l' ? presentation.leftImages : presentation.rightImages;
     if (!on || index < 0) return undefined;
-    const key = images[matchAnchorKey(side, index)];
+    const key = imgMap[matchAnchorKey(side, index)];
     return key ? `${IMAGE_BASE}${key}` : undefined;
   };
 
-  /*
-    DRAG IS A REAL GESTURE NOW, OR THE WORD GOES.
-
-    `mode: 'drag'` rendered "Drop an answer here" over a tap-to-pick control:
-    nothing was draggable, nothing accepted a drop, and an author who chose the
-    drag presentation shipped a form that told candidates to do something it
-    would not let them do. On a competency assessment that reads as a broken
-    page, and a candidate who takes the instruction literally gets stuck.
-
-    TAP STILL WORKS, and stays the primary path. A site assessment is filled on
-    a phone, where HTML5 drag-and-drop does not fire at all — so drag is an
-    ADDITION for the desktop authoring-and-review case, never the only way
-    through. Every drop target is also a button.
-  */
   const [draggingRight, setDraggingRight] = useState<string | null>(null);
 
   const dropOn = (left: string) => {
@@ -154,15 +118,27 @@ export function MatchingField({
     setDraggingRight(null);
   };
 
+  if (hasImages) {
+    return <ImageMatchLayout
+      groups={groups}
+      rights={rights}
+      chosen={chosen}
+      pair={pair}
+      pickedLeft={pickedLeft}
+      setPickedLeft={setPickedLeft}
+      draggingRight={draggingRight}
+      setDraggingRight={setDraggingRight}
+      dropOn={dropOn}
+      disabled={disabled}
+      mode={mode}
+      labelId={labelId}
+      pictureFor={pictureFor}
+    />;
+  }
+
   return (
     <div className="flex flex-col gap-2" role="group" aria-labelledby={labelId}>
       {mode === 'drag' && (
-        /*
-          The tray is what makes a drag possible: something to drag FROM that
-          stays put while the pointer travels. An answer is never removed from
-          it — the model lets one sign answer more than one statement, and a
-          tray that emptied would make the second pairing undraggable.
-        */
         <div className="flex flex-wrap gap-1.5 rounded-[10px] border border-dashed border-border bg-surface-sunken p-2">
           <span className="w-full text-[11px] text-text-tertiary">
             Drag an answer onto a statement, or tap a statement to choose one.
@@ -172,12 +148,6 @@ export function MatchingField({
               key={right}
               draggable={!disabled}
               onDragStart={(e) => {
-                /*
-                  The state is what the drop reads; `dataTransfer` is set for
-                  the benefit of anything outside this component and is guarded
-                  because a synthetic dispatch carries none. A throw here would
-                  take down the fill surface mid-assessment over a decoration.
-                */
                 if (e.dataTransfer) {
                   e.dataTransfer.effectAllowed = 'copy';
                   e.dataTransfer.setData('text/plain', right);
@@ -206,7 +176,6 @@ export function MatchingField({
             key={group.left}
             onDragOver={(e) => {
               if (disabled || !draggingRight) return;
-              // Without this the browser refuses the drop outright.
               e.preventDefault();
               if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
             }}
@@ -251,12 +220,6 @@ export function MatchingField({
               )}
             </div>
 
-            {/*
-              The answers appear under the statement being paired, rather than
-              in a permanent column. On a phone — where a site assessment is
-              routinely filled — two columns and a connector line is a layout
-              nobody can hit, and the pairing is the same either way.
-            */}
             {picking && !disabled && (
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {rights.map((right) => (
@@ -280,6 +243,192 @@ export function MatchingField({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Two-column image layout                                           */
+/* ------------------------------------------------------------------ */
+
+interface ImageMatchLayoutProps {
+  groups: ReturnType<typeof groupPairingOptions>;
+  rights: string[];
+  chosen: Map<string, string>;
+  pair: (left: string, right: string | null) => void;
+  pickedLeft: string | null;
+  setPickedLeft: (v: string | null) => void;
+  draggingRight: string | null;
+  setDraggingRight: (v: string | null) => void;
+  dropOn: (left: string) => void;
+  disabled: boolean;
+  mode: string;
+  labelId: string;
+  pictureFor: (side: 'l' | 'r', index: number) => string | undefined;
+}
+
+function ImageMatchLayout({
+  groups,
+  rights,
+  chosen,
+  pair,
+  pickedLeft,
+  setPickedLeft,
+  draggingRight,
+  setDraggingRight,
+  dropOn,
+  disabled,
+  mode,
+  labelId,
+  pictureFor,
+}: ImageMatchLayoutProps) {
+  return (
+    <div role="group" aria-labelledby={labelId} className="flex flex-col gap-3">
+      <p className="text-[11px] text-text-tertiary">
+        {mode === 'drag'
+          ? 'Drag an answer card onto a statement, or tap a statement then tap an answer.'
+          : 'Tap a statement, then tap the matching answer.'}
+      </p>
+
+      <div className="grid grid-cols-2 gap-4">
+        {/* -------- LEFT COLUMN: Statements -------- */}
+        <div className="flex flex-col gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
+            Statements
+          </span>
+          {groups.map((group, leftIndex) => {
+            const answer = chosen.get(group.left) ?? null;
+            const picking = pickedLeft === group.left;
+            const isOver = draggingRight !== null;
+
+            return (
+              <div
+                key={group.left}
+                onDragOver={(e) => {
+                  if (disabled || !draggingRight) return;
+                  e.preventDefault();
+                  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  dropOn(group.left);
+                }}
+                className={`relative flex flex-col rounded-lg border p-2 transition-colors ${
+                  picking
+                    ? 'border-accent bg-surface-accent-soft'
+                    : isOver
+                      ? 'border-dashed border-accent/60 bg-surface-accent-soft/40'
+                      : answer
+                        ? 'border-accent/40 bg-surface-card'
+                        : 'border-border-subtle bg-surface-card'
+                }`}
+              >
+                <button
+                  type="button"
+                  disabled={disabled}
+                  aria-pressed={picking}
+                  onClick={() => setPickedLeft(picking ? null : group.left)}
+                  className="text-left disabled:opacity-60"
+                >
+                  <EntryImage
+                    src={pictureFor('l', leftIndex)}
+                    alt={group.left}
+                    className="mb-1.5 block h-auto w-full max-w-full rounded border border-border-subtle object-contain"
+                  />
+                  <span className="block text-[12px] leading-snug text-text-secondary">
+                    {group.left}
+                  </span>
+                </button>
+
+                {answer ? (
+                  <div className="mt-2 flex items-center gap-1.5 rounded border border-accent/30 bg-surface-accent-soft/60 px-2 py-1">
+                    <EntryImage
+                      src={pictureFor('r', rights.indexOf(answer))}
+                      alt={answer}
+                      className="block h-8 w-8 rounded object-contain"
+                    />
+                    <span className="flex-1 truncate text-[11px] font-medium text-text-accent">
+                      {answer}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={disabled}
+                      aria-label={`Clear the answer for ${group.left}`}
+                      onClick={() => pair(group.left, null)}
+                      className="shrink-0 text-[11px] text-text-tertiary hover:text-danger"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ) : (
+                  <span className="mt-2 block text-center text-[10.5px] text-text-tertiary">
+                    {picking ? 'Pick an answer from the right' : 'Tap to pair'}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* -------- RIGHT COLUMN: Answers -------- */}
+        <div className="flex flex-col gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
+            Answers
+          </span>
+          {rights.map((right, i) => {
+            const isUsed = [...chosen.values()].includes(right);
+            return (
+              <button
+                key={right}
+                type="button"
+                draggable={mode === 'drag' && !disabled}
+                onDragStart={(e) => {
+                  if (e.dataTransfer) {
+                    e.dataTransfer.effectAllowed = 'copy';
+                    e.dataTransfer.setData('text/plain', right);
+                  }
+                  setDraggingRight(right);
+                }}
+                onDragEnd={() => setDraggingRight(null)}
+                disabled={disabled}
+                onClick={() => {
+                  if (disabled) return;
+                  if (pickedLeft) {
+                    pair(pickedLeft, right);
+                  }
+                }}
+                className={`flex flex-col rounded-lg border p-2 text-left transition-colors ${
+                  draggingRight === right
+                    ? 'opacity-50'
+                    : ''
+                } ${
+                  pickedLeft
+                    ? 'cursor-pointer border-accent/40 hover:border-accent hover:bg-surface-accent-soft'
+                    : mode === 'drag' && !disabled
+                      ? 'cursor-grab border-border'
+                      : 'border-border'
+                } ${
+                  isUsed ? 'bg-surface-sunken opacity-70' : 'bg-surface-card'
+                }`}
+              >
+                <EntryImage
+                  src={pictureFor('r', i)}
+                  alt={right}
+                  className="mb-1.5 block h-auto w-full max-w-full rounded border border-border-subtle object-contain"
+                />
+                <span className="block text-[12px] leading-snug text-text-secondary">
+                  {right}
+                </span>
+                {isUsed && (
+                  <span className="mt-1 text-[10px] font-medium text-text-accent">
+                    Paired
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

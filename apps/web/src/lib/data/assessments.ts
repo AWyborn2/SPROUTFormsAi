@@ -47,6 +47,7 @@ export interface AssessmentCaseRow {
   id: string;
   toolName: string;
   candidateUserId: string;
+  candidateName: string;
   pathway: AssessmentPathway;
   state: AssessmentCaseState;
   /** Null on a pooled case — shown as unassigned (U13). */
@@ -59,6 +60,7 @@ export interface AssessorQueueItem {
   id: string;
   toolName: string;
   candidateUserId: string;
+  candidateName: string;
   pathway: AssessmentPathway;
   locationId: string | null;
   locationName: string | null;
@@ -77,6 +79,7 @@ export interface CasePartView {
   state: PartState;
   attempts: number;
   latestOutcome: PartOutcome | null;
+  selfMarking: boolean;
 }
 
 export interface CaseAttemptView {

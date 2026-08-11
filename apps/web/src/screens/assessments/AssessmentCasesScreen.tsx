@@ -162,8 +162,8 @@ export function AssessmentCasesScreen() {
                   >
                     <td className="p-[11px_14px] font-semibold">{c.toolName}</td>
                     {!isCandidate && (
-                      <td className="p-[11px_14px] font-mono text-[12px] text-text-tertiary">
-                        {c.candidateUserId.slice(0, 8)}…
+                      <td className="p-[11px_14px] text-text-secondary">
+                        {c.candidateName}
                       </td>
                     )}
                     <td className="p-[11px_14px] text-text-secondary">{PATHWAY_LABELS[c.pathway]}</td>

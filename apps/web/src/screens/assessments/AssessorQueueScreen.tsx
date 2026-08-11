@@ -53,7 +53,7 @@ export function AssessorQueueScreen() {
                       {c.toolName}
                     </Link>
                   </td>
-                  <td className="px-4 py-2.5 text-text-secondary">{c.candidateUserId}</td>
+                  <td className="px-4 py-2.5 text-text-secondary">{c.candidateName}</td>
                   <td className="px-4 py-2.5 text-text-secondary">{c.locationName ?? '—'}</td>
                   <td className="px-4 py-2.5">
                     <span className="text-text-secondary">
