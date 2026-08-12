@@ -443,3 +443,55 @@ describe('assembleCaseValues — Candidate not yet Competent', () => {
     expect(values['overall-no']).toBeUndefined();
   });
 });
+
+/**
+ * The completion checklist ticks itself — on an OPEN case as much as a
+ * resolved one, because a mid-programme export is exactly where "what has
+ * this candidate finished so far" gets asked. Positional rows: a tick must
+ * sit at its own printed index, never slide up through a gap.
+ */
+describe('assembleCaseValues — part completion ticks', () => {
+  const TICKING: AssessmentToolManifest = {
+    ...BASE,
+    partCompletionMarks: [
+      { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'used' },
+      { partKey: 'p2', fieldId: 'methods', rowIndex: 1, columnKey: 'used' },
+      { partKey: 'p3', fieldId: 'methods', rowIndex: 2, columnKey: 'used' },
+    ],
+  };
+
+  it('ticks exactly the satisfied parts, at their own row indexes', () => {
+    const { values } = assembleCaseValues({
+      manifest: TICKING,
+      pathway: 'new',
+      attempts: [passed('p1'), { partKey: 'p2', attemptNumber: 1, outcome: 'not_satisfactory', values: {} }],
+    });
+
+    // p1 done, p2 failed, p3 untouched: one tick, in row 0 only. The failed
+    // and unstarted rows stay empty objects — never false, which would print
+    // a finding nobody made.
+    expect(values['methods']).toEqual([{ used: true }]);
+  });
+
+  it('keeps ticks at their printed positions when an earlier part is not done', () => {
+    const { values } = assembleCaseValues({
+      manifest: TICKING,
+      pathway: 'new',
+      attempts: [passed('p2')],
+    });
+
+    // p2 satisfied while p1 is untouched — its tick sits at index 1 behind an
+    // empty row, so the exporter's positional bands mark the right method.
+    expect(values['methods']).toEqual([{}, { used: true }]);
+  });
+
+  it('writes nothing when no mapped part is satisfied', () => {
+    const { values } = assembleCaseValues({
+      manifest: TICKING,
+      pathway: 'new',
+      attempts: [],
+    });
+
+    expect(values['methods']).toBeUndefined();
+  });
+});

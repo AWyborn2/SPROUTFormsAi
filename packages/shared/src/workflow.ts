@@ -431,6 +431,14 @@ export function autoSourcesFor(
       non-`entry` field, so mapping a field is what locks it.
     */
     if (manifest.profilePrefill?.[field.id]) out[field.id] = 'prefill';
+    /*
+      A COMPLETION CHECKLIST TICKS ITSELF — its rows are derived from the
+      parts' final states on every read, so a person typing into it would be
+      overwriting a fact the attempt rows already hold.
+    */
+    if (manifest.partCompletionMarks?.some((m) => m.fieldId === field.id)) {
+      out[field.id] = 'auto';
+    }
   }
 
   /*

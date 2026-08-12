@@ -30,6 +30,7 @@ import {
   type ExtractedField,
   type FormField,
   type FormFieldType,
+  type PartCompletionMark,
   type PartKind,
   type SetupAnswers,
   type StructureSection,
@@ -490,15 +491,107 @@ function signOffFrom(
   return proposeSignOff(extracted.filter((f) => f.coverSection === 'assessor_declaration'));
 }
 
+/** Words too common on this paper to tell one part from another. */
+const COMPLETION_STOP_WORDS = new Set(['part', 'the', 'a', 'an', 'of', 'and', 'or']);
+
+/** A label's comparable tokens: lowercase words, digits and noise dropped. */
+function completionTokens(label: string): Set<string> {
+  return new Set(
+    label
+      .toLowerCase()
+      .split(/[^a-z]+/)
+      .filter((w) => w.length > 1 && !COMPLETION_STOP_WORDS.has(w)),
+  );
+}
+
+/** The printed number a label leads with, or on a part heading ("PART 3 …"). */
+function printedNumber(label: string, asPart: boolean): number | null {
+  const match = asPart ? /part\s*0*(\d+)/i.exec(label) : /^\s*0*(\d+)\b/.exec(label);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Map each part to the printed checklist row that records its completion.
+ *
+ * The methods checklist prints one numbered row per part ("3. Direct
+ * Observation Log") and the parts carry the same numbers in their headings
+ * ("PART 3 - DIRECT OBSERVATON LOG" — typos and all). The NUMBER is the
+ * anchor, because the words drift exactly like that example; token overlap
+ * then separates "PART 2 - PRACTICAL DEMONSTRATION" from "PART 2 Assessor
+ * Assessment Declaration", which share the number and nothing else.
+ *
+ * A PROPOSAL, like every other pointer here: only a fixed-row table with one
+ * answer column qualifies, a row must beat every same-numbered rival on
+ * shared words, and a table that matches fewer than two parts is judged a
+ * coincidence and proposes nothing. An unmatched part simply never ticks —
+ * visible on the printed record, never wrong on it.
+ */
+export function proposePartCompletionMarks(
+  parts: readonly Pick<AssessmentPart, 'key' | 'label'>[],
+  extracted: readonly Pick<ExtractedField, 'id' | 'label' | 'type' | 'columns' | 'fixedRows'>[],
+): PartCompletionMark[] {
+  const tables = extracted.filter(
+    (f) =>
+      f.type === 'repeating_group' &&
+      (f.fixedRows?.length ?? 0) > 0 &&
+      (f.columns ?? []).slice(1).length === 1,
+  );
+
+  const byField = new Map<string, PartCompletionMark[]>();
+  for (const table of tables) {
+    const columnKey = table.columns![1]!.key;
+    const marks: PartCompletionMark[] = [];
+    const claimedRows = new Set<number>();
+
+    for (const part of parts) {
+      const partNumber = printedNumber(part.label, true);
+      if (partNumber === null) continue;
+      const partTokens = completionTokens(part.label);
+
+      let best: { rowIndex: number; overlap: number } | null = null;
+      let contested = false;
+      table.fixedRows!.forEach((rowLabel, rowIndex) => {
+        if (claimedRows.has(rowIndex)) return;
+        if (printedNumber(rowLabel, false) !== partNumber) return;
+        const overlap = [...completionTokens(rowLabel)].filter((t) => partTokens.has(t)).length;
+        if (overlap === 0) return;
+        if (best && overlap === best.overlap) contested = true;
+        else if (!best || overlap > best.overlap) {
+          best = { rowIndex, overlap };
+          contested = false;
+        }
+      });
+
+      if (best && !contested) {
+        const { rowIndex } = best;
+        claimedRows.add(rowIndex);
+        marks.push({ partKey: part.key, fieldId: table.id, rowIndex, columnKey });
+      }
+    }
+
+    if (marks.length >= 2) byField.set(table.id, marks);
+  }
+
+  return [...byField.values()].flat();
+}
+
 export function buildManifest(
   parts: readonly DerivedPart[],
-  extracted: readonly Pick<ExtractedField, 'id' | 'label' | 'type' | 'options' | 'coverSection'>[],
+  extracted: readonly Pick<
+    ExtractedField,
+    'id' | 'label' | 'type' | 'options' | 'coverSection' | 'columns' | 'fixedRows'
+  >[],
   setup?: Pick<SetupAnswers, 'theoryRendering'>,
 ): AssessmentToolManifest {
+  const completionMarks = proposePartCompletionMarks(parts, extracted);
   return {
     // `sectionKey` is builder bookkeeping and must not reach the stored record.
     parts: parts.map(({ sectionKey: _sectionKey, ...part }) => part),
     ...proposeCoverPointers(extracted),
+    // The completion checklist ticks itself as parts pass — see the manifest
+    // property. Proposed here so a tool published by this builder keeps its
+    // own printed record without anyone wiring the mapping by hand.
+    ...(completionMarks.length > 0 ? { partCompletionMarks: completionMarks } : {}),
     /*
       THE FRONT PAGE, from the assessor-declaration slice only.
 

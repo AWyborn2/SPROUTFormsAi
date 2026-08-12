@@ -276,6 +276,102 @@ export interface PrerequisiteCheck {
   competencyId: string;
 }
 
+/**
+ * One printed checklist row that ticks when its part completes — see
+ * `partCompletionMarks` on the manifest.
+ *
+ * Addressed by POSITION (a fixed-row index) rather than a row key, because
+ * fixed-row identity is positional everywhere: the fill surface seeds row i
+ * from `fixedRows[i]`, and the exporter maps value rows to printed bands the
+ * same way.
+ */
+export interface PartCompletionMark {
+  /** The part whose SATISFACTORY final state ticks the row. */
+  partKey: string;
+  /** The printed checklist — a fixed-row repeating table. */
+  fieldId: string;
+  /** Which printed row, as an index into the field's `fixedRows`. */
+  rowIndex: number;
+  /** The column the tick lands in. */
+  columnKey: string;
+}
+
+/**
+ * The checklist rows a case's progress has earned, merged over what is stored.
+ *
+ * `marks` are the entries for ONE field. The result is POSITIONAL — row i is
+ * printed row i — with gaps filled by empty rows so a tick at row 5 cannot
+ * slide up through a hole at row 2 when the exporter consumes rows in order.
+ * Only a SATISFACTORY part writes, and it writes `true` into its own cell:
+ * a failed or unstarted part leaves its row exactly as stored, because
+ * un-ticked means "not completed", never "failed".
+ */
+export function completionTickRows(
+  marks: readonly PartCompletionMark[],
+  progress: readonly PartProgress[],
+  existing?: SubmissionValue,
+): RepeatingRowValue[] {
+  const rows: RepeatingRowValue[] = Array.isArray(existing)
+    ? (existing as RepeatingRowValue[]).map((r) =>
+        r && typeof r === 'object' && !Array.isArray(r) ? { ...r } : {},
+      )
+    : [];
+
+  const satisfied = new Set(
+    progress.filter((p) => p.state === 'satisfactory').map((p) => p.part.key),
+  );
+
+  for (const mark of marks) {
+    if (!satisfied.has(mark.partKey)) continue;
+    while (rows.length <= mark.rowIndex) rows.push({});
+    rows[mark.rowIndex]![mark.columnKey] = true;
+  }
+
+  return rows;
+}
+
+/** Problems with completion-mark mappings — shared by publish and validation. */
+export function validatePartCompletionMarks(
+  marks: readonly PartCompletionMark[] | undefined,
+  manifest: Pick<AssessmentToolManifest, 'parts'>,
+  fields: readonly FormField[],
+): string[] {
+  const problems: string[] = [];
+  const partKeys = new Set(manifest.parts.map((p) => p.key));
+  const byId = new Map(fields.map((f) => [f.id, f]));
+
+  for (const mark of marks ?? []) {
+    if (!partKeys.has(mark.partKey)) {
+      problems.push(`Completion mark names part "${mark.partKey}", which this tool has no part for.`);
+      continue;
+    }
+    const field = byId.get(mark.fieldId);
+    if (!field) {
+      problems.push(`Completion mark names field "${mark.fieldId}", which is not in this version.`);
+      continue;
+    }
+    if (field.type !== 'repeating_group') {
+      problems.push(
+        `Completion mark for part "${mark.partKey}" targets "${mark.fieldId}", a ${field.type} — only a fixed-row table has rows to tick.`,
+      );
+      continue;
+    }
+    const rowCount = field.fixedRows?.length ?? 0;
+    if (!Number.isInteger(mark.rowIndex) || mark.rowIndex < 0 || mark.rowIndex >= rowCount) {
+      problems.push(
+        `Completion mark for part "${mark.partKey}" names row ${mark.rowIndex}, but "${mark.fieldId}" prints ${rowCount} row${rowCount === 1 ? '' : 's'}.`,
+      );
+    }
+    if (!(field.columns ?? []).some((c) => c.key === mark.columnKey)) {
+      problems.push(
+        `Completion mark for part "${mark.partKey}" names column "${mark.columnKey}", which "${mark.fieldId}" does not have.`,
+      );
+    }
+  }
+
+  return problems;
+}
+
 /** Problems with prerequisite mappings — shared by publish and the tool PATCH. */
 export function validatePrerequisiteChecks(
   checks: readonly PrerequisiteCheck[] | undefined,
@@ -474,6 +570,23 @@ export interface AssessmentToolManifest {
    * `PrerequisiteCheck`. Evaluated on read, gated at sign-off, never typed.
    */
   prerequisiteChecks?: PrerequisiteCheck[];
+
+  /**
+   * Printed checklist rows ticked as parts COMPLETE — the live record of what
+   * a candidate has finished, derived on every read and never stored.
+   *
+   * "Assessment Methods used" prints one row per part, and the paper practice
+   * is that the assessor ticks a row when that part of the training is done.
+   * Mapping each part to its printed row makes the document keep itself: the
+   * moment a part's final outcome is SATISFACTORY, its row ticks on the fill
+   * surface and the export — computed from the attempt rows exactly like part
+   * state itself, so it can never disagree with the progress it reports.
+   *
+   * A part that is failed, in progress, or not in this case's pathway leaves
+   * its row untouched: un-ticked means "not completed", never "failed", and
+   * writing false would print a finding nobody made.
+   */
+  partCompletionMarks?: PartCompletionMark[];
 
   /**
    * Tool-declared DEFAULT answers, by field id — applied wherever no answer
@@ -1034,6 +1147,7 @@ export function validateManifest(
   */
   problems.push(...validateProfilePrefill(manifest.profilePrefill, fields));
   problems.push(...validatePrerequisiteChecks(manifest.prerequisiteChecks, fields));
+  problems.push(...validatePartCompletionMarks(manifest.partCompletionMarks, manifest, fields));
   for (const id of Object.keys(manifest.fieldDefaults ?? {})) {
     if (!fieldIds.has(id)) {
       problems.push(`Default answer names field "${id}", which is not in this version.`);

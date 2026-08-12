@@ -1,5 +1,6 @@
 import {
   caseProgress,
+  completionTickRows,
   isCaseCompetent,
   moreCoachingRequired,
   requiredParts,
@@ -269,6 +270,31 @@ export function assembleCaseValues({
   }
   if (manifest.candidateNameFieldId && candidateName) {
     values[manifest.candidateNameFieldId] = candidateName;
+  }
+
+  /*
+    THE COMPLETION CHECKLIST TICKS ITSELF (manifest.partCompletionMarks).
+    Derived from the same attempt rows part state comes from, on an OPEN case
+    as much as a resolved one — a mid-programme export is exactly where "what
+    has this candidate finished so far" is being asked. Written over whatever
+    an attempt stored for the field, so the printed record can never claim a
+    completion the progress does not back.
+  */
+  const completionMarks = manifest.partCompletionMarks ?? [];
+  if (completionMarks.length > 0) {
+    const progress = caseProgress(
+      manifest,
+      pathway,
+      attempts.map((a) => ({ partKey: a.partKey, attemptNumber: a.attemptNumber, outcome: a.outcome })),
+    );
+    for (const fieldId of new Set(completionMarks.map((m) => m.fieldId))) {
+      const rows = completionTickRows(
+        completionMarks.filter((m) => m.fieldId === fieldId),
+        progress,
+        values[fieldId],
+      );
+      if (rows.length > 0) values[fieldId] = rows;
+    }
   }
 
   /*
