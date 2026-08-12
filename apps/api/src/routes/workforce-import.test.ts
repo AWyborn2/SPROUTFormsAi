@@ -20,8 +20,9 @@ vi.mock('../db.js', () => ({
   prices both pools.
 */
 const runMock = vi.hoisted(() => ({
-  executeImportRun: vi.fn(async () => ({ runId: 'run-1' })),
+  startImportRun: vi.fn(async () => ({ runId: 'run-1' }) as unknown),
   readRunReport: vi.fn(async () => null as unknown),
+  readActiveRunReport: vi.fn(async () => null as unknown),
 }));
 vi.mock('../lib/workforce-import-run.js', () => runMock);
 
@@ -181,7 +182,7 @@ describe('POST /workforce-import/validate (R144)', () => {
       expect(body.rejected[0]!.reason).toBe('unknown_location');
       // Pricing a file must not change anything about the organisation.
       expect(inserted).toHaveLength(0);
-      expect(runMock.executeImportRun).not.toHaveBeenCalled();
+      expect(runMock.startImportRun).not.toHaveBeenCalled();
     } finally {
       server.close();
     }
@@ -348,7 +349,7 @@ describe('POST /workforce-import/run (R144)', () => {
       expect(res.status).toBe(201);
       expect(await res.json()).toEqual({ runId: 'run-1' });
 
-      const [, , input] = runMock.executeImportRun.mock.calls[0] as unknown as [
+      const [, , input] = runMock.startImportRun.mock.calls[0] as unknown as [
         unknown,
         unknown,
         { validProfiles: unknown[]; rejected: unknown[] },
@@ -356,6 +357,62 @@ describe('POST /workforce-import/run (R144)', () => {
       // The route validated it itself: one good row, one rejection.
       expect(input.validProfiles).toHaveLength(1);
       expect(input.rejected).toHaveLength(1);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('STARTS the run rather than waiting for it', async () => {
+    /*
+      The incident, in one assertion. This route used to hold the request open
+      for the whole run — one transaction per row over 191 people and 3,325
+      competency lines — so the browser timed out, fell back to the upload form,
+      and offered a live confirm button beside an import that was still writing.
+      It now returns the moment the run has an id.
+    */
+    fakeDb();
+    // A run that would take far longer than any browser will wait.
+    runMock.startImportRun.mockImplementation(async () => {
+      void new Promise(() => {});
+      return { runId: 'run-1' };
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/workforce-import/run`, {
+        method: 'POST',
+        headers: authHeader(admin),
+        body: JSON.stringify({ csv: CSV }),
+      });
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ runId: 'run-1' });
+    } finally {
+      server.close();
+      runMock.startImportRun.mockImplementation(async () => ({ runId: 'run-1' }));
+    }
+  });
+
+  it('REFUSES a second run while one is active, and names the live one (409)', async () => {
+    /*
+      The difference between a confusing screen and duplicated work on
+      production data. 409 rather than 400 because the request is perfectly
+      well-formed and would be accepted a minute from now; the run id is the
+      useful half, because it is what the screen polls instead of drawing an
+      upload form.
+    */
+    fakeDb();
+    runMock.startImportRun.mockResolvedValueOnce({
+      refused: 'already_running',
+      runId: 'run-live',
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/workforce-import/run`, {
+        method: 'POST',
+        headers: authHeader(admin),
+        body: JSON.stringify({ csv: CSV }),
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ error: 'import_already_running', runId: 'run-live' });
     } finally {
       server.close();
     }
@@ -371,7 +428,59 @@ describe('POST /workforce-import/run (R144)', () => {
         body: JSON.stringify({ csv: CSV }),
       });
       expect(res.status).toBe(403);
-      expect(runMock.executeImportRun).not.toHaveBeenCalled();
+      expect(runMock.startImportRun).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('GET /workforce-import/active', () => {
+  /*
+    What the screen asks BEFORE it offers to start one. Without it a page loaded
+    after a timeout has no way to know an import is happening, and draws the
+    upload form over the top of it.
+  */
+  it('reports the run in flight, in full, so the screen can show progress', async () => {
+    fakeDb();
+    runMock.readActiveRunReport.mockResolvedValue({
+      runId: 'run-live',
+      status: 'running',
+      rowsProcessed: 61,
+      rowsTotal: 191,
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/workforce-import/active`, { headers: authHeader(admin) });
+      expect(res.status).toBe(200);
+      expect((await res.json()) as { run: { runId: string } }).toMatchObject({
+        run: { runId: 'run-live', status: 'running', rowsProcessed: 61, rowsTotal: 191 },
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('answers null when nothing is running, so the form comes back', async () => {
+    fakeDb();
+    runMock.readActiveRunReport.mockResolvedValue(null);
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/workforce-import/active`, { headers: authHeader(admin) });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ run: null });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a non-Admin', async () => {
+    fakeDb();
+    const { server, base } = startApp();
+    try {
+      expect(
+        (await fetch(`${base}/workforce-import/active`, { headers: authHeader(viewer) })).status,
+      ).toBe(403);
     } finally {
       server.close();
     }
@@ -381,12 +490,67 @@ describe('POST /workforce-import/run (R144)', () => {
 describe('GET /workforce-import/runs/:id (R171)', () => {
   it('returns the report so it outlives the tab', async () => {
     fakeDb();
-    runMock.readRunReport.mockResolvedValue({ runId: 'run-1', rowsTotal: 2, rejected: [] });
+    runMock.readRunReport.mockResolvedValue({
+      runId: 'run-1',
+      status: 'completed',
+      rowsTotal: 2,
+      rejected: [],
+    });
     const { server, base } = startApp();
     try {
       const res = await fetch(`${base}/workforce-import/runs/run-1`, { headers: authHeader(admin) });
       expect(res.status).toBe(200);
       expect((await res.json()) as { runId: string }).toMatchObject({ runId: 'run-1' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('is the STATUS endpoint too: progress and state while it runs', async () => {
+    /*
+      One route for both, because they are the same record. The operator in the
+      incident had neither — he watched `select count(*) from memberships` climb
+      61 → 122 → 178 → 191 in psql because the product could not tell him.
+    */
+    fakeDb();
+    runMock.readRunReport.mockResolvedValue({
+      runId: 'run-1',
+      status: 'running',
+      completedAt: null,
+      rowsProcessed: 61,
+      rowsTotal: 191,
+      rejected: [],
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/workforce-import/runs/run-1`, { headers: authHeader(admin) });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        status: 'running',
+        rowsProcessed: 61,
+        rowsTotal: 191,
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports a FAILED run as failed, not as forever running', async () => {
+    // A run whose process died stops heartbeating and is reaped. Reported
+    // `running`, it would be a spinner that never resolves.
+    fakeDb();
+    runMock.readRunReport.mockResolvedValue({
+      runId: 'run-1',
+      status: 'failed',
+      failureReason: 'abandoned',
+      rowsProcessed: 61,
+      rowsTotal: 191,
+      rejected: [],
+    });
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/workforce-import/runs/run-1`, { headers: authHeader(admin) });
+      expect(await res.json()).toMatchObject({ status: 'failed', failureReason: 'abandoned' });
     } finally {
       server.close();
     }

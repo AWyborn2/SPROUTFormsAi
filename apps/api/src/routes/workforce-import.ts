@@ -13,7 +13,11 @@ import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { loadHeldIdentifiers, previewImportCost } from '../lib/member-create.js';
-import { executeImportRun, readRunReport } from '../lib/workforce-import-run.js';
+import {
+  readActiveRunReport,
+  readRunReport,
+  startImportRun,
+} from '../lib/workforce-import-run.js';
 import { db } from '../db.js';
 
 /**
@@ -239,8 +243,19 @@ workforceImportRouter.post(
  * Execute the import (R144's confirmation step).
  *
  * Re-validates the file rather than trusting anything the client says was
- * approved, and returns a run id immediately — the report is addressable
- * afterwards, so closing the tab loses nothing.
+ * approved, then STARTS the run and returns its id — it does not wait for it.
+ *
+ * IT USED TO WAIT, and that is the bug this route exists to have fixed. A real
+ * file of 191 people and 3,325 competency lines held this request open for
+ * minutes at one transaction per row; the browser timed out, the screen fell
+ * back to the upload form with a live confirm button, and the operator — who
+ * had no way to tell a finished run from a lost one — came within a click of
+ * running the whole thing a second time against production while the first was
+ * still writing. The run was perfect. Everything around it was not.
+ *
+ * A SECOND RUN IS REFUSED, 409, while one is active, and the refusal names the
+ * run already in flight so the screen can show its progress instead of an
+ * upload form.
  */
 workforceImportRouter.post(
   '/run',
@@ -267,12 +282,49 @@ workforceImportRouter.post(
       return;
     }
 
-    const { runId } = await executeImportRun(db, tenant, {
+    const started = await startImportRun(db, tenant, {
       validProfiles: outcome.validated.validProfiles,
       validCompetencies: outcome.validated.validCompetencies,
       rejected: outcome.validated.rejected,
     });
-    res.status(201).json({ runId });
+    if ('refused' in started) {
+      // 409, not 400: the request is well-formed and would be accepted a minute
+      // from now. The id is the useful half — it is what the screen polls.
+      res.status(409).json({ error: 'import_already_running', runId: started.runId });
+      return;
+    }
+    res.status(201).json({ runId: started.runId });
+  }),
+);
+
+// ── GET /workforce-import/active ───────────────────────────────────────────
+
+/**
+ * The run this organisation has in flight, if any.
+ *
+ * ASKED ON LOAD, which is the half of the fix that lives on this side of the
+ * wire: a page opened at any moment — after a timeout, a reload, from another
+ * machine — can find out that an import is happening before it offers to start
+ * one. Returns the full report, so the screen needs no second call to show
+ * progress, and null once nothing is running.
+ *
+ * It is a separate path rather than `/runs/active` so that no run id can ever be
+ * shadowed by a literal segment.
+ */
+workforceImportRouter.get(
+  '/active',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    res.json({ run: await readActiveRunReport(db, tenant.orgId) });
   }),
 );
 

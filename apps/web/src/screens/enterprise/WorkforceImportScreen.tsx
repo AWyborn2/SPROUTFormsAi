@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { Badge, Button, Card, Icon } from '@formai/ui';
 import {
+  useActiveWorkforceImport,
   useRunWorkforceImport,
   useValidateWorkforceImport,
   useWorkforceImportRun,
 } from '../../lib/data/hooks.js';
+import { ApiError } from '../../lib/data/api-client.js';
 import { store } from '../../lib/data/store.js';
-import type { WorkforceImportPreview } from '../../lib/data/types.js';
+import type { WorkforceImportPreview, WorkforceImportRun } from '../../lib/data/types.js';
 
 /**
  * Bulk workforce import (U23, U24).
@@ -21,6 +23,14 @@ import type { WorkforceImportPreview } from '../../lib/data/types.js';
  * client-supplied list of approved rows, which is also why the Admin can leave
  * the preview open while somebody edits the taxonomy without landing rows
  * against values that have since been retired.
+ *
+ * A FOURTH STATE OUTRANKS ALL THREE: a run already in flight. The screen asks
+ * before it draws anything, because the incident this rebuild answers was not a
+ * broken import — the import was flawless — it was a browser that timed out
+ * after minutes of waiting, fell back to this upload form, and offered a live
+ * confirm button while 191 people were still landing. There is now no route
+ * through this screen that can start a second run mid-flight: the form is not
+ * rendered while one is active, and the server refuses one anyway.
  */
 export function WorkforceImportScreen() {
   const [csv, setCsv] = useState<string | null>(null);
@@ -29,8 +39,23 @@ export function WorkforceImportScreen() {
 
   const validate = useValidateWorkforceImport();
   const run = useRunWorkforceImport();
-  const report = useWorkforceImportRun(runId);
+  const active = useActiveWorkforceImport();
   const preview = validate.data;
+
+  /*
+    The run in flight wins over anything this page was in the middle of. It is
+    the same organisation's data either way, and a cost preview taken before it
+    started is describing a world that has since moved.
+  */
+  const activeRun = active.data?.run ?? null;
+  const watching = runId ?? activeRun?.runId;
+  const report = useWorkforceImportRun(watching);
+  // While the active-run query is still in flight we know nothing, and drawing
+  // a confirm button on "not yet loaded" is the exact mistake being fixed.
+  const undecided = active.isPending;
+  // The run's own report once we have it; the active-run answer is a complete
+  // report too, so there is no gap between finding one and rendering it.
+  const shown: WorkforceImportRun | undefined = report.data ?? activeRun ?? undefined;
 
   async function downloadTemplate() {
     const text = await store.getWorkforceImportTemplate();
@@ -75,8 +100,40 @@ export function WorkforceImportScreen() {
         </p>
       </Card>
 
-      {runId ? (
-        <RunReport runId={runId} report={report.data} />
+      {undecided ? (
+        <Card className="p-5 text-sm text-text-tertiary">
+          Checking whether an import is already running…
+        </Card>
+      ) : watching ? (
+        <>
+          <RunReport runId={watching} report={shown} />
+          {/*
+            Only offered once it is genuinely over. Not a "start another"
+            button beside a live run — the thing the timed-out browser drew.
+          */}
+          {shown && shown.status !== 'running' && (
+            <Card className="flex items-center justify-between gap-3 p-5">
+              <p className="text-[12.5px] text-text-tertiary">
+                {shown.status === 'failed'
+                  ? 'The rows that did land are real and were kept. Re-importing the same file merges rather than duplicating them.'
+                  : 'Finished. Import another file when you are ready.'}
+              </p>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setRunId(undefined);
+                  setCsv(null);
+                  setFileName('');
+                  validate.reset();
+                  run.reset();
+                  void active.refetch();
+                }}
+              >
+                Import another file
+              </Button>
+            </Card>
+          )}
+        </>
       ) : (
         <>
           <Card className="grid gap-3 p-5">
@@ -127,10 +184,27 @@ export function WorkforceImportScreen() {
                   <Button
                     disabled={!csv || preview.validRows === 0 || run.isPending}
                     onClick={() =>
-                      csv && run.mutate(csv, { onSuccess: (r) => setRunId(r.runId) })
+                      csv &&
+                      run.mutate(csv, {
+                        onSuccess: (r) => setRunId(r.runId),
+                        /*
+                          A 409 means somebody else — or this Admin in another
+                          tab — started one first. The server names it, so the
+                          answer is to WATCH that run rather than to report a
+                          failure: the work the Admin wanted is happening.
+                        */
+                        onError: (err) => {
+                          const body =
+                            err instanceof ApiError && err.status === 409
+                              ? (err.body as { runId?: string } | undefined)
+                              : undefined;
+                          if (body?.runId) setRunId(body.runId);
+                        },
+                      })
                     }
                   >
-                    {run.isPending ? 'Importing…' : 'Confirm and import'}
+                    {/* "Starting", not "Importing" — this call only kicks it off. */}
+                    {run.isPending ? 'Starting…' : 'Confirm and import'}
                   </Button>
                 </span>
               </Card>
@@ -231,16 +305,27 @@ function RejectionTable({ preview }: { preview: WorkforceImportPreview }) {
 }
 
 /**
- * The run report (R171).
+ * The run report (R171) — and, while it runs, the progress.
  *
  * Polls while the run is in flight, then renders the finished report from the
- * same route — which is what makes it survive the tab being closed.
+ * same route, which is what makes it survive the tab being closed.
+ *
+ * THE PROGRESS IS COUNTED, not estimated. `rowsProcessed` is recorded rows; it
+ * is the same figure the operator in the incident got by running
+ * `select count(*) from memberships` every thirty seconds, and a bar that
+ * interpolated from elapsed time would be a worse answer than the psql session
+ * it replaces.
  */
-function RunReport({ runId, report }: { runId: string; report?: ReturnType<typeof useWorkforceImportRun>['data'] }) {
+function RunReport({ runId, report }: { runId: string; report?: WorkforceImportRun }) {
   if (!report) {
     return <Card className="p-5 text-sm text-text-tertiary">Starting the import…</Card>;
   }
-  const done = report.completedAt !== null;
+  const done = report.status !== 'running';
+  const failed = report.status === 'failed';
+  const pct =
+    report.rowsTotal > 0
+      ? Math.min(100, Math.round((report.rowsProcessed / report.rowsTotal) * 100))
+      : 0;
   const figures: Array<[string, number]> = [
     ['Profiles created', report.profilesCreated],
     ['People merged', report.peopleMerged],
@@ -260,11 +345,47 @@ function RunReport({ runId, report }: { runId: string; report?: ReturnType<typeo
     <>
       <Card className="p-5">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="font-ui text-sm font-semibold">{done ? 'Import complete' : 'Importing…'}</h3>
+          <h3 className="font-ui text-sm font-semibold">
+            {failed ? 'Import stopped' : done ? 'Import complete' : 'Importing…'}
+          </h3>
           <span className="text-[12.5px] tabular-nums text-text-tertiary">
             {report.rowsProcessed} of {report.rowsTotal} rows
           </span>
         </div>
+
+        {/* Only while it runs: a finished report is the figures, not a bar. */}
+        {!done && (
+          <div
+            className="mt-3 h-1.5 overflow-hidden rounded-full bg-surface-sunken"
+            role="progressbar"
+            aria-valuenow={report.rowsProcessed}
+            aria-valuemin={0}
+            aria-valuemax={report.rowsTotal}
+            aria-label="Rows imported"
+          >
+            <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${pct}%` }} />
+          </div>
+        )}
+
+        {!done && (
+          <p className="mt-2 text-[12px] text-text-tertiary">
+            {/*
+              The reassurance that was missing. The run is server-side; the
+              request that started it ended seconds after it began.
+            */}
+            This is running on the server. You can close this page — it will keep going, and this
+            report will be here when you come back.
+          </p>
+        )}
+
+        {failed && (
+          <p className="mt-2 text-[12.5px] text-danger-text">
+            {report.failureReason === 'abandoned'
+              ? 'This run stopped before it finished — the server it was running on went away. The rows below did land and were kept.'
+              : `This run stopped before it finished: ${report.failureReason ?? 'unknown reason'}. The rows below did land and were kept.`}
+          </p>
+        )}
+
         <p className="mt-1 text-[12px] text-text-tertiary">
           Report {runId} — keep this reference; it stays readable after you close this page.
         </p>
