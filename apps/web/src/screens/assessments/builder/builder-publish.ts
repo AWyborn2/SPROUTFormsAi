@@ -30,6 +30,7 @@ import { resolveStructure } from './builder-structure.js';
 import {
   isSelfAnswering,
   linkOutcomeTargets,
+  unplacedMarkDestinations,
   validateAnswerKeys,
   validateManifest,
   type AssessmentToolManifest,
@@ -142,6 +143,14 @@ export interface PublishCheck {
    * something to spot-check.
    */
   inferred: string[];
+  /**
+   * Auto-mark destinations with no drawable box — the ✓/✗ cells, verdict
+   * pairs and sign-off boxes whose marks would compute and print NOWHERE.
+   * Warnings, never gates: the tool still assesses and certifies correctly,
+   * only the printed record is incomplete, and the exporter's own safe
+   * failure (silence) is exactly why it has to be said here.
+   */
+  unplaced: string[];
   fields: FormField[];
 }
 
@@ -216,6 +225,7 @@ export function checkPublish(
     problems,
     unlinked: resolved.unlinked,
     inferred: resolved.inferred,
+    unplaced: manifest ? unplacedMarkDestinations(manifest, resolved.fields) : [],
     fields: resolved.fields,
   };
 }

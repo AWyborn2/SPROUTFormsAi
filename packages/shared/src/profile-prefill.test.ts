@@ -14,6 +14,7 @@ import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import {
   profilePrefillValues,
+  unplacedMarkDestinations,
   validateManifest,
   validatePrerequisiteChecks,
   validateProfilePrefill,
@@ -272,5 +273,94 @@ describe('manifest.fieldDefaults validation', () => {
     const problems = validateManifest(manifest, [field('a')]);
 
     expect(problems.some((p) => p.includes('Default answer names field "ghost"'))).toBe(true);
+  });
+});
+
+describe('unplacedMarkDestinations', () => {
+  /*
+    The exporter skips a field with no geometry SILENTLY — the right failure on
+    the page, and an invisible one everywhere else. Thirty ✓/✗ cells can carry
+    thirty computed verdicts that print nowhere, and nothing says so. This is
+    the audit that says so, with the exporter's own resolver deciding what
+    "placed" means.
+  */
+  const box = { page: 0, x: 40, y: 60, width: 20, height: 14, pageWidth: 600, pageHeight: 800 };
+  const placed = (id: string, type: FormField['type'] = 'check_cross'): FormField => ({
+    ...field(id, type),
+    geometry: { segments: [box] },
+  });
+  const keyed = (id: string, target: string): FormField => ({
+    ...placed(id, 'checkbox_group'),
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: target },
+  });
+  const manifest: AssessmentToolManifest = {
+    parts: [
+      { key: 'p1', ordinal: 1, label: 'Theory', kind: 'theory', pathways: ['new'], startFieldId: 'q' },
+    ],
+  };
+
+  it('names the ✓/✗ box a question would mark into but nobody placed', () => {
+    const warnings = unplacedMarkDestinations(manifest, [keyed('q', 'q-out'), field('q-out', 'check_cross')]);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('✓/✗ box');
+    expect(warnings[0]).toContain('prints nowhere');
+  });
+
+  it('is silent when the box is placed', () => {
+    expect(unplacedMarkDestinations(manifest, [keyed('q', 'q-out'), placed('q-out')])).toEqual([]);
+  });
+
+  it('treats a legacy sourcePosition as placed — the exporter draws it', () => {
+    const legacy: FormField = { ...field('q-out', 'check_cross'), sourcePosition: box };
+
+    expect(unplacedMarkDestinations(manifest, [keyed('q', 'q-out'), legacy])).toEqual([]);
+  });
+
+  it('reports a shared unplaced cell once, not once per question', () => {
+    const warnings = unplacedMarkDestinations(manifest, [
+      keyed('q', 'shared-out'),
+      keyed('q2', 'shared-out'),
+      field('shared-out', 'check_cross'),
+    ]);
+
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('says nothing about a ghost id — that is validateManifest’s problem', () => {
+    expect(unplacedMarkDestinations(manifest, [keyed('q', 'ghost')])).toEqual([]);
+  });
+
+  it('covers the manifest’s own destinations — verdicts, sign-off, prerequisites', () => {
+    const withMarks: AssessmentToolManifest = {
+      parts: [
+        {
+          ...manifest.parts[0]!,
+          outcomeSatisfactory: { fieldId: 'v-yes', value: true },
+          outcomeNotSatisfactory: { fieldId: 'v-no', value: true },
+        },
+      ],
+      signOff: { overallSatisfactory: { fieldId: 'competent', value: true } },
+      prerequisiteChecks: [{ fieldId: 'prereq', competencyId: 'c1' }],
+      profilePrefill: { company: 'company_name' },
+    };
+    const fields = [
+      keyed('q', 'q-out'),
+      placed('q-out'),
+      field('v-yes', 'check_cross'),
+      placed('v-no'),
+      field('competent', 'check_cross'),
+      field('prereq', 'check_cross'),
+      placed('company', 'text'),
+    ];
+
+    const warnings = unplacedMarkDestinations(withMarks, fields);
+
+    expect(warnings).toHaveLength(3);
+    expect(warnings.some((w) => w.includes('Satisfactory verdict'))).toBe(true);
+    expect(warnings.some((w) => w.includes('Candidate Competent'))).toBe(true);
+    expect(warnings.some((w) => w.includes('prerequisite'))).toBe(true);
   });
 });

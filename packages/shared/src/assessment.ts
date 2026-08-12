@@ -27,6 +27,7 @@
  */
 
 import type { FormField, FormFieldType } from './form-field.js';
+import { geometrySegments } from './geometry.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 import type { AssessmentWorkflow } from './workflow.js';
 
@@ -1425,4 +1426,90 @@ export function validateAnswerKeys(fields: readonly FormField[]): string[] {
   }
 
   return problems;
+}
+
+/**
+ * Every mark destination the export writes that has NO BOX to draw into.
+ *
+ * The exporter's rule is "silence is the safe failure": a field with no
+ * geometry is skipped without an error, because a confident mark in a guessed
+ * position asserts a finding nobody made. The cost of that rule is that a
+ * whole class of authoring gap is invisible — the ✓/✗ column beside thirty
+ * questions can compute thirty verdicts that print NOWHERE, and nothing
+ * anywhere says so. The values exist, the marking ran, the document simply
+ * never shows it.
+ *
+ * This names those silences, using the SAME resolver the exporter draws with
+ * (`geometrySegments`, legacy `sourcePosition` bridge included) so the two can
+ * never disagree about what "placed" means. A ghost id — a destination naming
+ * a field the version lacks — is NOT reported here; that is `validateManifest`'s
+ * problem and a harder one.
+ *
+ * WARNINGS, NEVER GATES. A tool with unplaced marks still assesses, marks and
+ * certifies correctly — only the printed record is incomplete — and blocking
+ * publish on it would strand an author mid-build over boxes they may be about
+ * to place.
+ */
+export function unplacedMarkDestinations(
+  manifest: AssessmentToolManifest,
+  fields: readonly FormField[],
+): string[] {
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  const short = (label: string) =>
+    label.length > 48 ? `${label.slice(0, 48).trimEnd()}…` : label;
+
+  const check = (id: string | undefined, what: string) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    const field = byId.get(id);
+    if (!field) return;
+    if (geometrySegments(field).length > 0) return;
+    out.push(`${what} has no box on the document — its mark computes but prints nowhere.`);
+  };
+
+  for (const field of fields) {
+    if ((field.answerKey?.length ?? 0) > 0 && field.outcomeTarget) {
+      check(field.outcomeTarget.fieldId, `The ✓/✗ box for "${short(field.label)}"`);
+    }
+  }
+
+  for (const part of manifest.parts) {
+    check(part.outcomeSatisfactory?.fieldId, `Part "${part.label}" — the Satisfactory verdict box`);
+    check(
+      part.outcomeNotSatisfactory?.fieldId,
+      `Part "${part.label}" — the Not Satisfactory verdict box`,
+    );
+    check(part.furtherActionFieldId, `Part "${part.label}" — the further-action box`);
+    check(part.assessorNameFieldId, `Part "${part.label}" — the assessor-name box`);
+    check(part.signedDateFieldId, `Part "${part.label}" — the signed-date box`);
+    check(part.checklistMark?.fieldId, `Part "${part.label}" — its checklist mark`);
+  }
+
+  const signOff = manifest.signOff;
+  if (signOff) {
+    check(signOff.assessorNameFieldId, 'The sign-off assessor-name box');
+    check(signOff.assessorSignatureFieldId, 'The sign-off signature box');
+    check(signOff.signedDateFieldId, 'The sign-off date box');
+    check(signOff.overallSatisfactory?.fieldId, 'The "Candidate Competent" box');
+    check(signOff.overallNotSatisfactory?.fieldId, 'The "not yet Competent" box');
+    check(signOff.moreCoachingRequiredYes?.fieldId, 'The "more coaching — Yes" box');
+    check(signOff.moreCoachingRequiredNo?.fieldId, 'The "more coaching — No" box');
+  }
+
+  for (const prereq of manifest.prerequisiteChecks ?? []) {
+    check(prereq.fieldId, 'A prerequisite ✓/✗ box');
+  }
+  for (const fieldId of Object.keys(manifest.profilePrefill ?? {})) {
+    const label = byId.get(fieldId)?.label;
+    check(fieldId, `The profile-prefilled box${label ? ` "${short(label)}"` : ''}`);
+  }
+  check(manifest.candidateNameFieldId, "The candidate's-name box");
+  for (const mark of manifest.partCompletionMarks ?? []) {
+    check(mark.fieldId, 'The assessment-methods checklist');
+  }
+
+  return out;
 }
