@@ -61,7 +61,7 @@ import { heldCompetencyStates } from '../lib/assignment.js';
 import { identifyMember, loadDisplayIdentities } from '../lib/display-identity.js';
 import { recordAudit } from '../audit/record.js';
 import { grantCompetency, revokeGrantsFromCase } from '../lib/competency-grant.js';
-import { CaseExportError, exportCasePdf } from '../pdf/index.js';
+import { CaseExportError, exportCasePdf, withDerivedMarks, type CaseAttemptRecord } from '../pdf/index.js';
 import { getStorageClient } from '../storage/index.js';
 import { db } from '../db.js';
 
@@ -2597,7 +2597,40 @@ assessmentCasesRouter.post(
       return;
     }
 
-    const attempts = await attemptsFor(db, row.id);
+    const attemptRows = await attemptsFor(db, row.id);
+    /*
+      FILL THE MARKS OLDER ATTEMPTS NEVER STORED. `withDerivedMarks` re-runs
+      the marking arithmetic over each passing self-marked attempt against ITS
+      OWN version's keys, merging under the stored values — so the printed
+      ✓/✗ column, verdict pair and further-action note appear on attempts
+      marked before the marking wrote them, and nothing already recorded is
+      touched. Version fields are fetched once per distinct version.
+    */
+    const versionFieldsById = new Map<string, FormField[]>();
+    const attempts: CaseAttemptRecord[] = [];
+    for (const a of attemptRows) {
+      let versionFields = versionFieldsById.get(a.templateVersionId);
+      if (!versionFields) {
+        versionFields = await fieldsForVersion(db, a.templateVersionId);
+        versionFieldsById.set(a.templateVersionId, versionFields);
+      }
+      attempts.push(
+        withDerivedMarks(
+          {
+            partKey: a.partKey,
+            attemptNumber: a.attemptNumber,
+            outcome: a.outcome,
+            values: a.values,
+            // COLUMNS, not values. Dropping them here is why every printed
+            // "assessor name" and date box exported blank.
+            assessorName: a.assessorName,
+            signedAt: a.signedAt,
+          },
+          versionFields,
+          tool.manifest,
+        ),
+      );
+    }
     /*
       Resolved here rather than read off a filled field, because the cover page
       belongs to NO part — `fieldsInPart` slices from part 1's anchor onward, so
@@ -2639,16 +2672,7 @@ assessmentCasesRouter.post(
             (r) => [r.fieldId, r.satisfied],
           ),
         ),
-        attempts: attempts.map((a) => ({
-          partKey: a.partKey,
-          attemptNumber: a.attemptNumber,
-          outcome: a.outcome,
-          values: a.values,
-          // COLUMNS, not values. Dropping them here is why every printed
-          // "assessor name" and date box exported blank.
-          assessorName: a.assessorName,
-          signedAt: a.signedAt,
-        })),
+        attempts,
         /*
           Null until the assessor signs, which gates the whole certification
           block. A mid-programme export prints the front page blank, exactly as

@@ -2,6 +2,8 @@ import {
   caseProgress,
   completionTickRows,
   isCaseCompetent,
+  isSelfMarking,
+  markTheory,
   moreCoachingRequired,
   requiredParts,
   validateManifest,
@@ -126,6 +128,37 @@ function authoritativeAttempt(
   return attempts
     .filter((a) => a.partKey === partKey && a.outcome === 'satisfactory')
     .sort((a, b) => b.attemptNumber - a.attemptNumber)[0];
+}
+
+/**
+ * Re-derive the marks a self-marked attempt should carry, filling only gaps.
+ *
+ * The ✓/✗ each question earned, the part's verdict pair and the further-action
+ * note are all written into the attempt's stored values AT MARKING — but only
+ * by the marking code that ran then. An attempt marked before that code
+ * existed, or before the manifest declared its verdict boxes, stores the
+ * answers alone, and the printed outcome column exports blank on exactly the
+ * paper the marks were computed for.
+ *
+ * Re-run the same arithmetic over the same stored answers with the same
+ * version's keys, and MERGE UNDER the stored values: anything marking (or a
+ * person) already recorded wins, so a certified record is never rewritten —
+ * only its silences are filled. Skipped entirely unless the attempt PASSED and
+ * the part marks itself: a failed attempt never prints, and a judged part's
+ * marks belong to the person who judged it.
+ */
+export function withDerivedMarks(
+  attempt: CaseAttemptRecord,
+  versionFields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+): CaseAttemptRecord {
+  if (attempt.outcome !== 'satisfactory') return attempt;
+  const part = manifest.parts.find((p) => p.key === attempt.partKey);
+  if (!part) return attempt;
+  if (!isSelfMarking(versionFields, manifest, part.key)) return attempt;
+
+  const marked = markTheory({ fields: versionFields, values: attempt.values, part });
+  return { ...attempt, values: { ...marked.derivedValues, ...(attempt.values ?? {}) } };
 }
 
 /**
@@ -377,31 +410,24 @@ export interface ExportCaseInput extends AssembleCaseInput {
  * export that quietly drops a part is indistinguishable from one where the
  * candidate never did it.
  */
-export async function exportCasePdf({
-  originalPdf,
-  fields,
-  manifest,
-  pathway,
-  locationStream,
-  candidateName,
-  attempts,
-  signOff,
-  resolved,
-}: ExportCaseInput): Promise<Uint8Array> {
-  const problems = validateManifest(manifest, fields);
+export async function exportCasePdf(input: ExportCaseInput): Promise<Uint8Array> {
+  /*
+    EVERYTHING BUT THE RENDERER'S OWN INPUTS FLOWS THROUGH UNTOUCHED. This used
+    to re-list every assemble field by hand, and the list drifted: the route
+    resolved `prefillValues` and `prerequisiteValues` and this seam silently
+    dropped both, so the printed identity block and the prerequisite ✓ exported
+    blank on every case while the code that computed them ran for nothing. A
+    rest-spread cannot drift — a field added to `AssembleCaseInput` reaches
+    `assembleCaseValues` without this function knowing it exists.
+  */
+  const { originalPdf, fields, ...assemble } = input;
+
+  const problems = validateManifest(assemble.manifest, fields);
   if (problems.length > 0) {
     throw new CaseExportError('case_export_invalid_manifest', problems);
   }
 
-  const { values, blank } = assembleCaseValues({
-    manifest,
-    pathway,
-    locationStream,
-    candidateName,
-    attempts,
-    signOff,
-    resolved,
-  });
+  const { values, blank } = assembleCaseValues(assemble);
 
   /*
     A SIGNED CASE WITH A BLANK REQUIRED PART IS A CONTRADICTION.
@@ -414,7 +440,7 @@ export async function exportCasePdf({
 
     `blank` was previously destructured away and never consulted.
   */
-  if (signOff && blank.length > 0) {
+  if (assemble.signOff && blank.length > 0) {
     throw new CaseExportError(
       'case_export_competent_with_blank_parts',
       blank.map(

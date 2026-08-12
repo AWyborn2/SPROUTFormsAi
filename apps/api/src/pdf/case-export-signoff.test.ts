@@ -11,9 +11,16 @@
  * mark in the wrong box asserts that somebody was assessed as safe on something
  * nobody checked.
  */
+import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import type { AssessmentToolManifest, FormField, PageBox } from '@formai/shared';
-import { assembleCaseValues, CaseExportError, exportCasePdf, type CaseAttemptRecord } from './case-export.js';
+import {
+  assembleCaseValues,
+  CaseExportError,
+  exportCasePdf,
+  withDerivedMarks,
+  type CaseAttemptRecord,
+} from './case-export.js';
 import { makeTwoPageFlatPdf } from './test-pdfs.js';
 
 const header = (id: string): FormField => ({
@@ -493,5 +500,207 @@ describe('assembleCaseValues — part completion ticks', () => {
     });
 
     expect(values['methods']).toBeUndefined();
+  });
+});
+
+/**
+ * The maps the ROUTE resolves — identity prefill and prerequisite verdicts —
+ * and the seam that used to drop them. `exportCasePdf` re-listed every
+ * assemble field by hand and the list drifted: both maps were computed on
+ * every export and never reached the page.
+ */
+describe('assembleCaseValues — identity prefill and prerequisite verdicts', () => {
+  it('merges both maps over the attempts', () => {
+    const { values } = assembleCaseValues({
+      manifest: BASE,
+      pathway: 'experienced',
+      attempts: [passed('p1'), passed('p2')],
+      prefillValues: { 'cover-company': 'Charles Hull Contracting', 'cover-swipe': 'SC-0431' },
+      prerequisiteValues: { 'prereq-licence': true, 'prereq-lapsed': false },
+    });
+
+    expect(values['cover-company']).toBe('Charles Hull Contracting');
+    expect(values['cover-swipe']).toBe('SC-0431');
+    // Both verdicts are recorded findings: ✓ held, ✗ lapsed. Only absent is
+    // silent.
+    expect(values['prereq-licence']).toBe(true);
+    expect(values['prereq-lapsed']).toBe(false);
+  });
+
+  it('prefill wins over whatever an attempt stored for the same box', () => {
+    // The cover belongs to no part, so nothing legitimate writes it — a stray
+    // attempt value there is exactly what the case-sourced identity corrects.
+    const { values } = assembleCaseValues({
+      manifest: BASE,
+      pathway: 'experienced',
+      attempts: [passed('p1', { values: { 'cover-company': 'typed over' } })],
+      prefillValues: { 'cover-company': 'Charles Hull Contracting' },
+    });
+
+    expect(values['cover-company']).toBe('Charles Hull Contracting');
+  });
+});
+
+describe('exportCasePdf — the resolved maps survive the seam', () => {
+  const seamBox = (page: number, y: number): PageBox => ({
+    page,
+    x: 40,
+    y,
+    width: 160,
+    height: 16,
+    pageWidth: 600,
+    pageHeight: 800,
+  });
+
+  it('draws the prefilled identity onto the rendered page', async () => {
+    const fields: FormField[] = [
+      { ...header('h1'), type: 'text', geometry: { segments: [seamBox(0, 700)] } },
+      { ...header('h2'), type: 'text', geometry: { segments: [seamBox(0, 660)] } },
+      { ...header('h3'), type: 'text', geometry: { segments: [seamBox(0, 620)] } },
+      {
+        id: 'cover-company',
+        type: 'text',
+        label: "Candidate's Company Name",
+        required: false,
+        source: 'imported',
+        geometry: { segments: [seamBox(0, 580)] },
+      },
+    ];
+
+    const out = await exportCasePdf({
+      originalPdf: await makeTwoPageFlatPdf(),
+      fields,
+      manifest: BASE,
+      pathway: 'experienced',
+      attempts: [passed('p1'), passed('p2')],
+      prefillValues: { 'cover-company': 'Charles Hull Contracting' },
+    });
+
+    // The output's content streams are Flate-compressed; inflate each and
+    // grep the drawn glyphs — presence here is what the dropped seam lost.
+    const raw = Buffer.from(out);
+    const hay = raw.toString('latin1');
+    let drawn = '';
+    const streamRe = /stream\r?\n/g;
+    let m: RegExpExecArray | null;
+    while ((m = streamRe.exec(hay)) !== null) {
+      const start = m.index + m[0].length;
+      const end = hay.indexOf('endstream', start);
+      if (end < 0) continue;
+      try {
+        drawn += inflateSync(raw.subarray(start, end)).toString('latin1');
+      } catch {
+        drawn += hay.slice(start, end);
+      }
+    }
+    // pdf-lib writes text operands as hex strings; decode them before looking.
+    const decoded = drawn.replace(/<([0-9A-Fa-f]+)>/g, (_s, hex: string) =>
+      Buffer.from(hex, 'hex').toString('latin1'),
+    );
+    expect(decoded).toContain('Charles Hull Contracting');
+  });
+});
+
+/**
+ * Marks an attempt never stored still print.
+ *
+ * The marking writes each question's ✓/✗ (and the part's verdict pair) into
+ * the attempt's values at marking time — but only since it existed. An attempt
+ * marked before then, or before the manifest declared its verdict boxes,
+ * stores the answers alone and the printed outcome column exports blank.
+ */
+describe('withDerivedMarks', () => {
+  const question = (id: string): FormField => ({
+    id,
+    type: 'checkbox_group',
+    label: id,
+    required: false,
+    source: 'imported',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: `${id}-out` },
+  });
+  const cell = (id: string): FormField => ({
+    id,
+    type: 'check_cross',
+    label: id,
+    required: false,
+    source: 'imported',
+  });
+
+  const versionFields: FormField[] = [
+    header('h1'),
+    question('q1'),
+    cell('q1-out'),
+    question('q2'),
+    cell('q2-out'),
+    header('h2'),
+    { ...cell('prac'), label: 'Manoeuvres safely' },
+    header('h3'),
+  ];
+
+  const VERDICT: AssessmentToolManifest = {
+    ...BASE,
+    parts: BASE.parts.map((p) =>
+      p.key === 'p1'
+        ? {
+            ...p,
+            outcomeSatisfactory: { fieldId: 'p1-verdict-yes', value: true },
+            outcomeNotSatisfactory: { fieldId: 'p1-verdict-no', value: true },
+          }
+        : p,
+    ),
+  };
+
+  it('fills the ✓/✗ an old attempt never stored, from its own answers', () => {
+    const healed = withDerivedMarks(
+      passed('p1', { values: { q1: ['a'], q2: ['b'] } }),
+      versionFields,
+      BASE,
+    );
+
+    expect(healed.values['q1-out']).toBe(true);
+    expect(healed.values['q2-out']).toBe(false);
+    // The answers themselves are untouched.
+    expect(healed.values['q1']).toEqual(['a']);
+  });
+
+  it('writes the verdict pair the manifest has since declared', () => {
+    const healed = withDerivedMarks(
+      passed('p1', { values: { q1: ['a'], q2: ['a'] } }),
+      versionFields,
+      VERDICT,
+    );
+
+    expect(healed.values['p1-verdict-yes']).toBe(true);
+    expect(healed.values['p1-verdict-no']).toBeUndefined();
+  });
+
+  it('never overwrites a mark the attempt already stored', () => {
+    // Stored wins even where re-derivation disagrees: the record stands.
+    const healed = withDerivedMarks(
+      passed('p1', { values: { q1: ['a'], q2: ['b'], 'q2-out': true } }),
+      versionFields,
+      BASE,
+    );
+
+    expect(healed.values['q2-out']).toBe(true);
+  });
+
+  it('leaves a judged part alone — its marks belong to the person', () => {
+    const attempt = passed('p2', { values: { prac: true } });
+
+    expect(withDerivedMarks(attempt, versionFields, BASE)).toBe(attempt);
+  });
+
+  it('leaves a failed attempt alone — it never prints', () => {
+    const attempt: CaseAttemptRecord = {
+      partKey: 'p1',
+      attemptNumber: 1,
+      outcome: 'not_satisfactory',
+      values: { q1: ['b'] },
+    };
+
+    expect(withDerivedMarks(attempt, versionFields, BASE)).toBe(attempt);
   });
 });

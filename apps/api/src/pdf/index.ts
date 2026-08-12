@@ -18,6 +18,7 @@ export {
 export {
   assembleCaseValues,
   exportCasePdf,
+  withDerivedMarks,
   CaseExportError,
   type AssembledCase,
   type AssembleCaseInput,
