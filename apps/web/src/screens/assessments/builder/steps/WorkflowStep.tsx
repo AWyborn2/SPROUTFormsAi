@@ -219,6 +219,31 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         </div>
       )}
 
+      {/*
+        MARKS THAT WOULD PRINT NOWHERE. The exporter skips a field with no box
+        silently — the safe failure on a competency record — so the one place
+        the silence can be seen is before publish. Warning, not gate: the tool
+        still assesses and certifies correctly, and the boxes can be placed in
+        PDF mapping and re-published.
+      */}
+      {check.unplaced.length > 0 && (
+        <div className="flex flex-col gap-1.5 rounded-[14px] border border-warning bg-warning-soft p-3">
+          <span className="text-[11.5px] font-semibold text-warning-text">
+            {check.unplaced.length} mark{check.unplaced.length === 1 ? '' : 's'} would not print —
+            no box placed
+          </span>
+          {check.unplaced.map((message, i) => (
+            <p key={i} className="text-[11.5px] text-warning-text">
+              {message}
+            </p>
+          ))}
+          <p className="text-[11.5px] text-warning-text">
+            Place these in <strong>PDF mapping</strong> before publishing, or the marks will
+            compute and the printed record will not show them.
+          </p>
+        </div>
+      )}
+
       {failure && (
         <p role="alert" className="rounded-[10px] border border-danger bg-danger-soft p-[8px_10px] text-[11.5px] text-danger-text">
           {failure}

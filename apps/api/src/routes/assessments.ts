@@ -42,6 +42,7 @@ import {
   totalLoggedHours,
   stripMarkingSecrets,
   theoryRenderingOf,
+  unplacedMarkDestinations,
   validateAnswerKeys,
   validateManifest,
   type AssessmentPart,
@@ -800,6 +801,14 @@ assessmentToolsRouter.get(
 
     const workflow = workflowOf(tool.manifest, fields);
     const { problems, warnings } = validateWorkflow(workflow, tool.manifest, fields);
+    /*
+      THE MARKS THAT PRINT NOWHERE. The exporter skips a field with no
+      geometry silently — the safe failure on the page is an invisible one
+      here, so the editor is where the silence gets named: every auto-mark
+      destination with no drawable box, from the same resolver the exporter
+      draws with.
+    */
+    warnings.push(...unplacedMarkDestinations(tool.manifest, fields));
 
     res.json({
       id: tool.id,
@@ -943,6 +952,8 @@ assessmentToolsRouter.patch(
       icon: 'clipboard-check',
     });
 
+    // The same unplaced-box audit the GET serves, so saving cannot hide it.
+    warnings.push(...unplacedMarkDestinations(manifest, fields));
     res.json({ id: tool.id, workflow: workflowOf(manifest, fields), warnings });
   }),
 );
