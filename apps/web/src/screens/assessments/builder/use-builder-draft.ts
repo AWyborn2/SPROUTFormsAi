@@ -39,6 +39,7 @@ import {
   type DerivedPart,
 } from './builder-manifest.js';
 import { structureFromExtraction } from './builder-structure.js';
+import { resolvePublishFields } from './builder-publish.js';
 import type { BuilderSnapshot } from './builder-draft-state.js';
 
 /**
@@ -958,15 +959,25 @@ export function useBuilderDraftState({
   );
 
   /*
-    The problems come from the SHARED validator, live.
+    The problems come from the SHARED validator, live — and they are computed
+    against the PUBLISH-TIME fields, not the raw draft list.
 
     `validateManifest` owns every rule and its messages are written for a
     person. Re-implementing any of them here would give the builder a second
     rule set that agrees with publish right up until it matters.
+
+    The keys live BESIDE the fields until `resolvePublishFields` merges them
+    on at publish. Validating the bare list reported every keyed mandatory
+    question as unkeyed — thirty-one problems that appeared BECAUSE the author
+    keyed the paper: keying is what proposes a question as mandatory, and the
+    validator could not see the very keys that did it.
   */
   const manifestProblems = useMemo(
-    () => (parts.length > 0 ? validateManifest(manifest, fields) : []),
-    [manifest, fields, parts.length],
+    () =>
+      parts.length > 0
+        ? validateManifest(manifest, resolvePublishFields(fields, keys).fields)
+        : [],
+    [manifest, fields, keys, parts.length],
   );
 
   const partOps = useMemo<PartOps>(
