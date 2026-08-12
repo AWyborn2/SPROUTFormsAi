@@ -799,12 +799,19 @@ export interface WorkforceImportPreview {
   };
 }
 
-/** What a completed run did — every figure derived from its recorded rows (R171). */
+/** What a run is doing, or did. A dead one reads `failed`, never `running` forever. */
+export type WorkforceImportStatus = 'running' | 'completed' | 'failed';
+
+/** What a run did — every figure derived from its recorded rows (R171). */
 export interface WorkforceImportRun {
   runId: string;
   startedAt: string;
   completedAt: string | null;
+  status: WorkforceImportStatus;
+  /** Set only on a failure: what threw, or `abandoned` for a run whose process died. */
+  failureReason: string | null;
   rowsTotal: number;
+  /** Rows actually recorded — a count, never an estimate. */
   rowsProcessed: number;
   profilesCreated: number;
   membershipsAdded: number;

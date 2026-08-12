@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import { ApiError } from '../../lib/data/api-client.js';
 import type { WorkforceImportPreview, WorkforceImportRun } from '../../lib/data/types.js';
 
 /*
@@ -12,11 +13,31 @@ const state: {
   preview: WorkforceImportPreview | undefined;
   validating: boolean;
   report: WorkforceImportRun | undefined;
+  /** What `/workforce-import/active` answers — a run in flight, or none. */
+  active: WorkforceImportRun | null;
+  /** Whether that answer has arrived yet; the screen must not guess while it has not. */
+  activePending: boolean;
+  /** The 409 the server returns when one is already running, if it does. */
+  runConflict: { runId: string } | undefined;
   validated: string[];
   ran: string[];
-} = { preview: undefined, validating: false, report: undefined, validated: [], ran: [] };
+} = {
+  preview: undefined,
+  validating: false,
+  report: undefined,
+  active: null,
+  activePending: false,
+  runConflict: undefined,
+  validated: [],
+  ran: [],
+};
 
 vi.mock('../../lib/data/hooks.js', () => ({
+  useActiveWorkforceImport: () => ({
+    data: state.activePending ? undefined : { run: state.active },
+    isPending: state.activePending,
+    refetch: () => Promise.resolve(),
+  }),
   useValidateWorkforceImport: () => ({
     mutate: (csv: string) => state.validated.push(csv),
     data: state.preview,
@@ -32,11 +53,23 @@ vi.mock('../../lib/data/hooks.js', () => ({
       the run id from outside the click would land outside React's act() and
       never flush, so the assertion would read a screen the product never shows.
     */
-    mutate: (csv: string, opts?: { onSuccess?: (r: { runId: string }) => void }) => {
+    mutate: (
+      csv: string,
+      opts?: { onSuccess?: (r: { runId: string }) => void; onError?: (e: unknown) => void },
+    ) => {
       state.ran.push(csv);
+      // The 409 arm: the server refused because one is already running, and
+      // named it. The screen is expected to watch that run, not report a failure.
+      if (state.runConflict) {
+        opts?.onError?.(new ApiError(409, { error: 'import_already_running', ...state.runConflict }));
+        return;
+      }
       opts?.onSuccess?.({ runId: 'run-1' });
     },
     isPending: false,
+    reset: () => {
+      state.runConflict = undefined;
+    },
   }),
   useWorkforceImportRun: () => ({ data: state.report }),
 }));
@@ -81,8 +114,38 @@ afterEach(() => {
   state.preview = undefined;
   state.validating = false;
   state.report = undefined;
+  state.active = null;
+  state.activePending = false;
+  state.runConflict = undefined;
   state.validated = [];
   state.ran = [];
+});
+
+/** One run's report, in whichever state the case under test needs. */
+const report = (over: Partial<WorkforceImportRun> = {}): WorkforceImportRun => ({
+  runId: 'run-1',
+  startedAt: '2026-08-10T00:00:00Z',
+  completedAt: '2026-08-10T00:01:00Z',
+  status: 'completed',
+  failureReason: null,
+  rowsTotal: 4,
+  rowsProcessed: 4,
+  profilesCreated: 2,
+  membershipsAdded: 1,
+  membershipsReactivated: 1,
+  peopleMerged: 0,
+  duplicateRows: 0,
+  candidateSeats: 3,
+  staffSeats: 1,
+  competenciesRecorded: 5,
+  linesFlaggedNoDate: 1,
+  assessmentsAssigned: 2,
+  profilesFlaggedIncomplete: 1,
+  differencesReported: 0,
+  rejected: [],
+  flagged: [],
+  differences: [],
+  ...over,
 });
 
 describe('WorkforceImportScreen — before upload', () => {
@@ -173,30 +236,6 @@ describe('WorkforceImportScreen — after validation (R144)', () => {
 });
 
 describe('WorkforceImportScreen — the run report (R171)', () => {
-  const report = (over: Partial<WorkforceImportRun> = {}): WorkforceImportRun => ({
-    runId: 'run-1',
-    startedAt: '2026-08-10T00:00:00Z',
-    completedAt: '2026-08-10T00:01:00Z',
-    rowsTotal: 4,
-    rowsProcessed: 4,
-    profilesCreated: 2,
-    membershipsAdded: 1,
-    membershipsReactivated: 1,
-    peopleMerged: 0,
-    duplicateRows: 0,
-    candidateSeats: 3,
-    staffSeats: 1,
-    competenciesRecorded: 5,
-    linesFlaggedNoDate: 1,
-    assessmentsAssigned: 2,
-    profilesFlaggedIncomplete: 1,
-    differencesReported: 0,
-    rejected: [],
-    flagged: [],
-    differences: [],
-    ...over,
-  });
-
   it('names every figure R171 lists once the run is confirmed', async () => {
     state.preview = preview();
     state.report = report();
@@ -224,13 +263,52 @@ describe('WorkforceImportScreen — the run report (R171)', () => {
 
   it('shows progress against the total while the run is in flight', async () => {
     state.preview = preview();
-    state.report = report({ completedAt: null, rowsProcessed: 2 });
+    state.report = report({ status: 'running', completedAt: null, rowsProcessed: 2 });
     render(<WorkforceImportScreen />);
     await uploadFile();
     fireEvent.click(screen.getByText('Confirm and import'));
 
     expect(screen.getByText('Importing…')).toBeDefined();
+    // Counted rows, not an estimate — the figure the operator was reduced to
+    // fetching with `select count(*)` by hand.
     expect(screen.getByText('2 of 4 rows')).toBeDefined();
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('2');
+  });
+
+  it('says the run does not need this page open, because it does not', async () => {
+    // The reassurance that was missing. The request that started it ended
+    // seconds later; the browser closing changes nothing about the run.
+    state.preview = preview();
+    state.report = report({ status: 'running', completedAt: null, rowsProcessed: 2 });
+    render(<WorkforceImportScreen />);
+    await uploadFile();
+    fireEvent.click(screen.getByText('Confirm and import'));
+
+    expect(screen.getByText(/You can close this page/)).toBeDefined();
+  });
+
+  it('reports a FAILED run as stopped, not as still running', async () => {
+    /*
+      A run whose process died stops heartbeating and is reaped. Left reading
+      `running` it would spin forever, which is the same lie by a different
+      route as the upload form that replaced a live import.
+    */
+    state.preview = preview();
+    state.report = report({
+      status: 'failed',
+      failureReason: 'abandoned',
+      rowsProcessed: 61,
+      rowsTotal: 191,
+    });
+    render(<WorkforceImportScreen />);
+    await uploadFile();
+    fireEvent.click(screen.getByText('Confirm and import'));
+
+    expect(screen.getByText('Import stopped')).toBeDefined();
+    expect(screen.getByText(/the server it was running on went away/)).toBeDefined();
+    // The rows that landed are real and were kept — re-importing merges them.
+    expect(screen.getByText(/merges rather than duplicating/)).toBeDefined();
+    expect(screen.queryByRole('progressbar')).toBeNull();
   });
 
   it('lists a difference with a link to the record, and says nothing was overwritten (R149)', async () => {
@@ -270,5 +348,62 @@ describe('WorkforceImportScreen — the run report (R171)', () => {
     fireEvent.click(screen.getByText('Confirm and import'));
 
     expect(screen.getByText(/stays readable after you close this page/)).toBeDefined();
+  });
+});
+
+describe('WorkforceImportScreen — a run already in flight', () => {
+  /*
+    THE INCIDENT, as a suite. An operator's browser timed out waiting on a
+    191-person import; the screen fell back to the upload form and offered a
+    live "Confirm and import" button while the first run was still writing rows.
+    He came within one click of running the whole file a second time against
+    production, and only avoided it by asking.
+  */
+  it('shows the run in progress rather than an upload form', () => {
+    state.active = report({ status: 'running', completedAt: null, rowsProcessed: 61, rowsTotal: 191 });
+    render(<WorkforceImportScreen />);
+
+    expect(screen.getByText('Importing…')).toBeDefined();
+    expect(screen.getByText('61 of 191 rows')).toBeDefined();
+    // The button that nearly did the damage is not on the page at all.
+    expect(screen.queryByText('Confirm and import')).toBeNull();
+    expect(screen.queryByText('Download template')).toBeNull();
+  });
+
+  it('offers nothing at all until it knows whether one is running', () => {
+    // Drawing the form on "not yet loaded" would reproduce the bug exactly:
+    // the screen would be guessing, and guessing wrong is what happened.
+    state.activePending = true;
+    render(<WorkforceImportScreen />);
+
+    expect(screen.getByText(/Checking whether an import is already running/)).toBeDefined();
+    expect(screen.queryByText('Confirm and import')).toBeNull();
+  });
+
+  it('offers the upload form again once nothing is running', () => {
+    // The guard is against a CONCURRENT run, not against ever importing twice.
+    state.active = null;
+    render(<WorkforceImportScreen />);
+
+    expect(screen.getByText('Download template')).toBeDefined();
+  });
+
+  it('watches the named run when the server refuses with a 409', async () => {
+    /*
+      Two tabs, or a double submit. The work the Admin wanted IS happening, so
+      the honest response is to show them that run — not an error, which would
+      read as "your import did not happen" and invite them to try again.
+    */
+    state.preview = preview();
+    state.runConflict = { runId: 'run-already' };
+    state.report = report({ runId: 'run-already', status: 'running', completedAt: null, rowsProcessed: 7 });
+    render(<WorkforceImportScreen />);
+    await uploadFile();
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm and import'));
+    });
+
+    expect(screen.getByText('Importing…')).toBeDefined();
+    expect(screen.getByText(/run-already/)).toBeDefined();
   });
 });
