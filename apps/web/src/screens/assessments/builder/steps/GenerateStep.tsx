@@ -53,6 +53,7 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
         onCycleSpan={draft.structureOps.cycleSpan}
         onSetFieldType={draft.structureOps.setFieldType}
         onGroup={draft.structureOps.group}
+        onPatchField={draft.fieldOps.patch}
       />
 
       <div className="min-w-0 flex-1 px-7 pb-10">

@@ -19,6 +19,20 @@ import { StructurePanel, type StructurePanelProps } from './StructurePanel.js';
 
 vi.mock('@formai/ui', () => ({
   Icon: ({ name }: { name: string }) => <span data-icon={name} />,
+  // The shared ColumnInspector mounts inside this panel now; these two are
+  // the only controls it needs beyond Icon.
+  Select: ({ options, value, onChange, ...rest }: Record<string, unknown>) => (
+    <select value={value as string} onChange={onChange as never} aria-label={rest['aria-label'] as string}>
+      {(options as Array<{ label: string; value: string }>).map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  ),
+  Switch: ({ checked, onChange, ...rest }: Record<string, unknown>) => (
+    <input type="checkbox" checked={checked as boolean} onChange={onChange as never} aria-label={rest['aria-label'] as string} />
+  ),
 }));
 
 function field(over: Partial<FormField> & { id: string }): FormField {
@@ -56,6 +70,7 @@ function setup(over: Partial<StructurePanelProps> = {}) {
     onRenameField: vi.fn(),
     onDeleteField: vi.fn(),
     onFoldField: vi.fn(),
+    onPatchField: vi.fn(),
     ...over,
   };
   return { props, ...render(<StructurePanel {...props} />) };
@@ -446,4 +461,53 @@ describe('StructurePanel — correcting what the extraction got wrong', () => {
       expect(props.onRenameField).toHaveBeenCalledWith('a', 'Typed');
     });
   });
+
+/**
+ * The column editor — the shared ColumnInspector mounted per repeating row.
+ * Extraction gets a table's columns wrong the same ways it gets fields wrong
+ * (a missed column, a Date read as text); this is where an author corrects it.
+ */
+describe('column editing', () => {
+  it('offers the columns button only on repeating tables', () => {
+    setup();
+    expand('Part 2 — Practical');
+
+    expect(screen.getByRole('button', { name: 'Edit columns of Pre-start checks' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Edit columns of Assessor signature' })).toBeNull();
+  });
+
+  it('opens the shared inspector and patches a column type through it', () => {
+    const { props } = setup({
+      fields: FIELDS.map((f) =>
+        f.id === 'tbl'
+          ? {
+              ...f,
+              fixedRows: undefined,
+              columns: [
+                { key: 'date', label: 'Date', type: 'text' },
+                { key: 'task', label: 'Task', type: 'text' },
+              ],
+            }
+          : f,
+      ),
+    });
+    expand('Part 2 — Practical');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit columns of Pre-start checks' }));
+
+    expect(screen.getByText('Table columns')).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText('Column type: Date'), { target: { value: 'date' } });
+
+    expect(props.onPatchField).toHaveBeenCalledWith(
+      'tbl',
+      expect.objectContaining({
+        columns: [
+          { key: 'date', label: 'Date', type: 'date' },
+          { key: 'task', label: 'Task', type: 'text' },
+        ],
+      }),
+    );
+  });
+});
+
 });

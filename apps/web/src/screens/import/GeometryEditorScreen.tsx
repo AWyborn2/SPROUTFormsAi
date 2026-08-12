@@ -664,7 +664,12 @@ export function GeometryEditorScreen({
       (s) => rowCellIndex(s) === null && s.optionKey === undefined,
     );
     if (!box) return;
-    const result = proposeManualGrid({ box, rows, columns: field.columns });
+    const result = proposeManualGrid({
+      box,
+      rows,
+      columns: field.columns,
+      fixedRows: field.fixedRows,
+    });
     setGridRefusal(
       result.ok ? null : { fieldId: field.id, title: 'Not divided', detail: result.detail },
     );
@@ -1675,6 +1680,7 @@ function PlacementPanel({
                   value={divideRows}
                   onChange={(e) => setDivideRows(e.target.value)}
                   aria-label="Number of printed rows"
+                  placeholder="rows"
                   className="h-[28px] w-[64px] rounded-sm border border-border bg-surface-page px-1.5 text-[12px]"
                 />
                 <Button
