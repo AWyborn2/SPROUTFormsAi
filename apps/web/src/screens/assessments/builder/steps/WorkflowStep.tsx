@@ -1,11 +1,14 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Icon } from '@formai/ui';
+import { ApiError } from '../../../../lib/data/api-client.js';
 import {
   useCreateAssessmentTool,
+  useCreateDraftForm,
   usePublishFormVersion,
   useSaveVersionFields,
 } from '../../../../lib/data/hooks.js';
+import { store } from '../../../../lib/data/store.js';
 import { checkPublish, publishSummary } from '../builder-publish.js';
 import { workflowFromStructure } from '../builder-workflow.js';
 import type { BuilderDraftState } from '../use-builder-draft.js';
@@ -46,6 +49,7 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
   const saveFields = useSaveVersionFields(formId ?? '', versionId ?? '');
   const publishVersion = usePublishFormVersion();
   const createTool = useCreateAssessmentTool();
+  const createDraft = useCreateDraftForm();
 
   // The STRUCTURE carries the order. Without it publish writes extraction
   // order and the whole of step 2 is cosmetic.
@@ -55,30 +59,46 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
   );
   const summary = useMemo(() => publishSummary(fields, keys, manifest), [fields, keys, manifest]);
 
-  const busy = saveFields.isPending || publishVersion.isPending || createTool.isPending;
+  const busy =
+    saveFields.isPending ||
+    publishVersion.isPending ||
+    createTool.isPending ||
+    createDraft.isPending;
   const ready = !!formId && !!versionId && check.problems.length === 0;
 
   const publish = async () => {
     if (!formId || !versionId || !manifest) return;
     setFailure(null);
     try {
-      /*
-        THE RESOLVED FIELDS ARE WHAT IS SAVED — the same list `checkPublish`
-        validated. Validating one field list and writing another is how a gate
-        passes and the stored record still fails.
-      */
-      await saveFields.mutateAsync(check.fields);
-      await publishVersion.mutateAsync({ formId, versionId });
-      const tool = await createTool.mutateAsync({
-        templateId: formId,
-        name: title || 'Assessment',
+      let activeFormId = formId;
+      let activeVersionId = versionId;
+
+      try {
+        await saveFields.mutateAsync(check.fields);
+      } catch (err) {
+        if (!(err instanceof ApiError && err.status === 404)) throw err;
         /*
-          THE AUTHOR'S SECTIONS BECOME THE WORKFLOW. Published against the same
-          resolved field list the version stores, so a `fieldIds` section can
-          never reference an excluded question. Without this the editor opened
-          on the synthesised per-part default and the author's structure was
-          invisible — cover sections had no card at all.
+          The form or version the snapshot remembered no longer exists — the
+          author deleted it from Assessments and came back to the builder.
+          Re-create the draft so the work is not lost.
         */
+        const fresh = await createDraft.mutateAsync({
+          name: title || 'Assessment',
+          fields: check.fields,
+          sourcePdfAssetId: draft.assetId,
+        });
+        activeFormId = fresh.formId;
+        activeVersionId = fresh.versionId;
+        draft.setVersionIds(activeFormId, activeVersionId);
+      }
+
+      await (activeFormId === formId
+        ? publishVersion.mutateAsync({ formId: activeFormId, versionId: activeVersionId })
+        : store.publishFormVersion({ formId: activeFormId, versionId: activeVersionId }));
+
+      const tool = await createTool.mutateAsync({
+        templateId: activeFormId,
+        name: title || 'Assessment',
         manifest: {
           ...manifest,
           workflow: workflowFromStructure(structure, parts, manifest, check.fields),
@@ -86,12 +106,6 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
       });
       setDone({ toolId: tool.id });
     } catch (err) {
-      /*
-        Named plainly, and the step stays where it is. Some of the sequence may
-        have landed — the version can be published with no tool attached — and
-        saying "something went wrong" would leave an author guessing which half
-        to undo.
-      */
       setFailure(
         err instanceof Error
           ? `Publishing stopped: ${err.message}. The form version may already have published; check Assessments before retrying.`
