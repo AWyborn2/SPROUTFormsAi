@@ -44,7 +44,7 @@ function statusBadge(status: TemplateStatus) {
   );
 }
 
-/** Form library — the list of every template with its version history. */
+/** Document library — the list of every template with its version history. */
 export function TemplatesScreen() {
   const navigate = useNavigate();
   const forkDraft = useForkDraftVersion();
@@ -56,9 +56,32 @@ export function TemplatesScreen() {
   const [deleteError, setDeleteError] = useState<string | undefined>(undefined);
   const [driftOpen, setDriftOpen] = useState(false);
   const [publishTargetId, setPublishTargetId] = useState<string | undefined>(undefined);
+  const [query, setQuery] = useState('');
+  const [ownerFilter, setOwnerFilter] = useState('');
+  const [deptFilter, setDeptFilter] = useState('');
   const archivedCount = forms.filter((f) => f.status === 'archived').length;
+
+  /*
+    The filter options come from the documents themselves rather than a second
+    endpoint: every owner and department that can match is by definition
+    already on a row here.
+  */
+  const owners = [...new Set(forms.map((f) => f.owner).filter((o): o is string => !!o))].sort();
+  const depts = [...new Set(forms.map((f) => f.dept).filter(Boolean))].sort();
+  const filtersActive = query !== '' || ownerFilter !== '' || deptFilter !== '';
+
+  const q = query.trim().toLowerCase();
   // Archived forms leave the active list by default; the toggle brings them back.
-  const visibleForms = showArchived ? forms : forms.filter((f) => f.status !== 'archived');
+  const visibleForms = forms.filter(
+    (f) =>
+      (showArchived || f.status !== 'archived') &&
+      (!ownerFilter || f.owner === ownerFilter) &&
+      (!deptFilter || f.dept === deptFilter) &&
+      (!q ||
+        f.name.toLowerCase().includes(q) ||
+        f.dept.toLowerCase().includes(q) ||
+        (f.owner ?? '').toLowerCase().includes(q)),
+  );
   // Auto-select the first VISIBLE form until the user picks one (the fallback
   // must run against the filtered array, so selection degrades when the
   // selected form gets archived away or deleted); a hardcoded id would fire
@@ -318,7 +341,7 @@ export function TemplatesScreen() {
     <div className="fai-rise mx-auto max-w-[1160px] p-[30px_28px_60px]">
       <div className="mb-[18px] flex items-center justify-between gap-4">
         <p className="max-w-[520px] text-sm text-text-secondary">
-          Every form in your workspace — imported or built from scratch. Select one to see its
+          Every document in your workspace — imported or built from scratch. Select one to see its
           version history.
         </p>
         <div className="flex flex-none gap-2.5">
@@ -342,11 +365,73 @@ export function TemplatesScreen() {
         </div>
       </div>
 
+      {/* Filter bar — narrows the list by name, owner or department. Selects
+          appear only once there is something to choose between. */}
+      <div className="mb-4 flex flex-wrap items-center gap-2.5">
+        <label className="relative min-w-[220px] flex-1">
+          <Icon
+            name="search"
+            size={14}
+            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-tertiary"
+          />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by name, owner or department…"
+            aria-label="Search documents"
+            className="h-9 w-full rounded-md border border-border bg-surface-card pl-8 pr-3 text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus-visible:border-border-accent focus-visible:shadow-focus"
+          />
+        </label>
+        {owners.length > 0 && (
+          <select
+            value={ownerFilter}
+            onChange={(e) => setOwnerFilter(e.target.value)}
+            aria-label="Filter by owner"
+            className="h-9 flex-none cursor-pointer rounded-md border border-border bg-surface-card px-2.5 font-ui text-[12.5px] font-semibold text-text-primary focus:outline-none focus-visible:border-border-accent focus-visible:shadow-focus"
+          >
+            <option value="">All owners</option>
+            {owners.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        )}
+        {depts.length > 0 && (
+          <select
+            value={deptFilter}
+            onChange={(e) => setDeptFilter(e.target.value)}
+            aria-label="Filter by department"
+            className="h-9 flex-none cursor-pointer rounded-md border border-border bg-surface-card px-2.5 font-ui text-[12.5px] font-semibold text-text-primary focus:outline-none focus-visible:border-border-accent focus-visible:shadow-focus"
+          >
+            <option value="">All departments</option>
+            {depts.map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
+        )}
+        {filtersActive && (
+          <button
+            onClick={() => {
+              setQuery('');
+              setOwnerFilter('');
+              setDeptFilter('');
+            }}
+            className="flex h-9 flex-none items-center gap-1.5 rounded-md px-2.5 text-[12.5px] font-semibold text-text-secondary hover:bg-surface-hover"
+          >
+            <Icon name="x" size={13} />
+            Clear · {visibleForms.length} match{visibleForms.length === 1 ? '' : 'es'}
+          </button>
+        )}
+      </div>
+
       <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,1.7fr)_minmax(230px,1fr)]">
-        {/* Form list */}
+        {/* Document list */}
         <div className="overflow-hidden rounded-lg border border-border bg-surface-card shadow-xs">
           <div className="flex items-center gap-[14px] border-b border-border-subtle p-[11px_20px] font-mono text-[10.5px] uppercase tracking-wider text-text-tertiary">
-            <span className="flex-1">Form</span>
+            <span className="flex-1">Document</span>
             {archivedCount > 0 && (
               <button
                 onClick={() => setShowArchived((s) => !s)}
@@ -359,6 +444,13 @@ export function TemplatesScreen() {
             )}
             <span>Fills</span>
           </div>
+          {visibleForms.length === 0 && (
+            <p className="p-[18px_20px] text-[13px] text-text-tertiary">
+              {filtersActive
+                ? 'No documents match these filters.'
+                : 'No documents yet — import a PDF or build a form to get started.'}
+            </p>
+          )}
           {visibleForms.map((f) => {
             const style = FORM_ICON_STYLE[f.icon] ?? { bg: 'var(--surface-sunken)', color: 'var(--text-secondary)' };
             const isSel = f.id === effectiveId;
@@ -382,7 +474,7 @@ export function TemplatesScreen() {
                     {statusBadge(f.status)}
                   </span>
                   <span className="mt-0.5 block truncate text-xs text-text-tertiary">
-                    {f.dept} · {f.version} · {f.updated}
+                    {[f.dept, f.version, f.owner, f.updated].filter(Boolean).join(' · ')}
                   </span>
                 </span>
                 <span className="flex-none text-right">

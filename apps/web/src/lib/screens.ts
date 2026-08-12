@@ -8,6 +8,19 @@ import type { Role } from '@formai/shared';
 
 export type ShellKind = 'none' | 'app' | 'external' | 'mobile';
 
+/**
+ * The sidebar's collapsible sections. An entry without a `navGroup` renders at
+ * the top level — the everyday surfaces every member reaches for — while the
+ * training and settings entries fold away so the sidebar is not nineteen
+ * undifferentiated rows.
+ */
+export type NavGroupKey = 'training' | 'settings';
+
+export const NAV_GROUPS: ReadonlyArray<{ key: NavGroupKey; label: string; icon: string }> = [
+  { key: 'training', label: 'Training', icon: 'graduation-cap' },
+  { key: 'settings', label: 'Settings', icon: 'settings' },
+];
+
 export interface ScreenDef {
   key: string;
   path: string;
@@ -18,6 +31,8 @@ export interface ScreenDef {
   shell: ShellKind;
   /** Show in the left app nav. */
   inNav?: boolean;
+  /** Which collapsible sidebar section this entry folds into. Absent = top level. */
+  navGroup?: NavGroupKey;
   /**
    * Minimum access level a member needs to see this screen in the nav. Absent
    * means every level sees it. 'admin' also admits an owner. Filtering the nav
@@ -62,12 +77,15 @@ export const SCREENS: ScreenDef[] = [
 
   // Core product loop
   { key: 'dashboard', path: '/app', group: 'Core product loop', label: 'Dashboard', icon: 'layout-dashboard', shell: 'app', inNav: true },
-  { key: 'templates', path: '/app/forms', group: 'Core product loop', label: 'Form library', icon: 'folder', shell: 'app', inNav: true },
+  // "Document library" rather than "Form library": it holds imported PDFs and
+  // built forms alike, and the viewer floor keeps it off a candidate's sidebar
+  // — their surfaces are the dashboard, their record and their assessments.
+  { key: 'templates', path: '/app/forms', group: 'Core product loop', label: 'Document library', icon: 'folder', shell: 'app', inNav: true, minAccessLevel: 'viewer' },
   { key: 'builder', path: '/app/forms/build', group: 'Core product loop', label: 'Form builder', icon: 'layout-template', shell: 'app' },
   { key: 'import-1', path: '/app/import', group: 'Core product loop', label: 'PDF import · upload', icon: 'file-up', shell: 'app' },
   { key: 'import-2', path: '/app/import/review', group: 'Core product loop', label: 'PDF import · review', icon: 'scan-search', shell: 'app' },
   { key: 'import-3', path: '/app/import/publish', group: 'Core product loop', label: 'PDF import · publish', icon: 'badge-check', shell: 'app' },
-  { key: 'submissions', path: '/app/submissions', group: 'Core product loop', label: 'Submissions', icon: 'table-2', shell: 'app', inNav: true },
+  { key: 'submissions', path: '/app/submissions', group: 'Core product loop', label: 'Submissions', icon: 'table-2', shell: 'app', inNav: true, minAccessLevel: 'viewer' },
   { key: 'submission-detail', path: '/app/submissions/detail', group: 'Core product loop', label: 'Submission detail', icon: 'file-check-2', shell: 'app' },
   // Public token-addressed fill page (no auth — the token is the credential).
   // The post-submit confirmation renders inline on the same screen.
@@ -83,15 +101,22 @@ export const SCREENS: ScreenDef[] = [
   // CHC @ BBM — the purpose-built intake form. `shell: 'app'` (authenticated):
   // it records real submissions and uploads identity documents, so it is never
   // a public surface. The same form also exists as an editable template,
-  // reachable from the form library.
-  { key: 'chc-intake', path: '/app/chc-intake', group: 'Core product loop', label: 'CHC induction intake', icon: 'hard-hat', shell: 'app', inNav: true },
+  // reachable from the document library. NOT in the nav — it is one customer's
+  // workflow, reached from the library's "CHC intake" entry point or by URL,
+  // and a permanent sidebar row gave it more prominence than the product's own
+  // surfaces.
+  { key: 'chc-intake', path: '/app/chc-intake', group: 'Core product loop', label: 'CHC induction intake', icon: 'hard-hat', shell: 'app' },
 
-  // Enterprise & org
-  { key: 'team', path: '/app/team', group: 'Enterprise & org', label: 'Team management', icon: 'users', shell: 'app', inNav: true },
-  { key: 'taxonomy', path: '/app/taxonomy', group: 'Enterprise & org', label: 'Locations & roles', icon: 'map-pin', shell: 'app', inNav: true, minAccessLevel: 'admin' , requiresFeature: 'assessments' },
-  { key: 'roles', path: '/app/roles', group: 'Enterprise & org', label: 'Access levels', icon: 'shield', shell: 'app', inNav: true },
-  { key: 'working-list', path: '/app/working-list', group: 'Enterprise & org', label: 'Working list', icon: 'list-checks', shell: 'app', inNav: true, minAccessLevel: 'admin' , requiresFeature: 'assessments' },
-  { key: 'compliance', path: '/app/compliance', group: 'Enterprise & org', label: 'Compliance', icon: 'shield-check', shell: 'app', inNav: true, minAccessLevel: 'admin' , requiresFeature: 'assessments' },
+  // Enterprise & org. The workspace-administration entries fold into the
+  // sidebar's Settings section; the assessment-lifecycle ones into Training.
+  // The admin floors are nav hygiene, not security — the API stays the
+  // boundary — but a candidate's sidebar advertising Billing and API keys made
+  // the product read as broken for the very people it onboards.
+  { key: 'team', path: '/app/team', group: 'Enterprise & org', label: 'Team management', icon: 'users', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
+  { key: 'taxonomy', path: '/app/taxonomy', group: 'Enterprise & org', label: 'Locations & roles', icon: 'map-pin', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' , requiresFeature: 'assessments' },
+  { key: 'roles', path: '/app/roles', group: 'Enterprise & org', label: 'Access levels', icon: 'shield', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
+  { key: 'working-list', path: '/app/working-list', group: 'Enterprise & org', label: 'Working list', icon: 'list-checks', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' , requiresFeature: 'assessments' },
+  { key: 'compliance', path: '/app/compliance', group: 'Enterprise & org', label: 'Compliance', icon: 'shield-check', shell: 'app', inNav: true, navGroup: 'training', minAccessLevel: 'admin' , requiresFeature: 'assessments' },
   // The member record (U38). SERVES EVERY MEMBER, not only candidates — an
   // assessor's and an administrator's record is this same screen. No
   // `minAccessLevel`: the `profiles` matrix category is the real gate, and a
@@ -102,22 +127,22 @@ export const SCREENS: ScreenDef[] = [
   // Bulk workforce import (U23, U24). Admin-only and behind the assessments
   // tier, matching its routes: a row cannot be built without taxonomy the tier
   // does not carry.
-  { key: 'workforce-import', path: '/app/workforce-import', group: 'Enterprise & org', label: 'Import workforce', icon: 'upload', shell: 'app', inNav: true, minAccessLevel: 'admin', requiresFeature: 'assessments' },
-  { key: 'audit', path: '/app/audit', group: 'Enterprise & org', label: 'Audit log', icon: 'scroll-text', shell: 'app', inNav: true , requiresFeature: 'auditExport' },
-  { key: 'billing', path: '/app/billing', group: 'Enterprise & org', label: 'Billing', icon: 'credit-card', shell: 'app', inNav: true },
-  { key: 'competency', path: '/app/competency', group: 'Competency gating', label: 'Competency gating', icon: 'graduation-cap', shell: 'app', inNav: true , requiresFeature: 'competencyGating' },
+  { key: 'workforce-import', path: '/app/workforce-import', group: 'Enterprise & org', label: 'Import workforce', icon: 'upload', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin', requiresFeature: 'assessments' },
+  { key: 'audit', path: '/app/audit', group: 'Enterprise & org', label: 'Audit log', icon: 'scroll-text', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' , requiresFeature: 'auditExport' },
+  { key: 'billing', path: '/app/billing', group: 'Enterprise & org', label: 'Billing', icon: 'credit-card', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
+  { key: 'competency', path: '/app/competency', group: 'Competency gating', label: 'Competency gating', icon: 'graduation-cap', shell: 'app', inNav: true, navGroup: 'training', minAccessLevel: 'assessor' , requiresFeature: 'competencyGating' },
 
   // Multi-part assessments. The case list is one screen for two audiences —
   // an assessor sees the org's cases, a candidate sees their own — because the
   // API scopes the read by permission rather than the screen filtering it.
-  { key: 'assessments', path: '/app/assessments', group: 'Assessments', label: 'Assessments', icon: 'clipboard-check', shell: 'app', inNav: true , requiresFeature: 'assessments' },
+  { key: 'assessments', path: '/app/assessments', group: 'Assessments', label: 'Assessments', icon: 'clipboard-check', shell: 'app', inNav: true, navGroup: 'training' , requiresFeature: 'assessments' },
   // Progress across every case in one table. Declared BEFORE the case route so
   // the literal segment is listed ahead of the parameter it would otherwise be
   // read as; the API declares its matching endpoint in the same order.
   { key: 'assessment-progress', path: '/app/assessments/progress', group: 'Assessments', label: 'Assessment progress', icon: 'gauge', shell: 'app' , requiresFeature: 'assessments' },
   // Literal 'queue' segment, so it is not read as `/app/assessments/:id`; the API
   // gate is the real access boundary, this only hides the nav entry (U13).
-  { key: 'assessment-queue', path: '/app/assessments/queue', group: 'Assessments', label: 'Assessment queue', icon: 'inbox', shell: 'app', inNav: true, minAccessLevel: 'assessor' , requiresFeature: 'assessments' },
+  { key: 'assessment-queue', path: '/app/assessments/queue', group: 'Assessments', label: 'Assessment queue', icon: 'inbox', shell: 'app', inNav: true, navGroup: 'training', minAccessLevel: 'assessor' , requiresFeature: 'assessments' },
   // Who fills each section of an assessment, and in what order. Under a literal
   // /tools/ segment rather than another parameter on /assessments/:id, which
   // would be read as a case id — the same reason `progress` is declared above.
@@ -136,12 +161,12 @@ export const SCREENS: ScreenDef[] = [
   // invalidates any assessment tool keyed to those ids.
   { key: 'geometry-editor', path: '/app/forms/:id/versions/:versionId/placement', group: 'Core product loop', label: 'Field placement', icon: 'square-dashed', shell: 'app' },
   { key: 'assessment-part-fill', path: '/app/assessments/:id/attempts/:attemptId', group: 'Assessments', label: 'Complete assessment part', icon: 'pen-line', shell: 'app' },
-  { key: 'api-keys', path: '/app/settings/api-keys', group: 'Enterprise & org', label: 'API keys', icon: 'key', shell: 'app', inNav: true },
-  { key: 'whitelabel', path: '/app/settings/branding', group: 'Enterprise & org', label: 'Branding', icon: 'sliders-horizontal', shell: 'app', inNav: true },
+  { key: 'api-keys', path: '/app/settings/api-keys', group: 'Enterprise & org', label: 'API keys', icon: 'key', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
+  { key: 'whitelabel', path: '/app/settings/branding', group: 'Enterprise & org', label: 'Branding', icon: 'sliders-horizontal', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
   // The identities this org's forms are presented in — usually clients', not
   // its own. Declared AFTER `whitelabel` so the more specific static path is
   // matched on its own terms rather than by the branding route.
-  { key: 'client-brands', path: '/app/settings/client-brands', group: 'Enterprise & org', label: 'Client brands', icon: 'palette', shell: 'app', inNav: true },
+  { key: 'client-brands', path: '/app/settings/client-brands', group: 'Enterprise & org', label: 'Client brands', icon: 'palette', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
 
   // Mobile (responsive web)
   { key: 'mobile', path: '/m', group: 'Mobile app', label: 'Mobile field app', icon: 'smartphone', shell: 'mobile' },
@@ -172,6 +197,34 @@ export function navScreensFor(
       (!s.minAccessLevel || rank >= (ACCESS_RANK[s.minAccessLevel] ?? Number.POSITIVE_INFINITY)) &&
       (!s.requiresFeature || features?.[s.requiresFeature] === true),
   );
+}
+
+export interface NavSection {
+  key: NavGroupKey;
+  label: string;
+  icon: string;
+  screens: ScreenDef[];
+}
+
+/**
+ * The sidebar's shape for one member: the top-level entries in registry order,
+ * then each collapsible group that still has anything visible in it. A group
+ * every entry of which is gated away is omitted entirely — an empty "Settings"
+ * header on a candidate's sidebar would advertise a section they hold nothing
+ * in.
+ */
+export function navSectionsFor(
+  role: string | undefined,
+  features?: Readonly<Record<string, boolean>> | null,
+): { top: ScreenDef[]; groups: NavSection[] } {
+  const visible = navScreensFor(role, features);
+  return {
+    top: visible.filter((s) => !s.navGroup),
+    groups: NAV_GROUPS.map((g) => ({
+      ...g,
+      screens: visible.filter((s) => s.navGroup === g.key),
+    })).filter((g) => g.screens.length > 0),
+  };
 }
 
 export function screenByPath(pathname: string): ScreenDef | undefined {

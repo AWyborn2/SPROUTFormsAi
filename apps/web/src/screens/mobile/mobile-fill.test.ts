@@ -18,6 +18,7 @@ function summary(overrides: Partial<FormSummary>): FormSummary {
     sourceType: 'built_from_scratch',
     currentVersionId: 'v1',
     version: 'v1',
+    owner: null,
     submissions: 0,
     updated: 'Just now',
     ...overrides,

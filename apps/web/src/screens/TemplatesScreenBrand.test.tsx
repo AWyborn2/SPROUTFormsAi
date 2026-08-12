@@ -23,6 +23,7 @@ const SUMMARY: FormSummary = {
   icon: 'file-text',
   status: 'published',
   version: 'v1',
+  owner: null,
   updated: '2 days ago',
   submissions: 3,
   currentVersionId: 'ver-1',

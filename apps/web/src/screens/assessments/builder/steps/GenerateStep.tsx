@@ -82,7 +82,7 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
             <Link to="/app/settings/client-brands" className="font-semibold text-accent hover:underline">
               Client brands
             </Link>
-            , then assigned to a form from the form library — so every form for that client changes
+            , then assigned to a form from the document library — so every form for that client changes
             together.
           </span>
         </div>

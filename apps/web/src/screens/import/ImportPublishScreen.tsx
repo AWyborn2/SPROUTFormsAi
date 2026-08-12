@@ -164,7 +164,7 @@ export function ImportPublishScreen() {
                   <span className="w-[120px] flex-none text-[12.5px] text-text-tertiary">Destination</span>
                   <span className="flex items-center gap-[7px] text-sm font-semibold">
                     <Icon name="folder" size={15} className="text-text-tertiary" />
-                    Form library
+                    Document library
                   </span>
                 </div>
                 <div className="h-px bg-border-subtle" />
