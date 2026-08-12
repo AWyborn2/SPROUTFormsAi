@@ -189,6 +189,26 @@ describe('workflowFromFields', () => {
     expect(w.sections[0]!.label).toBe('Front page');
     expect(w.sections[0]!.fieldIds).toEqual(['loose']);
   });
+
+  it('skips headers with no fields beneath them', () => {
+    const withEmpties: FormField[] = [
+      header('h-details', 'Candidate Details'),
+      field('name'),
+      header('h-empty1', 'Empty Section A'),
+      header('h-empty2', 'Empty Section B'),
+      header('h-theory', 'Theory'),
+      { ...field('q1', 'checkbox_group'), answerKey: ['a'], outcomeTarget: { fieldId: 'q1-out' } },
+      field('q1-out', 'check_cross'),
+    ];
+    const w = workflowFromFields(withEmpties, manifest);
+
+    expect(w.sections.map((s) => s.label)).toEqual([
+      'Candidate Details',
+      'Theory',
+    ]);
+    expect(w.sections[0]!.ordinal).toBe(1);
+    expect(w.sections[1]!.ordinal).toBe(2);
+  });
 });
 
 describe('validatePrerequisiteChecks', () => {

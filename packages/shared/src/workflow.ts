@@ -296,7 +296,12 @@ export function workflowFromFields(
     current.ids.push(field.id);
   }
 
-  const sections: WorkflowSection[] = drafts.map((draft, index) => {
+  const populated = drafts.filter((draft) => {
+    if (draft.ids.length > 0) return true;
+    return manifest.parts.some((p) => p.startFieldId === draft.key);
+  });
+
+  const sections: WorkflowSection[] = populated.map((draft, index) => {
     const span = new Set(draft.ids);
     const part = manifest.parts.find((p) => span.has(p.startFieldId));
     const base: WorkflowSection = {
