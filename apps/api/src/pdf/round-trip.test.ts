@@ -1401,6 +1401,86 @@ describe('roundTripExport — verdict rings on auto-marked questions', () => {
 });
 
 /**
+ * A boolean printed as a "No ☐  Yes ☐" PAIR — two placed cells, optionKey
+ * `yes`/`no`. The mark's meaning is WHICH CELL it sits in, so the answered
+ * cell gets a TICK either way: a cross in the "No" cell would read as
+ * "not no". Its partner stays blank, and unanswered draws nothing anywhere.
+ */
+describe('roundTripExport — a boolean_yes_no placed as a Yes/No pair', () => {
+  const cell = (optionKey: 'yes' | 'no', x: number): PageBox => ({
+    page: 0,
+    x,
+    y: 500,
+    width: 14,
+    height: 12,
+    pageWidth: 600,
+    pageHeight: 800,
+    optionKey,
+  });
+  const NO_X = 420;
+  const YES_X = 470;
+
+  const pairField = (segments = [cell('no', NO_X), cell('yes', YES_X)]): FormField => ({
+    id: 'coaching',
+    type: 'boolean_yes_no',
+    label: 'More coaching and/or training required?',
+    required: false,
+    source: 'imported',
+    geometry: { segments },
+  });
+
+  it('ticks the Yes cell for true and leaves the No cell blank', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [pairField()],
+      values: { coaching: true },
+    });
+
+    const marks = drawnMarks(output);
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.kind).toBe('tick');
+    expect(marks[0]!.x).toBeGreaterThanOrEqual(YES_X);
+    expect(marks[0]!.x).toBeLessThan(YES_X + 14);
+  });
+
+  it('ticks the No cell for false — a tick, never a cross that would read as "not no"', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [pairField()],
+      values: { coaching: false },
+    });
+
+    const marks = drawnMarks(output);
+    expect(marks).toHaveLength(1);
+    expect(marks[0]!.kind).toBe('tick');
+    expect(marks[0]!.x).toBeGreaterThanOrEqual(NO_X);
+    expect(marks[0]!.x).toBeLessThan(NO_X + 14);
+  });
+
+  it('draws nothing when the question was never answered', async () => {
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [pairField()],
+      values: {},
+    });
+
+    expect(drawnMarks(output)).toHaveLength(0);
+  });
+
+  it('draws nothing when the answered cell is the one box not yet placed', async () => {
+    // Visibly incomplete beats a mark in the wrong cell: with only the No box
+    // placed and the answer Yes, nothing draws anywhere.
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [pairField([cell('no', NO_X)])],
+      values: { coaching: true },
+    });
+
+    expect(drawnMarks(output)).toHaveLength(0);
+  });
+});
+
+/**
  * A standalone check_cross outcome cell.
  *
  * This is where an auto-marked question's verdict lands: `applyMarks` writes a

@@ -443,6 +443,38 @@ export async function roundTripExport({
       happened.
     */
     if (isSelfAnswering(field.type)) {
+      /*
+        TWO PRINTED CELLS, ONE VERDICT. Plenty of papers print a boolean as a
+        "No ☐  Yes ☐" pair rather than one box, and a mark's meaning there is
+        WHICH CELL it sits in — so a placed pair (optionKey `yes`/`no`) draws a
+        tick in the answered cell and leaves its partner blank. A cross in the
+        "No" cell would read as "not no". Unanswered still draws nothing
+        anywhere, and a field carrying no pair keeps the single-box behaviour
+        below unchanged.
+      */
+      const pair = segments.filter((s) => s.optionKey === 'yes' || s.optionKey === 'no');
+      if (pair.length > 0) {
+        const pairVerdict = verdictOf(value);
+        if (pairVerdict === undefined) continue;
+        const cell = pair.find((s) => s.optionKey === (pairVerdict ? 'yes' : 'no'));
+        const cellPage = cell ? pages[cell.page] : undefined;
+        // The answered cell may be the one box the author has not placed yet —
+        // then nothing draws, which is visibly incomplete rather than a mark
+        // in the wrong cell.
+        if (cell && cellPage) {
+          const glyph = resolveMarkStyle(cell, 'tick');
+          if (glyph === 'ring') {
+            drawRing(cellPage, cell, INK);
+          } else if (glyph === 'highlight') {
+            drawHighlight(cellPage, cell);
+          } else {
+            const { x, y, size } = boxMarkPlacement(cell);
+            drawMark(cellPage, glyph === 'cross' ? 'cross' : 'tick', x, y, size);
+          }
+        }
+        continue;
+      }
+
       const verdict = verdictOf(value);
       if (verdict === undefined) continue;
       /*

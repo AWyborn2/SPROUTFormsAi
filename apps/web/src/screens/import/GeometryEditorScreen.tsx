@@ -560,7 +560,11 @@ export function GeometryEditorScreen({
   /** Replace one option's box, keyed by `optionKey`, leaving siblings alone. */
   function setOptionBox(fieldId: string, optionKey: string, box: PageBox | null) {
     mutate(fieldId, (f) => {
-      const kept = (f.geometry?.segments ?? []).filter((s) => s.optionKey !== optionKey);
+      const others = (f.geometry?.segments ?? []).filter((s) => s.optionKey !== optionKey);
+      // Placing an option box retires any whole-field box: the exporter reads
+      // one shape or the other, and a stale scalar segment left underneath is
+      // a second answer to "where does the mark go".
+      const kept = box ? others.filter((s) => s.optionKey !== undefined) : others;
       const next = box ? [...kept, { ...box, optionKey }] : kept;
       return next.length > 0 ? { ...f, geometry: { segments: next } } : stripGeometry(f);
     });
@@ -1599,16 +1603,48 @@ function PlacementPanel({
           <BoxRow
             label="Answer box"
             /*
-              The WHOLE-GRID segment only. In per-row mode the first stored
-              segment is a row's cell, and labelling it "Answer box · p1"
-              would report a grid nobody placed.
+              The WHOLE-FIELD segment only. In per-row or yes/no-pair mode the
+              first stored segment is one cell of several, and labelling it
+              "Answer box · p1" would report a box nobody placed.
             */
-            box={(field.geometry?.segments ?? []).find((s) => rowCellIndex(s) === null)}
+            box={(field.geometry?.segments ?? []).find(
+              (s) => rowCellIndex(s) === null && s.optionKey === undefined,
+            )}
             armed={sameTarget(drawTarget, { fieldId: field.id, optionKey: null })}
             onToggleDraw={() => onToggleDraw({ fieldId: field.id, optionKey: null })}
             onClear={() => onSetScalarBox(null)}
             onRestyle={onSetScalarBox}
           />
+          {field.type === 'boolean_yes_no' && (
+            <div className="flex flex-col gap-1.5">
+              {/*
+                THE PRINTED PAIR. Plenty of papers print a boolean as
+                "No ☐  Yes ☐" — two cells, and the mark's meaning is which one
+                it sits in. Placing the pair replaces the single box above (and
+                drawing that replaces the pair); the export ticks the answered
+                cell and leaves its partner blank.
+              */}
+              <p className="text-[11px] leading-snug text-text-tertiary">
+                Or place Yes and No as separate printed cells — the export draws a ✓ in whichever
+                one was answered.
+              </p>
+              {(['yes', 'no'] as const).map((key) => {
+                const target: DrawTarget = { fieldId: field.id, optionKey: key };
+                const box = (field.geometry?.segments ?? []).find((s) => s.optionKey === key);
+                return (
+                  <BoxRow
+                    key={key}
+                    label={key === 'yes' ? 'Yes cell' : 'No cell'}
+                    box={box}
+                    armed={sameTarget(drawTarget, target)}
+                    onToggleDraw={() => onToggleDraw(target)}
+                    onClear={() => onSetOptionBox(key, null)}
+                    onRestyle={(next) => onSetOptionBox(key, next)}
+                  />
+                );
+              })}
+            </div>
+          )}
           {rowFallback && (
             <div className="flex flex-col gap-1.5">
               <p className="text-[11px] leading-snug text-text-tertiary">
