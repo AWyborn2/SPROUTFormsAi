@@ -364,10 +364,12 @@ describe('proposeRowCell', () => {
  */
 describe('proposeManualGrid', () => {
   const box: PageBox = { page: 7, x: 500, y: 600, width: 120, height: 120, ...PAGE };
+  /** A fixed-row checklist — the shape whose first column is printed text. */
+  const FIXED = ['Row one', 'Row two', 'Row three', 'Row four'];
 
   it('divides the drawn box into equal rows, top-down, spanning the answer column', async () => {
     const { proposeManualGrid } = await import('./pdf-geometry.js');
-    const result = proposeManualGrid({ box, rows: 4, columns: COLUMNS });
+    const result = proposeManualGrid({ box, rows: 4, columns: COLUMNS, fixedRows: FIXED });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -385,7 +387,7 @@ describe('proposeManualGrid', () => {
       ...COLUMNS,
       { key: 'na', label: 'N/A', type: 'check_cross' },
     ];
-    const result = proposeManualGrid({ box, rows: 2, columns: three });
+    const result = proposeManualGrid({ box, rows: 2, columns: three, fixedRows: FIXED });
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -401,6 +403,7 @@ describe('proposeManualGrid', () => {
       box,
       rows: 3,
       columns: [{ key: 'method', label: 'Method', type: 'text' }],
+      fixedRows: FIXED,
     });
 
     expect(result.ok).toBe(false);
@@ -409,8 +412,52 @@ describe('proposeManualGrid', () => {
   it('refuses a row count that is not a whole positive number', async () => {
     const { proposeManualGrid } = await import('./pdf-geometry.js');
 
-    expect(proposeManualGrid({ box, rows: 0, columns: COLUMNS }).ok).toBe(false);
-    expect(proposeManualGrid({ box, rows: 2.5, columns: COLUMNS }).ok).toBe(false);
-    expect(proposeManualGrid({ box, rows: Number.NaN, columns: COLUMNS }).ok).toBe(false);
+    expect(proposeManualGrid({ box, rows: 0, columns: COLUMNS, fixedRows: FIXED }).ok).toBe(false);
+    expect(proposeManualGrid({ box, rows: 2.5, columns: COLUMNS, fixedRows: FIXED }).ok).toBe(false);
+    expect(proposeManualGrid({ box, rows: Number.NaN, columns: COLUMNS, fixedRows: FIXED }).ok).toBe(false);
+  });
+});
+
+/**
+ * An OPEN table — a logbook — prints blank cells in every column; there is no
+ * pre-printed label column to keep band-less. Dividing one must band ALL its
+ * columns, or the Date a candidate types would never reach the page.
+ */
+describe('proposeManualGrid on an open table', () => {
+  const LOG_COLUMNS: RepeatingColumn[] = [
+    { key: 'date', label: 'Date', type: 'date' },
+    { key: 'task', label: 'Task', type: 'text' },
+    { key: 'duration', label: 'Duration', type: 'number' },
+  ];
+  const box: PageBox = { page: 9, x: 100, y: 300, width: 300, height: 200, ...PAGE };
+
+  it('bands every column, first included, when the table declares no fixed rows', async () => {
+    const { proposeManualGrid } = await import('./pdf-geometry.js');
+    const result = proposeManualGrid({ box, rows: 10, columns: LOG_COLUMNS });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.segment.columnBands).toEqual([
+      { key: 'date', start: 100, end: 200 },
+      { key: 'task', start: 200, end: 300 },
+      { key: 'duration', start: 300, end: 400 },
+    ]);
+    expect(result.segment.rowBands).toHaveLength(10);
+  });
+
+  it('keeps the printed label column band-less on a fixed-row table', async () => {
+    const { proposeManualGrid } = await import('./pdf-geometry.js');
+    const result = proposeManualGrid({
+      box,
+      rows: 2,
+      columns: LOG_COLUMNS,
+      fixedRows: ['First printed row', 'Second printed row'],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // The first column is the paper's own text — banding it would draw the
+    // value over the printed words.
+    expect(result.segment.columnBands!.map((b) => b.key)).toEqual(['task', 'duration']);
   });
 });

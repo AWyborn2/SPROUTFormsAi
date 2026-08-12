@@ -8,6 +8,8 @@ import {
   type SectionColumns,
 } from '@formai/shared';
 import { FIELD_META, typeOptionsFor } from '../../../lib/field-editor/reducer.js';
+import { ColumnInspector } from '../../import/inspector/ColumnInspector.js';
+import { builderColumnActions } from '../../import/inspector/column-actions.js';
 
 /**
  * The structure editor — the left column of Step 2.
@@ -98,6 +100,15 @@ export interface StructurePanelProps {
   onDeleteField: (fieldId: string) => void;
   /** Fold a field into the previous one's description — an instruction, not a box. */
   onFoldField: (fieldId: string, targetFieldId: string) => void;
+  /**
+   * Patch a field's own properties — the column editor's write path.
+   *
+   * Extraction reads a table's columns off the page and gets them wrong the
+   * same ways it gets fields wrong: a merged column, a missed one, a Date
+   * read as text. The shared `ColumnInspector` is the correction, and it
+   * drives every host through exactly this patch shape.
+   */
+  onPatchField: (fieldId: string, patch: Partial<FormField>) => void;
 }
 
 export function StructurePanel({
@@ -118,10 +129,13 @@ export function StructurePanel({
   onRenameField,
   onDeleteField,
   onFoldField,
+  onPatchField,
 }: StructurePanelProps) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [typeMenuFor, setTypeMenuFor] = useState<string | null>(null);
+  /** The repeating field whose column editor is expanded, if any. */
+  const [columnsFor, setColumnsFor] = useState<string | null>(null);
   /**
    * The field being renamed, if any.
    *
@@ -451,6 +465,24 @@ export function StructurePanel({
                                 <Icon name="pencil" size={10} />
                               </button>
                             )}
+                            {field?.type === 'repeating_group' && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setColumnsFor((p) => (p === entry.id ? null : entry.id))
+                                }
+                                title="Edit the table's columns — names, types, add or remove"
+                                aria-label={`Edit columns of ${field?.label ?? entry.id}`}
+                                aria-expanded={columnsFor === entry.id}
+                                className={`flex-none rounded border px-1 py-px ${
+                                  columnsFor === entry.id
+                                    ? 'border-border-accent bg-surface-accent-soft text-text-accent'
+                                    : 'border-border text-text-tertiary hover:bg-surface-hover'
+                                }`}
+                              >
+                                <Icon name="table-2" size={10} />
+                              </button>
+                            )}
                             {section.cols > 1 && (
                               <button
                                 type="button"
@@ -500,6 +532,24 @@ export function StructurePanel({
                               <Icon name="trash-2" size={10} />
                             </button>
                           </div>
+
+                          {columnsFor === entry.id && field && (
+                            <div className="mt-1 rounded-lg border border-border bg-surface-card p-2.5">
+                              {/*
+                                The SHARED column inspector (R17) — the same
+                                panel import review and the template builder
+                                mount, driving this host through the same
+                                patch adapter. A third hand-rolled column
+                                editor is exactly the drift it exists to stop.
+                              */}
+                              <ColumnInspector
+                                field={field}
+                                actions={builderColumnActions(field, (patch) =>
+                                  onPatchField(entry.id, patch),
+                                )}
+                              />
+                            </div>
+                          )}
 
                           {typeMenuFor === entry.id && (
                             <div className="mt-1 flex flex-wrap gap-1 rounded-lg border border-border bg-surface-sunken p-1.5">

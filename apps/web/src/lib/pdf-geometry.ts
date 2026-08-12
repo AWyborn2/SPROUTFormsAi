@@ -1116,13 +1116,25 @@ export function proposeManualGrid(input: {
   box: PageBox;
   rows: number;
   columns: readonly RepeatingColumn[] | undefined;
+  /** The table's printed rows, where declared — decides which columns band. */
+  fixedRows?: readonly string[] | undefined;
 }): RowCellOutcome {
-  const optionColumns = (input.columns ?? []).slice(1);
+  /*
+    WHICH COLUMNS GET A BAND depends on what the paper already prints. A
+    fixed-row checklist prints its first column — the item text — so banding
+    it would draw the value over the printed words; only the answer columns
+    band. An OPEN table (a logbook: Date, Task, Duration…) prints blank cells
+    in every column, every column is data the export must place, and the
+    "first column is the label" contract does not describe its paper.
+  */
+  const openTable = (input.fixedRows?.length ?? 0) === 0;
+  const optionColumns = openTable ? (input.columns ?? []) : (input.columns ?? []).slice(1);
   if (optionColumns.length === 0) {
     return {
       ok: false,
-      detail:
-        'This table declares no answer column — only a label column — so there is nowhere for a mark to be recorded. Add the answer column on the structure step, then divide the box again.',
+      detail: openTable
+        ? 'This table declares no columns, so there is nothing to divide the box into. Add its columns on the structure step, then divide again.'
+        : 'This table declares no answer column — only a label column — so there is nowhere for a mark to be recorded. Add the answer column on the structure step, then divide the box again.',
     };
   }
   if (!Number.isInteger(input.rows) || input.rows < 1 || input.rows > 200) {

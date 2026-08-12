@@ -230,6 +230,16 @@ export interface FieldOps {
    * created to fix a gap could never receive a mark.
    */
   setOutcomeTarget: (questionId: string, outcomeFieldId: string | null) => void;
+  /**
+   * Patch one field's own properties — the column editor's write path.
+   *
+   * The shared `ColumnInspector` drives every host through a
+   * `(patch: Partial<FormField>) => void` adapter (`builderColumnActions`),
+   * and columns, answer sets and fixed rows all live ON the field — so one
+   * patch op is the whole integration, and the history layer sees it as one
+   * step like any other field edit.
+   */
+  patch: (fieldId: string, patch: Partial<FormField>) => void;
 }
 
 export interface PartOps {
@@ -920,6 +930,8 @@ export function useBuilderDraftState({
         applyFieldEdit((st) => mergeIntoDescription(st, fieldId, targetFieldId)),
       setOutcomeTarget: (questionId, outcomeFieldId) =>
         applyFieldEdit((st) => setOutcomeTarget(st, questionId, outcomeFieldId)),
+      patch: (fieldId, patchValue) =>
+        setFields((fs) => fs.map((f) => (f.id === fieldId ? { ...f, ...patchValue } : f))),
     }),
     [applyFieldEdit],
   );
