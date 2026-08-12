@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { CaseStateBadge } from '../statusBadges.js';
 import { Button, Icon, SignaturePad, useToast } from '@formai/ui';
 import { NS_DISPOSITIONS, type NotSatisfactoryDisposition, type PartState } from '@formai/shared';
+import { ApiError } from '../../lib/data/api-client.js';
 import {
   useAssessmentCase,
   useExportCasePdf,
@@ -222,6 +223,26 @@ export function AssessmentCaseScreen() {
  * server-stamped and never sent: it is a claim about when a judgement was made,
  * and the only moment we can vouch for is when the request arrived.
  */
+const SIGN_OFF_ERRORS: Record<string, string> = {
+  prerequisites_unsatisfied: 'The candidate has unsatisfied prerequisite competencies.',
+  case_closed: 'This case is already closed.',
+  candidate_cannot_sign_off: 'A candidate cannot sign off their own assessment.',
+  tool_missing: 'The assessment tool for this case no longer exists.',
+  parts_incomplete: 'Not all required parts are satisfactory yet.',
+};
+
+function signOffErrorMessage(body: Record<string, unknown>): string {
+  const code = typeof body.error === 'string' ? body.error : '';
+  const base = SIGN_OFF_ERRORS[code] ?? `Sign-off refused (${code || 'unknown'}).`;
+  if (code === 'prerequisites_unsatisfied' && typeof body.detail === 'string') {
+    return `${base} ${body.detail}`;
+  }
+  if (code === 'parts_incomplete' && Array.isArray(body.outstanding)) {
+    return `${base} Outstanding: ${(body.outstanding as string[]).join(', ')}.`;
+  }
+  return base;
+}
+
 function SignOffDialog({
   caseId,
   toolName,
@@ -260,7 +281,13 @@ function SignOffDialog({
       }
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not sign this case off.');
+      if (e instanceof ApiError && e.body && typeof e.body === 'object') {
+        const b = e.body as Record<string, unknown>;
+        const reason = signOffErrorMessage(b);
+        setError(reason);
+      } else {
+        setError(e instanceof Error ? e.message : 'Could not sign this case off.');
+      }
     }
   }
 
