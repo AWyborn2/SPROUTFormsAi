@@ -227,6 +227,31 @@ describe('rectTraced', () => {
     expect(iou(checkbox)).toBeGreaterThan(RECT_TRACE_MIN_OVERLAP + 0.2);
     expect(iou(cell)).toBeLessThan(RECT_TRACE_MIN_OVERLAP - 0.2);
   });
+
+  it('refuses to collapse a deliberate two-line box onto either of its lines', () => {
+    /*
+      THE REPORTED BUG. A textarea spanning two stacked one-line cells: the
+      drag covers both, scores IoU 0.5 against EACH — above the trace
+      threshold — and near-ties flipped which line won on every redraw. Each
+      cell accounts for only half the drag, so neither is what the author
+      meant, and the drawn box must survive at its drawn height.
+    */
+    const lineOne: PrintedRect = { x: 100, y: 714, width: 400, height: 14 };
+    const lineTwo: PrintedRect = { x: 100, y: 700, width: 400, height: 14 };
+    const drag = { x: 101, y: 701, width: 398, height: 26 };
+
+    expect(rectTraced(drag, [lineOne, lineTwo])).toBeNull();
+  });
+
+  it('still traces a single line drawn snugly, with the two-line gate in place', () => {
+    // The gate must not cost the feature it protects: a snug trace of ONE
+    // line covers most of the drag and comes back at the printed size.
+    const lineOne: PrintedRect = { x: 100, y: 714, width: 400, height: 14 };
+    const lineTwo: PrintedRect = { x: 100, y: 700, width: 400, height: 14 };
+    const drag = { x: 101, y: 713, width: 398, height: 16 };
+
+    expect(rectTraced(drag, [lineOne, lineTwo])).toEqual(lineOne);
+  });
 });
 
 describe('axisSnapRange', () => {

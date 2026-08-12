@@ -544,6 +544,26 @@ export function rectFromSubpath(
 export const RECT_TRACE_MIN_OVERLAP = 0.35;
 
 /**
+ * The share of the DRAG's extent, ON EACH AXIS, a printed rectangle must cover
+ * before it can claim the trace.
+ *
+ * IoU alone could not tell "traced this box" from "drew across this box and
+ * its neighbour": a drag spanning two stacked one-line cells scores IoU 0.5
+ * against EACH cell — above the trace threshold — so a deliberate two-line box
+ * collapsed to whichever single cell scored a hair higher, and near-ties made
+ * every redraw land on a different line. A rect covering barely half the
+ * drag's height is something the author drew PAST, not the thing they meant,
+ * however well it scores on IoU.
+ *
+ * Per axis rather than by area, deliberately: a sloppy hand trace is loose on
+ * BOTH axes at once, and the product of two honest 0.75s is an area score of
+ * 0.56 — an area gate strict enough to catch the two-line case would refuse
+ * real traces. Each axis alone stays comfortably above 0.65 on every trace
+ * measured, and a stacked-cell match sits at 0.5.
+ */
+export const RECT_TRACE_MIN_DRAG_COVERED = 0.65;
+
+/**
  * The printed rectangle an author was tracing, if they were tracing one.
  *
  * Snapping four edges INDEPENDENTLY is what deforms a traced checkbox: each
@@ -553,8 +573,13 @@ export const RECT_TRACE_MIN_OVERLAP = 0.35;
  * asks the question the author was answering — *which box did you mean* — and
  * returns that box exactly, at its printed size, with no accumulated error.
  *
- * Returns null when nothing clears `RECT_TRACE_MIN_OVERLAP`, which is the
- * common case on an unruled page and leaves per-edge snapping to handle it.
+ * TWO gates, because they refuse different mistakes. IoU refuses a rect far
+ * larger than the drag (the cell around a traced checkbox). Drag-coverage
+ * refuses a rect far smaller than the drag (one line of a deliberate two-line
+ * box) — a real trace covers its box snugly and clears both with room.
+ *
+ * Returns null when nothing clears both, which is the common case on an
+ * unruled page and leaves per-edge snapping to handle it.
  */
 export function rectTraced(
   drawn: { x: number; y: number; width: number; height: number },
@@ -570,6 +595,12 @@ export function rectTraced(
     const ix = Math.min(drawn.x + drawn.width, r.x + r.width) - Math.max(drawn.x, r.x);
     const iy = Math.min(drawn.y + drawn.height, r.y + r.height) - Math.max(drawn.y, r.y);
     if (ix <= 0 || iy <= 0) continue;
+    if (
+      ix < RECT_TRACE_MIN_DRAG_COVERED * drawn.width ||
+      iy < RECT_TRACE_MIN_DRAG_COVERED * drawn.height
+    ) {
+      continue;
+    }
     const intersection = ix * iy;
     const union = area + r.width * r.height - intersection;
     const score = union > 0 ? intersection / union : 0;

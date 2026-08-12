@@ -27,11 +27,29 @@ export interface MarkDescription {
   detail: string;
 }
 
-export function markDescription(field: Pick<FormField, 'type' | 'options' | 'printSelectedValue'>): MarkDescription {
+export function markDescription(
+  field: Pick<FormField, 'type' | 'options' | 'printSelectedValue' | 'geometry'>,
+): MarkDescription {
   // Types whose false is a recorded finding, so BOTH states draw something.
   // The list is the exporter's — see `isSelfAnswering` — because this sentence
   // is a promise about what that file will print.
   if (isSelfAnswering(field.type)) {
+    /*
+      A PLACED YES/NO PAIR CHANGES WHAT THE MARK MEANS: it is a tick in
+      whichever cell was answered, never a cross — a ✗ in the "No" cell would
+      read as "not no". The sentence follows the geometry the author actually
+      placed, because it is a promise about what the exporter will print.
+    */
+    const pair = (field.geometry?.segments ?? []).some(
+      (s) => s.optionKey === 'yes' || s.optionKey === 'no',
+    );
+    if (pair) {
+      return {
+        mark: 'a ✓ in whichever cell was answered',
+        detail:
+          'Yes and No are separate printed cells — the answered one gets the tick and its partner stays blank. A question nobody assessed draws nothing.',
+      };
+    }
     return {
       mark: 'a ✓ or a ✗',
       // Both directions are findings. Only never-assessed is blank, and saying
