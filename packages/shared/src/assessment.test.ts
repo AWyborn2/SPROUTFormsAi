@@ -832,3 +832,96 @@ describe('isTerminalCaseState', () => {
     expect(isTerminalCaseState('awaiting_sign_off')).toBe(false);
   });
 });
+
+/**
+ * The completion checklist ticks itself — derived from the parts' final
+ * states, positional like every fixed-row value, and only ever writing TRUE
+ * into a satisfied part's own cell. Un-ticked means "not completed", never
+ * "failed": a false here would print a finding nobody made.
+ */
+describe('completionTickRows', () => {
+  const marks = [
+    { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'done' },
+    { partKey: 'p2', fieldId: 'methods', rowIndex: 3, columnKey: 'done' },
+  ];
+  const progressOf = (states: Record<string, 'satisfactory' | 'open' | 'not_satisfactory'>) =>
+    Object.entries(states).map(([key, state]) => ({
+      part: part({ key, ordinal: 1 }),
+      state: state as never,
+      attempts: 1,
+      latestOutcome: null,
+    }));
+
+  it('ticks a satisfied part’s row and pads the gap with empty rows', async () => {
+    const { completionTickRows } = await import('./assessment.js');
+    const rows = completionTickRows(marks, progressOf({ p1: 'open', p2: 'satisfactory' }));
+
+    // Row 3 must sit at INDEX 3 — the exporter consumes rows positionally, so
+    // a tick that slid up through the gap would print on the wrong method.
+    expect(rows).toEqual([{}, {}, {}, { done: true }]);
+  });
+
+  it('leaves a failed or unstarted part’s row untouched', async () => {
+    const { completionTickRows } = await import('./assessment.js');
+    const rows = completionTickRows(marks, progressOf({ p1: 'not_satisfactory', p2: 'open' }));
+
+    expect(rows).toEqual([]);
+  });
+
+  it('merges over what is stored without erasing it', async () => {
+    const { completionTickRows } = await import('./assessment.js');
+    const rows = completionTickRows(
+      marks,
+      progressOf({ p1: 'satisfactory', p2: 'open' }),
+      [{ label: 'Theory', note: 'kept' }],
+    );
+
+    expect(rows).toEqual([{ label: 'Theory', note: 'kept', done: true }]);
+  });
+});
+
+describe('validatePartCompletionMarks', () => {
+  const manifest = { parts: [part({ key: 'p1', ordinal: 1 })] };
+  const table: FormField = {
+    id: 'methods',
+    type: 'repeating_group',
+    label: 'Assessment Methods',
+    required: false,
+    source: 'imported',
+    fixedRows: ['1. Theory', '2. Practical'],
+    columns: [
+      { key: 'method', label: 'Method', type: 'text' },
+      { key: 'done', label: 'Done', type: 'checkbox' },
+    ],
+  };
+
+  it('accepts a mark that names a real part, row and column', async () => {
+    const { validatePartCompletionMarks } = await import('./assessment.js');
+    expect(
+      validatePartCompletionMarks(
+        [{ partKey: 'p1', fieldId: 'methods', rowIndex: 1, columnKey: 'done' }],
+        manifest,
+        [table],
+      ),
+    ).toEqual([]);
+  });
+
+  it('refuses an unknown part, a missing field, a wrong type, an out-of-range row and a wrong column', async () => {
+    const { validatePartCompletionMarks } = await import('./assessment.js');
+    const scalar: FormField = { id: 'plain', type: 'text', label: 'x', required: false, source: 'imported' };
+
+    expect(
+      validatePartCompletionMarks(
+        [
+          { partKey: 'ghost', fieldId: 'methods', rowIndex: 0, columnKey: 'done' },
+          { partKey: 'p1', fieldId: 'nope', rowIndex: 0, columnKey: 'done' },
+          { partKey: 'p1', fieldId: 'plain', rowIndex: 0, columnKey: 'done' },
+          { partKey: 'p1', fieldId: 'methods', rowIndex: 9, columnKey: 'done' },
+          { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'ghost' },
+        ],
+        manifest,
+        [table, scalar],
+      ),
+    ).toHaveLength(5);
+  });
+});

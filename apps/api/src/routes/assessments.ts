@@ -8,6 +8,7 @@ import {
   NS_DISPOSITIONS,
   caseProgress,
   competencyCurrency,
+  completionTickRows,
   countsAsHeld,
   fieldsInPart,
   fieldsInSection,
@@ -575,6 +576,19 @@ const toolBody = z.object({
     */
     candidateNameFieldId: z.string().optional(),
     candidateSignatureFieldId: z.string().optional(),
+    // Named for the same reason as every optional above: an unlisted manifest
+    // property is silently STRIPPED, and a builder that appeared to save the
+    // completion mapping would publish a checklist that never ticks.
+    partCompletionMarks: z
+      .array(
+        z.object({
+          partKey: z.string().min(1),
+          fieldId: z.string().min(1),
+          rowIndex: z.number().int().min(0),
+          columnKey: z.string().min(1),
+        }),
+      )
+      .optional(),
     /*
       Who does what, and when. The same trap this file warns about above: a
       manifest property this schema does not name is silently STRIPPED, so a
@@ -2056,6 +2070,29 @@ assessmentCasesRouter.get(
     */
     const prereqIds = new Set((manifest.prerequisiteChecks ?? []).map((c) => c.fieldId));
     const prereqHere = visibleFields.some((f) => prereqIds.has(f.id));
+    /*
+      THE COMPLETION CHECKLIST TICKS ITSELF (manifest.partCompletionMarks).
+      Derived from the case's attempt rows on every read — the same source part
+      state itself comes from — and served over the stored value, so this
+      surface can never show a tick the progress does not back.
+    */
+    const completionIds = new Set((manifest.partCompletionMarks ?? []).map((m) => m.fieldId));
+    const completionValues: Record<string, SubmissionValue> = {};
+    if (visibleFields.some((f) => completionIds.has(f.id))) {
+      const progress = caseProgress(
+        manifest,
+        row.pathway as AssessmentPathway,
+        toAttemptFacts(await attemptsFor(db, row.id)),
+      );
+      for (const f of visibleFields) {
+        if (!completionIds.has(f.id)) continue;
+        completionValues[f.id] = completionTickRows(
+          (manifest.partCompletionMarks ?? []).filter((m) => m.fieldId === f.id),
+          progress,
+          attempt.values?.[f.id],
+        );
+      }
+    }
     const prereqValues: Record<string, boolean> = {};
     if (prereqHere) {
       for (const result of await evaluatePrerequisites(db, tenant.orgId, row.candidateUserId, manifest)) {
@@ -2134,19 +2171,20 @@ assessmentCasesRouter.get(
         to lock the box twice.
       */
       writableFieldIds: access.writable.filter(
-        (id) => !hidden.has(id) && !prefillMap[id] && !prereqIds.has(id),
+        (id) => !hidden.has(id) && !prefillMap[id] && !prereqIds.has(id) && !completionIds.has(id),
       ),
       /*
         Layering, least to most authoritative: tool DEFAULTS under everything —
         a default fills only where nothing exists, and the field stays
         writable — then the candidate's stored answers, then the derived
-        prefill and prerequisite verdicts, which nothing may shadow.
+        prefill, prerequisite and completion values, which nothing may shadow.
       */
       values: {
         ...defaultsFor(manifest, visibleFields),
         ...(attempt.values ?? {}),
         ...prefill,
         ...prereqValues,
+        ...completionValues,
       },
     });
   }),

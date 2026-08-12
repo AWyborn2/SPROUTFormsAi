@@ -590,3 +590,77 @@ describe('proposePartMarks', () => {
     expect(proposePartMarks([f('q', 'Manoeuvres the dozer safely')])).toEqual({});
   });
 });
+
+/**
+ * Mapping the printed methods checklist to the parts whose completion it
+ * records. The fixtures are the real paper's own hazards: a heading typo
+ * ("OBSERVATON") that defeats word matching, and a declaration part sharing
+ * its number with the part it declares for.
+ */
+describe('proposePartCompletionMarks', () => {
+  const methodsTable = {
+    id: 'methods',
+    label: 'Assessment Methods used (check all that apply)',
+    type: 'repeating_group' as const,
+    fixedRows: [
+      '1. Theory',
+      '2. Practical Demonstration',
+      '3. Direct Observation Log',
+      '4. Minimal Supervision Practical Assessment',
+    ],
+    columns: [
+      { key: 'method', label: 'Method', type: 'text' as const },
+      { key: 'used', label: 'Used', type: 'checkbox' as const },
+    ],
+  };
+  const PARTS = [
+    { key: 'p1', label: 'PART 1 - THEORY' },
+    { key: 'p2', label: 'PART 2 - PRACTICAL DEMONSTRATION' },
+    { key: 'p2d', label: 'PART 2 Assessor Assessment Declaration' },
+    { key: 'p3', label: 'PART 3 - DIRECT OBSERVATON LOG' },
+  ];
+
+  it('maps each part to its numbered row, typo and declaration collision included', async () => {
+    const { proposePartCompletionMarks } = await import('./builder-manifest.js');
+    const marks = proposePartCompletionMarks(PARTS, [methodsTable]);
+
+    expect(marks).toEqual([
+      { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'used' },
+      { partKey: 'p2', fieldId: 'methods', rowIndex: 1, columnKey: 'used' },
+      { partKey: 'p3', fieldId: 'methods', rowIndex: 2, columnKey: 'used' },
+    ]);
+    // The declaration part shares number 2 and no words with the row — it
+    // must not steal or duplicate the practical's tick.
+    expect(marks.some((m) => m.partKey === 'p2d')).toBe(false);
+  });
+
+  it('proposes nothing from a table matching fewer than two parts', async () => {
+    const { proposePartCompletionMarks } = await import('./builder-manifest.js');
+
+    expect(
+      proposePartCompletionMarks([PARTS[0]!], [methodsTable]),
+    ).toEqual([]);
+  });
+
+  it('proposes nothing from a multi-answer-column table', async () => {
+    const { proposePartCompletionMarks } = await import('./builder-manifest.js');
+    const twoColumns = {
+      ...methodsTable,
+      columns: [
+        ...methodsTable.columns,
+        { key: 'na', label: 'N/A', type: 'checkbox' as const },
+      ],
+    };
+
+    expect(proposePartCompletionMarks(PARTS, [twoColumns])).toEqual([]);
+  });
+
+  it('reaches the built manifest', async () => {
+    const { buildManifest, derivePartsFromStructure } = await import('./builder-manifest.js');
+    void derivePartsFromStructure;
+    const manifest = buildManifest([], [methodsTable]);
+    // No parts derived → nothing to map; the property stays absent rather
+    // than empty, like every other unproposed pointer.
+    expect(manifest.partCompletionMarks).toBeUndefined();
+  });
+});
