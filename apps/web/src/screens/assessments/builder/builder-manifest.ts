@@ -307,7 +307,12 @@ export function proposeCoverPointers(
  */
 
 /** Phrases that identify each printed box. Deliberately narrow. */
-const SATISFACTORY = /candidate'?s?\s+responses?\s+were|responses?\s+were\s*:?\s*$|^satisfactory$/i;
+// `['’]` because extraction reads the paper's own curly apostrophes — a
+// straight-quote-only pattern silently missed every real "Candidate's".
+const SATISFACTORY =
+  /candidate['’]?s?\s+responses?\s+were|responses?\s+were\s*:?\s*$|^(?:not\s+)?satisfactory$/i;
+/** The negative half, when the pair prints as two separate boxes. */
+const NOT_SATISFACTORY = /\bnot\s+satisfactory\b/i;
 const COACHING = /more\s+coaching|coaching\s+and\s*\/?\s*or\s+training/i;
 const FURTHER_ACTION = /detail\s+further\s+action|further\s+action/i;
 const RESULT = /assessment\s+result|overall\s+performance\s+meets|candidate\s+competent|not\s+yet\s+competent/i;
@@ -427,7 +432,27 @@ export function proposePartMarks(
   > = {};
 
   const verdicts = fields.filter((f) => SATISFACTORY.test(f.label));
-  const verdict = verdicts.length === 1 ? pairOn(verdicts[0]!) : null;
+  let verdict = verdicts.length === 1 ? pairOn(verdicts[0]!) : null;
+  /*
+    TWO PRINTED BOXES, ONE VERDICT. Plenty of papers print the pair as two
+    separate cells — "☐ Satisfactory ☐ Not Satisfactory" — which extraction
+    reads as two fields, and the exactly-one rule above rightly refuses to
+    guess between them. But two fields where exactly one is the negative is
+    not ambiguous: each half gets a TICK in its own box. `true` in the
+    negative box, never `false` in the positive one — a ✗ beside
+    "Satisfactory" with an empty "Not Satisfactory" next to it reads as
+    both and neither.
+  */
+  if (!verdict && verdicts.length === 2) {
+    const no = verdicts.find((f) => NOT_SATISFACTORY.test(f.label));
+    const yes = verdicts.find((f) => !NOT_SATISFACTORY.test(f.label));
+    if (no && yes && isSelfAnswering(no.type) && isSelfAnswering(yes.type)) {
+      verdict = {
+        yes: { fieldId: yes.id, value: true },
+        no: { fieldId: no.id, value: true },
+      };
+    }
+  }
   if (verdict) {
     out.outcomeSatisfactory = verdict.yes;
     out.outcomeNotSatisfactory = verdict.no;

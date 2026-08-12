@@ -586,6 +586,52 @@ describe('proposePartMarks', () => {
     expect(marks.outcomeSatisfactory).toBeUndefined();
   });
 
+  it('pairs two printed boxes — a tick in whichever box speaks', () => {
+    /*
+      The two-field shape: "☐ Satisfactory ☐ Not Satisfactory" as separate
+      cells. `true` in the NEGATIVE box, never `false` in the positive one — a
+      ✗ beside "Satisfactory" with an empty partner reads as both and neither.
+    */
+    const marks = proposePartMarks([
+      f('yes-box', 'Satisfactory'),
+      f('no-box', 'Not Satisfactory'),
+    ]);
+
+    expect(marks.outcomeSatisfactory).toEqual({ fieldId: 'yes-box', value: true });
+    expect(marks.outcomeNotSatisfactory).toEqual({ fieldId: 'no-box', value: true });
+  });
+
+  it('pairs the sentence-labelled two-field shape, curly apostrophe and all', () => {
+    // Extraction reads the paper's own punctuation; a straight-quote-only
+    // pattern silently missed every real "Candidate's".
+    const marks = proposePartMarks([
+      f('yes-box', 'The Candidate’s responses were: Satisfactory'),
+      f('no-box', 'The Candidate’s responses were: Not Satisfactory'),
+    ]);
+
+    expect(marks.outcomeSatisfactory).toEqual({ fieldId: 'yes-box', value: true });
+    expect(marks.outcomeNotSatisfactory).toEqual({ fieldId: 'no-box', value: true });
+  });
+
+  it('refuses two boxes where neither is the negative', () => {
+    // Two positives is the ambiguity the exactly-one rule exists for.
+    const marks = proposePartMarks([
+      f('a', 'Satisfactory'),
+      f('b', 'Satisfactory'),
+    ]);
+
+    expect(marks.outcomeSatisfactory).toBeUndefined();
+  });
+
+  it('refuses a two-field pair whose boxes cannot carry a mark', () => {
+    const marks = proposePartMarks([
+      f('yes-box', 'Satisfactory', 'textarea'),
+      f('no-box', 'Not Satisfactory'),
+    ]);
+
+    expect(marks.outcomeSatisfactory).toBeUndefined();
+  });
+
   it('proposes nothing for a section that prints neither', () => {
     expect(proposePartMarks([f('q', 'Manoeuvres the dozer safely')])).toEqual({});
   });
