@@ -40,6 +40,8 @@ export interface FormSummary {
   currentVersionId: string | null;
   /** Current published version label, e.g. "v3". */
   version: string;
+  /** Who published the current version — the library's "owner" filter. Null on never-published drafts. */
+  owner: string | null;
   submissions: number;
   /** Relative recency string, e.g. "2 days ago". */
   updated: string;
@@ -721,6 +723,9 @@ export interface ProfileAccess {
  */
 export interface HeldCompetencyRow {
   competencyId: string;
+  /** The competency's display name — records never show a raw id. */
+  name: string;
+  code: string | null;
   evidenceRef: string | null;
   /** Set only where this grant IS a licence (R34). */
   licenceClass: string | null;

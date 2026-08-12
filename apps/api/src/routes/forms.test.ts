@@ -199,10 +199,11 @@ describe('GET /forms', () => {
       currentVersionId: 'v1',
       updatedAt: new Date('2026-07-01T00:00:00Z'),
     };
-    const version = { id: 'v1', templateId: 't1', versionLabel: 'v2' };
+    const version = { id: 'v1', templateId: 't1', versionLabel: 'v2', publishedBy: 'u1' };
     mockDbValue = fakeDb({
       formTemplatesFindMany: [template],
       formTemplateVersionsFindMany: [version],
+      usersFindMany: [{ id: 'u1', name: 'Dana Builder', email: 'dana@example.com' }],
       submissionsCountRows: [{ templateId: 't1', count: 4 }],
     }).db;
 
@@ -220,6 +221,8 @@ describe('GET /forms', () => {
           status: 'published',
           currentVersionId: 'v1',
           currentVersionLabel: 'v2',
+          // The library's owner filter reads the current version's publisher.
+          owner: 'Dana Builder',
           submissionsCount: 4,
           updatedAt: '2026-07-01T00:00:00.000Z',
         },

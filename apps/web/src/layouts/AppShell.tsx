@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Avatar, Icon } from '@formai/ui';
-import { navScreensFor, screenByPath } from '../lib/screens.js';
+import { navSectionsFor, screenByPath, type NavSection, type ScreenDef } from '../lib/screens.js';
 import { useKeyboard } from '../lib/keyboard/KeyboardProvider.js';
 import { useSession } from '../lib/data/hooks.js';
 import { orgBrandVars } from '../lib/branding.js';
@@ -24,7 +24,7 @@ export function AppShell() {
     separate billing call would leave every gated entry flickering in once it
     returned.
   */
-  const navScreens = navScreensFor(session?.role, session?.features);
+  const { top, groups } = navSectionsFor(session?.role, session?.features);
   const userName = session?.userName || session?.userEmail || 'Account';
   const orgName = session?.orgName || 'Your organization';
   const orgInitial = (orgName.trim()[0] ?? '?').toUpperCase();
@@ -68,31 +68,11 @@ export function AppShell() {
           <Icon name="chevrons-up-down" size={15} color="rgba(255,255,255,.4)" />
         </div>
         <nav className="fai-scroll flex-1 overflow-auto px-2 py-2">
-          {navScreens.map((s) => (
-            <NavLink
-              key={s.key}
-              to={s.path}
-              end={s.path === '/app'}
-              className={({ isActive }) =>
-                [
-                  'mb-0.5 flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors',
-                  isActive
-                    ? 'bg-[rgba(110,199,146,0.14)] font-semibold text-white'
-                    : 'font-medium text-white/75 hover:bg-white/5',
-                ].join(' ')
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <Icon
-                    name={s.icon}
-                    size={17}
-                    color={isActive ? '#8fd6ad' : 'rgba(255,255,255,.55)'}
-                  />
-                  {s.label}
-                </>
-              )}
-            </NavLink>
+          {top.map((s) => (
+            <NavItem key={s.key} screen={s} />
+          ))}
+          {groups.map((g) => (
+            <NavGroup key={g.key} section={g} pathname={location.pathname} />
           ))}
         </nav>
         <div className="border-t border-white/[0.08] p-3">
@@ -165,6 +145,97 @@ export function AppShell() {
           <Outlet />
         </main>
       </div>
+    </div>
+  );
+}
+
+function NavItem({ screen, nested = false }: { screen: ScreenDef; nested?: boolean }) {
+  return (
+    <NavLink
+      to={screen.path}
+      end={screen.path === '/app'}
+      className={({ isActive }) =>
+        [
+          'mb-0.5 flex items-center gap-3 rounded-md py-2 text-sm transition-colors',
+          nested ? 'pl-[34px] pr-3' : 'px-3',
+          isActive
+            ? 'bg-[rgba(110,199,146,0.14)] font-semibold text-white'
+            : 'font-medium text-white/75 hover:bg-white/5',
+        ].join(' ')
+      }
+    >
+      {({ isActive }) => (
+        <>
+          <Icon
+            name={screen.icon}
+            size={nested ? 16 : 17}
+            color={isActive ? '#8fd6ad' : 'rgba(255,255,255,.55)'}
+          />
+          {screen.label}
+        </>
+      )}
+    </NavLink>
+  );
+}
+
+/** Remembered per group so a preference survives navigation and reloads. */
+function storedNavOpen(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem('fai-nav-open') ?? '{}') as Record<string, boolean>;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * A collapsible sidebar section.
+ *
+ * Closed by default UNLESS the current screen lives inside it — landing on
+ * Billing must not hide Billing — and a member's own toggle wins over both
+ * from then on. That default is what actually shortens the sidebar: the
+ * settings surfaces are visited rarely, so they spend most of their life as
+ * one row instead of nine.
+ */
+function NavGroup({ section, pathname }: { section: NavSection; pathname: string }) {
+  const [override, setOverride] = useState<boolean | undefined>(() => storedNavOpen()[section.key]);
+  const containsActive = section.screens.some(
+    (s) => pathname === s.path || pathname.startsWith(`${s.path}/`),
+  );
+  const open = override ?? containsActive;
+
+  function toggle() {
+    const next = !open;
+    setOverride(next);
+    try {
+      localStorage.setItem(
+        'fai-nav-open',
+        JSON.stringify({ ...storedNavOpen(), [section.key]: next }),
+      );
+    } catch {
+      /* Private-mode storage failures only lose the preference, not the nav. */
+    }
+  }
+
+  return (
+    <div className="mt-1">
+      <button
+        onClick={toggle}
+        aria-expanded={open}
+        className="mb-0.5 flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-sm font-medium text-white/75 transition-colors hover:bg-white/5"
+      >
+        <Icon
+          name={section.icon}
+          size={17}
+          color={containsActive && !open ? '#8fd6ad' : 'rgba(255,255,255,.55)'}
+        />
+        <span className="flex-1">{section.label}</span>
+        <Icon
+          name={open ? 'chevron-down' : 'chevron-right'}
+          size={14}
+          color="rgba(255,255,255,.4)"
+        />
+      </button>
+      {open && section.screens.map((s) => <NavItem key={s.key} screen={s} nested />)}
     </div>
   );
 }

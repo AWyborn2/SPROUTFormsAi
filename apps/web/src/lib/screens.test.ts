@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NAV_SCREENS, SCREENS, navScreensFor } from './screens.js';
+import { NAV_SCREENS, SCREENS, navScreensFor, navSectionsFor } from './screens.js';
 
 /**
  * The nav's plan gate.
@@ -72,6 +72,39 @@ describe('navScreensFor — the plan gate', () => {
     const viewerOnBusiness = keys(navScreensFor('viewer', BUSINESS));
     expect(viewerOnBusiness).not.toContain('working-list');
     expect(viewerOnBusiness).toContain('assessments');
+  });
+});
+
+describe('navSectionsFor — the grouped sidebar', () => {
+  it('keeps the everyday surfaces at the top level and folds the rest away', () => {
+    const { top, groups } = navSectionsFor('owner', BUSINESS);
+    expect(keys(top)).toEqual(['dashboard', 'templates', 'submissions', 'my-profile']);
+    expect(groups.map((g) => g.key)).toEqual(['training', 'settings']);
+    const training = groups.find((g) => g.key === 'training')!;
+    expect(keys(training.screens)).toContain('assessments');
+    expect(keys(training.screens)).toContain('competency');
+    const settings = groups.find((g) => g.key === 'settings')!;
+    expect(keys(settings.screens)).toContain('billing');
+    expect(keys(settings.screens)).toContain('api-keys');
+    expect(keys(settings.screens)).toContain('team');
+  });
+
+  it('gives a candidate only their own surfaces: dashboard, record, assessments', () => {
+    const { top, groups } = navSectionsFor('candidate', BUSINESS);
+    expect(keys(top)).toEqual(['dashboard', 'my-profile']);
+    // The settings group vanishes entirely rather than rendering an empty header.
+    expect(groups.map((g) => g.key)).toEqual(['training']);
+    expect(keys(groups[0]!.screens)).toEqual(['assessments']);
+  });
+
+  it('no longer offers the CHC intake as a nav entry', () => {
+    expect(keys(navScreensFor('owner', BUSINESS))).not.toContain('chc-intake');
+    // The route still exists — it is reached from the document library, not the sidebar.
+    expect(SCREENS.some((s) => s.key === 'chc-intake')).toBe(true);
+  });
+
+  it('labels the library as the document library', () => {
+    expect(SCREENS.find((s) => s.key === 'templates')!.label).toBe('Document library');
   });
 });
 

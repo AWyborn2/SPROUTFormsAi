@@ -549,6 +549,14 @@ competenciesRouter.get(
         const expiry = expiryOf(r, validity);
         return {
           competencyId: r.competencyId,
+          /*
+            The display name rides the row so the record never shows a raw id.
+            Falls back to the id only where the competency row has vanished —
+            a state the org cannot normally reach, but a blank would read as
+            "holds nothing" which is worse than an ugly identifier.
+          */
+          name: competency?.name ?? r.competencyId,
+          code: competency?.code ?? null,
           evidenceRef: r.evidenceRef,
           /** Null on an ordinary competency, or when the caller may not see it; set where this grant IS a licence (R34). */
           licenceClass: canSeeLicence ? r.licenceClass : null,

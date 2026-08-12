@@ -1,18 +1,227 @@
 import { useNavigate } from 'react-router-dom';
 import { Badge, Button, Icon } from '@formai/ui';
-import { useDashboard, useForms } from '../lib/data/hooks.js';
+import { isTerminalCaseState, type SessionInfo } from '@formai/shared';
+import {
+  useAssessmentCases,
+  useAssessorQueue,
+  useDashboard,
+  useForms,
+  useHeldCompetencies,
+  useSession,
+} from '../lib/data/hooks.js';
 import { FORM_ICON_STYLE } from '../lib/data/fixtures.js';
 import { useOnboarding } from '../lib/onboarding.js';
 import { MOD_LABEL } from '../lib/keyboard/platform.js';
+import { CaseStateBadge } from './statusBadges.js';
 
 /**
- * Dashboard. Renders the populated view when the workspace has forms (stat
- * cards, "your forms", recent activity); falls back to the first-run empty
- * state otherwise. Stats come from `GET /dashboard` — only counts the API
- * can honestly compute (the prototype's fabricated deltas and compliance
- * score are gone, not faked).
+ * Dashboard — one route, three shapes, chosen by WHO is looking.
+ *
+ * A candidate's day is their competencies and the assessments waiting on them;
+ * an assessor's is the cases waiting on THEM; everyone running the workspace
+ * gets the forms-and-submissions view. Splitting per audience here rather than
+ * sprinkling role checks through one component keeps each dashboard honest
+ * about the data it may actually read — a candidate cannot list the org's
+ * forms, so the workspace view would render them a permanently empty shell.
  */
 export function DashboardScreen() {
+  const { data: session } = useSession();
+  if (session?.role === 'candidate') return <CandidateDashboard session={session} />;
+  if (session?.role === 'assessor') return <AssessorDashboard session={session} />;
+  return <WorkspaceDashboard />;
+}
+
+/** Shared page chrome for the personal dashboards. */
+function firstNameOf(session: SessionInfo): string {
+  return session.userName?.trim().split(/\s+/)[0] || 'there';
+}
+
+/**
+ * The candidate's day: what they hold, what is lapsing, and what is waiting on
+ * them — the same three answers their record gives, surfaced on landing.
+ */
+function CandidateDashboard({ session }: { session: SessionInfo }) {
+  const navigate = useNavigate();
+  const held = useHeldCompetencies(session.userId);
+  const { data: cases } = useAssessmentCases();
+
+  const rows = held.data ?? [];
+  const current = rows.filter((c) => c.current).length;
+  const attention = rows.filter((c) => c.status !== 'held');
+  const due = (cases ?? []).filter((c) => !isTerminalCaseState(c.state));
+
+  const stats = [
+    { label: 'Current competencies', icon: 'award', iconColor: 'var(--accent)', value: current },
+    { label: 'Need attention', icon: 'alert-triangle', iconColor: 'var(--warning)', value: attention.length },
+    { label: 'Assessments open', icon: 'clipboard-check', iconColor: 'var(--info)', value: due.length },
+  ];
+
+  return (
+    <div className="fai-rise mx-auto max-w-[900px] p-[30px_28px_60px]">
+      <div className="mb-[22px] flex items-center justify-between gap-4">
+        <div>
+          <h2 className="font-heading text-[21px] font-bold">Welcome back, {firstNameOf(session)}</h2>
+          <p className="mt-0.5 text-sm text-text-secondary">
+            Your competencies and what&rsquo;s coming up.
+          </p>
+        </div>
+        <Button variant="outline" size="sm" leadingIcon="user" onClick={() => navigate('/app/profile')}>
+          My record
+        </Button>
+      </div>
+
+      <div className="mb-[22px] grid grid-cols-1 gap-4 sm:grid-cols-3">
+        {stats.map((s) => (
+          <div key={s.label} className="rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs">
+            <div className="mb-3 flex items-center justify-between">
+              <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">{s.label}</span>
+              <Icon name={s.icon} size={16} color={s.iconColor} />
+            </div>
+            <div className="font-heading text-[30px] font-bold tracking-tight">{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="rounded-lg border border-border bg-surface-card p-5 shadow-xs">
+          <div className="mb-3 font-heading text-[15px] font-bold">Assessments due</div>
+          {due.length === 0 ? (
+            <p className="text-[12.5px] text-text-tertiary">Nothing due — you&rsquo;re up to date.</p>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {due.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => navigate(`/app/assessments/${c.id}`)}
+                  className="fai-row flex w-full items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2 text-left hover:bg-surface-hover"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-[13px] font-semibold">{c.toolName}</span>
+                    <span className="block text-[11.5px] text-text-tertiary">
+                      Started {new Date(c.createdAt).toLocaleDateString()}
+                    </span>
+                  </span>
+                  <CaseStateBadge state={c.state} />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-border bg-surface-card p-5 shadow-xs">
+          <div className="mb-3 font-heading text-[15px] font-bold">Expiring &amp; expired</div>
+          {attention.length === 0 ? (
+            <p className="text-[12.5px] text-text-tertiary">
+              Every competency you hold is in date.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {attention.map((c) => (
+                <div
+                  key={c.competencyId}
+                  className="flex items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate text-[13px] font-semibold">{c.name}</span>
+                    {c.note && (
+                      <span className="block text-[11.5px] text-text-tertiary">{c.note}</span>
+                    )}
+                  </span>
+                  <Badge variant={c.status === 'expired' ? 'danger' : 'warning'}>{c.status}</Badge>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The assessor's day: the cases waiting on their judgement, then the shared
+ * queue they could pull from. Their forms-and-submissions numbers are noise —
+ * assessing is the job this level exists for.
+ */
+function AssessorDashboard({ session }: { session: SessionInfo }) {
+  const navigate = useNavigate();
+  const { data: cases } = useAssessmentCases();
+  const { data: queue } = useAssessorQueue();
+
+  const open = (cases ?? []).filter((c) => !isTerminalCaseState(c.state));
+  const awaiting = open.filter((c) => c.state === 'awaiting_sign_off');
+
+  const stats = [
+    { label: 'Open cases', icon: 'clipboard-check', iconColor: 'var(--info)', value: open.length },
+    { label: 'Awaiting sign-off', icon: 'flag', iconColor: 'var(--warning)', value: awaiting.length },
+    { label: 'In the shared queue', icon: 'inbox', iconColor: 'var(--accent)', value: queue?.length ?? 0 },
+  ];
+
+  return (
+    <div className="fai-rise mx-auto max-w-[900px] p-[30px_28px_60px]">
+      <div className="mb-[22px] flex items-center justify-between gap-4">
+        <div>
+          <h2 className="font-heading text-[21px] font-bold">Welcome back, {firstNameOf(session)}</h2>
+          <p className="mt-0.5 text-sm text-text-secondary">The cases waiting on you.</p>
+        </div>
+        <div className="flex flex-none gap-2.5">
+          <Button variant="outline" size="sm" leadingIcon="inbox" onClick={() => navigate('/app/assessments/queue')}>
+            Queue
+          </Button>
+          <Button size="sm" leadingIcon="clipboard-check" onClick={() => navigate('/app/assessments')}>
+            All cases
+          </Button>
+        </div>
+      </div>
+
+      <div className="mb-[22px] grid grid-cols-1 gap-4 sm:grid-cols-3">
+        {stats.map((s) => (
+          <div key={s.label} className="rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs">
+            <div className="mb-3 flex items-center justify-between">
+              <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">{s.label}</span>
+              <Icon name={s.icon} size={16} color={s.iconColor} />
+            </div>
+            <div className="font-heading text-[30px] font-bold tracking-tight">{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="rounded-lg border border-border bg-surface-card p-5 shadow-xs">
+        <div className="mb-3 font-heading text-[15px] font-bold">Open cases</div>
+        {open.length === 0 ? (
+          <p className="text-[12.5px] text-text-tertiary">No open cases — check the shared queue.</p>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {/* Sign-off-ready first: those are waiting on a PERSON, which is
+                the one thing an assessor opens this page to find. */}
+            {[...awaiting, ...open.filter((c) => c.state !== 'awaiting_sign_off')].map((c) => (
+              <button
+                key={c.id}
+                onClick={() => navigate(`/app/assessments/${c.id}`)}
+                className="fai-row flex w-full items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2 text-left hover:bg-surface-hover"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-[13px] font-semibold">{c.toolName}</span>
+                  <span className="block text-[11.5px] text-text-tertiary">{c.candidateName}</span>
+                </span>
+                <CaseStateBadge state={c.state} />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The workspace view — forms, submissions, activity. Renders the populated
+ * view when the workspace has forms (stat cards, "your forms", recent
+ * activity); falls back to the first-run empty state otherwise. Stats come
+ * from `GET /dashboard` — only counts the API can honestly compute (the
+ * prototype's fabricated deltas and compliance score are gone, not faked).
+ */
+function WorkspaceDashboard() {
   const navigate = useNavigate();
   const { orgName } = useOnboarding();
   const { data: forms = [] } = useForms();

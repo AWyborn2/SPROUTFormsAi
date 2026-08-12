@@ -21,11 +21,15 @@ const state: {
   held: HeldCompetencyRow[];
   saved: Array<{ membershipId: string; values: Record<string, string> }>;
   seed: ProfileSeedResponse | undefined;
+  role: string;
+  cases: Array<{ id: string; toolName: string; state: string; createdAt: string }>;
 } = {
   profile: { data: undefined, isLoading: false, isError: false },
   held: [],
   saved: [],
   seed: undefined,
+  role: 'admin',
+  cases: [],
 };
 
 /*
@@ -37,11 +41,14 @@ let searchParams = new URLSearchParams();
 vi.mock('react-router-dom', () => ({
   useParams: () => ({}),
   useSearchParams: () => [searchParams, vi.fn()] as const,
+  useNavigate: () => vi.fn(),
 }));
 
 vi.mock('../../lib/data/hooks.js', () => ({
   useProfile: () => state.profile,
   useMyProfileMembership: () => ({ data: { membershipId: 'm-1' }, isLoading: false }),
+  useSession: () => ({ data: { role: state.role } }),
+  useAssessmentCases: () => ({ data: state.cases }),
   useHeldCompetencies: () => ({ data: state.held }),
   useMemberPlacement: () => ({
     data: { locationIds: ['loc-1'], departmentIds: ['dep-1'], roleIds: ['role-1', 'role-2'] },
@@ -133,6 +140,8 @@ afterEach(() => {
   state.held = [];
   state.saved = [];
   state.seed = undefined;
+  state.role = 'admin';
+  state.cases = [];
   searchParams = new URLSearchParams();
 });
 
@@ -184,7 +193,9 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
   it('shows standing and currency as two separate facts', () => {
     state.held = [
       {
-        competencyId: 'Track Dozer',
+        competencyId: 'c-dozer',
+        name: 'Track Dozer',
+        code: null,
         evidenceRef: null,
         licenceClass: null,
         licenceNumber: null,
@@ -198,6 +209,9 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     show();
     expect(screen.getByText('required')).toBeDefined();
     expect(screen.getByText('held')).toBeDefined();
+    // The NAME renders, never the row's database id (the id stays an attribute).
+    expect(screen.getByText('Track Dozer')).toBeDefined();
+    expect(screen.queryByText('c-dozer')).toBeNull();
   });
 
   it('does not render an expired OPTIONAL competency as a compliance failure (AE43, R102)', () => {
@@ -209,7 +223,9 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     */
     state.held = [
       {
-        competencyId: 'Required Ticket',
+        competencyId: 'c-req',
+        name: 'Required Ticket',
+        code: null,
         evidenceRef: null,
         licenceClass: null,
         licenceNumber: null,
@@ -220,7 +236,9 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
         note: null,
       },
       {
-        competencyId: 'Voluntary Ticket',
+        competencyId: 'c-vol',
+        name: 'Voluntary Ticket',
+        code: null,
         evidenceRef: null,
         licenceClass: null,
         licenceNumber: null,
@@ -434,5 +452,38 @@ describe('ProfileScreen — seeded from an induction submission (U40)', () => {
   it('shows no seed banner at all without the query parameter', () => {
     show({ editableFields: ADMIN_FIELDS });
     expect(screen.queryByText(/Prefilled from an induction submission/)).toBeNull();
+  });
+});
+
+describe('ProfileScreen — the candidate-focused own view', () => {
+  it('shows a candidate their assessments due and hides the org bookkeeping', () => {
+    state.role = 'candidate';
+    state.cases = [
+      { id: 'case-1', toolName: 'Dozer Assessment', state: 'open', createdAt: '2026-08-01T00:00:00Z' },
+      // Terminal — finished, so not "due".
+      { id: 'case-2', toolName: 'Old Assessment', state: 'competent', createdAt: '2026-05-01T00:00:00Z' },
+    ];
+    show({ isSubject: true });
+
+    expect(screen.getByText('Assessments due')).toBeDefined();
+    expect(screen.getByText('Dozer Assessment')).toBeDefined();
+    expect(screen.queryByText('Old Assessment')).toBeNull();
+    // Placement and documents are the organisation's bookkeeping, not theirs.
+    expect(screen.queryByText('Placement')).toBeNull();
+    expect(screen.queryByText('Documents')).toBeNull();
+  });
+
+  it('tells an up-to-date candidate so instead of rendering an empty table', () => {
+    state.role = 'candidate';
+    show({ isSubject: true });
+    expect(screen.getByText(/Nothing due/)).toBeDefined();
+  });
+
+  it('keeps the full record — placement and documents — for a non-candidate reader', () => {
+    state.role = 'admin';
+    show();
+    expect(screen.getByText('Placement')).toBeDefined();
+    expect(screen.getByText('Documents')).toBeDefined();
+    expect(screen.queryByText('Assessments due')).toBeNull();
   });
 });

@@ -120,6 +120,8 @@ interface FormSummaryDto {
   status: TemplateStatus;
   currentVersionId: string | null;
   currentVersionLabel: string | null;
+  /** Who published the current version; absent on the detail DTO and on drafts. */
+  owner?: string | null;
   submissionsCount: number;
   updatedAt: string;
 }
@@ -188,6 +190,7 @@ function toFormSummary(dto: FormSummaryDto): FormSummary {
     sourceType: dto.sourceType,
     currentVersionId: dto.currentVersionId,
     version: dto.currentVersionLabel ?? '—',
+    owner: dto.owner ?? null,
     submissions: dto.submissionsCount,
     updated: relativeTime(dto.updatedAt),
   };
