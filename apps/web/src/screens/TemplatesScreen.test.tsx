@@ -30,10 +30,11 @@ const SUMMARY: FormSummary = {
 };
 
 let detail: FormDetail | undefined;
+let formsList: FormSummary[] = [SUMMARY];
 const publishFieldsMutate = vi.fn();
 
 vi.mock('../lib/data/hooks.js', () => ({
-  useForms: () => ({ data: [SUMMARY] }),
+  useForms: () => ({ data: formsList }),
   useForm: () => ({ data: detail }),
   useFillLinks: () => ({ data: [] }),
   useCreateFillLink: () => ({ mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }),
@@ -79,6 +80,7 @@ function staleFields() {
 afterEach(() => {
   vi.clearAllMocks();
   detail = undefined;
+  formsList = [SUMMARY];
 });
 
 describe('TemplatesScreen — intake drift banner', () => {
@@ -143,5 +145,64 @@ describe('TemplatesScreen — intake drift banner', () => {
 
     fireEvent.click(screen.getByText('Add and publish'));
     expect(publishFieldsMutate).not.toHaveBeenCalled();
+  });
+});
+
+describe('TemplatesScreen — status tabs', () => {
+  const archived: FormSummary = {
+    ...SUMMARY,
+    id: 'form-2',
+    name: 'Retired checklist',
+    status: 'archived',
+    currentVersionId: 'ver-9',
+  };
+  const draft: FormSummary = {
+    ...SUMMARY,
+    id: 'form-3',
+    name: 'Unfinished permit',
+    status: 'draft',
+    currentVersionId: null,
+    version: '—',
+  };
+
+  it('keeps archived documents out of "All" — their own tab is the way in', () => {
+    formsList = [SUMMARY, archived, draft];
+    render(<TemplatesScreen />);
+
+    expect(screen.queryByText('Retired checklist')).toBeNull();
+    expect(screen.getByText('Unfinished permit')).toBeDefined();
+
+    fireEvent.click(screen.getByText('Archived'));
+    expect(screen.getByText('Retired checklist')).toBeDefined();
+    expect(screen.queryByText('Unfinished permit')).toBeNull();
+  });
+
+  it('narrows to drafts on the Drafts tab', () => {
+    formsList = [SUMMARY, archived, draft];
+    render(<TemplatesScreen />);
+
+    fireEvent.click(screen.getByText('Drafts'));
+    expect(screen.getByText('Unfinished permit')).toBeDefined();
+    expect(screen.queryByText('CHC BBM Induction Intake Request Form')).toBeNull();
+  });
+
+  it('counts from the whole library so a filtered view cannot misreport a tab as empty', () => {
+    formsList = [SUMMARY, archived, draft];
+    render(<TemplatesScreen />);
+
+    // A search that matches nothing leaves the tab counts standing.
+    fireEvent.change(screen.getByLabelText('Search documents'), { target: { value: 'zzz' } });
+    expect(screen.getByText('No documents match these filters.')).toBeDefined();
+    const archivedTab = screen.getByText('Archived').closest('button')!;
+    expect(archivedTab.textContent).toContain('1');
+  });
+
+  it('says an empty tab is empty rather than pretending the workspace is', () => {
+    formsList = [SUMMARY];
+    render(<TemplatesScreen />);
+
+    fireEvent.click(screen.getByText('Archived'));
+    expect(screen.getByText('No archived documents.')).toBeDefined();
+    expect(screen.queryByText(/No documents yet/)).toBeNull();
   });
 });
