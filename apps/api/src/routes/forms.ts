@@ -87,6 +87,21 @@ formsRouter.get('/', requireTenant, withErrorHandling(async (req, res) => {
     .groupBy(schema.submissions.templateId);
   const countByTemplate = new Map(counts.map((c) => [c.templateId, c.count]));
 
+  /*
+    The library filters by OWNER — the person who published the version a form
+    currently serves. Resolved here in one batch because a name is the only
+    identity the list can show; a draft that has never been published has no
+    publisher and stays null rather than guessing at its creator, which the
+    template row does not record.
+  */
+  const publisherIds = [
+    ...new Set(versions.map((v) => v.publishedBy).filter((id): id is string => !!id)),
+  ];
+  const publishers = publisherIds.length
+    ? await db.query.users.findMany({ where: inArray(schema.users.id, publisherIds) })
+    : [];
+  const publisherNameById = new Map(publishers.map((u) => [u.id, u.name || u.email]));
+
   res.json(
     templates.map((t) => ({
       id: t.id,
@@ -98,6 +113,12 @@ formsRouter.get('/', requireTenant, withErrorHandling(async (req, res) => {
       currentVersionLabel: t.currentVersionId
         ? (versionById.get(t.currentVersionId)?.versionLabel ?? null)
         : null,
+      owner: (() => {
+        const publishedBy = t.currentVersionId
+          ? versionById.get(t.currentVersionId)?.publishedBy
+          : null;
+        return publishedBy ? (publisherNameById.get(publishedBy) ?? null) : null;
+      })(),
       submissionsCount: countByTemplate.get(t.id) ?? 0,
       updatedAt: t.updatedAt.toISOString(),
     })),

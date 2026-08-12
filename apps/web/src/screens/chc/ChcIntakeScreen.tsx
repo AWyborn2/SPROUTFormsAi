@@ -622,7 +622,7 @@ export function ChcIntakeScreen() {
             <p style={{ marginTop: 12, fontSize: 12, color: '#666', textAlign: 'center' }}>
               No published “{CHC_INTAKE_FORM_NAME}” template in this workspace yet, so this
               submission will produce the document to print and email but will not be recorded.
-              Publish the template from the form library to record submissions.
+              Publish the template from the document library to record submissions.
             </p>
           )}
         </div>

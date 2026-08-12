@@ -22,6 +22,7 @@ const SUMMARY: FormSummary = {
   icon: 'clipboard-list',
   status: 'published',
   version: 'v3',
+  owner: null,
   updated: '2 days ago',
   submissions: 12,
   currentVersionId: 'ver-3',

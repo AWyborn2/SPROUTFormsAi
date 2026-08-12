@@ -164,7 +164,7 @@ export function ClientBrandsScreen() {
           <h1 className="font-heading text-[21px] font-bold">Client brands</h1>
           <p className="mt-1 max-w-[620px] text-[13.5px] text-text-secondary">
             Make an online form look like the client&rsquo;s own. Assign a brand to a form in the
-            form library — anything a brand doesn&rsquo;t set falls back to your own branding.
+            document library — anything a brand doesn&rsquo;t set falls back to your own branding.
           </p>
         </div>
         <Button leadingIcon="plus" onClick={() => setAddOpen(true)}>

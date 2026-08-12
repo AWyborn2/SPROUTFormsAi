@@ -976,8 +976,17 @@ describe('competency holders', () => {
       const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
 
       expect(res.status).toBe(200);
-      const [row] = (await res.json()) as { competencyId: string; status: string; current: boolean }[];
+      const [row] = (await res.json()) as {
+        competencyId: string;
+        name: string;
+        code: string | null;
+        status: string;
+        current: boolean;
+      }[];
       expect(row!.competencyId).toBe('c1');
+      // The display name rides the row — the record screen shows names, not ids.
+      expect(row!.name).toBe('ATO - Track Dozer');
+      expect(row!.code).toBeNull();
       expect(row!.status).toBe('held');
       expect(row!.current).toBe(true);
     } finally {

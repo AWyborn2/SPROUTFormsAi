@@ -1,17 +1,25 @@
 import { useMemo, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
-import { Badge, Button, Card, Icon } from '@formai/ui';
-import { PROFILE_FIELDS, profileField, type ProfileFieldSpec } from '@formai/shared';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Avatar, Badge, Button, Card, Icon } from '@formai/ui';
 import {
+  PROFILE_FIELDS,
+  isTerminalCaseState,
+  profileField,
+  type ProfileFieldSpec,
+} from '@formai/shared';
+import {
+  useAssessmentCases,
   useHeldCompetencies,
   useMemberPlacement,
   useMyProfileMembership,
   useProfile,
   useProfileSeed,
   useSaveProfile,
+  useSession,
   useTaxonomy,
 } from '../../lib/data/hooks.js';
-import type { MemberProfile, ProfileAccess } from '../../lib/data/types.js';
+import { CaseStateBadge } from '../statusBadges.js';
+import type { HeldCompetencyRow, MemberProfile, ProfileAccess } from '../../lib/data/types.js';
 
 /**
  * A member's workforce record (U38).
@@ -40,6 +48,7 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
   */
   const params = useParams<{ id: string }>();
   const mine = useMyProfileMembership();
+  const session = useSession();
   const targetId = membershipId ?? params.id ?? mine.data?.membershipId;
 
   const { data, isLoading, isError, error } = useProfile(targetId);
@@ -80,16 +89,36 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
 
   const { profile, access, userId } = data;
   const canEdit = access.editableFields.length > 0;
+  /*
+    A candidate on their OWN record gets the focused layout: their details, the
+    competencies they hold, and the assessments waiting on them. The placement
+    and documents machinery is the organisation's bookkeeping — rendering it to
+    the person it is about only buried the three answers they came for.
+  */
+  const candidateSelf = access.isSubject && session.data?.role === 'candidate';
 
   return (
     <Frame>
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="font-heading text-xl font-bold">{profile.displayName || 'Member record'}</h2>
-          <p className="mt-1 text-sm text-text-tertiary">
-            {profile.identifier ? `${profile.identifier} · ` : ''}
-            The organisation&rsquo;s workforce record for this person.
-          </p>
+        <div className="flex items-center gap-4">
+          <Avatar name={profile.displayName || '?'} size="lg" />
+          <div>
+            <h2 className="font-heading text-xl font-bold">
+              {profile.displayName || 'Member record'}
+            </h2>
+            <p className="mt-0.5 flex items-center gap-2 text-sm text-text-tertiary">
+              {profile.identifier && (
+                <span className="font-mono text-[12px]">{profile.identifier}</span>
+              )}
+              <span>
+                {candidateSelf
+                  ? 'Your profile — your details, competencies and assessments.'
+                  : access.isSubject
+                    ? 'Your own workforce record.'
+                    : 'The organisation’s workforce record for this person.'}
+              </span>
+            </p>
+          </div>
         </div>
         {canEdit && !editing && (
           <Button variant="secondary" onClick={() => setEditing(true)}>
@@ -110,6 +139,14 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
 
       {seedFrom && <SeedBanner submissionId={seedFrom} />}
 
+      {candidateSelf && <MyAssessmentsCard />}
+
+      {access.canViewCompetencies ? (
+        <CompetenciesCard userId={userId} ownRecord={access.isSubject} />
+      ) : (
+        <WithheldCard title="Competencies" />
+      )}
+
       {editing && targetId ? (
         <ProfileForm
           membershipId={targetId}
@@ -122,20 +159,60 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
         <FieldsCard profile={profile} access={access} />
       )}
 
-      {targetId && <PlacementCard membershipId={targetId} />}
+      {!candidateSelf && targetId && <PlacementCard membershipId={targetId} />}
 
-      {access.canViewCompetencies ? (
-        <CompetenciesCard userId={userId} />
-      ) : (
-        <WithheldCard title="Competencies" />
-      )}
-
-      {access.canViewDocuments ? (
-        <DocumentsCard />
-      ) : (
-        <WithheldCard title="Documents" />
-      )}
+      {!candidateSelf &&
+        (access.canViewDocuments ? <DocumentsCard /> : <WithheldCard title="Documents" />)}
     </Frame>
+  );
+}
+
+/**
+ * The assessments still waiting on the candidate, on their own record (their
+ * "what do I owe" list). The API already scopes the case read to their own
+ * cases, so this filters only for the ones still open. Errors render as the
+ * empty state — a candidate whose plan or permissions carry no assessments has
+ * nothing due by definition.
+ */
+function MyAssessmentsCard() {
+  const navigate = useNavigate();
+  const { data: cases } = useAssessmentCases();
+  const due = (cases ?? []).filter((c) => !isTerminalCaseState(c.state));
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="font-ui text-sm font-semibold">Assessments due</h3>
+        {due.length > 0 && <Badge variant="warning">{due.length} open</Badge>}
+      </div>
+      {due.length === 0 ? (
+        <p className="mt-2 text-[12.5px] text-text-tertiary">
+          Nothing due — you&rsquo;re up to date.
+        </p>
+      ) : (
+        <ul className="mt-3 flex flex-col gap-1.5">
+          {due.map((c) => (
+            <li key={c.id}>
+              <button
+                onClick={() => navigate(`/app/assessments/${c.id}`)}
+                className="fai-row flex w-full items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2 text-left hover:bg-surface-hover"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-[13px] font-semibold">{c.toolName}</span>
+                  <span className="block text-[11.5px] text-text-tertiary">
+                    Started {new Date(c.createdAt).toLocaleDateString()}
+                  </span>
+                </span>
+                <span className="flex flex-none items-center gap-2">
+                  <CaseStateBadge state={c.state} />
+                  <Icon name="chevron-right" size={15} className="text-text-tertiary" />
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
 
@@ -432,27 +509,67 @@ function PlacementCard({ membershipId }: { membershipId: string }) {
  * Currency arrives already resolved on the reader's own audience window, so a
  * candidate sees the thirty-day warning and everyone else the assessor's ninety.
  */
-function CompetenciesCard({ userId }: { userId: string | undefined }) {
+function CompetenciesCard({
+  userId,
+  ownRecord = false,
+}: {
+  userId: string | undefined;
+  /** Changes only the copy — "you hold" reads differently from "they hold". */
+  ownRecord?: boolean;
+}) {
   // Keyed on the USER, not the membership: a grant is recorded against the
   // person, and passing a membership id here validates as a UUID and then
   // matches nothing.
   const held = useHeldCompetencies(userId);
   const rows = held.data ?? [];
+  /*
+    Sorted urgent-first: what has lapsed or is about to lapse is the reason
+    anyone opens this card, so it must not be buried under a long tail of
+    healthy tickets. Ties keep the name order so the list reads stably.
+  */
+  const URGENCY: Record<string, number> = { expired: 0, grace: 1, expiring: 2, held: 3 };
+  const sorted = [...rows].sort(
+    (a, b) => (URGENCY[a.status] ?? 4) - (URGENCY[b.status] ?? 4) || a.name.localeCompare(b.name),
+  );
+  const current = rows.filter((c) => c.current).length;
+  const attention = rows.filter((c) => c.status !== 'held').length;
 
   return (
     <Card className="p-5">
-      <h3 className="font-ui text-sm font-semibold">Competencies</h3>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="font-ui text-sm font-semibold">Competencies</h3>
+        {rows.length > 0 && (
+          <span className="flex items-center gap-1.5">
+            <Badge variant="success">{current} current</Badge>
+            {attention > 0 && <Badge variant="warning">{attention} need attention</Badge>}
+          </span>
+        )}
+      </div>
       {rows.length === 0 && (
-        <p className="mt-2 text-[12.5px] text-text-tertiary">No competencies held.</p>
+        <p className="mt-2 text-[12.5px] text-text-tertiary">
+          {ownRecord ? 'You hold no competencies yet.' : 'No competencies held.'}
+        </p>
       )}
-      <ul className="mt-3 flex flex-col gap-1">
-        {rows.map((c) => (
+      <ul className="mt-3 flex flex-col gap-1.5">
+        {sorted.map((c) => (
           <li
             key={c.competencyId}
-            className="flex items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-1.5 text-[12.5px]"
+            className="flex items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2"
           >
-            <span className="truncate font-medium">{c.competencyId}</span>
-            <span className="flex items-center gap-1.5">
+            <span className="min-w-0">
+              <span className="flex items-center gap-2">
+                <span className="truncate text-[13px] font-semibold">{c.name}</span>
+                {c.code && (
+                  <span className="flex-none font-mono text-[10.5px] uppercase tracking-wide text-text-tertiary">
+                    {c.code}
+                  </span>
+                )}
+              </span>
+              <span className="block text-[11.5px] text-text-tertiary">
+                {competencySubline(c)}
+              </span>
+            </span>
+            <span className="flex flex-none items-center gap-1.5">
               <Badge variant={c.standing === 'required' ? 'info' : 'neutral'}>{c.standing}</Badge>
               <Badge variant={currencyTone(c.status)}>{c.status}</Badge>
             </span>
@@ -461,6 +578,16 @@ function CompetenciesCard({ userId }: { userId: string | undefined }) {
       </ul>
     </Card>
   );
+}
+
+/** The one-line story under a competency's name: its dates, or that it has none. */
+function competencySubline(c: HeldCompetencyRow): string {
+  if (c.note) return c.note;
+  if (c.expiresAt) {
+    const when = new Date(c.expiresAt).toLocaleDateString();
+    return c.status === 'expired' ? `Expired ${when}` : `Valid until ${when}`;
+  }
+  return 'No expiry';
 }
 
 function currencyTone(status: string): 'success' | 'warning' | 'danger' | 'neutral' {
