@@ -15,7 +15,7 @@ import {
 } from '@formai/shared';
 import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../../lib/data/hooks.js';
 import type { FieldProposal, TableProposal, TextPage } from '../../lib/pdf-geometry.js';
-import { proposeRectGrid } from '../../lib/pdf-geometry.js';
+import { proposeRectGrid, proposeRowCell, rowCellIndex } from '../../lib/pdf-geometry.js';
 import {
   groupFields,
   overallCounts,
@@ -128,9 +128,11 @@ export function GeometryEditorScreen({
    * in the saved geometry can be inspected afterwards to recover why it has no
    * bands.
    */
-  const [gridRefusal, setGridRefusal] = useState<{ fieldId: string; detail: string } | null>(
-    null,
-  );
+  const [gridRefusal, setGridRefusal] = useState<{
+    fieldId: string;
+    title: string;
+    detail: string;
+  } | null>(null);
   /** Which box the next drag fills, or null when drawing is not armed. */
   const [drawTarget, setDrawTarget] = useState<DrawTarget | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -606,8 +608,55 @@ export function GeometryEditorScreen({
       plain box still stands either way: a wrong grid is worse than an honest
       undivided one.
     */
-    setGridRefusal(result.ok ? null : { fieldId: field.id, detail: result.detail });
+    setGridRefusal(
+      result.ok
+        ? null
+        : { fieldId: field.id, title: 'Placed, but its rows were not measured', detail: result.detail },
+    );
     setScalarBox(field.id, result.ok ? result.proposal.segment : box);
+  }
+
+  /**
+   * One printed row's cell, drawn by hand — the measured grid's manual
+   * fallback (the recourse a radio group has always had, U-repeater).
+   *
+   * Entering row mode retires the whole-grid segment in the same write: both
+   * shapes consume value rows, and a field carrying both would mark every row
+   * twice. The row index is stored ON the band key (`row:<n>`), so rows the
+   * author leaves unplaced can never shift the marks below them.
+   */
+  function setRowBox(field: FormField, rowIndex: number, box: PageBox) {
+    const result = proposeRowCell({ box, rowIndex, columns: field.columns });
+    setGridRefusal(
+      result.ok ? null : { fieldId: field.id, title: 'Not placed', detail: result.detail },
+    );
+    if (!result.ok) return;
+    mutate(field.id, (f) => {
+      const kept = (f.geometry?.segments ?? []).filter((s) => {
+        const at = rowCellIndex(s);
+        return at !== null && at !== rowIndex;
+      });
+      const next = [...kept, result.segment].sort(
+        (a, b) => (rowCellIndex(a) ?? 0) - (rowCellIndex(b) ?? 0),
+      );
+      return { ...f, geometry: { segments: next } };
+    });
+  }
+
+  function clearRowBox(fieldId: string, rowIndex: number) {
+    mutate(fieldId, (f) => {
+      const kept = (f.geometry?.segments ?? []).filter((s) => rowCellIndex(s) !== rowIndex);
+      return kept.length > 0 ? { ...f, geometry: { segments: kept } } : stripGeometry(f);
+    });
+  }
+
+  function restyleRowBox(fieldId: string, rowIndex: number, next: PageBox) {
+    mutate(fieldId, (f) => ({
+      ...f,
+      geometry: {
+        segments: (f.geometry?.segments ?? []).map((s) => (rowCellIndex(s) === rowIndex ? next : s)),
+      },
+    }));
   }
 
   if (isLoading) {
@@ -929,9 +978,11 @@ export function GeometryEditorScreen({
             drawLine={drawTarget?.toOptionKey !== undefined}
             onDrawBox={(box) => {
               if (!drawTarget) return;
-              const { fieldId, optionKey } = drawTarget;
+              const { fieldId, optionKey, rowIndex } = drawTarget;
               const target = fields.find((f) => f.id === fieldId);
-              if (optionKey !== null) setOptionBox(fieldId, optionKey, box);
+              if (target?.type === 'repeating_group' && rowIndex !== undefined) {
+                setRowBox(target, rowIndex, box);
+              } else if (optionKey !== null) setOptionBox(fieldId, optionKey, box);
               else if (target?.type === 'repeating_group') setTableBox(target, box);
               else setScalarBox(fieldId, box);
               setDrawTarget(null);
@@ -975,7 +1026,7 @@ export function GeometryEditorScreen({
             */
             <div className="mb-3 rounded-lg border border-warning bg-warning-soft p-[10px_12px]">
               <span className="block text-[12px] font-semibold text-warning-text">
-                Placed, but its rows were not measured
+                {gridRefusal.title}
               </span>
               <p className="mt-1 text-[11.5px] leading-relaxed text-text-secondary">
                 {gridRefusal.detail}
@@ -992,6 +1043,8 @@ export function GeometryEditorScreen({
               }
               onSetOptionBox={(optionKey, box) => setOptionBox(selected.id, optionKey, box)}
               onSetScalarBox={(box) => setScalarBox(selected.id, box)}
+              onClearRowBox={(rowIndex) => clearRowBox(selected.id, rowIndex)}
+              onRestyleRowBox={(rowIndex, box) => restyleRowBox(selected.id, rowIndex, box)}
             />
           ) : (
             <p className="text-[12.5px] text-text-tertiary">
@@ -1033,6 +1086,11 @@ interface DrawTarget {
    * draws exactly that. Absent everywhere else, where a drag is one box.
    */
   toOptionKey?: string;
+  /**
+   * One printed row of a repeating table, for the per-row placement fallback.
+   * Absent everywhere else — a table placed as a measured grid is one box.
+   */
+  rowIndex?: number;
 }
 
 function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
@@ -1042,7 +1100,8 @@ function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
     a.optionKey === b.optionKey &&
     // The far end is part of the identity: arming "statement 1 → sign 2" and
     // then "statement 1 → sign 3" must swap the target, not toggle it off.
-    a.toOptionKey === b.toOptionKey
+    a.toOptionKey === b.toOptionKey &&
+    a.rowIndex === b.rowIndex
   );
 }
 
@@ -1144,28 +1203,39 @@ function bandOverlayFor(
 ): BandOverlayInfo | null {
   if (drawTarget) {
     const field = fields.find((f) => f.id === drawTarget.fieldId);
-    const segment = (field?.geometry?.segments ?? []).find(
-      (s) => (s.optionKey ?? null) === drawTarget.optionKey,
-    );
+    const segment =
+      drawTarget.rowIndex !== undefined
+        ? (field?.geometry?.segments ?? []).find((s) => rowCellIndex(s) === drawTarget.rowIndex)
+        : (field?.geometry?.segments ?? []).find(
+            (s) => (s.optionKey ?? null) === drawTarget.optionKey,
+          );
     if (!segment) return null;
     return { box: segment, source: { kind: 'segment', fieldId: drawTarget.fieldId, optionKey: drawTarget.optionKey } };
   }
 
   if (!selectedId) return null;
 
-  const preview = proposalPreviews.find((p) => p.fieldId === selectedId);
-  if (preview) {
-    if ('segment' in preview.proposal) {
-      return { box: preview.proposal.segment, source: { kind: 'preview', fieldId: selectedId } };
+  /*
+    THE AUTHOR'S OWN PLACED SEGMENT WINS over a parked proposal. Detection can
+    land a grid pages away from where the table prints; once the author has
+    drawn (or applied) a box of their own, the grid they fine-tune must be the
+    one that exports — not a stale detection sitting on another page, which is
+    exactly what made a redrawn table look unplaceable: the box was stored,
+    and the band grid kept rendering on the proposal's page.
+  */
+  const field = fields.find((f) => f.id === selectedId);
+  if (field && !isPerOptionField(field)) {
+    const segment = field.geometry?.segments?.[0];
+    if (segment) {
+      return { box: segment, source: { kind: 'segment', fieldId: selectedId, optionKey: segment.optionKey ?? null } };
     }
-    return null; // FieldProposal: per-option scalar boxes, nothing to band-edit
   }
 
-  const field = fields.find((f) => f.id === selectedId);
-  if (!field || isPerOptionField(field)) return null;
-  const segment = field.geometry?.segments?.[0];
-  if (!segment) return null;
-  return { box: segment, source: { kind: 'segment', fieldId: selectedId, optionKey: segment.optionKey ?? null } };
+  const preview = proposalPreviews.find((p) => p.fieldId === selectedId);
+  if (preview && 'segment' in preview.proposal) {
+    return { box: preview.proposal.segment, source: { kind: 'preview', fieldId: selectedId } };
+  }
+  return null; // FieldProposal: per-option scalar boxes, nothing to band-edit
 }
 
 /**
@@ -1389,6 +1459,8 @@ function PlacementPanel({
   onToggleDraw,
   onSetOptionBox,
   onSetScalarBox,
+  onClearRowBox,
+  onRestyleRowBox,
 }: {
   field: FormField;
   textPages: readonly TextPage[];
@@ -1396,9 +1468,21 @@ function PlacementPanel({
   onToggleDraw: (target: DrawTarget) => void;
   onSetOptionBox: (optionKey: string, box: PageBox | null) => void;
   onSetScalarBox: (box: PageBox | null) => void;
+  onClearRowBox: (rowIndex: number) => void;
+  onRestyleRowBox: (rowIndex: number, box: PageBox) => void;
 }) {
   const perOption = isPerOptionField(field);
   const matchAnchorField = isMatchAnchorField(field);
+  /*
+   * The per-row fallback is offered where it can mean something: a fixed-row
+   * table with exactly ONE answer column. One drawn rectangle per row IS that
+   * row's cell; with two answer columns a rectangle cannot say which printed
+   * cell it is, and the measured grid stays the only honest tool.
+   */
+  const rowFallback =
+    field.type === 'repeating_group' &&
+    (field.fixedRows?.length ?? 0) > 0 &&
+    (field.columns ?? []).slice(1).length === 1;
 
   /**
    * The anchors a matching question needs — one per printed entry.
@@ -1511,14 +1595,47 @@ function PlacementPanel({
           })}
         </div>
       ) : (
-        <BoxRow
-          label="Answer box"
-          box={field.geometry?.segments?.[0]}
-          armed={sameTarget(drawTarget, { fieldId: field.id, optionKey: null })}
-          onToggleDraw={() => onToggleDraw({ fieldId: field.id, optionKey: null })}
-          onClear={() => onSetScalarBox(null)}
-          onRestyle={onSetScalarBox}
-        />
+        <>
+          <BoxRow
+            label="Answer box"
+            /*
+              The WHOLE-GRID segment only. In per-row mode the first stored
+              segment is a row's cell, and labelling it "Answer box · p1"
+              would report a grid nobody placed.
+            */
+            box={(field.geometry?.segments ?? []).find((s) => rowCellIndex(s) === null)}
+            armed={sameTarget(drawTarget, { fieldId: field.id, optionKey: null })}
+            onToggleDraw={() => onToggleDraw({ fieldId: field.id, optionKey: null })}
+            onClear={() => onSetScalarBox(null)}
+            onRestyle={onSetScalarBox}
+          />
+          {rowFallback && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-[11px] leading-snug text-text-tertiary">
+                Or place each row&rsquo;s box yourself — for when the measured grid is wrong.
+                Drawing any row replaces the whole-grid box; a row left blank exports as recorded
+                data with no mark on the page.
+              </p>
+              {field.fixedRows!.map((rowLabel, index) => {
+                const target: DrawTarget = { fieldId: field.id, optionKey: null, rowIndex: index };
+                const box = (field.geometry?.segments ?? []).find(
+                  (s) => rowCellIndex(s) === index,
+                );
+                return (
+                  <BoxRow
+                    key={index}
+                    label={rowLabel || `Row ${index + 1}`}
+                    box={box}
+                    armed={sameTarget(drawTarget, target)}
+                    onToggleDraw={() => onToggleDraw(target)}
+                    onClear={() => onClearRowBox(index)}
+                    onRestyle={(next) => onRestyleRowBox(index, next)}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
 
       <p className="text-[11px] leading-snug text-text-tertiary">{markSentence(field)}</p>

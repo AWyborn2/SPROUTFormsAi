@@ -306,3 +306,53 @@ describe('proposeRectGrid', () => {
     });
   });
 });
+
+/**
+ * The per-row fallback — one hand-drawn box IS one row's cell, stored with the
+ * printed row named EXPLICITLY on the band key so a partly-placed table can
+ * never shift marks onto the rows below a gap.
+ */
+describe('proposeRowCell', () => {
+  const box: PageBox = { page: 0, x: 1228, y: 730, width: 15, height: 12, ...PAGE };
+
+  it('builds a one-band segment keyed to the printed row', async () => {
+    const { proposeRowCell, rowCellIndex } = await import('./pdf-geometry.js');
+    const result = proposeRowCell({ box, rowIndex: 3, columns: COLUMNS });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.segment.rowBands).toEqual([{ key: 'row:3', start: 730, end: 742 }]);
+    expect(result.segment.columnBands).toEqual([{ key: 'used', start: 1228, end: 1243 }]);
+    expect(rowCellIndex(result.segment)).toBe(3);
+  });
+
+  it('refuses a table with no answer column, with a sentence an author can act on', async () => {
+    const { proposeRowCell } = await import('./pdf-geometry.js');
+    const result = proposeRowCell({
+      box,
+      rowIndex: 0,
+      columns: [{ key: 'method', label: 'Method', type: 'text' }],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.detail).toMatch(/structure step/i);
+  });
+
+  it('refuses two answer columns rather than guessing which printed cell the box is', async () => {
+    const { proposeRowCell } = await import('./pdf-geometry.js');
+    const three: RepeatingColumn[] = [
+      ...COLUMNS,
+      { key: 'na', label: 'N/A', type: 'check_cross' },
+    ];
+
+    expect(proposeRowCell({ box, rowIndex: 0, columns: three }).ok).toBe(false);
+  });
+
+  it('a whole-grid segment is not a row cell', async () => {
+    const { proposeRectGrid, rowCellIndex } = await import('./pdf-geometry.js');
+    const grid = proposeRectGrid({ page: 0, ...PAGE, rects: methodBoxes, within: drawn, columns: COLUMNS });
+
+    expect(grid.ok).toBe(true);
+    if (grid.ok) expect(rowCellIndex(grid.proposal.segment)).toBeNull();
+  });
+});

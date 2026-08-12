@@ -794,6 +794,65 @@ describe('roundTripExport — export against real bands', () => {
     expect(markXs(output)).toEqual([]);
   });
 
+  /*
+   * Per-row placement (the measured grid's manual fallback) stores one small
+   * segment per row an author drew, its band keyed `row:<n>`. The property
+   * pinned here is the reason the key exists: a row the author did NOT place
+   * must not shift every later mark up the table. Positional consumption would
+   * have drawn row 1's tick in row 2's box; keyed consumption draws row 2's
+   * own cross there and gives row 1 nothing.
+   */
+  it('maps row:<n> bands to value rows by index, so unplaced rows leave a gap rather than a shift', async () => {
+    const rowCell = (rowIndex: number, yStart: number): NonNullable<FormField['geometry']>['segments'][number] => ({
+      page: 0,
+      x: 240,
+      y: yStart,
+      width: 50,
+      height: 40,
+      pageWidth: 600,
+      pageHeight: 800,
+      columnBands: [{ key: 'done', start: 240, end: 290 }],
+      rowBands: [{ key: `row:${rowIndex}`, start: yStart, end: yStart + 40 }],
+    });
+    const field: FormField = {
+      id: 'checks',
+      type: 'repeating_group',
+      label: 'Checks',
+      required: false,
+      source: 'imported',
+      columns: [
+        { key: 'item', label: 'Item', type: 'text' },
+        { key: 'done', label: 'Done', type: 'check_cross' },
+      ],
+      // Rows 0 and 2 placed by hand; row 1 never was.
+      geometry: { segments: [rowCell(0, 440), rowCell(2, 360)] },
+    };
+
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [field],
+      values: {
+        checks: [
+          { item: 'First', done: true },
+          { item: 'Second', done: true },
+          { item: 'Third', done: false },
+        ],
+      },
+    });
+
+    const marks = drawnMarks(output);
+    expect(marks).toHaveLength(2);
+    // Row 0's tick in row 0's own cell (y 440-480)…
+    expect(marks[0]).toMatchObject({ kind: 'tick' });
+    expect(marks[0]!.y).toBeGreaterThanOrEqual(440);
+    expect(marks[0]!.y).toBeLessThan(480);
+    // …and row 2's CROSS in row 2's cell (y 360-400). A positional consumer
+    // would have put row 1's TICK here instead.
+    expect(marks[1]).toMatchObject({ kind: 'cross' });
+    expect(marks[1]!.y).toBeGreaterThanOrEqual(360);
+    expect(marks[1]!.y).toBeLessThan(400);
+  });
+
   it('skips a column that has no band rather than guessing where it sits', async () => {
     const field = twoPageField();
     field.geometry!.segments = field.geometry!.segments.map((s) => ({

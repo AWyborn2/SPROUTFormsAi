@@ -880,9 +880,21 @@ function drawRepeatingGroup(
     if (!page || bands.length === 0) continue;
 
     for (const rowBand of bands) {
-      const row = rows[rowCursor];
-      rowCursor += 1;
-      if (!row) return; // fewer answered rows than the table prints
+      /*
+        WHICH VALUE ROW THIS BAND MARKS. A `row:<n>` key names printed row n
+        EXPLICITLY — the per-row placement fallback stores one small segment
+        per row an author drew by hand, and the rows they have not placed must
+        not shift every later mark up the table. Any other key keeps the
+        positional contract every measured grid already relies on: bands
+        consume rows in printed order.
+      */
+      const explicit = /^row:(\d+)$/.exec(rowBand.key);
+      const row = explicit ? rows[Number(explicit[1])] : rows[rowCursor];
+      if (!explicit) {
+        rowCursor += 1;
+        if (!row) return; // fewer answered rows than the table prints
+      }
+      if (!row) continue; // an explicitly-named row the value does not reach
 
       /** Place text in a column's own recorded band, or nowhere. */
       const mark = (columnKey: string, text: string) => {

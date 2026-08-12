@@ -1021,6 +1021,81 @@ export function proposeRectGrid(input: RectGridProposeInput): RectGridOutcome {
   };
 }
 
+/* ── Per-row placement (the grid's manual fallback) ──────────────────────── */
+
+/** One row's cell, built from a hand-drawn box — or refused with a reason. */
+export type RowCellOutcome =
+  | { ok: true; segment: PageBox }
+  | { ok: false; detail: string };
+
+/**
+ * A single printed row's answer cell, drawn by hand.
+ *
+ * THE FALLBACK FOR A GRID THE PAGE MIS-MEASURED. `proposeRectGrid` reads the
+ * printed squares, and when detection lands on the wrong page — or the squares
+ * are shapes it cannot read — the author needs the same recourse a radio group
+ * has: draw each box themselves. One drawn box here IS one row's cell, stored
+ * as a one-band segment whose row key names the printed row EXPLICITLY
+ * (`row:<index>`), so a partly-placed table can never shift marks onto the
+ * rows below the gap — the exporter maps these bands by index, never by
+ * position.
+ *
+ * Refused for a table with more or fewer than one answer column, for the same
+ * reason `proposeRectGrid` refuses: one drawn rectangle cannot say which of
+ * two printed columns it is, and a guess here is a mark in the wrong cell of a
+ * competency record.
+ */
+export function proposeRowCell(input: {
+  box: PageBox;
+  rowIndex: number;
+  columns: readonly RepeatingColumn[] | undefined;
+}): RowCellOutcome {
+  const optionColumns = (input.columns ?? []).slice(1);
+  if (optionColumns.length !== 1) {
+    return {
+      ok: false,
+      detail:
+        optionColumns.length === 0
+          ? 'This table declares no answer column — only a label column — so there is nowhere for a mark to be recorded. Add the answer column on the structure step, then draw the box again.'
+          : `This table has ${optionColumns.length} answer columns, so one drawn box cannot say which printed cell it is. Place the whole grid instead.`,
+    };
+  }
+
+  const { box } = input;
+  const segment: PageBox = {
+    page: box.page,
+    x: box.x,
+    y: box.y,
+    width: box.width,
+    height: box.height,
+    pageWidth: box.pageWidth,
+    pageHeight: box.pageHeight,
+    columnBands: [{ key: optionColumns[0]!.key, start: box.x, end: box.x + box.width }],
+    rowBands: [{ key: `row:${input.rowIndex}`, start: box.y, end: box.y + box.height }],
+    ...(box.markStyle ? { markStyle: box.markStyle } : {}),
+  };
+
+  // The shipped validator has the final word here exactly as it does for the
+  // measured grid — a segment it would drop must be refused with the reason
+  // stated, not stored and silently invisible.
+  if (resolveGeometry({ geometry: { segments: [segment] } }).segments.length !== 1) {
+    return {
+      ok: false,
+      detail: 'The drawn box was refused by the geometry validator, so it was not applied.',
+    };
+  }
+
+  return { ok: true, segment };
+}
+
+/** The printed-row index a per-row segment names, or null for a whole grid. */
+export function rowCellIndex(segment: PageBox): number | null {
+  const bands = segment.rowBands;
+  if (bands?.length !== 1) return null;
+  const match = /^row:(\d+)$/.exec(bands[0]!.key);
+  return match ? Number(match[1]) : null;
+}
+
 /* ── Non-table fields ─────────────────────────────────────────────────────── */
 
 /**
