@@ -356,3 +356,61 @@ describe('proposeRowCell', () => {
     if (grid.ok) expect(rowCellIndex(grid.proposal.segment)).toBeNull();
   });
 });
+
+/**
+ * Manual division — the author's say-so, for a page whose printed shapes
+ * cannot be measured. Equal rows seeded from an explicit act, every edge
+ * draggable afterwards; nothing here is inferred from the page.
+ */
+describe('proposeManualGrid', () => {
+  const box: PageBox = { page: 7, x: 500, y: 600, width: 120, height: 120, ...PAGE };
+
+  it('divides the drawn box into equal rows, top-down, spanning the answer column', async () => {
+    const { proposeManualGrid } = await import('./pdf-geometry.js');
+    const result = proposeManualGrid({ box, rows: 4, columns: COLUMNS });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.segment.page).toBe(7);
+    expect(result.segment.rowBands).toHaveLength(4);
+    // r1 is the TOP row — the printed order the measured path also uses.
+    expect(result.segment.rowBands![0]).toEqual({ key: 'r1', start: 690, end: 720 });
+    expect(result.segment.rowBands![3]).toEqual({ key: 'r4', start: 600, end: 630 });
+    expect(result.segment.columnBands).toEqual([{ key: 'used', start: 500, end: 620 }]);
+  });
+
+  it('splits the width evenly across multiple answer columns, keyed in order', async () => {
+    const { proposeManualGrid } = await import('./pdf-geometry.js');
+    const three: RepeatingColumn[] = [
+      ...COLUMNS,
+      { key: 'na', label: 'N/A', type: 'check_cross' },
+    ];
+    const result = proposeManualGrid({ box, rows: 2, columns: three });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.segment.columnBands).toEqual([
+      { key: 'used', start: 500, end: 560 },
+      { key: 'na', start: 560, end: 620 },
+    ]);
+  });
+
+  it('refuses a table with no answer column', async () => {
+    const { proposeManualGrid } = await import('./pdf-geometry.js');
+    const result = proposeManualGrid({
+      box,
+      rows: 3,
+      columns: [{ key: 'method', label: 'Method', type: 'text' }],
+    });
+
+    expect(result.ok).toBe(false);
+  });
+
+  it('refuses a row count that is not a whole positive number', async () => {
+    const { proposeManualGrid } = await import('./pdf-geometry.js');
+
+    expect(proposeManualGrid({ box, rows: 0, columns: COLUMNS }).ok).toBe(false);
+    expect(proposeManualGrid({ box, rows: 2.5, columns: COLUMNS }).ok).toBe(false);
+    expect(proposeManualGrid({ box, rows: Number.NaN, columns: COLUMNS }).ok).toBe(false);
+  });
+});

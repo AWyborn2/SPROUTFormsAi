@@ -1096,6 +1096,79 @@ export function rowCellIndex(segment: PageBox): number | null {
   return match ? Number(match[1]) : null;
 }
 
+/**
+ * Divide an author's drawn box into a grid BY THEIR SAY-SO — the recourse when
+ * the page's printed shapes cannot be measured at all.
+ *
+ * `proposeRectGrid` reads the printed squares, and on a page whose checkboxes
+ * are not closed vector rectangles (or were never measured) it refuses — which
+ * left an author with an undivided box on the RIGHT page and a measured grid
+ * offer on the WRONG one, and no way to say "the table is here, divide it".
+ *
+ * This is equal division, which the measured path rightly refuses to do in
+ * silence — so it never runs in silence. It runs from an explicit act, seeds
+ * bands the author is SHOWN as draggable edges, and nothing reaches the record
+ * until they have adjusted and saved. Rows split the drawn height evenly; the
+ * single-answer-column case spans the drawn width, and a multi-column table
+ * splits it evenly per answer column, every edge nudgeable afterwards.
+ */
+export function proposeManualGrid(input: {
+  box: PageBox;
+  rows: number;
+  columns: readonly RepeatingColumn[] | undefined;
+}): RowCellOutcome {
+  const optionColumns = (input.columns ?? []).slice(1);
+  if (optionColumns.length === 0) {
+    return {
+      ok: false,
+      detail:
+        'This table declares no answer column — only a label column — so there is nowhere for a mark to be recorded. Add the answer column on the structure step, then divide the box again.',
+    };
+  }
+  if (!Number.isInteger(input.rows) || input.rows < 1 || input.rows > 200) {
+    return { ok: false, detail: 'Row count must be a whole number of printed rows.' };
+  }
+
+  const { box, rows } = input;
+  const rowHeight = box.height / rows;
+  // Top-down, matching the printed order the measured path uses — r1 is the
+  // top row. PDF y grows upward.
+  const rowBands: GeometryBand[] = Array.from({ length: rows }, (_, index) => ({
+    key: `r${index + 1}`,
+    start: box.y + box.height - rowHeight * (index + 1),
+    end: box.y + box.height - rowHeight * index,
+  }));
+
+  const columnWidth = box.width / optionColumns.length;
+  const columnBands: GeometryBand[] = optionColumns.map((column, index) => ({
+    key: column.key,
+    start: box.x + columnWidth * index,
+    end: box.x + columnWidth * (index + 1),
+  }));
+
+  const segment: PageBox = {
+    page: box.page,
+    x: box.x,
+    y: box.y,
+    width: box.width,
+    height: box.height,
+    pageWidth: box.pageWidth,
+    pageHeight: box.pageHeight,
+    columnBands,
+    rowBands,
+    ...(box.markStyle ? { markStyle: box.markStyle } : {}),
+  };
+
+  if (resolveGeometry({ geometry: { segments: [segment] } }).segments.length !== 1) {
+    return {
+      ok: false,
+      detail: 'The divided grid was refused by the geometry validator, so it was not applied.',
+    };
+  }
+
+  return { ok: true, segment };
+}
+
 /* ── Non-table fields ─────────────────────────────────────────────────────── */
 
 /**

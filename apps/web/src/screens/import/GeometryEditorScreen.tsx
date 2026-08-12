@@ -15,7 +15,12 @@ import {
 } from '@formai/shared';
 import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../../lib/data/hooks.js';
 import type { FieldProposal, TableProposal, TextPage } from '../../lib/pdf-geometry.js';
-import { proposeRectGrid, proposeRowCell, rowCellIndex } from '../../lib/pdf-geometry.js';
+import {
+  proposeManualGrid,
+  proposeRectGrid,
+  proposeRowCell,
+  rowCellIndex,
+} from '../../lib/pdf-geometry.js';
 import {
   groupFields,
   overallCounts,
@@ -647,6 +652,25 @@ export function GeometryEditorScreen({
     });
   }
 
+  /**
+   * Divide the whole-field drawn box into rows by the author's say-so — the
+   * recourse for a page whose printed shapes cannot be measured (U-manual).
+   * The seeded bands land on the SAME page the author drew, render as
+   * draggable edges through the band overlay, and reach the record only when
+   * they save.
+   */
+  function setManualGrid(field: FormField, rows: number) {
+    const box = (field.geometry?.segments ?? []).find(
+      (s) => rowCellIndex(s) === null && s.optionKey === undefined,
+    );
+    if (!box) return;
+    const result = proposeManualGrid({ box, rows, columns: field.columns });
+    setGridRefusal(
+      result.ok ? null : { fieldId: field.id, title: 'Not divided', detail: result.detail },
+    );
+    if (result.ok) setScalarBox(field.id, result.segment);
+  }
+
   function clearRowBox(fieldId: string, rowIndex: number) {
     mutate(fieldId, (f) => {
       const kept = (f.geometry?.segments ?? []).filter((s) => rowCellIndex(s) !== rowIndex);
@@ -1039,6 +1063,13 @@ export function GeometryEditorScreen({
           )}
           {selected ? (
             <PlacementPanel
+              /*
+                Remount per field: the panel now carries local state (the
+                divide-into-rows count), and carrying one field's typed number
+                onto the next field's panel would offer a row count nobody
+                chose for it.
+              */
+              key={selected.id}
               field={selected}
               textPages={textPages}
               drawTarget={drawTarget}
@@ -1049,6 +1080,7 @@ export function GeometryEditorScreen({
               onSetScalarBox={(box) => setScalarBox(selected.id, box)}
               onClearRowBox={(rowIndex) => clearRowBox(selected.id, rowIndex)}
               onRestyleRowBox={(rowIndex, box) => restyleRowBox(selected.id, rowIndex, box)}
+              onDivideGrid={(rows) => setManualGrid(selected, rows)}
             />
           ) : (
             <p className="text-[12.5px] text-text-tertiary">
@@ -1465,6 +1497,7 @@ function PlacementPanel({
   onSetScalarBox,
   onClearRowBox,
   onRestyleRowBox,
+  onDivideGrid,
 }: {
   field: FormField;
   textPages: readonly TextPage[];
@@ -1474,9 +1507,18 @@ function PlacementPanel({
   onSetScalarBox: (box: PageBox | null) => void;
   onClearRowBox: (rowIndex: number) => void;
   onRestyleRowBox: (rowIndex: number, box: PageBox) => void;
+  onDivideGrid: (rows: number) => void;
 }) {
   const perOption = isPerOptionField(field);
   const matchAnchorField = isMatchAnchorField(field);
+  /** The whole-field segment — not a per-row cell, not a yes/no half. */
+  const wholeFieldBox = (field.geometry?.segments ?? []).find(
+    (s) => rowCellIndex(s) === null && s.optionKey === undefined,
+  );
+  /** Divide-into-rows count; seeded from the printed rows where declared. */
+  const [divideRows, setDivideRows] = useState(() =>
+    field.fixedRows?.length ? String(field.fixedRows.length) : '',
+  );
   /*
    * The per-row fallback is offered where it can mean something: a fixed-row
    * table with exactly ONE answer column. One drawn rectangle per row IS that
@@ -1607,14 +1649,45 @@ function PlacementPanel({
               first stored segment is one cell of several, and labelling it
               "Answer box · p1" would report a box nobody placed.
             */
-            box={(field.geometry?.segments ?? []).find(
-              (s) => rowCellIndex(s) === null && s.optionKey === undefined,
-            )}
+            box={wholeFieldBox}
             armed={sameTarget(drawTarget, { fieldId: field.id, optionKey: null })}
             onToggleDraw={() => onToggleDraw({ fieldId: field.id, optionKey: null })}
             onClear={() => onSetScalarBox(null)}
             onRestyle={onSetScalarBox}
           />
+          {/*
+            DIVIDE BY SAY-SO. When a page's printed shapes cannot be measured —
+            or measured the wrong table — the author still knows where the rows
+            are: divide the drawn box evenly, then drag the band edges to fit.
+            Offered only while a whole-field box exists to divide, on the page
+            THAT box sits on, which is the page the author drew it.
+          */}
+          {field.type === 'repeating_group' && wholeFieldBox && (
+            <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+              <p className="text-[11px] leading-snug text-text-tertiary">
+                Rows not measured, or measured on the wrong page? Divide the drawn box into equal
+                rows, then drag the edges to fit the printed lines.
+              </p>
+              <div className="mt-1.5 flex items-center gap-1.5">
+                <input
+                  type="number"
+                  min={1}
+                  value={divideRows}
+                  onChange={(e) => setDivideRows(e.target.value)}
+                  aria-label="Number of printed rows"
+                  className="h-[28px] w-[64px] rounded-sm border border-border bg-surface-page px-1.5 text-[12px]"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!Number.isInteger(Number(divideRows)) || Number(divideRows) < 1}
+                  onClick={() => onDivideGrid(Number(divideRows))}
+                >
+                  Divide into rows
+                </Button>
+              </div>
+            </div>
+          )}
           {field.type === 'boolean_yes_no' && (
             <div className="flex flex-col gap-1.5">
               {/*
