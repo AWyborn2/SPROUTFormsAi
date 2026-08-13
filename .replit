@@ -77,7 +77,25 @@ externalPort = 3001
 [deployment]
 deploymentTarget = "autoscale"
 run = ["bash", "-c", "API_PORT=8000 pnpm --filter @formai/api start & pnpm --filter @formai/web preview --host 0.0.0.0 --port 5000"]
-build = ["bash", "-c", "pnpm -r build"]
+
+# MIGRATE IN THE BUILD, NOT THE RUN, AND NOT BY A GENERATED DIFF.
+#
+# `pnpm db:migrate` applies the migrations in packages/db/drizzle in order,
+# recording each in the ledger. That is the only mechanism that runs a DATA
+# migration: a schema diff reproduces structure and silently skips every
+# UPDATE. 0042_seed_profiles_category is the worked example — it backfills the
+# `profiles` permission key into role matrices, was skipped by exactly such a
+# sync, and every organisation with a stored matrix resolved profile access to
+# DENIED. An empty screen, no error, and hours to find.
+#
+# In `build` rather than `run` because autoscale starts many instances from one
+# build. Migrating in `run` races every replica against the others; migrating
+# in `build` happens once, before anything serves traffic.
+#
+# It is deliberately NOT guarded against a missing DATABASE_URL. A deploy that
+# cannot migrate must fail here, loudly, rather than start on a schema its code
+# does not expect.
+build = ["bash", "-c", "pnpm -r build && pnpm db:migrate"]
 
 [userenv]
 
