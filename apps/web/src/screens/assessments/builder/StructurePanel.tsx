@@ -69,6 +69,13 @@ export interface StructurePanelProps {
   onRenameSection: (key: string, label: string) => void;
   onSetColumns: (key: string, cols: SectionColumns) => void;
   onToggleOwnPage: (key: string) => void;
+  /**
+   * Delete a section from the arrangement. An empty one — a duplicate heading
+   * the extraction read, a part title with its fields filed under sub-headings
+   * — just disappears; a populated one hands its fields to the section before
+   * it, because a field that vanishes is one nobody notices is missing.
+   */
+  onDissolve: (key: string) => void;
   onMoveField: (
     fieldId: string,
     toSectionKey: string,
@@ -121,6 +128,7 @@ export function StructurePanel({
   onRenameSection,
   onSetColumns,
   onToggleOwnPage,
+  onDissolve,
   onMoveField,
   onCycleSpan,
   onSetFieldType,
@@ -323,6 +331,28 @@ export function StructurePanel({
                     >
                       <Icon name="file" size={10} />
                       Own page
+                    </button>
+                    {/*
+                      A duplicate or empty heading the extraction read is the
+                      COMMON case here — a part title whose fields all sit
+                      under sub-headings. Populated sections are deletable too,
+                      but nothing is lost: their fields move to the section
+                      before, exactly as `dissolveSection` has always worked.
+                    */}
+                    <button
+                      type="button"
+                      onClick={() => onDissolve(section.key)}
+                      disabled={structure.length === 1}
+                      title={
+                        section.fields.length === 0
+                          ? 'Delete this empty section'
+                          : 'Delete this section — its fields move to the section before it'
+                      }
+                      aria-label={`Delete section ${section.label}`}
+                      className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-[3px] text-[9.5px] font-semibold text-text-tertiary hover:border-danger hover:text-danger-text disabled:opacity-30"
+                    >
+                      <Icon name="trash-2" size={10} />
+                      Delete
                     </button>
                   </div>
 

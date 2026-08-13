@@ -62,6 +62,7 @@ function setup(over: Partial<StructurePanelProps> = {}) {
     onRenameSection: vi.fn(),
     onSetColumns: vi.fn(),
     onToggleOwnPage: vi.fn(),
+    onDissolve: vi.fn(),
     onMoveField: vi.fn(),
     onCycleSpan: vi.fn(),
     onSetFieldType: vi.fn(),
@@ -302,6 +303,26 @@ describe('StructurePanel', () => {
     setup({ structure: [{ ...STRUCTURE[0]!, ownPage: true }] });
 
     expect(screen.getByText('Own page')).toBeTruthy();
+  });
+
+  it('deletes a section', () => {
+    const onDissolve = vi.fn();
+    setup({ onDissolve });
+    expand('Candidate declaration');
+
+    fireEvent.click(screen.getByLabelText('Delete section Candidate declaration'));
+
+    expect(onDissolve).toHaveBeenCalledWith('s1');
+  });
+
+  it('disables delete on the last remaining section', () => {
+    // `dissolveSection` would no-op anyway; the disabled button says so.
+    setup({ structure: [STRUCTURE[0]!] });
+    expand('Candidate declaration');
+
+    expect(
+      (screen.getByLabelText('Delete section Candidate declaration') as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it('renames a section', () => {

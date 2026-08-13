@@ -298,6 +298,14 @@ export interface StructureOps {
   renameSection: (key: string, label: string) => void;
   setColumns: (key: string, cols: SectionColumns) => void;
   toggleOwnPage: (key: string) => void;
+  /**
+   * Remove a section from the arrangement. Its fields move to the section
+   * before it (never deleted — a field that vanishes is one nobody notices is
+   * missing), so on an EMPTY section this is a plain delete. The section's
+   * header field simply stops publishing: `resolveStructure` emits headers
+   * from sections, and its orphan report deliberately ignores headers.
+   */
+  dissolve: (key: string) => void;
   moveField: (
     fieldId: string,
     toSectionKey: string,
@@ -750,6 +758,7 @@ export function useBuilderDraftState({
           const section = s.find((x) => x.key === key);
           return section ? Structure.setOwnPage(s, key, !section.ownPage) : s;
         }),
+      dissolve: (key) => setStructure((s) => Structure.dissolveSection(s, key)),
       moveField: (fieldId, toSectionKey, beforeFieldId, after) =>
         setStructure((s) => Structure.moveField(s, fieldId, toSectionKey, beforeFieldId, after)),
       cycleSpan: (sectionKey, fieldId) =>
