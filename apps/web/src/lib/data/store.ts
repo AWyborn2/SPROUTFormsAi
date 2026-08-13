@@ -140,6 +140,8 @@ interface FormDetailDto extends FormSummaryDto {
     fieldCount: number;
     publishedAt: string | null;
     publishedByName: string | null;
+    revisionIdentity: { code?: string; reviewedOn?: string; note?: string } | null;
+    note: string | null;
   }>;
 }
 
@@ -210,6 +212,8 @@ function toFormDetail(dto: FormDetailDto): FormDetail {
       fieldCount: v.fieldCount,
       publishedAt: v.publishedAt ? relativeTime(v.publishedAt) : '—',
       publishedBy: v.publishedByName ?? '—',
+      revisionIdentity: v.revisionIdentity ?? undefined,
+      note: v.note ?? undefined,
     })),
   };
 }

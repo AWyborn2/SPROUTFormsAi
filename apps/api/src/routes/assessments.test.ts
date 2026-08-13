@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Assessment cases, end to end.
  *
  * These run against a STATEFUL fake database rather than the usual
@@ -6,7 +6,7 @@
  * compositional: that a retry allocates a second attempt row while the first
  * survives, that a part stays locked until its predecessor passes, and that a
  * case flips to competent only once every required part has. A stub that
- * returns canned rows per call cannot show any of that — it would assert the
+ * returns canned rows per call cannot show any of that â€” it would assert the
  * fixtures, not the logic.
  *
  * The fake honours `where` by extracting the bound values from the drizzle SQL
@@ -65,7 +65,7 @@ const auth = (t: Session = admin) => ({
   'content-type': 'application/json',
 });
 
-// ── the template the manifest is authored against ───────────────────────────
+// â”€â”€ the template the manifest is authored against â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const header = (id: string): FormField => ({
   id,
@@ -111,7 +111,7 @@ const FIELDS: FormField[] = [
   { id: 'q1-out', type: 'check_cross', label: 'Q1 outcome', required: false, source: 'imported' },
   streamSection('h-mining', 'Mining'),
   // Location-specific theory questions. Keyed like the general ones, so the
-  // theory part is fully self-marking (U15) — a candidate sees only their
+  // theory part is fully self-marking (U15) â€” a candidate sees only their
   // stream's set, and the hidden set is never marked.
   {
     id: 'q-mining',
@@ -194,10 +194,10 @@ const MANIFEST: AssessmentToolManifest = {
   ],
 };
 
-// ── stateful fake database ──────────────────────────────────────────────────
+// â”€â”€ stateful fake database â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /*
-  Keys that hang the schema metadata off a column node — the whole pgTable, its
+  Keys that hang the schema metadata off a column node â€” the whole pgTable, its
   encoders, its default expression. The bound param values live directly in the
   query chunks, so skipping these keeps the walk cheap and, since a column points
   back at its table, keeps it from looping.
@@ -223,7 +223,7 @@ function stringValues(node: unknown, out: string[] = [], depth = 0): string[] {
  * operands that must every one be present (an `and` of `eq`s), and each `anyOf`
  * group is an `inArray` where the row matching ANY one operand is a match.
  *
- * `inArray` renders as `col in $params`, so its operands are an OR — collecting
+ * `inArray` renders as `col in $params`, so its operands are an OR â€” collecting
  * them into `all` like the eqs would demand a single row hold every id at once
  * and match nothing. Enough structure to model these routes' reads without
  * importing a SQL engine.
@@ -272,10 +272,17 @@ function matchesWhere(row: Record<string, unknown>, where: unknown): boolean {
 }
 
 let idSeq = 0;
-/** Real UUID shapes — the routes validate ids as UUIDs, so the fake must too. */
+/** Real UUID shapes â€” the routes validate ids as UUIDs, so the fake must too. */
 const nextId = () => `00000000-0000-4000-8000-${String(++idSeq).padStart(12, '0')}`;
 
-function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERMISSIONS } = {}) {
+function makeDb(
+  opts: {
+    planTier?: string;
+    role?: keyof typeof DEFAULT_ROLE_PERMISSIONS;
+    /** Make every assessment_tools UPDATE throw â€” proves republish is one transaction. */
+    failToolUpdate?: boolean;
+  } = {},
+) {
   const store: Record<string, Record<string, unknown>[]> = {
     organizations: [{ id: ORG, planTier: opts.planTier ?? 'business', seatLimit: 15, candidateSeatLimit: 200 }],
     rolePermissions: [
@@ -288,7 +295,7 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
       The org's managed Locations (U8). A case points at one by id and the
       assessor rule is keyed by the same ids, so creation validates the id is one
       of these and the eligibility check is a plain lookup. OFFICE exists but no
-      tool has a rule for it — that is a Location with no extra requirement, not a
+      tool has a rule for it â€” that is a Location with no extra requirement, not a
       near-miss (R79).
     */
     locations: [
@@ -303,6 +310,7 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
       { id: DEPT_MAINT, orgId: ORG, name: 'Maintenance', status: 'retired' },
     ],
     assessmentTools: [],
+    assessmentToolDrafts: [],
     roleRequiredAssessments: [],
     assessmentCases: [],
     assessmentPartAttempts: [],
@@ -311,7 +319,7 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
     auditLogEntries: [],
     users: [],
     /*
-      Case creation requires the candidate to be a member of THIS org — without
+      Case creation requires the candidate to be a member of THIS org â€” without
       it, any org could open a case against any user id in the system. The fake
       db had no memberships table at all, which is the shape of harness that
       lets such a gap survive: the missing check had nothing to fail against.
@@ -324,7 +332,7 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
     ],
     /*
       Profiles backing the live display-identifier read a case DTO makes (R24,
-      R61). Empty by default, which is the state these cases actually run in —
+      R61). Empty by default, which is the state these cases actually run in â€”
       the identifier resolves to null and the DTO shows the name it always did,
       so every existing assertion about `candidateName` holds unchanged.
     */
@@ -369,12 +377,36 @@ function makeDb(opts: { planTier?: string; role?: keyof typeof DEFAULT_ROLE_PERM
       set: (patch: Record<string, unknown>) => ({
         where: async (w: unknown) => {
           const name = nameOf(table);
+          if (opts.failToolUpdate && name === 'assessmentTools') {
+            throw new Error('tool_update_failed (forced by test)');
+          }
           for (const row of store[name] ?? []) if (matchesWhere(row, w)) Object.assign(row, patch);
         },
       }),
     }),
-    delete: () => ({ where: async () => undefined }),
+    delete: (table: unknown) => ({
+      where: async (w: unknown) => {
+        const name = nameOf(table);
+        if (store[name]) store[name] = store[name].filter((row) => !matchesWhere(row, w));
+      },
+    }),
     select: () => ({ from: () => ({ where: async () => [{ count: 0 }] }) }),
+    /*
+      A transaction over the store: snapshot on entry, restore on throw. Row
+      copies are shallow â€” updates mutate row objects, so restoring the arrays
+      of copies is enough to model the rollback the routes rely on.
+    */
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
+      const snapshot = Object.fromEntries(
+        Object.entries(store).map(([k, v]) => [k, v.map((r) => ({ ...r }))]),
+      );
+      try {
+        return await fn(db);
+      } catch (err) {
+        for (const k of Object.keys(store)) store[k] = snapshot[k]!;
+        throw err;
+      }
+    },
   } as unknown as Db;
 
   return { db, store };
@@ -408,12 +440,12 @@ afterEach(() => {
   mockDbValue = null;
 });
 
-// ── tool authoring ──────────────────────────────────────────────────────────
+// â”€â”€ tool authoring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe('POST /assessment-tools', () => {
   /*
     A z.object STRIPS unknown keys. So a manifest property this schema omits is
-    discarded in silence on the HTTP path while the authoring script keeps it —
+    discarded in silence on the HTTP path while the authoring script keeps it â€”
     two writers, two different manifests, no error anywhere to say so.
 
     `candidateNameFieldId` was the one that got missed, and it is the pointer
@@ -497,7 +529,7 @@ describe('POST /assessment-tools', () => {
   });
 });
 
-// ── case creation ───────────────────────────────────────────────────────────
+// â”€â”€ case creation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe('POST /assessment-cases', () => {
   it('gives an experienced case only the parts that pathway requires', async () => {
@@ -552,7 +584,7 @@ describe('POST /assessment-cases', () => {
 
   it('refuses a candidate who is not a member of this org, and opens nothing', async () => {
     // candidateUserId was only checked for UUID shape, so a well-formed id
-    // belonging to another org's user opened a real case — building a
+    // belonging to another org's user opened a real case â€” building a
     // competency record against a stranger, on this org's candidate seat.
     const { db, store } = makeDb();
     mockDbValue = db;
@@ -714,7 +746,7 @@ describe('POST /assessment-cases', () => {
     A flat AND list fails both ways: all three warns on every case about a
     combination nobody holds, and one silently accepts an assessor authorised
     for the other site. The assessor holds nothing in these, so every
-    requirement that APPLIES surfaces as a gap — which is what makes the absent
+    requirement that APPLIES surfaces as a gap â€” which is what makes the absent
     one meaningful.
   */
   const WORSLEY = '00000000-0000-4000-8000-0000000000e1';
@@ -744,7 +776,7 @@ describe('POST /assessment-cases', () => {
         toolId: tool.id,
         candidateUserId: CANDIDATE,
         // Name an assessor who holds nothing, so the assessor-eligibility check
-        // has a subject (a pooled create names none and warns about none — U13).
+        // has a subject (a pooled create names none and warns about none â€” U13).
         assessorUserId: ADMIN,
         pathway: 'experienced',
         ...(locationId ? { locationId } : {}),
@@ -786,7 +818,7 @@ describe('POST /assessment-cases', () => {
       A Location is chosen from the org's list, never typed (R77), so an id that
       is not one of the org's active Locations is a bad request, not a case
       opened against an unknown site. This is the check that makes a near-miss
-      impossible — there is nothing to normalise because nothing is free text.
+      impossible â€” there is nothing to normalise because nothing is free text.
     */
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
@@ -804,7 +836,7 @@ describe('POST /assessment-cases', () => {
   it('says the check was only partial when the case names no Location', async () => {
     /*
       Reporting just the always-required half would present a partial check as a
-      complete one. The case still opens — eligibility never blocks — but the
+      complete one. The case still opens â€” eligibility never blocks â€” but the
       warning has to say what went unchecked and name the Locations the tool has
       a rule for, because the fix is to set one.
     */
@@ -829,7 +861,7 @@ describe('POST /assessment-cases', () => {
     /*
       The failure the old free-text model nearly shipped with is now impossible.
       A Location is an id chosen from the org's list, so a case at a Location the
-      tool has no rule for is a site with no extra requirement — the always-half
+      tool has no rule for is a site with no extra requirement â€” the always-half
       applies and the check is complete. There is no "unrecognised" state to warn
       about, because there is no spelling to get wrong.
     */
@@ -850,7 +882,7 @@ describe('POST /assessment-cases', () => {
 
   it('says nothing about Locations for a tool whose rule does not vary', async () => {
     // Every tool that existed before this column. A missing Location is not a gap
-    // when nothing depended on it — warning here would fire on every case.
+    // when nothing depended on it â€” warning here would fire on every case.
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
@@ -863,7 +895,7 @@ describe('POST /assessment-cases', () => {
   });
 });
 
-// ── the location-to-parts rule (U9) ─────────────────────────────────────────
+// â”€â”€ the location-to-parts rule (U9) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe('PATCH /assessment-tools/:id/location-parts', () => {
   async function makeTool(base: string) {
@@ -948,11 +980,11 @@ describe('PATCH /assessment-tools/:id/location-parts', () => {
     const { server, base } = startApp();
     try {
       const tool = await makeTool(base);
-      // Declared while MINING is active…
+      // Declared while MINING is activeâ€¦
       expect((await setRule(base, tool.id, { [MINING]: ['p1', 'p2'] })).status).toBe(200);
-      // …then MINING retires. A rule stays with the Location it names.
+      // â€¦then MINING retires. A rule stays with the Location it names.
       for (const l of rows(store, 'locations')) if (l.id === MINING) l.status = 'retired';
-      // Re-saving the same map is not rejected — the entry already existed.
+      // Re-saving the same map is not rejected â€” the entry already existed.
       expect((await setRule(base, tool.id, { [MINING]: ['p1', 'p2'] })).status).toBe(200);
 
       const got = await fetch(`${base}/assessment-tools/${tool.id}`, { headers: auth() });
@@ -977,7 +1009,7 @@ describe('PATCH /assessment-tools/:id/location-parts', () => {
   });
 });
 
-// ── tool classification and the Department filter (U10) ─────────────────────
+// â”€â”€ tool classification and the Department filter (U10) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe('PATCH /assessment-tools/:id/classification and the filter', () => {
   async function makeTool(base: string) {
@@ -1039,7 +1071,7 @@ describe('PATCH /assessment-tools/:id/classification and the filter', () => {
     }
   });
 
-  it('carries at most one Department — a second classification replaces the first (R9)', async () => {
+  it('carries at most one Department â€” a second classification replaces the first (R9)', async () => {
     const { db, store } = makeDb();
     const DEPT_RAIL = '00000000-0000-4000-8000-0000000000d3';
     rows(store, 'departments').push({ id: DEPT_RAIL, orgId: ORG, name: 'Rail', status: 'active' });
@@ -1096,7 +1128,7 @@ describe('PATCH /assessment-tools/:id/classification and the filter', () => {
   });
 });
 
-// ── attempts ────────────────────────────────────────────────────────────────
+// â”€â”€ attempts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe('attempt sequencing', () => {
   async function openCase(base: string, pathway = 'new') {
@@ -1164,8 +1196,8 @@ describe('attempt sequencing', () => {
     THIS TEST USED TO ASSERT THE OPPOSITE.
 
     It required a disposition and a reason for a COMPUTED theory failure, and
-    400'd without them. Nothing could supply them — the assessor makes no
-    judgement on a theory part, so the UI offers no outcome control — which left
+    400'd without them. Nothing could supply them â€” the assessor makes no
+    judgement on a theory part, so the UI offers no outcome control â€” which left
     `outcome` null, and an unresolved attempt is handed back by the open route
     as `reused: true` forever. A failed theory part was unrecordable and the
     part wedged. The rule below replaces it deliberately, so the change is
@@ -1224,7 +1256,7 @@ describe('attempt sequencing', () => {
         body: JSON.stringify({}),
       });
 
-      // Assert the failure was RECORDED as well as that the case stayed open —
+      // Assert the failure was RECORDED as well as that the case stayed open â€”
       // otherwise a route that refuses outright passes this vacuously.
       expect(rows(store, 'assessmentPartAttempts').find((r) => r.id === a.id)?.outcome).toBe('not_satisfactory');
       expect(rows(store, 'assessmentCases').find((r) => r.id === c.id)?.state).toBe('open');
@@ -1302,7 +1334,7 @@ describe('attempt sequencing', () => {
   });
 
   it('lets an assessor still close a theory part as not yet competent, explicitly', async () => {
-    // Defaulting to coaching is a DEFAULT, not a ceiling — the deliberate act
+    // Defaulting to coaching is a DEFAULT, not a ceiling â€” the deliberate act
     // of closing the case stays available.
     const { db, store } = makeDb();
     mockDbValue = db;
@@ -1363,7 +1395,7 @@ describe('attempt sequencing', () => {
   });
 });
 
-// ── logbook ─────────────────────────────────────────────────────────────────
+// â”€â”€ logbook â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe('logbook accumulation', () => {
   it('totals hours and flags the threshold exactly once', async () => {
@@ -1440,10 +1472,10 @@ describe('logbook accumulation', () => {
   });
 });
 
-// ── access scoping ──────────────────────────────────────────────────────────
+// â”€â”€ access scoping â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe('candidate scoping', () => {
-  it('hides another candidate’s case behind a 404, not a 403', async () => {
+  it('hides another candidateâ€™s case behind a 404, not a 403', async () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
@@ -1464,7 +1496,7 @@ describe('candidate scoping', () => {
     }
   });
 
-  it('lists only the calling candidate’s own cases', async () => {
+  it('lists only the calling candidateâ€™s own cases', async () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
@@ -1491,7 +1523,7 @@ describe('candidate scoping', () => {
   });
 });
 
-// ── the whole journey ───────────────────────────────────────────────────────
+// â”€â”€ the whole journey â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * The compositional test: a New candidate driven from an empty case to
@@ -1525,7 +1557,7 @@ describe('marker attribution (U15)', () => {
     const { server, base } = startApp();
     try {
       const c = await openCase(base);
-      const a = await openPart(base, c.id, 'p1'); // p1 is fully keyed → self-marking
+      const a = await openPart(base, c.id, 'p1'); // p1 is fully keyed â†’ self-marking
       await fetch(`${base}/assessment-cases/${c.id}/attempts/${a.id}`, {
         method: 'PATCH',
         headers: auth(),
@@ -1540,7 +1572,7 @@ describe('marker attribution (U15)', () => {
       const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === a.id);
       expect(row?.outcome).toBe('satisfactory');
       expect(row?.markerKind).toBe('automatic');
-      // Named by nobody — the submitted name is not stamped onto an automatic mark.
+      // Named by nobody â€” the submitted name is not stamped onto an automatic mark.
       expect(row?.assessorUserId).toBeNull();
       expect(row?.assessorName).toBe('');
     } finally {
@@ -1567,7 +1599,7 @@ describe('marker attribution (U15)', () => {
         body: JSON.stringify({}),
       });
 
-      // p2 is a practical part carrying no key → judged by a person.
+      // p2 is a practical part carrying no key â†’ judged by a person.
       const p2 = await openPart(base, c.id, 'p2');
       const res = await fetch(`${base}/assessment-cases/${c.id}/attempts/${p2.id}/outcome`, {
         method: 'POST',
@@ -1624,22 +1656,22 @@ describe('full case lifecycle', () => {
           })
         ).json()) as { outcome: string; caseState: string };
 
-      // Part 1 — theory, answered correctly. Outcome is computed, not supplied.
+      // Part 1 â€” theory, answered correctly. Outcome is computed, not supplied.
       const t = await open('p1');
       await save(t.id, { q1: ['a'] });
       const theory = await resolve(t.id, {});
       expect(theory.outcome).toBe('satisfactory');
 
-      // Part 2 — practical.
+      // Part 2 â€” practical.
       const p2 = await open('p2');
       await resolve(p2.id, { outcome: 'satisfactory', assessorName: 'A. Assessor' });
 
-      // Part 3 — logbook past its minimum.
+      // Part 3 â€” logbook past its minimum.
       const p3 = await open('p3');
       await save(p3.id, { entries: [{ duration: 21 }] });
       await resolve(p3.id, { outcome: 'satisfactory' });
 
-      // Part 4 — failed, then retried and passed.
+      // Part 4 â€” failed, then retried and passed.
       const first = await open('p4');
       const failed = await resolve(first.id, {
         outcome: 'not_satisfactory',
@@ -1662,7 +1694,7 @@ describe('full case lifecycle', () => {
       */
       expect(passed.caseState).toBe('awaiting_sign_off');
 
-      // Not terminal — a case waiting on a signature is not a finished one.
+      // Not terminal â€” a case waiting on a signature is not a finished one.
       expect((store.assessmentCases ?? []).find((r) => r.id === c.id)?.closedAt ?? null).toBeNull();
 
       const signed = (await (
@@ -1745,7 +1777,7 @@ describe('full case lifecycle', () => {
 
 /**
  * The document-generation logic lives in `pdf/case-export.test.ts`, which runs
- * against real PDFs. These cover the ROUTE's gates — who may mint an evidence
+ * against real PDFs. These cover the ROUTE's gates â€” who may mint an evidence
  * document, and what happens when the template cannot produce one.
  */
 describe('POST /assessment-cases/:id/export', () => {
@@ -1814,7 +1846,7 @@ describe('POST /assessment-cases/:id/export', () => {
 /**
  * Hours count toward a safety threshold, so two properties are pinned at the
  * route: a non-positive duration is REFUSED rather than quietly ignored, and a
- * duration column carrying a machine_hours calc is recomputed server-side —
+ * duration column carrying a machine_hours calc is recomputed server-side â€”
  * the client's figure for a derived cell is discarded, so meter arithmetic
  * cannot be forged by editing a request body.
  */
@@ -1918,7 +1950,7 @@ describe('logbook duration integrity', () => {
 });
 
 /**
- * An appeal is a NEW case linked to the disputed one — never an edit of it.
+ * An appeal is a NEW case linked to the disputed one â€” never an edit of it.
  * The two conflict rules are the integrity of the whole mechanism (R29/R30,
  * AE8): the disputed assessor can neither initiate the appeal nor be assigned
  * to assess it, so nobody adjudicates a dispute about their own decision.
@@ -1983,7 +2015,7 @@ describe('POST /assessment-cases/:id/appeal', () => {
     try {
       const tool = await seedTool(base);
       // The disputed case is OWNED by the admin calling the appeal route (a
-      // manual create naming an assessor keeps them — U13).
+      // manual create naming an assessor keeps them â€” U13).
       const c = (await (
         await fetch(`${base}/assessment-cases`, {
           method: 'POST',
@@ -2067,7 +2099,7 @@ describe('POST /assessment-cases/:id/appeal', () => {
 });
 
 /**
- * The fillable surface for one attempt — what the candidate portal renders.
+ * The fillable surface for one attempt â€” what the candidate portal renders.
  *
  * The headline behaviour is what is ABSENT. These fields carry the answer key
  * to the assessment the candidate is about to sit, and this route serves them
@@ -2104,7 +2136,7 @@ describe('GET /assessment-cases/:id/attempts/:attemptId', () => {
       expect(res.status).toBe(200);
       const body = (await res.json()) as { fields: FormField[] };
 
-      // The question itself must still be there — this is a fill surface.
+      // The question itself must still be there â€” this is a fill surface.
       expect(body.fields.some((f) => f.id === 'q1')).toBe(true);
       // But nothing that gives the answer away, on ANY field.
       expect(body.fields.some((f) => f.answerKey !== undefined)).toBe(false);
@@ -2184,7 +2216,7 @@ describe('GET /assessment-cases/:id/attempts/:attemptId', () => {
       });
       const body = (await res.json()) as { values: Record<string, unknown>; outcome: string | null };
       expect(body.values).toEqual({ q1: ['b'] });
-      // Still open — an unmarked attempt has no outcome.
+      // Still open â€” an unmarked attempt has no outcome.
       expect(body.outcome).toBeNull();
     } finally {
       server.close();
@@ -2240,7 +2272,7 @@ describe('GET /assessment-cases/:id/attempts/:attemptId', () => {
  * cases are driven through the real routes first, and the dashboard is then
  * checked against the rows those routes wrote and against what
  * `GET /assessment-cases/:id` says about the same case. If the two ever
- * disagree, one of them is summarising something it no longer reflects — which
+ * disagree, one of them is summarising something it no longer reflects â€” which
  * is the failure mode a stored progress column would have made permanent.
  *
  * Scope is the other half: a candidate's aggregate is filtered server-side, and
@@ -2274,7 +2306,7 @@ describe('GET /assessment-cases/progress', () => {
   /**
    * A case against an EXISTING tool. The tool is seeded once per test rather
    * than per case, because `assessment_tools_template_uq` allows exactly one
-   * tool per template — a second one would be a fixture that cannot exist.
+   * tool per template â€” a second one would be a fixture that cannot exist.
    */
   const openCase = async (base: string, toolId: string, candidateUserId = CANDIDATE, pathway = 'new') =>
     (await (
@@ -2329,7 +2361,7 @@ describe('GET /assessment-cases/progress', () => {
       const [row] = await dashboard(base);
 
       // The logbook is where the case has got to, and its hours are the ones
-      // the save route just totalled — not a separately tracked figure.
+      // the save route just totalled â€” not a separately tracked figure.
       expect(row?.currentPartKey).toBe('p3');
       expect(row?.currentPartLabel).toBe('Part 3 Logbook');
       const p3 = row?.parts.find((p) => p.key === 'p3');
@@ -2348,7 +2380,7 @@ describe('GET /assessment-cases/progress', () => {
     const { db, store } = makeDb();
     // One candidate, so the display name has somewhere to resolve from. The
     // fake's where-matching is a conjunction over bound values, so a
-    // multi-candidate lookup finds nothing — see the note at the top of this
+    // multi-candidate lookup finds nothing â€” see the note at the top of this
     // file. Scoping and hours are proven elsewhere; this pins the join.
     store.users!.push({ id: CANDIDATE, name: 'Dale Ferguson', email: 'dale@example.com' });
     mockDbValue = db;
@@ -2381,7 +2413,7 @@ describe('GET /assessment-cases/progress', () => {
       const mine = await dashboard(base, candidate);
       const all = await dashboard(base);
 
-      // Filtered in the query, not trimmed afterwards — the aggregate a
+      // Filtered in the query, not trimmed afterwards â€” the aggregate a
       // candidate receives was never computed over anyone else's attempts.
       expect(mine).toHaveLength(1);
       expect(mine[0]?.candidateUserId).toBe(CANDIDATE);
@@ -2463,7 +2495,7 @@ describe('GET /assessment-cases/progress', () => {
         detail.parts.map((p) => [p.key, p.state, p.latestOutcome, p.attempts]),
       );
       // And the part the dashboard calls current is the first the detail does
-      // not call satisfactory — the same rule, computed once.
+      // not call satisfactory â€” the same rule, computed once.
       expect(row?.currentPartKey).toBe(detail.parts.find((p) => p.state !== 'satisfactory')?.key);
     } finally {
       server.close();
@@ -2476,7 +2508,7 @@ describe('GET /assessment-cases/progress', () => {
     // that role and the customised matrix below is what denies them.
     (store.memberships!.find((m) => (m as { userId: string }).userId === ADMIN) as { role: string }).role = 'viewer';
     // Every shipped role may view assessments, so the denial has to come from a
-    // customised matrix — which is the real-world shape of it too: an org that
+    // customised matrix â€” which is the real-world shape of it too: an org that
     // has turned the category off for a role.
     store.rolePermissions!.push({
       id: nextId(),
@@ -2519,7 +2551,7 @@ describe('GET /assessment-cases/progress', () => {
 });
 
 /**
- * Signing a case off — the assessor's manual approval, and the last act of an
+ * Signing a case off â€” the assessor's manual approval, and the last act of an
  * assessment.
  *
  * Marking the final part reaches `awaiting_sign_off`, never `competent`. The
@@ -2577,13 +2609,13 @@ describe('POST /assessment-cases/:id/sign-off', () => {
     `unmetPrerequisites` changed from returning competency ids to returning
     {competencyId, reason}. Two call sites moved to `describeGap`; this one was
     interpolating the array straight into a template string, which does not
-    fail — it stringifies.
+    fail â€” it stringifies.
 
     It matters more than the two that were caught. Sign-off is the only place
     the person who ACTUALLY signs is checked: case creation checks whoever was
     named as assessor when it was opened, who need not be the same person. And
     these gaps are never written to the case, so this row is their only durable
-    record — the HTTP response carries them too, but that is a toast.
+    record â€” the HTTP response carries them too, but that is a toast.
   */
   it('names the competency in the audit trail when the signer is not qualified', async () => {
     const { db, store } = makeDb();
@@ -2746,7 +2778,7 @@ describe('POST /assessment-cases/:id/sign-off', () => {
     }
   });
 
-  it('is idempotent — a double tap does not restamp the approval time', async () => {
+  it('is idempotent â€” a double tap does not restamp the approval time', async () => {
     const { db, store } = makeDb();
     mockDbValue = db;
     const { server, base } = startApp();
@@ -2772,7 +2804,7 @@ describe('POST /assessment-cases/:id/sign-off', () => {
       The recompute runs on every outcome POST and derives state purely from the
       attempt rows. Without the signedOffAt conjunct, resolving anything
       afterwards would silently walk a certified case back down to
-      awaiting_sign_off — un-certifying someone who has been certified.
+      awaiting_sign_off â€” un-certifying someone who has been certified.
     */
     const { db, store } = makeDb();
     mockDbValue = db;
@@ -2803,7 +2835,7 @@ describe('POST /assessment-cases/:id/sign-off', () => {
     Passing puts the candidate on the register the product exists to maintain.
 
     `assessment_tools` declared what a candidate must BRING and what an assessor
-    must HOLD, but nothing naming what passing AWARDS — so a competent case
+    must HOLD, but nothing naming what passing AWARDS â€” so a competent case
     updated its own state and stopped. `competency_holders` could only ever be
     written by hand, and a prerequisite chain could never be built out of the
     product's own assessments.
@@ -2871,7 +2903,7 @@ describe('POST /assessment-cases/:id/sign-off', () => {
     mockDbValue = db;
     const { server, base } = startApp();
     try {
-      // readyCase seeds a tool with no awardedCompetencyIds — the default, and
+      // readyCase seeds a tool with no awardedCompetencyIds â€” the default, and
       // the state every existing tool is in.
       const c = await readyCase(base);
       await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
@@ -2932,7 +2964,7 @@ describe('submitting an attempt', () => {
       expect(res.status).toBe(200);
       expect(((await res.json()) as { submittedAt: string | null }).submittedAt).toBeTruthy();
 
-      // Visible to the assessor without opening the attempt — that IS the
+      // Visible to the assessor without opening the attempt â€” that IS the
       // signal, so it has to reach the case view.
       const detail = await fetch(`${base}/assessment-cases/${caseId}`, { headers: auth() });
       const body = (await detail.json()) as { attempts: { id: string; submittedAt: string | null }[] };
@@ -2954,7 +2986,7 @@ describe('submitting an attempt', () => {
         headers: auth(candidate),
         body: JSON.stringify({ values: { q1: ['a'] } }),
       });
-      // Otherwise "handed in" would mean nothing — the answers could keep
+      // Otherwise "handed in" would mean nothing â€” the answers could keep
       // moving while the assessor was reading them. On this fully-keyed part
       // the hand-in also MARKED the attempt, so the refusal is the stronger
       // one: resolved, not merely parked.
@@ -2983,7 +3015,7 @@ describe('submitting an attempt', () => {
       const { caseId, attemptId } = await openAttemptFor(base);
       await passTheory(base, caseId, attemptId);
 
-      // The candidate opens the practical THEMSELVES — the sequence has
+      // The candidate opens the practical THEMSELVES â€” the sequence has
       // authorised it, and waiting for an assessor to press the button was the
       // turnstile this removes.
       const opened = await fetch(`${base}/assessment-cases/${caseId}/parts/p2/attempts`, {
@@ -3015,7 +3047,7 @@ describe('submitting an attempt', () => {
   /*
     HAND-IN IS THE MARKING MOMENT ON A FULLY-KEYED PART. The arithmetic needs
     no judgement, so making it wait for an assessor to visit was pure queue
-    time — the candidate learns the result in the submit response, and
+    time â€” the candidate learns the result in the submit response, and
     everything sequenced behind the part unlocks the moment it is earned.
   */
   it('marks a fully-keyed part at hand-in and tells the candidate the result', async () => {
@@ -3035,7 +3067,7 @@ describe('submitting an attempt', () => {
       const body = (await res.json()) as { outcome?: string; caseState?: string };
       expect(body.outcome).toBe('satisfactory');
 
-      // The mark was made by nobody — automatic attribution, no name (U15).
+      // The mark was made by nobody â€” automatic attribution, no name (U15).
       const row = rows(store, 'assessmentPartAttempts').find((a) => a.id === attemptId);
       expect(row?.outcome).toBe('satisfactory');
       expect(row?.markerKind).toBe('automatic');
@@ -3059,7 +3091,7 @@ describe('submitting an attempt', () => {
       const res = await submit(base, caseId, attemptId);
       expect(((await res.json()) as { outcome?: string }).outcome).toBe('not_satisfactory');
 
-      // The candidate opens their own retry — no assessor in the loop — and
+      // The candidate opens their own retry â€” no assessor in the loop â€” and
       // the question they got RIGHT is already answered on it, while the one
       // they missed is blank.
       const retry = await fetch(`${base}/assessment-cases/${caseId}/parts/p1/attempts`, {
@@ -3110,7 +3142,7 @@ describe('submitting an attempt', () => {
       const attempt = (await attemptRes.json()) as { id: string };
       await passTheory(base, kase.id, attempt.id);
 
-      // p2 is unlocked, but the workflow says the ASSESSOR fills it — the
+      // p2 is unlocked, but the workflow says the ASSESSOR fills it â€” the
       // candidate opening it would put an empty row on someone else's step.
       const res = await fetch(`${base}/assessment-cases/${kase.id}/parts/p2/attempts`, {
         method: 'POST',
@@ -3126,7 +3158,7 @@ describe('submitting an attempt', () => {
   /*
     THE DECLARATION SHAPE (U-workflow): a workflow's `requires` replaces the
     printed sequence. Here p2 declares no dependencies at all, so it is open
-    from the start — the candidate does not wait for p1 even though it prints
+    from the start â€” the candidate does not wait for p1 even though it prints
     first.
   */
   it('lets requires override the printed order for what opens when', async () => {
@@ -3161,7 +3193,7 @@ describe('submitting an attempt', () => {
     }
   });
 
-  it('refuses to submit another candidate’s attempt, as not found', async () => {
+  it('refuses to submit another candidateâ€™s attempt, as not found', async () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
@@ -3224,7 +3256,7 @@ describe('submitting an attempt', () => {
     }
   });
 
-  it('is idempotent — submitting twice keeps the first hand-in time', async () => {
+  it('is idempotent â€” submitting twice keeps the first hand-in time', async () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
@@ -3244,10 +3276,10 @@ describe('submitting an attempt', () => {
  * The candidate's name on the case detail.
  *
  * Added for the evidence export's filename. Those PDFs get emailed and filed, so
- * a UUID in the name makes a document nobody can identify later — and the one
+ * a UUID in the name makes a document nobody can identify later â€” and the one
  * place it matters is an audit, months after the fact.
  */
-describe('GET /assessment-cases/:id — candidate name', () => {
+describe('GET /assessment-cases/:id â€” candidate name', () => {
   it('resolves the name for display and for the exported filename', async () => {
     const { db, store } = makeDb();
     store.users!.push({ id: CANDIDATE, name: 'Dale Ferguson', email: 'dale@example.com' });
@@ -3275,7 +3307,7 @@ describe('GET /assessment-cases/:id — candidate name', () => {
   });
 
   it('answers with an empty name rather than failing when the user row is gone', async () => {
-    // A deleted account must not make an existing case unreadable — the case is
+    // A deleted account must not make an existing case unreadable â€” the case is
     // the record, and it has to stay openable to be exported.
     const { db } = makeDb();
     mockDbValue = db;
@@ -3304,9 +3336,9 @@ describe('GET /assessment-cases/:id — candidate name', () => {
 
   The save route asked who owned the CASE and never what part the attempt was
   for, so any field id in the body was accepted. A candidate could open their
-  own theory attempt and post the practical's observation checklist — the
+  own theory attempt and post the practical's observation checklist â€” the
   criteria their assessor is meant to mark while watching them operate the
-  machine — and it would be stored against the case and merged into the
+  machine â€” and it would be stored against the case and merged into the
   evidence PDF.
 */
 describe('attempt writes are scoped to their part', () => {
@@ -3391,14 +3423,14 @@ describe('attempt writes are scoped to their part', () => {
     /*
       The fill screen seeds its state from the stored values and PATCHes the
       whole map back. Rejecting outright would permanently 403 any attempt
-      already carrying a stray key — and real data does, under keys the manifest
+      already carrying a stray key â€” and real data does, under keys the manifest
       never named.
     */
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
       const { caseId, attempt } = await openAttempt(base);
-      // Nothing stored under it, and nothing sent for it either — an echo of
+      // Nothing stored under it, and nothing sent for it either â€” an echo of
       // undefined is not a change.
       const res = await save(base, caseId, attempt.id, { q1: ['a'], 'log-table': undefined });
 
@@ -3413,12 +3445,12 @@ describe('attempt writes are scoped to their part', () => {
   AND ONLY WITH THE FIELDS THIS PARTY OWNS.
 
   Part scoping stopped a candidate writing ANOTHER part's checklist. It did not
-  stop them writing THIS part's — which is the case the customer described: the
+  stop them writing THIS part's â€” which is the case the customer described: the
   candidate fills nothing in a practical, but the practical is one part and its
   fields are all in it.
 
   The caller here IS the candidate (ADMIN opens the case, so these use a case
-  whose candidate is the caller) — that is what makes the party resolution the
+  whose candidate is the caller) â€” that is what makes the party resolution the
   thing under test rather than incidental.
 */
 describe('workflow ownership is enforced on an attempt', () => {
@@ -3534,9 +3566,9 @@ describe('workflow ownership is enforced on an attempt', () => {
       });
 
       const body = (await res.json()) as { fields: { id: string }[]; writableFieldIds: string[] };
-      // Visible — a candidate reads the standard they are held to…
+      // Visible â€” a candidate reads the standard they are held toâ€¦
       expect(body.fields.some((f) => f.id === 'q1')).toBe(true);
-      // …and cannot mark themselves against it.
+      // â€¦and cannot mark themselves against it.
       expect(body.writableFieldIds).toEqual([]);
     } finally {
       server.close();
@@ -3690,9 +3722,9 @@ describe('the pooled queue and unowned cases (U13)', () => {
     mockDbValue = db;
     const { server, base } = startApp();
     try {
-      // Default threshold is 14 → overdue.
+      // Default threshold is 14 â†’ overdue.
       expect((await queue(base)).find((c) => c.id === POOL_CASE)?.overdue).toBe(true);
-      // Raise the threshold past its age → no longer overdue, with no case write.
+      // Raise the threshold past its age â†’ no longer overdue, with no case write.
       (rows(store, 'organizations')[0] as { pooledCaseOverdueDays?: number }).pooledCaseOverdueDays = 60;
       expect((await queue(base)).find((c) => c.id === POOL_CASE)?.overdue).toBe(false);
     } finally {
@@ -3703,7 +3735,7 @@ describe('the pooled queue and unowned cases (U13)', () => {
   it('excludes from an appeal whoever recorded a part on the pooled case (R61, R62)', async () => {
     const { db, store } = makeDb();
     seedPooled(store);
-    // ADMIN recorded a part on the pooled case — so ADMIN is not independent.
+    // ADMIN recorded a part on the pooled case â€” so ADMIN is not independent.
     rows(store, 'assessmentPartAttempts').push({
       id: '00000000-0000-4000-8000-0000000000c9',
       orgId: ORG,
@@ -3887,7 +3919,7 @@ describe('appeal independence covers the sign-off assessor (U13 review fix)', ()
       departmentId: null,
     });
     // Pooled (no named assessor), self-marked (no person attempts), but SIGNED
-    // OFF by ADMIN — who is therefore not independent of it.
+    // OFF by ADMIN â€” who is therefore not independent of it.
     rows(store, 'assessmentCases').push({
       id: POOL_CASE,
       orgId: ORG,
@@ -3917,3 +3949,312 @@ describe('appeal independence covers the sign-off assessor (U13 review fix)', ()
     }
   });
 });
+
+// â”€â”€ republishing a revision â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+describe('POST /assessment-tools/:id/republish', () => {
+  const DRAFT_VERSION = '00000000-0000-4000-8000-000000000003';
+
+  function seedDraftVersion(
+    store: Record<string, Record<string, unknown>[]>,
+    fields: FormField[] = FIELDS,
+  ) {
+    rows(store, 'formTemplateVersions').push({
+      id: DRAFT_VERSION,
+      templateId: TEMPLATE,
+      fields,
+      state: 'draft',
+      versionLabel: 'v2',
+    });
+  }
+
+  function republishBodyFor(over: Record<string, unknown> = {}) {
+    return JSON.stringify({
+      versionId: DRAFT_VERSION,
+      seededFromVersionId: VERSION,
+      fields: FIELDS,
+      manifest: MANIFEST,
+      ...over,
+    });
+  }
+
+  it('publishes the draft version and updates the tool in one call', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      // Admin config the create path zeroes, set after creation â€” a revision
+      // must not reset it.
+      Object.assign(rows(store, 'assessmentTools')[0]!, {
+        departmentId: DEPT_OPS,
+        locationPartKeys: { [MINING]: ['p1'] },
+      });
+      // The revision draft whose slot the republish frees.
+      rows(store, 'assessmentToolDrafts').push({
+        id: '00000000-0000-4000-8000-0000000000dd',
+        orgId: ORG,
+        name: 'Track Dozer - v2',
+        revisionOfToolId: tool.id,
+      });
+      seedDraftVersion(store);
+
+      const res = await fetch(`${base}/assessment-tools/${tool.id}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        body: republishBodyFor({
+          manifest: { ...MANIFEST, candidateNameFieldId: 'q-mining' },
+          revisionIdentity: { code: 'Rev 3', reviewedOn: '08/2026', note: 'Annual review' },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const version = rows(store, 'formTemplateVersions').find((v) => v.id === DRAFT_VERSION)!;
+      expect(version.state).toBe('published');
+      expect((version.revisionIdentity as { code?: string }).code).toBe('Rev 3');
+      const template = rows(store, 'formTemplates')[0]!;
+      expect(template.currentVersionId).toBe(DRAFT_VERSION);
+      const toolRow = rows(store, 'assessmentTools')[0]!;
+      // Manifest replaced, admin config preserved.
+      expect((toolRow.manifest as { candidateNameFieldId?: string }).candidateNameFieldId).toBe('q-mining');
+      expect(toolRow.departmentId).toBe(DEPT_OPS);
+      expect(toolRow.locationPartKeys).toEqual({ [MINING]: ['p1'] });
+      // The one-revision-per-tool slot is freed.
+      expect(rows(store, 'assessmentToolDrafts')).toHaveLength(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('AE3: an open case keeps its pinned version; only the template pointer moves', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      seedDraftVersion(store);
+      rows(store, 'assessmentCases').push({
+        id: '00000000-0000-4000-8000-0000000000c1',
+        orgId: ORG,
+        toolId: tool.id,
+        candidateUserId: CANDIDATE,
+        currentVersionId: VERSION,
+        state: 'open',
+        pathway: 'new',
+      });
+
+      const res = await fetch(`${base}/assessment-tools/${tool.id}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        body: republishBodyFor(),
+      });
+
+      expect(res.status).toBe(200);
+      const openCase = rows(store, 'assessmentCases')[0]!;
+      expect(openCase.currentVersionId).toBe(VERSION);
+      expect(rows(store, 'formTemplates')[0]!.currentVersionId).toBe(DRAFT_VERSION);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses stale_revision when somebody published after the revision was seeded', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      seedDraftVersion(store);
+
+      const res = await fetch(`${base}/assessment-tools/${tool.id}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        // Seeded from a version that is no longer current.
+        body: republishBodyFor({ seededFromVersionId: DRAFT_VERSION }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('stale_revision');
+      expect(rows(store, 'formTemplateVersions').find((v) => v.id === DRAFT_VERSION)!.state).toBe('draft');
+      expect(rows(store, 'formTemplates')[0]!.currentVersionId).toBe(VERSION);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('R16: refuses open_cases_incompatible naming the case a new manifest would dangle against', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      // The revised document adds a section, and the new manifest anchors a
+      // part to it â€” valid against the draft version, dangling against the
+      // open case pinned to the old one.
+      const revisedFields = [...FIELDS, header('h-new')];
+      seedDraftVersion(store, revisedFields);
+      const caseId = '00000000-0000-4000-8000-0000000000c2';
+      rows(store, 'assessmentCases').push({
+        id: caseId,
+        orgId: ORG,
+        toolId: tool.id,
+        candidateUserId: CANDIDATE,
+        currentVersionId: VERSION,
+        state: 'open',
+        pathway: 'new',
+      });
+      const newManifest = {
+        ...MANIFEST,
+        parts: [
+          ...MANIFEST.parts,
+          {
+            key: 'p5',
+            ordinal: 5,
+            label: 'Part 5 New',
+            kind: 'practical',
+            pathways: ['new'],
+            startFieldId: 'h-new',
+          },
+        ],
+      };
+
+      const res = await fetch(`${base}/assessment-tools/${tool.id}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        body: republishBodyFor({ fields: revisedFields, manifest: newManifest }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string; cases: Array<{ id: string }> };
+      expect(body.error).toBe('open_cases_incompatible');
+      expect(body.cases.map((c) => c.id)).toEqual([caseId]);
+      expect(rows(store, 'formTemplateVersions').find((v) => v.id === DRAFT_VERSION)!.state).toBe('draft');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a manifest that orphans a Location parts rule, naming the part', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      Object.assign(rows(store, 'assessmentTools')[0]!, {
+        locationPartKeys: { [MINING]: ['p4'] },
+      });
+      seedDraftVersion(store);
+      // A revised manifest that drops p4 while the Mining rule still names it.
+      const trimmed = { ...MANIFEST, parts: MANIFEST.parts.slice(0, 3) };
+
+      const res = await fetch(`${base}/assessment-tools/${tool.id}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        body: republishBodyFor({ manifest: trimmed }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; problems: string[] };
+      expect(body.error).toBe('invalid_manifest');
+      expect(body.problems.join(' ')).toContain('p4');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('rolls back the version publish when the tool update fails', async () => {
+    const { db, store } = makeDb({ failToolUpdate: true });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // Seed the tool row directly - seedTool would also hit the forced failure.
+      rows(store, 'assessmentTools').push({
+        id: '00000000-0000-4000-8000-0000000000e1',
+        orgId: ORG,
+        templateId: TEMPLATE,
+        name: 'Track Dozer',
+        manifest: MANIFEST,
+        locationPartKeys: {},
+      });
+      const toolId = rows(store, 'assessmentTools')[0]!.id as string;
+      rows(store, 'assessmentToolDrafts').push({
+        id: '00000000-0000-4000-8000-0000000000de',
+        orgId: ORG,
+        name: 'Track Dozer - v2',
+        revisionOfToolId: toolId,
+      });
+      seedDraftVersion(store);
+
+      const res = await fetch(`${base}/assessment-tools/${toolId}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        body: republishBodyFor(),
+      });
+
+      expect(res.status).toBe(500);
+      // Nothing partially applied: version still draft, pointer unmoved,
+      // revision draft still occupying its slot.
+      expect(rows(store, 'formTemplateVersions').find((v) => v.id === DRAFT_VERSION)!.state).toBe('draft');
+      expect(rows(store, 'formTemplates')[0]!.currentVersionId).toBe(VERSION);
+      expect(rows(store, 'assessmentToolDrafts')).toHaveLength(1);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses an already-published version and a version of another template', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      seedDraftVersion(store);
+
+      Object.assign(rows(store, 'formTemplateVersions').find((v) => v.id === VERSION)!, { state: 'published' });
+      const published = await fetch(`${base}/assessment-tools/${tool.id}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        body: republishBodyFor({ versionId: VERSION }),
+      });
+      expect(published.status).toBe(409);
+      expect(((await published.json()) as { error: string }).error).toBe('version_already_published');
+
+      const foreign = await fetch(`${base}/assessment-tools/${tool.id}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        body: republishBodyFor({ versionId: '00000000-0000-4000-8000-0000000000ff' }),
+      });
+      expect(foreign.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a role that cannot author, and caps identity field lengths', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      seedDraftVersion(store);
+
+      const denied = await fetch(`${base}/assessment-tools/${tool.id}/republish`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: republishBodyFor(),
+      });
+      expect(denied.status).toBe(403);
+
+      const oversized = await fetch(`${base}/assessment-tools/${tool.id}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        body: republishBodyFor({ revisionIdentity: { note: 'x'.repeat(2001) } }),
+      });
+      expect(oversized.status).toBe(400);
+      expect(((await oversized.json()) as { error: string }).error).toBe('invalid_request');
+    } finally {
+      server.close();
+    }
+  });
+});
+

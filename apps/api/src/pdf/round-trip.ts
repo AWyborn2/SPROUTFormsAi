@@ -344,6 +344,29 @@ export interface RoundTripInput {
   originalPdf: Uint8Array;
   fields: FormField[];
   values: Record<string, SubmissionValue>;
+  /**
+   * The paper document's revision identity, drawn once as a small line at the
+   * very bottom edge of page 1 — below any printed content, where auditors
+   * expect a document-control mark. Absent on plain forms and on versions
+   * that predate revisions, which export exactly as before.
+   */
+  revisionIdentity?: { code?: string; reviewedOn?: string; note?: string } | null;
+}
+
+/**
+ * The identity line's text — "Rev 3 (reviewed 08/2026) — Annual review", or
+ * whichever of the three parts exist. Empty when none do, so the caller can
+ * skip drawing entirely.
+ */
+export function revisionIdentityLine(identity: {
+  code?: string;
+  reviewedOn?: string;
+  note?: string;
+}): string {
+  const head = [identity.code, identity.reviewedOn ? `(reviewed ${identity.reviewedOn})` : '']
+    .filter(Boolean)
+    .join(' ');
+  return [head, identity.note].filter(Boolean).join(' — ');
 }
 
 /**
@@ -355,6 +378,7 @@ export async function roundTripExport({
   originalPdf,
   fields,
   values,
+  revisionIdentity,
 }: RoundTripInput): Promise<Uint8Array> {
   const doc = await PDFDocument.load(originalPdf);
   const font = await doc.embedFont(StandardFonts.Helvetica);
@@ -604,6 +628,24 @@ export async function roundTripExport({
       color: INK,
       maxWidth: Math.max(20, pos.width - 6),
     });
+  }
+
+  /*
+    The revision identity, at the very bottom edge of page 1. 6pt at y=3 sits
+    below any printed margin, so it cannot overlap a mapped box; the width is
+    truncated to the page rather than wrapped, because a wrapped footer would
+    climb into content on a certified record.
+  */
+  const identityText = revisionIdentity ? revisionIdentityLine(revisionIdentity) : '';
+  if (identityText && pages[0]) {
+    const page = pages[0];
+    const size = 6;
+    const maxWidth = page.getWidth() - 12;
+    let text = winAnsiSafe(identityText);
+    while (text.length > 1 && font.widthOfTextAtSize(text, size) > maxWidth) {
+      text = `${text.slice(0, -4)}...`;
+    }
+    page.drawText(text, { x: 6, y: 3, size, font, color: INK });
   }
 
   return doc.save();

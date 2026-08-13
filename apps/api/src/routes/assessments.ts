@@ -45,6 +45,7 @@ import {
   unplacedMarkDestinations,
   validateAnswerKeys,
   validateManifest,
+  REVISION_IDENTITY_LIMITS,
   type AssessmentPart,
   type AssessmentPathway,
   type AssessmentToolManifest,
@@ -704,6 +705,253 @@ assessmentToolsRouter.post(
     });
 
     res.status(201).json({ id: row.id, name: row.name, templateId: row.templateId });
+  }),
+);
+
+/*
+  The manifest as a REVISION sends it back. `toolBody.manifest` names what the
+  builder authors at create; a revised tool's manifest additionally carries the
+  workflow-editor properties added after creation (`profilePrefill`,
+  `prerequisiteChecks`, `fieldDefaults`). They must be NAMED here — an unlisted
+  manifest property is silently STRIPPED, and a republish that appeared to keep
+  the prefill would publish a tool that lost it.
+*/
+const republishManifestSchema = toolBody.shape.manifest.extend({
+  profilePrefill: z.record(z.string(), z.enum(PROFILE_PREFILL_KEYS)).optional(),
+  prerequisiteChecks: z
+    .array(z.object({ fieldId: z.string().min(1), competencyId: z.string().min(1) }))
+    .optional(),
+  fieldDefaults: z.record(z.string(), z.unknown()).optional(),
+});
+
+const republishBody = z.object({
+  /** The revision's DRAFT version — published by this call. */
+  versionId: z.string().uuid(),
+  /**
+   * The version the revision was seeded from. Refused (`stale_revision`) when
+   * it no longer matches the template's current version — a revision of v1
+   * must not silently discard a v2 somebody else published in between.
+   */
+  seededFromVersionId: z.string().uuid(),
+  /** The resolved fields (keys + outcome links applied) to freeze into the version. */
+  fields: z.array(z.custom<FormField>()),
+  manifest: republishManifestSchema,
+  name: z.string().min(1).optional(),
+  /** The paper document's revision identity, recorded on the published version. */
+  revisionIdentity: z
+    .object({
+      code: z.string().max(REVISION_IDENTITY_LIMITS.code).optional(),
+      reviewedOn: z.string().max(REVISION_IDENTITY_LIMITS.reviewedOn).optional(),
+      note: z.string().max(REVISION_IDENTITY_LIMITS.note).optional(),
+    })
+    .strict()
+    .optional(),
+});
+
+/**
+ * Publish a REVISION of an existing tool: one transaction that freezes the
+ * revised draft version and updates the tool's manifest together.
+ *
+ * This exists because the create route cannot run twice (one tool per
+ * template, enforced by `assessment_tools_template_uq`) and the PATCH cannot
+ * carry a new parts manifest — so before this, a published version with a
+ * stale tool was one failed client call away. Everything the create path
+ * would zero (`departmentId`, `locationPartKeys`, competency and prerequisite
+ * columns) is deliberately untouched here: a revision changes the document,
+ * not the tool's admin configuration.
+ *
+ * Guard order is the contract: staleness, then field validation, then
+ * open-case compatibility (R16) — an open case finishes on its pinned version
+ * and reads THIS tool's one manifest against those pinned fields, so a
+ * manifest that would dangle against any open case is refused, never
+ * published-then-broken.
+ */
+assessmentToolsRouter.post(
+  '/:id/republish',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    // Both doors this call opens, gated alike: it publishes a version
+    // (forms.edit, same as the per-version publish endpoint) and it rewrites
+    // the tool (assessments.create, same as the create path).
+    if (!(await hasPermission(tenant, 'forms', 'edit')) || !(await hasPermission(tenant, 'assessments', 'create'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = republishBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tool = await loadTool(db, req.params.id!, tenant.orgId);
+    if (!tool) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const template = await db.query.formTemplates.findFirst({
+      where: and(
+        eq(schema.formTemplates.id, tool.templateId),
+        eq(schema.formTemplates.orgId, tenant.orgId),
+      ),
+    });
+    if (!template) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const version = await db.query.formTemplateVersions.findFirst({
+      where: and(
+        eq(schema.formTemplateVersions.id, parsed.data.versionId),
+        eq(schema.formTemplateVersions.templateId, template.id),
+      ),
+    });
+    if (!version) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (version.state === 'published') {
+      res.status(409).json({ error: 'version_already_published' });
+      return;
+    }
+    if (parsed.data.seededFromVersionId !== template.currentVersionId) {
+      // Somebody published after this revision was seeded. Surface who and
+      // when so the author can judge, and stop — retrying cannot succeed.
+      const current = template.currentVersionId
+        ? await db.query.formTemplateVersions.findFirst({
+            where: eq(schema.formTemplateVersions.id, template.currentVersionId),
+          })
+        : undefined;
+      const publisher = current?.publishedBy
+        ? await db.query.users.findFirst({ where: eq(schema.users.id, current.publishedBy) })
+        : undefined;
+      res.status(409).json({
+        error: 'stale_revision',
+        currentVersionLabel: current?.versionLabel ?? null,
+        publishedAt: current?.publishedAt ? current.publishedAt.toISOString() : null,
+        publishedByName: publisher?.name ?? null,
+      });
+      return;
+    }
+
+    const manifest = parsed.data.manifest as AssessmentToolManifest;
+    const { fields } = parsed.data;
+    const { problems: workflowProblems } = validateWorkflow(workflowOf(manifest, fields), manifest, fields);
+    const problems = [
+      ...validateManifest(manifest, fields),
+      ...validateAnswerKeys(fields),
+      ...workflowProblems,
+      ...validateProfilePrefill(manifest.profilePrefill, fields),
+      ...validatePrerequisiteChecks(manifest.prerequisiteChecks, fields),
+    ];
+    // A Location rule naming a part the revised manifest no longer declares
+    // would silently dangle — the rule's own PATCH validates against the
+    // manifest, so the manifest changing owes the rule the same check.
+    const partKeys = new Set(orderedParts(manifest).map((p) => p.key));
+    for (const [locationId, keys] of Object.entries(tool.locationPartKeys ?? {})) {
+      for (const key of keys) {
+        if (!partKeys.has(key)) {
+          problems.push(
+            `Location rule ${locationId} requires part "${key}", which the revised manifest no longer declares`,
+          );
+        }
+      }
+    }
+    if (problems.length > 0) {
+      res.status(400).json({ error: 'invalid_manifest', problems });
+      return;
+    }
+
+    // R16: this tool has ONE manifest, and every open case reads it against
+    // the case's PINNED version fields. Refuse a manifest that would dangle
+    // against any of them — the open case finishes on its pinned version.
+    const cases = await db.query.assessmentCases.findMany({
+      where: and(
+        eq(schema.assessmentCases.toolId, tool.id),
+        eq(schema.assessmentCases.orgId, tenant.orgId),
+      ),
+    });
+    const openCases = cases.filter((c) => !isTerminalCaseState(c.state as AssessmentCaseState));
+    const fieldsByVersion = new Map<string, FormField[]>();
+    const incompatible: Array<{ id: string; candidateUserId: string; versionId: string; problems: string[] }> = [];
+    for (const openCase of openCases) {
+      let pinnedFields = fieldsByVersion.get(openCase.currentVersionId);
+      if (!pinnedFields) {
+        pinnedFields = await fieldsForVersion(db, openCase.currentVersionId);
+        fieldsByVersion.set(openCase.currentVersionId, pinnedFields);
+      }
+      const caseProblems = validateManifest(manifest, pinnedFields);
+      if (caseProblems.length > 0) {
+        incompatible.push({
+          id: openCase.id,
+          candidateUserId: openCase.candidateUserId,
+          versionId: openCase.currentVersionId,
+          problems: caseProblems,
+        });
+      }
+    }
+    if (incompatible.length > 0) {
+      res.status(409).json({ error: 'open_cases_incompatible', cases: incompatible });
+      return;
+    }
+
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.formTemplateVersions)
+        .set({
+          fields,
+          revisionIdentity: parsed.data.revisionIdentity ?? null,
+          state: 'published',
+          publishedAt: now,
+          publishedBy: tenant.userId,
+        })
+        .where(eq(schema.formTemplateVersions.id, version.id));
+      // Publishing on an archived template restores it — same deliberate
+      // behaviour as the per-version publish endpoint; the web layer warns.
+      await tx
+        .update(schema.formTemplates)
+        .set({ currentVersionId: version.id, status: 'published', updatedAt: now })
+        .where(eq(schema.formTemplates.id, template.id));
+      await tx
+        .update(schema.assessmentTools)
+        .set({
+          manifest,
+          ...(parsed.data.name ? { name: parsed.data.name } : {}),
+        })
+        .where(eq(schema.assessmentTools.id, tool.id));
+      // The revision shipped — free the one-revision-per-tool slot so next
+      // year's review seeds fresh instead of 409ing at a published draft.
+      await tx
+        .delete(schema.assessmentToolDrafts)
+        .where(
+          and(
+            eq(schema.assessmentToolDrafts.orgId, tenant.orgId),
+            eq(schema.assessmentToolDrafts.revisionOfToolId, tool.id),
+          ),
+        );
+    });
+
+    await recordAudit(db, tenant, {
+      action: 'Republished assessment tool',
+      target: `${parsed.data.name ?? tool.name} ${version.versionLabel}${
+        parsed.data.revisionIdentity?.note ? ` — ${parsed.data.revisionIdentity.note}` : ''
+      }`,
+      category: 'forms',
+      icon: 'rocket',
+    });
+
+    res.json({
+      id: tool.id,
+      templateId: tool.templateId,
+      versionId: version.id,
+      versionLabel: version.versionLabel,
+      // The same unplaced-box audit create-time publishing surfaces — a
+      // warning, never a gate (R8).
+      warnings: unplacedMarkDestinations(manifest, fields),
+    });
   }),
 );
 
@@ -2667,6 +2915,9 @@ assessmentCasesRouter.post(
       const out = await exportCasePdf({
         originalPdf: original,
         fields: (version.fields ?? []) as FormField[],
+        // The PINNED version's paper identity — a case that finished on Rev 2
+        // keeps printing Rev 2 after a Rev 3 republishes.
+        revisionIdentity: version.revisionIdentity ?? null,
         manifest: tool.manifest,
         pathway: row.pathway as AssessmentPathway,
         locationStream: exportLocationName,

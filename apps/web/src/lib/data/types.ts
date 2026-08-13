@@ -56,6 +56,8 @@ export interface FormVersionSummary {
   publishedAt: string;
   publishedBy: string;
   note?: string;
+  /** The paper document's own revision identity — set by assessment-tool revisions. */
+  revisionIdentity?: { code?: string; reviewedOn?: string; note?: string };
 }
 
 /** Full template detail incl. the fields of the current version (builder/fill). */

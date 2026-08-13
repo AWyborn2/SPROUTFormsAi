@@ -2206,3 +2206,40 @@ describe('roundTripExport — the five glyphs that used to be ignored', () => {
     expect(strokes(bytes).length).toBeGreaterThan(strokes(plain).length);
   });
 });
+
+// ── the revision identity line ──────────────────────────────────────────────
+
+describe('revision identity line', () => {
+  it('draws the pinned identity at the very foot of page 1', async () => {
+    const original = await makeFlatPdf();
+    const out = await roundTripExport({
+      originalPdf: original,
+      fields: [],
+      values: {},
+      revisionIdentity: { code: 'Rev 3', reviewedOn: '08/2026', note: 'Annual review' },
+    });
+
+    // AE4: the document-control identity the auditors recognise is on the page.
+    expect(bytesInclude(out, 'Rev 3 (reviewed 08/2026)')).toBe(true);
+    expect(bytesInclude(out, 'Annual review')).toBe(true);
+    // Below any printed margin - it cannot sit over a mapped box.
+    const line = drawnGlyphs(out).find((g) => g.text.includes('Rev 3'));
+    expect(line).toBeDefined();
+    expect(line!.y).toBeLessThan(10);
+  });
+
+  it('AE1: a version without one exports exactly as before', async () => {
+    const original = await makeFlatPdf();
+    const without = await roundTripExport({ originalPdf: original, fields: [], values: {} });
+    const withEmpty = await roundTripExport({
+      originalPdf: original,
+      fields: [],
+      values: {},
+      revisionIdentity: {},
+    });
+    // No identity and an empty identity both draw nothing.
+    expect(bytesInclude(without, 'reviewed')).toBe(false);
+    expect(bytesInclude(withEmpty, 'reviewed')).toBe(false);
+    expect(drawnGlyphs(without)).toEqual(drawnGlyphs(withEmpty));
+  });
+});
