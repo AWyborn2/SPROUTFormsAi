@@ -821,6 +821,38 @@ export function useBuilderDraftState({
   }, []);
 
   /*
+    ONE ATOMIC APPLY, because a field id is referenced from four pieces of state.
+
+    Each operation is computed once from the CURRENT values and then written to
+    all four. Four independent functional updates would each see the others
+    stale — and a delete that removed the field but not its answer key produces a
+    manifest that fails at publish, naming a field the author can no longer see.
+    `builder-fields.ts` makes the half-done version unexpressible; this keeps it
+    that way through React state.
+
+    ITS IDENTITY CHANGES WITH THE DRAFT, deliberately — it reads the slices
+    from closure — so every memo that calls it MUST list it as a dependency.
+    `structureOps.duplicate` shipped without that and ran against the draft as
+    it stood at mount: the second duplicate minted the same added-N ids and
+    section key as the first and silently reverted every edit in between.
+  */
+  const applyFieldEdit = useCallback(
+    (edit: (state: {
+      fields: FormField[];
+      structure: BuilderStructure;
+      keys: DraftAnswerKey[];
+      excluded: Set<string>;
+    }) => ReturnType<typeof deleteField>) => {
+      const next = edit({ fields, structure, keys, excluded });
+      setFields(next.fields);
+      setStructure(next.structure);
+      setKeys(next.keys);
+      setExcluded(next.excluded);
+    },
+    [fields, structure, keys, excluded],
+  );
+
+  /*
     Every structure edit is a pure function applied to current state.
 
     Each operation returns the SAME array when it changes nothing, so a
@@ -864,7 +896,9 @@ export function useBuilderDraftState({
       setFieldType: setFieldTypeAndClearKey,
       reset: () => setStructure(extraction ? structureFromExtraction(extraction) : []),
     }),
-    [extraction, groupCount, setFieldTypeAndClearKey],
+    // applyFieldEdit is a real dependency: `duplicate` reads the whole draft
+    // through it. Omitting it froze `duplicate` on the state at mount.
+    [extraction, groupCount, setFieldTypeAndClearKey, applyFieldEdit],
   );
 
   const setAssessorVerdict = useCallback((fieldId: string, verdict: boolean) => {
@@ -983,32 +1017,6 @@ export function useBuilderDraftState({
       },
     }),
     [setAssessorVerdict],
-  );
-
-  /*
-    ONE ATOMIC APPLY, because a field id is referenced from four pieces of state.
-
-    Each operation is computed once from the CURRENT values and then written to
-    all four. Four independent functional updates would each see the others
-    stale — and a delete that removed the field but not its answer key produces a
-    manifest that fails at publish, naming a field the author can no longer see.
-    `builder-fields.ts` makes the half-done version unexpressible; this keeps it
-    that way through React state.
-  */
-  const applyFieldEdit = useCallback(
-    (edit: (state: {
-      fields: FormField[];
-      structure: BuilderStructure;
-      keys: DraftAnswerKey[];
-      excluded: Set<string>;
-    }) => ReturnType<typeof deleteField>) => {
-      const next = edit({ fields, structure, keys, excluded });
-      setFields(next.fields);
-      setStructure(next.structure);
-      setKeys(next.keys);
-      setExcluded(next.excluded);
-    },
-    [fields, structure, keys, excluded],
   );
 
   const fieldOps = useMemo<FieldOps>(
