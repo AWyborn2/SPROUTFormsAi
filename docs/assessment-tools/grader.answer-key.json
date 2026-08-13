@@ -1,0 +1,139 @@
+{
+  "_meta": {
+    "assessmentTool": "Authorised to Operate Grader",
+    "documentControl": "WAPL-Business-CD-200000221",
+    "documentVersion": "3.0",
+    "deployed": "2025-12-30",
+    "preparedFrom": [
+      "BBM Grader Manual (01016930)",
+      "Authorised to Operate Grader assessment tool (candidate-supplied PDF)"
+    ],
+    "unverifiedSources": [
+      "Mine Site SME Operating Manual (00117938) — referenced by the assessment tool but not supplied"
+    ],
+    "notes": [
+      "Marking is exact-set-match: the candidate must select every listed answer and nothing else.",
+      "Questions 6, 7, 8, 10, 11, 14, 15 are not explicitly answered in the supplied BBM Grader Manual text and have been inferred from standard mine-site SME practice and internal consistency with the rest of the assessment. These are flagged verified:false and should be checked by the training authority/SME before use.",
+      "Question 14 (blade angle range) is inferred from the manual's statement that the mouldboard is 'usually angled at 75 degrees from the centreline of the frame' — the only offered range containing 75° is 30-90°.",
+      "SENSITIVE: this file is the complete answer key to a safety-critical assessment. Repository read access is answer access. The API strips answerKey from every fill-surface payload (stripMarkingSecrets), but this source file's audience should be authoring staff only.",
+      "TEMPORARY HOME: once answer-guide upload at PDF import exists, this file moves out of git and lives only in the database."
+    ],
+    "verifiedBy": "Not yet verified by a training authority — pending SME sign-off",
+    "verifiedOn": null
+  },
+  "sections": {
+    "general": {
+      "mandatory": true,
+      "questions": [
+        {
+          "n": 1,
+          "answers": ["a"],
+          "verified": true,
+          "note": "True — isolate with hasp and personnel lock before entering the grader footprint."
+        },
+        {
+          "n": 2,
+          "answers": ["a"],
+          "verified": true,
+          "note": "True — three points of contact to access/egress."
+        },
+        {
+          "n": 3,
+          "answers": ["d"],
+          "verified": true,
+          "note": "All the above."
+        },
+        {
+          "n": 4,
+          "answers": ["c"],
+          "verified": true,
+          "note": "Do not operate the grader and report the tag to pit control."
+        },
+        {
+          "n": 5,
+          "answers": ["a"],
+          "verified": true,
+          "note": "True — 40m exclusion zone applies (Grader Manual s8.2)."
+        },
+        {
+          "n": 6,
+          "answers": ["a"],
+          "verified": false,
+          "note": "True — coolant/hydraulic oil sight glass check; not explicit in the supplied manual, inferred from standard prestart practice. Confirm with SME."
+        },
+        {
+          "n": 7,
+          "answers": ["b"],
+          "verified": false,
+          "note": "False — the specific brake-test procedure described does not match standard OEM brake-test method; flagged for SME confirmation against the CAT 16M OMM."
+        },
+        {
+          "n": 8,
+          "answers": ["a"],
+          "verified": true,
+          "note": "True — brake tests are part of the prestart routine."
+        },
+        {
+          "n": 9,
+          "answers": ["e"],
+          "verified": true,
+          "note": "All of the above."
+        },
+        {
+          "n": 10,
+          "answers": ["b"],
+          "verified": false,
+          "note": "False — overtaking is only acceptable via positive two-way communication, not simply 'acceptable'. Confirm against Mine Site Drivers Permit Manual."
+        },
+        {
+          "n": 11,
+          "answers": ["a"],
+          "verified": false,
+          "note": "True — positive two-way communication is the required method to respond to overtaking requests. Confirm against Mine Site Drivers Permit Manual."
+        },
+        {
+          "n": 12,
+          "answers": ["a"],
+          "verified": true,
+          "note": "True — excessive downward pressure on dry hard surfaces causes rapid cutting-edge wear."
+        },
+        {
+          "n": 13,
+          "answers": ["d"],
+          "verified": true,
+          "note": "All of these answers are correct."
+        },
+        {
+          "n": 14,
+          "answers": ["d"],
+          "verified": false,
+          "note": "30 to 90 degrees — Grader Manual s12.1 states the mouldboard is usually angled at 75 degrees from the centreline, the only offered range that contains 75°. Confirm with SME."
+        },
+        {
+          "n": 15,
+          "answers": ["a"],
+          "verified": false,
+          "note": "True — grader steering is hydraulically driven (standard OEM fact, not explicit in supplied manual)."
+        },
+        {
+          "n": 16,
+          "answers": ["e"],
+          "verified": true,
+          "note": "All of these answers are correct."
+        }
+      ]
+    }
+  },
+  "practicalAssessorReference": [
+    "Isolation: hasp and personnel lock before entering the footprint; visually confirm the boarding ladder lifts as a backup to the interlock.",
+    "Access/egress: three points of contact at all times.",
+    "Start-up: do not idle more than 20 minutes; horn twice before moving off.",
+    "Moving off: 40m exclusion zone clear; blade raised ~400mm; ripper raised to full height; park brake released only after all safety checks pass.",
+    "Downhill travel: transmission preselected to 4th gear or lower for engine-assisted braking; never descend in 5th gear or higher.",
+    "Ripper: apply differential lock first; do not use the ripper while turning or articulating.",
+    "Mouldboard: usually angled at 75 degrees from the centreline; tilt forward for aggressive cutting, backward to carry material.",
+    "Crowning: standard road crown 3%, standard cross fall/super elevation 8%.",
+    "Float loading: spotter positions between goose neck and float access step; isolate with lock and hasp before entering the footprint to apply the articulation locking bar; four wheel chocks secured with chained D-shackles at 45 degrees.",
+    "Incident in the work area: stop work, call supervisor, gather evidence; never attempt self-recovery if bogged or bellied — JHA required first."
+  ]
+}

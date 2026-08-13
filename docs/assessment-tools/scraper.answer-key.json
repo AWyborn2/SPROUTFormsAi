@@ -1,0 +1,194 @@
+{
+  "_meta": {
+    "assessmentTool": "Authority to Operate Scraper",
+    "documentControl": "WAPL-Business-CD-200000214",
+    "documentVersion": "4.0",
+    "deployed": "2026-01-01",
+    "preparedFrom": [
+      "BBM Motor Scraper Operations Manual (00118739)",
+      "Authority to Operate Scraper assessment tool (candidate-supplied PDF)"
+    ],
+    "unverifiedSources": [
+      "Mine Site SME Operating Manual (00117938) — referenced by the assessment tool but not supplied",
+      "Mine Site Drivers Permit Manual (00120014) — referenced by the assessment tool but not supplied"
+    ],
+    "notes": [
+      "Marking is exact-set-match: the candidate must select every listed answer and nothing else.",
+      "This scraper has two engines (front and rear) — Q1 isolation requires lock/hasp on BOTH engines, not one.",
+      "Several questions (3, 6, 10, 12, 13, 16, 21, 25) touch mechanical specifics (fault categories, brake-test RPM/gear, retarder function, diff lock, prestart categories) not explicitly covered in the supplied Operations Manual — these are inferred from the Grader Manual's parallel conventions and general SME practice, flagged verified:false, and should be checked by the training authority/SME before use.",
+      "SENSITIVE: this file is the complete answer key to a safety-critical assessment. Repository read access is answer access. The API strips answerKey from every fill-surface payload (stripMarkingSecrets), but this source file's audience should be authoring staff only.",
+      "TEMPORARY HOME: once answer-guide upload at PDF import exists, this file moves out of git and lives only in the database."
+    ],
+    "verifiedBy": "Not yet verified by a training authority — pending SME sign-off",
+    "verifiedOn": null
+  },
+  "sections": {
+    "general": {
+      "mandatory": true,
+      "questions": [
+        {
+          "n": 1,
+          "answers": ["a", "e"],
+          "verified": true,
+          "note": "PPE, and proven isolation with lock and hasp on BOTH engines (scraper has front and rear engines)."
+        },
+        {
+          "n": 2,
+          "answers": ["c"],
+          "verified": true,
+          "note": "Prior to the first use of each shift."
+        },
+        {
+          "n": 3,
+          "answers": ["b", "c", "d", "f"],
+          "verified": false,
+          "note": "Do not operate; contact pit control; notify supervisor; wait for authorised personnel to repair and remove the tag. Never remove a tag on a supervisor's say-so alone. Confirm exact combination with SME."
+        },
+        {
+          "n": 4,
+          "answers": ["b"],
+          "verified": false,
+          "note": "Fully retracted — ejector position affects hydraulic reservoir volume reading; confirm against OEM manual."
+        },
+        {
+          "n": 5,
+          "answers": ["a"],
+          "verified": true,
+          "note": "True — SME must be parked safely and shut down before checking oils."
+        },
+        {
+          "n": 6,
+          "answers": ["a", "f"],
+          "verified": false,
+          "note": "Category A and Category B — matches the Category A/B defect convention used in the BBM Grader Manual (lost G.E.T. is 'Category A'). Confirm this scraper prestart sheet uses the same two categories."
+        },
+        {
+          "n": 7,
+          "answers": ["a", "b"],
+          "verified": true,
+          "note": "Maintain three points of contact; ensure the parking area is flat, free of rocks and the scraper is fundamentally stable."
+        },
+        {
+          "n": 8,
+          "answers": ["a", "b", "c"],
+          "verified": false,
+          "note": "Note it in the prestart book; notify supervisor and pit control; do not operate. Confirm whether 'tag it out' (d) should also be included."
+        },
+        {
+          "n": 9,
+          "answers": ["d"],
+          "verified": true,
+          "note": "All the above — service brake, park/emergency brake, retarder."
+        },
+        {
+          "n": 10,
+          "answers": ["b"],
+          "verified": false,
+          "note": "Build air pressure, raise bowl, release park brake, confirm stability, apply park/service brake/retarder, select 2nd gear at 1200 RPM. Confirm exact figures with SME/OEM manual."
+        },
+        {
+          "n": 11,
+          "answers": ["a", "b", "c"],
+          "verified": true,
+          "note": "Slows ground speed, avoids overuse of the service brake, and prevents engine overspeed on downgrade."
+        },
+        {
+          "n": 12,
+          "answers": ["a", "b"],
+          "verified": false,
+          "note": "Engine overspeed and engine detonation. Overheated brakes/brake failure relate more to service-brake overuse than engine over-rev; confirm with SME."
+        },
+        {
+          "n": 13,
+          "answers": ["a", "b"],
+          "verified": true,
+          "note": "Select the appropriate gear before descending, and use the retarder to control RPM below 2100 — the service brake alone is not the correct method (rules out c and therefore d)."
+        },
+        {
+          "n": 14,
+          "answers": ["f"],
+          "verified": true,
+          "note": "All of the above."
+        },
+        {
+          "n": 15,
+          "answers": ["b"],
+          "verified": true,
+          "note": "20 metres — Operations Manual s8.2: '20m of separation – in a loading zone. This zone can be either a stripping area or reclaiming a stock pile.'"
+        },
+        {
+          "n": 16,
+          "answers": ["b"],
+          "verified": false,
+          "note": "False — confirm exact diff-lock mechanism (front vs rear vs all-wheel) against the OEM manual."
+        },
+        {
+          "n": 17,
+          "answers": ["a"],
+          "verified": true,
+          "note": "True — Operations Manual s10: 'Inspection of the area by the Duty WAPL Supervisor must be made before the activity commences.'"
+        },
+        {
+          "n": 18,
+          "answers": ["b"],
+          "verified": true,
+          "note": "False — do not move off with the service truck parked alongside."
+        },
+        {
+          "n": 19,
+          "answers": ["a"],
+          "verified": true,
+          "note": "False — Operations Manual s11: 'Scraper Operators must not load the bowl unless the cushion hitch is locked down.'"
+        },
+        {
+          "n": 20,
+          "answers": ["b", "c", "d", "e", "f", "g"],
+          "verified": true,
+          "note": "Park up safely, cease operating, contact pit control, contact supervisor, shut down, and place an out-of-service tag. Never continue operating with a safety-affecting defect."
+        },
+        {
+          "n": 21,
+          "answers": ["b"],
+          "verified": false,
+          "note": "Reduces ground speed. Question wording overlaps with Q11's 'prevents engine overspeed when used correctly'; confirm single vs multi-answer intent with SME."
+        },
+        {
+          "n": 22,
+          "answers": ["a"],
+          "verified": true,
+          "note": "Loss of air pressure from the primary braking system automatically activates the spring-applied emergency brake."
+        },
+        {
+          "n": 23,
+          "answers": ["d"],
+          "verified": true,
+          "note": "All the above."
+        },
+        {
+          "n": 24,
+          "answers": ["c"],
+          "verified": true,
+          "note": "20% — Operations Manual s8.3: 'The maximum slope angle (up/down) for the Scraper/s must not exceed 20% unless a risk assessment has been completed and approved.'"
+        },
+        {
+          "n": 25,
+          "answers": ["b"],
+          "verified": false,
+          "note": "2nd gear with sufficient power to prevent wheel spin — matches the self-loading procedure (1st or 2nd gear, full throttle). Confirm exact recommended gear with SME."
+        }
+      ]
+    }
+  },
+  "practicalAssessorReference": [
+    "Isolation: hasp and personnel lock on BOTH engines, plus a try test, before entering the footprint.",
+    "Access/egress: three points of contact at all times.",
+    "Travel/separation distances: 40m minimum travel separation; 20m in a loading zone (stripping or reclaiming a stockpile).",
+    "Haul route slope: maximum 20% (up/down) without an approved risk assessment.",
+    "Cushion hitch: must be locked down before loading the bowl.",
+    "Push-pull: two scrapers only, never three or more; material depth must be 500mm or more; area inspection by Duty WAPL Supervisor required before commencing.",
+    "Stockpiles: minimum 300mm edge windrow while working, 500mm when not being worked; maximum 5m per lift; stockpile edge to excavation minimum 10m.",
+    "Large rock removal: open apron no more than 30cm; jack-knife 90° to eject; never crush the rock with the ejector/apron.",
+    "Defects affecting safe operation: cease operating, notify supervisor and pit control, shut down, tag out — never continue operating.",
+    "Incident in the work area: stop work, call supervisor, gather evidence; never attempt self-recovery if bogged or bellied — JHA required first."
+  ]
+}
