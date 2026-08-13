@@ -4317,35 +4317,75 @@ describe('POST /assessment-tools/:id/republish', () => {
     }
   });
 
-  it('400s a revision that removes a part somebody has already attempted', async () => {
+  it('trims dangling Location rules with the publish when the author opts in', async () => {
     /*
-      The export selects attempts by the manifest's part keys and fails loud
-      on an attempt whose part the manifest no longer declares — so dropping
-      an attempted part would leave those cases unable to print their
-      evidence, discovered months later by an auditor.
+      The refusal's one-click fix: the untick is the AUTHOR'S explicit
+      choice (the flag), applied in the same transaction as the publish —
+      never defaulted, because silently changing what a Location requires is
+      a policy edit nobody made.
     */
     const { db, store } = makeDb();
     mockDbValue = db;
     const { server, base } = startApp();
     try {
       const tool = await seedTool(base);
-      // A case with an attempt recorded against p1.
-      const caseRes = await fetch(`${base}/assessment-cases`, {
-        method: 'POST',
-        headers: auth(),
-        body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
-      });
-      const kase = (await caseRes.json()) as { id: string };
-      await fetch(`${base}/assessment-cases/${kase.id}/parts/p1/attempts`, {
-        method: 'POST',
-        headers: auth(),
-        body: '{}',
+      Object.assign(rows(store, 'assessmentTools')[0]!, {
+        locationPartKeys: { [MINING]: ['p4', 'p1'] },
       });
       seedDraftVersion(store);
-      // A revised manifest without p1.
-      const trimmed = { ...MANIFEST, parts: MANIFEST.parts.slice(1) };
+      const trimmed = { ...MANIFEST, parts: MANIFEST.parts.slice(0, 3) };
 
       const res = await fetch(`${base}/assessment-tools/${tool.id}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        body: republishBodyFor({ manifest: trimmed, dropDanglingLocationRules: true }),
+      });
+
+      expect(res.status).toBe(200);
+      // The rule kept p1 (still declared) and lost only the removed p4.
+      const row = rows(store, 'assessmentTools')[0] as { locationPartKeys: Record<string, string[]> };
+      expect(row.locationPartKeys[MINING]).toEqual(['p1']);
+    } finally {
+      server.close();
+    }
+  });
+
+  /** A case with an attempt on p1, for the removed-part guards. */
+  async function attemptedCase(base: string) {
+    const caseRes = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ toolId: (await seedTool(base)).id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
+    });
+    const kase = (await caseRes.json()) as { id: string };
+    await fetch(`${base}/assessment-cases/${kase.id}/parts/p1/attempts`, {
+      method: 'POST',
+      headers: auth(),
+      body: '{}',
+    });
+    return kase;
+  }
+
+  it('400s a revision that removes a part with evidence on a COMPLETED case', async () => {
+    /*
+      The export selects attempts by the manifest's part keys and fails loud
+      on an attempt whose part the manifest no longer declares — so dropping
+      a certified part would leave that evidence unable to print, discovered
+      months later by an auditor.
+    */
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const kase = await attemptedCase(base);
+      Object.assign(
+        rows(store, 'assessmentCases').find((r) => r.id === kase.id)!,
+        { state: 'competent' },
+      );
+      seedDraftVersion(store);
+      const trimmed = { ...MANIFEST, parts: MANIFEST.parts.slice(1) };
+
+      const res = await fetch(`${base}/assessment-tools/${(rows(store, 'assessmentTools')[0] as { id: string }).id}/republish`, {
         method: 'POST',
         headers: auth(),
         body: republishBodyFor({ manifest: trimmed }),
@@ -4354,8 +4394,37 @@ describe('POST /assessment-tools/:id/republish', () => {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string; problems: string[] };
       expect(body.error).toBe('invalid_manifest');
-      expect(body.problems.join(' ')).toContain('recorded attempts');
+      expect(body.problems.join(' ')).toContain('evidence on completed cases');
       expect(body.problems.join(' ')).toContain('Part 1 Theory');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('publishes over an OPEN case attempt on a removed part, warning about the progress', async () => {
+    /*
+      A consolidation — the part's fields folded into a neighbouring section,
+      still printed, still filled — is a legitimate revision. An open case's
+      progress is the author's to spend, and blocking on it would freeze
+      every tool the moment a live test case touched a part being merged.
+    */
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      await attemptedCase(base);
+      seedDraftVersion(store);
+      const trimmed = { ...MANIFEST, parts: MANIFEST.parts.slice(1) };
+
+      const res = await fetch(`${base}/assessment-tools/${(rows(store, 'assessmentTools')[0] as { id: string }).id}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        body: republishBodyFor({ manifest: trimmed }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { warnings: string[] };
+      expect(body.warnings.join(' ')).toContain('Open cases have attempts on "Part 1 Theory"');
     } finally {
       server.close();
     }
