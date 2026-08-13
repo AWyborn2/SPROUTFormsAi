@@ -896,19 +896,66 @@ assessmentToolsRouter.post(
       ...validateProfilePrefill(manifest.profilePrefill, fields),
       ...validatePrerequisiteChecks(manifest.prerequisiteChecks, fields),
     ];
-    // A Location rule naming a part the revised manifest no longer declares
-    // would silently dangle — the rule's own PATCH validates against the
-    // manifest, so the manifest changing owes the rule the same check.
+    /*
+      A Location rule naming a part the revised manifest no longer declares
+      would silently dangle — the rule's own PATCH validates against the
+      manifest, so the manifest changing owes the rule the same check. Named
+      in PEOPLE'S TERMS: the rule stores a Location id and the part key is an
+      internal handle, and a refusal reading "rule 764679d8… requires
+      secnew2" tells an author nothing they can act on.
+    */
     const partKeys = new Set(orderedParts(manifest).map((p) => p.key));
+    const oldPartLabels = new Map(orderedParts(tool.manifest).map((p) => [p.key, p.label]));
+    const ruleLocationIds = Object.keys(tool.locationPartKeys ?? {});
+    const ruleLocationNames =
+      ruleLocationIds.length > 0
+        ? await locationNamesByIdFor(db, tenant.orgId, ruleLocationIds)
+        : new Map<string, string>();
     for (const [locationId, keys] of Object.entries(tool.locationPartKeys ?? {})) {
       for (const key of keys) {
         if (!partKeys.has(key)) {
+          const location = ruleLocationNames.get(locationId) ?? locationId;
+          const label = oldPartLabels.get(key) ?? key;
           problems.push(
-            `Location rule ${locationId} requires part "${key}", which the revised manifest no longer declares`,
+            `${location} requires "${label}", which this revision removes. Untick it under Where each part applies in the tool's workflow, or keep the part in this revision.`,
           );
         }
       }
     }
+
+    const cases = await db.query.assessmentCases.findMany({
+      where: and(
+        eq(schema.assessmentCases.toolId, tool.id),
+        eq(schema.assessmentCases.orgId, tenant.orgId),
+      ),
+    });
+
+    /*
+      A PART WITH RECORDED ATTEMPTS CANNOT BE REMOVED. The export selects
+      attempts by the manifest's part keys and FAILS LOUD on an attempt whose
+      part the manifest no longer declares — so a revision that drops a part
+      somebody has sat would leave every one of those cases unable to print
+      its evidence. That is discovered months later by an auditor, which is
+      why it is refused here, where the author can still keep the part.
+    */
+    const removedKeys = [...oldPartLabels.keys()].filter((k) => !partKeys.has(k));
+    if (removedKeys.length > 0 && cases.length > 0) {
+      const priorAttempts = await db.query.assessmentPartAttempts.findMany({
+        where: inArray(
+          schema.assessmentPartAttempts.caseId,
+          cases.map((c) => c.id),
+        ),
+      });
+      const touched = new Set(
+        priorAttempts.filter((a) => removedKeys.includes(a.partKey)).map((a) => a.partKey),
+      );
+      for (const key of touched) {
+        problems.push(
+          `Part "${oldPartLabels.get(key) ?? key}" has recorded attempts, so this revision cannot remove it — those cases' evidence would no longer export. Keep the part (it can stop being required at any Location instead).`,
+        );
+      }
+    }
+
     if (problems.length > 0) {
       res.status(400).json({ error: 'invalid_manifest', problems });
       return;
@@ -917,12 +964,6 @@ assessmentToolsRouter.post(
     // R16: this tool has ONE manifest, and every open case reads it against
     // the case's PINNED version fields. Refuse a manifest that would dangle
     // against any of them — the open case finishes on its pinned version.
-    const cases = await db.query.assessmentCases.findMany({
-      where: and(
-        eq(schema.assessmentCases.toolId, tool.id),
-        eq(schema.assessmentCases.orgId, tenant.orgId),
-      ),
-    });
     const openCases = cases.filter((c) => !isTerminalCaseState(c.state as AssessmentCaseState));
     const fieldsByVersion = new Map<string, FormField[]>();
     const incompatible: Array<{ id: string; candidateUserId: string; versionId: string; problems: string[] }> = [];
