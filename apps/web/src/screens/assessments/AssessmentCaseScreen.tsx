@@ -43,6 +43,7 @@ const KIND_HINT: Record<string, string> = {
   theory: 'Auto-marked from the answer key. The outcome is computed, not entered.',
   practical: 'Observed demonstration. The assessor records the outcome.',
   logbook: 'Hours accumulate over weeks until the minimum is reached.',
+  declaration: 'Signed by the candidate. Completes on hand-in — nobody marks it.',
 };
 
 export function AssessmentCaseScreen() {
@@ -429,7 +430,7 @@ function PartCard({
               mark it. Only the marking control below is assessor-only. */}
           {/* The whole point of the hand-in signal: an assessor can see which
               parts are waiting on them without opening each one. */}
-          {openAttempt?.submittedAt && !readOnly && (
+          {openAttempt?.submittedAt && !readOnly && part.kind !== 'declaration' && (
             <p className="inline-flex w-fit items-center gap-1.5 rounded-pill px-3 py-1.5 text-[12.5px] font-semibold"
               style={{ background: 'var(--warning-soft)', color: 'var(--warning-text)' }}>
               <Icon name="inbox" size={14} />
@@ -448,9 +449,22 @@ function PartCard({
             </Link>
           )}
 
-          {!readOnly && openAttempt && (
-            <OutcomeForm caseId={caseId} attemptId={openAttempt.id} kind={part.kind} selfMarking={part.selfMarking} />
-          )}
+          {/*
+            THE MARKING KIT APPEARS ONLY AT A REAL CHECKPOINT.
+
+            A declaration never shows it — signing completes it, and an
+            assessor's verdict on someone else's attestation is not a thing
+            this product records. A self-marking part resolves at hand-in, so
+            the kit appears only for an attempt PARKED awaiting a mark (handed
+            in before hand-in marking existed). Person-judged parts — the
+            paper's own assessor checkpoints — keep it as always.
+          */}
+          {!readOnly &&
+            openAttempt &&
+            part.kind !== 'declaration' &&
+            (!part.selfMarking || !!openAttempt.submittedAt) && (
+              <OutcomeForm caseId={caseId} attemptId={openAttempt.id} kind={part.kind} selfMarking={part.selfMarking} />
+            )}
 
           {/* Both sides get the button now: the server authorises per
               workflow, so a candidate opening a step handed to them succeeds

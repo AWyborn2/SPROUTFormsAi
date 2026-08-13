@@ -15,11 +15,26 @@
  */
 ﻿import zlib from 'node:zlib';
 import { PDFDocument } from 'pdf-lib';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { GLYPH_KINDS, MARK_STYLES_DRAWN } from '@formai/shared';
 import type { FormField, GlyphKind, PageBox, SubmissionValue } from '@formai/shared';
 import { resolveMarkStyle, roundTripExport } from './round-trip.js';
 import { LETTERHEAD, makeFlatPdf, makeTwoPageFlatPdf } from './test-pdfs.js';
+
+/*
+  THE CLOCK IS FROZEN FOR THIS FILE. pdf-lib stamps CreationDate/ModDate from
+  the wall clock into every save, and several tests here compare two
+  separately-rendered documents byte-for-byte — render across a second
+  boundary and the metadata (and the xref offsets behind it) differ, failing
+  a comparison about MARKS on a diff about TIME. Only Date is faked, so
+  nothing that awaits real timers can hang.
+*/
+beforeAll(() => {
+  vi.useFakeTimers({ now: new Date('2026-01-05T09:00:00Z'), toFake: ['Date'] });
+});
+afterAll(() => {
+  vi.useRealTimers();
+});
 
 /** Decode `<hex>` PDF string literals in a content stream to plain text. */
 function decodeHexLiterals(content: string): string {
