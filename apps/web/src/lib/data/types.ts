@@ -559,6 +559,8 @@ export interface ComplianceGap {
 export interface ComplianceReport {
   /** A required competency that lapsed on its date. */
   expired: ComplianceGap[];
+  /** A required competency still current but inside the 90-day planning window — bookable runway. */
+  expiring: ComplianceGap[];
   /** A required competency the person has never held. */
   neverHeld: ComplianceGap[];
   /** A held competency that lapsed but no Role requires — reported, not a failure (R102). */

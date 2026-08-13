@@ -101,6 +101,74 @@ describe('GET /compliance (U20)', () => {
     server.close();
   });
 
+  it('reports a required competency inside the 90-day window under expiring, still compliant (AE3)', async () => {
+    /*
+      `countsAsHeld` treats an expiring grant as current, so before the expiring
+      bucket existed this person appeared nowhere until they tipped into
+      `expired` — the dashboard tile exists to book them BEFORE that.
+    */
+    mockDbValue = fakeDb({ holders: [grant(COMP, { expiresAt: daysAhead(40) })] });
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/compliance`, { headers: authHeader(admin) });
+    const body = (await res.json()) as {
+      expired: unknown[];
+      expiring: Array<{ competencyId: string }>;
+      neverHeld: unknown[];
+    };
+    expect(body.expiring.map((g) => g.competencyId)).toEqual([COMP]);
+    expect(body.expired).toEqual([]);
+    expect(body.neverHeld).toEqual([]);
+    server.close();
+  });
+
+  it('does not list a grace-period grant under expiring — grace is its own urgency', async () => {
+    mockDbValue = fakeDb({
+      holders: [grant(COMP, { expiresAt: daysAgo(5) })],
+      competencies: [
+        { id: COMP, orgId: 'org-1', name: 'Track Dozer', validForMonths: 36, gracePeriodDays: 90 },
+        { id: COMP_OPT, orgId: 'org-1', name: 'First Aid', validForMonths: 36 },
+      ],
+    });
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/compliance`, { headers: authHeader(admin) });
+    const body = (await res.json()) as { expired: unknown[]; expiring: unknown[] };
+    expect(body.expiring).toEqual([]);
+    // Grace still counts as held, so it is not expired either.
+    expect(body.expired).toEqual([]);
+    server.close();
+  });
+
+  it('ignores a revoked grant when computing expiring (R107)', async () => {
+    mockDbValue = fakeDb({
+      holders: [grant(COMP, { expiresAt: daysAhead(40), revokedAt: daysAgo(1) })],
+    });
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/compliance`, { headers: authHeader(admin) });
+    const body = (await res.json()) as {
+      expiring: unknown[];
+      neverHeld: Array<{ competencyId: string }>;
+    };
+    expect(body.expiring).toEqual([]);
+    // A revoked grant confers nothing, so the requirement reads as never held.
+    expect(body.neverHeld.map((g) => g.competencyId)).toEqual([COMP]);
+    server.close();
+  });
+
+  it('keeps an expiring OPTIONAL competency out of every bucket (R102)', async () => {
+    mockDbValue = fakeDb({
+      holders: [grant(COMP, { expiresAt: daysAhead(400) }), grant(COMP_OPT, { expiresAt: daysAhead(40) })],
+    });
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/compliance`, { headers: authHeader(admin) });
+    const body = (await res.json()) as {
+      expiring: unknown[];
+      optionalLapses: unknown[];
+    };
+    expect(body.expiring).toEqual([]);
+    expect(body.optionalLapses).toEqual([]);
+    server.close();
+  });
+
   it('reports a required competency never held under never held, separate from expired (R103)', async () => {
     mockDbValue = fakeDb({ holders: [] }); // holds nothing
     const { server, base } = startApp();
@@ -163,7 +231,7 @@ describe('GET /compliance (U20)', () => {
     mockDbValue = fakeDb({ memberships: [] });
     const { server, base } = startApp();
     const res = await fetch(`${base}/compliance`, { headers: authHeader(admin) });
-    expect(await res.json()).toEqual({ expired: [], neverHeld: [], optionalLapses: [], unreachable: [] });
+    expect(await res.json()).toEqual({ expired: [], expiring: [], neverHeld: [], optionalLapses: [], unreachable: [] });
     server.close();
   });
 

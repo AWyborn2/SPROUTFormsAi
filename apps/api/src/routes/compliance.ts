@@ -10,8 +10,10 @@ import { db } from '../db.js';
 
 /**
  * Compliance reporting (U20) — how the workforce stands, as the surface shown an
- * auditor. Three things and no more: a REQUIRED competency expired, a required
- * competency a holder has NEVER held, and a member no notification can reach.
+ * auditor: a REQUIRED competency expired, a required competency a holder has
+ * NEVER held, a required competency EXPIRING inside the assessor planning
+ * window (still current — the number that lets an Admin book a reassessment
+ * before anything lapses), and a member no notification can reach.
  *
  * Only REQUIRED competencies count (R101): an optional lapse is not a compliance
  * failure (R102), so standing is read here, not currency alone. The two gaps are
@@ -64,10 +66,10 @@ complianceRouter.get(
     });
     if (memberships.length === 0) {
       // An organisation with no active members has nobody to report on, and
-      // nobody unreachable. Returns the FULL shape (all four keys) so this path
+      // nobody unreachable. Returns the FULL shape (all five keys) so this path
       // never differs from the normal one — the web type has no optional keys
       // and reads `optionalLapses.length` unconditionally.
-      res.json({ expired: [], neverHeld: [], optionalLapses: [], unreachable: [] });
+      res.json({ expired: [], expiring: [], neverHeld: [], optionalLapses: [], unreachable: [] });
       return;
     }
     const userIds = [...new Set(memberships.map((m) => m.userId))];
@@ -109,6 +111,7 @@ complianceRouter.get(
     });
 
     const expired: ComplianceGap[] = [];
+    const expiring: ComplianceGap[] = [];
     const neverHeld: ComplianceGap[] = [];
     const optionalLapses: ComplianceGap[] = [];
     for (const membership of memberships) {
@@ -127,6 +130,16 @@ complianceRouter.get(
         const currencies = (grantsByKey.get(`${membership.userId}|${competencyId}`) ?? []).map((g) =>
           competencyCurrency(g, competency, now, 'assessor'),
         );
+        /*
+          EXPIRING is captured before the compliant-continue swallows it:
+          `countsAsHeld` deliberately treats an expiring grant as current, so
+          without this branch the person books nowhere until they tip into
+          `expired`. Grace is not listed here — it has already lapsed and reads
+          on the record as its own urgency, not as bookable runway.
+        */
+        if (currencies.some((c) => !c.revoked && c.status === 'expiring')) {
+          expiring.push(gapOf(membership.userId, competencyId, competency.name));
+        }
         if (currencies.some((c) => countsAsHeld(c))) continue; // compliant
         const gap = gapOf(membership.userId, competencyId, competency.name);
         // Lapsed on its date (not revoked) → a refresher; otherwise (no grant, or
@@ -195,6 +208,6 @@ complianceRouter.get(
       }
     }
 
-    res.json({ expired, neverHeld, optionalLapses, unreachable });
+    res.json({ expired, expiring, neverHeld, optionalLapses, unreachable });
   }),
 );
