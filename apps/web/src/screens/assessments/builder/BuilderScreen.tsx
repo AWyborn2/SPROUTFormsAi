@@ -163,11 +163,12 @@ export function BuilderScreen() {
   const at = stepIndex(step);
   const canAdvance = draft.hasDocument;
   /*
-    Steps 2 and 3 own the full width: their left column is a full-height panel
+    Steps 2 and 6 own the full width: their left column is a full-height panel
     flush against the app sidebar, so the page header and the wide stepper are
-    replaced by the compact rail that sits inside the artifact column.
+    replaced by the compact rail — and the page itself stops scrolling, each
+    column scrolling internally instead.
   */
-  const compactChrome = step === 'generate';
+  const compactChrome = step === 'generate' || step === 'placement';
 
   const body = (() => {
     /*

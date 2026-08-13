@@ -59,10 +59,28 @@ import {
  * two alongside its checklist, and calling that part theory would auto-mark a
  * demonstration nobody watched.
  */
-export function inferKind(sectionFields: readonly FormField[]): PartKind {
+export function inferKind(sectionFields: readonly FormField[], sectionLabel = ''): PartKind {
   const tables = sectionFields.filter((f) => f.type === 'repeating_group');
   if (tables.some((t) => !t.fixedRows || t.fixedRows.length === 0)) return 'logbook';
   if (tables.length > 0) return 'practical';
+  /*
+    THE ONE LABEL-BASED RULE, and deliberately the narrowest one. A CANDIDATE
+    declaration is an attestation, not an assessment — defaulting it to theory
+    put a "Theory" dropdown on a signature box and parked the hand-in for
+    marking nobody could do. The label must say CANDIDATE: this paper prints an
+    assessor declaration per part, and those are the assessor's attestations —
+    auto-completing one on the candidate's submit would sign the assessor's
+    block for them. Content alone cannot tell the two apart (both are a
+    signature and a date), which is why the word is required rather than
+    inferred. Overridable in Units & gating like every proposal.
+  */
+  if (
+    /candidate['’]?s?\s+declaration/i.test(sectionLabel) &&
+    sectionFields.some((f) => f.type === 'signature') &&
+    !sectionFields.some((f) => (f.answerKey?.length ?? 0) > 0)
+  ) {
+    return 'declaration';
+  }
   return 'theory';
 }
 
@@ -137,7 +155,7 @@ export function derivePartsFromStructure({
     if (fillable.length === 0) continue;
 
     ordinal += 1;
-    const kind = inferKind(sectionFields);
+    const kind = inferKind(sectionFields, section.label);
 
     /*
       THE ANCHOR IS THE SECTION'S HEADING WHERE IT HAS ONE, AND ITS FIRST

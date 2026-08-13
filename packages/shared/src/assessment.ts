@@ -29,6 +29,7 @@
 import type { FormField, FormFieldType } from './form-field.js';
 import { geometrySegments } from './geometry.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
+import { visibleFields, type VisibilityAnswers } from './visibility.js';
 import type { AssessmentWorkflow } from './workflow.js';
 
 /**
@@ -46,8 +47,15 @@ export type AssessmentPathway = (typeof ASSESSMENT_PATHWAYS)[number];
  * What kind of evidence a part gathers. Drives which surface fills it and how
  * it completes — a logbook accumulates over weeks against an hours minimum, a
  * practical is marked in one sitting, theory is auto-marked.
+ *
+ * `declaration` is the one that is NOT an assessment: "I was told what this
+ * involves and I am ready" is an attestation, not evidence anyone judges.
+ * It completes the moment the candidate hands it in with every required box
+ * filled — no answer keys, no assessor verdict — and it still GATES: a
+ * pathway that requires it cannot reach sign-off unsigned, which is the whole
+ * reason it is a part rather than furniture.
  */
-export const PART_KINDS = ['theory', 'practical', 'logbook'] as const;
+export const PART_KINDS = ['theory', 'practical', 'logbook', 'declaration'] as const;
 export type PartKind = (typeof PART_KINDS)[number];
 
 /**
@@ -1512,4 +1520,43 @@ export function unplacedMarkDestinations(
   }
 
   return out;
+}
+
+/**
+ * The required boxes a declaration hand-in has not filled.
+ *
+ * A declaration completes at submit with nobody judging it, so submit is the
+ * only gate there is — and "signed" has to mean the required boxes actually
+ * hold something. Without this an empty tap on Submit would auto-complete the
+ * attestation, and the printed record would carry a satisfied declaration
+ * with a blank signature box: an attestation nobody made.
+ *
+ * VISIBILITY IS RESPECTED, over the full field list — a section the
+ * candidate's stream hides is not theirs to sign. Structural furniture
+ * (headers) can hold no value and is skipped by type.
+ */
+export function missingDeclarationFields(
+  fields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+  partKey: string,
+  values: Record<string, SubmissionValue> | null | undefined,
+): { id: string; label: string }[] {
+  const answers = values ?? {};
+  const visible = new Set(visibleFields(fields, answers as VisibilityAnswers).map((f) => f.id));
+  const empty = (v: SubmissionValue | undefined): boolean => {
+    if (v === undefined || v === null) return true;
+    if (typeof v === 'string') return v.trim() === '';
+    if (Array.isArray(v)) return v.length === 0;
+    return false;
+  };
+
+  return fieldsInPart(fields, manifest, partKey)
+    .filter(
+      (f) =>
+        f.required &&
+        f.type !== 'section_header' &&
+        visible.has(f.id) &&
+        empty(answers[f.id]),
+    )
+    .map((f) => ({ id: f.id, label: f.label }));
 }

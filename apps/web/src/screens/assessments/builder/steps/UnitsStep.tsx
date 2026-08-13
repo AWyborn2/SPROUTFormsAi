@@ -35,6 +35,7 @@ const KIND_LABELS: Record<PartKind, string> = {
   theory: 'Theory',
   practical: 'Practical',
   logbook: 'Logbook',
+  declaration: 'Declaration',
 };
 
 const PATHWAY_LABELS: Record<AssessmentPathway, string> = {

@@ -95,6 +95,35 @@ describe('inferKind', () => {
       ]),
     ).toBe('logbook');
   });
+
+  it('reads a declaration from a CANDIDATE declaration with a signature', () => {
+    // An attestation, not an assessment — defaulting it to theory parked the
+    // hand-in for marking nobody could do.
+    expect(
+      inferKind([field({ id: 'sig', type: 'signature' })], 'Candidate’s Declaration'),
+    ).toBe('declaration');
+  });
+
+  it('never proposes declaration for the ASSESSOR block', () => {
+    /*
+      This paper prints an assessor declaration per part, and those are the
+      assessor's attestations — auto-completing one at the CANDIDATE's submit
+      would sign the assessor's block for them. Content alone cannot tell the
+      two apart (both are a signature and a date), so the word is required.
+    */
+    expect(
+      inferKind([field({ id: 'sig', type: 'signature' })], 'PART 2 Assessor Assessment Declaration'),
+    ).toBe('theory');
+  });
+
+  it('keeps keyed content theory whatever the heading says', () => {
+    expect(
+      inferKind(
+        [field({ id: 'sig', type: 'signature' }), { ...question('q1'), answerKey: ['a'] }],
+        'Candidate Declaration',
+      ),
+    ).toBe('theory');
+  });
 });
 
 describe('findDurationColumn', () => {

@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import {
+  missingDeclarationFields,
   profilePrefillValues,
   unplacedMarkDestinations,
   validateManifest,
@@ -362,5 +363,65 @@ describe('unplacedMarkDestinations', () => {
     expect(warnings.some((w) => w.includes('Satisfactory verdict'))).toBe(true);
     expect(warnings.some((w) => w.includes('Candidate Competent'))).toBe(true);
     expect(warnings.some((w) => w.includes('prerequisite'))).toBe(true);
+  });
+});
+
+describe('missingDeclarationFields', () => {
+  /*
+    A declaration completes at hand-in with nobody judging it, so hand-in is
+    the only gate — and "signed" must mean the required boxes actually hold
+    something, or an empty tap on Submit auto-completes an attestation nobody
+    made.
+  */
+  const manifest: AssessmentToolManifest = {
+    parts: [
+      {
+        key: 'pd',
+        ordinal: 1,
+        label: 'Candidate declaration',
+        kind: 'declaration',
+        pathways: ['new'],
+        startFieldId: 'h-decl',
+      },
+    ],
+  };
+  const fields: FormField[] = [
+    { id: 'h-decl', type: 'section_header', label: 'Candidate declaration', required: false, source: 'imported' },
+    { ...field('sig', 'signature', 'Candidate signature'), required: true },
+    field('date', 'date', 'Date'),
+  ];
+
+  it('names the required boxes still empty', () => {
+    expect(missingDeclarationFields(fields, manifest, 'pd', {})).toEqual([
+      { id: 'sig', label: 'Candidate signature' },
+    ]);
+  });
+
+  it('is satisfied once the signature holds a drawing', () => {
+    expect(
+      missingDeclarationFields(fields, manifest, 'pd', { sig: 'data:image/png;base64,iVBOR' }),
+    ).toEqual([]);
+  });
+
+  it('treats whitespace as unsigned', () => {
+    expect(missingDeclarationFields(fields, manifest, 'pd', { sig: '   ' })).toHaveLength(1);
+  });
+
+  it('never demands a box a condition hides', () => {
+    const gated: FormField[] = [
+      ...fields,
+      {
+        ...field('extra', 'text', 'Union rep name'),
+        required: true,
+        visibleWhen: { fieldId: 'date', op: 'equals', value: 'union' },
+      },
+    ];
+
+    const missing = missingDeclarationFields(gated, manifest, 'pd', {
+      sig: 'data:image/png;base64,iVBOR',
+    });
+
+    // 'extra' is hidden — its emptiness is not the candidate's to fix.
+    expect(missing).toEqual([]);
   });
 });

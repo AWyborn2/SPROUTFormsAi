@@ -779,7 +779,14 @@ export function GeometryEditorScreen({
   ];
 
   return (
-    <div className="fai-rise flex h-[calc(100vh-56px)] flex-col">
+    /*
+      Standalone, the screen owns the viewport below the 56px app bar. Embedded
+      (the builder's PDF-mapping step) it FILLS ITS SLOT instead — the builder
+      pins its own chrome and footer around a fixed-height body, and a
+      viewport-height child inside that slot would overflow it by exactly the
+      chrome's height, putting the page scrollbar back.
+    */
+    <div className={`fai-rise flex flex-col ${embedded ? 'h-full min-h-0' : 'h-[calc(100vh-56px)]'}`}>
       {/*
         THE HEADER'S TWO HALVES ARE GATED SEPARATELY.
 

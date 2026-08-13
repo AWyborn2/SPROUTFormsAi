@@ -47,6 +47,10 @@ import { builderColumnActions } from '../../import/inspector/column-actions.js';
   one from a scalar.
 */
 
+const PANEL_WIDTH_KEY = 'fai.builder.structureWidth';
+const PANEL_MIN = 260;
+const PANEL_MAX = 640;
+
 const GRID_CLASS: Record<SectionColumns, string> = {
   1: 'grid-cols-1',
   2: 'grid-cols-2',
@@ -143,6 +147,30 @@ export function StructurePanel({
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   /** Sections ticked for bulk actions — independent of the field selection. */
   const [selectedSections, setSelectedSections] = useState<Record<string, boolean>>({});
+  /*
+    The panel's width is the author's, dragged at the right edge and kept
+    across sessions. 24 sections of long printed headings do not fit a fixed
+    340px, and the preview beside it is sometimes the thing that deserves the
+    room — one number cannot be right for both moments.
+  */
+  const [width, setWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+    return Number.isFinite(saved) && saved >= PANEL_MIN && saved <= PANEL_MAX ? saved : 340;
+  });
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = width;
+    const clamp = (w: number) => Math.min(PANEL_MAX, Math.max(PANEL_MIN, w));
+    const move = (ev: PointerEvent) => setWidth(clamp(startW + ev.clientX - startX));
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      localStorage.setItem(PANEL_WIDTH_KEY, String(clamp(startW + ev.clientX - startX)));
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
   const [typeMenuFor, setTypeMenuFor] = useState<string | null>(null);
   /** The repeating field whose column editor is expanded, if any. */
   const [columnsFor, setColumnsFor] = useState<string | null>(null);
@@ -198,7 +226,33 @@ export function StructurePanel({
   }
 
   return (
-    <div className="flex h-full w-[340px] flex-none flex-col overflow-hidden border-r border-border bg-surface-card">
+    <div
+      style={{ width }}
+      className="relative flex h-full flex-none flex-col overflow-hidden border-r border-border bg-surface-card"
+    >
+      {/*
+        The resize grip. A separator the keyboard can also work — arrows nudge
+        by 20px — because a drag-only control is invisible to anyone not
+        pointing at it.
+      */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the structure panel"
+        tabIndex={0}
+        onPointerDown={startResize}
+        onKeyDown={(e) => {
+          if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+          e.preventDefault();
+          const next = Math.min(
+            PANEL_MAX,
+            Math.max(PANEL_MIN, width + (e.key === 'ArrowRight' ? 20 : -20)),
+          );
+          setWidth(next);
+          localStorage.setItem(PANEL_WIDTH_KEY, String(next));
+        }}
+        className="absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-accent/30 focus-visible:bg-accent/40 focus-visible:outline-none"
+      />
       <div className="flex items-start gap-2 border-b border-border-subtle p-[14px_12px_10px_16px]">
         <span className="min-w-0 flex-1">
           <span className="block text-[14.5px] font-semibold">Form structure</span>
