@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { SubmissionValue } from '@formai/shared';
 import { Button, Icon, useToast } from '@formai/ui';
+import { ApiError } from '../../lib/data/api-client.js';
 import {
   useAssessmentAttempt,
   useOpenAttempt,
@@ -347,6 +348,9 @@ export function CasePartFillScreen() {
           {/* Handing in is the signal an assessor waits on. Saving first means a
               candidate cannot submit a version of their answers that differs
               from the one still sitting unsaved on screen. */}
+          {/* A DECLARATION is not marked — signing it IS the act, so the button
+              says what actually happens and nobody is told to wait for a
+              marking that will never occur. */}
           <Button
             leadingIcon="send"
             disabled={save.isPending || setSubmitted.isPending}
@@ -365,7 +369,13 @@ export function CasePartFillScreen() {
                       // union has to be narrowed before the outcome is read.
                       const outcome = 'outcome' in r ? r.outcome : undefined;
                       if (outcome === 'satisfactory') {
-                        toast({ variant: 'success', message: 'Marked satisfactory — this part is done.' });
+                        toast({
+                          variant: 'success',
+                          message:
+                            attempt?.partKind === 'declaration'
+                              ? 'Declaration signed — you can start the assessment.'
+                              : 'Marked satisfactory — this part is done.',
+                        });
                       } else if (outcome === 'not_satisfactory') {
                         toast({
                           variant: 'warning',
@@ -375,8 +385,21 @@ export function CasePartFillScreen() {
                         toast({ variant: 'success', message: 'Handed in for marking.' });
                       }
                     },
-                    onError: () =>
-                      toast({ variant: 'danger', message: "Couldn't hand in — try again." }),
+                    onError: (err) => {
+                      // The one refusal with its own next step: the declaration
+                      // names the boxes still empty, so say them.
+                      const body =
+                        err instanceof ApiError && err.body && typeof err.body === 'object'
+                          ? (err.body as { error?: string; detail?: string })
+                          : null;
+                      toast({
+                        variant: 'danger',
+                        message:
+                          body?.error === 'declaration_incomplete' && body.detail
+                            ? body.detail
+                            : "Couldn't hand in — try again.",
+                      });
+                    },
                   },
                 );
               if (!dirty) return handOff();
@@ -390,7 +413,13 @@ export function CasePartFillScreen() {
               );
             }}
           >
-            {setSubmitted.isPending ? 'Handing in…' : 'Hand in for marking'}
+            {setSubmitted.isPending
+              ? attempt?.partKind === 'declaration'
+                ? 'Signing…'
+                : 'Handing in…'
+              : attempt?.partKind === 'declaration'
+                ? 'Sign and continue'
+                : 'Hand in for marking'}
           </Button>
         </div>
       )}
