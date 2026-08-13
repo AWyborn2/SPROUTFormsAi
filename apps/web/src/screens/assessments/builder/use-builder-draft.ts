@@ -196,6 +196,13 @@ export interface BuilderDraftState {
   /** Record the draft version the placement step created. */
   setVersionIds: (formId: string, versionId: string) => void;
   /**
+   * Forget a version that no longer exists — the placement step's recovery
+   * path when the form the snapshot remembered was deleted server-side.
+   * Clearing the ids hands control back to that step's create-on-arrival
+   * effect, which re-materialises a version from the draft's OWN fields.
+   */
+  clearVersionIds: () => void;
+  /**
    * Take the geometry back from the placement step.
    *
    * THE DRAFT'S FIELD LIST IS WHAT PUBLISHES. `WorkflowStep` validates
@@ -1103,6 +1110,11 @@ export function useBuilderDraftState({
     setVersionId(nextVersionId);
   }, []);
 
+  const clearVersionIds = useCallback(() => {
+    setFormId(undefined);
+    setVersionId(undefined);
+  }, []);
+
   /*
     Geometry comes back from the placement step by ID, not by replacing the
     list. The editor is handed the fields minus the excluded ones, so what it
@@ -1222,6 +1234,7 @@ export function useBuilderDraftState({
     setRevisionIdentity,
     confirmCarried,
     setVersionIds,
+    clearVersionIds,
     setPlacedFields,
     parts,
     manifest,
