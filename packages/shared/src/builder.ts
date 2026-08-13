@@ -450,6 +450,14 @@ export interface BuilderDraft {
   /** The paper revision identity captured for the version this draft publishes. */
   revisionIdentity?: RevisionIdentity;
   /**
+   * The tool's manifest as it stood at seed time. Republish starts from this
+   * and overlays what the builder derives, so workflow-editor extras the
+   * builder does not model survive a revision untouched.
+   */
+  revisionToolManifest?: AssessmentToolManifest;
+  /** The seeded source PDF's handle, so "revert to original" can restore it. */
+  seedAssetId?: string;
+  /**
    * Geometry carried from the seeded version after the PDF was REPLACED,
    * keyed by field id. These are pre-placed PROPOSALS, never confirmed
    * geometry: a box confirmed against the old document's layout was not

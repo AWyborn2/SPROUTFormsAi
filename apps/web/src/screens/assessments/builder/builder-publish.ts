@@ -36,9 +36,32 @@ import {
   type AssessmentToolManifest,
   type BuilderStructure,
   type DraftAnswerKey,
+  type FieldGeometry,
   type OutcomeTarget,
   type FormField,
 } from '@formai/shared';
+
+/**
+ * The manifest a REVISION republishes: the seeded tool's manifest with the
+ * builder's derivation overlaid.
+ *
+ * The seeded copy carries what the builder does not model — `profilePrefill`,
+ * `prerequisiteChecks`, `fieldDefaults`, workflow customisations layered on
+ * after creation — and a republish that sent only the derived manifest would
+ * silently shed them (the republish schema names them for exactly this
+ * moment). Derived keys win where both exist: parts, pathways and pointers
+ * are what the author is here to edit. Undefined derived keys are stripped
+ * first, so an absence in the derivation can never erase a seeded value.
+ */
+export function composeRevisionManifest(
+  seeded: AssessmentToolManifest,
+  derived: AssessmentToolManifest,
+): AssessmentToolManifest {
+  const overlay = Object.fromEntries(
+    Object.entries(derived).filter(([, value]) => value !== undefined),
+  );
+  return { ...seeded, ...overlay } as AssessmentToolManifest;
+}
 
 /**
  * Put the draft's answer keys and the resolved outcome links onto the version's
@@ -151,6 +174,13 @@ export interface PublishCheck {
    * failure (silence) is exactly why it has to be said here.
    */
   unplaced: string[];
+  /**
+   * Fields whose boxes were CARRIED across a PDF replacement and never
+   * re-confirmed. Warnings, never gates (R8): the field simply prints
+   * nowhere until placed, and the silence has to be said here because the
+   * exporter's safe failure is exactly that silence.
+   */
+  carried: string[];
   fields: FormField[];
 }
 
@@ -185,6 +215,8 @@ export function checkPublish(
    * the flat list.
    */
   structure?: BuilderStructure,
+  /** The revision's carried-but-unconfirmed stash, when there is one. */
+  carriedGeometry?: Record<string, FieldGeometry>,
 ): PublishCheck {
   const arranged = structure && structure.length > 0 ? resolveStructure(structure, fields) : null;
   const ordered = arranged ? arranged.fields : fields;
@@ -221,11 +253,16 @@ export function checkPublish(
     );
   }
 
+  const carried = Object.keys(carriedGeometry ?? {}).map(
+    (id) => fields.find((f) => f.id === id)?.label ?? id,
+  );
+
   return {
     problems,
     unlinked: resolved.unlinked,
     inferred: resolved.inferred,
     unplaced: manifest ? unplacedMarkDestinations(manifest, resolved.fields) : [],
+    carried,
     fields: resolved.fields,
   };
 }

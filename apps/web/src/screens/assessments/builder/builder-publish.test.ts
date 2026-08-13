@@ -369,3 +369,23 @@ describe('resolvePublishFields — the outcome box a question’s mark lands in'
     expect(inferred).toEqual([]);
   });
 });
+
+describe('carried geometry at publish (AE2)', () => {
+  it('names every carried-but-unconfirmed field, and none when the stash is empty', async () => {
+    const { checkPublish } = await import('./builder-publish.js');
+    const fields = [
+      { id: 'q1', type: 'text', label: 'Pre-start checks', required: false, source: 'imported' },
+      { id: 'q2', type: 'text', label: 'Shutdown procedure', required: false, source: 'imported' },
+    ] as never[];
+    const stash = {
+      q1: { segments: [{ page: 0, x: 1, y: 1, width: 2, height: 2, pageWidth: 595, pageHeight: 842 }] },
+      q2: { segments: [{ page: 3, x: 1, y: 1, width: 2, height: 2, pageWidth: 595, pageHeight: 842 }] },
+    };
+
+    const withStash = checkPublish(fields, [], null, undefined, stash);
+    expect(withStash.carried.sort()).toEqual(['Pre-start checks', 'Shutdown procedure']);
+
+    const withoutStash = checkPublish(fields, [], null);
+    expect(withoutStash.carried).toEqual([]);
+  });
+});

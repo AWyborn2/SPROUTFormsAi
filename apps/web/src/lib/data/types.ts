@@ -896,6 +896,8 @@ export interface BuilderDraftSummary {
   step: string;
   formId: string | null;
   versionId: string | null;
+  /** Set when the draft revises a published tool — one per tool, server-enforced. */
+  revisionOfToolId: string | null;
   savedByUserId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -921,4 +923,6 @@ export interface SaveBuilderDraftInput {
   state: Record<string, unknown>;
   formId?: string | null;
   versionId?: string | null;
+  /** Set when the draft revises a published tool — the server enforces one per tool. */
+  revisionOfToolId?: string | null;
 }

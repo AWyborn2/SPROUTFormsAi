@@ -572,11 +572,14 @@ export const store = {
   forkDraftVersion(input: {
     formId: string;
     fields: FormField[];
+    /** Overrides the inherited source PDF — a revision that replaced the paper. */
+    sourcePdfAssetId?: string;
   }): Promise<{ form: FormSummary; versionId: string }> {
     return apiClient
       .post<FormSummaryDto & { createdVersionId: string }>(`/forms/${input.formId}/versions`, {
         fields: input.fields,
         publish: false,
+        ...(input.sourcePdfAssetId ? { sourcePdfAssetId: input.sourcePdfAssetId } : {}),
       })
       .then((dto) => ({ form: toFormSummary(dto), versionId: dto.createdVersionId }));
   },

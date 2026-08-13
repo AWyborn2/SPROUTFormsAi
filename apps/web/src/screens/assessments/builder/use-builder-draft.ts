@@ -11,10 +11,13 @@ import {
   type BuiltMatchingQuestion,
   type BuilderStructure,
   type DraftAnswerKey,
+  type AssessmentToolManifest as ToolManifest,
   type ExtractionResult,
+  type FieldGeometry,
   type FormField,
   type FormFieldType,
   type KeySource,
+  type RevisionIdentity,
   type MatchPresentation,
   type SectionColumns,
   type SetupAnswers,
@@ -166,6 +169,30 @@ export interface BuilderDraftState {
   versionId?: string;
   /** The uploaded PDF's storage handle, for the version to carry. */
   assetId?: string;
+  /** Set when this draft REVISES a published tool. Gates every revision branch. */
+  revisionOfToolId?: string;
+  /** The version the revision was seeded from — republish refuses if the tool moved on. */
+  seededFromVersionId?: string;
+  /** The tool's manifest at seed time; republish overlays the builder's onto it. */
+  revisionToolManifest?: ToolManifest;
+  /** The paper revision identity the publish step captures. */
+  revisionIdentity?: RevisionIdentity;
+  /** Geometry carried off the fields when the PDF was replaced — proposals only. */
+  carriedGeometry: Record<string, FieldGeometry>;
+  /** Whether a replacement PDF is in force (revert is offered). */
+  pdfReplaced: boolean;
+  /**
+   * Replace the source PDF in a revision: swap the asset handle and move every
+   * field's geometry into the carried stash — a box confirmed against the old
+   * layout is a PROPOSAL against the new one, never confirmed geometry.
+   */
+  replacePdf: (assetId: string, fileName: string) => void;
+  /** Undo a mis-upload: original PDF back, carried geometry back on as confirmed. */
+  revertPdf: () => void;
+  /** Record the rev code / review date / change note the publish step captures. */
+  setRevisionIdentity: (patch: Partial<RevisionIdentity>) => void;
+  /** Confirm carried boxes onto the fields (placement's apply path). */
+  confirmCarried: (fieldIds: readonly string[]) => void;
   /** Record the draft version the placement step created. */
   setVersionIds: (formId: string, versionId: string) => void;
   /**
@@ -423,6 +450,25 @@ export function useBuilderDraftState({
   const [formId, setFormId] = useState<string | undefined>(undefined);
   const [versionId, setVersionId] = useState<string | undefined>(undefined);
   /*
+    ── Revision mode ───────────────────────────────────────────────────────
+
+    Set only by hydrating a seeded revision draft (`revision-seed.ts`); a
+    fresh build never touches these. `carriedGeometry` is the KTD2 stash:
+    stored geometry means CONFIRMED everywhere it is read — the exporter above
+    all — so boxes carried across a PDF replacement live here as proposals
+    until a reviewer confirms them back onto the fields.
+  */
+  const [revisionOfToolId, setRevisionOfToolId] = useState<string | undefined>(undefined);
+  const [seededFromVersionId, setSeededFromVersionId] = useState<string | undefined>(undefined);
+  const [revisionToolManifest, setRevisionToolManifest] = useState<ToolManifest | undefined>(
+    undefined,
+  );
+  const [seedAssetId, setSeedAssetId] = useState<string | undefined>(undefined);
+  const [revisionIdentity, setRevisionIdentityState] = useState<RevisionIdentity | undefined>(
+    undefined,
+  );
+  const [carriedGeometry, setCarriedGeometry] = useState<Record<string, FieldGeometry>>({});
+  /*
     PARTS ARE DERIVED, WITH THE AUTHOR'S EDITS LAYERED ON TOP.
 
     Holding a resolved list would freeze the manifest at the moment the units
@@ -506,6 +552,12 @@ export function useBuilderDraftState({
     setAssetId(hydrateFrom.assetId);
     setFormId(hydrateFrom.formId);
     setVersionId(hydrateFrom.versionId);
+    setRevisionOfToolId(hydrateFrom.revisionOfToolId);
+    setSeededFromVersionId(hydrateFrom.seededFromVersionId);
+    setRevisionToolManifest(hydrateFrom.revisionToolManifest);
+    setSeedAssetId(hydrateFrom.seedAssetId);
+    setRevisionIdentityState(hydrateFrom.revisionIdentity);
+    setCarriedGeometry(hydrateFrom.carriedGeometry ?? {});
     /*
       `ready` SPECIFICALLY, because `hasDocument` is
       `phase === 'ready' && extraction !== null` and every step past upload is
@@ -514,9 +566,15 @@ export function useBuilderDraftState({
       are there, and nothing can be opened.
 
       A draft with no extraction never got past upload, so it stays idle and
-      the author lands on the dropzone, which is correct.
+      the author lands on the dropzone, which is correct — EXCEPT a revision
+      draft, which never has an extraction: it was seeded from a published
+      version, its fields ARE the document, and it must open ready (KTD7).
     */
-    setPhase(hydrateFrom.extraction ? 'ready' : 'idle');
+    setPhase(
+      hydrateFrom.extraction || (hydrateFrom.revisionOfToolId && hydrateFrom.fields.length > 0)
+        ? 'ready'
+        : 'idle',
+    );
   }, [hydrateFrom]);
 
   /** Everything worth saving, for the persistence hook to write. */
@@ -535,6 +593,12 @@ export function useBuilderDraftState({
       ...(assetId ? { assetId } : {}),
       ...(formId ? { formId } : {}),
       ...(versionId ? { versionId } : {}),
+      ...(revisionOfToolId ? { revisionOfToolId } : {}),
+      ...(seededFromVersionId ? { seededFromVersionId } : {}),
+      ...(revisionToolManifest ? { revisionToolManifest } : {}),
+      ...(seedAssetId ? { seedAssetId } : {}),
+      ...(revisionIdentity ? { revisionIdentity } : {}),
+      ...(Object.keys(carriedGeometry).length > 0 ? { carriedGeometry } : {}),
     }),
     [
       fileName,
@@ -550,6 +614,12 @@ export function useBuilderDraftState({
       assetId,
       formId,
       versionId,
+      revisionOfToolId,
+      seededFromVersionId,
+      revisionToolManifest,
+      seedAssetId,
+      revisionIdentity,
+      carriedGeometry,
     ],
   );
 
@@ -1035,6 +1105,74 @@ export function useBuilderDraftState({
     setFields((prev) => prev.map((f) => byId.get(f.id) ?? f));
   }, []);
 
+  /*
+    ── Revision PDF swap (KTD2) ────────────────────────────────────────────
+
+    Replacing the document moves every field's geometry into the carried
+    stash and strips it from the fields: stored geometry means CONFIRMED, and
+    a box confirmed against the old layout was not confirmed against the new
+    one. The draft's NAME is deliberately untouched — it is the autosave
+    upsert key, and renaming mid-session would strand the revision row.
+  */
+  const replacePdf = useCallback(
+    (nextAssetId: string, _nextFileName: string) => {
+      setCarriedGeometry((prev) => {
+        // On a double swap the ORIGINAL carried set wins — the fields are
+        // already bare, and re-stashing from them would lose every box.
+        const next = { ...prev };
+        for (const f of fields) {
+          if (next[f.id]) continue;
+          if (f.geometry) next[f.id] = f.geometry;
+          else if (f.sourcePosition) next[f.id] = { segments: [{ ...f.sourcePosition }] };
+        }
+        return next;
+      });
+      setFields((prev) =>
+        prev.map((f) => {
+          if (!f.geometry && !f.sourcePosition) return f;
+          const { geometry: _g, sourcePosition: _s, ...rest } = f;
+          return rest;
+        }),
+      );
+      setAssetId(nextAssetId);
+    },
+    [fields],
+  );
+
+  /** A mis-upload never costs re-confirmation: original PDF and geometry back. */
+  const revertPdf = useCallback(() => {
+    if (!seedAssetId) return;
+    setFields((prev) =>
+      prev.map((f) => {
+        const carried = carriedGeometry[f.id];
+        return carried ? { ...f, geometry: carried } : f;
+      }),
+    );
+    setCarriedGeometry({});
+    setAssetId(seedAssetId);
+  }, [seedAssetId, carriedGeometry]);
+
+  /** Confirm carried boxes back onto the fields — placement's apply path. */
+  const confirmCarried = useCallback(
+    (fieldIds: readonly string[]) => {
+      const confirmable = fieldIds.filter((id) => carriedGeometry[id]);
+      if (confirmable.length === 0) return;
+      setFields((prev) =>
+        prev.map((f) => (confirmable.includes(f.id) ? { ...f, geometry: carriedGeometry[f.id]! } : f)),
+      );
+      setCarriedGeometry((prev) => {
+        const next = { ...prev };
+        for (const id of confirmable) delete next[id];
+        return next;
+      });
+    },
+    [carriedGeometry],
+  );
+
+  const setRevisionIdentity = useCallback((patch: Partial<RevisionIdentity>) => {
+    setRevisionIdentityState((prev) => ({ ...prev, ...patch }));
+  }, []);
+
   const stats = useMemo(() => (extraction ? statsFor(extraction) : null), [extraction]);
 
   return {
@@ -1047,8 +1185,16 @@ export function useBuilderDraftState({
     setup,
     excluded,
     structure,
-    hasDocument: phase === 'ready' && extraction !== null,
-    title: extraction ? extraction.fileName.replace(/\.pdf$/i, '') : null,
+    // A revision draft has no extraction — its seeded fields ARE the document
+    // (KTD7), so the stepper opens on their strength alone.
+    hasDocument:
+      phase === 'ready' &&
+      (extraction !== null || (revisionOfToolId !== undefined && fields.length > 0)),
+    title: extraction
+      ? extraction.fileName.replace(/\.pdf$/i, '')
+      : revisionOfToolId
+        ? fileName
+        : null,
     pageCount: extraction?.pageCount ?? 0,
     ingest,
     setSetup,
@@ -1056,6 +1202,16 @@ export function useBuilderDraftState({
     ...(formId ? { formId } : {}),
     ...(versionId ? { versionId } : {}),
     ...(assetId ? { assetId } : {}),
+    ...(revisionOfToolId ? { revisionOfToolId } : {}),
+    ...(seededFromVersionId ? { seededFromVersionId } : {}),
+    ...(revisionToolManifest ? { revisionToolManifest } : {}),
+    ...(revisionIdentity ? { revisionIdentity } : {}),
+    carriedGeometry,
+    pdfReplaced: Boolean(revisionOfToolId && seedAssetId && assetId !== seedAssetId),
+    replacePdf,
+    revertPdf,
+    setRevisionIdentity,
+    confirmCarried,
     setVersionIds,
     setPlacedFields,
     parts,

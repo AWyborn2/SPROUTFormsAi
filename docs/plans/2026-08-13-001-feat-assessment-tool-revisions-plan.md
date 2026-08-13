@@ -296,13 +296,13 @@ stateDiagram-v2
 - **Requirements:** R6, R7, KTD2.
 - **Dependencies:** U4, U5.
 - **Files:** `apps/web/src/screens/assessments/builder/steps/PlacementStep.tsx`, `apps/web/src/screens/import/GeometryEditorScreen.tsx`, `apps/web/src/screens/import/inspector/geometry-actions.ts`, tests alongside.
-- **Approach:** Revision branch in `PlacementStep`: instead of `useCreateDraftForm` (new template), fork via the existing `POST /forms/:formId/versions` with the working fields and, when the PDF was replaced, the new `sourcePdfAssetId` override — once, guarded like today's `started` ref; keep the add-only reconcile effect. Seed `carriedGeometry` into the geometry editor as needs-review proposals (extend its input; proposals stay client/draft-state only). Add a per-page "confirm carried boxes" bulk action scoped to the visible page. Boxes whose page index exceeds the new PDF's page count render in a distinct "off-document" list — flagged, never dropped (KTD2). Confirm applies and saves through the existing `useSaveVersionFields` PATCH; `onSaved` merge-back keeps the draft authoritative for publish.
+- **Approach:** Revision branch in `PlacementStep`: instead of `useCreateDraftForm` (new template), fork via the existing `POST /forms/:formId/versions` with the working fields and, when the PDF was replaced, the new `sourcePdfAssetId` override — once, guarded like today's `started` ref; keep the add-only reconcile effect. Carried boxes surface in a review panel beside the geometry editor, grouped by the page they sat on, with a per-page "confirm" bulk action; confirming writes the stashed geometry onto the draft's and the version's fields together through the existing `useSaveVersionFields` PATCH, after which the editor renders the boxes at their old positions for fine-tuning. (As built, unconfirmed carried boxes are listed in the panel rather than overlaid on the canvas — seeding them into the editor's own needs-review proposal machinery is deferred polish; the stash, the confirm gate, and the publish warning are unaffected.) A whole-document confirm is deliberately absent — the honest review unit is a page. Boxes whose page exceeds the replacement PDF's page count are safe by construction: `geometrySegments` resolves an out-of-range segment to nothing and the publish warning names the field (KTD2).
 - **Test scenarios:**
   - Revision placement forks the existing form (no new template row) with field ids preserved; same-PDF fork carries `sourcePdfAssetId` by inheritance.
   - Covers AE1 (placement half): same-PDF revision — placement step optional, geometry already on fields, nothing to confirm.
-  - New-PDF: carried boxes render as needs-review proposals; confirming one writes geometry to the version fields; unconfirmed ones do not.
-  - Per-page bulk confirm confirms exactly the visible page's carried proposals (covers R7).
-  - Box targeting page 9 of a 7-page replacement PDF appears in the off-document list and survives save/reload.
+  - New-PDF: carried boxes appear in the review panel; confirming writes geometry to the version fields; unconfirmed ones do not.
+  - Per-page bulk confirm confirms exactly that page's carried boxes (covers R7).
+  - A carried box survives a double PDF swap and a revert restores it as confirmed (no geometry loss on a mis-upload).
 - **Verification:** web suite passes; manual F1 walk to the publish step.
 
 ### U7. Publish step: revision publish flow and warnings

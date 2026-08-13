@@ -773,6 +773,21 @@ export function TemplatesScreen() {
                       </>
                     ) : null}
                   </div>
+                  {/* The paper document's own identity, where a revision
+                      recorded one — the code and review date auditors match
+                      against the printed document, ahead of the change note. */}
+                  {v.revisionIdentity && (v.revisionIdentity.code || v.revisionIdentity.reviewedOn) && (
+                    <div className="mt-[3px] font-mono text-[11px] uppercase tracking-[0.05em] text-text-secondary">
+                      {[
+                        v.revisionIdentity.code,
+                        v.revisionIdentity.reviewedOn
+                          ? `reviewed ${v.revisionIdentity.reviewedOn}`
+                          : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </div>
+                  )}
                   {v.note && (
                     <div className="mt-[3px] text-[12.5px] leading-snug text-text-secondary">{v.note}</div>
                   )}

@@ -388,7 +388,8 @@ export function useSaveVersionFields(formId: string, versionId: string) {
 export function useForkDraftVersion() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { formId: string; fields: FormField[] }) => store.forkDraftVersion(input),
+    mutationFn: (input: { formId: string; fields: FormField[]; sourcePdfAssetId?: string }) =>
+      store.forkDraftVersion(input),
     onSuccess: (_r, input) => {
       void qc.invalidateQueries({ queryKey: keys.form(input.formId) });
       void qc.invalidateQueries({ queryKey: keys.forms });

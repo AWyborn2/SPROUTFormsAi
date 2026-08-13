@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef } from 'react';
+import { Button, Icon } from '@formai/ui';
 import {
   useCreateDraftForm,
+  useForkDraftVersion,
   useFormVersion,
   useSaveVersionFields,
 } from '../../../../lib/data/hooks.js';
 import { GeometryEditorScreen } from '../../../import/GeometryEditorScreen.js';
 import type { BuilderDraftState } from '../use-builder-draft.js';
-import type { FormField } from '@formai/shared';
+import type { FieldGeometry, FormField } from '@formai/shared';
 
 /**
  * Step 6 — map each field onto the printed page.
@@ -62,6 +64,8 @@ export function PlacementStep({ draft }: PlacementStepProps) {
   const { formId, versionId, setVersionIds, setPlacedFields, fields, excluded, assetId, title } =
     draft;
   const createDraftForm = useCreateDraftForm();
+  const forkDraftVersion = useForkDraftVersion();
+  const isRevision = Boolean(draft.revisionOfToolId);
   /*
     ONE CREATION, EVER. `useEffect` re-runs on every dependency change and
     React 18 mounts effects twice in development, so the guard cannot be the
@@ -95,6 +99,42 @@ export function PlacementStep({ draft }: PlacementStepProps) {
         started.current = false;
       });
   }, [formId, fields, excluded, assetId, title, createDraftForm, setVersionIds]);
+
+  /*
+    A REVISION FORKS, IT NEVER CREATES. The form already exists — it is the
+    published tool's own template, and the seed set `formId` to it — so this
+    step forks a fresh draft version of THAT form, field ids preserved (which
+    is the entire point: the manifest, the keys and every stored attempt are
+    keyed to them). When the paper was replaced, the fork carries the new
+    `sourcePdfAssetId`; kept, it inherits the current one.
+  */
+  const forkStarted = useRef(false);
+  useEffect(() => {
+    if (!isRevision || !formId || versionId || forkStarted.current || fields.length === 0) return;
+    forkStarted.current = true;
+    void forkDraftVersion
+      .mutateAsync({
+        formId,
+        fields: fields.filter((f) => !excluded.has(f.id)),
+        ...(draft.pdfReplaced && assetId ? { sourcePdfAssetId: assetId } : {}),
+      })
+      .then((result) => {
+        if (result.versionId) setVersionIds(formId, result.versionId);
+      })
+      .catch(() => {
+        forkStarted.current = false;
+      });
+  }, [
+    isRevision,
+    formId,
+    versionId,
+    fields,
+    excluded,
+    assetId,
+    draft.pdfReplaced,
+    forkDraftVersion,
+    setVersionIds,
+  ]);
 
   /*
     RE-TICKING A FIELD USED TO BE A DEAD END.
@@ -147,14 +187,17 @@ export function PlacementStep({ draft }: PlacementStepProps) {
   }
 
   if (!formId || !versionId) {
+    const preparing = createDraftForm.isPending || forkDraftVersion.isPending;
     return (
       <div className="rounded-[14px] border border-border bg-surface-card p-4">
         <span className="block text-[14.5px] font-semibold">
-          {createDraftForm.isPending ? 'Preparing the document…' : 'Could not prepare the document'}
+          {preparing ? 'Preparing the document…' : 'Could not prepare the document'}
         </span>
         <p className="mt-1 text-[12.5px] leading-relaxed text-text-secondary">
-          {createDraftForm.isPending
-            ? 'Creating the draft version this step places geometry onto. It stays a draft until you publish, so nobody can fill it in the meantime.'
+          {preparing
+            ? isRevision
+              ? 'Forking a draft version of the published form — same fields, same ids — so this revision has somewhere to save placements without touching what is live.'
+              : 'Creating the draft version this step places geometry onto. It stays a draft until you publish, so nobody can fill it in the meantime.'
             : 'The draft version could not be created, so there is nowhere to save a placement — a box drawn now would have nothing to be saved onto. Move away from this step and back to try again.'}
         </p>
       </div>
@@ -163,6 +206,28 @@ export function PlacementStep({ draft }: PlacementStepProps) {
 
   return (
     <div className="-mx-[22px] -my-3">
+      {isRevision && Object.keys(draft.carriedGeometry).length > 0 && (
+        <CarriedBoxesPanel
+          carried={draft.carriedGeometry}
+          fields={fields}
+          onConfirm={(ids) => {
+            /*
+              Confirming writes the carried boxes onto BOTH copies of the
+              fields in the same act — the draft's (what publishes) and the
+              version's (what the editor and exporter read) — because a stash
+              applied to one and not the other is exactly the two-copies drift
+              this builder refuses everywhere else.
+            */
+            const stash = draft.carriedGeometry;
+            draft.confirmCarried(ids);
+            const onVersion = version.data?.fields ?? [];
+            const next = onVersion.map((f) =>
+              ids.includes(f.id) && stash[f.id] ? { ...f, geometry: stash[f.id]! } : f,
+            );
+            void saveVersionFields.mutateAsync(next).then(() => setPlacedFields(next));
+          }}
+        />
+      )}
       {/*
         Embedded: the builder's own stepper is the chrome, and the screen's
         header would read as a second page title stacked on the first.
@@ -179,6 +244,78 @@ export function PlacementStep({ draft }: PlacementStepProps) {
         embedded
         onSaved={setPlacedFields}
       />
+    </div>
+  );
+}
+
+/**
+ * Boxes carried across a PDF replacement, grouped by the page they sat on.
+ *
+ * Carried geometry is a PROPOSAL — it lives in the draft's stash, never on a
+ * field, because stored geometry means confirmed everywhere it is read (the
+ * exporter above all). Confirming a page moves that page's boxes onto the
+ * fields at their old positions, where the editor below renders them for
+ * fine-tuning; anything left unconfirmed is named at publish rather than
+ * silently printed against a layout nobody checked (R7, R8).
+ *
+ * Per PAGE, deliberately never one whole-document button: the honest review
+ * unit is a page held next to its printed counterpart.
+ */
+function CarriedBoxesPanel({
+  carried,
+  fields,
+  onConfirm,
+}: {
+  carried: Record<string, FieldGeometry>;
+  fields: readonly FormField[];
+  onConfirm: (fieldIds: string[]) => void;
+}) {
+  const labelById = useMemo(() => new Map(fields.map((f) => [f.id, f.label])), [fields]);
+  const byPage = useMemo(() => {
+    const pages = new Map<number, string[]>();
+    for (const [fieldId, geometry] of Object.entries(carried)) {
+      const page = geometry.segments[0]?.page ?? 0;
+      const bucket = pages.get(page);
+      if (bucket) bucket.push(fieldId);
+      else pages.set(page, [fieldId]);
+    }
+    return [...pages.entries()].sort(([a], [b]) => a - b);
+  }, [carried]);
+  const total = Object.keys(carried).length;
+
+  return (
+    <div className="m-[22px_22px_12px] rounded-[14px] border border-warning bg-warning-soft p-[14px_16px]">
+      <div className="mb-1 flex items-center gap-2 text-[13.5px] font-semibold text-warning-text">
+        <Icon name="map-pin" size={15} />
+        {total} carried box{total === 1 ? '' : 'es'} awaiting re-confirmation
+      </div>
+      <p className="mb-3 max-w-[70ch] text-[12px] leading-relaxed text-warning-text">
+        These were confirmed against the previous document. Confirm a page to place its boxes at
+        their old positions — then check them on the page below and adjust any the new layout
+        moved. Anything left here is named before publish and prints nowhere until placed.
+      </p>
+      <div className="flex flex-col gap-1.5">
+        {byPage.map(([page, ids]) => (
+          <div
+            key={page}
+            className="flex flex-wrap items-center gap-2 rounded-lg border border-border-subtle bg-surface-card p-[8px_10px]"
+          >
+            <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-text-tertiary">
+              Page {page + 1}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[12px] text-text-secondary">
+              {ids
+                .slice(0, 4)
+                .map((id) => labelById.get(id) ?? id)
+                .join(' · ')}
+              {ids.length > 4 ? ` · +${ids.length - 4} more` : ''}
+            </span>
+            <Button size="sm" variant="outline" leadingIcon="check" onClick={() => onConfirm(ids)}>
+              Confirm page {page + 1} ({ids.length})
+            </Button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
