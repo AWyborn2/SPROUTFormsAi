@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { Badge, Button, Icon } from '@formai/ui';
+import { Badge, Button, Icon, useToast } from '@formai/ui';
 import { isTerminalCaseState, type SessionInfo } from '@formai/shared';
 import {
   useAssessmentCases,
@@ -8,6 +8,8 @@ import {
   useDashboard,
   useForms,
   useHeldCompetencies,
+  useMyRecommended,
+  useRequestTraining,
   useSession,
   useWorkingList,
 } from '../lib/data/hooks.js';
@@ -173,6 +175,71 @@ function CandidateDashboard({ session }: { session: SessionInfo }) {
             </div>
           )}
         </div>
+
+        <RecommendedTrainingCard />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Unheld recommendations on the candidate's landing page (U7, R12). Absent —
+ * not an empty shell — when every recommendation is held or none exists.
+ * "Request this training" needs BOTH facts (R14, AE5): the org's self-start
+ * toggle ON and a bookable awarding tool from the KTD2 resolver; toggle OFF
+ * leaves the recommendation visible with no start action, and an evidence-only
+ * entry names evidence as the route. The request posts the existing voluntary
+ * `{ toolId }` body and waits on an admin (R94, R96).
+ */
+function RecommendedTrainingCard() {
+  const { toast } = useToast();
+  const { data } = useMyRecommended();
+  const request = useRequestTraining();
+  const unheld = (data?.items ?? []).filter((r) => !r.held);
+  if (unheld.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-border bg-surface-card p-5 shadow-xs lg:col-span-2">
+      <div className="mb-3 font-heading text-[15px] font-bold">Recommended for your roles</div>
+      <div className="flex flex-col gap-1.5">
+        {unheld.map((r) => (
+          <div
+            key={r.competencyId}
+            className="flex items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2"
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="truncate text-[13px] font-semibold">{r.name}</span>
+              {r.code && (
+                <span className="flex-none font-mono text-[10.5px] uppercase tracking-wide text-text-tertiary">
+                  {r.code}
+                </span>
+              )}
+            </span>
+            {data?.selfStartEnabled && r.requestableToolId ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={request.isPending}
+                onClick={() =>
+                  request.mutate(r.requestableToolId!, {
+                    onSuccess: () =>
+                      toast({ variant: 'success', message: `Requested training for ${r.name}.` }),
+                    onError: () =>
+                      toast({ variant: 'danger', message: 'Could not send the request.' }),
+                  })
+                }
+              >
+                Request this training
+              </Button>
+            ) : (
+              <span className="flex-none text-[11px] text-text-tertiary">
+                {r.requestableToolId
+                  ? 'Ask your supervisor'
+                  : 'Evidence-based — ask your supervisor'}
+              </span>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );

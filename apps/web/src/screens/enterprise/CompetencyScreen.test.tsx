@@ -276,6 +276,20 @@ describe('CompetencyScreen holder register', () => {
     expect(screen.getByText('Optional')).toBeDefined();
   });
 
+  it('labels a recommended holder "Recommended" — never collapsed to Optional (U7, R12, KTD7)', () => {
+    // The standing map is exhaustive over the union: the third tier gets its
+    // own label, end to end from the API's standingOf to this register row.
+    competencies.data = [TRACK_DOZER];
+    holdersResult.data = [
+      holder({ userId: 'rec', name: 'Ria Recommended', standing: 'recommended' }),
+    ];
+    render(<CompetencyScreen />);
+    openRegister();
+
+    expect(screen.getByText('Recommended')).toBeDefined();
+    expect(screen.queryByText('Optional')).toBeNull();
+  });
+
   it('counts how many are no longer current', () => {
     // The number on the row is grants, not currency. This line is the only
     // place the screen says how many of them actually still count.

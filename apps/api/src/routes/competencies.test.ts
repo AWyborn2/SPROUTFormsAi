@@ -58,6 +58,8 @@ function fakeDb(opts: {
   roleRequiredCompetenciesFindMany?: unknown[];
   /** Every route is gated by requirePlanFeature('competencyGating'). */
   planTier?: string;
+  /** The org's candidate self-start toggle (U7, R14). Default OFF — the stored default. */
+  selfStart?: boolean;
   /** The caller's stored permission matrix; absent falls back to the role default. */
   matrix?: PermissionMatrix;
 }) {
@@ -68,7 +70,11 @@ function fakeDb(opts: {
   const db = {
     query: {
       organizations: {
-        findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: opts.planTier ?? 'enterprise' }),
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'org-1',
+          planTier: opts.planTier ?? 'enterprise',
+          candidateSelfStartRecommended: opts.selfStart ?? false,
+        }),
       },
       rolePermissions: {
         findFirst: vi.fn().mockResolvedValue(opts.matrix ? { matrix: opts.matrix } : undefined),
@@ -1848,6 +1854,113 @@ describe('GET /competencies/:id/holders', () => {
 
       const [row] = (await res.json()) as { standing: string }[];
       expect(row!.standing).toBe('optional');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('GET /competencies/recommended (U7 — R12, R14, KTD2)', () => {
+  // Self-scope: the caller is the subject, so the read works for a candidate.
+  const cand = { userId: HOLDER_ID, orgId: 'org-1', role: 'candidate' as const };
+  const asUser = (t: { userId: string; orgId: string; role: string }) => ({
+    cookie: `fai_session=${sealSession(t)}`,
+  });
+  const ago = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
+  /** One held Role recommending First Aid — the caller's own recommendation. */
+  const recommendedFixture = {
+    membershipsFindMany: [{ id: 'm1', userId: HOLDER_ID }],
+    membershipRolesFindMany: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
+    roleRequiredCompetenciesFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'recommended' }],
+    competenciesFindMany: [
+      { id: 'c1', orgId: 'org-1', name: 'First Aid', code: 'HLTAID011', validForMonths: 36 },
+    ],
+  };
+
+  it('lists an unheld recommendation with its bookable awarding tool and the toggle (KTD2, R14)', async () => {
+    mockDbValue = fakeDb({
+      ...recommendedFixture,
+      selfStart: true,
+      assessmentToolsFindMany: [
+        {
+          id: 't1',
+          orgId: 'org-1',
+          templateId: 'tpl-1',
+          awardedCompetencyIds: ['c1'],
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ],
+      formTemplatesFindMany: [{ id: 'tpl-1', orgId: 'org-1', currentVersionId: 'v1' }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/recommended`, { headers: asUser(cand) });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        selfStartEnabled: true,
+        items: [
+          { competencyId: 'c1', name: 'First Aid', code: 'HLTAID011', held: false, requestableToolId: 't1' },
+        ],
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reads held from the caller’s own live grant, and null tool for evidence-only (R7)', async () => {
+    // Nothing awards First Aid — there is no assessment to self-start, only
+    // evidence to record; and the caller already holds it current.
+    mockDbValue = fakeDb({
+      ...recommendedFixture,
+      competencyHoldersFindMany: [{ competencyId: 'c1', userId: HOLDER_ID, grantedAt: ago(100), revokedAt: null }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/recommended`, { headers: asUser(cand) });
+      const body = (await res.json()) as { selfStartEnabled: boolean; items: Array<Record<string, unknown>> };
+      expect(body.selfStartEnabled).toBe(false); // the stored default (R14)
+      expect(body.items).toEqual([
+        { competencyId: 'c1', name: 'First Aid', code: 'HLTAID011', held: true, requestableToolId: null },
+      ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reads an UNPUBLISHED awarding tool as nothing to request — the KTD2 filter, not raw awards', async () => {
+    mockDbValue = fakeDb({
+      ...recommendedFixture,
+      assessmentToolsFindMany: [
+        {
+          id: 't1',
+          orgId: 'org-1',
+          templateId: 'tpl-1',
+          awardedCompetencyIds: ['c1'],
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ],
+      // No published version → the tool cannot carry a case → evidence-only.
+      formTemplatesFindMany: [{ id: 'tpl-1', orgId: 'org-1', currentVersionId: null }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/recommended`, { headers: asUser(cand) });
+      const body = (await res.json()) as { items: Array<{ requestableToolId: string | null }> };
+      expect(body.items[0]!.requestableToolId).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('resolves as its own route with nothing recommended — an empty list, never a 404 (:id ordering)', async () => {
+    // Pins the registration order: '/recommended' must never be swallowed as
+    // a parameterised sibling's :id, even for a caller with no roles at all.
+    mockDbValue = fakeDb({}).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/recommended`, { headers: asUser(cand) });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ selfStartEnabled: false, items: [] });
     } finally {
       server.close();
     }

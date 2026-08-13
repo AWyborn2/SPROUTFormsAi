@@ -105,6 +105,7 @@ taxonomyRouter.get(
         pooledCaseOverdueDays: org?.pooledCaseOverdueDays ?? 14,
         notificationLeadDays: org?.notificationLeadDays ?? 30,
         dateFormat: org?.dateFormat ?? 'dmy',
+        candidateSelfStartRecommended: org?.candidateSelfStartRecommended ?? false,
       },
     });
   }),
@@ -1521,6 +1522,15 @@ const settingsBody = z.object({
   // How far ahead of an expiry the sweep notifies (U21, KTD12).
   notificationLeadDays: z.number().int().min(1).max(365).optional(),
   dateFormat: z.enum(['dmy', 'mdy']).optional(),
+  /*
+    Whether a candidate may SELF-START recommended training (R14, KTD6).
+    Default OFF — the stricter reading. The toggle gates the candidate
+    affordance and scopes the candidate's training-request POST to their
+    recommended set; it never touches required-gap requests (which are always
+    available) nor assessor/admin assignment, which rides the ordinary New
+    Case flow regardless (R13, R14).
+  */
+  candidateSelfStartRecommended: z.boolean().optional(),
 });
 
 taxonomyRouter.patch(
@@ -1553,6 +1563,9 @@ taxonomyRouter.patch(
           ? { notificationLeadDays: parsed.data.notificationLeadDays }
           : {}),
         ...(parsed.data.dateFormat ? { dateFormat: parsed.data.dateFormat } : {}),
+        ...(parsed.data.candidateSelfStartRecommended !== undefined
+          ? { candidateSelfStartRecommended: parsed.data.candidateSelfStartRecommended }
+          : {}),
       })
       .where(eq(schema.organizations.id, tenant.orgId))
       .returning();
@@ -1570,6 +1583,7 @@ taxonomyRouter.patch(
       pooledCaseOverdueDays: row?.pooledCaseOverdueDays ?? 14,
       notificationLeadDays: row?.notificationLeadDays ?? 30,
       dateFormat: row?.dateFormat ?? 'dmy',
+      candidateSelfStartRecommended: row?.candidateSelfStartRecommended ?? false,
     });
   }),
 );

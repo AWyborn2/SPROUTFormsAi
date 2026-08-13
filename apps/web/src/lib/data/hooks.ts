@@ -45,6 +45,7 @@ import type {
   SubmissionDetail,
   SubmissionRow,
   TaxonomySettings,
+  RoleRequirementTiers,
 } from './types.js';
 import type { TaxonomyStatus } from '@formai/shared';
 
@@ -170,6 +171,13 @@ export const keys = {
   profileSeed: (submissionId: string) => ['profiles', 'seed', submissionId] as const,
   /** One person's held competencies, keyed on the USER the grants belong to. */
   heldCompetencies: (userId: string) => ['competencies', 'held', userId] as const,
+  /**
+   * The caller's OWN recommended competencies (U7, R12). Nested under the
+   * `competencies` prefix on purpose: granting or creating a competency can
+   * change `held` and the rows themselves, and the register invalidations
+   * already sweep that prefix.
+   */
+  myRecommended: ['competencies', 'recommended', 'mine'] as const,
 };
 
 /**
@@ -1606,7 +1614,11 @@ export function useUpdateTaxonomySettings() {
   );
 }
 
-/** A Role's required assessments (U10). `configured` distinguishes never-set from emptied. */
+/**
+ * A Role's requirements in COMPETENCY terms (U6, U3): two tiers, the legacy
+ * `awaitingLink` rows, and the KTD9 fingerprint every write must echo.
+ * `configured` distinguishes never-set from emptied (R50).
+ */
 export function useRoleRequiredAssessments(roleId: string | undefined) {
   return useQuery({
     queryKey: keys.roleRequiredAssessments(roleId ?? ''),
@@ -1615,29 +1627,69 @@ export function useRoleRequiredAssessments(roleId: string | undefined) {
   });
 }
 
-/** Project a proposed change's blast radius without committing it (U12). */
+/**
+ * Project a proposed change's blast radius without committing it (U12, KTD10).
+ * Takes both tiers plus optional legacy removals — the awaitingLink exit
+ * previews through this same door (KTD9).
+ */
 export function usePreviewRoleRequiredAssessments(roleId: string) {
   return useMutation({
-    mutationFn: (toolIds: string[]) => store.previewRoleRequiredAssessments(roleId, toolIds),
+    mutationFn: (body: RoleRequirementTiers & { removeLegacyToolIds?: string[] }) =>
+      store.previewRoleRequiredAssessments(roleId, body),
   });
 }
 
-export function useSetRoleRequiredAssessments(roleId: string) {
+/** The invalidation sweep both requirement writes share — what a save or legacy removal goes stale. */
+function useRequirementWriteInvalidation(roleId: string) {
   const qc = useQueryClient();
+  return () => {
+    void qc.invalidateQueries({ queryKey: keys.roleRequiredAssessments(roleId) });
+    // The taxonomy read carries each Role's configured flag; a new case can
+    // reach the case list AND the progress dashboard (a deliberate sibling key,
+    // so it must be swept explicitly); the audit feed logs the change. The
+    // recommended surfaces derive from the same links (U7), and standing feeds
+    // the compliance numbers (U8), so both refetch too.
+    void qc.invalidateQueries({ queryKey: keys.taxonomy });
+    void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    void qc.invalidateQueries({ queryKey: keys.assessorQueue });
+    void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
+    void qc.invalidateQueries({ queryKey: keys.myRecommended });
+    void qc.invalidateQueries({ queryKey: keys.compliance });
+    void qc.invalidateQueries({ queryKey: keys.auditLog });
+  };
+}
+
+/** Replace both tiers, echoing the fingerprint (KTD9 — a stale echo 409s `requirements_changed`). */
+export function useSetRoleRequiredAssessments(roleId: string) {
+  const invalidate = useRequirementWriteInvalidation(roleId);
   return useMutation({
-    mutationFn: (toolIds: string[]) => store.setRoleRequiredAssessments(roleId, toolIds),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: keys.roleRequiredAssessments(roleId) });
-      // The taxonomy read carries each Role's configured flag; a new case can
-      // reach the case list AND the progress dashboard (a deliberate sibling key,
-      // so it must be swept explicitly); the audit feed logs the change.
-      void qc.invalidateQueries({ queryKey: keys.taxonomy });
-      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
-      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
-      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
-      void qc.invalidateQueries({ queryKey: keys.auditLog });
-    },
+    mutationFn: (body: RoleRequirementTiers & { fingerprint: string }) =>
+      store.setRoleRequiredAssessments(roleId, body),
+    onSuccess: invalidate,
   });
+}
+
+/**
+ * Remove ONE awaitingLink legacy row (U6, KTD9) — the exit for a tool that
+ * will never be linked. Fingerprint-guarded like the PUT, and confirmed
+ * through the same preview before the editor calls this.
+ */
+export function useRemoveLegacyRequirement(roleId: string) {
+  const invalidate = useRequirementWriteInvalidation(roleId);
+  return useMutation({
+    mutationFn: (input: { toolId: string; fingerprint: string }) =>
+      store.removeLegacyRequirement(roleId, input.toolId, input.fingerprint),
+    onSuccess: invalidate,
+  });
+}
+
+/**
+ * The caller's OWN recommended competencies (U7, R12) — powers the candidate
+ * record and dashboard. Self-scope, so no admin gate and no `enabled` dance:
+ * mounting the surface IS the decision to ask.
+ */
+export function useMyRecommended() {
+  return useQuery({ queryKey: keys.myRecommended, queryFn: () => store.listMyRecommended() });
 }
 
 export function useMemberPlacement(membershipId: string | undefined) {

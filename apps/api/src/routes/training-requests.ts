@@ -7,6 +7,7 @@ import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
 import { assignToolToMembership } from '../lib/assignment.js';
+import { recommendedCompetencyIdsFor, requiredCompetencyIdsFor } from '../lib/standing.js';
 import { db } from '../db.js';
 
 /**
@@ -70,6 +71,47 @@ trainingRequestsRouter.post(
       res.status(404).json({ error: 'tool_not_found' });
       return;
     }
+
+    /*
+      THE CANDIDATE-RELEVANCE CHECK (KTD6 — R14, AE5). A candidate's request is
+      validated against THEIR OWN roles, closing the open-catalogue abuse (a
+      candidate self-requesting the assessor skill set) while keeping the
+      voluntary flow intact for everyone else — assessor and admin requests are
+      untouched, and the admin assignment path is the ordinary New Case flow.
+
+      Relevance is read in COMPETENCY terms, through the same dual-read standing
+      resolvers every other surface uses (KTD2/KTD3):
+        - a tool that awards a competency the candidate's roles REQUIRE is
+          always requestable — the toggle hides nothing for a required gap
+          (AE5, the R94 voluntary flow survives for required work);
+        - a tool that awards a merely RECOMMENDED competency is requestable
+          only while the org's self-start toggle is ON (R14) — OFF, the
+          candidate's relevant set is required-only, so the request reads as
+          not relevant rather than as a distinct refusal;
+        - anything else 403s `tool_not_relevant`.
+      An award-less tool intersects neither set and is refused too — it is
+      inert competency machinery (sign-off grants nothing), so a candidate
+      self-starting it could never close any gap.
+    */
+    if (tenant.role === 'candidate') {
+      const awards = tool.awardedCompetencyIds ?? [];
+      const required = await requiredCompetencyIdsFor(db, tenant.orgId, tenant.userId);
+      const fillsRequiredGap = awards.some((a) => required.has(a));
+      if (!fillsRequiredGap) {
+        const org = await db.query.organizations.findFirst({
+          where: eq(schema.organizations.id, tenant.orgId),
+        });
+        const selfStart = org?.candidateSelfStartRecommended ?? false;
+        const recommended = selfStart
+          ? await recommendedCompetencyIdsFor(db, tenant.orgId, tenant.userId)
+          : new Set<string>();
+        if (!awards.some((a) => recommended.has(a))) {
+          res.status(403).json({ error: 'tool_not_relevant' });
+          return;
+        }
+      }
+    }
+
     const existing = await db.query.trainingRequests.findFirst({
       where: and(
         eq(schema.trainingRequests.userId, tenant.userId),

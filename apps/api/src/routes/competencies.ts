@@ -21,6 +21,7 @@ import {
   requiredCompetencyIdsByUser,
   requiredCompetencyIdsFor,
 } from '../lib/standing.js';
+import { awardingToolByCompetency } from '../lib/requirement-links.js';
 import { permissionScope } from '../lib/permissions.js';
 import { db } from '../db.js';
 
@@ -79,6 +80,100 @@ competenciesRouter.get(
         gracePeriodDays: c.gracePeriodDays,
       })),
     );
+  }),
+);
+
+/**
+ * The caller's OWN recommended competencies (U7 — R12, R14, KTD6).
+ *
+ * SELF-SCOPE, like the training-request POST it feeds: the subject is always
+ * the caller, so no matrix check applies and no role is refused the read — a
+ * candidate seeing what their Roles recommend is the entire point (R12).
+ *
+ * REGISTERED AHEAD OF THE PARAMETERISED SIBLINGS deliberately. Express matches
+ * in registration order, and although no bare `GET /:id` exists today, one
+ * added later would swallow `/recommended` as an id — this ordering makes the
+ * route immune to that regression rather than dependent on nobody adding one.
+ *
+ * Each row resolves `requestableToolId` through the KTD2 resolver — the SAME
+ * resolution assignment and compliance use, so the tool this offers to request
+ * is exactly the tool an approval would assign. Null means evidence-only (R7):
+ * nothing bookable awards it, so there is nothing to self-start.
+ *
+ * `selfStartEnabled` rides the payload because the affordance needs BOTH facts
+ * (toggle ON and a requestable tool, R14/AE5) and the org toggle lives on a
+ * surface a candidate has no other read for.
+ */
+competenciesRouter.get(
+  '/recommended',
+  requireTenant,
+  requirePlanFeature('competencyGating'),
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const [org, recommended] = await Promise.all([
+      db.query.organizations.findFirst({ where: eq(schema.organizations.id, tenant.orgId) }),
+      // Non-withdrawn roles only — heldRolesByUser filters withdrawn rows (R52).
+      recommendedCompetencyIdsFor(db, tenant.orgId, tenant.userId),
+    ]);
+    const selfStartEnabled = org?.candidateSelfStartRecommended ?? false;
+    if (recommended.size === 0) {
+      res.json({ selfStartEnabled, items: [] });
+      return;
+    }
+
+    const ids = [...recommended];
+    const [rows, grants, awarding] = await Promise.all([
+      db.query.competencies.findMany({
+        where: and(eq(schema.competencies.orgId, tenant.orgId), inArray(schema.competencies.id, ids)),
+      }),
+      // The caller's live grants of these — revoked confers nothing (R107).
+      db.query.competencyHolders.findMany({
+        where: and(
+          eq(schema.competencyHolders.orgId, tenant.orgId),
+          eq(schema.competencyHolders.userId, tenant.userId),
+          inArray(schema.competencyHolders.competencyId, ids),
+          isNull(schema.competencyHolders.revokedAt),
+        ),
+      }),
+      awardingToolByCompetency(db, tenant.orgId, ids),
+    ]);
+    const competencyById = new Map(rows.map((c) => [c.id, c]));
+    const grantsByCompetency = new Map<string, (typeof grants)[number][]>();
+    for (const g of grants) {
+      const list = grantsByCompetency.get(g.competencyId) ?? [];
+      list.push(g);
+      grantsByCompetency.set(g.competencyId, list);
+    }
+
+    // One instant for the whole response; the candidate window, because this
+    // is someone reading their own record (same posture as /held).
+    const now = new Date();
+    const items = ids
+      .flatMap((competencyId) => {
+        const competency = competencyById.get(competencyId);
+        // A recommendation of a competency the org no longer defines has
+        // nothing to show and nothing to request — dropped rather than named
+        // by raw id.
+        if (!competency) return [];
+        const held = (grantsByCompetency.get(competencyId) ?? []).some((g) =>
+          countsAsHeld(competencyCurrency(g, competency, now, 'candidate')),
+        );
+        return [
+          {
+            competencyId,
+            name: competency.name,
+            code: competency.code,
+            held,
+            requestableToolId: awarding.get(competencyId) ?? null,
+          },
+        ];
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json({ selfStartEnabled, items });
   }),
 );
 

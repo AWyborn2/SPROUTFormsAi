@@ -4,6 +4,7 @@ import { schema, type Db } from '@formai/db';
 
 const admin = { userId: 'admin-1', orgId: 'org-1', role: 'admin' as const };
 const candidate = { userId: 'cand-1', orgId: 'org-1', role: 'candidate' as const };
+const assessor = { userId: 'assess-1', orgId: 'org-1', role: 'assessor' as const };
 let sealSession: (t: { userId: string; orgId: string; role: string }) => string;
 
 let mockDbValue: Db | null = null;
@@ -33,6 +34,8 @@ const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
 
 function fakeDb(opts: {
   planTier?: string;
+  /** The org's self-start toggle (R14, KTD6). Default OFF — the stored default. */
+  selfStart?: boolean;
   tool?: Record<string, unknown>;
   existingRequest?: unknown;
   requests?: unknown[];
@@ -42,6 +45,14 @@ function fakeDb(opts: {
   openCases?: unknown[];
   competencyHolders?: unknown[];
   competencies?: unknown[];
+  /** The caller's memberships, for the KTD6 standing read (heldRolesByUser). */
+  memberships?: unknown[];
+  /** The caller's held Roles — what the relevance check derives from (KTD6). */
+  membershipRoles?: unknown[];
+  /** Legacy Role → tool requirements: the dual read's first half (KTD3). */
+  roleRequirements?: unknown[];
+  /** Direct Role → competency links: the dual read's second half (KTD1). */
+  roleLinks?: unknown[];
   insertedRequest?: unknown;
   insertedCase?: unknown;
   updatedRequest?: unknown;
@@ -51,7 +62,11 @@ function fakeDb(opts: {
   const db = {
     query: {
       organizations: {
-        findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: opts.planTier ?? 'business' }),
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'org-1',
+          planTier: opts.planTier ?? 'business',
+          candidateSelfStartRecommended: opts.selfStart ?? false,
+        }),
       },
       assessmentTools: {
         findFirst: vi.fn().mockResolvedValue(opts.tool),
@@ -61,12 +76,43 @@ function fakeDb(opts: {
         findFirst: vi.fn().mockResolvedValue(opts.existingRequest),
         findMany: vi.fn().mockResolvedValue(opts.requests ?? []),
       },
-      memberships: { findFirst: vi.fn().mockResolvedValue(opts.membership) },
+      memberships: {
+        findFirst: vi.fn().mockResolvedValue(opts.membership),
+        findMany: vi.fn().mockResolvedValue(opts.memberships ?? []),
+      },
       users: { findFirst: vi.fn().mockResolvedValue({ id: 'admin-1', name: 'Ada Admin' }) },
       formTemplates: { findMany: vi.fn().mockResolvedValue(opts.templates ?? []) },
       membershipLocations: { findMany: vi.fn().mockResolvedValue(opts.heldLocations ?? []) },
-      membershipRoles: { findMany: vi.fn().mockResolvedValue([]) },
-      roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue([]) },
+      membershipRoles: { findMany: vi.fn().mockResolvedValue(opts.membershipRoles ?? []) },
+      roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue(opts.roleRequirements ?? []) },
+      roleRequiredCompetencies: {
+        /*
+          TIER-AWARE, same as the competencies-route fake: the standing loaders
+          filter tier in the WHERE clause ('required' for the dual read,
+          'recommended' for its sibling), and a mock returning every seeded row
+          to both would let a recommended link read as required — masking
+          exactly the R13/KTD6 regression these tests pin (a recommended tool
+          becoming requestable with the toggle OFF).
+        */
+        findMany: vi.fn((args?: { where?: unknown }) => {
+          const rows = (opts.roleLinks ?? []) as { tier?: string }[];
+          const seen = new Set<unknown>();
+          const stack: unknown[] = [args?.where];
+          let tier: string | null = null;
+          while (stack.length && !tier) {
+            const n = stack.pop();
+            if (!n || typeof n !== 'object' || seen.has(n)) continue;
+            seen.add(n);
+            const rec = n as Record<string, unknown>;
+            if (rec.value === 'required' || rec.value === 'recommended') {
+              tier = rec.value as string;
+              break;
+            }
+            for (const v of Object.values(rec)) if (v && typeof v === 'object') stack.push(v);
+          }
+          return Promise.resolve(tier ? rows.filter((r) => r.tier === tier) : rows);
+        }),
+      },
       assessmentCases: { findMany: vi.fn().mockResolvedValue(opts.openCases ?? []) },
       competencyHolders: { findMany: vi.fn().mockResolvedValue(opts.competencyHolders ?? []) },
       competencies: { findMany: vi.fn().mockResolvedValue(opts.competencies ?? []) },
@@ -90,6 +136,10 @@ function fakeDb(opts: {
       },
     })),
   } as unknown as Db;
+  // The dual standing read runs inside db.transaction (KTD3); the fake hands
+  // the same surface back, since these mocks have no snapshot to isolate.
+  (db as { transaction?: unknown }).transaction = async (fn: (tx: unknown) => Promise<unknown>) =>
+    fn(db);
   return { db, insertValues, updateSet };
 }
 
@@ -98,12 +148,24 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const orgTool = { id: TOOL, orgId: 'org-1', name: 'Working at Heights' };
+const orgTool = { id: TOOL, orgId: 'org-1', name: 'Working at Heights', awardedCompetencyIds: [COMP] };
+
+/*
+  A candidate whose held Role REQUIRES the competency the tool awards — the
+  role-relevant footing every candidate 201 now stands on (KTD6): the open
+  catalogue closed, so a candidate request must fill a gap of their own.
+*/
+const relevantCandidate = {
+  memberships: [{ id: 'm-cand', userId: candidate.userId, orgId: 'org-1' }],
+  membershipRoles: [{ membershipId: 'm-cand', roleId: 'r1', withdrawnAt: null }],
+  roleLinks: [{ roleId: 'r1', competencyId: COMP, tier: 'required' as const }],
+};
 
 describe('POST /training-requests (U22, R37, R94)', () => {
   it('records a member’s request for a tool (R94)', async () => {
     const { db, insertValues } = fakeDb({
       tool: orgTool,
+      ...relevantCandidate,
       existingRequest: undefined,
       insertedRequest: { id: 'tr-1', userId: candidate.userId, toolId: TOOL, state: 'pending', createdAt: new Date() },
     });
@@ -127,6 +189,7 @@ describe('POST /training-requests (U22, R37, R94)', () => {
   it('succeeds for a Candidate — the matrix grants nothing outside their own record (R37)', async () => {
     const { db } = fakeDb({
       tool: orgTool,
+      ...relevantCandidate,
       insertedRequest: { id: 'tr-1', userId: candidate.userId, toolId: TOOL, state: 'pending', createdAt: new Date() },
     });
     mockDbValue = db;
@@ -142,7 +205,7 @@ describe('POST /training-requests (U22, R37, R94)', () => {
 
   it('is idempotent while one is still pending — no duplicate on the working list', async () => {
     const existing = { id: 'tr-1', userId: candidate.userId, toolId: TOOL, state: 'pending', createdAt: new Date() };
-    const { db, insertValues } = fakeDb({ tool: orgTool, existingRequest: existing });
+    const { db, insertValues } = fakeDb({ tool: orgTool, ...relevantCandidate, existingRequest: existing });
     mockDbValue = db;
     const { server, base } = startApp();
     const res = await fetch(`${base}/training-requests`, {
@@ -166,6 +229,98 @@ describe('POST /training-requests (U22, R37, R94)', () => {
       body: JSON.stringify({ toolId: TOOL }),
     });
     expect(res.status).toBe(404);
+    server.close();
+  });
+});
+
+describe('POST /training-requests — the candidate-relevance check (U7, KTD6, R14, AE5)', () => {
+  const post = (base: string, session: { userId: string; orgId: string; role: string }) =>
+    fetch(`${base}/training-requests`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(session) },
+      body: JSON.stringify({ toolId: TOOL }),
+    });
+  const inserted = {
+    id: 'tr-1',
+    userId: candidate.userId,
+    toolId: TOOL,
+    state: 'pending',
+    createdAt: new Date(),
+  };
+
+  it('201s a required-gap request with the toggle OFF — the toggle hides nothing required (AE5)', async () => {
+    // The R94 voluntary flow survives for required work: self-start scoping is
+    // about the RECOMMENDED tier only.
+    const { db } = fakeDb({ tool: orgTool, ...relevantCandidate, selfStart: false, insertedRequest: inserted });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    expect((await post(base, candidate)).status).toBe(201);
+    server.close();
+  });
+
+  it('403s tool_not_relevant for a tool outside the candidate’s roles, even with the toggle ON (KTD6)', async () => {
+    // The open-catalogue abuse: a candidate self-requesting a tool none of
+    // their roles require OR recommend (the assessor skill set case).
+    const { db, insertValues } = fakeDb({
+      tool: orgTool,
+      selfStart: true,
+      memberships: [{ id: 'm-cand', userId: candidate.userId, orgId: 'org-1' }],
+      membershipRoles: [{ membershipId: 'm-cand', roleId: 'r1', withdrawnAt: null }],
+      roleLinks: [], // their role names nothing this tool awards
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await post(base, candidate);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'tool_not_relevant' });
+    expect(insertValues).not.toHaveBeenCalled();
+    server.close();
+  });
+
+  it('201s a recommended-relevant request while the toggle is ON (R14, AE5)', async () => {
+    const { db } = fakeDb({
+      tool: orgTool,
+      selfStart: true,
+      memberships: [{ id: 'm-cand', userId: candidate.userId, orgId: 'org-1' }],
+      membershipRoles: [{ membershipId: 'm-cand', roleId: 'r1', withdrawnAt: null }],
+      roleLinks: [{ roleId: 'r1', competencyId: COMP, tier: 'recommended' }],
+      insertedRequest: inserted,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    expect((await post(base, candidate)).status).toBe(201);
+    server.close();
+  });
+
+  it('403s the same recommended-relevant request while the toggle is OFF (R14, AE5)', async () => {
+    // Toggle OFF, the candidate's relevant set is required-only (KTD6): the
+    // recommendation is visible on their record, but there is no self-start.
+    const { db, insertValues } = fakeDb({
+      tool: orgTool,
+      selfStart: false,
+      memberships: [{ id: 'm-cand', userId: candidate.userId, orgId: 'org-1' }],
+      membershipRoles: [{ membershipId: 'm-cand', roleId: 'r1', withdrawnAt: null }],
+      roleLinks: [{ roleId: 'r1', competencyId: COMP, tier: 'recommended' }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await post(base, candidate);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'tool_not_relevant' });
+    expect(insertValues).not.toHaveBeenCalled();
+    server.close();
+  });
+
+  it('leaves a non-candidate request untouched — an assessor may request anything (KTD6)', async () => {
+    // The check scopes CANDIDATES only; assessor/admin requests keep the
+    // original open-request semantics, and assignment stays the New Case flow.
+    const { db } = fakeDb({
+      tool: orgTool,
+      insertedRequest: { ...inserted, userId: assessor.userId },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    expect((await post(base, assessor)).status).toBe(201);
     server.close();
   });
 });

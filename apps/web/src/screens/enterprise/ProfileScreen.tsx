@@ -1,19 +1,22 @@
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Avatar, Badge, Button, Card, Icon } from '@formai/ui';
+import { Avatar, Badge, Button, Card, Icon, useToast, type BadgeVariant } from '@formai/ui';
 import {
   PROFILE_FIELDS,
   isTerminalCaseState,
   profileField,
   type ProfileFieldSpec,
+  type Standing,
 } from '@formai/shared';
 import {
   useAssessmentCases,
   useHeldCompetencies,
   useMemberPlacement,
   useMyProfileMembership,
+  useMyRecommended,
   useProfile,
   useProfileSeed,
+  useRequestTraining,
   useSaveProfile,
   useSession,
   useTaxonomy,
@@ -146,6 +149,10 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
       ) : (
         <WithheldCard title="Competencies" />
       )}
+
+      {/* Recommended-but-unheld, on the candidate's OWN record only (U7, R12):
+          the held tier already shows through the standing badge above. */}
+      {candidateSelf && <RecommendedCard />}
 
       {editing && targetId ? (
         <ProfileForm
@@ -570,9 +577,88 @@ function CompetenciesCard({
               </span>
             </span>
             <span className="flex flex-none items-center gap-1.5">
-              <Badge variant={c.standing === 'required' ? 'info' : 'neutral'}>{c.standing}</Badge>
+              <Badge variant={STANDING_TONE[c.standing]}>{c.standing}</Badge>
               <Badge variant={currencyTone(c.status)}>{c.status}</Badge>
             </span>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+/**
+ * The standing badge's tone, EXHAUSTIVE over the union (U7, KTD7): a
+ * recommended competency is marked distinct from required AND from merely-held
+ * (R12) — the accent tone, where the old two-branch ternary would have
+ * collapsed it into the neutral "optional" look by omission.
+ */
+const STANDING_TONE: Record<Standing, BadgeVariant> = {
+  required: 'info',
+  recommended: 'accent',
+  optional: 'neutral',
+};
+
+/**
+ * What the candidate's Roles RECOMMEND that they do not yet hold (U7, R12).
+ *
+ * "Request this training" renders only when BOTH facts hold (R14, AE5): the
+ * org's self-start toggle is ON and the KTD2 resolver found a bookable
+ * awarding tool. Toggle OFF, the recommendation stays visible with no start
+ * action; evidence-only entries (no tool) name evidence as the route instead.
+ * The request posts the existing voluntary body — it lands on the admin's
+ * working list, never enrols directly (R94, R96).
+ */
+function RecommendedCard() {
+  const { toast } = useToast();
+  const { data } = useMyRecommended();
+  const request = useRequestTraining();
+  const unheld = (data?.items ?? []).filter((r) => !r.held);
+  if (unheld.length === 0) return null;
+
+  return (
+    <Card className="p-5">
+      <h3 className="font-ui text-sm font-semibold">Recommended for your roles</h3>
+      <p className="mt-1 text-[12px] text-text-tertiary">
+        Worth holding for the roles you carry — never required, and never counted against you.
+      </p>
+      <ul className="mt-3 flex flex-col gap-1.5">
+        {unheld.map((r) => (
+          <li
+            key={r.competencyId}
+            className="flex items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2"
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="truncate text-[13px] font-semibold">{r.name}</span>
+              {r.code && (
+                <span className="flex-none font-mono text-[10.5px] uppercase tracking-wide text-text-tertiary">
+                  {r.code}
+                </span>
+              )}
+            </span>
+            {data?.selfStartEnabled && r.requestableToolId ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={request.isPending}
+                onClick={() =>
+                  request.mutate(r.requestableToolId!, {
+                    onSuccess: () =>
+                      toast({ variant: 'success', message: `Requested training for ${r.name}.` }),
+                    onError: () =>
+                      toast({ variant: 'danger', message: 'Could not send the request.' }),
+                  })
+                }
+              >
+                Request this training
+              </Button>
+            ) : (
+              <span className="flex-none text-[11px] text-text-tertiary">
+                {r.requestableToolId
+                  ? 'Ask your supervisor'
+                  : 'Evidence-based — ask your supervisor'}
+              </span>
+            )}
           </li>
         ))}
       </ul>

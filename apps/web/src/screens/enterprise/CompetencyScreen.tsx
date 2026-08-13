@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { describeValidity, type CompetencyStatus } from '@formai/shared';
+import { describeValidity, type CompetencyStatus, type Standing } from '@formai/shared';
 import { Badge, Button, Icon, Input, Select, Switch, useToast, type BadgeVariant } from '@formai/ui';
 import type { AwardLinkEffects, Competency, UnlinkedTool } from '../../lib/data/types.js';
 import { useForm, useForms } from '../../lib/data/hooks.js';
@@ -40,6 +40,21 @@ const STATUS_STYLE: Record<CompetencyStatus, { label: string; variant: BadgeVari
   grace: { label: 'In grace', variant: 'warning' },
   expired: { label: 'Expired', variant: 'danger' },
   undated: { label: 'Undated', variant: 'neutral' },
+};
+
+/**
+ * How each STANDING reads on the register (U7, KTD7) — an EXHAUSTIVE map over
+ * the union, not a two-branch ternary. The ternary this replaces rendered the
+ * recommended tier as "Optional", which is exactly the by-omission collapse
+ * KTD7's required third argument exists to make impossible: a tier the type
+ * grows next lands here as a compile error, never as a silently wrong label.
+ * Required is the compliance-bearing tier, so it is the louder mark;
+ * recommended sits between required and optional in visibility only (R12, R13).
+ */
+const STANDING_LABEL: Record<Standing, { label: string; className: string }> = {
+  required: { label: 'Required', className: 'text-text-secondary' },
+  recommended: { label: 'Recommended', className: 'text-text-secondary' },
+  optional: { label: 'Optional', className: 'text-text-tertiary' },
 };
 
 /** ISO instant → the date alone. Nobody schedules requalification by the hour. */
@@ -243,18 +258,18 @@ function HolderRegister({ competency }: { competency: Competency }) {
                 </div>
               </div>
               {/*
-                STANDING AND CURRENCY, TWO MARKS (R108). Standing — required or
-                optional for this person's Roles — sits beside the currency
-                badge, because they answer different questions: obligation
-                versus the date. A required competency is the one that counts
-                against compliance when it lapses, so it is the louder mark.
+                STANDING AND CURRENCY, TWO MARKS (R108). Standing — required,
+                recommended or optional for this person's Roles — sits beside
+                the currency badge, because they answer different questions:
+                obligation versus the date. A required competency is the one
+                that counts against compliance when it lapses, so it is the
+                louder mark; a recommended one is visible and never enforced
+                (R12, R13). The map is exhaustive over the union (KTD7).
               */}
               <span
-                className={`text-[10px] font-medium uppercase tracking-wide ${
-                  h.standing === 'required' ? 'text-text-secondary' : 'text-text-tertiary'
-                }`}
+                className={`text-[10px] font-medium uppercase tracking-wide ${STANDING_LABEL[h.standing].className}`}
               >
-                {h.standing === 'required' ? 'Required' : 'Optional'}
+                {STANDING_LABEL[h.standing].label}
               </span>
               {/*
                 Revocation is a MARK, not a status (R104): a revoked grant still

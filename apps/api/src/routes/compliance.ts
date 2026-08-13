@@ -6,6 +6,7 @@ import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { requiredCompetencyIdsByUser } from '../lib/standing.js';
+import { awardingToolByCompetency } from '../lib/requirement-links.js';
 import { db } from '../db.js';
 
 /**
@@ -35,6 +36,16 @@ export interface ComplianceGap {
   name: string;
   competencyId: string;
   competencyName: string;
+  /**
+   * Whether a BOOKABLE assessment awards this competency, from the KTD2
+   * resolver — the same resolution assignment plans cases with, so this flag
+   * and "an assignment exists for it" describe one situation from two sides
+   * (U8, R7, R9). False is the evidence-only case: a licence-type competency
+   * nothing awards (or whose only awarding tool has no published version) is
+   * cleared by RECORDING EVIDENCE — an imported or manual grant (R11) — never
+   * by booking an assessment that does not exist.
+   */
+  hasAwardingAssessment: boolean;
 }
 
 /** A member no notification can reach: a flagged address AND no login (R98, R99). */
@@ -104,11 +115,21 @@ complianceRouter.get(
       : [];
     const competencyById = new Map(competencies.map((c) => [c.id, c]));
 
+    /*
+      Bookability per competency, resolved ONCE for every competency the report
+      can name (U8, KTD2). Never read off raw awards: a tool whose template has
+      no published version cannot carry a case, and the resolver is the one
+      place that filter lives — so this flag cannot disagree with what the
+      assignment engine would actually book.
+    */
+    const awarding = await awardingToolByCompetency(db, orgId, [...relevantIds]);
+
     const gapOf = (userId: string, competencyId: string, competencyName: string): ComplianceGap => ({
       userId,
       name: nameByUser.get(userId) ?? 'Unknown user',
       competencyId,
       competencyName,
+      hasAwardingAssessment: awarding.has(competencyId),
     });
 
     const expired: ComplianceGap[] = [];
