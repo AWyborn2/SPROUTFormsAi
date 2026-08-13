@@ -18,6 +18,7 @@ import {
   appendRowBelow,
   applyFieldChanges,
   applyMatrix,
+  retargetPageChanges,
   classifyProposalTier,
   columnHandles,
   type FieldChange,
@@ -1668,5 +1669,64 @@ describe('deriveMatchAnchorsAcrossPages', () => {
 
   it('refuses a question with fewer than two entries before reading a page', () => {
     expect(deriveMatchAnchorsAcrossPages([ANCHORS[0]!], [signs])).toBeNull();
+  });
+});
+
+describe('retargetPageChanges', () => {
+  /*
+    The duplicated-checklist paper: Parts 2, 4 and 6 print the identical
+    checklist, detection lands all three parts' boxes on the first matching
+    page, and the x/y it found are right everywhere but the page number.
+  */
+  const box = (page: number, x = 40, optionKey?: string) => ({
+    page,
+    x,
+    y: 60,
+    width: 20,
+    height: 14,
+    pageWidth: 600,
+    pageHeight: 800,
+    ...(optionKey ? { optionKey } : {}),
+  });
+  const placed = (id: string, pages: number[]): FormField => ({
+    id,
+    type: 'check_cross',
+    label: id,
+    required: false,
+    source: 'imported',
+    geometry: { segments: pages.map((p, i) => box(p, 40 + i * 30, i === 0 ? undefined : `opt${i}`)) },
+  });
+  const unplaced: FormField = {
+    id: 'bare',
+    type: 'text',
+    label: 'bare',
+    required: false,
+    source: 'imported',
+  };
+
+  it('re-stamps every segment onto the target page, keeping position and keys', () => {
+    const fields = [placed('a', [7, 7]), unplaced];
+
+    const next = applyFieldChanges(fields, retargetPageChanges(fields, ['a'], 11));
+    const segments = next[0]!.geometry!.segments;
+
+    expect(segments.map((s) => s.page)).toEqual([11, 11]);
+    // Position and option identity survive verbatim — the layouts are identical.
+    expect(segments.map((s) => s.x)).toEqual([40, 70]);
+    expect(segments[1]!.optionKey).toBe('opt1');
+  });
+
+  it('skips fields with no boxes rather than inventing empty geometry', () => {
+    const fields = [placed('a', [7]), unplaced];
+
+    const changes = retargetPageChanges(fields, ['a', 'bare', 'ghost'], 11);
+
+    expect(changes.map((c) => c.fieldId)).toEqual(['a']);
+  });
+
+  it('is a no-op for a field already on the target page', () => {
+    const fields = [placed('a', [11, 11])];
+
+    expect(retargetPageChanges(fields, ['a'], 11)).toEqual([]);
   });
 });

@@ -1499,6 +1499,46 @@ export function applyFieldChanges(
 }
 
 /**
+ * Move fields' boxes to another page, SAME position.
+ *
+ * The duplicated-checklist paper: Parts 2, 4 and 6 print the identical
+ * practical checklist on three different pages, and detection — matching by
+ * the text layer — lands all three parts' boxes on the first page that
+ * matches. The x/y/w/h it found are RIGHT (the layouts are identical); only
+ * the page is wrong, and redrawing thirty well-positioned boxes to fix a
+ * page number is the tedium this removes: every segment (bands and option
+ * keys intact) is re-stamped onto the target page verbatim.
+ *
+ * Fields with no boxes are skipped rather than given empty geometry, so a
+ * section-level move can be handed headers and unplaced fields freely.
+ */
+export function retargetPageChanges(
+  fields: readonly FormField[],
+  fieldIds: readonly string[],
+  page: number,
+): FieldChange[] {
+  const wanted = new Set(fieldIds);
+  const changes: FieldChange[] = [];
+  for (const field of fields) {
+    if (!wanted.has(field.id)) continue;
+    const segments = field.geometry?.segments ?? [];
+    if (segments.length === 0) continue;
+    if (segments.every((s) => s.page === page)) continue;
+    changes.push({
+      fieldId: field.id,
+      change: (f) => ({
+        ...f,
+        geometry: {
+          ...f.geometry!,
+          segments: (f.geometry?.segments ?? []).map((s) => ({ ...s, page })),
+        },
+      }),
+    });
+  }
+  return changes;
+}
+
+/**
  * Propose one checkmark box per option for a NON-TABLE choice field, across the
  * whole document.
  *

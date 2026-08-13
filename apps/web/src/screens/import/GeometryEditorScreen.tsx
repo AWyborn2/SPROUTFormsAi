@@ -42,6 +42,7 @@ import {
   removeSegment,
   moveBand,
   moveBoundary,
+  retargetPageChanges,
   snapTargets,
   snapTargetsY,
   type BandHandle,
@@ -159,6 +160,12 @@ export function GeometryEditorScreen({
   >([]);
   /** Busy flag around the bulk auto-place pass (U4), for the button's affordance. */
   const [isAutoPlacing, setIsAutoPlacing] = useState(false);
+  /**
+   * The 1-based page the move/scan controls target. Text, not number — an
+   * input mid-edit is legitimately empty, and coercing '' to 0 would offer
+   * "move to page 0" while the author is still typing.
+   */
+  const [targetPage, setTargetPage] = useState('');
 
   const fields = edited ?? version?.fields ?? [];
   const selected = fields.find((f) => f.id === selectedId) ?? null;
@@ -465,7 +472,7 @@ export function GeometryEditorScreen({
    * pass instead of calling `mutateMany` once per field. needs-review fields
    * are parked into `proposalPreviews`; no-match fields are left alone.
    */
-  function autoPlaceRemaining() {
+  function autoPlaceRemaining(onlyPage?: number) {
     setIsAutoPlacing(true);
 
     // Yield a frame first: the loop below is synchronous and, for a large
@@ -476,10 +483,27 @@ export function GeometryEditorScreen({
       const changes: FieldChange[] = [];
       const reviews: { fieldId: string; proposal: FieldProposal | TableProposal }[] = [];
 
+      /*
+        A PAGE-SCOPED SCAN EMPTIES THE OTHER PAGES, it never slices the array:
+        a TextPage's number IS its index, so handing the derivers
+        `[textPages[7]]` would re-number page 7 as page 0 and every box would
+        land on the cover. Duplicated-checklist papers are why the scope
+        exists — Parts 2, 4 and 6 print identical fields, so a whole-document
+        match lands all three on the first page that fits, and scoping the
+        scan to the page in front of the author is what lets detection find
+        the OTHER copies.
+      */
+      const scope =
+        onlyPage === undefined
+          ? textPages
+          : textPages.map((p, i) =>
+              i === onlyPage ? p : { ...p, items: [], rules: undefined, rects: undefined },
+            );
+
       for (const field of fields) {
         if (geometrySegments(field).length >= expectedBoxes(field)) continue;
 
-        const proposal = deriveProposal(field, textPages);
+        const proposal = deriveProposal(field, scope);
         const tier = classifyProposalTier(proposal);
         if (tier === 'no-match') continue;
         if (tier === 'needs-review') {
@@ -500,6 +524,55 @@ export function GeometryEditorScreen({
 
       setIsAutoPlacing(false);
     });
+  }
+
+  /** The 1-based page input as a 0-based index, or null while empty/invalid. */
+  function targetPageIndex(): number | null {
+    const n = Number(targetPage);
+    if (!Number.isInteger(n) || n < 1) return null;
+    if (textPages.length > 0 && n > textPages.length) return null;
+    return n - 1;
+  }
+
+  /** Re-stamp the given fields' boxes onto a page at the same x/y. */
+  function moveBoxesToPage(fieldIds: readonly string[], page: number) {
+    const changes = retargetPageChanges(fields, fieldIds, page);
+    if (changes.length === 0) {
+      toast({ variant: 'warning', message: 'Nothing to move — no placed boxes on that selection.' });
+      return;
+    }
+    mutateMany(changes);
+    toast({
+      variant: 'success',
+      message: `Moved ${changes.length} field${changes.length === 1 ? '' : 's'} to page ${page + 1}.`,
+    });
+  }
+
+  /**
+   * The ids of the selected field's SECTION — nearest preceding
+   * `section_header` through to the next one. This is the unit the
+   * duplicated-checklist fix works in: Part 4 is one section whose every box
+   * sits on Part 2's page, and moving it field-by-field is thirty chances to
+   * miss one.
+   */
+  function sectionIdsOf(fieldId: string): string[] {
+    const at = fields.findIndex((f) => f.id === fieldId);
+    if (at < 0) return [fieldId];
+    let start = 0;
+    for (let i = at; i >= 0; i -= 1) {
+      if (fields[i]!.type === 'section_header') {
+        start = i;
+        break;
+      }
+    }
+    let end = fields.length;
+    for (let i = start + 1; i < fields.length; i += 1) {
+      if (fields[i]!.type === 'section_header') {
+        end = i;
+        break;
+      }
+    }
+    return fields.slice(start, end).map((f) => f.id);
   }
 
   /**
@@ -816,10 +889,70 @@ export function GeometryEditorScreen({
             variant="outline"
             leadingIcon="wand-sparkles"
             disabled={isAutoPlacing}
-            onClick={autoPlaceRemaining}
+            onClick={() => autoPlaceRemaining()}
           >
             {isAutoPlacing ? 'Auto-placing…' : 'Auto-place remaining fields'}
           </Button>
+          {/*
+            THE DUPLICATED-SECTION KIT. Parts 2, 4 and 6 print the identical
+            checklist on different pages, so whole-document detection lands
+            all three on the first page that matches. The page number here
+            scopes both remedies: SCAN re-runs detection against that page
+            alone (for the copies detection never found), and the MOVE
+            buttons re-stamp already-placed boxes onto it at the same x/y
+            (for boxes that are right everywhere but their page).
+          */}
+          <span className="flex items-center gap-1.5 rounded-lg border border-border px-2 py-1">
+            <label htmlFor="target-page" className="text-[11px] font-semibold text-text-tertiary">
+              Page
+            </label>
+            <input
+              id="target-page"
+              type="number"
+              min={1}
+              max={Math.max(1, textPages.length)}
+              value={targetPage}
+              onChange={(e) => setTargetPage(e.target.value)}
+              placeholder="–"
+              className="h-6 w-14 rounded border border-border bg-surface-card px-1.5 text-[12px]"
+            />
+            <button
+              type="button"
+              disabled={isAutoPlacing || !targetPageIndex()}
+              onClick={() => {
+                const page = targetPageIndex();
+                if (page !== null) autoPlaceRemaining(page);
+              }}
+              title="Re-run detection for unplaced fields against this page only"
+              className="rounded-md border border-border px-2 py-0.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-hover disabled:opacity-40"
+            >
+              Scan
+            </button>
+            <button
+              type="button"
+              disabled={!selectedId || !targetPageIndex()}
+              onClick={() => {
+                const page = targetPageIndex();
+                if (page !== null && selectedId) moveBoxesToPage([selectedId], page);
+              }}
+              title="Move the selected field's boxes to this page, same position"
+              className="rounded-md border border-border px-2 py-0.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-hover disabled:opacity-40"
+            >
+              Move field
+            </button>
+            <button
+              type="button"
+              disabled={!selectedId || !targetPageIndex()}
+              onClick={() => {
+                const page = targetPageIndex();
+                if (page !== null && selectedId) moveBoxesToPage(sectionIdsOf(selectedId), page);
+              }}
+              title="Move every box in the selected field's section to this page, same positions"
+              className="rounded-md border border-border px-2 py-0.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-hover disabled:opacity-40"
+            >
+              Move section
+            </button>
+          </span>
           <Button
             variant="outline"
             leadingIcon="save"
@@ -867,9 +1000,16 @@ export function GeometryEditorScreen({
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <aside className="w-[340px] shrink-0 overflow-y-auto border-r border-border">
+        <aside className="flex w-[340px] shrink-0 flex-col border-r border-border">
+          {/*
+            PINNED, NOT FIRST-IN-THE-SCROLL. The review queue is what the
+            author is acting on — Confirm/Reject for the proposal highlighted
+            on the page — and living inside the list's scroll meant it left
+            the screen the moment they scrolled to see the field in context.
+            The queue and the filter hold still; only the field list scrolls.
+          */}
           {proposalPreviews.length > 0 && (
-            <div className="border-b border-border bg-[var(--accent-soft)] p-[12px_14px]">
+            <div className="flex-none border-b border-border bg-[var(--accent-soft)] p-[12px_14px]">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[12.5px] font-semibold">
                   {proposalPreviews.length} field{proposalPreviews.length === 1 ? '' : 's'} need review
@@ -883,7 +1023,9 @@ export function GeometryEditorScreen({
                   Confirm all proposed
                 </Button>
               </div>
-              <div className="mt-2 flex flex-col gap-1.5">
+              {/* Its own scroll past ~4 rows, so a big bulk pass cannot pin
+                  the whole panel's height to the queue. */}
+              <div className="fai-scroll mt-2 flex max-h-[150px] flex-col gap-1.5 overflow-y-auto">
                 {proposalPreviews.map(({ fieldId }) => {
                   const field = fields.find((f) => f.id === fieldId);
                   const label = field?.label || fieldId;
@@ -921,7 +1063,7 @@ export function GeometryEditorScreen({
               </div>
             </div>
           )}
-          <div className="border-b border-border p-[10px_14px]">
+          <div className="flex-none border-b border-border p-[10px_14px]">
             <input
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -931,6 +1073,7 @@ export function GeometryEditorScreen({
             />
           </div>
 
+          <div className="fai-scroll min-h-0 flex-1 overflow-y-auto">
           {groups.map((group) => {
             const isCollapsed = !!collapsedGroups[group.key];
             return (
@@ -986,6 +1129,7 @@ export function GeometryEditorScreen({
               No fields match “{filter}”.
             </p>
           )}
+          </div>
         </aside>
 
         {/*
