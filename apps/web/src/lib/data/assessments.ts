@@ -257,6 +257,34 @@ export const assessmentsApi = {
   listTools: () => apiClient.get<AssessmentToolSummary[]>('/assessment-tools'),
 
   /**
+   * Publish a REVISION: one transaction that freezes the revised draft version
+   * and updates this tool's manifest together. Refused with `stale_revision`
+   * when the tool was republished after the revision was seeded, and with
+   * `open_cases_incompatible` when the new manifest would dangle against an
+   * open case's pinned fields (R14, R16).
+   */
+  republishTool: (input: {
+    toolId: string;
+    versionId: string;
+    seededFromVersionId: string;
+    fields: FormField[];
+    manifest: AssessmentToolManifest;
+    name?: string;
+    revisionIdentity?: { code?: string; reviewedOn?: string; note?: string };
+  }) =>
+    apiClient.post<{ id: string; templateId: string; versionId: string; versionLabel: string; warnings: string[] }>(
+      `/assessment-tools/${input.toolId}/republish`,
+      {
+        versionId: input.versionId,
+        seededFromVersionId: input.seededFromVersionId,
+        fields: input.fields,
+        manifest: input.manifest,
+        ...(input.name ? { name: input.name } : {}),
+        ...(input.revisionIdentity ? { revisionIdentity: input.revisionIdentity } : {}),
+      },
+    ),
+
+  /**
    * One tool with everything the workflow builder renders.
    *
    * The manifest AND the version's fields in one response — the builder draws

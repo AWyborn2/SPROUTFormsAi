@@ -339,6 +339,8 @@ describe('GET /forms/:id', () => {
         publishedAt: new Date('2026-07-01T00:00:00Z'),
         publishedBy: 'u1',
         createdAt: new Date('2026-07-01T00:00:00Z'),
+        // The paper document's identity, as an assessment-tool revision records it.
+        revisionIdentity: { code: 'Rev 3', reviewedOn: '08/2026', note: 'Annual review' },
       },
       {
         id: 'v1',
@@ -373,6 +375,14 @@ describe('GET /forms/:id', () => {
       expect(body.submissionsCount).toBe(7);
       expect(body.versions).toHaveLength(2);
       expect(body.versions[0]).toMatchObject({ id: 'v2', publishedByName: 'Ash Wyborn' });
+      // AE4 (data half): the revision identity rides the version list; the
+      // note also fills the summary's own note slot. A version without one
+      // reads null rather than inventing an identity.
+      expect(body.versions[0]).toMatchObject({
+        revisionIdentity: { code: 'Rev 3', reviewedOn: '08/2026', note: 'Annual review' },
+        note: 'Annual review',
+      });
+      expect(body.versions[1]).toMatchObject({ revisionIdentity: null, note: null });
     } finally {
       server.close();
     }
