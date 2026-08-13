@@ -1,11 +1,10 @@
 import { Router } from 'express';
 import { eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { sensitiveProfileFieldKeys } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
-import { auditEntryDto } from '../audit/record.js';
+import { auditEntryDto, isSensitiveEntry } from '../audit/record.js';
 import { db } from '../db.js';
 
 /** Read-only audit trail. Rows are written by `recordAudit` from other routes. */
@@ -14,14 +13,6 @@ export const auditRouter: Router = Router();
 /** Owner holds everything Admin holds, so both pass every Admin-only rule. */
 function isAdmin(role: string): boolean {
   return role === 'admin' || role === 'owner';
-}
-
-/** The inventory's sensitive keys, resolved once (R8). */
-const SENSITIVE_FIELDS = new Set(sensitiveProfileFieldKeys());
-
-/** Whether this entry covers a field the inventory marks sensitive (R58). */
-function isSensitiveEntry(row: { category: string; field: string | null }): boolean {
-  return row.category === 'profiles' && row.field !== null && SENSITIVE_FIELDS.has(row.field);
 }
 
 auditRouter.get(

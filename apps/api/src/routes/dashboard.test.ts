@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { schema, type Db } from '@formai/db';
 
 const tenant = { userId: 'u1', orgId: 'org-1', role: 'admin' as const };
-let sealSession: (t: typeof tenant) => string;
+let sealSession: (t: { userId: string; orgId: string; role: string }) => string;
 
 let mockDbValue: Db | null = null;
 vi.mock('../db.js', () => ({
@@ -23,8 +23,8 @@ function startApp() {
   return { server, base: `http://127.0.0.1:${port}` };
 }
 
-function authHeader() {
-  return { cookie: `fai_session=${sealSession(tenant)}` };
+function authHeader(as: { userId: string; orgId: string; role: string } = tenant) {
+  return { cookie: `fai_session=${sealSession(as)}` };
 }
 
 /**
@@ -68,6 +68,8 @@ function fakeDb(opts: {
       auditLogEntries: {
         findMany: auditFindMany,
       },
+      // Unset so `hasPermission` falls back to the shipped default matrix.
+      rolePermissions: { findFirst: vi.fn().mockResolvedValue(undefined) },
     },
     select: vi.fn(() => ({
       from: vi.fn((table: unknown) => ({
@@ -203,6 +205,119 @@ describe('GET /dashboard', () => {
         (c) => c.table === schema.submissions && c.params.length > 1,
       );
       expect(pendingCall?.params).toEqual(['org-1', 'submitted', 'review', 'pending']);
+    } finally {
+      server.close();
+    }
+  });
+
+  /*
+    The permission gates (pre-existing P2 from the admin-oversight round): the
+    route stays 200 for every org member because it is a shared landing read,
+    but each aggregate empties unless the caller holds the grant guarding the
+    data it summarises. All roles below run on the shipped default matrix —
+    fakeDb stores no per-org override.
+  */
+
+  it('zeroes the submission counts for a role without submissions.view, without running the queries', async () => {
+    const { db, whereCalls, auditFindMany } = fakeDb({
+      activeForms: 4,
+      submissionsTotal: 527,
+      pendingReview: 3,
+      auditRows: [],
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/dashboard`, {
+        headers: authHeader({ userId: 'u2', orgId: 'org-1', role: 'candidate' }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      // Shape stays stable — gated-out fields empty rather than 403.
+      expect(body).toEqual({
+        activeForms: 4,
+        submissionsTotal: 0,
+        pendingReview: 0,
+        recentActivity: [],
+      });
+
+      // The denied aggregates were never queried, not queried-then-discarded.
+      expect(whereCalls.map((c) => c.table)).toEqual([schema.formTemplates]);
+      expect(auditFindMany).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('drops recent activity for a role without audit.view but keeps its submission counts', async () => {
+    const { db, auditFindMany } = fakeDb({
+      activeForms: 4,
+      submissionsTotal: 527,
+      pendingReview: 3,
+      auditRows: [{ id: 'a1' }],
+    });
+    mockDbValue = db;
+
+    const { server, base } = startApp();
+    try {
+      // Viewer: submissions.view true, audit.view false on the default matrix.
+      const res = await fetch(`${base}/dashboard`, {
+        headers: authHeader({ userId: 'u3', orgId: 'org-1', role: 'viewer' }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        submissionsTotal: number;
+        pendingReview: number;
+        recentActivity: unknown[];
+      };
+      expect(body.submissionsTotal).toBe(527);
+      expect(body.pendingReview).toBe(3);
+      expect(body.recentActivity).toEqual([]);
+      expect(auditFindMany).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('hides sensitive profile-field entries from non-admin audit.view holders (R58), as GET /audit does', async () => {
+    const plain = {
+      id: 'a1',
+      actorName: 'Ash Wyborn',
+      action: 'Published form',
+      target: 'Vendor onboarding',
+      category: 'forms',
+      field: null,
+      icon: 'rocket',
+      createdAt: new Date('2026-07-02T00:00:00Z'),
+    };
+    const sensitive = {
+      id: 'a2',
+      actorName: 'Ash Wyborn',
+      action: 'Edited profile field',
+      target: 'Riley Park',
+      category: 'profiles',
+      field: 'dateOfBirth',
+      icon: 'user',
+      createdAt: new Date('2026-07-01T00:00:00Z'),
+    };
+    mockDbValue = fakeDb({ auditRows: [plain, sensitive] }).db;
+
+    const { server, base } = startApp();
+    try {
+      // Reviewer holds audit.view without Admin rights — the sensitive entry goes.
+      const reviewer = await fetch(`${base}/dashboard`, {
+        headers: authHeader({ userId: 'u4', orgId: 'org-1', role: 'reviewer' }),
+      });
+      expect(reviewer.status).toBe(200);
+      const reviewerBody = (await reviewer.json()) as { recentActivity: Array<{ id: string }> };
+      expect(reviewerBody.recentActivity.map((a) => a.id)).toEqual(['a1']);
+
+      // An admin's feed is unfiltered.
+      const admin = await fetch(`${base}/dashboard`, { headers: authHeader() });
+      expect(admin.status).toBe(200);
+      const adminBody = (await admin.json()) as { recentActivity: Array<{ id: string }> };
+      expect(adminBody.recentActivity.map((a) => a.id)).toEqual(['a1', 'a2']);
     } finally {
       server.close();
     }
