@@ -72,6 +72,15 @@ export const organizations = pgTable('organizations', {
   allowMultipleLocations: boolean('allow_multiple_locations').notNull().default(false),
   allowMultipleDepartments: boolean('allow_multiple_departments').notNull().default(false),
   /**
+   * Whether a qualified assessor may run and certify their OWN assessment
+   * case. Industry practice differs by organisation — some registered
+   * training setups permit self-assessment, most do not — so it is a policy
+   * switch, defaulting to the stricter reading: nobody certifies themselves.
+   * Enforced at the sign-off gate and in the fill surface's party resolution,
+   * never inferred from role alone.
+   */
+  allowSelfAssessment: boolean('allow_self_assessment').notNull().default(false),
+  /**
    * Which of the two workforce numbers identifies a person on screen (R40).
    * Defaults to the employee number; the swipe card number is the alternative.
    * The numbers themselves are profile fields owned by the candidate profile

@@ -1,0 +1,1 @@
+ALTER TABLE "organizations" ADD COLUMN "allow_self_assessment" boolean DEFAULT false NOT NULL;

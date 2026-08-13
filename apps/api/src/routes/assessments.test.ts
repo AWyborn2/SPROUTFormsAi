@@ -2768,6 +2768,37 @@ describe('POST /assessment-cases/:id/sign-off', () => {
     }
   });
 
+  it('lets a qualified person certify their own case when the organisation allows it', async () => {
+    /*
+      Self-assessment is a real policy that differs between registered
+      training setups — the org's switch, never inferred from role. The
+      stricter default stays: the test above pins the refusal with the flag
+      off, this one pins the allowance with it on.
+    */
+    const { db, store } = makeDb();
+    (rows(store, 'memberships').find((m) => (m as { userId: string }).userId === CANDIDATE) as {
+      role: string;
+    }).role = 'admin';
+    (rows(store, 'organizations')[0] as { allowSelfAssessment?: boolean }).allowSelfAssessment = true;
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyCase(base);
+      const res = await fetch(`${base}/assessment-cases/${c.id}/sign-off`, {
+        method: 'POST',
+        headers: auth({ userId: CANDIDATE, orgId: ORG, role: 'admin' }),
+        body: JSON.stringify({ assessorName: 'Self Assessor', signature: SIG }),
+      });
+
+      expect(res.status).toBe(200);
+      const row = rows(store, 'assessmentCases').find((r) => r.id === c.id);
+      expect(row?.state).toBe('competent');
+      expect(row?.signedOffName).toBe('Self Assessor');
+    } finally {
+      server.close();
+    }
+  });
+
   it('refuses a signature that is not a PNG data URL', async () => {
     // The exporter draws nothing it cannot recognise, so a bad signature
     // accepted here would certify a record with an empty signature box.

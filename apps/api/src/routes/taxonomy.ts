@@ -99,6 +99,7 @@ taxonomyRouter.get(
       settings: {
         allowMultipleLocations: org?.allowMultipleLocations ?? false,
         allowMultipleDepartments: org?.allowMultipleDepartments ?? false,
+        allowSelfAssessment: org?.allowSelfAssessment ?? false,
         displayIdentifier: org?.displayIdentifier ?? 'employee_number',
         pooledCaseOverdueDays: org?.pooledCaseOverdueDays ?? 14,
         notificationLeadDays: org?.notificationLeadDays ?? 30,
@@ -1303,6 +1304,9 @@ taxonomyRouter.post(
 const settingsBody = z.object({
   allowMultipleLocations: z.boolean().optional(),
   allowMultipleDepartments: z.boolean().optional(),
+  // Whether a qualified assessor may run and certify their own case. Policy
+  // differs by organisation; the default is the stricter reading.
+  allowSelfAssessment: z.boolean().optional(),
   displayIdentifier: z.enum(['employee_number', 'swipe_card_number']).optional(),
   // At least a day, so a zero/negative threshold cannot mark every fresh pooled
   // case overdue (U13, R63).
@@ -1331,6 +1335,9 @@ taxonomyRouter.patch(
         ...(parsed.data.allowMultipleDepartments !== undefined
           ? { allowMultipleDepartments: parsed.data.allowMultipleDepartments }
           : {}),
+        ...(parsed.data.allowSelfAssessment !== undefined
+          ? { allowSelfAssessment: parsed.data.allowSelfAssessment }
+          : {}),
         ...(parsed.data.displayIdentifier ? { displayIdentifier: parsed.data.displayIdentifier } : {}),
         ...(parsed.data.pooledCaseOverdueDays !== undefined
           ? { pooledCaseOverdueDays: parsed.data.pooledCaseOverdueDays }
@@ -1351,6 +1358,7 @@ taxonomyRouter.patch(
     res.json({
       allowMultipleLocations: row?.allowMultipleLocations ?? false,
       allowMultipleDepartments: row?.allowMultipleDepartments ?? false,
+      allowSelfAssessment: row?.allowSelfAssessment ?? false,
       displayIdentifier: row?.displayIdentifier ?? 'employee_number',
       pooledCaseOverdueDays: row?.pooledCaseOverdueDays ?? 14,
       notificationLeadDays: row?.notificationLeadDays ?? 30,

@@ -132,6 +132,51 @@ async function attemptsFor(database: Database, caseId: string) {
   });
 }
 
+/** The org's self-assessment policy — one column, read where it gates. */
+async function selfAssessmentAllowed(database: Database, orgId: string): Promise<boolean> {
+  const org = await database.query.organizations.findFirst({
+    where: eq(schema.organizations.id, orgId),
+  });
+  return org?.allowSelfAssessment ?? false;
+}
+
+/**
+ * Whether this caller is SELF-ASSESSING on this case: they are the candidate,
+ * they hold a staff role, and the organisation permits it. A candidate-role
+ * login never qualifies — the policy is about qualified people running their
+ * own assessment, not about candidates marking themselves.
+ */
+async function isSelfAssessing(
+  database: Database,
+  tenant: { userId: string; orgId: string; role: string },
+  candidateUserId: string,
+): Promise<boolean> {
+  if (tenant.userId !== candidateUserId) return false;
+  if (tenant.role === 'candidate') return false;
+  return selfAssessmentAllowed(database, tenant.orgId);
+}
+
+/**
+ * Field access for a self-assessor: the UNION of what the candidate and the
+ * assessor may see and write. The workflow split one document between two
+ * people; with the org's policy putting one person on both ends of it, a
+ * field either side could touch is theirs — hidden only where hidden from
+ * BOTH. `auto` and `prefill` sources stay locked exactly as they are for
+ * either party alone, because `partFieldAccess` already excludes them from
+ * `writable` per party and a union of two exclusions is still an exclusion.
+ */
+function unionPartFieldAccess(
+  workflow: ReturnType<typeof workflowOf>,
+  partKey: string,
+  partFields: readonly FormField[],
+  parties: readonly WorkflowRole[],
+): { hidden: string[]; writable: string[] } {
+  const per = parties.map((p) => partFieldAccess(workflow, partKey, partFields, p));
+  const hidden = (per[0]?.hidden ?? []).filter((id) => per.every((a) => a.hidden.includes(id)));
+  const writable = [...new Set(per.flatMap((a) => a.writable))];
+  return { hidden, writable };
+}
+
 /** The repeating table a logbook part totals its hours from, on one version. */
 async function logbookTableId(
   database: Database,
@@ -2298,7 +2343,10 @@ assessmentCasesRouter.get(
     */
     const workflow = workflowOf(manifest, allFields);
     const partFields = fieldsInPart(allFields, manifest, attempt.partKey);
-    const access = partFieldAccess(workflow, attempt.partKey, partFields, party);
+    // A self-assessor is both ends of the paper: union access (org policy).
+    const access = (await isSelfAssessing(db, tenant, row.candidateUserId))
+      ? unionPartFieldAccess(workflow, attempt.partKey, partFields, ['candidate', 'assessor'])
+      : partFieldAccess(workflow, attempt.partKey, partFields, party);
     const hidden = new Set(access.hidden);
     const visibleFields = partFields.filter((f) => !hidden.has(f.id));
 
@@ -2744,13 +2792,24 @@ assessmentCasesRouter.patch(
       a candidate's typed outcome would be accepted here.
     */
     const versionFields = tool ? await fieldsForVersion(db, attempt.templateVersionId) : [];
+    // The same union the attempt GET serves — a self-assessor must be able to
+    // SAVE every field the surface showed them as writable.
+    const selfAssessing = tool ? await isSelfAssessing(db, tenant, row.candidateUserId) : false;
     const allowed = tool
       ? new Set(
-          partFieldAccess(
-            workflowOf(tool.manifest, versionFields),
-            attempt.partKey,
-            fieldsInPart(versionFields, tool.manifest, attempt.partKey),
-            party,
+          (selfAssessing
+            ? unionPartFieldAccess(
+                workflowOf(tool.manifest, versionFields),
+                attempt.partKey,
+                fieldsInPart(versionFields, tool.manifest, attempt.partKey),
+                ['candidate', 'assessor'],
+              )
+            : partFieldAccess(
+                workflowOf(tool.manifest, versionFields),
+                attempt.partKey,
+                fieldsInPart(versionFields, tool.manifest, attempt.partKey),
+                party,
+              )
           ).writable,
         )
       : null;
@@ -3550,10 +3609,19 @@ assessmentCasesRouter.post(
       res.status(409).json({ error: 'case_closed' });
       return;
     }
-    // Nobody certifies themselves, even holding an assessor role.
+    /*
+      Nobody certifies themselves — unless the ORGANISATION says its assessors
+      may. Self-assessment is a real policy that differs between registered
+      training setups, so it is the org's switch (default off), never inferred
+      from the caller holding an assessor role. The permission gate above still
+      applies: a candidate-role user cannot reach this route at all, so "self"
+      here always means a qualified person signing their own case.
+    */
     if (tenant.userId === row.candidateUserId) {
-      res.status(409).json({ error: 'candidate_cannot_sign_off' });
-      return;
+      if (!(await selfAssessmentAllowed(db, tenant.orgId))) {
+        res.status(409).json({ error: 'candidate_cannot_sign_off' });
+        return;
+      }
     }
 
     const tool = await loadTool(db, row.toolId, tenant.orgId);

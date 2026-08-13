@@ -357,6 +357,7 @@ function SettingsPanel({
   settings: {
     allowMultipleLocations: boolean;
     allowMultipleDepartments: boolean;
+    allowSelfAssessment: boolean;
     displayIdentifier: DisplayIdentifier;
     pooledCaseOverdueDays: number;
     notificationLeadDays: number;
@@ -389,6 +390,20 @@ function SettingsPanel({
             checked={settings.allowMultipleDepartments}
             aria-label="Allow several Departments"
             onChange={(e) => update.mutate({ allowMultipleDepartments: e.target.checked }, { onError })}
+          />
+        </label>
+        <label className="flex items-center justify-between gap-4">
+          <span className="text-sm">
+            Assessors can assess themselves
+            <span className="block text-[12px] text-text-tertiary">
+              A qualified assessor may run and sign off their own case. Off, nobody certifies
+              themselves.
+            </span>
+          </span>
+          <Switch
+            checked={settings.allowSelfAssessment}
+            aria-label="Assessors can assess themselves"
+            onChange={(e) => update.mutate({ allowSelfAssessment: e.target.checked }, { onError })}
           />
         </label>
         <label className="flex items-center justify-between gap-4">
