@@ -653,10 +653,12 @@ export interface RetirementReview {
   roles: Array<RetiredValueReview & { departmentId: string }>;
 }
 
-/** The three organisation settings that govern how far a person may spread (R24, R25, R40). */
+/** The organisation settings that govern how far a person may spread (R24, R25, R40). */
 export interface TaxonomySettings {
   allowMultipleLocations: boolean;
   allowMultipleDepartments: boolean;
+  /** Whether a qualified assessor may run and certify their own case. */
+  allowSelfAssessment: boolean;
   displayIdentifier: DisplayIdentifier;
   /** Days before a pooled case reads as overdue (U13, R63). */
   pooledCaseOverdueDays: number;

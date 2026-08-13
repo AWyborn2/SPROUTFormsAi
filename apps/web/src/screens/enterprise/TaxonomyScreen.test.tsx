@@ -81,6 +81,7 @@ function base(): Taxonomy {
     settings: {
       allowMultipleLocations: false,
       allowMultipleDepartments: false,
+      allowSelfAssessment: false,
       displayIdentifier: 'employee_number',
       pooledCaseOverdueDays: 14,
       notificationLeadDays: 30,
