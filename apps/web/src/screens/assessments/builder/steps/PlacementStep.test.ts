@@ -16,7 +16,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { FormField, PageBox } from '@formai/shared';
-import { reconciledVersionFields } from './PlacementStep.js';
+import { ApiError } from '../../../../lib/data/api-client.js';
+import { reconciledVersionFields, shouldRecoverMissingVersion } from './PlacementStep.js';
 
 const field = (id: string, extra: Partial<FormField> = {}): FormField => ({
   id,
@@ -103,5 +104,50 @@ describe('reconciledVersionFields', () => {
 
   it('handles an empty version', () => {
     expect(reconciledVersionFields([], [field('a')])?.map((f) => f.id)).toEqual(['a']);
+  });
+});
+
+/**
+ * Recovering from a version the author deleted out from under the draft.
+ *
+ * Delete an assessment, resume its builder draft, and the snapshot still holds
+ * the deleted form's ids — the mapping step queried them, got a 404, and
+ * dead-ended on "This version isn't available" with the whole build intact in
+ * the draft. Publish recovers from the same 404 (#199); this decides when the
+ * mapping step may forget its ids and re-create.
+ */
+describe('shouldRecoverMissingVersion', () => {
+  const notFound = new ApiError(404, { error: 'not_found' });
+
+  it('recovers when the remembered version 404s on a fresh build', () => {
+    expect(shouldRecoverMissingVersion(notFound, { isRevision: false, hasIds: true })).toBe(true);
+  });
+
+  it('never recovers on a revision — its form is the published tool’s template', () => {
+    /*
+      A fresh unrelated form is not a recovery for a revision: the manifest,
+      the keys and every stored attempt are keyed to the template's field ids,
+      and republish targets the tool. A missing template means the tool itself
+      was deleted, which needs a person's decision.
+    */
+    expect(shouldRecoverMissingVersion(notFound, { isRevision: true, hasIds: true })).toBe(false);
+  });
+
+  it('ignores a transient failure — only a 404 is definitive', () => {
+    // Discarding ids on a 500 or a network drop would orphan the geometry the
+    // ids point at while the version still exists.
+    expect(
+      shouldRecoverMissingVersion(new ApiError(500, {}), { isRevision: false, hasIds: true }),
+    ).toBe(false);
+    expect(
+      shouldRecoverMissingVersion(new Error('network'), { isRevision: false, hasIds: true }),
+    ).toBe(false);
+    expect(shouldRecoverMissingVersion(null, { isRevision: false, hasIds: true })).toBe(false);
+  });
+
+  it('does nothing while there are no ids to forget', () => {
+    // No ids means the create-on-arrival effect already owns this render —
+    // there is nothing stale to clear.
+    expect(shouldRecoverMissingVersion(notFound, { isRevision: false, hasIds: false })).toBe(false);
   });
 });

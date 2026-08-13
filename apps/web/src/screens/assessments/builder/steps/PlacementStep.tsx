@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { Button, Icon } from '@formai/ui';
+import { ApiError } from '../../../../lib/data/api-client.js';
 import {
   useCreateDraftForm,
   useForkDraftVersion,
@@ -60,9 +61,43 @@ export function reconciledVersionFields(
   return missing.length > 0 ? [...onVersion, ...missing] : null;
 }
 
+/**
+ * Whether the remembered version is GONE and this step should forget its ids
+ * and re-create.
+ *
+ * Only a 404 — that is the API saying the form or version does not exist, which
+ * is definitive. A network failure, a 500 or an auth lapse must NOT trigger
+ * this: the version may be fine, and discarding its ids on a transient error
+ * would orphan the very geometry the ids point at.
+ *
+ * Never for a revision. A revision's form is the published tool's own template
+ * — forking it is the entire point, because the manifest, the keys and every
+ * stored attempt are keyed to its field ids — so a fresh unrelated form is not
+ * a recovery, and republish would refuse it anyway. If a revision's template is
+ * gone, the tool itself was deleted, and that needs a person's decision, not a
+ * silent re-create.
+ */
+export function shouldRecoverMissingVersion(
+  error: unknown,
+  opts: { isRevision: boolean; hasIds: boolean },
+): boolean {
+  return (
+    opts.hasIds && !opts.isRevision && error instanceof ApiError && error.status === 404
+  );
+}
+
 export function PlacementStep({ draft }: PlacementStepProps) {
-  const { formId, versionId, setVersionIds, setPlacedFields, fields, excluded, assetId, title } =
-    draft;
+  const {
+    formId,
+    versionId,
+    setVersionIds,
+    clearVersionIds,
+    setPlacedFields,
+    fields,
+    excluded,
+    assetId,
+    title,
+  } = draft;
   const createDraftForm = useCreateDraftForm();
   const forkDraftVersion = useForkDraftVersion();
   const isRevision = Boolean(draft.revisionOfToolId);
@@ -160,6 +195,35 @@ export function PlacementStep({ draft }: PlacementStepProps) {
   const version = useFormVersion(formId, versionId);
   const saveVersionFields = useSaveVersionFields(formId ?? '', versionId ?? '');
   const reconciling = useRef(false);
+
+  /*
+    THE REMEMBERED VERSION CAN BE GONE. Delete the assessment from the library,
+    resume this draft, and the snapshot still holds the deleted form's ids —
+    so the editor below dead-ended on "This version isn't available" with the
+    author's whole build sitting intact in the draft. Publish learned to
+    recover from exactly this 404 (#199); this step sits four screens earlier
+    and hit it first.
+
+    Recovery is to FORGET, not to create: clearing the ids re-arms the
+    create-on-arrival effect above, which builds a fresh draft version from the
+    draft's own field list — the list that owns every key, every structure edit
+    and every box `setPlacedFields` carried back. `started` is re-armed with it
+    so a deletion that happens mid-session recovers the same way as one found
+    on resume. What qualifies as gone — and why a revision never takes this
+    path — is `shouldRecoverMissingVersion`.
+  */
+  useEffect(() => {
+    if (
+      !shouldRecoverMissingVersion(version.error, {
+        isRevision,
+        hasIds: Boolean(formId && versionId),
+      })
+    ) {
+      return;
+    }
+    started.current = false;
+    clearVersionIds();
+  }, [version.error, isRevision, formId, versionId, clearVersionIds]);
 
   const included = useMemo(() => fields.filter((f) => !excluded.has(f.id)), [fields, excluded]);
 
