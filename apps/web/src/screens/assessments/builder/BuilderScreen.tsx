@@ -206,7 +206,20 @@ export function BuilderScreen() {
   })();
 
   return (
-    <div className="fai-rise p-[26px_28px_60px]">
+    /*
+      THE GENERATE STEP DOES NOT SCROLL THE PAGE. Its columns scroll
+      themselves — the structure list in its panel, the preview in its column —
+      so the app bar, the builder chrome and the selection toolbar hold still
+      while an author works a 24-section document. Every other step keeps the
+      ordinary scrolling page.
+    */
+    <div
+      className={
+        compactChrome
+          ? 'fai-rise flex h-[calc(100vh-56px)] min-h-0 flex-col overflow-hidden p-[12px_28px_0]'
+          : 'fai-rise p-[26px_28px_60px]'
+      }
+    >
       {!compactChrome && (
         <>
           {!hintDismissed && (
@@ -301,9 +314,13 @@ export function BuilderScreen() {
         </div>
       )}
 
-      {body}
+      {compactChrome ? <div className="min-h-0 flex-1">{body}</div> : body}
 
-      <div className="relative z-[1] mx-auto mt-[26px] flex max-w-[1000px] items-center justify-between">
+      <div
+        className={`relative z-[1] mx-auto flex max-w-[1000px] items-center justify-between ${
+          compactChrome ? 'w-full flex-none py-2.5' : 'mt-[26px]'
+        }`}
+      >
         {at > 0 ? (
           <button
             type="button"
