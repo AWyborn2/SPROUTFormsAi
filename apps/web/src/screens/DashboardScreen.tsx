@@ -4,15 +4,18 @@ import { isTerminalCaseState, type SessionInfo } from '@formai/shared';
 import {
   useAssessmentCases,
   useAssessorQueue,
+  useComplianceReport,
   useDashboard,
   useForms,
   useHeldCompetencies,
   useSession,
+  useWorkingList,
 } from '../lib/data/hooks.js';
 import { FORM_ICON_STYLE } from '../lib/data/fixtures.js';
 import { useOnboarding } from '../lib/onboarding.js';
 import { MOD_LABEL } from '../lib/keyboard/platform.js';
 import { CaseStateBadge } from './statusBadges.js';
+import { complianceTileCounts, type ComplianceTileCounts } from './dashboard-compliance.js';
 
 /**
  * Dashboard — one route, three shapes, chosen by WHO is looking.
@@ -224,10 +227,39 @@ function AssessorDashboard({ session }: { session: SessionInfo }) {
 function WorkspaceDashboard() {
   const navigate = useNavigate();
   const { orgName } = useOnboarding();
+  const { data: session } = useSession();
   const { data: forms = [] } = useForms();
   const { data: dash } = useDashboard();
 
-  if (forms.length === 0 || !dash) return <EmptyDashboard orgName={orgName} navigate={navigate} />;
+  /*
+    The compliance tile (R10–R12): admin/owner on the assessments tier only,
+    absent — not zeroed — everywhere else, and rendered ABOVE the forms-based
+    empty-state return: an admin with compliance duties and no forms yet still
+    has a workforce to oversee. The fetches are gated the same way, because
+    the compliance and working-list reads 403 below admin.
+  */
+  const showTile =
+    (session?.role === 'admin' || session?.role === 'owner') &&
+    session?.features?.assessments === true;
+  const compliance = useComplianceReport({ enabled: showTile });
+  const cases = useAssessmentCases({ enabled: showTile });
+  const working = useWorkingList({ enabled: showTile });
+  const tile = showTile
+    ? complianceTileCounts(compliance.data, cases.data, working.data)
+    : null;
+
+  if (forms.length === 0 || !dash) {
+    return (
+      <div>
+        {tile && (
+          <div className="mx-auto max-w-[1120px] px-[28px] pt-[30px]">
+            <ComplianceTile counts={tile} navigate={navigate} />
+          </div>
+        )}
+        <EmptyDashboard orgName={orgName} navigate={navigate} />
+      </div>
+    );
+  }
 
   const stats = [
     { label: 'Active forms', icon: 'folder', iconColor: 'var(--accent)', value: dash.activeForms },
@@ -274,6 +306,12 @@ function WorkspaceDashboard() {
           </div>
         ))}
       </div>
+
+      {tile && (
+        <div className="mb-[22px]">
+          <ComplianceTile counts={tile} navigate={navigate} />
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.7fr_1fr]">
         {/* Your forms */}
@@ -353,6 +391,81 @@ function WorkspaceDashboard() {
             )}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The four compliance numbers, each a way in (R10, R11).
+ *
+ * Interactive on purpose where the stat row above is not: hover lift, pointer
+ * and a trailing chevron distinguish "click me" cards from the static counts
+ * that share their shape — four identical-looking but secretly clickable divs
+ * would leave the click-through undiscovered.
+ */
+function ComplianceTile({
+  counts,
+  navigate,
+}: {
+  counts: ComplianceTileCounts;
+  navigate: ReturnType<typeof useNavigate>;
+}) {
+  const cards = [
+    {
+      label: 'Expiring within 90 days',
+      icon: 'calendar-clock',
+      iconColor: 'var(--warning)',
+      value: counts.expiringMembers,
+      to: '/app/compliance?status=expiring',
+    },
+    {
+      label: 'Required expired',
+      icon: 'clock-alert',
+      iconColor: 'var(--danger)',
+      value: counts.expiredMembers,
+      to: '/app/compliance?status=expired',
+    },
+    {
+      label: 'Awaiting sign-off',
+      icon: 'flag',
+      iconColor: 'var(--info)',
+      value: counts.awaitingSignOff,
+      to: '/app/assessments',
+    },
+    {
+      label: 'Working list',
+      icon: 'list-checks',
+      iconColor: 'var(--accent)',
+      value: counts.workingListSize,
+      to: '/app/working-list',
+    },
+  ];
+
+  return (
+    <div>
+      <div className="mb-2 font-mono text-[10.5px] uppercase tracking-wider text-text-tertiary">
+        Workforce compliance
+      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {cards.map((c) => (
+          <button
+            key={c.label}
+            onClick={() => navigate(c.to)}
+            className="fai-lift cursor-pointer rounded-lg border border-border bg-surface-card p-[18px_20px] text-left shadow-xs hover:shadow-md"
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">
+                {c.label}
+              </span>
+              <Icon name={c.icon} size={16} color={c.iconColor} />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="font-heading text-[30px] font-bold tracking-tight">{c.value}</span>
+              <Icon name="chevron-right" size={16} className="text-text-tertiary" />
+            </div>
+          </button>
+        ))}
       </div>
     </div>
   );

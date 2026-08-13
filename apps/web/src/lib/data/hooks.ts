@@ -1158,8 +1158,12 @@ export function useSetLocationParts(toolId: string) {
   });
 }
 
-export function useAssessmentCases() {
-  return useQuery({ queryKey: keys.assessmentCases, queryFn: () => assessmentsApi.listCases() });
+export function useAssessmentCases(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: keys.assessmentCases,
+    queryFn: () => assessmentsApi.listCases(),
+    enabled: options?.enabled ?? true,
+  });
 }
 
 /** The shared assessor queue — unowned cases the reader is eligible for (U13). */
