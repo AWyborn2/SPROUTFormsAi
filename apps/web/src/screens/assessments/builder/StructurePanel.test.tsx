@@ -184,6 +184,64 @@ describe('StructurePanel', () => {
     expect(screen.queryByText(/selected/)).toBeNull();
   });
 
+  it('bulk-deletes the ticked fields and clears the selection', () => {
+    const onDeleteField = vi.fn();
+    setup({ onDeleteField });
+    expand('Candidate declaration');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select Candidate name' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select Employee ID' }));
+    fireEvent.click(screen.getByRole('button', { name: /Delete fields/ }));
+
+    expect(onDeleteField).toHaveBeenCalledTimes(2);
+    expect(onDeleteField).toHaveBeenCalledWith('a');
+    expect(onDeleteField).toHaveBeenCalledWith('b');
+    expect(screen.queryByText(/selected/)).toBeNull();
+  });
+
+  it('bulk-moves the ticked fields to the chosen section, in arrangement order', () => {
+    const onMoveField = vi.fn();
+    setup({ onMoveField });
+    expand('Candidate declaration');
+
+    // Ticked in REVERSE order — the move must still follow the arrangement.
+    fireEvent.click(screen.getByRole('button', { name: 'Select Employee ID' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select Candidate name' }));
+    fireEvent.change(screen.getByLabelText('Move selected fields to section'), {
+      target: { value: 's2' },
+    });
+
+    expect(onMoveField.mock.calls).toEqual([
+      ['a', 's2', null, false],
+      ['b', 's2', null, false],
+    ]);
+    expect(screen.queryByText(/selected/)).toBeNull();
+  });
+
+  it('bulk-deletes the ticked sections', () => {
+    const onDissolve = vi.fn();
+    setup({ onDissolve });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select section Candidate declaration' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select section Part 2 — Practical' }));
+    expect(screen.getByText('2 sections selected')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Delete sections/ }));
+
+    expect(onDissolve.mock.calls).toEqual([['s1'], ['s2']]);
+    expect(screen.queryByText(/selected/)).toBeNull();
+  });
+
+  it('reports fields and sections together when both are ticked', () => {
+    setup();
+    expand('Candidate declaration');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Select Candidate name' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Select section Part 2 — Practical' }));
+
+    expect(screen.getByText('1 field · 1 section selected')).toBeTruthy();
+  });
+
   describe('the type palette', () => {
     it('offers what the shared guard allows, not a list of its own', () => {
       // `typeOptionsFor` on a scalar returns the authorable types only — no

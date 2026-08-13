@@ -151,6 +151,11 @@ const FIELDS: FormField[] = [
     ],
   },
   header('h-prac2'),
+  // The candidate-declaration block, for the declaration-kind tests below.
+  // Appended last so every existing part slice keeps its shape.
+  header('h-decl'),
+  { id: 'decl-sig', type: 'signature', label: 'Candidate signature', required: true, source: 'imported' },
+  { id: 'decl-date', type: 'date', label: 'Date', required: false, source: 'imported' },
 ];
 
 const MANIFEST: AssessmentToolManifest = {
@@ -2909,6 +2914,116 @@ describe('POST /assessment-cases/:id/sign-off', () => {
       await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
 
       expect(rows(store, 'competencyHolders')).toHaveLength(0);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * A DECLARATION IS NOT AN ASSESSMENT. "I was told what this involves and I am
+ * ready" is an attestation: nobody judges it, and signing it IS the act. It
+ * completes at hand-in — with the one gate that matters checked first, because
+ * an empty tap on Submit must not auto-satisfy an attestation with a blank
+ * signature box.
+ */
+describe('declaration parts', () => {
+  const DECL_MANIFEST: AssessmentToolManifest = {
+    parts: [
+      {
+        key: 'pd',
+        ordinal: 1,
+        label: 'Candidate declaration',
+        kind: 'declaration',
+        pathways: ['experienced', 'new', 'rpl'],
+        startFieldId: 'h-decl',
+      },
+      {
+        key: 'p1',
+        ordinal: 2,
+        label: 'Part 1 Theory',
+        kind: 'theory',
+        pathways: ['experienced', 'new', 'rpl'],
+        startFieldId: 'h-theory',
+      },
+    ],
+  };
+
+  async function openDeclaration(base: string) {
+    const tool = await seedTool(base, DECL_MANIFEST);
+    const caseRes = await fetch(`${base}/assessment-cases`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+    });
+    const kase = (await caseRes.json()) as { id: string };
+    const attemptRes = await fetch(`${base}/assessment-cases/${kase.id}/parts/pd/attempts`, {
+      method: 'POST',
+      headers: auth(),
+      body: '{}',
+    });
+    const attempt = (await attemptRes.json()) as { id: string };
+    return { caseId: kase.id, attemptId: attempt.id };
+  }
+
+  const handIn = (base: string, caseId: string, attemptId: string) =>
+    fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/submit`, {
+      method: 'POST',
+      headers: auth(candidate),
+      body: '{}',
+    });
+
+  it('refuses an unsigned hand-in, naming the empty boxes, and leaves the attempt open', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await openDeclaration(base);
+
+      const res = await handIn(base, caseId, attemptId);
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; missing: { id: string }[] };
+      expect(body.error).toBe('declaration_incomplete');
+      expect(body.missing.some((m) => m.id === 'decl-sig')).toBe(true);
+
+      // NOT stamped submitted — the gate ran before the write, so the
+      // candidate signs and hands in again without anyone reopening anything.
+      const save = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'decl-sig': 'data:image/png;base64,iVBORw0KGgo=' } }),
+      });
+      expect(save.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('completes at hand-in once signed — satisfactory, automatically, no assessor', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await openDeclaration(base);
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'decl-sig': 'data:image/png;base64,iVBORw0KGgo=' } }),
+      });
+
+      const res = await handIn(base, caseId, attemptId);
+
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { outcome?: string }).outcome).toBe('satisfactory');
+
+      // The case view agrees: the declaration is satisfied and the theory part
+      // is what remains — the attestation gates, it is never judged.
+      const detail = await fetch(`${base}/assessment-cases/${caseId}`, { headers: auth() });
+      const body = (await detail.json()) as {
+        state: string;
+        parts: { key: string; state: string }[];
+      };
+      expect(body.parts.find((p) => p.key === 'pd')?.state).toBe('satisfactory');
+      expect(body.state).toBe('open');
     } finally {
       server.close();
     }

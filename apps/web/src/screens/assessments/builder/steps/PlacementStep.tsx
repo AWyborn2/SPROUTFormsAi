@@ -205,7 +205,10 @@ export function PlacementStep({ draft }: PlacementStepProps) {
   }
 
   return (
-    <div className="-mx-[22px] -my-3">
+    // A flex column filling the frozen-chrome slot: the carried-boxes panel
+    // (when there is one) keeps its height, the editor takes the rest and
+    // manages its own internal scrolling.
+    <div className="-mx-7 -mt-1 flex h-full min-h-0 flex-col">
       {isRevision && Object.keys(draft.carriedGeometry).length > 0 && (
         <CarriedBoxesPanel
           carried={draft.carriedGeometry}
@@ -238,12 +241,14 @@ export function PlacementStep({ draft }: PlacementStepProps) {
         onto the version is overwritten there — the boxes are on screen the
         whole time, which is what makes that failure invisible.
       */}
-      <GeometryEditorScreen
-        formId={formId}
-        versionId={versionId}
-        embedded
-        onSaved={setPlacedFields}
-      />
+      <div className="min-h-0 flex-1">
+        <GeometryEditorScreen
+          formId={formId}
+          versionId={versionId}
+          embedded
+          onSaved={setPlacedFields}
+        />
+      </div>
     </div>
   );
 }

@@ -5,6 +5,7 @@ import { schema } from '@formai/db';
 import {
   applyCalcs,
   ASSESSMENT_PATHWAYS,
+  PART_KINDS,
   NS_DISPOSITIONS,
   caseProgress,
   competencyCurrency,
@@ -38,6 +39,7 @@ import {
   workflowOf,
   writableFieldIds,
   type WorkflowRole,
+  missingDeclarationFields,
   streamCheckWarning,
   totalLoggedHours,
   stripMarkingSecrets,
@@ -369,7 +371,10 @@ const partSchema = z.object({
   key: z.string().min(1),
   ordinal: z.number().int().positive(),
   label: z.string().min(1),
-  kind: z.enum(['theory', 'practical', 'logbook']),
+  // From the shared constant, never a re-typed list — a kind this schema
+  // omits is silently rejected over HTTP while the shared model accepts it,
+  // which is exactly how `candidateNameFieldId` once went missing.
+  kind: z.enum(PART_KINDS),
   pathways: z.array(z.enum(ASSESSMENT_PATHWAYS)).min(1),
   startFieldId: z.string().min(1),
   minimumHours: z.number().positive().optional(),
@@ -2517,6 +2522,27 @@ async function setSubmitted(
     return;
   }
 
+  /*
+    A DECLARATION IS CHECKED BEFORE IT IS STAMPED. It completes at hand-in with
+    nobody judging it, so hand-in is the only gate there is — and the gate has
+    to run before `submittedAt` is written, or an empty tap on Submit would
+    leave a submitted, auto-satisfied attestation with a blank signature box.
+  */
+  const tool = submitting ? await loadTool(db, row.toolId, tenant.orgId) : null;
+  const part = tool ? orderedParts(tool.manifest).find((p) => p.key === attempt.partKey) : undefined;
+  if (submitting && tool && part?.kind === 'declaration') {
+    const fields = await fieldsForVersion(db, attempt.templateVersionId);
+    const missing = missingDeclarationFields(fields, tool.manifest, part.key, attempt.values);
+    if (missing.length > 0) {
+      res.status(400).json({
+        error: 'declaration_incomplete',
+        missing,
+        detail: `Fill ${missing.map((m) => `"${m.label}"`).join(', ')} before handing this in.`,
+      });
+      return;
+    }
+  }
+
   const submittedAt = submitting ? new Date() : null;
   await db
     .update(schema.assessmentPartAttempts)
@@ -2548,10 +2574,28 @@ async function setSubmitted(
     untouched: hand-in still just parks it for marking.
   */
   let marked: Awaited<ReturnType<typeof resolveAttemptOutcome>> | null = null;
-  if (submitting) {
-    const tool = await loadTool(db, row.toolId, tenant.orgId);
-    const part = tool ? orderedParts(tool.manifest).find((p) => p.key === attempt.partKey) : undefined;
-    if (tool && part) {
+  if (submitting && tool && part) {
+    /*
+      A DECLARATION COMPLETES AT HAND-IN. Signing it IS the act — there is no
+      arithmetic to run and no judgement to wait for, and parking it "for
+      marking" would queue an assessor visit whose only possible outcome is
+      pressing a button the candidate's signature already answered. The
+      completeness gate above is what makes this safe to do blind.
+    */
+    if (part.kind === 'declaration') {
+      marked = await resolveAttemptOutcome(db, tenant, {
+        row,
+        attempt,
+        manifest: tool.manifest,
+        outcome: 'satisfactory',
+        derivedValues: attempt.values ?? {},
+        disposition: null,
+        reason: null,
+        belowThresholdReason: null,
+        markingEligibilityWarnings: [],
+        marker: { kind: 'automatic' },
+      });
+    } else {
       // Unstripped on purpose — marking must see answerKey/outcomeTarget.
       const fields = await fieldsForVersion(db, attempt.templateVersionId);
       if (isSelfMarking(fields, tool.manifest, part.key)) {

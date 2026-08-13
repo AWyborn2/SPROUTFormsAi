@@ -34,7 +34,7 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
   const byId = new Map(draft.fields.map((f) => [f.id, f]));
 
   return (
-    <div className="-mx-7 -mt-1 flex items-start gap-0">
+    <div className="-mx-7 -mt-1 flex h-full min-h-0 items-stretch gap-0">
       <StructurePanel
         structure={draft.structure}
         fields={draft.fields}
@@ -57,7 +57,10 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
         onPatchField={draft.fieldOps.patch}
       />
 
-      <div className="min-w-0 flex-1 px-7 pb-10">
+      {/* The preview scrolls INSIDE this column, so the chrome above and the
+          structure panel beside it hold still while an author pages a long
+          document. */}
+      <div className="fai-scroll h-full min-w-0 flex-1 overflow-y-auto px-7 pb-10">
         <div className="mb-3 flex items-start gap-2.5 text-[12px] leading-relaxed text-text-tertiary">
           <Icon name="sparkles" size={14} className="mt-0.5 flex-none text-accent" />
           <span>
