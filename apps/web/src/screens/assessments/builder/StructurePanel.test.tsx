@@ -63,6 +63,7 @@ function setup(over: Partial<StructurePanelProps> = {}) {
     onSetColumns: vi.fn(),
     onToggleOwnPage: vi.fn(),
     onDissolve: vi.fn(),
+    onDuplicate: vi.fn(),
     onMoveField: vi.fn(),
     onCycleSpan: vi.fn(),
     onSetFieldType: vi.fn(),

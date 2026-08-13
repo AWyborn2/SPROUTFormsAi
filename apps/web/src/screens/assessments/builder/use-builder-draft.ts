@@ -29,6 +29,7 @@ import * as Structure from './builder-structure.js';
 import {
   addField,
   deleteField,
+  duplicateSection,
   mergeIntoDescription,
   renameField,
   setOutcomeTarget,
@@ -340,6 +341,8 @@ export interface StructureOps {
    * from sections, and its orphan report deliberately ignores headers.
    */
   dissolve: (key: string) => void;
+  /** Clone a section — fields, geometry and all — for multi-stage papers. */
+  duplicate: (key: string) => void;
   moveField: (
     fieldId: string,
     toSectionKey: string,
@@ -836,6 +839,7 @@ export function useBuilderDraftState({
           return section ? Structure.setOwnPage(s, key, !section.ownPage) : s;
         }),
       dissolve: (key) => setStructure((s) => Structure.dissolveSection(s, key)),
+      duplicate: (key) => applyFieldEdit((st) => duplicateSection(st, key)),
       moveField: (fieldId, toSectionKey, beforeFieldId, after) =>
         setStructure((s) => Structure.moveField(s, fieldId, toSectionKey, beforeFieldId, after)),
       cycleSpan: (sectionKey, fieldId) =>
