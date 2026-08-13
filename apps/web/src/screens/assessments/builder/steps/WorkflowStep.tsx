@@ -43,6 +43,36 @@ export interface WorkflowStepProps {
   draft: BuilderDraftState;
 }
 
+/**
+ * The refusal, in the SERVER'S OWN WORDS. A 400 from publish or republish
+ * carries exactly why — `invalid_manifest` lists validator problems,
+ * `invalid_request` names the fields the schema refused — and showing only
+ * "API request failed (400)" left an author staring at a green summary and a
+ * red box that disagreed with it, with nothing to fix.
+ */
+function publishFailureText(err: unknown, fallbackSuffix: string): string {
+  if (err instanceof ApiError && err.body && typeof err.body === 'object') {
+    const body = err.body as {
+      error?: string;
+      problems?: string[];
+      detail?: { formErrors?: string[]; fieldErrors?: Record<string, string[]> };
+    };
+    if (Array.isArray(body.problems) && body.problems.length > 0) {
+      return `Publishing refused: ${body.problems.join(' · ')}`;
+    }
+    if (body.error === 'invalid_request' && body.detail) {
+      const fieldMessages = Object.entries(body.detail.fieldErrors ?? {}).map(
+        ([key, messages]) => `${key}: ${messages.join(', ')}`,
+      );
+      const all = [...(body.detail.formErrors ?? []), ...fieldMessages];
+      if (all.length > 0) return `Publishing refused — the request did not match: ${all.join(' · ')}`;
+    }
+  }
+  return err instanceof Error
+    ? `Publishing stopped: ${err.message}. ${fallbackSuffix}`
+    : `Publishing stopped before it finished. ${fallbackSuffix}`;
+}
+
 export function WorkflowStep({ draft }: WorkflowStepProps) {
   const { fields, keys, manifest, structure, parts, formId, versionId, title } = draft;
   const isRevision = Boolean(draft.revisionOfToolId);
@@ -144,9 +174,7 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         }
       }
       setFailure(
-        err instanceof Error
-          ? `Publishing stopped: ${err.message}. Nothing was partially applied — the revision is intact; retry when ready.`
-          : 'Publishing stopped before it finished. Nothing was partially applied.',
+        publishFailureText(err, 'Nothing was partially applied — the revision is intact; retry when ready.'),
       );
     }
   };
@@ -178,11 +206,7 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
       });
       setDone({ toolId: tool.id });
     } catch (err) {
-      setFailure(
-        err instanceof Error
-          ? `Publishing as a new tool stopped: ${err.message}.`
-          : 'Publishing as a new tool stopped before it finished.',
-      );
+      setFailure(publishFailureText(err, 'Publishing as a new tool did not finish.'));
     }
   };
 
@@ -238,9 +262,10 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
       setDone({ toolId: tool.id });
     } catch (err) {
       setFailure(
-        err instanceof Error
-          ? `Publishing stopped: ${err.message}. The form version may already have published; check Assessments before retrying.`
-          : 'Publishing stopped before it finished. Check Assessments before retrying.',
+        publishFailureText(
+          err,
+          'The form version may already have published; check Assessments before retrying.',
+        ),
       );
     }
   };
