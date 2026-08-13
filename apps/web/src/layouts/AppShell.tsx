@@ -10,6 +10,14 @@ import { MOD_LABEL } from '../lib/keyboard/platform.js';
 import { BrandMark } from '../components/BrandMark.js';
 import { AccountMenu } from '../components/AccountMenu.js';
 import { FinishBrandingBanner } from '../components/FinishBrandingBanner.js';
+import {
+  BADGE_CONTEXT,
+  badgeFor,
+  groupRollup,
+  NavCountPill,
+  useNavBadgeCounts,
+  type NavBadgeCounts,
+} from './nav-badges.js';
 
 /** The authenticated app shell: slate sidebar + topbar + routed content. */
 export function AppShell() {
@@ -25,6 +33,13 @@ export function AppShell() {
     returned.
   */
   const { top, groups } = navSectionsFor(session?.role, session?.features);
+  /*
+    Work-queue counts for the badges (R5–R7). Computed once here — a group
+    header needs its children's counts to roll up while collapsed, so the
+    counts cannot live inside the per-entry components.
+  */
+  const visibleKeys = new Set([...top, ...groups.flatMap((g) => g.screens)].map((s) => s.key));
+  const badgeCounts = useNavBadgeCounts(visibleKeys, session?.role);
   const userName = session?.userName || session?.userEmail || 'Account';
   const orgName = session?.orgName || 'Your organization';
   const orgInitial = (orgName.trim()[0] ?? '?').toUpperCase();
@@ -69,10 +84,15 @@ export function AppShell() {
         </div>
         <nav className="fai-scroll flex-1 overflow-auto px-2 py-2">
           {top.map((s) => (
-            <NavItem key={s.key} screen={s} />
+            <NavItem key={s.key} screen={s} badgeCounts={badgeCounts} />
           ))}
           {groups.map((g) => (
-            <NavGroup key={g.key} section={g} pathname={location.pathname} />
+            <NavGroup
+              key={g.key}
+              section={g}
+              pathname={location.pathname}
+              badgeCounts={badgeCounts}
+            />
           ))}
         </nav>
         <div className="border-t border-white/[0.08] p-3">
@@ -149,7 +169,16 @@ export function AppShell() {
   );
 }
 
-function NavItem({ screen, nested = false }: { screen: ScreenDef; nested?: boolean }) {
+function NavItem({
+  screen,
+  nested = false,
+  badgeCounts,
+}: {
+  screen: ScreenDef;
+  nested?: boolean;
+  badgeCounts?: NavBadgeCounts;
+}) {
+  const badge = badgeFor(badgeCounts, screen.key);
   return (
     <NavLink
       to={screen.path}
@@ -172,6 +201,9 @@ function NavItem({ screen, nested = false }: { screen: ScreenDef; nested?: boole
             color={isActive ? '#8fd6ad' : 'rgba(255,255,255,.55)'}
           />
           {screen.label}
+          {badge !== null && (
+            <NavCountPill count={badge} context={BADGE_CONTEXT[screen.key as keyof NavBadgeCounts]} />
+          )}
         </>
       )}
     </NavLink>
@@ -196,12 +228,23 @@ function storedNavOpen(): Record<string, boolean> {
  * settings surfaces are visited rarely, so they spend most of their life as
  * one row instead of nine.
  */
-function NavGroup({ section, pathname }: { section: NavSection; pathname: string }) {
+function NavGroup({
+  section,
+  pathname,
+  badgeCounts,
+}: {
+  section: NavSection;
+  pathname: string;
+  badgeCounts?: NavBadgeCounts;
+}) {
   const [override, setOverride] = useState<boolean | undefined>(() => storedNavOpen()[section.key]);
   const containsActive = section.screens.some(
     (s) => pathname === s.path || pathname.startsWith(`${s.path}/`),
   );
   const open = override ?? containsActive;
+  // Badged children live INSIDE this collapsible group — while it is closed
+  // their pills do not exist, so the header carries their sum (see groupRollup).
+  const rollup = groupRollup(badgeCounts, section.screens.map((s) => s.key));
 
   function toggle() {
     const next = !open;
@@ -229,13 +272,19 @@ function NavGroup({ section, pathname }: { section: NavSection; pathname: string
           color={containsActive && !open ? '#8fd6ad' : 'rgba(255,255,255,.55)'}
         />
         <span className="flex-1">{section.label}</span>
+        {!open && rollup > 0 && (
+          <NavCountPill count={rollup} context={`items waiting in ${section.label}`} />
+        )}
         <Icon
           name={open ? 'chevron-down' : 'chevron-right'}
           size={14}
           color="rgba(255,255,255,.4)"
         />
       </button>
-      {open && section.screens.map((s) => <NavItem key={s.key} screen={s} nested />)}
+      {open &&
+        section.screens.map((s) => (
+          <NavItem key={s.key} screen={s} nested badgeCounts={badgeCounts} />
+        ))}
     </div>
   );
 }

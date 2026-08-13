@@ -4,15 +4,18 @@ import { isTerminalCaseState, type SessionInfo } from '@formai/shared';
 import {
   useAssessmentCases,
   useAssessorQueue,
+  useComplianceReport,
   useDashboard,
   useForms,
   useHeldCompetencies,
   useSession,
+  useWorkingList,
 } from '../lib/data/hooks.js';
 import { FORM_ICON_STYLE } from '../lib/data/fixtures.js';
 import { useOnboarding } from '../lib/onboarding.js';
 import { MOD_LABEL } from '../lib/keyboard/platform.js';
 import { CaseStateBadge } from './statusBadges.js';
+import { complianceTileCounts, type ComplianceTileCounts } from './dashboard-compliance.js';
 
 /**
  * Dashboard — one route, three shapes, chosen by WHO is looking.
@@ -34,6 +37,49 @@ export function DashboardScreen() {
 /** Shared page chrome for the personal dashboards. */
 function firstNameOf(session: SessionInfo): string {
   return session.userName?.trim().split(/\s+/)[0] || 'there';
+}
+
+/**
+ * The one stat-card shape every dashboard uses. Static by default; passing
+ * `onClick` makes it a button with the interactive affordances (lift, pointer,
+ * trailing chevron) that distinguish "click me" cards from the plain counts
+ * that share their silhouette.
+ */
+function StatCard({
+  label,
+  icon,
+  iconColor,
+  value,
+  onClick,
+}: {
+  label: string;
+  icon: string;
+  iconColor: string;
+  value: number | string;
+  onClick?: () => void;
+}) {
+  const inner = (
+    <>
+      <div className="mb-3 flex items-center justify-between">
+        <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">
+          {label}
+        </span>
+        <Icon name={icon} size={16} color={iconColor} />
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="font-heading text-[30px] font-bold tracking-tight">{value}</span>
+        {onClick && <Icon name="chevron-right" size={16} className="text-text-tertiary" />}
+      </div>
+    </>
+  );
+  const shell = 'rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs';
+  return onClick ? (
+    <button onClick={onClick} className={`fai-lift cursor-pointer text-left hover:shadow-md ${shell}`}>
+      {inner}
+    </button>
+  ) : (
+    <div className={shell}>{inner}</div>
+  );
 }
 
 /**
@@ -72,13 +118,7 @@ function CandidateDashboard({ session }: { session: SessionInfo }) {
 
       <div className="mb-[22px] grid grid-cols-1 gap-4 sm:grid-cols-3">
         {stats.map((s) => (
-          <div key={s.label} className="rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs">
-            <div className="mb-3 flex items-center justify-between">
-              <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">{s.label}</span>
-              <Icon name={s.icon} size={16} color={s.iconColor} />
-            </div>
-            <div className="font-heading text-[30px] font-bold tracking-tight">{s.value}</div>
-          </div>
+          <StatCard key={s.label} {...s} />
         ))}
       </div>
 
@@ -176,13 +216,7 @@ function AssessorDashboard({ session }: { session: SessionInfo }) {
 
       <div className="mb-[22px] grid grid-cols-1 gap-4 sm:grid-cols-3">
         {stats.map((s) => (
-          <div key={s.label} className="rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs">
-            <div className="mb-3 flex items-center justify-between">
-              <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">{s.label}</span>
-              <Icon name={s.icon} size={16} color={s.iconColor} />
-            </div>
-            <div className="font-heading text-[30px] font-bold tracking-tight">{s.value}</div>
-          </div>
+          <StatCard key={s.label} {...s} />
         ))}
       </div>
 
@@ -224,10 +258,42 @@ function AssessorDashboard({ session }: { session: SessionInfo }) {
 function WorkspaceDashboard() {
   const navigate = useNavigate();
   const { orgName } = useOnboarding();
+  const { data: session } = useSession();
   const { data: forms = [] } = useForms();
   const { data: dash } = useDashboard();
 
-  if (forms.length === 0 || !dash) return <EmptyDashboard orgName={orgName} navigate={navigate} />;
+  /*
+    The compliance tile (R10–R12): admin/owner on the assessments tier only,
+    absent — not zeroed — everywhere else, and rendered ABOVE the forms-based
+    empty-state return: an admin with compliance duties and no forms yet still
+    has a workforce to oversee. The fetches are gated the same way, because
+    the compliance and working-list reads 403 below admin.
+  */
+  const showTile =
+    (session?.role === 'admin' || session?.role === 'owner') &&
+    session?.features?.assessments === true;
+  const TILE_STALE_MS = 5 * 60 * 1000;
+  const compliance = useComplianceReport({ enabled: showTile, staleTime: TILE_STALE_MS });
+  const cases = useAssessmentCases({ enabled: showTile, staleTime: TILE_STALE_MS });
+  const working = useWorkingList({ enabled: showTile, staleTime: TILE_STALE_MS });
+  const tile = showTile
+    ? complianceTileCounts(compliance.data, cases.data, working.data)
+    : null;
+  const tileErrored =
+    showTile && !tile && (compliance.isError || cases.isError || working.isError);
+
+  if (forms.length === 0 || !dash) {
+    return (
+      <div>
+        {(tile || tileErrored) && (
+          <div className="mx-auto max-w-[1120px] px-[28px] pt-[30px]">
+            {tile ? <ComplianceTile counts={tile} navigate={navigate} /> : <ComplianceTileError />}
+          </div>
+        )}
+        <EmptyDashboard orgName={orgName} navigate={navigate} />
+      </div>
+    );
+  }
 
   const stats = [
     { label: 'Active forms', icon: 'folder', iconColor: 'var(--accent)', value: dash.activeForms },
@@ -260,20 +326,15 @@ function WorkspaceDashboard() {
       {/* Stat cards */}
       <div className="mb-[22px] grid grid-cols-1 gap-4 sm:grid-cols-3">
         {stats.map((s) => (
-          <div
-            key={s.label}
-            className="rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs"
-          >
-            <div className="mb-3 flex items-center justify-between">
-              <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">
-                {s.label}
-              </span>
-              <Icon name={s.icon} size={16} color={s.iconColor} />
-            </div>
-            <div className="font-heading text-[30px] font-bold tracking-tight">{s.value}</div>
-          </div>
+          <StatCard key={s.label} {...s} />
         ))}
       </div>
+
+      {(tile || tileErrored) && (
+        <div className="mb-[22px]">
+          {tile ? <ComplianceTile counts={tile} navigate={navigate} /> : <ComplianceTileError />}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.7fr_1fr]">
         {/* Your forms */}
@@ -354,6 +415,90 @@ function WorkspaceDashboard() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The four compliance numbers, each a way in (R10, R11).
+ *
+ * Interactive on purpose where the stat row above is not: hover lift, pointer
+ * and a trailing chevron distinguish "click me" cards from the static counts
+ * that share their shape — four identical-looking but secretly clickable divs
+ * would leave the click-through undiscovered.
+ */
+function ComplianceTile({
+  counts,
+  navigate,
+}: {
+  counts: ComplianceTileCounts;
+  navigate: ReturnType<typeof useNavigate>;
+}) {
+  const cards = [
+    {
+      // Grace included: past the date but still counting is the most urgent
+      // booking of all, and the compliance read files it in the same bucket.
+      label: 'Expiring or in grace',
+      icon: 'calendar-clock',
+      iconColor: 'var(--warning)',
+      value: counts.expiringMembers,
+      to: '/app/compliance?status=expiring',
+    },
+    {
+      label: 'Required expired',
+      icon: 'clock-alert',
+      iconColor: 'var(--danger)',
+      value: counts.expiredMembers,
+      to: '/app/compliance?status=expired',
+    },
+    {
+      label: 'Awaiting sign-off',
+      icon: 'flag',
+      iconColor: 'var(--info)',
+      value: counts.awaitingSignOff,
+      to: '/app/assessments',
+    },
+    {
+      label: 'Working list',
+      icon: 'list-checks',
+      iconColor: 'var(--accent)',
+      value: counts.workingListSize,
+      to: '/app/working-list',
+    },
+  ];
+
+  return (
+    <div>
+      <div className="mb-2 font-mono text-[10.5px] uppercase tracking-wider text-text-tertiary">
+        Workforce compliance
+      </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {cards.map((c) => (
+          <StatCard
+            key={c.label}
+            label={c.label}
+            icon={c.icon}
+            iconColor={c.iconColor}
+            value={c.value}
+            onClick={() => navigate(c.to)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Absence must not be ambiguous. The tile disappears for a reader it does not
+ * apply to — but for an eligible admin whose reads FAILED, the same absence
+ * would silently hide the numbers they steer by (`retry: false` means nothing
+ * re-fires while they stay on the page). One quiet line names the difference.
+ */
+function ComplianceTileError() {
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-card p-4 text-[12.5px] text-text-tertiary">
+      <Icon name="alert-triangle" size={14} className="text-warning" />
+      Workforce compliance numbers couldn&rsquo;t load — refresh to retry.
     </div>
   );
 }
