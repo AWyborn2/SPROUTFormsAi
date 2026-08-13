@@ -257,6 +257,22 @@ describe('requiredCompetencyIdsByUser', () => {
     expect(reads.every((r) => r.surface === 'tx')).toBe(true);
   });
 
+  it('AE1: reads all FIVE required competencies when only one has an awarding tool (R5, R7)', async () => {
+    // Dozer Operator: the ATO (awarded by an assessment) plus four
+    // licence-type competencies nothing awards. Standing is the same size
+    // either way — an evidence-only requirement is still a requirement.
+    const FIVE = ['c-ato', 'c-licence', 'c-sme', 'c-grade', 'c-tip'];
+    const { db } = makeDb({
+      ...member('m1', 'u1', ['r1']),
+      roleRequiredCompetencies: FIVE.map((c) => link('r1', c, 'required')),
+      assessmentTools: [{ id: 't-ato', orgId: ORG, awardedCompetencyIds: ['c-ato'] }],
+    });
+
+    const byUser = await requiredCompetencyIdsByUser(db, ORG, ['u1']);
+
+    expect([...byUser.get('u1')!].sort()).toEqual([...FIVE].sort());
+  });
+
   it('maps every requested userId, empty set by default — nobody is absent', async () => {
     const { db } = makeDb({
       ...member('m1', 'u1', ['r1']),

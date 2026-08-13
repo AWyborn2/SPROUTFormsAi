@@ -317,6 +317,11 @@ function makeDb(
     assessmentTools: [],
     assessmentToolDrafts: [],
     roleRequiredAssessments: [],
+    roleRequiredCompetencies: [],
+    // The award-link plan walks a legacy role's holders and their Locations
+    // (U2) — empty by default, seeded by the award tests.
+    membershipRoles: [],
+    membershipLocations: [],
     assessmentCases: [],
     assessmentPartAttempts: [],
     competencies: [{ id: COMPETENCY, orgId: ORG, name: 'Track Dozer Operator', code: 'TD-OP', holders: 0 }],
@@ -426,7 +431,14 @@ function rows(store: Record<string, Record<string, unknown>[]>, table: string) {
   return store[table] ?? [];
 }
 
-async function seedTool(base: string, manifest = MANIFEST, awardedCompetencyIds?: string[]) {
+/*
+  Creation now REQUIRES exactly one award (U2, R1), so the helper defaults to
+  the seeded competency — the shape every real tool has from this round on.
+  Tests about the PRE-round state (award-less tools in production data) seed
+  their tool row directly into the store instead, because the API can no
+  longer create one.
+*/
+async function seedTool(base: string, manifest = MANIFEST, awardedCompetencyIds: string[] = [COMPETENCY]) {
   const res = await fetch(`${base}/assessment-tools`, {
     method: 'POST',
     headers: auth(),
@@ -434,10 +446,34 @@ async function seedTool(base: string, manifest = MANIFEST, awardedCompetencyIds?
       templateId: TEMPLATE,
       name: 'Track Dozer',
       manifest,
-      ...(awardedCompetencyIds ? { awardedCompetencyIds } : {}),
+      awardedCompetencyIds,
     }),
   });
   return (await res.json()) as { id: string };
+}
+
+/** An award-less tool planted straight into the store — the pre-round state. */
+function seedUnlinkedTool(
+  store: Record<string, Record<string, unknown>[]>,
+  over: Record<string, unknown> = {},
+) {
+  const row = {
+    id: nextId(),
+    orgId: ORG,
+    templateId: TEMPLATE,
+    name: 'Track Dozer',
+    manifest: MANIFEST,
+    candidatePrerequisiteIds: [],
+    assessorCompetencyIds: [],
+    assessorStreamCompetencyIds: {},
+    awardedCompetencyIds: [],
+    locationPartKeys: {},
+    departmentId: null,
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    ...over,
+  };
+  rows(store, 'assessmentTools').push(row);
+  return row as { id: string; name: string };
 }
 
 afterEach(() => {
@@ -472,6 +508,7 @@ describe('POST /assessment-tools', () => {
           // Any real field id: validateManifest checks it exists in this
           // version, which is the half that was already working.
           manifest: { ...MANIFEST, candidateNameFieldId: 'q-mining' },
+          awardedCompetencyIds: [COMPETENCY],
         }),
       });
 
@@ -492,7 +529,7 @@ describe('POST /assessment-tools', () => {
       const res = await fetch(`${base}/assessment-tools`, {
         method: 'POST',
         headers: auth(),
-        body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST }),
+        body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST, awardedCompetencyIds: [COMPETENCY] }),
       });
       expect(res.status).toBe(201);
     } finally {
@@ -508,7 +545,7 @@ describe('POST /assessment-tools', () => {
       const res = await fetch(`${base}/assessment-tools`, {
         method: 'POST',
         headers: auth(),
-        body: JSON.stringify({ templateId: TEMPLATE, name: 'Bad', manifest: bad }),
+        body: JSON.stringify({ templateId: TEMPLATE, name: 'Bad', manifest: bad, awardedCompetencyIds: [COMPETENCY] }),
       });
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toBe('invalid_manifest');
@@ -528,6 +565,408 @@ describe('POST /assessment-tools', () => {
       });
       expect(res.status).toBe(403);
       expect(((await res.json()) as { feature: string }).feature).toBe('assessments');
+    } finally {
+      server.close();
+    }
+  });
+
+  /*
+    THE EXACTLY-ONE AWARD RULE (U2, R1, KTD4). A tool that awards nothing is
+    vacuously satisfied by everyone (pinned against decideAssignments in
+    packages/shared/src/assignment.test.ts), so creation refuses to mint one;
+    and strictly-one means a combined course is two assessments, never a
+    two-award tool.
+  */
+  it('refuses a create with ZERO award ids', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-tools`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          templateId: TEMPLATE,
+          name: 'Track Dozer',
+          manifest: MANIFEST,
+          awardedCompetencyIds: [],
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_request');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a create with TWO award ids (strictly one, KTD4)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const second = '00000000-0000-4000-8000-0000000000f2';
+      rows(store, 'competencies').push({ id: second, orgId: ORG, name: 'Second', holders: 0 });
+      const res = await fetch(`${base}/assessment-tools`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          templateId: TEMPLATE,
+          name: 'Track Dozer',
+          manifest: MANIFEST,
+          awardedCompetencyIds: [COMPETENCY, second],
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_request');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses an award that is not one of the organisation’s competencies (invalid_award)', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-tools`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          templateId: TEMPLATE,
+          name: 'Track Dozer',
+          manifest: MANIFEST,
+          awardedCompetencyIds: ['00000000-0000-4000-8000-00000000dead'],
+        }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_award');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ── the backfill worklist and the award link (U2 — R2, R3, R15, KTD5, KTD10) ─
+
+describe('GET /assessment-tools/unlinked', () => {
+  it('lists only award-less tools, suggesting on an exact name or code match (KTD5)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // A LINKED tool (created through the API, so it awards) must not appear.
+      await seedTool(base);
+      const byName = seedUnlinkedTool(store, { name: 'Track Dozer Operator' }); // = competency name
+      const byCode = seedUnlinkedTool(store, { name: 'td-op' }); // = code, case-insensitively
+      const noMatch = seedUnlinkedTool(store, { name: 'Site Familiarisation v2' }); // AE3's resolve row
+
+      const res = await fetch(`${base}/assessment-tools/unlinked`, { headers: auth() });
+      /*
+        200 with an ARRAY is also the registration-order pin: declared after
+        GET /:id, "unlinked" would be captured as an :id and cast against a
+        uuid column instead of reaching this handler.
+      */
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Array<{
+        id: string;
+        suggestion: { competencyId: string; name: string } | null;
+      }>;
+      expect(Array.isArray(body)).toBe(true);
+      expect(body.map((t) => t.id).sort()).toEqual([byName.id, byCode.id, noMatch.id].sort());
+      const suggestionOf = (id: string) => body.find((t) => t.id === id)?.suggestion;
+      expect(suggestionOf(byName.id)).toEqual({ competencyId: COMPETENCY, name: 'Track Dozer Operator' });
+      expect(suggestionOf(byCode.id)).toEqual({ competencyId: COMPETENCY, name: 'Track Dozer Operator' });
+      expect(suggestionOf(noMatch.id)).toBeNull(); // surfaced, never guessed (R3)
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a non-admin — reading the worklist sits on the gate that acts on it', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-tools/unlinked`, { headers: auth(candidate) });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3, KTD10)', () => {
+  const ROLE_1 = '00000000-0000-4000-8000-00000000ab01';
+  const ROLE_2 = '00000000-0000-4000-8000-00000000ab02';
+  const COMP_2 = '00000000-0000-4000-8000-0000000000f2';
+
+  /** Give `userId`'s membership the Role and a Location, so a case can land. */
+  function placeHolder(
+    store: Record<string, Record<string, unknown>[]>,
+    userId: string,
+    roleId: string,
+  ) {
+    const membership = rows(store, 'memberships').find((m) => m.userId === userId)!;
+    rows(store, 'membershipRoles').push({
+      id: nextId(),
+      membershipId: membership.id,
+      roleId,
+      withdrawnAt: null,
+    });
+    rows(store, 'membershipLocations').push({
+      id: nextId(),
+      membershipId: membership.id,
+      locationId: MINING,
+      position: 0,
+    });
+    return membership;
+  }
+
+  const award = (base: string, toolId: string, body: Record<string, unknown>, session: Session = admin) =>
+    fetch(`${base}/assessment-tools/${toolId}/award`, {
+      method: 'PUT',
+      headers: auth(session),
+      body: JSON.stringify(body),
+    });
+  const preview = (base: string, toolId: string, body: Record<string, unknown>) =>
+    fetch(`${base}/assessment-tools/${toolId}/award/preview`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify(body),
+    });
+
+  it('FIRST LINK: preview counts equal the apply, which converts legacy rows and inserts the cases (R15, KTD3)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = seedUnlinkedTool(store);
+      rows(store, 'roleRequiredAssessments').push({
+        id: nextId(),
+        orgId: ORG,
+        roleId: ROLE_1,
+        toolId: tool.id,
+      });
+      placeHolder(store, CANDIDATE, ROLE_1);
+
+      // The preview — the tool still awards nothing, so the count MUST come
+      // from the injected pending award, not the stored (vacuous) state.
+      const previewed = (await (
+        await preview(base, tool.id, { competencyId: COMPETENCY })
+      ).json()) as Record<string, number>;
+      expect(previewed).toEqual({ rolesLinked: 1, affected: 1, created: 1 });
+      // A preview writes nothing.
+      expect(rows(store, 'assessmentCases')).toHaveLength(0);
+      expect(rows(store, 'roleRequiredCompetencies')).toHaveLength(0);
+
+      const applied = await award(base, tool.id, { competencyId: COMPETENCY });
+      expect(applied.status).toBe(200);
+      expect(await applied.json()).toEqual(previewed); // preview == apply (KTD10)
+
+      // One transaction: award set, link inserted, legacy drained, case live.
+      const toolRow = rows(store, 'assessmentTools').find((t) => t.id === tool.id)!;
+      expect(toolRow.awardedCompetencyIds).toEqual([COMPETENCY]);
+      expect(rows(store, 'roleRequiredCompetencies')).toEqual([
+        expect.objectContaining({ roleId: ROLE_1, competencyId: COMPETENCY, tier: 'required' }),
+      ]);
+      expect(rows(store, 'roleRequiredAssessments')).toHaveLength(0);
+      const cases = rows(store, 'assessmentCases');
+      expect(cases).toHaveLength(1);
+      expect(cases[0]).toMatchObject({ toolId: tool.id, candidateUserId: CANDIDATE, locationId: MINING });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('conversion UPGRADES an existing recommended row rather than inserting a second (unique index)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = seedUnlinkedTool(store);
+      rows(store, 'roleRequiredAssessments').push({
+        id: nextId(),
+        orgId: ORG,
+        roleId: ROLE_2,
+        toolId: tool.id,
+      });
+      const existingLinkId = nextId();
+      rows(store, 'roleRequiredCompetencies').push({
+        id: existingLinkId,
+        orgId: ORG,
+        roleId: ROLE_2,
+        competencyId: COMPETENCY,
+        tier: 'recommended',
+      });
+
+      const applied = await award(base, tool.id, { competencyId: COMPETENCY });
+      expect(applied.status).toBe(200);
+
+      const links = rows(store, 'roleRequiredCompetencies');
+      expect(links).toHaveLength(1); // upgraded IN PLACE — never a second row
+      expect(links[0]).toMatchObject({ id: existingLinkId, tier: 'required' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('repeats idempotently: a second PUT of the SAME competency converts nothing further', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = seedUnlinkedTool(store);
+      rows(store, 'roleRequiredAssessments').push({
+        id: nextId(),
+        orgId: ORG,
+        roleId: ROLE_1,
+        toolId: tool.id,
+      });
+      placeHolder(store, CANDIDATE, ROLE_1);
+
+      await award(base, tool.id, { competencyId: COMPETENCY });
+      const repeat = await award(base, tool.id, { competencyId: COMPETENCY });
+
+      expect(repeat.status).toBe(200);
+      expect(await repeat.json()).toMatchObject({ rolesLinked: 0, affected: 0, created: 0 });
+      expect(rows(store, 'assessmentCases')).toHaveLength(1); // no duplicate case
+      expect(rows(store, 'roleRequiredCompetencies')).toHaveLength(1);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('RE-LINK: 409s while the tool has a non-terminal case (KTD10)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base); // awards COMPETENCY
+      rows(store, 'competencies').push({ id: COMP_2, orgId: ORG, name: 'Grader Operator', holders: 0 });
+      rows(store, 'assessmentCases').push({
+        id: nextId(),
+        orgId: ORG,
+        toolId: tool.id,
+        candidateUserId: CANDIDATE,
+        state: 'open',
+      });
+
+      const res = await award(base, tool.id, { competencyId: COMP_2, confirm: true });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('open_cases');
+      // Nothing moved: the award still points at the outgoing competency.
+      const toolRow = rows(store, 'assessmentTools').find((t) => t.id === tool.id)!;
+      expect(toolRow.awardedCompetencyIds).toEqual([COMPETENCY]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('RE-LINK: demands confirm, previews the outgoing grants, and carries the role links across (KTD10)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base); // awards COMPETENCY (the outgoing)
+      rows(store, 'competencies').push({ id: COMP_2, orgId: ORG, name: 'Grader Operator', holders: 0 });
+      // Two live grants of the outgoing competency — they must be COUNTED and
+      // never touched (history is state).
+      for (const userId of [CANDIDATE, OTHER_CANDIDATE]) {
+        rows(store, 'competencyHolders').push({
+          id: nextId(),
+          orgId: ORG,
+          competencyId: COMPETENCY,
+          userId,
+          grantedAt: new Date('2025-01-01'),
+          revokedAt: null,
+        });
+      }
+      // One role requires the outgoing competency; its holder lacks COMP_2.
+      const linkId = nextId();
+      rows(store, 'roleRequiredCompetencies').push({
+        id: linkId,
+        orgId: ORG,
+        roleId: ROLE_1,
+        competencyId: COMPETENCY,
+        tier: 'required',
+      });
+      placeHolder(store, OTHER_CANDIDATE, ROLE_1);
+
+      const previewed = (await (
+        await preview(base, tool.id, { competencyId: COMP_2, carryRoleLinks: true })
+      ).json()) as Record<string, number>;
+      expect(previewed).toEqual({ outgoingGrants: 2, rolesRequiringOutgoing: 1, created: 1 });
+
+      // A bare re-link is refused — the caller must attest they saw the preview.
+      const bare = await award(base, tool.id, { competencyId: COMP_2, carryRoleLinks: true });
+      expect(bare.status).toBe(400);
+      expect(((await bare.json()) as { error: string }).error).toBe('confirm_required');
+
+      const applied = await award(base, tool.id, {
+        competencyId: COMP_2,
+        carryRoleLinks: true,
+        confirm: true,
+      });
+      expect(applied.status).toBe(200);
+      expect(await applied.json()).toEqual(previewed); // preview == apply (KTD10)
+
+      // The role link is RE-POINTED in place; the grants are untouched.
+      const links = rows(store, 'roleRequiredCompetencies');
+      expect(links).toHaveLength(1);
+      expect(links[0]).toMatchObject({ id: linkId, competencyId: COMP_2, tier: 'required' });
+      const grants = rows(store, 'competencyHolders');
+      expect(grants).toHaveLength(2);
+      expect(grants.every((g) => g.competencyId === COMPETENCY)).toBe(true);
+      // The activated case for the carried role's holder.
+      expect(rows(store, 'assessmentCases')).toHaveLength(1);
+      expect(rows(store, 'assessmentCases')[0]).toMatchObject({
+        toolId: tool.id,
+        candidateUserId: OTHER_CANDIDATE,
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('RE-LINK with carry MERGES into an existing incoming link instead of colliding (unique index)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      rows(store, 'competencies').push({ id: COMP_2, orgId: ORG, name: 'Grader Operator', holders: 0 });
+      // The role ALREADY requires the incoming competency alongside the outgoing.
+      rows(store, 'roleRequiredCompetencies').push(
+        { id: nextId(), orgId: ORG, roleId: ROLE_1, competencyId: COMPETENCY, tier: 'required' },
+        { id: nextId(), orgId: ORG, roleId: ROLE_1, competencyId: COMP_2, tier: 'required' },
+      );
+
+      const applied = await award(base, tool.id, {
+        competencyId: COMP_2,
+        carryRoleLinks: true,
+        confirm: true,
+      });
+      expect(applied.status).toBe(200);
+
+      const links = rows(store, 'roleRequiredCompetencies');
+      expect(links).toHaveLength(1); // the outgoing row deleted, never re-pointed into a clash
+      expect(links[0]).toMatchObject({ roleId: ROLE_1, competencyId: COMP_2, tier: 'required' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a non-admin and a competency outside the organisation', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = seedUnlinkedTool(store);
+      const forbidden = await award(base, tool.id, { competencyId: COMPETENCY }, candidate);
+      expect(forbidden.status).toBe(403);
+
+      const foreign = await award(base, tool.id, {
+        competencyId: '00000000-0000-4000-8000-00000000dead',
+      });
+      expect(foreign.status).toBe(400);
+      expect(((await foreign.json()) as { error: string }).error).toBe('invalid_award');
     } finally {
       server.close();
     }
@@ -627,6 +1066,7 @@ describe('POST /assessment-cases', () => {
           name: 'Track Dozer',
           manifest: MANIFEST,
           candidatePrerequisiteIds: ['00000000-0000-4000-8000-0000000000f1'],
+          awardedCompetencyIds: [COMPETENCY],
         }),
       });
       const tool = (await created.json()) as { id: string };
@@ -678,6 +1118,7 @@ describe('POST /assessment-cases', () => {
         name: 'Track Dozer',
         manifest: MANIFEST,
         candidatePrerequisiteIds: [COMPETENCY],
+        awardedCompetencyIds: [COMPETENCY],
       }),
     });
     const tool = (await created.json()) as { id: string };
@@ -766,6 +1207,7 @@ describe('POST /assessment-cases', () => {
         name: 'Track Dozer',
         manifest: MANIFEST,
         assessorCompetencyIds: [COMPETENCY],
+        awardedCompetencyIds: [COMPETENCY],
         // Keyed by Location id now, not by stream name (U8).
         ...(byStream
           ? { assessorStreamCompetencyIds: { [MINING]: [WORSLEY], [RAW_MATERIALS]: [MOBILE_PLANT] } }
@@ -907,7 +1349,7 @@ describe('PATCH /assessment-tools/:id/location-parts', () => {
     const res = await fetch(`${base}/assessment-tools`, {
       method: 'POST',
       headers: auth(),
-      body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST }),
+      body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST, awardedCompetencyIds: [COMPETENCY] }),
     });
     return (await res.json()) as { id: string };
   }
@@ -1021,7 +1463,7 @@ describe('PATCH /assessment-tools/:id/classification and the filter', () => {
     const res = await fetch(`${base}/assessment-tools`, {
       method: 'POST',
       headers: auth(),
-      body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST }),
+      body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST, awardedCompetencyIds: [COMPETENCY] }),
     });
     return (await res.json()) as { id: string };
   }
@@ -2567,8 +3009,8 @@ describe('GET /assessment-cases/progress', () => {
 describe('POST /assessment-cases/:id/sign-off', () => {
   const SIG = 'data:image/png;base64,iVBORw0KGgo=';
 
-  async function readyCase(base: string) {
-    const tool = await seedTool(base);
+  async function readyCase(base: string, toolId?: string) {
+    const tool = toolId ? { id: toolId } : await seedTool(base);
     const c = (await (
       await fetch(`${base}/assessment-cases`, {
         method: 'POST',
@@ -2636,6 +3078,7 @@ describe('POST /assessment-cases/:id/sign-off', () => {
           name: 'Track Dozer',
           manifest: MANIFEST,
           assessorCompetencyIds: [COMPETENCY],
+          awardedCompetencyIds: [COMPETENCY],
         }),
       });
       const tool = (await created.json()) as { id: string };
@@ -2939,9 +3382,11 @@ describe('POST /assessment-cases/:id/sign-off', () => {
     mockDbValue = db;
     const { server, base } = startApp();
     try {
-      // readyCase seeds a tool with no awardedCompetencyIds â€” the default, and
-      // the state every existing tool is in.
-      const c = await readyCase(base);
+      // The PRE-round state: production tools created before U2 award nothing.
+      // The API can no longer create one (exactly-one is enforced at create),
+      // so the tool row is planted straight into the store.
+      const unlinked = seedUnlinkedTool(store);
+      const c = await readyCase(base, unlinked.id);
       await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
 
       expect(rows(store, 'competencyHolders')).toHaveLength(0);
@@ -3619,6 +4064,7 @@ describe('workflow ownership is enforced on an attempt', () => {
         templateId: TEMPLATE,
         name: 'Track Dozer',
         manifest: workflow ? { ...MANIFEST, workflow } : MANIFEST,
+        awardedCompetencyIds: [COMPETENCY],
       }),
     });
     const tool = (await created.json()) as { id: string };
@@ -3930,6 +4376,7 @@ describe('assessor eligibility warned at marking (U14)', () => {
         name: 'Track Dozer',
         manifest: MANIFEST,
         assessorCompetencyIds: [COMPETENCY],
+        awardedCompetencyIds: [COMPETENCY],
       }),
     });
     return (await res.json()) as { id: string };

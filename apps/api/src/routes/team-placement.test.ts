@@ -49,7 +49,16 @@ function fakeDb(opts: {
     delete: chainDelete,
     insert: chainInsert,
     update: chainUpdate,
-    query: { membershipRoles: { findMany: vi.fn().mockResolvedValue([]) } },
+    query: {
+      membershipRoles: { findMany: vi.fn().mockResolvedValue([]) },
+      /*
+        The KTD2 resolver pins its dual read to a transaction, so assign-on-
+        placement now reads BOTH requirement sources through this tx surface.
+        Empty on both sides keeps the assignment a no-op, as above.
+      */
+      roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue([]) },
+      roleRequiredCompetencies: { findMany: vi.fn().mockResolvedValue([]) },
+    },
   };
   // Order is deterministic: `loadPlacementContext` fires the active query first,
   // then `admitHeldRoles` fires the by-id query second.
@@ -77,8 +86,10 @@ function fakeDb(opts: {
       membershipRoles: { findMany: vi.fn().mockResolvedValue(opts.heldRoles ?? []) },
       users: { findFirst: vi.fn().mockResolvedValue({ name: 'Ada' }) },
       // Assign-on-placement (U11) runs after a successful write; with no Role
-      // requirements it is a no-op, which is all these placement tests need.
+      // requirements FROM EITHER SOURCE (legacy rows or direct competency
+      // links, KTD2) it is a no-op, which is all these placement tests need.
       roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue([]) },
+      roleRequiredCompetencies: { findMany: vi.fn().mockResolvedValue([]) },
     },
     insert: () => ({ values: () => Promise.resolve(undefined) }),
     transaction: vi.fn(async (cb: (t: typeof tx) => Promise<void>) => cb(tx)),

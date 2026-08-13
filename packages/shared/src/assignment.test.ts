@@ -55,6 +55,21 @@ describe('decideAssignments — the skip rule', () => {
     expect(out.map((d) => d.toolId).sort()).toEqual(['t1', 't2']);
   });
 
+  it('treats a tool that awards NOTHING as vacuously satisfied — no case ever (transition pin, KTD3)', () => {
+    /*
+      The fact the role-competency links round is built on: an empty awards
+      list means `every()` over nothing, which is true, so the tool is skipped
+      for EVERYONE — a required-but-unlinked assessment assigns no case until
+      its award is linked. That is why linking an award ACTIVATES assignment
+      rather than preserving it, and why the award link travels through a
+      preview (U2). If this pin breaks, the award-link preview counts are
+      counting a different world.
+    */
+    const t1 = tool({ toolId: 't1', awardedCompetencyIds: [] });
+    const out = decideAssignments(input({ roleRequirements: [['t1']], tools: { t1 }, held: [] }));
+    expect(out).toEqual([]);
+  });
+
   it('creates no case where every awarded competency is held and current (R45)', () => {
     const t1 = tool({ toolId: 't1', awardedCompetencyIds: [COMP_A, COMP_B] });
     const out = decideAssignments(

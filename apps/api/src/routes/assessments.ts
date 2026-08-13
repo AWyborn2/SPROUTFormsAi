@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
@@ -61,7 +61,12 @@ import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission, permissionScope } from '../lib/permissions.js';
-import { heldCompetencyStates } from '../lib/assignment.js';
+import { assignmentCaseValues, heldCompetencyStates } from '../lib/assignment.js';
+import {
+  computeAwardLinkChange,
+  computeAwardRelinkChange,
+  NON_TERMINAL_STATES,
+} from '../lib/requirement-change.js';
 import { identifyMember, loadDisplayIdentities } from '../lib/display-identity.js';
 import { recordAudit } from '../audit/record.js';
 import { grantCompetency, revokeGrantsFromCase } from '../lib/competency-grant.js';
@@ -675,8 +680,17 @@ const toolBody = z.object({
    * assessor needs depends on where the assessment happens.
    */
   assessorStreamCompetencyIds: z.record(z.string().min(1), z.array(z.string().uuid())).optional(),
-  /** What passing this tool AWARDS. Granted on sign-off, linked to the case. */
-  awardedCompetencyIds: z.array(z.string().uuid()).optional(),
+  /**
+   * What passing this tool AWARDS. Granted on sign-off, linked to the case.
+   *
+   * REQUIRED, and exactly ONE (U2, R1, KTD4): strictly-one rides the plural
+   * jsonb column, with the cardinality enforced here at the API boundary. A
+   * tool that awards nothing is vacuously satisfied by everyone — the engine
+   * plans no case for it and sign-off grants nothing — so an award-less
+   * create would ship an inert tool; that state now exists only on tools
+   * created before this round, and the backfill (GET /unlinked) drains it.
+   */
+  awardedCompetencyIds: z.array(z.string().uuid()).min(1).max(1),
 });
 
 /**
@@ -705,6 +719,21 @@ assessmentToolsRouter.post(
       return;
     }
     const { templateId, name, manifest } = parsed.data;
+
+    // The one award must be a competency THIS organisation defines (U2) — an
+    // id from another tenant (or thin air) would silently create a tool whose
+    // sign-off grants nothing resolvable.
+    const awardedCompetencyId = parsed.data.awardedCompetencyIds[0]!;
+    const awardedCompetency = await db.query.competencies.findFirst({
+      where: and(
+        eq(schema.competencies.id, awardedCompetencyId),
+        eq(schema.competencies.orgId, tenant.orgId),
+      ),
+    });
+    if (!awardedCompetency) {
+      res.status(400).json({ error: 'invalid_award' });
+      return;
+    }
 
     const template = await db.query.formTemplates.findFirst({
       where: and(
@@ -737,7 +766,7 @@ assessmentToolsRouter.post(
         candidatePrerequisiteIds: parsed.data.candidatePrerequisiteIds ?? [],
         assessorCompetencyIds: parsed.data.assessorCompetencyIds ?? [],
         assessorStreamCompetencyIds: parsed.data.assessorStreamCompetencyIds ?? {},
-        awardedCompetencyIds: parsed.data.awardedCompetencyIds ?? [],
+        awardedCompetencyIds: parsed.data.awardedCompetencyIds,
         // The parts rule and the Department classification are declared later,
         // both behind the Admin gate (U9/U10, R73/R9) — never at create, which
         // runs on the authoring permission.
@@ -1093,6 +1122,334 @@ assessmentToolsRouter.get(
         locations: orgLocations.map((l) => ({ id: l.id, name: l.name })),
       })),
     );
+  }),
+);
+
+// ── award links (U2 — R1, R2, R3, R15, KTD3, KTD5, KTD10) ───────────────────
+
+/**
+ * The tools still awarding NOTHING — the backfill worklist (KTD5, R3).
+ *
+ * Admin-gated: accepting a row converts Role requirements and creates cases,
+ * so reading the worklist sits on the same gate as acting on it. Each row
+ * carries at most one SUGGESTION — an exact case-insensitive match of the
+ * tool's name against a competency's name or code — and never guesses beyond
+ * that (R3): a fuzzy match accepted by reflex would link the wrong award,
+ * which activates the wrong assignment.
+ *
+ * REGISTERED ABOVE `GET /:id`: express matches in registration order, so
+ * declared after it, "unlinked" would be captured as an :id and cast against
+ * a uuid column.
+ */
+assessmentToolsRouter.get(
+  '/unlinked',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const [tools, competencies] = await Promise.all([
+      db.query.assessmentTools.findMany({ where: eq(schema.assessmentTools.orgId, tenant.orgId) }),
+      db.query.competencies.findMany({ where: eq(schema.competencies.orgId, tenant.orgId) }),
+    ]);
+    const unlinked = tools.filter((t) => (t.awardedCompetencyIds ?? []).length === 0);
+    res.json(
+      unlinked.map((t) => {
+        const wanted = t.name.trim().toLowerCase();
+        const match = competencies.find(
+          (c) =>
+            c.name.trim().toLowerCase() === wanted ||
+            (c.code ?? '').trim().toLowerCase() === wanted,
+        );
+        return {
+          id: t.id,
+          name: t.name,
+          templateId: t.templateId,
+          suggestion: match ? { competencyId: match.id, name: match.name } : null,
+        };
+      }),
+    );
+  }),
+);
+
+const awardBody = z.object({
+  competencyId: z.string().uuid(),
+  /** Re-link only: carry the outgoing competency's required Role links across. */
+  carryRoleLinks: z.boolean().optional(),
+  /** Re-link only: the reviewed-preview acknowledgement the PUT demands (KTD10). */
+  confirm: z.boolean().optional(),
+});
+
+/**
+ * The guard the award preview and apply share, so they cannot drift on who may
+ * link an award or which competency is valid: Admin (linking converts Role
+ * requirements and creates cases — R73's blast-radius standard, not the
+ * authoring permission), the tool is the organisation's, and the competency
+ * is too (`invalid_award` mirrors the create-path check). Sends the error
+ * response and returns null on any failure.
+ */
+async function loadAwardChange(database: Database, req: Request, res: Response) {
+  const tenant = req.tenant!;
+  if (!isAdmin(tenant.role)) {
+    res.status(403).json({ error: 'forbidden' });
+    return null;
+  }
+  const parsed = awardBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+    return null;
+  }
+  const tool = await loadTool(database, req.params.id!, tenant.orgId);
+  if (!tool) {
+    res.status(404).json({ error: 'not_found' });
+    return null;
+  }
+  const competency = await database.query.competencies.findFirst({
+    where: and(
+      eq(schema.competencies.id, parsed.data.competencyId),
+      eq(schema.competencies.orgId, tenant.orgId),
+    ),
+  });
+  if (!competency) {
+    res.status(400).json({ error: 'invalid_award' });
+    return null;
+  }
+  return { tenant, tool, competency, body: parsed.data, current: tool.awardedCompetencyIds ?? [] };
+}
+
+/**
+ * A RE-LINK may not run over live work (KTD10): a non-terminal case was opened
+ * against the outgoing award and will grant it at sign-off; re-pointing
+ * mid-flight would make the signed evidence attest one competency and the
+ * grant another. Terminal states (competent, closed, invalidated) are history
+ * and never block. Sends the 409 and returns true when blocked.
+ */
+async function relinkBlockedByOpenCases(
+  database: Database,
+  orgId: string,
+  toolId: string,
+  res: Response,
+): Promise<boolean> {
+  const openCases = await database.query.assessmentCases.findMany({
+    where: and(
+      eq(schema.assessmentCases.orgId, orgId),
+      eq(schema.assessmentCases.toolId, toolId),
+      inArray(schema.assessmentCases.state, NON_TERMINAL_STATES),
+    ),
+  });
+  if (openCases.length > 0) {
+    res.status(409).json({ error: 'open_cases', count: openCases.length });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Preview an award link or re-link (U2, KTD10) — the SAME computation the PUT
+ * applies, writing nothing. First link answers {rolesLinked, affected,
+ * created}; re-link answers {outgoingGrants, rolesRequiringOutgoing, created}.
+ * A preview a PUT would 409 must 409 too, so the open-case guard runs here as
+ * well.
+ */
+assessmentToolsRouter.post(
+  '/:id/award/preview',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const change = await loadAwardChange(db, req, res);
+    if (!change) return;
+    const { tenant, tool, body, current } = change;
+    const now = new Date();
+
+    if (current.includes(body.competencyId)) {
+      // Already linked to this competency — a repeat converts nothing (U2).
+      res.json({ rolesLinked: 0, affected: 0, created: 0, alreadyLinked: true });
+      return;
+    }
+    if (current.length === 0) {
+      const { effects } = await computeAwardLinkChange(
+        db,
+        tenant.orgId,
+        tool.id,
+        body.competencyId,
+        now,
+      );
+      res.json(effects);
+      return;
+    }
+    if (await relinkBlockedByOpenCases(db, tenant.orgId, tool.id, res)) return;
+    const { effects } = await computeAwardRelinkChange(
+      db,
+      tenant.orgId,
+      tool.id,
+      current[0]!,
+      body.competencyId,
+      body.carryRoleLinks ?? false,
+      now,
+    );
+    res.json(effects);
+  }),
+);
+
+/**
+ * Link (or re-link) the ONE competency this tool awards (U2, R2).
+ *
+ * FIRST LINK is the backfill/conversion case (R15, KTD3): in ONE transaction
+ * the award is written, every legacy `role_required_assessments` row for this
+ * tool becomes a direct required link (upgrading an existing recommended row
+ * rather than colliding with the unique index), the legacy rows are deleted,
+ * and the activated cases are inserted — exactly the plan the preview counted.
+ *
+ * RE-LINK is guarded (KTD10): refused while the tool has non-terminal cases,
+ * and requires `confirm: true` — the caller attesting they reviewed the
+ * preview. With `carryRoleLinks` the outgoing competency's required links are
+ * re-pointed in the same transaction; grants of the outgoing competency are
+ * NEVER touched — history is state.
+ *
+ * A repeat PUT naming the already-linked competency is an idempotent no-op.
+ */
+assessmentToolsRouter.put(
+  '/:id/award',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const change = await loadAwardChange(db, req, res);
+    if (!change) return;
+    const { tenant, tool, competency, body, current } = change;
+    const now = new Date();
+
+    if (current.includes(body.competencyId)) {
+      // Idempotent: the award already stands; converting again would find no
+      // legacy rows anyway, and a retried click must not 409 or double-write.
+      res.json({ rolesLinked: 0, affected: 0, created: 0, alreadyLinked: true });
+      return;
+    }
+
+    if (current.length === 0) {
+      // ── first link: convert and activate (compute-then-apply, KTD10) ──────
+      const plan = await computeAwardLinkChange(db, tenant.orgId, tool.id, body.competencyId, now);
+      await db.transaction(async (tx) => {
+        await tx
+          .update(schema.assessmentTools)
+          .set({ awardedCompetencyIds: [body.competencyId] })
+          .where(eq(schema.assessmentTools.id, tool.id));
+        for (const step of plan.roleLinkPlan) {
+          if (step.action === 'insert') {
+            await tx.insert(schema.roleRequiredCompetencies).values({
+              orgId: tenant.orgId,
+              roleId: step.roleId,
+              competencyId: body.competencyId,
+              tier: 'required',
+            });
+          } else if (step.action === 'upgrade' && step.existingLinkId) {
+            // A recommended row already names this pair — promote its tier;
+            // inserting would collide with role_required_competencies_uq.
+            await tx
+              .update(schema.roleRequiredCompetencies)
+              .set({ tier: 'required' })
+              .where(eq(schema.roleRequiredCompetencies.id, step.existingLinkId));
+          }
+          // 'exists': already required — nothing to write.
+        }
+        // The legacy rows are DRAINED, not kept alongside the links: the dual
+        // read would deduplicate them, but leaving them makes every later
+        // requirement edit fingerprint-race against rows nobody owns (KTD9).
+        await tx
+          .delete(schema.roleRequiredAssessments)
+          .where(
+            and(
+              eq(schema.roleRequiredAssessments.orgId, tenant.orgId),
+              eq(schema.roleRequiredAssessments.toolId, tool.id),
+            ),
+          );
+        // The activation's cases — exactly the plan the preview counted.
+        for (const c of plan.casesToInsert) {
+          await tx.insert(schema.assessmentCases).values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
+        }
+      });
+      await recordAudit(db, tenant, {
+        action: 'Linked assessment award',
+        target: `${tool.name} → ${competency.name}`,
+        category: 'settings',
+        icon: 'clipboard-check',
+      });
+      res.json(plan.effects);
+      return;
+    }
+
+    // ── re-link: guarded correction (KTD10) ──────────────────────────────────
+    if (await relinkBlockedByOpenCases(db, tenant.orgId, tool.id, res)) return;
+    if (body.confirm !== true) {
+      // The preview names outgoing grants and orphaned requirements; the PUT
+      // demands the caller has seen it. A bare re-link is refused, not warned.
+      res.status(400).json({ error: 'confirm_required' });
+      return;
+    }
+    const outgoingCompetencyId = current[0]!;
+    const carry = body.carryRoleLinks ?? false;
+    const plan = await computeAwardRelinkChange(
+      db,
+      tenant.orgId,
+      tool.id,
+      outgoingCompetencyId,
+      body.competencyId,
+      carry,
+      now,
+    );
+    await db.transaction(async (tx) => {
+      await tx
+        .update(schema.assessmentTools)
+        .set({ awardedCompetencyIds: [body.competencyId] })
+        .where(eq(schema.assessmentTools.id, tool.id));
+      if (carry) {
+        for (const step of plan.carryPlan) {
+          if (step.action === 'repoint') {
+            await tx
+              .update(schema.roleRequiredCompetencies)
+              .set({ competencyId: body.competencyId })
+              .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
+          } else if (step.action === 'merge-upgrade' && step.targetLinkId) {
+            await tx
+              .update(schema.roleRequiredCompetencies)
+              .set({ tier: 'required' })
+              .where(eq(schema.roleRequiredCompetencies.id, step.targetLinkId));
+            await tx
+              .delete(schema.roleRequiredCompetencies)
+              .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
+          } else {
+            // merge-delete: the role already requires the incoming competency.
+            await tx
+              .delete(schema.roleRequiredCompetencies)
+              .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
+          }
+        }
+        for (const c of plan.casesToInsert) {
+          await tx.insert(schema.assessmentCases).values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
+        }
+      }
+      // Grants of the outgoing competency are deliberately untouched (KTD10):
+      // they attest what was assessed at the time, and re-pointing the award
+      // must not rewrite anyone's history.
+    });
+    await recordAudit(db, tenant, {
+      action: 'Linked assessment award',
+      target: `${tool.name} → ${competency.name}`,
+      category: 'settings',
+      icon: 'clipboard-check',
+    });
+    res.json(plan.effects);
   }),
 );
 

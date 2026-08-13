@@ -28,6 +28,8 @@ interface DbOpts {
   memberships?: Record<string, unknown>[];
   membershipRoles?: Record<string, unknown>[];
   roleReqs?: Record<string, unknown>[];
+  /** Direct role→competency links (KTD2) — the dual read's second half. */
+  roleLinks?: Record<string, unknown>[];
   tools?: Record<string, unknown>[];
   templates?: Record<string, unknown>[];
   heldLocations?: Record<string, unknown>[];
@@ -60,9 +62,18 @@ function makeDb(opts: DbOpts) {
   const db = {
     query: {
       organizations: { findMany: async () => opts.orgs ?? [org()] },
-      memberships: { findMany: async () => opts.memberships ?? [] },
+      memberships: {
+        findMany: async () => opts.memberships ?? [],
+        // The assignment pass loads each membership's context by id.
+        findFirst: async () => (opts.memberships ?? [])[0],
+      },
       membershipRoles: { findMany: async () => opts.membershipRoles ?? [] },
       roleRequiredAssessments: { findMany: async () => opts.roleReqs ?? [] },
+      // The resolver asks for tier 'required' only (R13); this lean fake does
+      // not parse WHEREs, so the load-bearing filter is honoured manually.
+      roleRequiredCompetencies: {
+        findMany: async () => (opts.roleLinks ?? []).filter((l) => l.tier === 'required'),
+      },
       assessmentTools: { findMany: async () => opts.tools ?? [] },
       formTemplates: { findMany: async () => opts.templates ?? [] },
       membershipLocations: { findMany: async () => opts.heldLocations ?? [] },
@@ -231,6 +242,47 @@ describe('sweepOrganization — notification pass', () => {
     await sweepOrganization(db, org() as never, NOW);
 
     expect(sendExpiry).toHaveBeenCalledWith(expect.objectContaining({ to: 'u2@example.com' }));
+  });
+});
+
+describe('sweepOrganization — assignment pass through the shared resolver (KTD2)', () => {
+  it('creates a case from a Role with ONLY a direct competency link — no legacy row anywhere', async () => {
+    /*
+      The end-to-end proof the resolver swap demands (U3): the sweep reaches
+      the engine through assignForMembership, and a Role whose requirement
+      exists solely as a role_required_competencies row must still assign the
+      awarding tool to a holder who lacks the competency. Before the swap this
+      exact fixture created nothing — roleRequiredAssessments is empty.
+    */
+    const { db, cases } = makeDb({
+      memberships: [{ id: 'm1', orgId: 'org-1', userId: 'u1', status: 'active' }],
+      membershipRoles: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
+      roleReqs: [], // NO legacy rows — the direct link is the whole requirement
+      roleLinks: [{ id: 'l1', orgId: 'org-1', roleId: 'r1', competencyId: 'c1', tier: 'required' }],
+      tools: [
+        {
+          id: 't1',
+          orgId: 'org-1',
+          templateId: 'tpl1',
+          awardedCompetencyIds: ['c1'],
+          manifest: { parts: [{ key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'] }] },
+          locationPartKeys: {},
+          assessorStreamCompetencyIds: {},
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ],
+      templates: [{ id: 'tpl1', orgId: 'org-1', currentVersionId: 'v1' }],
+      heldLocations: [{ membershipId: 'm1', locationId: 'loc1', position: 0 }],
+      holders: [], // u1 holds nothing → the requirement is unmet
+      comps: [COMP],
+      users: [USER],
+    });
+
+    const result = await sweepOrganization(db, org() as never, NOW);
+
+    expect(result.casesCreated).toBe(1);
+    expect(cases).toHaveLength(1);
+    expect(cases[0]).toMatchObject({ toolId: 't1', candidateUserId: 'u1', locationId: 'loc1' });
   });
 });
 

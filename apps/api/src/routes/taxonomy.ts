@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
@@ -596,52 +597,89 @@ taxonomyRouter.post(
   }),
 );
 
-// ── A Role's required assessments (U10 — R43, R49, R50, R121) ─────────────────
+// ── A Role's requirements, in COMPETENCY terms (U10/U12, reworked by U3 of the
+//    role-competency links round — R5, R6, R8, R43, R49, R50, R121, KTD9) ─────
 
-const requiredAssessmentsBody = z.object({ toolIds: z.array(z.string().uuid()) });
+/*
+  The PATH stays `/roles/:id/required-assessments` although the payload now
+  speaks competencies: the web store, its tests and the deployed client all
+  address this path, and renaming it would force the U6 web unit to land in
+  the same deploy or 404. The name is historical; the contract below is the
+  real interface.
+*/
 
-taxonomyRouter.get(
-  '/roles/:id/required-assessments',
-  ...TAXONOMY_GATE,
-  withErrorHandling(async (req, res) => {
-    if (!db) return reply(res, 503, { error: 'db_unavailable' });
-    const tenant = req.tenant!;
-    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
-    const role = await db.query.jobRoles.findFirst({
-      where: and(eq(schema.jobRoles.id, req.params.id!), eq(schema.jobRoles.orgId, tenant.orgId)),
-    });
-    if (!role) return reply(res, 404, { error: 'not_found' });
-    const rows = await db
-      .select({ toolId: schema.roleRequiredAssessments.toolId })
-      .from(schema.roleRequiredAssessments)
-      .where(eq(schema.roleRequiredAssessments.roleId, role.id));
-    // `configured` is the STORED fact (R50), never `rows.length > 0`: a Role
-    // emptied of its requirements is still configured and reads differently from
-    // one never set up.
-    res.json({ configured: role.requirementsConfigured, toolIds: rows.map((r) => r.toolId) });
-  }),
-);
+const requirementTierShapes = {
+  required: z.array(z.string().uuid()),
+  recommended: z.array(z.string().uuid()),
+};
+const requirementsPutBody = z.object({
+  ...requirementTierShapes,
+  /** The GET's fingerprint, echoed back — the KTD9 stale-edit guard. */
+  fingerprint: z.string().min(1),
+});
+const requirementsPreviewBody = z.object({
+  ...requirementTierShapes,
+  /** Legacy rows the caller would ALSO remove — the awaitingLink exit (KTD9). */
+  removeLegacyToolIds: z.array(z.string().uuid()).optional(),
+});
+const legacyRemoveBody = z.object({ fingerprint: z.string().min(1) });
 
 /**
- * The guard both the preview and the apply share (U12), so they cannot drift on
- * who may change a Role's requirements or which tools are valid: Admin (R73/R12),
- * the Role is the organisation's and active (R121), and every proposed tool
- * belongs to the organisation. Sends the error response and returns null on any
- * failure; returns the loaded Role and the deduplicated desired set otherwise.
+ * The fingerprint the GET serves and the PUT/DELETE echo (KTD9): a
+ * deterministic hash over the Role's direct links (both tiers) AND its
+ * remaining legacy rows. Any conversion, edit or legacy-row removal landing
+ * between an editor's GET and PUT changes it, so the stale write 409s instead
+ * of silently erasing the other change with its replace-write.
  */
-async function loadRequirementChange(
+function requirementsFingerprint(
+  links: readonly { competencyId: string; tier: string }[],
+  legacyToolIds: readonly string[],
+): string {
+  const required = links.filter((l) => l.tier === 'required').map((l) => l.competencyId).sort();
+  const recommended = links
+    .filter((l) => l.tier === 'recommended')
+    .map((l) => l.competencyId)
+    .sort();
+  const legacy = [...legacyToolIds].sort();
+  return createHash('sha1')
+    .update(JSON.stringify({ required, recommended, legacy }))
+    .digest('hex');
+}
+
+/** The Role's stored requirement state — links, legacy rows, fingerprint. */
+async function loadRequirementState(database: Database, roleId: string) {
+  const [links, legacyRows] = await Promise.all([
+    database.query.roleRequiredCompetencies.findMany({
+      where: eq(schema.roleRequiredCompetencies.roleId, roleId),
+    }),
+    database.query.roleRequiredAssessments.findMany({
+      where: eq(schema.roleRequiredAssessments.roleId, roleId),
+    }),
+  ]);
+  const legacyToolIds = [...new Set(legacyRows.map((r) => r.toolId))];
+  return {
+    links,
+    legacyToolIds,
+    required: links.filter((l) => l.tier === 'required').map((l) => l.competencyId),
+    recommended: links.filter((l) => l.tier === 'recommended').map((l) => l.competencyId),
+    fingerprint: requirementsFingerprint(links, legacyToolIds),
+  };
+}
+
+/**
+ * The guard every requirement route shares, so they cannot drift on who may
+ * change a Role's requirements: Admin (R73/R12 — the gate SURVIVES the
+ * competency rework unchanged), and the Role is the organisation's and active
+ * (R121). Sends the error response and returns null on any failure.
+ */
+async function loadRequirementRole(
   database: Database,
   req: Request,
   res: Response,
-): Promise<{ role: typeof schema.jobRoles.$inferSelect; toolIds: string[] } | null> {
+): Promise<typeof schema.jobRoles.$inferSelect | null> {
   const tenant = req.tenant!;
   if (!isAdmin(tenant.role)) {
     reply(res, 403, { error: 'forbidden' });
-    return null;
-  }
-  const parsed = requiredAssessmentsBody.safeParse(req.body);
-  if (!parsed.success) {
-    reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
     return null;
   }
   const role = await database.query.jobRoles.findFirst({
@@ -656,29 +694,80 @@ async function loadRequirementChange(
     reply(res, 409, { error: 'role_retired' });
     return null;
   }
-  const toolIds = [...new Set(parsed.data.toolIds)];
-  if (toolIds.length > 0) {
-    const found = await database
-      .select({ id: schema.assessmentTools.id })
-      .from(schema.assessmentTools)
-      .where(
-        and(
-          eq(schema.assessmentTools.orgId, tenant.orgId),
-          inArray(schema.assessmentTools.id, toolIds),
-        ),
-      );
-    if (found.length !== toolIds.length) {
-      reply(res, 400, { error: 'tool_not_found' });
+  return role;
+}
+
+/**
+ * Normalise and validate the two tiers: deduplicate each, refuse an overlap
+ * (one row per (role, competency) — the tier is a column, so a competency
+ * cannot be both, KTD1), and mirror the old tool-ownership check onto
+ * competencies. Sends the error response and returns null on failure.
+ */
+async function normalizeRequirementTiers(
+  database: Database,
+  res: Response,
+  orgId: string,
+  body: { required: string[]; recommended: string[] },
+): Promise<{ required: string[]; recommended: string[] } | null> {
+  const required = [...new Set(body.required)];
+  const recommended = [...new Set(body.recommended)];
+  const requiredSet = new Set(required);
+  if (recommended.some((id) => requiredSet.has(id))) {
+    reply(res, 400, { error: 'tiers_overlap' });
+    return null;
+  }
+  const all = [...required, ...recommended];
+  if (all.length > 0) {
+    const found = await database.query.competencies.findMany({
+      where: and(
+        eq(schema.competencies.orgId, orgId),
+        inArray(schema.competencies.id, all),
+      ),
+    });
+    // Compared by ID, not by count — a duplicate row could mask a missing one.
+    const foundIds = new Set(found.map((c) => c.id));
+    if (all.some((id) => !foundIds.has(id))) {
+      reply(res, 400, { error: 'competency_not_found' });
       return null;
     }
   }
-  return { role, toolIds };
+  return { required, recommended };
 }
+
+taxonomyRouter.get(
+  '/roles/:id/required-assessments',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
+    const role = await db.query.jobRoles.findFirst({
+      where: and(eq(schema.jobRoles.id, req.params.id!), eq(schema.jobRoles.orgId, tenant.orgId)),
+    });
+    if (!role) return reply(res, 404, { error: 'not_found' });
+    const state = await loadRequirementState(db, role.id);
+    // `configured` is the STORED fact (R50), never a row count: a Role emptied
+    // of its requirements is still configured and reads differently from one
+    // never set up. `awaitingLink` is the legacy rows still deriving the old
+    // way (R15) — tools whose award has not been linked yet, listed so the
+    // editor can point at the backfill or remove them explicitly (KTD9).
+    res.json({
+      configured: role.requirementsConfigured,
+      required: state.required,
+      recommended: state.recommended,
+      awaitingLink: state.legacyToolIds,
+      fingerprint: state.fingerprint,
+    });
+  }),
+);
 
 /**
  * The blast radius of a proposed change, BEFORE it commits (U12, R84–R86).
  * Computes the same effects the apply will, and writes nothing — the Admin sees
  * how many people are affected and what the change does, and may abandon it.
+ * Takes the PUT body minus the fingerprint (a preview cannot go stale), plus
+ * the optional legacy-row removals so the awaitingLink exit previews through
+ * the same door.
  */
 taxonomyRouter.post(
   '/roles/:id/required-assessments/preview',
@@ -686,13 +775,23 @@ taxonomyRouter.post(
   withErrorHandling(async (req, res) => {
     if (!db) return reply(res, 503, { error: 'db_unavailable' });
     const tenant = req.tenant!;
-    const change = await loadRequirementChange(db, req, res);
-    if (!change) return;
+    const role = await loadRequirementRole(db, req, res);
+    if (!role) return;
+    const parsed = requirementsPreviewBody.safeParse(req.body);
+    if (!parsed.success)
+      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+    const tiers = await normalizeRequirementTiers(db, res, tenant.orgId, parsed.data);
+    if (!tiers) return;
     const { effects } = await computeRequiredAssessmentsChange(
       db,
       tenant.orgId,
-      change.role,
-      change.toolIds,
+      role,
+      {
+        requiredCompetencyIds: tiers.required,
+        ...(parsed.data.removeLegacyToolIds
+          ? { removeLegacyToolIds: parsed.data.removeLegacyToolIds }
+          : {}),
+      },
       new Date(),
     );
     res.json({ effects });
@@ -705,9 +804,20 @@ taxonomyRouter.put(
   withErrorHandling(async (req, res) => {
     if (!db) return reply(res, 503, { error: 'db_unavailable' });
     const tenant = req.tenant!;
-    const change = await loadRequirementChange(db, req, res);
-    if (!change) return;
-    const { role, toolIds } = change;
+    const role = await loadRequirementRole(db, req, res);
+    if (!role) return;
+    const parsed = requirementsPutBody.safeParse(req.body);
+    if (!parsed.success)
+      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+    const tiers = await normalizeRequirementTiers(db, res, tenant.orgId, parsed.data);
+    if (!tiers) return;
+
+    // KTD9: the fingerprint guard. A backfill conversion landing between this
+    // editor's GET and PUT rewrote the links; the replace-write below would
+    // silently erase it. Stale echo → 409, the editor reloads and re-decides.
+    const state = await loadRequirementState(db, role.id);
+    if (state.fingerprint !== parsed.data.fingerprint)
+      return reply(res, 409, { error: 'requirements_changed' });
 
     // ONE code path (KTD10): the apply runs the SAME computation the preview did,
     // so `effects.created` is exactly the number of cases it inserts. Its reads
@@ -717,32 +827,50 @@ taxonomyRouter.put(
       db,
       tenant.orgId,
       role,
-      toolIds,
+      { requiredCompetencyIds: tiers.required },
       now,
     );
 
     /*
-      Apply atomically. `compute` derived the additions as a diff against the
-      current requirements, so if the requirement rows committed but a case
-      insert then failed, a retry would see the new rows as current, compute an
-      empty diff, and never create the missing case — the holder would be left
-      permanently uncovered. A transaction makes a partial failure roll the
-      requirement replacement back with it, so a retry re-plans and re-inserts.
-
-      Replace the whole set rather than diff it (a full replace cannot leave a
-      stale requirement behind); removing a tool leaves its in-flight cases
-      untouched (R55) — nothing here cancels a case.
+      Apply atomically, and to the LINKS TABLE ONLY (KTD9): legacy rows leave
+      via conversion or the explicit remove below, never as a side effect of a
+      requirement save. The full-replace posture carries over from the tool
+      era — `compute` derived the additions as a diff against the current
+      links, so if the link rows committed but a case insert then failed, a
+      retry would see the new rows as current, compute an empty diff, and
+      never create the missing case. A transaction makes a partial failure
+      roll the replacement back with it. Removing a competency leaves its
+      in-flight cases untouched (R55) — nothing here cancels a case.
     */
+    const flipConfigured = !role.requirementsConfigured && tiers.required.length > 0;
     await db.transaction(async (tx) => {
       await tx
-        .delete(schema.roleRequiredAssessments)
-        .where(eq(schema.roleRequiredAssessments.roleId, role.id));
-      if (toolIds.length > 0) {
-        await tx
-          .insert(schema.roleRequiredAssessments)
-          .values(toolIds.map((toolId) => ({ orgId: tenant.orgId, roleId: role.id, toolId })));
+        .delete(schema.roleRequiredCompetencies)
+        .where(eq(schema.roleRequiredCompetencies.roleId, role.id));
+      const rows = [
+        ...tiers.required.map((competencyId) => ({
+          orgId: tenant.orgId,
+          roleId: role.id,
+          competencyId,
+          tier: 'required' as const,
+        })),
+        ...tiers.recommended.map((competencyId) => ({
+          orgId: tenant.orgId,
+          roleId: role.id,
+          competencyId,
+          tier: 'recommended' as const,
+        })),
+      ];
+      if (rows.length > 0) {
+        await tx.insert(schema.roleRequiredCompetencies).values(rows);
       }
-      if (!role.requirementsConfigured) {
+      /*
+        `requirementsConfigured` flips only when the REQUIRED tier is authored
+        (KTD9): a recommended-only save on a never-configured Role leaves it
+        reading never-configured, because recommending is not deciding what
+        the Role demands — R50's distinction is about the required set.
+      */
+      if (flipConfigured) {
         await tx
           .update(schema.jobRoles)
           .set({ requirementsConfigured: true })
@@ -759,12 +887,91 @@ taxonomyRouter.put(
     });
 
     await recordAudit(db, tenant, {
-      action: 'Set role required assessments',
+      action: 'Set role required competencies',
       target: role.name,
       category: 'settings',
       icon: 'briefcase',
     });
-    res.json({ configured: true, toolIds, effects });
+    res.json({
+      configured: role.requirementsConfigured || flipConfigured,
+      required: tiers.required,
+      recommended: tiers.recommended,
+      awaitingLink: state.legacyToolIds,
+      effects,
+      // The post-write fingerprint, so the editor can save again without a
+      // fresh GET.
+      fingerprint: requirementsFingerprint(
+        [
+          ...tiers.required.map((competencyId) => ({ competencyId, tier: 'required' })),
+          ...tiers.recommended.map((competencyId) => ({ competencyId, tier: 'recommended' })),
+        ],
+        state.legacyToolIds,
+      ),
+    });
+  }),
+);
+
+/**
+ * Remove ONE awaitingLink legacy row — the exit for a tool that will never be
+ * linked (KTD9). The requirement PUT deliberately cannot touch legacy rows, so
+ * without this route an abandoned unlinked tool would sit in `awaitingLink`
+ * forever, still deriving requirements the old way. The removal effects are
+ * previewed through the SAME preview POST (pass `removeLegacyToolIds`), and
+ * the apply here is fingerprint-guarded like the PUT: a conversion landing
+ * in between changes the legacy set this row belongs to, and the stale
+ * removal must 409 rather than fire against a world the admin never saw.
+ */
+taxonomyRouter.delete(
+  '/roles/:id/required-assessments/:toolId',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) return reply(res, 503, { error: 'db_unavailable' });
+    const tenant = req.tenant!;
+    const role = await loadRequirementRole(db, req, res);
+    if (!role) return;
+    const parsed = legacyRemoveBody.safeParse(req.body);
+    if (!parsed.success)
+      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+
+    const state = await loadRequirementState(db, role.id);
+    const toolId = req.params.toolId!;
+    if (!state.legacyToolIds.includes(toolId)) return reply(res, 404, { error: 'not_found' });
+    if (state.fingerprint !== parsed.data.fingerprint)
+      return reply(res, 409, { error: 'requirements_changed' });
+
+    // The same compute as the preview ran: current tiers unchanged, this one
+    // legacy row removed — so the effects reported here equal the previewed
+    // ones on unchanged data (KTD10).
+    const now = new Date();
+    const { effects } = await computeRequiredAssessmentsChange(
+      db,
+      tenant.orgId,
+      role,
+      { requiredCompetencyIds: state.required, removeLegacyToolIds: [toolId] },
+      now,
+    );
+
+    await db
+      .delete(schema.roleRequiredAssessments)
+      .where(
+        and(
+          eq(schema.roleRequiredAssessments.roleId, role.id),
+          eq(schema.roleRequiredAssessments.toolId, toolId),
+        ),
+      );
+
+    await recordAudit(db, tenant, {
+      action: 'Removed legacy required assessment',
+      target: role.name,
+      category: 'settings',
+      icon: 'briefcase',
+    });
+    const remainingLegacy = state.legacyToolIds.filter((id) => id !== toolId);
+    res.json({
+      awaitingLink: remainingLegacy,
+      effects,
+      fingerprint: requirementsFingerprint(state.links, remainingLegacy),
+    });
   }),
 );
 
