@@ -485,6 +485,43 @@ export interface CompetencyHolder {
   note: string | null;
 }
 
+/**
+ * One assessment tool still awarding NOTHING — a row on the one-time backfill
+ * worklist (U4, R3, KTD5).
+ *
+ * An award-less tool is INERT competency machinery: the engine treats its empty
+ * awards list as vacuously satisfied (no case is ever assigned for it) and
+ * sign-off grants nothing. New tools cannot be created this way any more (U2
+ * requires exactly one award at create), so this list only ever shrinks.
+ */
+export interface UnlinkedTool {
+  id: string;
+  name: string;
+  templateId: string;
+  /**
+   * The server's one confident guess — an exact case-insensitive match of the
+   * tool's name against a competency's name or code — or null. Never fuzzier
+   * than that (R3): linking activates assignment, so a wrong match accepted by
+   * reflex would assign the wrong assessment to real people.
+   */
+  suggestion: { competencyId: string; name: string } | null;
+}
+
+/**
+ * What a FIRST award link converts and activates (U2/U4, KTD10): legacy Role →
+ * tool requirements that become competency links, the people those Roles
+ * cover, and the cases the activation creates. The preview and the apply
+ * return the same shape from the same computation, which is what lets the
+ * panel promise "links N, creates M" before anything lands.
+ */
+export interface AwardLinkEffects {
+  rolesLinked: number;
+  affected: number;
+  created: number;
+  /** True when the tool already awards this competency — a no-op, not an error. */
+  alreadyLinked?: boolean;
+}
+
 /** A rule gating one form section behind a required competency. */
 export interface CompetencyRule {
   id: string;

@@ -11,12 +11,22 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import type { Competency, CompetencyHolder } from '../../lib/data/types.js';
+import type { Competency, CompetencyHolder, UnlinkedTool } from '../../lib/data/types.js';
 
 const competencies: { data: Competency[] } = { data: [] };
 const setValidityMutate = vi.fn();
 const createMutate = vi.fn();
 const grantMutate = vi.fn();
+/*
+  THE BACKFILL PANEL (U4). Defaults keep every pre-existing test blind to it:
+  an admin session with an empty worklist renders no panel at all.
+*/
+const sessionResult: { data: { role: string } | undefined } = { data: { role: 'admin' } };
+const unlinkedResult: { data: UnlinkedTool[] | undefined } = { data: [] };
+/** Records the `enabled` option the screen passed, or null if never asked. */
+let unlinkedEnabledWith: boolean | null = null;
+const previewMutate = vi.fn();
+const applyMutate = vi.fn();
 const holdersResult: { data: CompetencyHolder[] | undefined; isLoading: boolean; isError: boolean } = {
   data: [],
   isLoading: false,
@@ -40,6 +50,14 @@ vi.mock('../../lib/data/hooks.js', () => ({
   useMembers: () => membersResult,
   useCompetencies: () => competencies,
   useCompetencyRules: () => ({ data: [] }),
+  useSession: () => sessionResult,
+  useUnlinkedTools: (options?: { enabled?: boolean }) => {
+    unlinkedEnabledWith = options?.enabled ?? true;
+    // Mirrors react-query: a disabled query never fetches, so it has no data.
+    return unlinkedEnabledWith ? unlinkedResult : { data: undefined };
+  },
+  usePreviewAwardLink: () => ({ mutate: previewMutate, isPending: false }),
+  useApplyAwardLink: () => ({ mutate: applyMutate, isPending: false }),
   useAddRule: () => ({ mutate: vi.fn() }),
   useToggleRule: () => ({ mutate: vi.fn() }),
   useRemoveRule: () => ({ mutate: vi.fn() }),
@@ -110,6 +128,9 @@ afterEach(() => {
   grantAskedFor = null;
   membersResult.data = [];
   formDetail.data = undefined;
+  sessionResult.data = { role: 'admin' };
+  unlinkedResult.data = [];
+  unlinkedEnabledWith = null;
 });
 
 describe('CompetencyScreen validity', () => {
@@ -740,5 +761,197 @@ describe('CompetencyScreen add competency', () => {
     expect(toast).toHaveBeenCalledWith(
       expect.objectContaining({ variant: 'warning', message: expect.stringContaining('feature_not_available') }),
     );
+  });
+});
+
+/*
+  THE ONE-TIME BACKFILL PANEL (U4, R3, KTD5 — AE3).
+
+  Tools created before awards were required at create are INERT: the engine
+  treats their empty awards list as vacuously satisfied and assigns nothing,
+  and sign-off grants nothing. Linking an award ACTIVATES assignment — real
+  cases for real people — which is why every Accept here travels through a
+  preview whose counts the admin confirms before anything lands.
+*/
+describe('CompetencyScreen backfill panel', () => {
+  /** AE3's matched half: exact name match, so the server suggested it. */
+  const MATCHED: UnlinkedTool = {
+    id: 't-dozer',
+    name: 'Track Dozer Assessment',
+    templateId: 'tpl-1',
+    suggestion: { competencyId: 'c1', name: 'ATO - Track Dozer' },
+  };
+  /** AE3's unmatched half: nothing on the register matches, no guessing. */
+  const UNMATCHED: UnlinkedTool = {
+    id: 't-fam',
+    name: 'Site Familiarisation v2',
+    templateId: 'tpl-2',
+    suggestion: null,
+  };
+
+  it('is absent when nothing is unlinked', () => {
+    competencies.data = [TRACK_DOZER];
+    unlinkedResult.data = [];
+    render(<CompetencyScreen />);
+
+    expect(screen.queryByText(/awarding nothing/i)).toBeNull();
+    expect(screen.queryByText('Link award')).toBeNull();
+  });
+
+  it('never fetches the worklist for a role the endpoint would 403', () => {
+    // The unlinked read is admin-only server-side; an assessor mounting this
+    // screen must not fire a request that lands as a 403 in every log.
+    sessionResult.data = { role: 'assessor' };
+    unlinkedResult.data = [MATCHED];
+    render(<CompetencyScreen />);
+
+    expect(unlinkedEnabledWith).toBe(false);
+    expect(screen.queryByText(/awarding nothing/i)).toBeNull();
+  });
+
+  it('covers AE3: the matched row carries the suggestion, the unmatched row offers a prefilled create', () => {
+    competencies.data = [TRACK_DOZER];
+    unlinkedResult.data = [MATCHED, UNMATCHED];
+    render(<CompetencyScreen />);
+
+    // Both rows are on the worklist.
+    expect(screen.getByText('Track Dozer Assessment')).toBeDefined();
+    expect(screen.getByText('Site Familiarisation v2')).toBeDefined();
+
+    // The matched row arrives with the server's suggestion already picked…
+    const matchedPick = screen.getByLabelText(
+      'What Track Dozer Assessment awards',
+    ) as HTMLSelectElement;
+    expect(matchedPick.value).toBe('c1');
+
+    // …the unmatched row arrives with nothing picked — no guessing (R3).
+    const unmatchedPick = screen.getByLabelText(
+      'What Site Familiarisation v2 awards',
+    ) as HTMLSelectElement;
+    expect(unmatchedPick.value).toBe('');
+
+    // And the unmatched row offers creating the competency, name prefilled
+    // from the tool so accepting the default is the one-step path.
+    fireEvent.click(screen.getByLabelText('Create a competency for Site Familiarisation v2'));
+    expect((screen.getByLabelText('Competency name') as HTMLInputElement).value).toBe(
+      'Site Familiarisation v2',
+    );
+  });
+
+  it('shows the preview counts before anything is applied', () => {
+    competencies.data = [TRACK_DOZER];
+    unlinkedResult.data = [MATCHED];
+    previewMutate.mockImplementation((_input, opts) =>
+      opts?.onSuccess?.({ rolesLinked: 2, affected: 5, created: 3 }),
+    );
+    render(<CompetencyScreen />);
+
+    fireEvent.click(screen.getByLabelText('Preview link for Track Dozer Assessment'));
+
+    expect(previewMutate).toHaveBeenCalledWith(
+      { toolId: 't-dozer', competencyId: 'c1' },
+      expect.anything(),
+    );
+    // The counts, in the panel's own words — what the admin is agreeing to.
+    expect(screen.getByText(/links 2 role requirements/i)).toBeDefined();
+    expect(screen.getByText(/creates 3 cases for 5 people/i)).toBeDefined();
+    // Preview is READ-ONLY: nothing has been applied yet.
+    expect(applyMutate).not.toHaveBeenCalled();
+  });
+
+  it('applies the previewed link and reports the created cases', () => {
+    competencies.data = [TRACK_DOZER];
+    unlinkedResult.data = [MATCHED];
+    previewMutate.mockImplementation((_input, opts) =>
+      opts?.onSuccess?.({ rolesLinked: 2, affected: 5, created: 3 }),
+    );
+    applyMutate.mockImplementation((_input, opts) =>
+      opts?.onSuccess?.({ rolesLinked: 2, affected: 5, created: 3 }),
+    );
+    render(<CompetencyScreen />);
+
+    fireEvent.click(screen.getByLabelText('Preview link for Track Dozer Assessment'));
+    fireEvent.click(screen.getByText('Link award'));
+
+    expect(applyMutate).toHaveBeenCalledWith(
+      { toolId: 't-dozer', competencyId: 'c1' },
+      expect.anything(),
+    );
+    // The report AFTER: the admin learns what actually landed, not just that
+    // a request returned 200.
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        variant: 'success',
+        message: expect.stringContaining('3 cases'),
+      }),
+    );
+  });
+
+  it('refuses to apply without a fresh preview of the picked competency', () => {
+    /*
+      The preview's counts belong to a (tool, competency) PAIR. Re-picking
+      after previewing would let "Link award" apply a pair the admin never
+      saw counts for — so a change of pick discards the preview.
+    */
+    competencies.data = [
+      TRACK_DOZER,
+      { ...TRACK_DOZER, id: 'c2', name: 'ATO - Grader', code: 'Q99' },
+    ];
+    unlinkedResult.data = [MATCHED];
+    previewMutate.mockImplementation((_input, opts) =>
+      opts?.onSuccess?.({ rolesLinked: 2, affected: 5, created: 3 }),
+    );
+    render(<CompetencyScreen />);
+
+    fireEvent.click(screen.getByLabelText('Preview link for Track Dozer Assessment'));
+    expect(screen.getByText('Link award')).toBeDefined();
+
+    fireEvent.change(screen.getByLabelText('What Track Dozer Assessment awards'), {
+      target: { value: 'c2' },
+    });
+
+    expect(screen.queryByText('Link award')).toBeNull();
+    expect(screen.queryByText(/links 2 role requirements/i)).toBeNull();
+  });
+
+  it('cannot preview until a competency is picked', () => {
+    competencies.data = [TRACK_DOZER];
+    unlinkedResult.data = [UNMATCHED];
+    render(<CompetencyScreen />);
+
+    const previewBtn = screen.getByLabelText(
+      'Preview link for Site Familiarisation v2',
+    ) as HTMLButtonElement;
+    expect(previewBtn.disabled).toBe(true);
+    fireEvent.click(previewBtn);
+    expect(previewMutate).not.toHaveBeenCalled();
+  });
+
+  it('creates the competency inline and picks it in one step', () => {
+    competencies.data = [TRACK_DOZER];
+    unlinkedResult.data = [UNMATCHED];
+    createMutate.mockImplementation((input, opts) =>
+      opts?.onSuccess?.({
+        id: 'c-new',
+        name: input.name,
+        code: input.code,
+        holders: 0,
+        validForMonths: null,
+        gracePeriodDays: null,
+        color: 'var(--accent)',
+      }),
+    );
+    render(<CompetencyScreen />);
+
+    fireEvent.click(screen.getByLabelText('Create a competency for Site Familiarisation v2'));
+    fireEvent.click(screen.getByText('Add & pick'));
+
+    expect(createMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'Site Familiarisation v2', code: null }),
+      expect.anything(),
+    );
+    // The new competency is now this row's pick — ready to preview.
+    const pick = screen.getByLabelText('What Site Familiarisation v2 awards') as HTMLSelectElement;
+    expect(pick.value).toBe('c-new');
   });
 });

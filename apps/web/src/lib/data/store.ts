@@ -45,9 +45,11 @@ import type {
   BrandEditProposal,
   BrandPdfScan,
   BrandScanProposal,
+  AwardLinkEffects,
   Competency,
   CompetencyHolder,
   CompetencyRule,
+  UnlinkedTool,
   DashboardSummary,
   FillLink,
   FormDetail,
@@ -629,8 +631,50 @@ export const store = {
     templateId: string;
     name: string;
     manifest: AssessmentToolManifest;
+    /**
+     * The ONE competency passing this tool awards (U5, R1, KTD4). Required and
+     * exactly one element — the API 400s `invalid_award` on zero, two, or an id
+     * the org does not own. The plural spelling rides the existing jsonb
+     * column; strictly-one is enforced at the boundary, not the schema.
+     */
+    awardedCompetencyIds: string[];
   }): Promise<{ id: string }> {
     return apiClient.post<{ id: string }>('/assessment-tools', input);
+  },
+
+  /**
+   * The tools still awarding nothing — the one-time backfill worklist (U4, R3,
+   * KTD5). Admin-gated server-side (403 below admin): reading the worklist
+   * sits on the same gate as acting on it, so callers must not fetch this for
+   * roles the endpoint would refuse.
+   */
+  listUnlinkedTools(): Promise<UnlinkedTool[]> {
+    return apiClient.get<UnlinkedTool[]>('/assessment-tools/unlinked');
+  },
+
+  /**
+   * What a FIRST award link would convert and activate, computed without
+   * committing (U4, KTD10) — the same computation the apply runs, so the
+   * counts shown before are the counts reported after.
+   *
+   * The backfill panel only performs first links (its rows are, by
+   * definition, tools with no award), so neither this nor the apply below
+   * ever sends the re-link fields (`confirm`, `carryRoleLinks`).
+   */
+  previewAwardLink(toolId: string, competencyId: string): Promise<AwardLinkEffects> {
+    return apiClient.post<AwardLinkEffects>(`/assessment-tools/${toolId}/award/preview`, {
+      competencyId,
+    });
+  },
+
+  /**
+   * Link the one competency an existing tool awards (U4, R3, R15). In one
+   * server transaction this writes the award, converts every legacy
+   * Role → tool requirement into a direct competency link, and creates the
+   * activated cases — exactly what the preview counted.
+   */
+  applyAwardLink(toolId: string, competencyId: string): Promise<AwardLinkEffects> {
+    return apiClient.put<AwardLinkEffects>(`/assessment-tools/${toolId}/award`, { competencyId });
   },
 
   publishFormVersion(input: { formId: string; versionId: string }): Promise<FormSummary> {
