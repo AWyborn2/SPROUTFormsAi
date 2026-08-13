@@ -22,11 +22,14 @@
  */
 import {
   DEFAULT_SETUP_ANSWERS,
+  type AssessmentToolManifest,
   type BuilderDraft,
   type BuilderStructure,
   type DraftAnswerKey,
   type ExtractionResult,
+  type FieldGeometry,
   type FormField,
+  type RevisionIdentity,
   type SetupAnswers,
 } from '@formai/shared';
 
@@ -52,6 +55,27 @@ export interface BuilderSnapshot {
   versionId?: string;
   partOverrides: Record<string, unknown>;
   partOrder: string[];
+  /** Set when this draft REVISES a published tool rather than building one. */
+  revisionOfToolId?: string;
+  /** The version the revision was seeded from — republish refuses if the tool moved on. */
+  seededFromVersionId?: string;
+  /**
+   * The tool's manifest as it stood at seed time. Republish starts from this
+   * and overlays what the builder derives, so workflow-editor extras the
+   * builder does not model (profile prefill, prerequisite checks, field
+   * defaults) survive a revision untouched.
+   */
+  revisionToolManifest?: AssessmentToolManifest;
+  /** The seeded source PDF's handle, kept so "revert to original" can restore it. */
+  seedAssetId?: string;
+  /** The paper revision identity captured for the version this draft publishes. */
+  revisionIdentity?: RevisionIdentity;
+  /**
+   * Geometry carried off the fields when the PDF was REPLACED — proposals,
+   * never confirmed geometry (a box confirmed against the old layout was not
+   * confirmed against the new one). Keyed by field id.
+   */
+  carriedGeometry?: Record<string, FieldGeometry>;
 }
 
 /** The state a builder that has read nothing starts from. */
@@ -93,6 +117,14 @@ export function toDraftState(snapshot: BuilderSnapshot): Partial<BuilderDraft> {
     ...(snapshot.assetId ? { assetId: snapshot.assetId } : {}),
     ...(snapshot.formId ? { formId: snapshot.formId } : {}),
     ...(snapshot.versionId ? { versionId: snapshot.versionId } : {}),
+    ...(snapshot.revisionOfToolId ? { revisionOfToolId: snapshot.revisionOfToolId } : {}),
+    ...(snapshot.seededFromVersionId ? { seededFromVersionId: snapshot.seededFromVersionId } : {}),
+    ...(snapshot.revisionToolManifest
+      ? { revisionToolManifest: snapshot.revisionToolManifest }
+      : {}),
+    ...(snapshot.seedAssetId ? { seedAssetId: snapshot.seedAssetId } : {}),
+    ...(snapshot.revisionIdentity ? { revisionIdentity: snapshot.revisionIdentity } : {}),
+    ...(snapshot.carriedGeometry ? { carriedGeometry: snapshot.carriedGeometry } : {}),
   };
 }
 
@@ -136,6 +168,18 @@ export function fromDraftState(state: unknown): BuilderSnapshot {
     ...(str(s.assetId) ? { assetId: str(s.assetId)! } : {}),
     ...(str(s.formId) ? { formId: str(s.formId)! } : {}),
     ...(str(s.versionId) ? { versionId: str(s.versionId)! } : {}),
+    ...(str(s.revisionOfToolId) ? { revisionOfToolId: str(s.revisionOfToolId)! } : {}),
+    ...(str(s.seededFromVersionId) ? { seededFromVersionId: str(s.seededFromVersionId)! } : {}),
+    ...(s.revisionToolManifest && typeof s.revisionToolManifest === 'object'
+      ? { revisionToolManifest: s.revisionToolManifest as AssessmentToolManifest }
+      : {}),
+    ...(str(s.seedAssetId) ? { seedAssetId: str(s.seedAssetId)! } : {}),
+    ...(s.revisionIdentity && typeof s.revisionIdentity === 'object'
+      ? { revisionIdentity: s.revisionIdentity as RevisionIdentity }
+      : {}),
+    ...(s.carriedGeometry && typeof s.carriedGeometry === 'object'
+      ? { carriedGeometry: s.carriedGeometry as Record<string, FieldGeometry> }
+      : {}),
   };
 }
 

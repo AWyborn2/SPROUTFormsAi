@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Icon } from '@formai/ui';
+import { Button, Icon } from '@formai/ui';
 import { ApiError } from '../../../../lib/data/api-client.js';
+import { assessmentsApi } from '../../../../lib/data/assessments.js';
 import {
   useCreateAssessmentTool,
   useCreateDraftForm,
@@ -9,8 +10,9 @@ import {
   useSaveVersionFields,
 } from '../../../../lib/data/hooks.js';
 import { store } from '../../../../lib/data/store.js';
-import { checkPublish, publishSummary } from '../builder-publish.js';
+import { checkPublish, composeRevisionManifest, publishSummary } from '../builder-publish.js';
 import { workflowFromStructure } from '../builder-workflow.js';
+import { useStartRevision } from '../use-start-revision.js';
 import type { BuilderDraftState } from '../use-builder-draft.js';
 
 /**
@@ -43,8 +45,17 @@ export interface WorkflowStepProps {
 
 export function WorkflowStep({ draft }: WorkflowStepProps) {
   const { fields, keys, manifest, structure, parts, formId, versionId, title } = draft;
+  const isRevision = Boolean(draft.revisionOfToolId);
   const [done, setDone] = useState<{ toolId: string } | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
+  const [stale, setStale] = useState<{
+    currentVersionLabel: string | null;
+    publishedAt: string | null;
+    publishedByName: string | null;
+  } | null>(null);
+  const [openCases, setOpenCases] = useState<Array<{ id: string }> | null>(null);
+  const [formGone, setFormGone] = useState(false);
+  const restart = useStartRevision();
 
   const saveFields = useSaveVersionFields(formId ?? '', versionId ?? '');
   const publishVersion = usePublishFormVersion();
@@ -54,8 +65,8 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
   // The STRUCTURE carries the order. Without it publish writes extraction
   // order and the whole of step 2 is cosmetic.
   const check = useMemo(
-    () => checkPublish(fields, keys, manifest, structure),
-    [fields, keys, manifest, structure],
+    () => checkPublish(fields, keys, manifest, structure, draft.carriedGeometry),
+    [fields, keys, manifest, structure, draft.carriedGeometry],
   );
   const summary = useMemo(() => publishSummary(fields, keys, manifest), [fields, keys, manifest]);
 
@@ -66,7 +77,127 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
     createDraft.isPending;
   const ready = !!formId && !!versionId && check.problems.length === 0;
 
+  /*
+    A REVISION REPUBLISHES — one server transaction that freezes the revised
+    version and updates the EXISTING tool together. The fresh-build sequence
+    below cannot run here: its `createTool` would trip the one-tool-per-template
+    unique index after the version already published, which is exactly the
+    live-form-with-a-stale-tool state the header warns about.
+  */
+  const republish = async () => {
+    if (!formId || !versionId || !manifest || !draft.revisionOfToolId || !draft.seededFromVersionId)
+      return;
+    setFailure(null);
+    setStale(null);
+    setOpenCases(null);
+    setFormGone(false);
+    try {
+      try {
+        await saveFields.mutateAsync(check.fields);
+      } catch (err) {
+        /*
+          The form is gone. NEVER the silent re-create the fresh build uses —
+          that would convert "revise tool X" into "create unrelated tool Y"
+          while the real tool lives on. The author gets an explicit choice.
+        */
+        if (err instanceof ApiError && err.status === 404) {
+          setFormGone(true);
+          return;
+        }
+        throw err;
+      }
+
+      const result = await assessmentsApi.republishTool({
+        toolId: draft.revisionOfToolId,
+        versionId,
+        seededFromVersionId: draft.seededFromVersionId,
+        fields: check.fields,
+        // The seeded manifest carries the workflow-editor extras the builder
+        // does not model; the builder's derivation overlays it.
+        manifest: composeRevisionManifest(draft.revisionToolManifest ?? manifest, {
+          ...manifest,
+          workflow: workflowFromStructure(structure, parts, manifest, check.fields),
+        }),
+        ...(draft.revisionIdentity ? { revisionIdentity: draft.revisionIdentity } : {}),
+      });
+      setDone({ toolId: result.id });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        const body = err.body as {
+          error?: string;
+          currentVersionLabel?: string | null;
+          publishedAt?: string | null;
+          publishedByName?: string | null;
+          cases?: Array<{ id: string }>;
+        };
+        if (body?.error === 'stale_revision') {
+          setStale({
+            currentVersionLabel: body.currentVersionLabel ?? null,
+            publishedAt: body.publishedAt ?? null,
+            publishedByName: body.publishedByName ?? null,
+          });
+          return;
+        }
+        if (body?.error === 'open_cases_incompatible') {
+          setOpenCases(body.cases ?? []);
+          return;
+        }
+      }
+      setFailure(
+        err instanceof Error
+          ? `Publishing stopped: ${err.message}. Nothing was partially applied — the revision is intact; retry when ready.`
+          : 'Publishing stopped before it finished. Nothing was partially applied.',
+      );
+    }
+  };
+
+  /**
+   * The EXPLICIT arm of the deleted-form recovery: mint a fresh form and a
+   * fresh tool from this revision's content. Never run silently — the author
+   * chose it from the formGone dialog, knowing it creates rather than revises.
+   */
+  const publishAsNewTool = async () => {
+    if (!manifest) return;
+    setFailure(null);
+    setFormGone(false);
+    try {
+      const fresh = await createDraft.mutateAsync({
+        name: title || 'Assessment',
+        fields: check.fields,
+        ...(draft.assetId ? { sourcePdfAssetId: draft.assetId } : {}),
+      });
+      draft.setVersionIds(fresh.formId, fresh.versionId);
+      await store.publishFormVersion({ formId: fresh.formId, versionId: fresh.versionId });
+      const tool = await createTool.mutateAsync({
+        templateId: fresh.formId,
+        name: title || 'Assessment',
+        manifest: {
+          ...manifest,
+          workflow: workflowFromStructure(structure, parts, manifest, check.fields),
+        },
+      });
+      setDone({ toolId: tool.id });
+    } catch (err) {
+      setFailure(
+        err instanceof Error
+          ? `Publishing as a new tool stopped: ${err.message}.`
+          : 'Publishing as a new tool stopped before it finished.',
+      );
+    }
+  };
+
+  /** Stale recovery: discard this revision and re-seed from the new current version. */
+  const discardAndRestart = async () => {
+    const toolId = draft.revisionOfToolId;
+    if (!toolId) return;
+    const drafts = await store.listBuilderDrafts();
+    const mine = drafts.find((d) => d.revisionOfToolId === toolId);
+    if (mine) await store.discardBuilderDraft(mine.id);
+    await restart.start(toolId);
+  };
+
   const publish = async () => {
+    if (isRevision) return republish();
     if (!formId || !versionId || !manifest) return;
     setFailure(null);
     try {
@@ -173,6 +304,143 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
           Open <strong>PDF mapping</strong> first — that is where the draft version this publishes
           gets created.
         </p>
+      )}
+
+      {/*
+        The paper document's own identity (R9). Optional on purpose — a
+        webform-only tweak has no new paper to cite — but empty is warned
+        below, because the change note is the severity signal assessors read.
+      */}
+      {isRevision && (
+        <div className="rounded-[14px] border border-border bg-surface-card p-4">
+          <span className="block text-[13.5px] font-semibold">Document revision identity</span>
+          <p className="mb-2.5 mt-0.5 text-[11.5px] text-text-tertiary">
+            As printed on the reviewed document — shown in version history and on every evidence
+            export from this version.
+          </p>
+          <div className="flex flex-wrap gap-2.5">
+            <label className="flex flex-col gap-1 text-[11px] font-semibold text-text-secondary">
+              Revision code
+              <input
+                value={draft.revisionIdentity?.code ?? ''}
+                maxLength={64}
+                placeholder="Rev 3"
+                onChange={(e) => draft.setRevisionIdentity({ code: e.target.value })}
+                className="h-8 w-[120px] rounded-lg border border-border bg-surface-card px-2.5 text-[12.5px] font-normal"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-[11px] font-semibold text-text-secondary">
+              Reviewed
+              <input
+                value={draft.revisionIdentity?.reviewedOn ?? ''}
+                maxLength={32}
+                placeholder="08/2026"
+                onChange={(e) => draft.setRevisionIdentity({ reviewedOn: e.target.value })}
+                className="h-8 w-[110px] rounded-lg border border-border bg-surface-card px-2.5 text-[12.5px] font-normal"
+              />
+            </label>
+            <label className="flex min-w-[240px] flex-1 flex-col gap-1 text-[11px] font-semibold text-text-secondary">
+              What changed
+              <input
+                value={draft.revisionIdentity?.note ?? ''}
+                maxLength={2000}
+                placeholder="Annual review — no content change"
+                onChange={(e) => draft.setRevisionIdentity({ note: e.target.value })}
+                className="h-8 rounded-lg border border-border bg-surface-card px-2.5 text-[12.5px] font-normal"
+              />
+            </label>
+          </div>
+          {!draft.revisionIdentity?.code && !draft.revisionIdentity?.note && (
+            <p className="mt-2 text-[11.5px] text-warning-text">
+              No identity recorded — the new version will publish without one, and auditors will
+              only see the internal version label.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/*
+        CARRIED BOXES NOBODY RE-CONFIRMED (R8/AE2). A warning, never a gate —
+        the field prints nowhere until placed, which is the safe failure, and
+        this is where that silence gets said out loud, field by field.
+      */}
+      {isRevision && check.carried.length > 0 && (
+        <div className="flex flex-col gap-1.5 rounded-[14px] border border-warning bg-warning-soft p-3">
+          <span className="text-[11.5px] font-semibold text-warning-text">
+            {check.carried.length} carried box{check.carried.length === 1 ? '' : 'es'} never
+            re-confirmed against the new document
+          </span>
+          {check.carried.map((label) => (
+            <p key={label} className="text-[11.5px] text-warning-text">
+              “{label}” — pre-placed from the old layout, unconfirmed. It prints nowhere until
+              confirmed or re-placed in PDF mapping.
+            </p>
+          ))}
+        </div>
+      )}
+
+      {stale && (
+        <div className="flex flex-col gap-2 rounded-[14px] border border-danger bg-danger-soft p-3">
+          <span className="text-[12.5px] font-semibold text-danger-text">
+            Somebody published {stale.currentVersionLabel ?? 'a newer version'} after this revision
+            was started
+            {stale.publishedByName ? ` — ${stale.publishedByName}` : ''}
+            {stale.publishedAt ? `, ${stale.publishedAt.slice(0, 10)}` : ''}
+          </span>
+          <p className="text-[11.5px] leading-relaxed text-danger-text">
+            This revision was seeded from a version that is no longer current, so publishing it
+            would silently discard theirs. It cannot publish — start a new revision from the
+            current version instead.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            leadingIcon="git-branch"
+            onClick={() => void discardAndRestart()}
+          >
+            Discard this draft and start a new revision from {stale.currentVersionLabel ?? 'the current version'}
+          </Button>
+        </div>
+      )}
+
+      {openCases && (
+        <div className="flex flex-col gap-1.5 rounded-[14px] border border-danger bg-danger-soft p-3">
+          <span className="text-[12.5px] font-semibold text-danger-text">
+            {openCases.length} open case{openCases.length === 1 ? '' : 's'} would break under the
+            revised structure
+          </span>
+          <p className="text-[11.5px] leading-relaxed text-danger-text">
+            An open case finishes on the version it started on, and this tool has ONE part
+            structure — the revised one no longer fits what those candidates are mid-way through.
+            Publishing waits until they settle (finish or close), or revise without removing the
+            parts they are on.
+          </p>
+          {openCases.map((c) => (
+            <Link
+              key={c.id}
+              to={`/app/assessments/${c.id}`}
+              className="text-[11.5px] font-medium text-danger-text underline"
+            >
+              View case {c.id.slice(0, 8)}
+            </Link>
+          ))}
+        </div>
+      )}
+
+      {formGone && (
+        <div className="flex flex-col gap-2 rounded-[14px] border border-danger bg-danger-soft p-3">
+          <span className="text-[12.5px] font-semibold text-danger-text">
+            The tool’s form no longer exists
+          </span>
+          <p className="text-[11.5px] leading-relaxed text-danger-text">
+            The form this revision publishes into was deleted. The revision cannot update the
+            original tool any more — you can publish this work as a NEW tool instead, which
+            creates a fresh form and tool rather than revising the old one.
+          </p>
+          <Button size="sm" variant="outline" leadingIcon="plus" onClick={() => void publishAsNewTool()}>
+            Publish as a new tool
+          </Button>
+        </div>
       )}
 
       {check.problems.length > 0 && (

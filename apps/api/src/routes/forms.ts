@@ -275,6 +275,9 @@ formsRouter.get('/:id', requireTenant, withErrorHandling(async (req, res) => {
       fieldCount: v.fields.length,
       publishedAt: v.publishedAt ? v.publishedAt.toISOString() : null,
       publishedByName: v.publishedBy ? (nameById.get(v.publishedBy) ?? null) : null,
+      /** The paper document's revision identity — null on plain-form versions. */
+      revisionIdentity: v.revisionIdentity ?? null,
+      note: v.revisionIdentity?.note ?? null,
     })),
   });
 }));
@@ -410,6 +413,7 @@ formsRouter.get('/:id/versions/:versionId', requireTenant, withErrorHandling(asy
     fields: version.fields ?? [],
     container: version.container,
     sourcePdfAssetId: version.sourcePdfAssetId,
+    revisionIdentity: version.revisionIdentity ?? null,
   });
 }));
 

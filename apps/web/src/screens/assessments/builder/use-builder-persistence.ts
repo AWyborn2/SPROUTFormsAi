@@ -132,6 +132,9 @@ export function useBuilderAutosave(
           state: toDraftState(snapshot) as Record<string, unknown>,
           formId: snapshot.formId ?? null,
           versionId: snapshot.versionId ?? null,
+          // The COLUMN, not just state: the server enforces one revision
+          // draft per tool through it.
+          revisionOfToolId: snapshot.revisionOfToolId ?? null,
         })
         .then((row) => {
           // The id is what makes THIS tab resumable: the screen puts it in the

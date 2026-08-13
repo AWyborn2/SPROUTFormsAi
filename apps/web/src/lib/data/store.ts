@@ -140,6 +140,8 @@ interface FormDetailDto extends FormSummaryDto {
     fieldCount: number;
     publishedAt: string | null;
     publishedByName: string | null;
+    revisionIdentity: { code?: string; reviewedOn?: string; note?: string } | null;
+    note: string | null;
   }>;
 }
 
@@ -210,6 +212,8 @@ function toFormDetail(dto: FormDetailDto): FormDetail {
       fieldCount: v.fieldCount,
       publishedAt: v.publishedAt ? relativeTime(v.publishedAt) : '—',
       publishedBy: v.publishedByName ?? '—',
+      revisionIdentity: v.revisionIdentity ?? undefined,
+      note: v.note ?? undefined,
     })),
   };
 }
@@ -568,11 +572,14 @@ export const store = {
   forkDraftVersion(input: {
     formId: string;
     fields: FormField[];
+    /** Overrides the inherited source PDF — a revision that replaced the paper. */
+    sourcePdfAssetId?: string;
   }): Promise<{ form: FormSummary; versionId: string }> {
     return apiClient
       .post<FormSummaryDto & { createdVersionId: string }>(`/forms/${input.formId}/versions`, {
         fields: input.fields,
         publish: false,
+        ...(input.sourcePdfAssetId ? { sourcePdfAssetId: input.sourcePdfAssetId } : {}),
       })
       .then((dto) => ({ form: toFormSummary(dto), versionId: dto.createdVersionId }));
   },
@@ -1144,13 +1151,25 @@ export const store = {
   validateWorkforceImport(csv: string): Promise<WorkforceImportPreview> {
     return apiClient.post<WorkforceImportPreview>('/workforce-import/validate', { csv });
   },
-  /** Confirm and run it. The file is re-validated server-side (U24). */
+  /**
+   * Confirm and START it — the file is re-validated server-side, and this
+   * returns as soon as the run has an id rather than when the run has finished
+   * (U24). A file of a few hundred people takes minutes; waiting for it is what
+   * timed the browser out and left an operator staring at an upload form beside
+   * a live import.
+   *
+   * 409 here means one is already running, and the error body carries its id.
+   */
   runWorkforceImport(csv: string): Promise<{ runId: string }> {
     return apiClient.post<{ runId: string }>('/workforce-import/run', { csv });
   },
-  /** The run report, readable long after the page was closed (U24, R171). */
+  /** The run report — progress while it runs, the full report after (U24, R171). */
   getWorkforceImportRun(runId: string): Promise<WorkforceImportRun> {
     return apiClient.get<WorkforceImportRun>(`/workforce-import/runs/${runId}`);
+  },
+  /** The run this organisation has in flight, asked before offering to start one. */
+  getActiveWorkforceImport(): Promise<{ run: WorkforceImportRun | null }> {
+    return apiClient.get<{ run: WorkforceImportRun | null }>('/workforce-import/active');
   },
   /** A member's record as this reader is admitted to it (U29, U38). */
   getProfile(membershipId: string): Promise<ProfileResponse> {

@@ -400,6 +400,11 @@ export interface ExportCaseInput extends AssembleCaseInput {
   originalPdf: Uint8Array;
   /** The full field set of the version being exported against. */
   fields: FormField[];
+  /**
+   * The PINNED version's paper revision identity, printed at the bottom of
+   * page 1 so the evidence names the document revision it certifies against.
+   */
+  revisionIdentity?: { code?: string; reviewedOn?: string; note?: string } | null;
 }
 
 /**
@@ -420,7 +425,7 @@ export async function exportCasePdf(input: ExportCaseInput): Promise<Uint8Array>
     rest-spread cannot drift — a field added to `AssembleCaseInput` reaches
     `assembleCaseValues` without this function knowing it exists.
   */
-  const { originalPdf, fields, ...assemble } = input;
+  const { originalPdf, fields, revisionIdentity, ...assemble } = input;
 
   const problems = validateManifest(assemble.manifest, fields);
   if (problems.length > 0) {
@@ -452,5 +457,5 @@ export async function exportCasePdf(input: ExportCaseInput): Promise<Uint8Array>
 
   // `roundTripExport` applies the visibility filter itself, so a section the
   // candidate's stream excluded cannot appear carrying an answer.
-  return roundTripExport({ originalPdf, fields, values });
+  return roundTripExport({ originalPdf, fields, values, revisionIdentity });
 }

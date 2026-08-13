@@ -183,10 +183,13 @@ export const roleRequiredAssessments = pgTable(
 /**
  * One candidate's journey through one assessment tool.
  *
- * The case carries the CURRENT template version; each attempt pins the version
- * it was assessed under. Republishing the tool advances this pointer only, so a
- * candidate mid-pathway moves to the new version for work not yet done while
- * completed evidence keeps saying what it was actually assessed against.
+ * The case pins the template version it was OPENED against; each attempt pins
+ * the version it was assessed under. Nothing advances this pointer after
+ * creation — an open case finishes every remaining part on the version it
+ * started on, and only cases created after a republish pick up the new
+ * version. Republish refuses (`open_cases_incompatible`) when a new manifest
+ * would dangle against an open case's pinned fields, so this pinning can
+ * never strand an open case against a manifest it cannot satisfy.
  */
 export const assessmentCases = pgTable(
   'assessment_cases',

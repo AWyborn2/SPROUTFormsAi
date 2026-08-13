@@ -67,7 +67,9 @@ function draftRow(over: Record<string, unknown> = {}) {
   };
 }
 
-function fakeDb(opts: { findMany?: unknown[]; findFirst?: unknown; inserted?: unknown } = {}) {
+function fakeDb(
+  opts: { findMany?: unknown[]; findFirst?: unknown; inserted?: unknown; tool?: unknown } = {},
+) {
   const onConflict = vi.fn();
   const insertValues = vi.fn();
   const deleteWhere = vi.fn();
@@ -79,8 +81,13 @@ function fakeDb(opts: { findMany?: unknown[]; findFirst?: unknown; inserted?: un
         findMany: vi.fn().mockResolvedValue(opts.findMany ?? []),
         findFirst,
       },
+      // The revision guard resolves the tool inside the caller's org.
+      assessmentTools: { findFirst: vi.fn().mockResolvedValue(opts.tool) },
       // `recordAudit` looks the actor up to stamp a name on the entry.
       users: { findFirst: vi.fn().mockResolvedValue({ id: 'u1', name: 'A. Admin' }) },
+      // `hasPermission` reads the org's stored matrix; no row falls back to
+      // the product default for the role, which grants admins forms.edit.
+      rolePermissions: { findFirst: vi.fn().mockResolvedValue(undefined) },
     },
     insert: vi.fn((table: unknown) => ({
       // Awaitable AND chainable: the upsert chains
@@ -417,6 +424,138 @@ describe('DELETE /assessment-tool-drafts/:id', () => {
       });
 
       expect(res.status).toBe(404);
+      expect(f.deleteWhere).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('revision drafts', () => {
+  const TOOL_ID = '5f2b7d24-1111-4111-8111-000000000001';
+  const TOOL = { id: TOOL_ID, orgId: 'org-1', name: 'Mine Site SME Theory' };
+
+  it('refuses a second revision of the same tool, pointing at the existing draft', async () => {
+    // AE5: the upsert arbiter is (org, name), so without this guard a second
+    // start under a new name would trip the partial index as a 500 — and under
+    // the same name it would silently overwrite a colleague's revision work.
+    const existing = draftRow({
+      id: 'draft-rev',
+      name: 'Mine Site SME Theory — v2',
+      revisionOfToolId: TOOL_ID,
+    });
+    const f = fakeDb({ tool: TOOL, findFirst: existing });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-tool-drafts`, {
+        method: 'POST',
+        headers: authHeader(),
+        body: JSON.stringify({
+          name: 'Mine Site SME Theory — v2 (mine)',
+          assetId: 'asset-abc',
+          state: {},
+          revisionOfToolId: TOOL_ID,
+        }),
+      });
+
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as {
+        error: string;
+        existing: { id: string; name: string; savedByName: string | null };
+      };
+      expect(body.error).toBe('revision_draft_exists');
+      expect(body.existing.id).toBe('draft-rev');
+      expect(body.existing.name).toBe('Mine Site SME Theory — v2');
+      expect(body.existing.savedByName).toBe('A. Admin');
+      expect(f.insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets autosave update the existing revision draft under its own name', async () => {
+    const existing = draftRow({
+      id: 'draft-rev',
+      name: 'Mine Site SME Theory — v2',
+      revisionOfToolId: TOOL_ID,
+    });
+    const f = fakeDb({ tool: TOOL, findFirst: existing, inserted: existing });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-tool-drafts`, {
+        method: 'POST',
+        headers: authHeader(),
+        body: JSON.stringify({
+          name: 'Mine Site SME Theory — v2',
+          assetId: 'asset-abc',
+          state: {},
+          revisionOfToolId: TOOL_ID,
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      expect(f.insertValues).toHaveBeenCalledWith(
+        schema.assessmentToolDrafts,
+        expect.objectContaining({ revisionOfToolId: TOOL_ID }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s a revision of a tool outside the caller’s org, writing nothing', async () => {
+    // The tool id must never act as a cross-tenant oracle: a foreign id reads
+    // exactly like a missing one, and no draft row is written that could squat
+    // the other org's one-revision-per-tool slot.
+    const f = fakeDb({ tool: undefined });
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-tool-drafts`, {
+        method: 'POST',
+        headers: authHeader(),
+        body: JSON.stringify({
+          name: 'Their tool — v2',
+          assetId: 'asset-abc',
+          state: {},
+          revisionOfToolId: '5f2b7d24-0000-4000-8000-000000000000',
+        }),
+      });
+
+      expect(res.status).toBe(404);
+      expect(f.insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s every drafts route for a role that cannot author forms', async () => {
+    // The draft state carries the complete answer key; the reads are gated
+    // exactly like the writes.
+    const f = fakeDb();
+    mockDbValue = f.db;
+    const { server, base } = startApp();
+    const headers = {
+      cookie: `fai_session=${sealSession({ userId: 'u9', orgId: 'org-1', role: 'ghost' as never })}`,
+      'content-type': 'application/json',
+    };
+    try {
+      const calls = [
+        fetch(`${base}/assessment-tool-drafts`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ name: 'X', assetId: 'a', state: {} }),
+        }),
+        fetch(`${base}/assessment-tool-drafts`, { headers }),
+        fetch(`${base}/assessment-tool-drafts/draft-1`, { headers }),
+        fetch(`${base}/assessment-tool-drafts/draft-1`, { method: 'DELETE', headers }),
+      ];
+      for (const res of await Promise.all(calls)) {
+        expect(res.status).toBe(403);
+      }
+      expect(f.insertValues).not.toHaveBeenCalled();
       expect(f.deleteWhere).not.toHaveBeenCalled();
     } finally {
       server.close();

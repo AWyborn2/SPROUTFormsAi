@@ -20,9 +20,12 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "rm -rf dist *.tsbuildinfo && tsc -p tsconfig.build.json",
+    "test": "vitest run",
     "generate": "drizzle-kit generate",
     "migrate": "drizzle-kit migrate",
-    "studio": "drizzle-kit studio"
+    "studio": "drizzle-kit studio",
+    "status": "tsx --conditions=development src/scripts/db-status.ts",
+    "baseline": "tsx --conditions=development src/scripts/db-baseline.ts"
   },
   "dependencies": {
     "@formai/shared": "workspace:*",
@@ -32,6 +35,8 @@
   "devDependencies": {
     "@types/node": "^22.10.5",
     "drizzle-kit": "^0.30.1",
-    "typescript": "^5.7.3"
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.10"
   }
 }

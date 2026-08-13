@@ -1,8 +1,9 @@
-import { relations } from 'drizzle-orm';
-import { index, jsonb, pgTable, text, timestamp, unique, uuid } from 'drizzle-orm/pg-core';
+import { relations, sql } from 'drizzle-orm';
+import { index, jsonb, pgTable, text, timestamp, unique, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 import type { BuilderDraft } from '@formai/shared';
 import { organizations, users } from './organizations.ts';
 import { formTemplates, formTemplateVersions } from './forms.ts';
+import { assessmentTools } from './assessments.ts';
 
 /**
  * An assessment tool being BUILT — the seven-step builder's working state.
@@ -63,6 +64,19 @@ export const assessmentToolDrafts = pgTable(
       onDelete: 'set null',
     }),
     /**
+     * Set when this draft REVISES a published tool rather than building a new
+     * one. At most one revision draft exists per tool (partial unique index
+     * below) — a second "start revision" is refused pointing at this one, so
+     * two authors cannot silently overwrite each other's revision work. The
+     * republish path deletes this row on success, freeing the slot.
+     *
+     * `set null` on delete: losing the tool must not delete the record of the
+     * authoring work — the draft degrades to an ordinary build draft.
+     */
+    revisionOfToolId: uuid('revision_of_tool_id').references(() => assessmentTools.id, {
+      onDelete: 'set null',
+    }),
+    /**
      * Who saved it last, not who created it. Like an import draft, this is
      * explicitly work a colleague may pick up, so the useful question on a list
      * is whose work you would be continuing.
@@ -79,6 +93,14 @@ export const assessmentToolDrafts = pgTable(
       at exactly the point somebody needs to find theirs.
     */
     unique('assessment_tool_drafts_org_name_uq').on(t.orgId, t.name),
+    /*
+      One REVISION draft per tool. Partial so ordinary build drafts (null) are
+      unlimited. The route refuses with a named 409 before this ever trips —
+      the index is the race backstop, not the mechanism.
+    */
+    uniqueIndex('assessment_tool_drafts_revision_tool_uq')
+      .on(t.revisionOfToolId)
+      .where(sql`${t.revisionOfToolId} is not null`),
     index('assessment_tool_drafts_org_idx').on(t.orgId),
   ],
 );
@@ -99,5 +121,9 @@ export const assessmentToolDraftsRelations = relations(assessmentToolDrafts, ({ 
   version: one(formTemplateVersions, {
     fields: [assessmentToolDrafts.versionId],
     references: [formTemplateVersions.id],
+  }),
+  revisionOf: one(assessmentTools, {
+    fields: [assessmentToolDrafts.revisionOfToolId],
+    references: [assessmentTools.id],
   }),
 }));

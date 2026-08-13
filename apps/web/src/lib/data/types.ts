@@ -56,6 +56,8 @@ export interface FormVersionSummary {
   publishedAt: string;
   publishedBy: string;
   note?: string;
+  /** The paper document's own revision identity — set by assessment-tool revisions. */
+  revisionIdentity?: { code?: string; reviewedOn?: string; note?: string };
 }
 
 /** Full template detail incl. the fields of the current version (builder/fill). */
@@ -799,12 +801,19 @@ export interface WorkforceImportPreview {
   };
 }
 
-/** What a completed run did — every figure derived from its recorded rows (R171). */
+/** What a run is doing, or did. A dead one reads `failed`, never `running` forever. */
+export type WorkforceImportStatus = 'running' | 'completed' | 'failed';
+
+/** What a run did — every figure derived from its recorded rows (R171). */
 export interface WorkforceImportRun {
   runId: string;
   startedAt: string;
   completedAt: string | null;
+  status: WorkforceImportStatus;
+  /** Set only on a failure: what threw, or `abandoned` for a run whose process died. */
+  failureReason: string | null;
   rowsTotal: number;
+  /** Rows actually recorded — a count, never an estimate. */
   rowsProcessed: number;
   profilesCreated: number;
   membershipsAdded: number;
@@ -894,6 +903,8 @@ export interface BuilderDraftSummary {
   step: string;
   formId: string | null;
   versionId: string | null;
+  /** Set when the draft revises a published tool — one per tool, server-enforced. */
+  revisionOfToolId: string | null;
   savedByUserId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -919,4 +930,6 @@ export interface SaveBuilderDraftInput {
   state: Record<string, unknown>;
   formId?: string | null;
   versionId?: string | null;
+  /** Set when the draft revises a published tool — the server enforces one per tool. */
+  revisionOfToolId?: string | null;
 }
