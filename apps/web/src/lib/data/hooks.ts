@@ -280,11 +280,12 @@ export function useSetSubmissionStatus() {
   screens themselves only mount for readers the nav already admits, so every
   existing call site passes nothing and keeps `enabled: true`.
 */
-export function useDashboard(options?: { enabled?: boolean }) {
+export function useDashboard(options?: { enabled?: boolean; staleTime?: number }) {
   return useQuery({
     queryKey: keys.dashboard,
     queryFn: () => store.dashboard(),
     enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
   });
 }
 
@@ -1158,20 +1159,22 @@ export function useSetLocationParts(toolId: string) {
   });
 }
 
-export function useAssessmentCases(options?: { enabled?: boolean }) {
+export function useAssessmentCases(options?: { enabled?: boolean; staleTime?: number }) {
   return useQuery({
     queryKey: keys.assessmentCases,
     queryFn: () => assessmentsApi.listCases(),
     enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
   });
 }
 
 /** The shared assessor queue — unowned cases the reader is eligible for (U13). */
-export function useAssessorQueue(options?: { enabled?: boolean }) {
+export function useAssessorQueue(options?: { enabled?: boolean; staleTime?: number }) {
   return useQuery({
     queryKey: keys.assessorQueue,
     queryFn: () => assessmentsApi.listQueue(),
     enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
   });
 }
 
@@ -1446,20 +1449,22 @@ export function useTransferRole() {
 }
 
 /** Everything waiting on an Admin, from all sources, on one list (U19). */
-export function useWorkingList(options?: { enabled?: boolean }) {
+export function useWorkingList(options?: { enabled?: boolean; staleTime?: number }) {
   return useQuery({
     queryKey: keys.workingList,
     queryFn: () => store.getWorkingList(),
     enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
   });
 }
 
 /** How the workforce stands — expired, expiring, never-held, unreachable (U20). */
-export function useComplianceReport(options?: { enabled?: boolean }) {
+export function useComplianceReport(options?: { enabled?: boolean; staleTime?: number }) {
   return useQuery({
     queryKey: keys.compliance,
     queryFn: () => store.getComplianceReport(),
     enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
   });
 }
 

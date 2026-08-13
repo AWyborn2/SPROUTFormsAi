@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { competencyCurrency, countsAsHeld } from '@formai/shared';
+import { bestCurrency, competencyCurrency, countsAsHeld } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -12,8 +12,9 @@ import { db } from '../db.js';
  * Compliance reporting (U20) — how the workforce stands, as the surface shown an
  * auditor: a REQUIRED competency expired, a required competency a holder has
  * NEVER held, a required competency EXPIRING inside the assessor planning
- * window (still current — the number that lets an Admin book a reassessment
- * before anything lapses), and a member no notification can reach.
+ * window or already IN GRACE (both still count, both need a booking — the
+ * number that lets an Admin act before anything stops counting), and a member
+ * no notification can reach.
  *
  * Only REQUIRED competencies count (R101): an optional lapse is not a compliance
  * failure (R102), so standing is read here, not currency alone. The two gaps are
@@ -131,13 +132,16 @@ complianceRouter.get(
           competencyCurrency(g, competency, now, 'assessor'),
         );
         /*
-          EXPIRING is captured before the compliant-continue swallows it:
-          `countsAsHeld` deliberately treats an expiring grant as current, so
-          without this branch the person books nowhere until they tip into
-          `expired`. Grace is not listed here — it has already lapsed and reads
-          on the record as its own urgency, not as bookable runway.
+          EXPIRING-OR-GRACE is captured before the compliant-continue swallows
+          it: `countsAsHeld` deliberately treats both as current, so without
+          this branch the person books nowhere until they tip into `expired` —
+          and somebody in grace is PAST their date, the last person this
+          surface may hide. Read off the BEST grant, not any grant: a renewal
+          leaves the superseded row in place, and flagging a renewed person on
+          the old row's date would book someone who already acted.
         */
-        if (currencies.some((c) => !c.revoked && c.status === 'expiring')) {
+        const best = bestCurrency(currencies);
+        if (best && (best.status === 'expiring' || best.status === 'grace')) {
           expiring.push(gapOf(membership.userId, competencyId, competency.name));
         }
         if (currencies.some((c) => countsAsHeld(c))) continue; // compliant

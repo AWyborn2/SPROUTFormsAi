@@ -237,6 +237,57 @@ export function countsAsHeld(currency: CompetencyCurrency): boolean {
   return status === 'held' || status === 'expiring' || status === 'grace' || status === 'undated';
 }
 
+/*
+  Strongest first. A person can hold SEVERAL grants of one competency — a
+  renewal leaves the superseded grant in place (history is state, never a
+  delete) — and any surface that reads the grants one by one flags a renewed
+  person as lapsed on the strength of the old row. The person's standing on a
+  competency is their BEST grant, resolved here once.
+*/
+const CURRENCY_RANK: Record<CompetencyStatus, number> = {
+  undated: 5,
+  held: 4,
+  expiring: 3,
+  grace: 2,
+  expired: 1,
+};
+
+/**
+ * The strongest non-revoked grant among a person's grants of ONE competency,
+ * or null when nothing confers anything (no grants, or revoked only).
+ *
+ * This is the renewal rule: an old expired grant beside a fresh held one reads
+ * as held — the person renewed, and no oversight surface should book them.
+ */
+export function bestCurrency(
+  currencies: readonly CompetencyCurrency[],
+): CompetencyCurrency | null {
+  let best: CompetencyCurrency | null = null;
+  for (const c of currencies) {
+    if (c.revoked) continue;
+    if (!best || CURRENCY_RANK[c.status] > CURRENCY_RANK[best.status]) best = c;
+  }
+  return best;
+}
+
+/**
+ * Whether a person's grants of one competency put it on an oversight surface's
+ * attention list: the BEST grant is expiring, in grace, or expired.
+ *
+ * Reads the best grant, not any grant, so a renewal clears the flag (the
+ * superseded row stays for the audit trail and must not keep the person
+ * listed). Expiring and grace overlap with `countsAsHeld` on purpose — those
+ * states are simultaneously valid and urgent, which is exactly what an
+ * attention list exists to say.
+ */
+export function needsAttention(currencies: readonly CompetencyCurrency[]): boolean {
+  const best = bestCurrency(currencies);
+  return (
+    best !== null &&
+    (best.status === 'expiring' || best.status === 'grace' || best.status === 'expired')
+  );
+}
+
 /**
  * A competency's validity, as an admin reads it in a list.
  *

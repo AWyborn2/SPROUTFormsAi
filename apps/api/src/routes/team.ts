@@ -7,8 +7,10 @@ import {
   DEFAULT_ROLE_PERMISSIONS,
   PERMISSION_CATEGORIES,
   ROLES,
+  bestCurrency,
   competencyCurrency,
   countsAsHeld,
+  needsAttention,
   type PermissionMatrix,
   type Role,
 } from '@formai/shared';
@@ -25,6 +27,7 @@ import { recordExpansion, seatOrExpand, type SeatExpansion } from '../lib/seat-b
 import { readPlacement, writePlacement } from '../lib/membership-placement.js';
 import { assignForMembership } from '../lib/assignment.js';
 import { identifyMember, loadDisplayIdentities } from '../lib/display-identity.js';
+import { profileTierOrg } from '../lib/profile-access.js';
 import { deactivateMember, reactivateMember } from '../lib/deactivation.js';
 import { db } from '../db.js';
 
@@ -102,23 +105,36 @@ teamRouter.get(
     const identities = await loadDisplayIdentities(db, tenant.orgId, userIds);
 
     /*
-      Competency counts ride the SAME grant the record's competency section
-      uses: `profiles.view_competencies` at org scope (KTD4). Below that scope
-      the field is null and the web renders no column — the roster must not
-      leak through a chip what the record withholds. Batched: the standing
-      resolver takes every userId at once, then one holders read and one
-      competencies read cover the lot (R2 — never a per-member lookup).
+      Competency counts ride the SAME two gates the record's competency section
+      resolves: the plan tier that carries profiles at all, AND
+      `profiles.view_competencies` at org scope (KTD4). The tier half matters as
+      much as the matrix half — every dedicated competency surface refuses an
+      organisation below the assessments tier, and the roster must not become
+      the one read that leaks the same derived data past that boundary. Below
+      either gate the field is null and the web renders no column.
+
+      Batched: the standing resolver takes every userId at once, then one
+      holders read and one competencies read cover the lot (R2 — never a
+      per-member lookup). Inputs are ACTIVE members only — a suspended row's
+      counts are nulled in the response, so computing them would be waste.
     */
+    const activeUserIds = [
+      ...new Set(memberships.filter((m) => m.status === 'active').map((m) => m.userId)),
+    ];
     const countsScope = await permissionScope(tenant, 'profiles', 'view_competencies');
+    const tierOrg =
+      countsScope === 'all' && activeUserIds.length > 0
+        ? await profileTierOrg(db, tenant.orgId)
+        : null;
     let countsByUser: Map<string, MemberCompetencyCounts> | null = null;
-    if (countsScope === 'all' && userIds.length > 0) {
-      const requiredByUser = await requiredCompetencyIdsByUser(db, tenant.orgId, userIds);
+    if (countsScope === 'all' && tierOrg && activeUserIds.length > 0) {
+      const requiredByUser = await requiredCompetencyIdsByUser(db, tenant.orgId, activeUserIds);
       // The eligibility read: a revoked grant confers nothing, so it is
       // filtered here rather than carried and re-checked per status.
       const holders = await db.query.competencyHolders.findMany({
         where: and(
           eq(schema.competencyHolders.orgId, tenant.orgId),
-          inArray(schema.competencyHolders.userId, userIds),
+          inArray(schema.competencyHolders.userId, activeUserIds),
           isNull(schema.competencyHolders.revokedAt),
         ),
       });
@@ -144,7 +160,7 @@ teamRouter.get(
       // what "today" is.
       const now = new Date();
       countsByUser = new Map();
-      for (const userId of new Set(userIds)) {
+      for (const userId of activeUserIds) {
         const required = requiredByUser.get(userId) ?? new Set<string>();
         const grants = grantsByUser.get(userId) ?? [];
         // Currency per held competency, via the ONE shared derivation (R13).
@@ -156,25 +172,28 @@ teamRouter.get(
           currenciesByCompetency.set(g.competencyId, list);
         }
 
+        /*
+          Per competency, the person's standing is their BEST grant
+          (`bestCurrency`) — a renewal leaves the superseded grant in place,
+          and reading grants one by one would flag a renewed person forever on
+          the strength of the old row. Eligibility and urgency still overlap on
+          purpose: an expiring required competency is simultaneously valid and
+          flagged (KTD5).
+        */
         let requiredCurrent = 0;
         let requiredAttention = 0;
         for (const competencyId of required) {
           const currencies = currenciesByCompetency.get(competencyId) ?? [];
-          // Eligibility and urgency overlap on purpose: an expiring required
-          // competency is simultaneously valid and flagged (KTD5).
-          if (currencies.some((c) => countsAsHeld(c))) requiredCurrent += 1;
-          if (currencies.some((c) => c.status === 'expiring' || c.status === 'grace' || c.status === 'expired')) {
-            requiredAttention += 1;
-          }
+          const best = bestCurrency(currencies);
+          if (best && countsAsHeld(best)) requiredCurrent += 1;
+          if (needsAttention(currencies)) requiredAttention += 1;
         }
 
         let optionalLapsed = 0;
         for (const [competencyId, currencies] of currenciesByCompetency) {
           if (required.has(competencyId)) continue;
-          // A genuine lapse only: some grant expired AND none still counts.
-          if (!currencies.some((c) => countsAsHeld(c)) && currencies.some((c) => c.status === 'expired')) {
-            optionalLapsed += 1;
-          }
+          // A genuine lapse only: the best grant has fully expired.
+          if (bestCurrency(currencies)?.status === 'expired') optionalLapsed += 1;
         }
 
         countsByUser.set(userId, { requiredCurrent, requiredAttention, optionalLapsed });

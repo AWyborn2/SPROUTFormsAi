@@ -149,7 +149,10 @@ export function TeamScreen() {
           <span className="flex-1">Member</span>
           <span className="w-[170px]">Access level</span>
           <span className="w-24">Status</span>
-          <span className="w-[34px]" />
+          {/* Mirrors the body row's counts and action slots so the labels sit
+              over the columns they name. */}
+          <span className="w-[170px]">Competencies</span>
+          <span className="w-[98px]" />
         </div>
         {members.map((m) => (
           <MemberRow
@@ -390,7 +393,12 @@ function MemberRow({
             title="Open this member's record"
             className="fai-chip-btn inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 hover:bg-surface-hover"
           >
-            <Badge variant="success">{member.counts.requiredCurrent} current</Badge>
+            {/* Zero is "nothing measured", not "all clear" — a green badge on a
+                person whose Roles require nothing would assert compliance
+                nobody checked. */}
+            <Badge variant={member.counts.requiredCurrent > 0 ? 'success' : 'neutral'}>
+              {member.counts.requiredCurrent} current
+            </Badge>
             {member.counts.requiredAttention > 0 && (
               <Badge variant="warning">{member.counts.requiredAttention} due</Badge>
             )}

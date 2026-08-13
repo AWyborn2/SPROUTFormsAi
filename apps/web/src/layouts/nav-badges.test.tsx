@@ -33,7 +33,9 @@ vi.mock('../lib/data/hooks.js', () => ({
   },
 }));
 
-const { badgeLabel, NavCountPill, useNavBadgeCounts } = await import('./nav-badges.js');
+const { badgeFor, badgeLabel, groupRollup, NavCountPill, useNavBadgeCounts } = await import(
+  './nav-badges.js'
+);
 
 const ALL_KEYS = new Set(['assessment-queue', 'working-list', 'submissions']);
 
@@ -105,5 +107,29 @@ describe('useNavBadgeCounts — fetch gating (R5–R7)', () => {
   it('reports null (not zero) while a count is unknown, so no badge flashes a 0', () => {
     const { result } = renderHook(() => useNavBadgeCounts(ALL_KEYS, 'assessor'));
     expect(result.current['assessment-queue']).toBeNull();
+  });
+});
+
+describe('badgeFor and groupRollup — the shell wiring (R5–R7, R9)', () => {
+  const counts = { 'assessment-queue': 3, 'working-list': 2, submissions: 5 } as const;
+
+  it('answers only for badged keys — an unbadged entry never grows a pill', () => {
+    expect(badgeFor(counts, 'assessment-queue')).toBe(3);
+    expect(badgeFor(counts, 'compliance')).toBeNull();
+    expect(badgeFor(undefined, 'assessment-queue')).toBeNull();
+  });
+
+  it('sums a collapsed group across ONLY its badged children', () => {
+    // The Training group holds compliance (unbadged), assessments (unbadged)
+    // and the queue — the rollup is the queue's 3, nothing invented.
+    expect(groupRollup(counts, ['compliance', 'assessments', 'assessment-queue'])).toBe(3);
+    // The Settings group's only badged child is the working list.
+    expect(groupRollup(counts, ['team', 'working-list', 'billing'])).toBe(2);
+  });
+
+  it('rolls unknown counts up as zero rather than poisoning the sum', () => {
+    const partial = { 'assessment-queue': null, 'working-list': 4, submissions: null };
+    expect(groupRollup(partial, ['assessment-queue', 'working-list'])).toBe(4);
+    expect(groupRollup(undefined, ['assessment-queue'])).toBe(0);
   });
 });

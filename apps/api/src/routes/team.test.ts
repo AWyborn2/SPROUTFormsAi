@@ -218,6 +218,8 @@ describe('GET /team/members', () => {
     mockDbValue = fakeDb({
       membershipsFindMany: [{ id: 'm1', userId: 'u1', role: 'admin', status: 'active' }],
       usersFindMany: [{ id: 'u1', name: 'Ash Wyborn', email: 'ash@x.io' }],
+      // Counts require the tier that carries profiles (same gate as the record).
+      organizationsFindFirst: { id: 'org-1', planTier: 'enterprise' },
     }).db;
 
     const { server, base } = startApp();
@@ -335,6 +337,7 @@ describe('GET /team/members', () => {
       membershipsFindMany: [{ id: 'm1', userId: 'u1', role: 'admin', status: 'active' }],
       usersFindMany: [{ id: 'u1', name: 'Ash Wyborn', email: 'ash@x.io' }],
       invitesFindMany: [{ id: 'inv-1', email: 'sam.lee@x.io', role: 'builder', acceptedAt: null }],
+      organizationsFindFirst: { id: 'org-1', planTier: 'enterprise' },
     }).db;
 
     const { server, base } = startApp();
@@ -375,6 +378,7 @@ describe('GET /team/members', () => {
       assessmentToolsFindMany: [
         { id: 't1', orgId: 'org-1', awardedCompetencyIds: ['c-ok', 'c-exp'] },
       ],
+      organizationsFindFirst: { id: 'org-1', planTier: 'enterprise' },
       ...over,
     });
   }
@@ -419,6 +423,84 @@ describe('GET /team/members', () => {
       const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
       const [row] = (await res.json()) as Array<{ counts: unknown }>;
       expect(row!.counts).toEqual({ requiredCurrent: 1, requiredAttention: 1, optionalLapsed: 0 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('counts a grace-period REQUIRED competency as current AND needing attention', async () => {
+    // Past its date but inside grace: still counts, urgently bookable — the
+    // same reading the compliance report's expiring bucket now gives it.
+    mockDbValue = countsFixture({
+      assessmentToolsFindMany: [{ id: 't1', orgId: 'org-1', awardedCompetencyIds: ['c-grace'] }],
+      competencyHoldersFindMany: [
+        { userId: 'u9', competencyId: 'c-grace', grantedAt: daysAgo(400), expiresAt: daysAgo(5), revokedAt: null },
+      ],
+      competenciesFindMany: [
+        { id: 'c-grace', orgId: 'org-1', name: 'Working at Heights', gracePeriodDays: 90 },
+      ],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
+      const [row] = (await res.json()) as Array<{ counts: unknown }>;
+      expect(row!.counts).toEqual({ requiredCurrent: 1, requiredAttention: 1, optionalLapsed: 0 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not flag a renewed required competency — the best grant decides', async () => {
+    // The superseded grant stays for history; only the renewal's currency counts.
+    mockDbValue = countsFixture({
+      assessmentToolsFindMany: [{ id: 't1', orgId: 'org-1', awardedCompetencyIds: ['c-ok'] }],
+      competencyHoldersFindMany: [
+        { userId: 'u9', competencyId: 'c-ok', grantedAt: daysAgo(1200), expiresAt: daysAgo(100), revokedAt: null },
+        { userId: 'u9', competencyId: 'c-ok', grantedAt: daysAgo(50), expiresAt: daysAhead(1000), revokedAt: null },
+      ],
+      competenciesFindMany: [{ id: 'c-ok', orgId: 'org-1', name: 'Dozer' }],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
+      const [row] = (await res.json()) as Array<{ counts: unknown }>;
+      expect(row!.counts).toEqual({ requiredCurrent: 1, requiredAttention: 0, optionalLapsed: 0 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('serves counts to an assessor — the widest default reader of the field', async () => {
+    const assessorTenant = { userId: 'u5', orgId: 'org-1', role: 'assessor' as const };
+    mockDbValue = countsFixture().db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(assessorTenant) });
+      expect(res.status).toBe(200);
+      const [row] = (await res.json()) as Array<{ counts: unknown }>;
+      expect(row!.counts).toEqual({ requiredCurrent: 0, requiredAttention: 0, optionalLapsed: 0 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('nulls counts for an org below the assessments tier — the roster must not outleak the record', async () => {
+    // Every dedicated competency surface refuses this org; the roster field
+    // carries the same tier gate, and only the counts disappear — the roster
+    // itself still serves.
+    mockDbValue = countsFixture({
+      organizationsFindFirst: { id: 'org-1', planTier: 'free' },
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
+      expect(res.status).toBe(200);
+      const [row] = (await res.json()) as Array<{ counts: unknown }>;
+      expect(row!.counts).toBeNull();
     } finally {
       server.close();
     }

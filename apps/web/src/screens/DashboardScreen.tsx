@@ -40,6 +40,49 @@ function firstNameOf(session: SessionInfo): string {
 }
 
 /**
+ * The one stat-card shape every dashboard uses. Static by default; passing
+ * `onClick` makes it a button with the interactive affordances (lift, pointer,
+ * trailing chevron) that distinguish "click me" cards from the plain counts
+ * that share their silhouette.
+ */
+function StatCard({
+  label,
+  icon,
+  iconColor,
+  value,
+  onClick,
+}: {
+  label: string;
+  icon: string;
+  iconColor: string;
+  value: number | string;
+  onClick?: () => void;
+}) {
+  const inner = (
+    <>
+      <div className="mb-3 flex items-center justify-between">
+        <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">
+          {label}
+        </span>
+        <Icon name={icon} size={16} color={iconColor} />
+      </div>
+      <div className="flex items-center justify-between">
+        <span className="font-heading text-[30px] font-bold tracking-tight">{value}</span>
+        {onClick && <Icon name="chevron-right" size={16} className="text-text-tertiary" />}
+      </div>
+    </>
+  );
+  const shell = 'rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs';
+  return onClick ? (
+    <button onClick={onClick} className={`fai-lift cursor-pointer text-left hover:shadow-md ${shell}`}>
+      {inner}
+    </button>
+  ) : (
+    <div className={shell}>{inner}</div>
+  );
+}
+
+/**
  * The candidate's day: what they hold, what is lapsing, and what is waiting on
  * them — the same three answers their record gives, surfaced on landing.
  */
@@ -75,13 +118,7 @@ function CandidateDashboard({ session }: { session: SessionInfo }) {
 
       <div className="mb-[22px] grid grid-cols-1 gap-4 sm:grid-cols-3">
         {stats.map((s) => (
-          <div key={s.label} className="rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs">
-            <div className="mb-3 flex items-center justify-between">
-              <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">{s.label}</span>
-              <Icon name={s.icon} size={16} color={s.iconColor} />
-            </div>
-            <div className="font-heading text-[30px] font-bold tracking-tight">{s.value}</div>
-          </div>
+          <StatCard key={s.label} {...s} />
         ))}
       </div>
 
@@ -179,13 +216,7 @@ function AssessorDashboard({ session }: { session: SessionInfo }) {
 
       <div className="mb-[22px] grid grid-cols-1 gap-4 sm:grid-cols-3">
         {stats.map((s) => (
-          <div key={s.label} className="rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs">
-            <div className="mb-3 flex items-center justify-between">
-              <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">{s.label}</span>
-              <Icon name={s.icon} size={16} color={s.iconColor} />
-            </div>
-            <div className="font-heading text-[30px] font-bold tracking-tight">{s.value}</div>
-          </div>
+          <StatCard key={s.label} {...s} />
         ))}
       </div>
 
@@ -241,19 +272,22 @@ function WorkspaceDashboard() {
   const showTile =
     (session?.role === 'admin' || session?.role === 'owner') &&
     session?.features?.assessments === true;
-  const compliance = useComplianceReport({ enabled: showTile });
-  const cases = useAssessmentCases({ enabled: showTile });
-  const working = useWorkingList({ enabled: showTile });
+  const TILE_STALE_MS = 5 * 60 * 1000;
+  const compliance = useComplianceReport({ enabled: showTile, staleTime: TILE_STALE_MS });
+  const cases = useAssessmentCases({ enabled: showTile, staleTime: TILE_STALE_MS });
+  const working = useWorkingList({ enabled: showTile, staleTime: TILE_STALE_MS });
   const tile = showTile
     ? complianceTileCounts(compliance.data, cases.data, working.data)
     : null;
+  const tileErrored =
+    showTile && !tile && (compliance.isError || cases.isError || working.isError);
 
   if (forms.length === 0 || !dash) {
     return (
       <div>
-        {tile && (
+        {(tile || tileErrored) && (
           <div className="mx-auto max-w-[1120px] px-[28px] pt-[30px]">
-            <ComplianceTile counts={tile} navigate={navigate} />
+            {tile ? <ComplianceTile counts={tile} navigate={navigate} /> : <ComplianceTileError />}
           </div>
         )}
         <EmptyDashboard orgName={orgName} navigate={navigate} />
@@ -292,24 +326,13 @@ function WorkspaceDashboard() {
       {/* Stat cards */}
       <div className="mb-[22px] grid grid-cols-1 gap-4 sm:grid-cols-3">
         {stats.map((s) => (
-          <div
-            key={s.label}
-            className="rounded-lg border border-border bg-surface-card p-[18px_20px] shadow-xs"
-          >
-            <div className="mb-3 flex items-center justify-between">
-              <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">
-                {s.label}
-              </span>
-              <Icon name={s.icon} size={16} color={s.iconColor} />
-            </div>
-            <div className="font-heading text-[30px] font-bold tracking-tight">{s.value}</div>
-          </div>
+          <StatCard key={s.label} {...s} />
         ))}
       </div>
 
-      {tile && (
+      {(tile || tileErrored) && (
         <div className="mb-[22px]">
-          <ComplianceTile counts={tile} navigate={navigate} />
+          {tile ? <ComplianceTile counts={tile} navigate={navigate} /> : <ComplianceTileError />}
         </div>
       )}
 
@@ -413,7 +436,9 @@ function ComplianceTile({
 }) {
   const cards = [
     {
-      label: 'Expiring within 90 days',
+      // Grace included: past the date but still counting is the most urgent
+      // booking of all, and the compliance read files it in the same bucket.
+      label: 'Expiring or in grace',
       icon: 'calendar-clock',
       iconColor: 'var(--warning)',
       value: counts.expiringMembers,
@@ -449,24 +474,31 @@ function ComplianceTile({
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {cards.map((c) => (
-          <button
+          <StatCard
             key={c.label}
+            label={c.label}
+            icon={c.icon}
+            iconColor={c.iconColor}
+            value={c.value}
             onClick={() => navigate(c.to)}
-            className="fai-lift cursor-pointer rounded-lg border border-border bg-surface-card p-[18px_20px] text-left shadow-xs hover:shadow-md"
-          >
-            <div className="mb-3 flex items-center justify-between">
-              <span className="font-mono text-[11px] uppercase tracking-wide text-text-tertiary">
-                {c.label}
-              </span>
-              <Icon name={c.icon} size={16} color={c.iconColor} />
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="font-heading text-[30px] font-bold tracking-tight">{c.value}</span>
-              <Icon name="chevron-right" size={16} className="text-text-tertiary" />
-            </div>
-          </button>
+          />
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Absence must not be ambiguous. The tile disappears for a reader it does not
+ * apply to — but for an eligible admin whose reads FAILED, the same absence
+ * would silently hide the numbers they steer by (`retry: false` means nothing
+ * re-fires while they stay on the page). One quiet line names the difference.
+ */
+function ComplianceTileError() {
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-card p-4 text-[12.5px] text-text-tertiary">
+      <Icon name="alert-triangle" size={14} className="text-warning" />
+      Workforce compliance numbers couldn&rsquo;t load — refresh to retry.
     </div>
   );
 }

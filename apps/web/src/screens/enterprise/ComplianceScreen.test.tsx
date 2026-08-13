@@ -71,7 +71,7 @@ describe('ComplianceScreen (U20)', () => {
       expiring: [{ userId: 'u3', name: 'Ada Fitter', competencyId: 'c3', competencyName: 'Working at Heights' }],
     };
     render(<ComplianceScreen />);
-    expect(screen.getByText('Required competencies expiring soon')).toBeDefined();
+    expect(screen.getByText('Required competencies expiring or in grace')).toBeDefined();
     expect(screen.getByText('Ada Fitter')).toBeDefined();
   });
 
@@ -83,13 +83,30 @@ describe('ComplianceScreen (U20)', () => {
       expired: [{ userId: 'u1', name: 'Bo Worker', competencyId: 'c1', competencyName: 'Track Dozer' }],
     };
     render(<ComplianceScreen />);
-    expect(screen.getByText('Required competencies expiring soon')).toBeDefined();
+    expect(screen.getByText('Required competencies expiring or in grace')).toBeDefined();
     // The other sections are hidden, not rendered-and-empty.
     expect(screen.queryByText('Required competencies expired')).toBeNull();
     expect(screen.queryByText('Optional lapses')).toBeNull();
 
     fireEvent.click(screen.getByText('Show full report'));
-    expect(setSearchParams).toHaveBeenCalled();
+    // The exact call matters: clearing the wrong param or dropping `replace`
+    // would leave the narrow view sticky or pollute browser history.
+    expect(setSearchParams).toHaveBeenCalledWith({}, { replace: true });
+  });
+
+  it('leads the expiry sections with the PEOPLE count the dashboard tile shows', () => {
+    // Ada holds two lapsing tickets, Bo one: the tile says 2, so this header
+    // must not silently say 3 — it says both numbers.
+    report.data = {
+      ...EMPTY,
+      expiring: [
+        { userId: 'u1', name: 'Ada Fitter', competencyId: 'c1', competencyName: 'Heights' },
+        { userId: 'u1', name: 'Ada Fitter', competencyId: 'c2', competencyName: 'Dozer' },
+        { userId: 'u2', name: 'Bo Worker', competencyId: 'c1', competencyName: 'Heights' },
+      ],
+    };
+    render(<ComplianceScreen />);
+    expect(screen.getByText('2 people · 3 tickets')).toBeDefined();
   });
 
   it('ignores an unknown status param rather than rendering a blank page', () => {

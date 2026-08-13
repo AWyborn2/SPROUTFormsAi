@@ -35,7 +35,8 @@ export function ComplianceScreen() {
       {focus && (
         <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface-card px-4 py-2.5">
           <span className="text-[12.5px] text-text-secondary">
-            Showing {focus === 'expired' ? 'expired' : 'expiring'} required competencies only.
+            Showing {focus === 'expired' ? 'expired' : 'expiring or in-grace'} required competencies
+            only.
           </span>
           <button
             onClick={() => setSearchParams({}, { replace: true })}
@@ -56,15 +57,17 @@ export function ComplianceScreen() {
               hint="A ticket a Role requires has lapsed on its date — book a refresher."
               gaps={report.expired}
               icon="clock-alert"
+              countPeople
             />
           )}
           {(!focus || focus === 'expiring') && (
             <GapSection
-              title="Required competencies expiring soon"
-              hint="Still current, but inside the 90-day planning window — book the reassessment now."
+              title="Required competencies expiring or in grace"
+              hint="Still counting, but the clock is running — inside the 90-day window or already past the date in grace. Book the reassessment now."
               gaps={report.expiring}
               icon="calendar-clock"
               tone="warning"
+              countPeople
             />
           )}
           {!focus && (
@@ -136,13 +139,22 @@ function GapSection({
   icon,
   /** Expiring is runway, not failure — it warns where the others alarm. */
   tone = 'danger',
+  /*
+    The dashboard tile counts PEOPLE (one person with two lapsing tickets is
+    one person to book), so the sections its cards land on must lead with the
+    same number — a click that shows different arithmetic than the card gets
+    questioned, and this is an auditor-facing page.
+  */
+  countPeople = false,
 }: {
   title: string;
   hint: string;
   gaps: ComplianceGap[];
   icon: string;
   tone?: 'danger' | 'warning';
+  countPeople?: boolean;
 }) {
+  const people = new Set(gaps.map((g) => g.userId)).size;
   return (
     <Card className="p-5">
       <div className="flex items-center justify-between gap-3">
@@ -160,7 +172,11 @@ function GapSection({
           />
           <h3 className="font-ui text-sm font-semibold">{title}</h3>
         </div>
-        <span className="text-[13px] font-semibold tabular-nums">{gaps.length}</span>
+        <span className="text-[13px] font-semibold tabular-nums">
+          {!countPeople || people === gaps.length
+            ? gaps.length
+            : `${people} people · ${gaps.length} tickets`}
+        </span>
       </div>
       <p className="mt-1 text-[12px] text-text-tertiary">{hint}</p>
       {gaps.length > 0 && (

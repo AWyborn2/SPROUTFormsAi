@@ -12,6 +12,8 @@ import { AccountMenu } from '../components/AccountMenu.js';
 import { FinishBrandingBanner } from '../components/FinishBrandingBanner.js';
 import {
   BADGE_CONTEXT,
+  badgeFor,
+  groupRollup,
   NavCountPill,
   useNavBadgeCounts,
   type NavBadgeCounts,
@@ -167,16 +169,6 @@ export function AppShell() {
   );
 }
 
-/** The keys that carry a count badge, in nav order. */
-const BADGED_KEYS = ['assessment-queue', 'working-list', 'submissions'] as const;
-
-function badgeFor(counts: NavBadgeCounts | undefined, key: string): number | null {
-  if (!counts) return null;
-  return (BADGED_KEYS as readonly string[]).includes(key)
-    ? counts[key as keyof NavBadgeCounts]
-    : null;
-}
-
 function NavItem({
   screen,
   nested = false,
@@ -250,16 +242,9 @@ function NavGroup({
     (s) => pathname === s.path || pathname.startsWith(`${s.path}/`),
   );
   const open = override ?? containsActive;
-  /*
-    The rolled-up count: badged children live INSIDE this collapsible group, so
-    while it is closed their pills do not exist — without this sum on the
-    header, two of the three badges would be invisible in the sidebar's default
-    state, which defeats the reason badges exist.
-  */
-  const rollup = section.screens.reduce(
-    (sum, s) => sum + (badgeFor(badgeCounts, s.key) ?? 0),
-    0,
-  );
+  // Badged children live INSIDE this collapsible group — while it is closed
+  // their pills do not exist, so the header carries their sum (see groupRollup).
+  const rollup = groupRollup(badgeCounts, section.screens.map((s) => s.key));
 
   function toggle() {
     const next = !open;
