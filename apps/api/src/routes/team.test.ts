@@ -55,6 +55,12 @@ function fakeDb(opts: {
   invitesFindMany?: unknown[];
   /** Profiles backing the live display-identifier read (R24). Default: none. */
   memberProfilesFindMany?: unknown[];
+  /** The competency-counts inputs (oversight round). All default empty. */
+  membershipRolesFindMany?: unknown[];
+  roleRequiredAssessmentsFindMany?: unknown[];
+  assessmentToolsFindMany?: unknown[];
+  competencyHoldersFindMany?: unknown[];
+  competenciesFindMany?: unknown[];
   /** Cases in flight that deactivation invalidates (R71). */
   openCases?: unknown[];
   /** Throw from the `invites` insert — the pending-invite unique violation. */
@@ -128,6 +134,17 @@ function fakeDb(opts: {
     assessmentCases: {
       findMany: vi.fn().mockResolvedValue(opts.openCases ?? []),
     },
+    // The counts read: standing resolver inputs plus grants. Empty by default,
+    // which computes zero counts for every active member.
+    membershipRoles: { findMany: vi.fn().mockResolvedValue(opts.membershipRolesFindMany ?? []) },
+    roleRequiredAssessments: {
+      findMany: vi.fn().mockResolvedValue(opts.roleRequiredAssessmentsFindMany ?? []),
+    },
+    assessmentTools: { findMany: vi.fn().mockResolvedValue(opts.assessmentToolsFindMany ?? []) },
+    competencyHolders: {
+      findMany: vi.fn().mockResolvedValue(opts.competencyHoldersFindMany ?? []),
+    },
+    competencies: { findMany: vi.fn().mockResolvedValue(opts.competenciesFindMany ?? []) },
   };
 
   const makeSurface = (on: 'root' | 'tx') => ({
@@ -212,7 +229,18 @@ describe('GET /team/members', () => {
       // list keeps working through the state every org is in before its
       // workforce is entered.
       expect(body).toEqual([
-        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', identifier: null, email: 'ash@x.io', role: 'admin', status: 'active' },
+        {
+          id: 'm1',
+          userId: 'u1',
+          name: 'Ash Wyborn',
+          identifier: null,
+          email: 'ash@x.io',
+          role: 'admin',
+          status: 'active',
+          // Zeros, not null: the admin caller may read counts; this member
+          // simply holds nothing yet.
+          counts: { requiredCurrent: 0, requiredAttention: 0, optionalLapsed: 0 },
+        },
       ]);
     } finally {
       server.close();
@@ -316,9 +344,154 @@ describe('GET /team/members', () => {
       // The invitee has no user row yet — the name is derived from the address
       // the inviter typed, and `status` is what marks them as not-yet-joined.
       expect(await res.json()).toEqual([
-        { id: 'm1', userId: 'u1', name: 'Ash Wyborn', identifier: null, email: 'ash@x.io', role: 'admin', status: 'active' },
-        { id: 'inv-1', userId: null, name: 'Sam Lee', identifier: null, email: 'sam.lee@x.io', role: 'builder', status: 'invited' },
+        {
+          id: 'm1',
+          userId: 'u1',
+          name: 'Ash Wyborn',
+          identifier: null,
+          email: 'ash@x.io',
+          role: 'admin',
+          status: 'active',
+          counts: { requiredCurrent: 0, requiredAttention: 0, optionalLapsed: 0 },
+        },
+        // A pending invite has nobody to hold anything — counts stay null.
+        { id: 'inv-1', userId: null, name: 'Sam Lee', identifier: null, email: 'sam.lee@x.io', role: 'builder', status: 'invited', counts: null },
       ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
+  const daysAhead = (n: number) => new Date(Date.now() + n * 86_400_000);
+
+  /** One member whose Role requires a tool awarding the given competency ids. */
+  function countsFixture(over: Parameters<typeof fakeDb>[0] = {}) {
+    return fakeDb({
+      membershipsFindMany: [{ id: 'm1', userId: 'u9', role: 'candidate', status: 'active' }],
+      usersFindMany: [{ id: 'u9', name: 'Bo Worker', email: 'bo@x.io' }],
+      membershipRolesFindMany: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
+      roleRequiredAssessmentsFindMany: [{ orgId: 'org-1', roleId: 'r1', toolId: 't1' }],
+      assessmentToolsFindMany: [
+        { id: 't1', orgId: 'org-1', awardedCompetencyIds: ['c-ok', 'c-exp'] },
+      ],
+      ...over,
+    });
+  }
+
+  it('computes required-vs-optional counts per member in one batched read (AE1, R1, R2)', async () => {
+    // 2 required (1 current, 1 expired) + 1 optional fully expired.
+    mockDbValue = countsFixture({
+      competencyHoldersFindMany: [
+        { userId: 'u9', competencyId: 'c-ok', grantedAt: daysAgo(100), expiresAt: daysAhead(400), revokedAt: null },
+        { userId: 'u9', competencyId: 'c-exp', grantedAt: daysAgo(400), expiresAt: daysAgo(10), revokedAt: null },
+        { userId: 'u9', competencyId: 'c-opt', grantedAt: daysAgo(400), expiresAt: daysAgo(10), revokedAt: null },
+      ],
+      competenciesFindMany: [
+        { id: 'c-ok', orgId: 'org-1', name: 'Dozer' },
+        { id: 'c-exp', orgId: 'org-1', name: 'Heights' },
+        { id: 'c-opt', orgId: 'org-1', name: 'First Aid' },
+      ],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
+      const [row] = (await res.json()) as Array<{ counts: unknown }>;
+      // The lapsed optional never colours the flag — it stays its own number.
+      expect(row!.counts).toEqual({ requiredCurrent: 1, requiredAttention: 1, optionalLapsed: 1 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('counts an expiring required competency as current AND needing attention (KTD5)', async () => {
+    mockDbValue = countsFixture({
+      assessmentToolsFindMany: [{ id: 't1', orgId: 'org-1', awardedCompetencyIds: ['c-soon'] }],
+      competencyHoldersFindMany: [
+        { userId: 'u9', competencyId: 'c-soon', grantedAt: daysAgo(100), expiresAt: daysAhead(40), revokedAt: null },
+      ],
+      competenciesFindMany: [{ id: 'c-soon', orgId: 'org-1', name: 'Working at Heights' }],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
+      const [row] = (await res.json()) as Array<{ counts: unknown }>;
+      expect(row!.counts).toEqual({ requiredCurrent: 1, requiredAttention: 1, optionalLapsed: 0 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('does not count a grace-period optional as lapsed — grace still counts as current', async () => {
+    mockDbValue = countsFixture({
+      assessmentToolsFindMany: [{ id: 't1', orgId: 'org-1', awardedCompetencyIds: [] }],
+      competencyHoldersFindMany: [
+        { userId: 'u9', competencyId: 'c-opt', grantedAt: daysAgo(400), expiresAt: daysAgo(5), revokedAt: null },
+      ],
+      competenciesFindMany: [
+        { id: 'c-opt', orgId: 'org-1', name: 'First Aid', gracePeriodDays: 90 },
+      ],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
+      const [row] = (await res.json()) as Array<{ counts: unknown }>;
+      expect(row!.counts).toEqual({ requiredCurrent: 0, requiredAttention: 0, optionalLapsed: 0 });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('nulls counts for a caller whose view_competencies scope is not org-wide (R4)', async () => {
+    // Builder holds team.view but not profiles.view_competencies — the roster
+    // renders, the counts column does not.
+    const builderTenant = { userId: 'u3', orgId: 'org-1', role: 'builder' as const };
+    mockDbValue = countsFixture().db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(builderTenant) });
+      expect(res.status).toBe(200);
+      const [row] = (await res.json()) as Array<{ counts: unknown }>;
+      expect(row!.counts).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('nulls counts on a non-active member row rather than flagging somebody who left', async () => {
+    mockDbValue = countsFixture({
+      membershipsFindMany: [
+        { id: 'm1', userId: 'u9', role: 'candidate', status: 'active' },
+        { id: 'm2', userId: 'u10', role: 'candidate', status: 'suspended' },
+      ],
+      usersFindMany: [
+        { id: 'u9', name: 'Bo Worker', email: 'bo@x.io' },
+        { id: 'u10', name: 'Gone Worker', email: 'gone@x.io' },
+      ],
+    }).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(adminTenant) });
+      const rows = (await res.json()) as Array<{ id: string; counts: unknown }>;
+      expect(rows.find((r) => r.id === 'm1')!.counts).toEqual({ requiredCurrent: 0, requiredAttention: 0, optionalLapsed: 0 });
+      expect(rows.find((r) => r.id === 'm2')!.counts).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s the roster for a role without team.view — the list is every member’s name and address', async () => {
+    mockDbValue = fakeDb({}).db;
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/team/members`, { headers: authHeader(viewerTenant) });
+      expect(res.status).toBe(403);
     } finally {
       server.close();
     }

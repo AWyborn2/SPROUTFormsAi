@@ -279,6 +279,8 @@ interface MemberDto {
   emailSent?: boolean;
   /** Present on a freshly created invite — the link to hand over or print. */
   acceptPath?: string;
+  /** Competency counts; null below the view_competencies grant, on invites, and on non-active rows. Absent on create/patch responses. */
+  counts?: { requiredCurrent: number; requiredAttention: number; optionalLapsed: number } | null;
 }
 
 interface AuditEntryDto {
@@ -361,6 +363,7 @@ function toMember(dto: MemberDto): Member {
     email: dto.email,
     role: ROLE_LABELS[dto.role] as RoleName,
     status: (dto.status === 'active' ? 'active' : 'invited') as MemberStatus,
+    counts: dto.counts ?? null,
   };
 }
 

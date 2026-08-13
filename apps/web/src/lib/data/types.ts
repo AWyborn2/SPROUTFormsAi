@@ -178,6 +178,16 @@ export const INVITABLE_ROLES: RoleName[] = ['Admin', 'Builder', 'Reviewer', 'Vie
 
 export type MemberStatus = 'active' | 'invited';
 
+/** Per-member competency counts on the Team list (oversight round, R1). */
+export interface MemberCompetencyCounts {
+  /** Required competencies currently held (incl. expiring and grace — eligibility). */
+  requiredCurrent: number;
+  /** Required competencies expiring, in grace, or expired (urgency; overlaps current by design). */
+  requiredAttention: number;
+  /** Optional competencies fully lapsed — muted, never a flag. */
+  optionalLapsed: number;
+}
+
 /** A team member (membership projection). */
 export interface Member {
   /** The MEMBERSHIP id — what team management routes address. */
@@ -193,6 +203,8 @@ export interface Member {
   email: string;
   role: RoleName;
   status: MemberStatus;
+  /** Null when the reader may not see competencies (R4), and on invited/non-active rows. */
+  counts: MemberCompetencyCounts | null;
 }
 
 /* ── API keys ─────────────────────────────────────────────────────────────── */

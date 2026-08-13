@@ -7,12 +7,15 @@ import {
   DEFAULT_ROLE_PERMISSIONS,
   PERMISSION_CATEGORIES,
   ROLES,
+  competencyCurrency,
+  countsAsHeld,
   type PermissionMatrix,
   type Role,
 } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
-import { hasPermission } from '../lib/permissions.js';
+import { hasPermission, permissionScope } from '../lib/permissions.js';
+import { requiredCompetencyIdsByUser } from '../lib/standing.js';
 import { isUniqueViolation } from '../lib/db-errors.js';
 import { recordAudit } from '../audit/record.js';
 import { sendInviteEmail } from '../email/resend.js';
@@ -42,6 +45,23 @@ const permissionActions = [
 
 const canManageTeam = (tenant: { orgId: string; role: string }) => hasPermission(tenant, 'team', 'manage');
 
+/**
+ * Per-member competency counts for the Team list (oversight round).
+ *
+ * `requiredCurrent` measures eligibility (held, expiring or grace);
+ * `requiredAttention` measures urgency (expiring, grace or expired) — an
+ * expiring required competency deliberately counts in BOTH, mirroring how the
+ * record shows it as simultaneously valid and flagged. `optionalLapsed` is
+ * fully expired optional grants only; grace still counts as current everywhere.
+ * A required competency never held appears in neither number — that gap is the
+ * compliance report's `neverHeld`, not a row chip.
+ */
+interface MemberCompetencyCounts {
+  requiredCurrent: number;
+  requiredAttention: number;
+  optionalLapsed: number;
+}
+
 teamRouter.get(
   '/members',
   requireTenant,
@@ -51,6 +71,17 @@ teamRouter.get(
       return;
     }
     const tenant = req.tenant!;
+    /*
+      Gated at last. This list is every member's name, address and role — the
+      matrix's `team.view` existed for exactly this read but was never applied,
+      so any authenticated member could pull the roster. Tightened while the
+      round adds competency data to the same response; the only product caller
+      is the Team screen, which the nav already scopes to admins.
+    */
+    if (!(await canViewTeam(tenant))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const [memberships, pendingInvites] = await Promise.all([
       db.query.memberships.findMany({ where: eq(schema.memberships.orgId, tenant.orgId) }),
       db.query.invites.findMany({
@@ -69,6 +100,86 @@ teamRouter.get(
       list already showed.
     */
     const identities = await loadDisplayIdentities(db, tenant.orgId, userIds);
+
+    /*
+      Competency counts ride the SAME grant the record's competency section
+      uses: `profiles.view_competencies` at org scope (KTD4). Below that scope
+      the field is null and the web renders no column — the roster must not
+      leak through a chip what the record withholds. Batched: the standing
+      resolver takes every userId at once, then one holders read and one
+      competencies read cover the lot (R2 — never a per-member lookup).
+    */
+    const countsScope = await permissionScope(tenant, 'profiles', 'view_competencies');
+    let countsByUser: Map<string, MemberCompetencyCounts> | null = null;
+    if (countsScope === 'all' && userIds.length > 0) {
+      const requiredByUser = await requiredCompetencyIdsByUser(db, tenant.orgId, userIds);
+      // The eligibility read: a revoked grant confers nothing, so it is
+      // filtered here rather than carried and re-checked per status.
+      const holders = await db.query.competencyHolders.findMany({
+        where: and(
+          eq(schema.competencyHolders.orgId, tenant.orgId),
+          inArray(schema.competencyHolders.userId, userIds),
+          isNull(schema.competencyHolders.revokedAt),
+        ),
+      });
+      const competencyIds = [...new Set(holders.map((h) => h.competencyId))];
+      const competencies = competencyIds.length
+        ? await db.query.competencies.findMany({
+            where: and(
+              eq(schema.competencies.orgId, tenant.orgId),
+              inArray(schema.competencies.id, competencyIds),
+            ),
+          })
+        : [];
+      const competencyById = new Map(competencies.map((c) => [c.id, c]));
+
+      const grantsByUser = new Map<string, typeof holders>();
+      for (const h of holders) {
+        const list = grantsByUser.get(h.userId) ?? [];
+        list.push(h);
+        grantsByUser.set(h.userId, list);
+      }
+
+      // One instant for the whole response, so two rows cannot disagree about
+      // what "today" is.
+      const now = new Date();
+      countsByUser = new Map();
+      for (const userId of new Set(userIds)) {
+        const required = requiredByUser.get(userId) ?? new Set<string>();
+        const grants = grantsByUser.get(userId) ?? [];
+        // Currency per held competency, via the ONE shared derivation (R13).
+        const currenciesByCompetency = new Map<string, ReturnType<typeof competencyCurrency>[]>();
+        for (const g of grants) {
+          const currency = competencyCurrency(g, competencyById.get(g.competencyId) ?? {}, now, 'assessor');
+          const list = currenciesByCompetency.get(g.competencyId) ?? [];
+          list.push(currency);
+          currenciesByCompetency.set(g.competencyId, list);
+        }
+
+        let requiredCurrent = 0;
+        let requiredAttention = 0;
+        for (const competencyId of required) {
+          const currencies = currenciesByCompetency.get(competencyId) ?? [];
+          // Eligibility and urgency overlap on purpose: an expiring required
+          // competency is simultaneously valid and flagged (KTD5).
+          if (currencies.some((c) => countsAsHeld(c))) requiredCurrent += 1;
+          if (currencies.some((c) => c.status === 'expiring' || c.status === 'grace' || c.status === 'expired')) {
+            requiredAttention += 1;
+          }
+        }
+
+        let optionalLapsed = 0;
+        for (const [competencyId, currencies] of currenciesByCompetency) {
+          if (required.has(competencyId)) continue;
+          // A genuine lapse only: some grant expired AND none still counts.
+          if (!currencies.some((c) => countsAsHeld(c)) && currencies.some((c) => c.status === 'expired')) {
+            optionalLapsed += 1;
+          }
+        }
+
+        countsByUser.set(userId, { requiredCurrent, requiredAttention, optionalLapsed });
+      }
+    }
 
     res.json([
       ...memberships.map((m) => {
@@ -90,6 +201,13 @@ teamRouter.get(
           email: u?.email ?? '',
           role: m.role,
           status: m.status,
+          /*
+            Null when the caller may not read competencies (R4), and on rows
+            that are not active — a suspended or deactivated member's lapses
+            are nobody's attention item, and computing them would contradict
+            the compliance report, which only reads active members.
+          */
+          counts: m.status === 'active' ? (countsByUser?.get(m.userId) ?? null) : null,
         };
       }),
       ...pendingInvites.map((i) => ({
@@ -110,6 +228,8 @@ teamRouter.get(
         email: i.email ?? '',
         role: i.role,
         status: 'invited' as const,
+        // Nobody has accepted, so there is nobody to hold anything.
+        counts: null,
       })),
     ]);
   }),
