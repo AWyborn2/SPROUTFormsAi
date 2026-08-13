@@ -85,6 +85,11 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
   } | null>(null);
   const [openCases, setOpenCases] = useState<Array<{ id: string }> | null>(null);
   const [formGone, setFormGone] = useState(false);
+  /** The structured republish refusal — rendered as a fix, not a dead end. */
+  const [refusal, setRefusal] = useState<{
+    danglingRules: Array<{ locationName: string; partLabel: string }>;
+    attemptedParts: Array<{ key: string; label: string }>;
+  } | null>(null);
   const restart = useStartRevision();
 
   const saveFields = useSaveVersionFields(formId ?? '', versionId ?? '');
@@ -114,13 +119,14 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
     unique index after the version already published, which is exactly the
     live-form-with-a-stale-tool state the header warns about.
   */
-  const republish = async () => {
+  const republish = async (opts?: { dropDanglingLocationRules?: boolean }) => {
     if (!formId || !versionId || !manifest || !draft.revisionOfToolId || !draft.seededFromVersionId)
       return;
     setFailure(null);
     setStale(null);
     setOpenCases(null);
     setFormGone(false);
+    setRefusal(null);
     try {
       try {
         await saveFields.mutateAsync(check.fields);
@@ -142,6 +148,7 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         versionId,
         seededFromVersionId: draft.seededFromVersionId,
         fields: check.fields,
+        ...(opts?.dropDanglingLocationRules ? { dropDanglingLocationRules: true } : {}),
         // The seeded manifest carries the workflow-editor extras the builder
         // does not model; the builder's derivation overlays it.
         manifest: composeRevisionManifest(draft.revisionToolManifest ?? manifest, {
@@ -170,6 +177,29 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         }
         if (body?.error === 'open_cases_incompatible') {
           setOpenCases(body.cases ?? []);
+          return;
+        }
+      }
+      /*
+        A STRUCTURED refusal becomes an OFFER. Dangling Location rules are
+        one click to resolve — the author unticks them with the publish —
+        while a part with recorded evidence has no click: it must stay, and
+        the panel says so instead of narrating a dead end.
+      */
+      if (err instanceof ApiError && err.status === 400) {
+        const body = err.body as {
+          error?: string;
+          danglingRules?: Array<{ locationName: string; partLabel: string }>;
+          attemptedParts?: Array<{ key: string; label: string }>;
+        };
+        if (
+          body?.error === 'invalid_manifest' &&
+          ((body.danglingRules?.length ?? 0) > 0 || (body.attemptedParts?.length ?? 0) > 0)
+        ) {
+          setRefusal({
+            danglingRules: body.danglingRules ?? [],
+            attemptedParts: body.attemptedParts ?? [],
+          });
           return;
         }
       }
@@ -541,6 +571,62 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         <p role="alert" className="rounded-[10px] border border-danger bg-danger-soft p-[8px_10px] text-[11.5px] text-danger-text">
           {failure}
         </p>
+      )}
+
+      {/*
+        THE REFUSAL, AS A FIX. Dangling Location rules resolve with one
+        labelled click — the untick happens in the same transaction as the
+        publish. A part with recorded evidence has no click: it must stay,
+        and the panel says exactly which and why.
+      */}
+      {refusal && (
+        <div className="flex flex-col gap-2 rounded-[14px] border border-warning bg-warning-soft p-3">
+          {refusal.attemptedParts.length > 0 && (
+            <>
+              <span className="text-[11.5px] font-semibold text-warning-text">
+                {refusal.attemptedParts.length === 1 ? 'A part' : 'Parts'} with recorded evidence
+                cannot be removed
+              </span>
+              {refusal.attemptedParts.map((part) => (
+                <p key={part.key} className="text-[11.5px] text-warning-text">
+                  <strong>{part.label}</strong> has evidence on completed cases — removing it
+                  would leave that evidence unable to print. Go back to{' '}
+                  <strong>Generate</strong> and keep its section in this revision (it can stop
+                  being required at any Location instead).
+                </p>
+              ))}
+            </>
+          )}
+          {refusal.danglingRules.length > 0 && (
+            <>
+              <span className="text-[11.5px] font-semibold text-warning-text">
+                Location rules still require parts this revision removes
+              </span>
+              {refusal.danglingRules.map((rule, i) => (
+                <p key={i} className="text-[11.5px] text-warning-text">
+                  <strong>{rule.locationName}</strong> requires <strong>{rule.partLabel}</strong>
+                </p>
+              ))}
+              {refusal.attemptedParts.length === 0 ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void republish({ dropDanglingLocationRules: true })}
+                  className="inline-flex h-[30px] w-fit items-center gap-1.5 rounded-lg bg-warning px-3 text-[11.5px] font-semibold text-white"
+                >
+                  <Icon name="check" size={13} />
+                  Untick these at the Locations and publish
+                </button>
+              ) : (
+                <p className="text-[11.5px] text-warning-text">
+                  Keep the parts above first — rules naming a kept part stop dangling by
+                  themselves, and any that still name a removed part can be unticked with the
+                  publish then.
+                </p>
+              )}
+            </>
+          )}
+        </div>
       )}
 
       <button
