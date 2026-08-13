@@ -15,7 +15,12 @@ import {
   createCompetencyBody,
   optionalCompetencyCode,
 } from '../lib/competency-create.js';
-import { requiredCompetencyIdsByUser, requiredCompetencyIdsFor } from '../lib/standing.js';
+import {
+  recommendedCompetencyIdsByUser,
+  recommendedCompetencyIdsFor,
+  requiredCompetencyIdsByUser,
+  requiredCompetencyIdsFor,
+} from '../lib/standing.js';
 import { permissionScope } from '../lib/permissions.js';
 import { db } from '../db.js';
 
@@ -27,6 +32,26 @@ import { db } from '../db.js';
  */
 export const competenciesRouter: Router = Router();
 export const competencyRulesRouter: Router = Router();
+
+/*
+  WHO MAY WRITE THE REGISTER (KTD8). Competencies stopped being a private
+  gating list the round Role requirements started pointing at them: a rename
+  now relabels every Role that requires it, and a delete would cascade through
+  the links table. So creation and editing take the assessments-edit tier —
+  owner/admin/assessor, the same population that authors assessments and works
+  the register — and NOT the builder/reviewer/viewer/candidate tiers, whose
+  form-side permissions never implied authority over the competency taxonomy.
+  Note this is the access-level ROLE on the membership, not the permission
+  matrix: DEFAULT_ROLE_PERMISSIONS gates profile reads, not taxonomy writes.
+*/
+function canAuthorCompetencies(role: string): boolean {
+  return role === 'owner' || role === 'admin' || role === 'assessor';
+}
+
+/** DELETE is narrower still (KTD8): destroying a register entry is admin work. */
+function isAdmin(role: string): boolean {
+  return role === 'owner' || role === 'admin';
+}
 
 competenciesRouter.get(
   '/',
@@ -88,12 +113,16 @@ competenciesRouter.post(
       res.status(503).json({ error: 'db_unavailable' });
       return;
     }
+    const tenant = req.tenant!;
+    if (!canAuthorCompetencies(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const parsed = createCompetencyBody.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
       return;
     }
-    const tenant = req.tenant!;
     const row = await createCompetency(db, tenant.orgId, parsed.data);
     res.status(201).json(competencyDto(row));
   }),
@@ -121,12 +150,16 @@ competenciesRouter.patch(
       res.status(503).json({ error: 'db_unavailable' });
       return;
     }
+    const tenant = req.tenant!;
+    if (!canAuthorCompetencies(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const parsed = updateCompetencyBody.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
       return;
     }
-    const tenant = req.tenant!;
     const existing = await findOwnedCompetency(db, req.params.id!, tenant.orgId);
     if (!existing) {
       res.status(404).json({ error: 'not_found' });
@@ -161,6 +194,17 @@ competenciesRouter.patch(
   }),
 );
 
+/**
+ * Delete a competency — an EXPLICIT act with a dependency check, never a
+ * cascade surprise (KTD8).
+ *
+ * The links table's competency FK cascades, so an unchecked delete would
+ * silently strip a requirement from every Role naming it, disarm every tool
+ * awarding it, and orphan every live grant of it. This route makes that
+ * impossible to do by accident: it 409s while anything depends on the row,
+ * NAMING each dependency kind so the admin knows exactly what to un-require
+ * first. Force-delete is deliberately not offered — un-requiring is the exit.
+ */
 competenciesRouter.delete(
   '/:id',
   requireTenant,
@@ -171,6 +215,10 @@ competenciesRouter.delete(
       return;
     }
     const tenant = req.tenant!;
+    if (!isAdmin(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const row = await db.query.competencies.findFirst({
       where: and(eq(schema.competencies.id, req.params.id!), eq(schema.competencies.orgId, tenant.orgId)),
     });
@@ -178,7 +226,49 @@ competenciesRouter.delete(
       res.status(404).json({ error: 'not_found' });
       return;
     }
+
+    const [links, orgTools, liveGrants] = await Promise.all([
+      // Both tiers in one read, split below — a recommendation is a real
+      // dependency too (a Role's editor would show a dangling entry).
+      db.query.roleRequiredCompetencies.findMany({
+        where: and(
+          eq(schema.roleRequiredCompetencies.orgId, tenant.orgId),
+          eq(schema.roleRequiredCompetencies.competencyId, row.id),
+        ),
+      }),
+      // `awardedCompetencyIds` is jsonb with no FK, so containment is filtered
+      // in JS — the same way every award read in this codebase treats it.
+      db.query.assessmentTools.findMany({
+        where: eq(schema.assessmentTools.orgId, tenant.orgId),
+      }),
+      // Live grants only: a revoked grant is audit history, not a dependency —
+      // it confers nothing and must not block a tidy-up forever.
+      db.query.competencyHolders.findMany({
+        where: and(
+          eq(schema.competencyHolders.competencyId, row.id),
+          eq(schema.competencyHolders.orgId, tenant.orgId),
+          isNull(schema.competencyHolders.revokedAt),
+        ),
+      }),
+    ]);
+    const roles = links.filter((l) => l.tier === 'required').length;
+    const recommendedBy = links.filter((l) => l.tier === 'recommended').length;
+    const tools = orgTools.filter((t) => (t.awardedCompetencyIds ?? []).includes(row.id)).length;
+    const grants = liveGrants.length;
+    if (roles + recommendedBy + tools + grants > 0) {
+      // Counts, not ids: enough to say WHAT stands in the way and how much,
+      // without this error payload becoming a second register read.
+      res.status(409).json({ error: 'competency_in_use', roles, recommendedBy, tools, grants });
+      return;
+    }
+
     await db.delete(schema.competencies).where(eq(schema.competencies.id, row.id));
+    await recordAudit(db, tenant, {
+      action: 'Deleted competency',
+      target: row.code ?? row.name,
+      category: 'settings',
+      icon: 'award',
+    });
     res.status(204).end();
   }),
 );
@@ -403,9 +493,12 @@ competenciesRouter.get(
     const canSeeLicence = (holderUserId: string) =>
       licenceScope === 'all' || holderUserId === tenant.userId;
 
-    // Standing per holder: is THIS competency one their held Roles require
-    // (R108)? Batched into one query path rather than per holder.
+    // Standing per holder: is THIS competency one their held Roles require —
+    // or merely recommend (R108, R12)? Batched into one query path rather than
+    // per holder; the recommended set rides beside the required one because
+    // standingOf demands both (KTD7).
     const requiredByUser = await requiredCompetencyIdsByUser(db, tenant.orgId, holderUserIds);
+    const recommendedByUser = await recommendedCompetencyIdsByUser(db, tenant.orgId, holderUserIds);
 
     // One instant for the whole response, so two holders cannot disagree about
     // what "today" is and sort inconsistently.
@@ -428,7 +521,11 @@ competenciesRouter.get(
         expiresAt: expiry ? expiry.toISOString() : null,
         status: currency.status,
         revoked: currency.revoked,
-        standing: standingOf(competency.id, requiredByUser.get(r.userId) ?? new Set()),
+        standing: standingOf(
+          competency.id,
+          requiredByUser.get(r.userId) ?? new Set(),
+          recommendedByUser.get(r.userId) ?? new Set(),
+        ),
         current: countsAsHeld(currency),
         // A revoked grant's date is moot; the revoked mark says all there is.
         note: currency.revoked ? null : expiryNote(currency.status, expiry, competency.name),
@@ -527,9 +624,11 @@ competenciesRouter.get(
         : 'assessor';
 
     // Standing beside currency (R108): which of these the person's held Roles
-    // oblige them to hold. Resolved once for the whole record. Revoked rows were
-    // already excluded above, so `current` never has to fold revocation in here.
+    // oblige them to hold, and which they merely recommend (R12). Resolved once
+    // for the whole record. Revoked rows were already excluded above, so
+    // `current` never has to fold revocation in here.
     const required = await requiredCompetencyIdsFor(db, tenant.orgId, req.params.userId!);
+    const recommended = await recommendedCompetencyIdsFor(db, tenant.orgId, req.params.userId!);
 
     // Licence numbers are sensitive profile data (R34): a caller sees them on
     // someone else's record only with the `profiles.view_competencies` grant —
@@ -562,8 +661,8 @@ competenciesRouter.get(
           licenceClass: canSeeLicence ? r.licenceClass : null,
           licenceNumber: canSeeLicence ? r.licenceNumber : null,
           status: currency.status,
-          /** Required or optional for this person, from their held Roles (R108). */
-          standing: standingOf(r.competencyId, required),
+          /** Required, recommended or optional for this person, from their held Roles (R108, R12). */
+          standing: standingOf(r.competencyId, required, recommended),
           /** True while it still satisfies a requirement — held, expiring or grace. */
           current: countsAsHeld(currency),
           expiresAt: expiry ? expiry.toISOString() : null,

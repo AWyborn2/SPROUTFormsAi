@@ -50,7 +50,7 @@ function fakeDb(opts: {
   /** Overrides the default user row — pass `passwordHash` to give somebody a login. */
   users?: unknown[];
 }) {
-  return {
+  const db = {
     query: {
       organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: 'enterprise' }) },
       memberships: {
@@ -77,8 +77,17 @@ function fakeDb(opts: {
         ),
       },
       competencyHolders: { findMany: vi.fn().mockResolvedValue(opts.holders ?? []) },
+      // The dual read's direct half (KTD1). Empty keeps every fixture on the
+      // legacy derivation, which is what these compliance scenarios pin.
+      roleRequiredCompetencies: { findMany: vi.fn().mockResolvedValue([]) },
     },
   } as unknown as Db;
+  // requiredCompetencyIdsByUser reads inside db.transaction (KTD3); hand the
+  // same surface back — these mocks have no snapshot to isolate.
+  (db as unknown as { transaction: unknown }).transaction = async (
+    fn: (tx: unknown) => Promise<unknown>,
+  ) => fn(db);
+  return db;
 }
 
 afterEach(() => {
