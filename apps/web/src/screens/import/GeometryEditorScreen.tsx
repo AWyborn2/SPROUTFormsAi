@@ -1000,9 +1000,16 @@ export function GeometryEditorScreen({
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <aside className="w-[340px] shrink-0 overflow-y-auto border-r border-border">
+        <aside className="flex w-[340px] shrink-0 flex-col border-r border-border">
+          {/*
+            PINNED, NOT FIRST-IN-THE-SCROLL. The review queue is what the
+            author is acting on — Confirm/Reject for the proposal highlighted
+            on the page — and living inside the list's scroll meant it left
+            the screen the moment they scrolled to see the field in context.
+            The queue and the filter hold still; only the field list scrolls.
+          */}
           {proposalPreviews.length > 0 && (
-            <div className="border-b border-border bg-[var(--accent-soft)] p-[12px_14px]">
+            <div className="flex-none border-b border-border bg-[var(--accent-soft)] p-[12px_14px]">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[12.5px] font-semibold">
                   {proposalPreviews.length} field{proposalPreviews.length === 1 ? '' : 's'} need review
@@ -1016,7 +1023,9 @@ export function GeometryEditorScreen({
                   Confirm all proposed
                 </Button>
               </div>
-              <div className="mt-2 flex flex-col gap-1.5">
+              {/* Its own scroll past ~4 rows, so a big bulk pass cannot pin
+                  the whole panel's height to the queue. */}
+              <div className="fai-scroll mt-2 flex max-h-[150px] flex-col gap-1.5 overflow-y-auto">
                 {proposalPreviews.map(({ fieldId }) => {
                   const field = fields.find((f) => f.id === fieldId);
                   const label = field?.label || fieldId;
@@ -1054,7 +1063,7 @@ export function GeometryEditorScreen({
               </div>
             </div>
           )}
-          <div className="border-b border-border p-[10px_14px]">
+          <div className="flex-none border-b border-border p-[10px_14px]">
             <input
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -1064,6 +1073,7 @@ export function GeometryEditorScreen({
             />
           </div>
 
+          <div className="fai-scroll min-h-0 flex-1 overflow-y-auto">
           {groups.map((group) => {
             const isCollapsed = !!collapsedGroups[group.key];
             return (
@@ -1119,6 +1129,7 @@ export function GeometryEditorScreen({
               No fields match “{filter}”.
             </p>
           )}
+          </div>
         </aside>
 
         {/*
