@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { competencyCurrency, countsAsHeld } from '@formai/shared';
+import { bestCurrency, competencyCurrency, countsAsHeld } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -10,8 +10,11 @@ import { db } from '../db.js';
 
 /**
  * Compliance reporting (U20) — how the workforce stands, as the surface shown an
- * auditor. Three things and no more: a REQUIRED competency expired, a required
- * competency a holder has NEVER held, and a member no notification can reach.
+ * auditor: a REQUIRED competency expired, a required competency a holder has
+ * NEVER held, a required competency EXPIRING inside the assessor planning
+ * window or already IN GRACE (both still count, both need a booking — the
+ * number that lets an Admin act before anything stops counting), and a member
+ * no notification can reach.
  *
  * Only REQUIRED competencies count (R101): an optional lapse is not a compliance
  * failure (R102), so standing is read here, not currency alone. The two gaps are
@@ -64,10 +67,10 @@ complianceRouter.get(
     });
     if (memberships.length === 0) {
       // An organisation with no active members has nobody to report on, and
-      // nobody unreachable. Returns the FULL shape (all four keys) so this path
+      // nobody unreachable. Returns the FULL shape (all five keys) so this path
       // never differs from the normal one — the web type has no optional keys
       // and reads `optionalLapses.length` unconditionally.
-      res.json({ expired: [], neverHeld: [], optionalLapses: [], unreachable: [] });
+      res.json({ expired: [], expiring: [], neverHeld: [], optionalLapses: [], unreachable: [] });
       return;
     }
     const userIds = [...new Set(memberships.map((m) => m.userId))];
@@ -109,6 +112,7 @@ complianceRouter.get(
     });
 
     const expired: ComplianceGap[] = [];
+    const expiring: ComplianceGap[] = [];
     const neverHeld: ComplianceGap[] = [];
     const optionalLapses: ComplianceGap[] = [];
     for (const membership of memberships) {
@@ -127,6 +131,19 @@ complianceRouter.get(
         const currencies = (grantsByKey.get(`${membership.userId}|${competencyId}`) ?? []).map((g) =>
           competencyCurrency(g, competency, now, 'assessor'),
         );
+        /*
+          EXPIRING-OR-GRACE is captured before the compliant-continue swallows
+          it: `countsAsHeld` deliberately treats both as current, so without
+          this branch the person books nowhere until they tip into `expired` —
+          and somebody in grace is PAST their date, the last person this
+          surface may hide. Read off the BEST grant, not any grant: a renewal
+          leaves the superseded row in place, and flagging a renewed person on
+          the old row's date would book someone who already acted.
+        */
+        const best = bestCurrency(currencies);
+        if (best && (best.status === 'expiring' || best.status === 'grace')) {
+          expiring.push(gapOf(membership.userId, competencyId, competency.name));
+        }
         if (currencies.some((c) => countsAsHeld(c))) continue; // compliant
         const gap = gapOf(membership.userId, competencyId, competency.name);
         // Lapsed on its date (not revoked) → a refresher; otherwise (no grant, or
@@ -195,6 +212,6 @@ complianceRouter.get(
       }
     }
 
-    res.json({ expired, neverHeld, optionalLapses, unreachable });
+    res.json({ expired, expiring, neverHeld, optionalLapses, unreachable });
   }),
 );

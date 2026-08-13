@@ -273,8 +273,20 @@ export function useSetSubmissionStatus() {
   });
 }
 
-export function useDashboard() {
-  return useQuery({ queryKey: keys.dashboard, queryFn: () => store.dashboard() });
+/*
+  The `enabled` option on this and the three reads below exists for the shell:
+  nav badges and the dashboard tile reuse these exact query keys (KTD1), but
+  must not fire the fetch for readers whose role the API would 403 — the
+  screens themselves only mount for readers the nav already admits, so every
+  existing call site passes nothing and keeps `enabled: true`.
+*/
+export function useDashboard(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.dashboard,
+    queryFn: () => store.dashboard(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
 }
 
 /** Publish a builder session as a brand-new template (first version, published). */
@@ -1147,13 +1159,23 @@ export function useSetLocationParts(toolId: string) {
   });
 }
 
-export function useAssessmentCases() {
-  return useQuery({ queryKey: keys.assessmentCases, queryFn: () => assessmentsApi.listCases() });
+export function useAssessmentCases(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.assessmentCases,
+    queryFn: () => assessmentsApi.listCases(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
 }
 
 /** The shared assessor queue — unowned cases the reader is eligible for (U13). */
-export function useAssessorQueue() {
-  return useQuery({ queryKey: keys.assessorQueue, queryFn: () => assessmentsApi.listQueue() });
+export function useAssessorQueue(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.assessorQueue,
+    queryFn: () => assessmentsApi.listQueue(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
 }
 
 /**
@@ -1427,13 +1449,23 @@ export function useTransferRole() {
 }
 
 /** Everything waiting on an Admin, from all sources, on one list (U19). */
-export function useWorkingList() {
-  return useQuery({ queryKey: keys.workingList, queryFn: () => store.getWorkingList() });
+export function useWorkingList(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.workingList,
+    queryFn: () => store.getWorkingList(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
 }
 
-/** How the workforce stands — expired, never-held, unreachable (U20). */
-export function useComplianceReport() {
-  return useQuery({ queryKey: keys.compliance, queryFn: () => store.getComplianceReport() });
+/** How the workforce stands — expired, expiring, never-held, unreachable (U20). */
+export function useComplianceReport(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.compliance,
+    queryFn: () => store.getComplianceReport(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
 }
 
 /** The caller's own expiry notices — the login delivery route (U21, R98). */
