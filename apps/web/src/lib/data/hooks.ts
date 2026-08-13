@@ -157,6 +157,8 @@ export const keys = {
   myProfileMembership: ['profiles', 'mine'] as const,
   /** One import run's report, addressable long after the page closed (U24). */
   importRun: (runId: string) => ['workforceImport', 'run', runId] as const,
+  /** Whether an import is in flight for this organisation, asked on load (U24). */
+  activeImportRun: ['workforceImport', 'active'] as const,
   /** What an induction submission would seed onto a profile (U40). */
   profileSeed: (submissionId: string) => ['profiles', 'seed', submissionId] as const,
   /** One person's held competencies, keyed on the USER the grants belong to. */
@@ -1628,10 +1630,12 @@ export function useValidateWorkforceImport() {
 }
 
 /**
- * Confirm and run the import.
+ * Confirm and START the import.
  *
- * Invalidates the team list and the working list: a run creates members and can
- * leave rows flagged, so both are stale the moment it returns.
+ * Resolves with the run id as soon as the run exists, NOT when it finishes — the
+ * work continues server-side either way. Invalidates the team list and the
+ * working list because both go stale as rows land, and the active-run query
+ * because there is now one in flight.
  */
 export function useRunWorkforceImport() {
   const qc = useQueryClient();
@@ -1641,22 +1645,41 @@ export function useRunWorkforceImport() {
       void qc.invalidateQueries({ queryKey: keys.members });
       void qc.invalidateQueries({ queryKey: keys.workingList });
       void qc.invalidateQueries({ queryKey: keys.auditLog });
+      void qc.invalidateQueries({ queryKey: keys.activeImportRun });
     },
   });
 }
 
 /**
- * One run's report.
+ * One run's report: progress while it runs, the whole thing after.
  *
- * Polls while the run is in progress — `completedAt` is null until it finishes —
- * and stops the moment it is done, so a finished report costs nothing to keep on
- * screen.
+ * Polls on STATUS rather than on `completedAt`, which is the difference between
+ * a screen that stops and one that spins forever. A failed run — including one
+ * whose process died and was reaped — is finished, and polling it would be
+ * asking a question already answered.
  */
 export function useWorkforceImportRun(runId: string | undefined) {
   return useQuery({
     queryKey: keys.importRun(runId ?? ''),
     queryFn: () => store.getWorkforceImportRun(runId!),
     enabled: !!runId,
-    refetchInterval: (query) => (query.state.data?.completedAt ? false : 1000),
+    refetchInterval: (query) => (query.state.data?.status === 'running' ? 1000 : false),
+  });
+}
+
+/**
+ * Whether this organisation has an import in flight.
+ *
+ * ASKED BEFORE THE SCREEN OFFERS TO START ONE. Without it, a page loaded after a
+ * timeout has no idea a run exists and shows an upload form beside a live
+ * confirm button — which is exactly what nearly put a 191-person file through
+ * production twice. `staleTime: 0` because the whole value here is being
+ * current at the moment the form would otherwise be drawn.
+ */
+export function useActiveWorkforceImport() {
+  return useQuery({
+    queryKey: keys.activeImportRun,
+    queryFn: () => store.getActiveWorkforceImport(),
+    staleTime: 0,
   });
 }

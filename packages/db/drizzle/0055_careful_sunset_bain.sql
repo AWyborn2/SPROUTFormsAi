@@ -1,4 +1,0 @@
-ALTER TABLE "form_template_versions" ADD COLUMN "revision_identity" jsonb;--> statement-breakpoint
-ALTER TABLE "assessment_tool_drafts" ADD COLUMN "revision_of_tool_id" uuid;--> statement-breakpoint
-ALTER TABLE "assessment_tool_drafts" ADD CONSTRAINT "assessment_tool_drafts_revision_of_tool_id_assessment_tools_id_fk" FOREIGN KEY ("revision_of_tool_id") REFERENCES "public"."assessment_tools"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-CREATE UNIQUE INDEX "assessment_tool_drafts_revision_tool_uq" ON "assessment_tool_drafts" USING btree ("revision_of_tool_id") WHERE "assessment_tool_drafts"."revision_of_tool_id" is not null;

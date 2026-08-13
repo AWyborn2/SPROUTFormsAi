@@ -1,5 +1,5 @@
 {
-  "id": "779a2aff-5d79-4a29-9401-1f17490d09d2",
+  "id": "d4801dab-eb11-4690-a17f-fea30756d5a4",
   "prevId": "5f2ef2aa-b076-43b9-baff-19adf4c21d8a",
   "version": "7",
   "dialect": "postgresql",
@@ -679,12 +679,6 @@
         "source_pdf_asset_id": {
           "name": "source_pdf_asset_id",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "revision_identity": {
-          "name": "revision_identity",
-          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },
@@ -2135,6 +2129,26 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'running'"
+        },
+        "heartbeat_at": {
+          "name": "heartbeat_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "failure_reason": {
+          "name": "failure_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -2149,6 +2163,22 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "import_runs_one_active_per_org": {
+          "name": "import_runs_one_active_per_org",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "status = 'running'",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -3947,12 +3977,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "revision_of_tool_id": {
-          "name": "revision_of_tool_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "saved_by_user_id": {
           "name": "saved_by_user_id",
           "type": "uuid",
@@ -3975,22 +3999,6 @@
         }
       },
       "indexes": {
-        "assessment_tool_drafts_revision_tool_uq": {
-          "name": "assessment_tool_drafts_revision_tool_uq",
-          "columns": [
-            {
-              "expression": "revision_of_tool_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"assessment_tool_drafts\".\"revision_of_tool_id\" is not null",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "assessment_tool_drafts_org_idx": {
           "name": "assessment_tool_drafts_org_idx",
           "columns": [
@@ -4040,19 +4048,6 @@
           "tableTo": "form_template_versions",
           "columnsFrom": [
             "version_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "assessment_tool_drafts_revision_of_tool_id_assessment_tools_id_fk": {
-          "name": "assessment_tool_drafts_revision_of_tool_id_assessment_tools_id_fk",
-          "tableFrom": "assessment_tool_drafts",
-          "tableTo": "assessment_tools",
-          "columnsFrom": [
-            "revision_of_tool_id"
           ],
           "columnsTo": [
             "id"
