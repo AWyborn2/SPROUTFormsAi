@@ -1,8 +1,9 @@
 /**
  * Record migrations as applied WITHOUT running them.
  *
- *   pnpm db:baseline --url-env PRODUCTION_DATABASE_URL              # dry run
- *   pnpm db:baseline --url-env PRODUCTION_DATABASE_URL --yes        # writes
+ *   pnpm db:baseline --url-env PRODUCTION_DATABASE_URL                    # dry run
+ *   pnpm db:baseline --url-env PRODUCTION_DATABASE_URL --yes              # writes
+ *   pnpm db:baseline --url-env PROD --through 0054_unique_jack_flag --yes # stop short
  *
  * For the one case this is for: a database whose SCHEMA is genuinely ahead of
  * its ledger, because something outside this repo pushed the schema directly.
@@ -18,6 +19,10 @@
  *   - It prints every row it would write, hash and all, before writing any.
  *   - It is idempotent: an already-recorded tag is skipped, never duplicated.
  *   - It requires the database to be NAMED. No ambient DATABASE_URL.
+ *   - `--through <tag>` stops after that migration, leaving later ones PENDING.
+ *     Use it whenever the schema is ahead only UP TO a point: recording a
+ *     migration that has run nowhere makes the next migrate skip it, and its
+ *     columns never appear.
  */
 import { buildStatusReport, decideBaseline, planBaseline } from '../migration-ledger.js';
 import {
@@ -37,6 +42,7 @@ async function main(): Promise<number> {
 
   const confirmed = process.argv.includes('--yes');
   const allowDml = process.argv.includes('--allow-dml');
+  const through = flag('through') ?? undefined;
   const folder = flag('migrations') ?? defaultMigrationsFolder();
   const migrations = await readMigrations(folder);
 
@@ -46,7 +52,15 @@ async function main(): Promise<number> {
     console.log('');
 
     const report = buildStatusReport(conn.database, migrations, conn.rows);
-    const plan = planBaseline(migrations, report);
+    const plan = planBaseline(migrations, report, through);
+    if (through !== undefined && plan.toRecord.length === 0 && plan.beyondRange.length > 0) {
+      console.error(
+        `--through "${through}" matched no pending migration at or before it.
+` +
+          `Check the tag. Pending: ${plan.beyondRange.slice(0, 3).join(', ')}...`,
+      );
+      return 2;
+    }
     const decision = decideBaseline({
       database: conn.database,
       plan,
@@ -92,6 +106,11 @@ async function main(): Promise<number> {
     });
 
     console.log(`Recorded ${plan.toRecord.length} migration(s) in ${conn.database}.`);
+    if (plan.beyondRange.length > 0) {
+      console.log('');
+      console.log(`STILL PENDING (left out by --through), run these with db:migrate:`);
+      for (const t of plan.beyondRange) console.log(`  ${t}`);
+    }
     console.log('Re-run db:status to confirm.');
     return 0;
   } finally {

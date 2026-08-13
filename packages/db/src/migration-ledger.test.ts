@@ -232,6 +232,59 @@ describe('planBaseline', () => {
     expect(plan.blockedByDml).toEqual(['0002_seed']);
   });
 
+  /*
+    The range limit, and why it exists at all.
+
+    Baselining asserts "these already ran". That is a claim about the database,
+    not a wish. A schema pushed to some point is ahead of its ledger only UP TO
+    that point — anything merged since has run nowhere, and recording it as
+    applied makes the next migrate skip a migration whose columns do not exist.
+
+    Production on 2026-08-12 was exactly this: ledger 24, schema 0054, and 0055
+    merged an hour earlier and present nowhere.
+  */
+  it('stops after --through, leaving later migrations pending', () => {
+    const migrations = fixture();
+    const report = buildStatusReport('neondb', migrations, ledgerFor(migrations).slice(0, 1));
+    const plan = planBaseline(migrations, report, '0001_fk');
+
+    expect(plan.toRecord.map((r) => r.tag)).toEqual(['0001_fk']);
+    expect(plan.beyondRange).toEqual(['0002_seed']);
+  });
+
+  it('does NOT refuse over a data migration that --through excludes', () => {
+    const migrations = fixture();
+    const report = buildStatusReport('neondb', migrations, ledgerFor(migrations).slice(0, 1));
+    // 0002_seed is DML, but it is beyond the range — it stays pending, so it
+    // has no business blocking a baseline it is not part of.
+    const plan = planBaseline(migrations, report, '0001_fk');
+
+    expect(plan.blockedByDml).toEqual([]);
+    expect(
+      decideBaseline({ database: 'neondb', plan, report, confirmed: true, allowDml: false }).action,
+    ).toBe('write');
+  });
+
+  it('still refuses over a data migration INSIDE the range', () => {
+    const migrations = fixture();
+    const report = buildStatusReport('neondb', migrations, ledgerFor(migrations).slice(0, 1));
+    const plan = planBaseline(migrations, report, '0002_seed');
+
+    expect(plan.blockedByDml).toEqual(['0002_seed']);
+    expect(
+      decideBaseline({ database: 'neondb', plan, report, confirmed: true, allowDml: false }).action,
+    ).toBe('refuse-dml');
+  });
+
+  it('records everything missing when no range is given', () => {
+    const migrations = fixture();
+    const report = buildStatusReport('neondb', migrations, ledgerFor(migrations).slice(0, 1));
+    const plan = planBaseline(migrations, report);
+
+    expect(plan.toRecord).toHaveLength(2);
+    expect(plan.beyondRange).toEqual([]);
+  });
+
   it('is idempotent — a recorded tag is skipped, never duplicated', () => {
     const migrations = fixture();
     // Second run: the ledger now holds everything the first run wrote.

@@ -335,6 +335,14 @@ export interface BaselinePlan {
   alreadyRecorded: string[];
   /** Missing entries that write data. Non-empty means refuse, unless overridden. */
   blockedByDml: string[];
+  /**
+   * Missing entries left OUT by `--through`, and so still pending afterwards.
+   *
+   * Reported rather than silent: an operator who mistypes the tag would
+   * otherwise see a baseline that looks complete and leaves half the range
+   * unrecorded, which is the same confusion this whole tool exists to end.
+   */
+  beyondRange: string[];
 }
 
 /**
@@ -346,21 +354,60 @@ export interface BaselinePlan {
 export function planBaseline(
   migrations: MigrationFile[],
   report: StatusReport,
+  /**
+   * Stop after this tag (inclusive), leaving everything later PENDING.
+   *
+   * WHY A RANGE IS NOT OPTIONAL IN PRACTICE. Baselining says "these already
+   * ran"; it is a claim about the database, not a wish. A database whose schema
+   * was pushed to some point is ahead of its ledger only UP TO that point —
+   * anything merged since has run nowhere, and recording it as applied is a lie
+   * the next `drizzle-kit migrate` will believe. It will then skip a migration
+   * whose columns do not exist, and the failure surfaces far from here.
+   *
+   * Concretely, on 2026-08-12: production sat at ledger 24 with schema 0054,
+   * while 0055 had just merged and existed nowhere. Baselining everything
+   * missing would have marked 0055 applied, and `import_runs.status` — the
+   * column its own backfill needs — would never have been created.
+   *
+   * Omitted, every missing migration is recorded, which is only right when the
+   * schema truly matches the last one on disk.
+   */
+  through?: string,
 ): BaselinePlan {
   const byTag = new Map(migrations.map((m) => [m.tag, m]));
   const missingTags = new Set(report.missing.map((e) => e.tag));
+
+  /*
+    Cut by the migration's ORDER on disk rather than by string comparison of
+    tags: the tags carry a numeric prefix, but the words after it are arbitrary
+    and would sort a range apart.
+  */
+  const order = new Map(migrations.map((m, i) => [m.tag, i]));
+  const limit = through === undefined ? Infinity : (order.get(through) ?? -1);
+  const beyondRange: string[] = [];
 
   const toRecord: BaselineRow[] = [];
   for (const e of report.missing) {
     const m = byTag.get(e.tag);
     if (!m) continue;
+    if ((order.get(m.tag) ?? Infinity) > limit) {
+      beyondRange.push(m.tag);
+      continue;
+    }
     toRecord.push({ tag: m.tag, hash: m.canonicalHash, createdAt: m.when });
   }
 
+  const recordedTags = new Set(toRecord.map((r) => r.tag));
   return {
     toRecord,
     alreadyRecorded: migrations.filter((m) => !missingTags.has(m.tag)).map((m) => m.tag),
-    blockedByDml: report.missingWithDml.map((e) => e.tag),
+    /*
+      Only what this run would actually record can block it. A data migration
+      LATER than `through` is left pending on purpose — that is the point of the
+      range — so it must not refuse the baseline it is excluded from.
+    */
+    blockedByDml: report.missingWithDml.map((e) => e.tag).filter((t) => recordedTags.has(t)),
+    beyondRange,
   };
 }
 
