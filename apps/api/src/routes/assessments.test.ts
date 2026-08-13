@@ -4302,7 +4302,60 @@ describe('POST /assessment-tools/:id/republish', () => {
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string; problems: string[] };
       expect(body.error).toBe('invalid_manifest');
-      expect(body.problems.join(' ')).toContain('p4');
+      /*
+        In PEOPLE'S TERMS — the Location's NAME and the part's printed LABEL,
+        never the rule's UUID or the internal part key. "Rule 764679d8…
+        requires secnew2" is what an author actually saw, and it told them
+        nothing they could act on.
+      */
+      const joined = body.problems.join(' ');
+      expect(joined).toContain('Mining');
+      expect(joined).toContain('Part 4 Practical');
+      expect(joined).toContain('Where each part applies');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a revision that removes a part somebody has already attempted', async () => {
+    /*
+      The export selects attempts by the manifest's part keys and fails loud
+      on an attempt whose part the manifest no longer declares — so dropping
+      an attempted part would leave those cases unable to print their
+      evidence, discovered months later by an auditor.
+    */
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      // A case with an attempt recorded against p1.
+      const caseRes = await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'experienced' }),
+      });
+      const kase = (await caseRes.json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${kase.id}/parts/p1/attempts`, {
+        method: 'POST',
+        headers: auth(),
+        body: '{}',
+      });
+      seedDraftVersion(store);
+      // A revised manifest without p1.
+      const trimmed = { ...MANIFEST, parts: MANIFEST.parts.slice(1) };
+
+      const res = await fetch(`${base}/assessment-tools/${tool.id}/republish`, {
+        method: 'POST',
+        headers: auth(),
+        body: republishBodyFor({ manifest: trimmed }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; problems: string[] };
+      expect(body.error).toBe('invalid_manifest');
+      expect(body.problems.join(' ')).toContain('recorded attempts');
+      expect(body.problems.join(' ')).toContain('Part 1 Theory');
     } finally {
       server.close();
     }
