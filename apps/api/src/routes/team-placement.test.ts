@@ -54,8 +54,15 @@ function fakeDb(opts: {
       /*
         The KTD2 resolver pins its dual read to a transaction, so assign-on-
         placement now reads BOTH requirement sources through this tx surface.
-        Empty on both sides keeps the assignment a no-op, as above.
+        Empty on both sides keeps the assignment a no-op, as above. Since U2
+        the same snapshot covers the SCOPE EXPANSION too (placement axes plus
+        their taxonomy values), so those tables answer here as well — empty,
+        which expands to no scope keys and keeps the no-op.
       */
+      membershipLocations: { findMany: vi.fn().mockResolvedValue([]) },
+      membershipDepartments: { findMany: vi.fn().mockResolvedValue([]) },
+      locations: { findMany: vi.fn().mockResolvedValue([]) },
+      departments: { findMany: vi.fn().mockResolvedValue([]) },
       roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue([]) },
       competencyRequirements: { findMany: vi.fn().mockResolvedValue([]) },
     },

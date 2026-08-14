@@ -10,9 +10,8 @@ import { describe, expect, it, vi } from 'vitest';
 // parameter, so a null module db is all this needs.
 vi.mock('../db.js', () => ({ db: null, getDbStatus: () => 'unconfigured' }));
 
-const { awardingToolByCompetency, awardingToolFor, requiredToolIdsByRole } = await import(
-  './requirement-links.js'
-);
+const { awardingToolByCompetency, awardingToolFor, requiredToolIdsByRole, requiredToolIdsForMembership } =
+  await import('./requirement-links.js');
 
 const ORG = 'org-1';
 
@@ -66,12 +65,45 @@ function whereTerms(
   return acc;
 }
 
+/** Column names the WHERE demands be NULL — `isNull` on scope columns and
+ * `withdrawn_at` is load-bearing (KTD1's org shape, R52), so the fake honours it. */
+function nullColumns(node: unknown, out = new Set<string>(), depth = 0): Set<string> {
+  if (!node || depth > 12 || typeof node !== 'object') return out;
+  const rec = node as Record<string, unknown>;
+  const chunks = rec.queryChunks;
+  if (Array.isArray(chunks)) {
+    for (let i = 0; i < chunks.length; i++) {
+      const v = (chunks[i] as { value?: unknown } | null)?.value;
+      const text = Array.isArray(v) ? v.filter((s) => typeof s === 'string').join('') : '';
+      if (text.includes('is null')) {
+        const col = chunks[i - 1] as { name?: unknown } | null;
+        if (col && typeof col.name === 'string') out.add(col.name);
+      } else {
+        nullColumns(chunks[i], out, depth + 1);
+      }
+    }
+    return out;
+  }
+  for (const [k, v] of Object.entries(rec)) {
+    if (SKIP_KEYS.has(k)) continue;
+    if (Array.isArray(v)) v.forEach((n) => nullColumns(n, out, depth + 1));
+    else nullColumns(v, out, depth + 1);
+  }
+  return out;
+}
+
+const camel = (snake: string) => snake.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+
 function matchesWhere(row: Record<string, unknown>, where: unknown): boolean {
   if (!where) return true;
   const { all, anyOf } = whereTerms(where);
   const present = new Set(Object.values(row).filter((v) => typeof v === 'string'));
   if (![...new Set(all)].every((w) => present.has(w))) return false;
-  return anyOf.every((group) => group.some((w) => present.has(w)));
+  if (!anyOf.every((group) => group.some((w) => present.has(w)))) return false;
+  for (const colName of nullColumns(where)) {
+    if (row[camel(colName)] != null) return false;
+  }
+  return true;
 }
 
 type Store = Record<string, Record<string, unknown>[]>;
@@ -91,6 +123,12 @@ function makeDb(store: Store, { withTransaction = true } = {}) {
       competencyRequirements: table('competencyRequirements'),
       assessmentTools: table('assessmentTools'),
       formTemplates: table('formTemplates'),
+      // Scope expansion for the membership-shaped read (U2/U3).
+      membershipRoles: table('membershipRoles'),
+      membershipLocations: table('membershipLocations'),
+      membershipDepartments: table('membershipDepartments'),
+      locations: table('locations'),
+      departments: table('departments'),
     };
   };
   const tx = { query: tables('tx') };
@@ -254,5 +292,149 @@ describe('requiredToolIdsByRole', () => {
     const byRole = await requiredToolIdsByRole(db, ORG, ['r1']);
 
     expect(byRole.get('r1')).toEqual(['t1']);
+  });
+});
+
+// ── the membership-shaped read that replaces the per-role one at the ─────────
+// ── assignment seam (U2, KTD4): scope expansion → union → tool resolution ────
+
+/** One-scope link rows (KTD1) — explicit nulls so the org query's `is null` bites. */
+const scoped = (
+  scope: { roleId?: string; locationId?: string; departmentId?: string },
+  competencyId: string,
+  tier: 'required' | 'recommended' = 'required',
+) => ({
+  id: `link-${scope.roleId ?? scope.locationId ?? scope.departmentId ?? 'org'}-${competencyId}`,
+  orgId: ORG,
+  roleId: null,
+  locationId: null,
+  departmentId: null,
+  competencyId,
+  tier,
+  ...scope,
+});
+
+/** A membership placed/holding across the three key tables, with active values. */
+function placedMembership(
+  m: string,
+  { roleIds = [], locationIds = [], departmentIds = [] }: Record<string, string[]>,
+) {
+  return {
+    membershipRoles: roleIds.map((roleId) => ({ membershipId: m, roleId, withdrawnAt: null })),
+    membershipLocations: locationIds.map((locationId) => ({ membershipId: m, locationId })),
+    membershipDepartments: departmentIds.map((departmentId) => ({ membershipId: m, departmentId })),
+    locations: locationIds.map((id) => ({ id, orgId: ORG, status: 'active' })),
+    departments: departmentIds.map((id) => ({ id, orgId: ORG, status: 'active' })),
+  };
+}
+
+describe('requiredToolIdsForMembership', () => {
+  it('unions all four scopes AND the legacy rows into one tool set, deduplicated (KTD4, KTD2)', async () => {
+    const { db } = makeDb({
+      ...placedMembership('m1', { roleIds: ['r1'], locationIds: ['loc1'], departmentIds: ['dep1'] }),
+      roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'r1', toolId: 't-legacy' }],
+      competencyRequirements: [
+        scoped({ roleId: 'r1' }, 'c-role'),
+        scoped({ locationId: 'loc1' }, 'c-loc'),
+        scoped({ departmentId: 'dep1' }, 'c-dept'),
+        scoped({}, 'c-org'),
+        // Cross-scope duplicate resolving to the SAME tool as the role link —
+        // the union carries one entry, never two (AE4's read side).
+        scoped({ locationId: 'loc1' }, 'c-role'),
+      ],
+      assessmentTools: [
+        tool('t-legacy', [], AT('2026-01-01T00:00:00Z')),
+        tool('t-role', ['c-role'], AT('2026-01-02T00:00:00Z')),
+        tool('t-loc', ['c-loc'], AT('2026-01-03T00:00:00Z')),
+        tool('t-dept', ['c-dept'], AT('2026-01-04T00:00:00Z')),
+        tool('t-org', ['c-org'], AT('2026-01-05T00:00:00Z')),
+      ],
+      formTemplates: ['t-legacy', 't-role', 't-loc', 't-dept', 't-org'].map((t) =>
+        template(`tpl-${t}`, 'v1'),
+      ),
+    });
+
+    const toolIds = await requiredToolIdsForMembership(db, ORG, 'm1');
+
+    expect([...toolIds].sort()).toEqual(['t-dept', 't-legacy', 't-loc', 't-org', 't-role']);
+  });
+
+  it('reaches a membership with NO roles through the org scope (KTD4 — the early return is dead)', async () => {
+    // The exact shape the zero-roles early return used to drop on the floor:
+    // no membership_roles row anywhere, an org-wide requirement, one tool.
+    const { db } = makeDb({
+      ...placedMembership('m1', { locationIds: ['loc1'] }),
+      competencyRequirements: [scoped({}, 'c-org')],
+      assessmentTools: [tool('t-org', ['c-org'], AT('2026-01-01T00:00:00Z'))],
+      formTemplates: [template('tpl-t-org', 'v1')],
+    });
+
+    expect(await requiredToolIdsForMembership(db, ORG, 'm1')).toEqual(['t-org']);
+  });
+
+  it('keeps evidence-only requirements out of the tool set and recommended out entirely (R7, R13)', async () => {
+    const { db } = makeDb({
+      ...placedMembership('m1', { locationIds: ['loc1'] }),
+      competencyRequirements: [
+        scoped({ locationId: 'loc1' }, 'c-licence'), // nothing awards it
+        scoped({}, 'c1', 'recommended'), // never enforced
+      ],
+      assessmentTools: [tool('t1', ['c1'], AT('2026-01-01T00:00:00Z'))],
+      formTemplates: [template('tpl-t1', 'v1')],
+    });
+
+    expect(await requiredToolIdsForMembership(db, ORG, 'm1')).toEqual([]);
+  });
+
+  it('lets a RETIRED location confer no tools — its scope key drops out of the expansion (U4)', async () => {
+    const { db } = makeDb({
+      membershipLocations: [{ membershipId: 'm1', locationId: 'loc-gone' }],
+      locations: [{ id: 'loc-gone', orgId: ORG, status: 'retired' }],
+      competencyRequirements: [scoped({ locationId: 'loc-gone' }, 'c1')],
+      assessmentTools: [tool('t1', ['c1'], AT('2026-01-01T00:00:00Z'))],
+      formTemplates: [template('tpl-t1', 'v1')],
+    });
+
+    expect(await requiredToolIdsForMembership(db, ORG, 'm1')).toEqual([]);
+  });
+
+  it('pins the whole expansion — placement tables included — to ONE repeatable-read transaction (KTD3)', async () => {
+    // The snapshot now covers the placement reads too: a location transfer
+    // committing mid-read must not feed one placement to the scope expansion
+    // and another to the requirement rows.
+    const { db, transaction, reads } = makeDb({
+      ...placedMembership('m1', { roleIds: ['r1'], locationIds: ['loc1'] }),
+      roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'r1', toolId: 't1' }],
+      competencyRequirements: [scoped({ locationId: 'loc1' }, 'c2')],
+      assessmentTools: [
+        tool('t1', [], AT('2026-01-01T00:00:00Z')),
+        tool('t2', ['c2'], AT('2026-01-02T00:00:00Z')),
+      ],
+      formTemplates: [template('tpl-t1', 'v1'), template('tpl-t2', 'v2')],
+    });
+
+    const toolIds = await requiredToolIdsForMembership(db, ORG, 'm1');
+
+    expect([...toolIds].sort()).toEqual(['t1', 't2']);
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((r) => r.surface === 'tx')).toBe(true);
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: 'repeatable read',
+    });
+  });
+
+  it('still reads correctly on a surface with no transaction (lean read-only callers)', async () => {
+    const { db } = makeDb(
+      {
+        ...placedMembership('m1', { locationIds: ['loc1'] }),
+        competencyRequirements: [scoped({ locationId: 'loc1' }, 'c1')],
+        assessmentTools: [tool('t1', ['c1'], AT('2026-01-01T00:00:00Z'))],
+        formTemplates: [template('tpl-t1', 'v1')],
+      },
+      { withTransaction: false },
+    );
+
+    expect(await requiredToolIdsForMembership(db, ORG, 'm1')).toEqual(['t1']);
   });
 });

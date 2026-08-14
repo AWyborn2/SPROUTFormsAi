@@ -1,12 +1,15 @@
 /**
- * Loading and writing around the pure assignment engine (U11).
+ * Loading and writing around the pure assignment engine (U11; membership-
+ * scoped by the requirement inheritance round, U3/KTD4).
  *
  * `packages/shared/src/assignment.ts` decides WHAT to create; this reads the
- * membership, its Roles' requirements, the tools, the person's current
- * competencies and Locations, and the cases already open, then writes the cases
- * the engine returns. It is the one function four callers share — placement
- * change, requirement change, import and the sweep (KTD16) — so the skip rule
- * lives in exactly one place and every trigger is idempotent by construction.
+ * membership, the requirements its FULL scope union confers (org, placed
+ * Locations, placed Departments, held Roles — R2), the tools, the person's
+ * current competencies and Locations, and the cases already open, then writes
+ * the cases the engine returns. It is the one function four callers share —
+ * placement change, requirement change, import and the sweep (KTD16) — so the
+ * skip rule lives in exactly one place and every trigger is idempotent by
+ * construction.
  */
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
@@ -19,7 +22,7 @@ import {
   type HeldCompetencyState,
 } from '@formai/shared';
 import { db } from '../db.js';
-import { requiredToolIdsByRole } from './requirement-links.js';
+import { requiredToolIdsForMembership } from './requirement-links.js';
 import type { Reader } from './standing.js';
 import { DEACTIVATED_STATUS } from '../middleware/tenant.js';
 
@@ -220,10 +223,14 @@ async function loadMembershipContext(
  */
 function planFromContext(
   ctx: MembershipAssignmentContext,
-  roleRequirements: readonly (readonly string[])[],
+  requirements: readonly (readonly string[])[],
 ): PlannedCase[] {
   const decisions = decideAssignments({
-    roleRequirements,
+    // The engine's input keeps its historical name; since U3 the real
+    // assignment passes ONE flattened array (the membership's whole scope
+    // union, KTD4) — the engine has always flattened before deciding, so the
+    // grouping never carried meaning.
+    roleRequirements: requirements,
     tools: ctx.tools,
     held: ctx.held,
     locationIds: ctx.locationIds,
@@ -287,11 +294,12 @@ export async function insertPlannedCases(
 }
 
 /**
- * Assign one membership's Role requirements. Creates a case only where a
- * requirement is unmet and none is already open, resolving the Location from the
- * membership (R57–R60). Idempotent (KTD16): the engine excludes any tool with an
- * open case, so this may be run on every placement change, requirement change,
- * import row and sweep without duplicating.
+ * Assign one membership's requirements — the FULL scope union (KTD4, R2), not
+ * just its Roles'. Creates a case only where a requirement is unmet and none
+ * is already open, resolving the Location from the membership (R57–R60).
+ * Idempotent (KTD16): the engine excludes any tool with an open case, so this
+ * may be run on every placement change, requirement change, import row and
+ * sweep without duplicating.
  *
  * `now` is threaded so currency and the run share one instant.
  */
@@ -301,63 +309,27 @@ export async function assignForMembership(
   membershipId: string,
   now: Date = new Date(),
 ): Promise<AssignmentResult> {
-  // Held Roles only — a withdrawn Role confers no requirement (R52).
-  const roleRows = await database.query.membershipRoles.findMany({
-    where: and(
-      eq(schema.membershipRoles.membershipId, membershipId),
-      isNull(schema.membershipRoles.withdrawnAt),
-    ),
-  });
-  const roleIds = roleRows.map((r) => r.roleId);
-  if (roleIds.length === 0) return { createdCaseIds: [] };
-
   /*
-    The SHARED resolver (KTD2), not a direct `roleRequiredAssessments` read:
-    a Role's requirement now lives as a competency link, and this seam — which
-    the sweep, placement change, import and training-request approval all flow
-    through — must see BOTH sources or a direct-link-only Role would silently
-    assign nothing. The resolver returns per-role TOOL arrays (legacy rows plus
-    each required link resolved to its awarding tool), so everything below it
-    is unchanged.
+    THE MEMBERSHIP-SHAPED RESOLVER (KTD4), and NO zero-roles early return: an
+    org, Location or Department requirement reaches a member who holds no role
+    at all (R2, R3) — the admin placed at a site owes its induction before
+    they hold anything — so bailing on an empty role list would silently drop
+    every non-role scope, and the sweep would never be a backstop for scope
+    changes. The resolver expands the membership's placement to scope keys
+    (retired locations/departments dropped, withdrawn roles excluded, legacy
+    role rows still honoured — KTD2/KTD3 live inside it) and returns the flat
+    deduplicated tool set the engine has always reduced to anyway.
   */
-  const toolIdsByRole = await requiredToolIdsByRole(database, orgId, roleIds);
-  // One array per Role — the engine unions and deduplicates (R48, R49).
-  const roleRequirements = roleIds.map((roleId) => toolIdsByRole.get(roleId) ?? []);
-  const toolIds = [...new Set(roleRequirements.flat())];
+  const toolIds = await requiredToolIdsForMembership(database, orgId, membershipId);
+  // Zero TOOLS stays an early return: nothing to plan, nothing to load. An
+  // evidence-only obligation (R7) lands here — visible in standing, no case.
   if (toolIds.length === 0) return { createdCaseIds: [] };
 
   const ctx = await loadMembershipContext(database, orgId, membershipId, toolIds, now);
   if (!ctx) return { createdCaseIds: [] };
 
-  const planned = planFromContext(ctx, roleRequirements);
+  const planned = planFromContext(ctx, [toolIds]);
   return { createdCaseIds: await insertPlannedCases(database, orgId, ctx.userId, planned) };
-}
-
-/**
- * Assign a Role's requirements to everyone holding it today (R82's mechanism).
- * Runs the same per-membership decision for each current holder, so a
- * requirement added to a Role reaches the people already in it. Idempotent for
- * the same reason a single membership's run is.
- */
-export async function assignForRole(
-  database: Database,
-  orgId: string,
-  roleId: string,
-  now: Date = new Date(),
-): Promise<AssignmentResult> {
-  const holders = await database.query.membershipRoles.findMany({
-    where: and(
-      eq(schema.membershipRoles.roleId, roleId),
-      isNull(schema.membershipRoles.withdrawnAt),
-    ),
-  });
-  const membershipIds = [...new Set(holders.map((h) => h.membershipId))];
-  const createdCaseIds: string[] = [];
-  for (const membershipId of membershipIds) {
-    const result = await assignForMembership(database, orgId, membershipId, now);
-    createdCaseIds.push(...result.createdCaseIds);
-  }
-  return { createdCaseIds };
 }
 
 /**

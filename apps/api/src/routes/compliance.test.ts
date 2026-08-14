@@ -29,6 +29,33 @@ function authHeader(t: { userId: string; orgId: string; role: string }) {
 const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
 const daysAhead = (n: number) => new Date(Date.now() + n * 86_400_000);
 
+/*
+  Does a WHERE carry an `is null` predicate? Among the four scope shapes the
+  requirement reads issue (U2), ONLY the org-scope query does (all three scope
+  columns null, KTD1) — so this is how the lean fake below tells the org read
+  apart and keeps role-link fixtures from leaking into it as org-wide rows.
+  Depth-limited and schema-key-skipping, same as the tier walk.
+*/
+const WHERE_SKIP = new Set(['table', 'config', 'encoder', 'decoder', 'session', 'dialect', 'default']);
+function hasIsNull(node: unknown, depth = 0): boolean {
+  if (!node || typeof node !== 'object' || depth > 12) return false;
+  const rec = node as Record<string, unknown>;
+  const chunks = rec.queryChunks;
+  if (Array.isArray(chunks)) {
+    for (const c of chunks) {
+      const v = (c as { value?: unknown } | null)?.value;
+      if (Array.isArray(v) && v.some((s) => typeof s === 'string' && s.includes('is null'))) return true;
+      if (hasIsNull(c, depth + 1)) return true;
+    }
+    return false;
+  }
+  for (const [k, v] of Object.entries(rec)) {
+    if (WHERE_SKIP.has(k)) continue;
+    if (hasIsNull(v, depth + 1)) return true;
+  }
+  return false;
+}
+
 const COMP = 'comp-required';
 const COMP_OPT = 'comp-optional';
 const grant = (competencyId: string, over: Record<string, unknown> = {}) => ({
@@ -67,6 +94,12 @@ function fakeDb(opts: {
         ),
       },
       membershipRoles: { findMany: vi.fn().mockResolvedValue([{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }]) },
+      // Scope expansion (U2) reads the placement axes and their taxonomy
+      // values too; these fixtures stay role-shaped, so all default empty.
+      membershipLocations: { findMany: vi.fn().mockResolvedValue([]) },
+      membershipDepartments: { findMany: vi.fn().mockResolvedValue([]) },
+      locations: { findMany: vi.fn().mockResolvedValue([]) },
+      departments: { findMany: vi.fn().mockResolvedValue([]) },
       roleRequiredAssessments: {
         findMany: vi.fn().mockResolvedValue(
           opts.legacyRequirements ?? [{ orgId: 'org-1', roleId: 'r1', toolId: 't1' }],
@@ -129,7 +162,20 @@ function fakeDb(opts: {
             }
             for (const v of Object.values(rec)) if (v && typeof v === 'object') stack.push(v);
           }
-          return Promise.resolve(tier ? rows.filter((r) => r.tier === tier) : rows);
+          const byTier = tier ? rows.filter((r) => r.tier === tier) : rows;
+          // SCOPE-AWARE too (U2): the org-scope read is the only one with an
+          // `is null` shape, and these role-link fixtures must not answer it —
+          // otherwise every seeded role requirement would read as org-wide.
+          return Promise.resolve(
+            hasIsNull(args?.where)
+              ? byTier.filter(
+                  (r) =>
+                    (r as Record<string, unknown>).roleId == null &&
+                    (r as Record<string, unknown>).locationId == null &&
+                    (r as Record<string, unknown>).departmentId == null,
+                )
+              : byTier,
+          );
         }),
       },
     },

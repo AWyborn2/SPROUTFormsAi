@@ -43,6 +43,33 @@ function insertResult(rows: unknown[]) {
   return awaitable;
 }
 
+/*
+  Does a WHERE carry an `is null` predicate? Of the four requirement scope
+  reads (U2), only the ORG one does (all three scope columns null, KTD1) —
+  which is how the competencyRequirements fake below tells it apart, so
+  role-link fixtures never leak into it as org-wide rows. Depth-limited and
+  schema-key-skipping, matching the other route fakes' where-walkers.
+*/
+const WHERE_SKIP = new Set(['table', 'config', 'encoder', 'decoder', 'session', 'dialect', 'default']);
+function hasIsNull(node: unknown, depth = 0): boolean {
+  if (!node || typeof node !== 'object' || depth > 12) return false;
+  const rec = node as Record<string, unknown>;
+  const chunks = rec.queryChunks;
+  if (Array.isArray(chunks)) {
+    for (const c of chunks) {
+      const v = (c as { value?: unknown } | null)?.value;
+      if (Array.isArray(v) && v.some((s) => typeof s === 'string' && s.includes('is null'))) return true;
+      if (hasIsNull(c, depth + 1)) return true;
+    }
+    return false;
+  }
+  for (const [k, v] of Object.entries(rec)) {
+    if (WHERE_SKIP.has(k)) continue;
+    if (hasIsNull(v, depth + 1)) return true;
+  }
+  return false;
+}
+
 function fakeDb(opts: {
   rolePermissionsFindFirst?: unknown;
   rolePermissionsFindMany?: unknown[];
@@ -139,13 +166,28 @@ function fakeDb(opts: {
     // The counts read: standing resolver inputs plus grants. Empty by default,
     // which computes zero counts for every active member.
     membershipRoles: { findMany: vi.fn().mockResolvedValue(opts.membershipRolesFindMany ?? []) },
+    // Scope expansion (U2) reads the placement axes and their taxonomy values
+    // too; these fixtures stay role-shaped, so all default empty.
+    membershipLocations: { findMany: vi.fn().mockResolvedValue([]) },
+    membershipDepartments: { findMany: vi.fn().mockResolvedValue([]) },
+    locations: { findMany: vi.fn().mockResolvedValue([]) },
+    departments: { findMany: vi.fn().mockResolvedValue([]) },
     roleRequiredAssessments: {
       findMany: vi.fn().mockResolvedValue(opts.roleRequiredAssessmentsFindMany ?? []),
     },
     // The dual read's direct half (KTD1). Empty keeps these fixtures on the
-    // legacy derivation the counts were written against.
+    // legacy derivation the counts were written against. SCOPE-AWARE (U2):
+    // only the ORG read carries an `is null` shape, and role-link fixtures
+    // must not answer it as org-wide rows.
     competencyRequirements: {
-      findMany: vi.fn().mockResolvedValue(opts.competencyRequirementsFindMany ?? []),
+      findMany: vi.fn((args?: { where?: unknown }) => {
+        const rows = (opts.competencyRequirementsFindMany ?? []) as Record<string, unknown>[];
+        return Promise.resolve(
+          hasIsNull(args?.where)
+            ? rows.filter((r) => r.roleId == null && r.locationId == null && r.departmentId == null)
+            : rows,
+        );
+      }),
     },
     assessmentTools: { findMany: vi.fn().mockResolvedValue(opts.assessmentToolsFindMany ?? []) },
     competencyHolders: {

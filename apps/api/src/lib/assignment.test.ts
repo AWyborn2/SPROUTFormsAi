@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // parameter, so a null module db is all this needs — every test passes its own.
 vi.mock('../db.js', () => ({ db: null, getDbStatus: () => 'unconfigured' }));
 
-const { assignForMembership, assignForRole } = await import('./assignment.js');
+const { assignForMembership } = await import('./assignment.js');
 
 const ORG = 'org-1';
 const USER = 'user-1';
@@ -40,6 +40,14 @@ function makeDb(rows: Rows) {
       assessmentTools: table('assessmentTools'),
       formTemplates: table('formTemplates'),
       membershipLocations: table('membershipLocations'),
+      // Scope expansion (U2/U3): the membership-shaped requirement read walks
+      // departments and the taxonomy value tables too. This lean fake ignores
+      // WHEREs — the scope filters themselves are pinned where the fakes
+      // honour them (standing.test.ts, requirement-links.test.ts); here the
+      // fixtures are single-scope so returning everything is faithful.
+      membershipDepartments: table('membershipDepartments'),
+      locations: table('locations'),
+      departments: table('departments'),
       /*
         The ONE read here that must honour its predicate. The loader asks for
         cases in flight — `open` and `awaiting_sign_off` — and the skip rule is
@@ -91,6 +99,11 @@ function baseRows(over: Partial<Rows> = {}): Rows {
     ],
     formTemplates: [{ id: 'tpl1', orgId: ORG, currentVersionId: 'v1' }],
     membershipLocations: [{ membershipId: 'm1', locationId: 'loc1', position: 0 }],
+    // The placed value itself must exist and be active — a retired (or
+    // unknown) location drops out of the scope expansion (U4 semantics).
+    locations: [{ id: 'loc1', orgId: ORG, status: 'active' }],
+    membershipDepartments: [],
+    departments: [],
     assessmentCases: [],
     competencyHolders: [],
     competencies: [],
@@ -201,8 +214,82 @@ describe('assignForMembership', () => {
     expect(created).toHaveLength(0);
   });
 
-  it('assigns nothing when the membership holds no Role', async () => {
+  it('lets ROLE-scoped requirements reach nobody who holds no role (R2 — scope union, not roster)', async () => {
+    // The zero-roles EARLY RETURN is dead (KTD4), so this is no longer "no
+    // role → nothing" — it is "a role requirement follows the role": with only
+    // role-shaped requirements configured, a role-less member owes nothing.
     const { db, created } = makeDb(baseRows({ membershipRoles: [] }));
+    const result = await assignForMembership(db, ORG, 'm1', NOW);
+
+    expect(result.createdCaseIds).toEqual([]);
+    expect(created).toHaveLength(0);
+  });
+
+  it('assigns an ORG-scope requirement to a role-less member (KTD4 — the early return is dead)', async () => {
+    // The exact membership the old `roleIds.length === 0` return dropped: no
+    // membership_roles row at all, an org-wide required competency, a bookable
+    // tool. The sweep-facing seam must now produce the case.
+    const rows = baseRows({
+      membershipRoles: [],
+      roleRequiredAssessments: [],
+      competencyRequirements: [
+        { id: 'l-org', orgId: ORG, roleId: null, locationId: null, departmentId: null, competencyId: 'c1', tier: 'required' },
+      ],
+    });
+    (rows.assessmentTools![0] as Record<string, unknown>).createdAt = new Date('2026-01-01T00:00:00Z');
+    const { db, created } = makeDb(rows);
+    const result = await assignForMembership(db, ORG, 'm1', NOW);
+
+    expect(result.createdCaseIds).toHaveLength(1);
+    expect(created[0]).toMatchObject({ toolId: 't1', candidateUserId: USER, locationId: 'loc1' });
+  });
+
+  it('assigns a LOCATION-scope requirement to a role-less member placed there (R3)', async () => {
+    const rows = baseRows({
+      membershipRoles: [],
+      roleRequiredAssessments: [],
+      competencyRequirements: [
+        { id: 'l-loc', orgId: ORG, roleId: null, locationId: 'loc1', departmentId: null, competencyId: 'c1', tier: 'required' },
+      ],
+    });
+    (rows.assessmentTools![0] as Record<string, unknown>).createdAt = new Date('2026-01-01T00:00:00Z');
+    const { db, created } = makeDb(rows);
+    const result = await assignForMembership(db, ORG, 'm1', NOW);
+
+    expect(result.createdCaseIds).toHaveLength(1);
+    expect(created[0]).toMatchObject({ toolId: 't1', candidateUserId: USER, locationId: 'loc1' });
+  });
+
+  it('creates ZERO cases for a member with no location placement — the gap stays visible elsewhere (KTD4)', async () => {
+    /*
+      A case needs somewhere to be assessed, so the decideAssignments
+      no-location skip stands. The requirement is NOT lost: the standing read
+      still carries it (pinned in standing.test.ts — "keeps the requirement
+      VISIBLE for a member with no location placement"), so the gap shows on
+      compliance rather than silently reading as met.
+    */
+    const rows = baseRows({
+      membershipRoles: [],
+      roleRequiredAssessments: [],
+      membershipLocations: [],
+      competencyRequirements: [
+        { id: 'l-org', orgId: ORG, roleId: null, locationId: null, departmentId: null, competencyId: 'c1', tier: 'required' },
+      ],
+    });
+    (rows.assessmentTools![0] as Record<string, unknown>).createdAt = new Date('2026-01-01T00:00:00Z');
+    const { db, created } = makeDb(rows);
+    const result = await assignForMembership(db, ORG, 'm1', NOW);
+
+    expect(result.createdCaseIds).toEqual([]);
+    expect(created).toHaveLength(0);
+  });
+
+  it('plans nothing for an EMPTY-AWARD tool — vacuously satisfied, at any scope (R45)', async () => {
+    // Legacy row naming a tool that awards nothing: the engine treats it as
+    // already met, and the scope generalisation must not change that.
+    const rows = baseRows();
+    (rows.assessmentTools![0] as Record<string, unknown>).awardedCompetencyIds = [];
+    const { db, created } = makeDb(rows);
     const result = await assignForMembership(db, ORG, 'm1', NOW);
 
     expect(result.createdCaseIds).toEqual([]);
@@ -242,17 +329,5 @@ describe('assignForMembership', () => {
 
     expect(result.createdCaseIds).toEqual([]);
     expect(created).toHaveLength(0);
-  });
-});
-
-describe('assignForRole', () => {
-  it('runs the same decision for every current holder of the Role (R47)', async () => {
-    const { db, created } = makeDb(baseRows());
-    const result = await assignForRole(db, ORG, 'r1', NOW);
-
-    // One holder (m1) with one unmet requirement → one case, by the same rule
-    // placement change would apply.
-    expect(result.createdCaseIds).toHaveLength(1);
-    expect(created[0]).toMatchObject({ toolId: 't1', candidateUserId: USER, locationId: 'loc1' });
   });
 });

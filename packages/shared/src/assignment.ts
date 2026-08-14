@@ -45,11 +45,17 @@ export interface HeldCompetencyState {
 
 export interface AssignmentInput {
   /**
-   * The required tool ids of each Role the person holds, one array per Role. The
-   * union across them is what the person is obliged to hold (R48); a Role with
-   * no configured requirements contributes an empty array and so assigns nothing
-   * (R49). Changing which Roles a person holds is passing a different set of
-   * arrays (R51).
+   * The required tool ids the person's scopes confer. HISTORICAL NAME, WIDER
+   * MEANING since the requirement inheritance round (U3, KTD4): the arrays
+   * once carried one Role each, but the caller now passes the flattened union
+   * of the membership's WHOLE scope stack — org, placed Locations, placed
+   * Departments, held Roles (R2) — usually as a single array. The name stays
+   * because the engine has NEVER read the grouping: it unions everything
+   * before deciding (see below), so per-role arrays and one flat array are
+   * indistinguishable here, and renaming would touch every caller for zero
+   * behaviour change. A scope with no requirements contributes nothing (R49);
+   * changing what a person's placement confers is passing a different set
+   * (R51).
    */
   roleRequirements: readonly (readonly string[])[];
   /** The tools those requirements name, by id. A named tool absent here is skipped. */
@@ -58,8 +64,12 @@ export interface AssignmentInput {
   held: readonly HeldCompetencyState[];
   /**
    * The Location ids on the membership, in membership order (R60 reads the
-   * first). At least one — U4's placement validator guarantees it, and with none
-   * there is nowhere to place a case, so an empty list assigns nothing.
+   * first). With none there is nowhere to place a case, so an empty list
+   * assigns nothing — and that skip DELIBERATELY survives the scope rounds
+   * (KTD4): a member with no location placement can still OWE an org or
+   * department requirement, which stays visible through standing/compliance
+   * while no case is planned. The gap names its own fix; it is never silently
+   * met.
    */
   locationIds: readonly string[];
   /**

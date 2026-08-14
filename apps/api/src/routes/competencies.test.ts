@@ -158,6 +158,12 @@ function fakeDb(opts: {
       membershipRoles: {
         findMany: vi.fn().mockResolvedValue(opts.membershipRolesFindMany ?? []),
       },
+      // Scope expansion (U2) reads the placement axes and their taxonomy
+      // values too; these fixtures stay role-shaped, so all default empty.
+      membershipLocations: { findMany: vi.fn().mockResolvedValue([]) },
+      membershipDepartments: { findMany: vi.fn().mockResolvedValue([]) },
+      locations: { findMany: vi.fn().mockResolvedValue([]) },
+      departments: { findMany: vi.fn().mockResolvedValue([]) },
       roleRequiredAssessments: {
         findMany: vi.fn().mockResolvedValue(opts.roleRequiredAssessmentsFindMany ?? []),
       },
@@ -189,7 +195,24 @@ function fakeDb(opts: {
             }
             for (const v of Object.values(rec)) if (v && typeof v === 'object') stack.push(v);
           }
-          return Promise.resolve(tier ? rows.filter((r) => r.tier === tier) : rows);
+          const byTier = tier ? rows.filter((r) => r.tier === tier) : rows;
+          /*
+            SCOPE-AWARE too (U2): of the four scope reads, only the ORG one
+            carries an `is null` shape (all three scope columns null, KTD1) —
+            `wantsUnrevoked` is a generic is-null sniffer, reused here — and
+            these role-link fixtures must not answer it, or every seeded role
+            requirement would read as org-wide for every member.
+          */
+          return Promise.resolve(
+            wantsUnrevoked(args?.where)
+              ? byTier.filter(
+                  (r) =>
+                    (r as Record<string, unknown>).roleId == null &&
+                    (r as Record<string, unknown>).locationId == null &&
+                    (r as Record<string, unknown>).departmentId == null,
+                )
+              : byTier,
+          );
         }),
       },
     },
