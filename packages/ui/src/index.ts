@@ -38,6 +38,7 @@ export {
 export {
   RepeatingGroup,
   currentTimeHHMM,
+  todayISODate,
   type RepeatingGroupProps,
   type RepeatingGroupColumn,
   type RepeatingGroupAnswerSet,
