@@ -447,6 +447,24 @@ export interface AssessmentPart {
    */
   durationColumnKey?: string;
   /**
+   * Logbook parts only — per-task-type hour minimums WITHIN the one table.
+   *
+   * The multi-stage logbook (the Scraper's Part 5): one printed checklist, a
+   * task-type dropdown column, and a minimum number of hours per task type on
+   * top of the part's overall `minimumHours`. The candidate logs against any
+   * task in any order — exposure to a task type is driven by operations, not a
+   * training sequence — so this NEVER gates progression. It is a target the
+   * fill surface shows the candidate, the assessor reads before signing, and
+   * the save route notifies on, exactly as the overall minimum already is: a
+   * soft target, not a lock.
+   */
+  taskMinimums?: {
+    /** The table column whose value names the task type — a dropdown column. */
+    columnKey: string;
+    /** Minimum hours required for each task-type value. */
+    targets: Array<{ value: string; minimumHours: number }>;
+  };
+  /**
    * The page-one assessment-method entry this part ticks once it passes.
    *
    * Replaces the bare `checklistFieldId`, which named a field but not what to
@@ -949,28 +967,66 @@ export function validateManifest(
     }
 
     if (part.kind === 'logbook') {
+      // Resolved once: both the duration column and the per-task targets check
+      // against the part's own table.
+      const table = fieldsInSection(fields, part.startFieldId).find(
+        (f) => f.type === 'repeating_group',
+      );
+
       if (!(part.minimumHours && part.minimumHours > 0)) {
         problems.push(`Logbook part "${part.key}" has no positive minimumHours.`);
       }
       if (!part.durationColumnKey) {
         problems.push(`Logbook part "${part.key}" declares no durationColumnKey.`);
-      } else {
+      } else if (!table) {
         // The declared column must exist in the part's own table. Totalling a
         // column that is not there silently reports zero hours against a
         // safety threshold, so the mismatch is an authoring error — caught
         // here, where an author can fix it.
-        const table = fieldsInSection(fields, part.startFieldId).find(
-          (f) => f.type === 'repeating_group',
+        problems.push(`Logbook part "${part.key}" has no repeating table in its section.`);
+      } else if (table.columns && !table.columns.some((c) => c.key === part.durationColumnKey)) {
+        problems.push(
+          `Logbook part "${part.key}" names duration column "${part.durationColumnKey}", which is not a column of its table.`,
         );
-        if (!table) {
-          problems.push(`Logbook part "${part.key}" has no repeating table in its section.`);
-        } else if (
-          table.columns &&
-          !table.columns.some((c) => c.key === part.durationColumnKey)
-        ) {
+      }
+
+      /*
+        Per-task-type hour targets. Every pointer validated where an author can
+        still fix it: a target on a column that is not there, or a task value
+        the dropdown never offers, would silently never accrue and never be met
+        — the hours would land nowhere and the target read as unreachable on a
+        candidate who did the work.
+      */
+      if (part.taskMinimums) {
+        const tm = part.taskMinimums;
+        const col = table?.columns?.find((c) => c.key === tm.columnKey);
+        if (table?.columns && !col) {
           problems.push(
-            `Logbook part "${part.key}" names duration column "${part.durationColumnKey}", which is not a column of its table.`,
+            `Logbook part "${part.key}" names task column "${tm.columnKey}", which is not a column of its table.`,
           );
+        }
+        if (col && (col.options?.length ?? 0) === 0) {
+          problems.push(
+            `Logbook part "${part.key}" task column "${tm.columnKey}" has no options for a filler to choose from.`,
+          );
+        }
+        if (tm.targets.length === 0) {
+          problems.push(`Logbook part "${part.key}" declares task minimums with no targets.`);
+        }
+        const seen = new Set<string>();
+        for (const t of tm.targets) {
+          if (!(t.minimumHours > 0)) {
+            problems.push(`Logbook part "${part.key}" task "${t.value}" has no positive minimumHours.`);
+          }
+          if (seen.has(t.value)) {
+            problems.push(`Logbook part "${part.key}" lists task target "${t.value}" more than once.`);
+          }
+          seen.add(t.value);
+          if (col?.options && col.options.length > 0 && !col.options.includes(t.value)) {
+            problems.push(
+              `Logbook part "${part.key}" task target "${t.value}" is not one of task column "${tm.columnKey}" options.`,
+            );
+          }
         }
       }
     }
@@ -1388,6 +1444,63 @@ export function totalLoggedHours(
     if (Number.isFinite(value) && value > 0) total += value;
   }
   return Math.round(total * 100) / 100;
+}
+
+/**
+ * Hours logged PER TASK TYPE — the multi-stage logbook's totals, summed from
+ * the duration column and grouped by the task column.
+ *
+ * A row with a blank task, or a non-positive / non-numeric duration, contributes
+ * nothing: the same tolerance `totalLoggedHours` has, because the same
+ * cab-filled data reaches here and one malformed row must not distort a task's
+ * total. Each task's running sum is rounded the same way the overall total is,
+ * so per-task and overall figures reconcile.
+ */
+export function hoursByTask(
+  rows: readonly Record<string, unknown>[],
+  taskColumnKey: string,
+  durationKey: string,
+): Map<string, number> {
+  const totals = new Map<string, number>();
+  for (const row of rows) {
+    const task = row?.[taskColumnKey];
+    if (typeof task !== 'string' || task.trim() === '') continue;
+    const raw = row?.[durationKey];
+    const value = typeof raw === 'number' ? raw : Number.parseFloat(String(raw ?? ''));
+    if (!Number.isFinite(value) || value <= 0) continue;
+    totals.set(task, Math.round(((totals.get(task) ?? 0) + value) * 100) / 100);
+  }
+  return totals;
+}
+
+/** One task type's progress toward its logbook hour minimum. */
+export interface TaskHourProgress {
+  value: string;
+  minimumHours: number;
+  loggedHours: number;
+  /** Hours logged have reached the minimum. A SOFT target — never a gate. */
+  met: boolean;
+}
+
+/**
+ * Per-task progress for a logbook part, in the order the targets are declared.
+ *
+ * The one read behind the candidate's progress chips, the assessor's pre-sign
+ * readout, and the per-task "minimum reached" notice — so those three can never
+ * disagree about a task's hours. A target with no matching rows still appears,
+ * at zero: a task never started is exactly what the candidate and assessor most
+ * need to see.
+ */
+export function logbookTaskProgress(
+  rows: readonly Record<string, unknown>[],
+  taskMinimums: NonNullable<AssessmentPart['taskMinimums']>,
+  durationKey: string,
+): TaskHourProgress[] {
+  const totals = hoursByTask(rows, taskMinimums.columnKey, durationKey);
+  return taskMinimums.targets.map((t) => {
+    const loggedHours = totals.get(t.value) ?? 0;
+    return { value: t.value, minimumHours: t.minimumHours, loggedHours, met: loggedHours >= t.minimumHours };
+  });
 }
 
 /**
