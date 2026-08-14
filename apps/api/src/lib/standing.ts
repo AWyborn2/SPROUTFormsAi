@@ -479,18 +479,43 @@ export interface CompetencySourcesForUser {
   recommended: Map<string, CompetencySource[]>;
 }
 
+/**
+ * The `{scope, name}` wire shape the read surfaces render (R5, U8): the DTO
+ * drops `scopeId` — screens caption with names, never ids — and the mapper
+ * lives beside the source type so the three routes that serialise sources
+ * (candidate record, compliance gaps, holders register) cannot each invent a
+ * slightly different shape. `undefined` in maps to `[]` out, because a
+ * competency the maps do not name simply has no contributing scope.
+ */
+export interface CompetencySourceRef {
+  scope: RequirementScope;
+  name: string;
+}
+
+export function sourceRefs(sources: readonly CompetencySource[] | undefined): CompetencySourceRef[] {
+  return (sources ?? []).map((s) => ({ scope: s.scope, name: s.scopeName }));
+}
+
 /** Render order: broadest first, then by name so a rebuilt list reads identically. */
 const SCOPE_RANK: Record<RequirementScope, number> = { org: 0, location: 1, department: 2, role: 3 };
 
+const emptySources = (): CompetencySourcesForUser => ({ required: new Map(), recommended: new Map() });
+
 /**
- * The provenance sibling of the standing reads (KTD3): competencyId → every
- * scope that names it, with scope names resolved for rendering ("Required —
- * from <Location>", R5). ONE COMBINED READ for both tiers rather than two
- * functions, deliberately: the record page renders required and recommended
- * side by side, and two separate calls would be two snapshots — a tier change
- * (an UPDATE on the row, KTD1) committing between them could show one
- * competency in both tiers or neither. The tier split is structural (two
+ * The provenance sibling of the standing reads (KTD3): per user, competencyId
+ * → every scope that names it, with scope names resolved for rendering
+ * ("Required — from <Location>", R5). ONE COMBINED READ for both tiers rather
+ * than two functions, deliberately: the record page renders required and
+ * recommended side by side, and two separate calls would be two snapshots — a
+ * tier change (an UPDATE on the row, KTD1) committing between them could show
+ * one competency in both tiers or neither. The tier split is structural (two
  * maps), not a field to filter.
+ *
+ * BATCHED BY USER (the U2-anticipated sibling) because compliance captions a
+ * whole workforce's gap rows in one response (U8): the reads are set-wise over
+ * the union of every user's scope keys — one query per table however many
+ * users are asked about — and each user's sources are then assembled from
+ * their OWN membership's keys, so u1's role never captions u2's record.
  *
  * The legacy derivation is provenance too: a pre-conversion tool requirement
  * is still a ROLE obligation, and R5 allows no requirement without a source,
@@ -498,12 +523,15 @@ const SCOPE_RANK: Record<RequirementScope, number> = { org: 0, location: 1, depa
  * direct link. Sources are deduped per (scope, scopeId) and ordered broadest
  * scope first, then by name — deterministic, so preview and record agree.
  */
-export async function competencySourcesFor(
+export async function competencySourcesByUser(
   database: Database,
   orgId: string,
-  userId: string,
-): Promise<CompetencySourcesForUser> {
-  const result: CompetencySourcesForUser = { required: new Map(), recommended: new Map() };
+  userIds: readonly string[],
+): Promise<Map<string, CompetencySourcesForUser>> {
+  const uniqueUserIds = [...new Set(userIds)];
+  const byUser = new Map<string, CompetencySourcesForUser>();
+  for (const userId of uniqueUserIds) byUser.set(userId, emptySources());
+  if (uniqueUserIds.length === 0) return byUser;
 
   // Same KTD3 posture as the batch reads: one repeatable-read snapshot across
   // placement, requirement, legacy and NAME reads — a rename or transfer
@@ -512,16 +540,19 @@ export async function competencySourcesFor(
   return database.transaction(
     async (tx) => {
       const membershipRows = await tx.query.memberships.findMany({
-        where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.userId, userId)),
+        where: and(
+          eq(schema.memberships.orgId, orgId),
+          inArray(schema.memberships.userId, [...uniqueUserIds]),
+        ),
       });
-      if (membershipRows.length === 0) return result;
+      if (membershipRows.length === 0) return byUser;
 
       const keysByMembership = await scopeKeysForMemberships(
         tx,
         orgId,
         membershipRows.map((m) => m.id),
       );
-      // One user: the union of their memberships' keys IS their scope set.
+      // The whole batch's keys — what the scoped reads and the name reads take.
       const keys = unionKeys(keysByMembership);
 
       const requiredIndex = await requirementIndexForScopes(tx, orgId, keys, 'required');
@@ -536,6 +567,12 @@ export async function competencySourcesFor(
             ),
           })
         : [];
+      const legacyToolIdsByRole = new Map<string, string[]>();
+      for (const row of reqRows) {
+        const list = legacyToolIdsByRole.get(row.roleId) ?? [];
+        list.push(row.toolId);
+        legacyToolIdsByRole.set(row.roleId, list);
+      }
       const legacyToolIds = [...new Set(reqRows.map((r) => r.toolId))];
       const legacyTools = legacyToolIds.length
         ? await tx.query.assessmentTools.findMany({
@@ -581,8 +618,11 @@ export async function competencySourcesFor(
       const departmentNames = await nameOf('departments', keys.departmentIds);
       const roleNames = await nameOf('jobRoles', keys.roleIds);
 
-      // Assemble: dedupe per (scope, scopeId) so the legacy half and a direct
-      // link on the same role read as ONE source, then sort deterministically.
+      // Assemble PER MEMBERSHIP, from that membership's own keys — the batch
+      // indexes cover everyone's scopes, and slicing by each member's keys is
+      // what keeps one person's placement out of a colleague's captions.
+      // Dedupe per (scope, scopeId) so the legacy half and a direct link on
+      // the same role read as ONE source, then sort deterministically.
       const collect = (
         into: Map<string, CompetencySource[]>,
         competencyId: string,
@@ -594,12 +634,17 @@ export async function competencySourcesFor(
         }
         into.set(competencyId, list);
       };
-      const spread = (into: Map<string, CompetencySource[]>, index: ScopeRequirementIndex) => {
+      const spread = (
+        into: Map<string, CompetencySource[]>,
+        index: ScopeRequirementIndex,
+        memberKeys: MembershipScopeKeys,
+      ) => {
+        // Org scope is implicit — every membership of the org sits under it (R2).
         for (const competencyId of index.orgCompetencyIds) {
           collect(into, competencyId, { scope: 'org', scopeId: null, scopeName: orgName });
         }
-        for (const [locationId, competencyIds] of index.byLocation) {
-          for (const competencyId of competencyIds) {
+        for (const locationId of memberKeys.locationIds) {
+          for (const competencyId of index.byLocation.get(locationId) ?? []) {
             collect(into, competencyId, {
               scope: 'location',
               scopeId: locationId,
@@ -607,8 +652,8 @@ export async function competencySourcesFor(
             });
           }
         }
-        for (const [departmentId, competencyIds] of index.byDepartment) {
-          for (const competencyId of competencyIds) {
+        for (const departmentId of memberKeys.departmentIds) {
+          for (const competencyId of index.byDepartment.get(departmentId) ?? []) {
             collect(into, competencyId, {
               scope: 'department',
               scopeId: departmentId,
@@ -616,8 +661,8 @@ export async function competencySourcesFor(
             });
           }
         }
-        for (const [roleId, competencyIds] of index.byRole) {
-          for (const competencyId of competencyIds) {
+        for (const roleId of memberKeys.roleIds) {
+          for (const competencyId of index.byRole.get(roleId) ?? []) {
             collect(into, competencyId, {
               scope: 'role',
               scopeId: roleId,
@@ -626,30 +671,54 @@ export async function competencySourcesFor(
           }
         }
       };
-      spread(result.required, requiredIndex);
-      spread(result.recommended, recommendedIndex);
-      for (const row of reqRows) {
-        for (const competencyId of awardsByTool.get(row.toolId) ?? []) {
-          collect(result.required, competencyId, {
-            scope: 'role',
-            scopeId: row.roleId,
-            scopeName: roleNames.get(row.roleId) ?? '',
-          });
+
+      for (const membership of membershipRows) {
+        // A user can hold several memberships; `collect` dedupes across them,
+        // so the union of their keys assembles into one caption set.
+        const result = byUser.get(membership.userId) ?? emptySources();
+        byUser.set(membership.userId, result);
+        const memberKeys = keysByMembership.get(membership.id) ?? emptyKeys();
+        spread(result.required, requiredIndex, memberKeys);
+        spread(result.recommended, recommendedIndex, memberKeys);
+        // Legacy half → role-sourced REQUIRED provenance, from THIS member's
+        // held roles only.
+        for (const roleId of memberKeys.roleIds) {
+          for (const toolId of legacyToolIdsByRole.get(roleId) ?? []) {
+            for (const competencyId of awardsByTool.get(toolId) ?? []) {
+              collect(result.required, competencyId, {
+                scope: 'role',
+                scopeId: roleId,
+                scopeName: roleNames.get(roleId) ?? '',
+              });
+            }
+          }
         }
       }
 
-      for (const map of [result.required, result.recommended]) {
-        for (const list of map.values()) {
-          list.sort(
-            (a, b) =>
-              SCOPE_RANK[a.scope] - SCOPE_RANK[b.scope] ||
-              a.scopeName.localeCompare(b.scopeName) ||
-              (a.scopeId ?? '').localeCompare(b.scopeId ?? ''),
-          );
+      for (const result of byUser.values()) {
+        for (const map of [result.required, result.recommended]) {
+          for (const list of map.values()) {
+            list.sort(
+              (a, b) =>
+                SCOPE_RANK[a.scope] - SCOPE_RANK[b.scope] ||
+                a.scopeName.localeCompare(b.scopeName) ||
+                (a.scopeId ?? '').localeCompare(b.scopeId ?? ''),
+            );
+          }
         }
       }
-      return result;
+      return byUser;
     },
     { isolationLevel: 'repeatable read' },
   );
+}
+
+/** The provenance for one user — the single-user shape of the batch. */
+export async function competencySourcesFor(
+  database: Database,
+  orgId: string,
+  userId: string,
+): Promise<CompetencySourcesForUser> {
+  const byUser = await competencySourcesByUser(database, orgId, [userId]);
+  return byUser.get(userId) ?? emptySources();
 }

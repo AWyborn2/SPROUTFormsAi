@@ -5,7 +5,13 @@ import { bestCurrency, competencyCurrency, countsAsHeld } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
-import { requiredCompetencyIdsByUser } from '../lib/standing.js';
+import {
+  competencySourcesByUser,
+  requiredCompetencyIdsByUser,
+  scopeKeysForMemberships,
+  sourceRefs,
+  type CompetencySourceRef,
+} from '../lib/standing.js';
 import { awardingToolByCompetency } from '../lib/requirement-links.js';
 import { db } from '../db.js';
 
@@ -46,6 +52,22 @@ export interface ComplianceGap {
    * by booking an assessment that does not exist.
    */
   hasAwardingAssessment: boolean;
+  /**
+   * WHICH scopes require it of this person, by name (R5, U8) — org, location,
+   * department, role; every contributor on a cross-scope duplicate (AE4), the
+   * legacy role derivation included. Empty on an optional lapse: nothing
+   * requires those, which is exactly what the section says. No viewer gate
+   * here — this whole route is admin/owner-only (the isAdmin check below).
+   */
+  sources: CompetencySourceRef[];
+  /**
+   * The KTD4 visibility outcome: this member has NO location placement, so
+   * the assignment engine can plan no case for them anywhere — the gap is
+   * real but permanently unbookable until somebody places them. Read from the
+   * SAME scope expansion the resolver uses, so a member stranded on a retired
+   * location reads as unplaced here too (retired confers nothing).
+   */
+  noLocationPlacement: boolean;
 }
 
 /** A member no notification can reach: a flagged address AND no login (R98, R99). */
@@ -89,6 +111,28 @@ complianceRouter.get(
     // The obligation per person, from the SAME resolver the assignment engine
     // reads (R103) — required competencies only (R101).
     const requiredByUser = await requiredCompetencyIdsByUser(db, orgId, userIds);
+    // WHY each obligation stands (R5, U8): the batched provenance sibling —
+    // one read for the whole workforce, never a per-member loop.
+    const sourcesByUser = await competencySourcesByUser(db, orgId, userIds);
+    /*
+      WHO CAN BE SCHEDULED (U8, KTD4). A member with no location placement
+      keeps their gaps — the requirement is real — but the engine plans no
+      case with nowhere to assess, so their rows carry an explicit marker
+      instead of silently never resolving. Read through the same batched
+      expansion the resolver uses: a retired location has already stopped
+      conferring, so "placed only at a closed site" reads as unplaced too.
+    */
+    const keysByMembership = await scopeKeysForMemberships(
+      db,
+      orgId,
+      memberships.map((m) => m.id),
+    );
+    const placedUserIds = new Set<string>();
+    for (const membership of memberships) {
+      if ((keysByMembership.get(membership.id)?.locationIds.length ?? 0) > 0) {
+        placedUserIds.add(membership.userId);
+      }
+    }
     const users = await db.query.users.findMany({ where: inArray(schema.users.id, userIds) });
     const nameByUser = new Map(users.map((u) => [u.id, u.name]));
 
@@ -130,6 +174,10 @@ complianceRouter.get(
       competencyId,
       competencyName,
       hasAwardingAssessment: awarding.has(competencyId),
+      // REQUIRED provenance only: gaps are required by definition, and an
+      // optional lapse's empty list is the true answer (nothing requires it).
+      sources: sourceRefs(sourcesByUser.get(userId)?.required.get(competencyId)),
+      noLocationPlacement: !placedUserIds.has(userId),
     });
 
     const expired: ComplianceGap[] = [];

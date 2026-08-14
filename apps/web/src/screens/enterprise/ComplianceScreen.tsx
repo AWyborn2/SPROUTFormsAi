@@ -1,6 +1,7 @@
 import { Card, Icon } from '@formai/ui';
 import { useSearchParams } from 'react-router-dom';
 import { useComplianceReport } from '../../lib/data/hooks.js';
+import { sourcesPhrase } from '../../lib/competency-sources.js';
 import type { ComplianceGap, UnreachableMember } from '../../lib/data/types.js';
 
 /**
@@ -190,6 +191,18 @@ function GapSection({
               <span className="flex min-w-0 flex-none items-center gap-2">
                 <span className="truncate text-text-tertiary">{g.competencyName}</span>
                 {/*
+                  WHICH scope requires it (R5, U8) — "from Boddington and
+                  Dozer Operator", or "org-wide". Every gap here is required
+                  by definition, so the phrase needs no "Required" prefix
+                  under a section already titled with it. Empty on an
+                  optional lapse (nothing requires those), so no phrase.
+                */}
+                {sourcesPhrase(g.sources) && (
+                  <span className="flex-none text-[10.5px] text-text-tertiary">
+                    {sourcesPhrase(g.sources)}
+                  </span>
+                )}
+                {/*
                   EVIDENCE-ONLY GAPS SAY SO (U8, R7). The section hint says
                   "book the assessment", but no assessment awards this
                   competency — a licence-type requirement — so booking is a
@@ -203,6 +216,21 @@ function GapSection({
                     title="No assessment awards this competency. Clear the gap by recording evidence — an imported or manual grant."
                   >
                     Evidence-based — record evidence
+                  </span>
+                )}
+                {/*
+                  THE UNPLACED-MEMBER MARKER (U8, KTD4). This member has no
+                  location placement, so the engine can plan no case anywhere:
+                  a bookable gap that will never book itself until somebody
+                  places them — the marker names that fix. Evidence-only rows
+                  skip it: their remedy is recording evidence, placed or not.
+                */}
+                {g.noLocationPlacement && g.hasAwardingAssessment && (
+                  <span
+                    className="flex-none rounded-sm bg-surface-card px-1.5 py-0.5 text-[10.5px] font-medium text-warning-text"
+                    title="No case can be planned: this member is placed at no location, so there is nowhere to assess them. Place them at a location to make this bookable."
+                  >
+                    Cannot be scheduled — no location placement
                   </span>
                 )}
               </span>

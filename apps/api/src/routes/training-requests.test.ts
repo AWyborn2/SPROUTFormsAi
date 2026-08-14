@@ -69,6 +69,8 @@ function fakeDb(opts: {
   membership?: unknown;
   templates?: unknown[];
   heldLocations?: unknown[];
+  /** Location VALUE rows — active ones make a placement confer requirements (U2/U8). */
+  locations?: unknown[];
   openCases?: unknown[];
   competencyHolders?: unknown[];
   competencies?: unknown[];
@@ -117,7 +119,7 @@ function fakeDb(opts: {
       // the expansion treats them as inactive, which keeps these role-only
       // relevance fixtures exactly as they were.)
       membershipDepartments: { findMany: vi.fn().mockResolvedValue([]) },
-      locations: { findMany: vi.fn().mockResolvedValue([]) },
+      locations: { findMany: vi.fn().mockResolvedValue(opts.locations ?? []) },
       departments: { findMany: vi.fn().mockResolvedValue([]) },
       roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue(opts.roleRequirements ?? []) },
       competencyRequirements: {
@@ -411,6 +413,69 @@ describe('POST /training-requests — the candidate-relevance check (U7, KTD6, R
     mockDbValue = db;
     const { server, base } = startApp();
     expect((await post(base, builder)).status).toBe(201);
+    server.close();
+  });
+
+  /*
+    MULTI-SCOPE RE-PINS (U8, R11). The relevance check itself is UNCHANGED —
+    it reads the same unioned standing sets as every other surface — so these
+    pin that a recommendation or requirement arriving from a NON-role scope
+    behaves exactly as the role-scope cases above: the scope that names a
+    competency is invisible to the toggle logic.
+  */
+  const placedCandidate = {
+    memberships: [{ id: 'm-cand', userId: candidate.userId, orgId: 'org-1' }],
+    heldLocations: [{ membershipId: 'm-cand', locationId: 'loc-1', position: 0 }],
+    locations: [{ id: 'loc-1', orgId: 'org-1', name: 'Location A', status: 'active' }],
+  };
+
+  it('201s a LOCATION-scope recommended request while the toggle is ON — no role held at all (R8, AE5)', async () => {
+    const { db } = fakeDb({
+      tool: orgTool,
+      selfStart: true,
+      ...placedCandidate,
+      roleLinks: [
+        { roleId: null, locationId: 'loc-1', departmentId: null, competencyId: COMP, tier: 'recommended' },
+      ],
+      insertedRequest: inserted,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    expect((await post(base, candidate)).status).toBe(201);
+    server.close();
+  });
+
+  it('403s the same LOCATION-scope recommendation while the toggle is OFF (R14, AE5)', async () => {
+    const { db, insertValues } = fakeDb({
+      tool: orgTool,
+      selfStart: false,
+      ...placedCandidate,
+      roleLinks: [
+        { roleId: null, locationId: 'loc-1', departmentId: null, competencyId: COMP, tier: 'recommended' },
+      ],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await post(base, candidate);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'tool_not_relevant' });
+    expect(insertValues).not.toHaveBeenCalled();
+    server.close();
+  });
+
+  it('201s an ORG-scope required gap with the toggle OFF — required hides behind nothing (R2, AE5)', async () => {
+    const { db } = fakeDb({
+      tool: orgTool,
+      selfStart: false,
+      memberships: [{ id: 'm-cand', userId: candidate.userId, orgId: 'org-1' }],
+      roleLinks: [
+        { roleId: null, locationId: null, departmentId: null, competencyId: COMP, tier: 'required' },
+      ],
+      insertedRequest: inserted,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    expect((await post(base, candidate)).status).toBe(201);
     server.close();
   });
 });

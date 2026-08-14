@@ -22,10 +22,12 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('../db.js', () => ({ db: null, getDbStatus: () => 'unconfigured' }));
 
 const {
+  competencySourcesByUser,
   competencySourcesFor,
   recommendedCompetencyIdsByUser,
   requiredCompetencyIdsByUser,
   requiredCompetencyIdsFor,
+  sourceRefs,
 } = await import('./standing.js');
 
 const ORG = 'org-1';
@@ -671,5 +673,87 @@ describe('competencySourcesFor', () => {
     expect(transaction).toHaveBeenCalledWith(expect.any(Function), {
       isolationLevel: 'repeatable read',
     });
+  });
+});
+
+describe('competencySourcesByUser (the batched sibling, U8)', () => {
+  it('assembles each user from their OWN keys — u1’s role never captions u2 (R5)', async () => {
+    /*
+      The batch reads are set-wise over the UNION of everyone's scope keys, so
+      the isolation has to be proven, not assumed: u2 is placed at the same
+      location as u1 but holds no role and sits in a department with no rows —
+      their captions must carry the location and org scopes ONLY, while u1's
+      carry all four. A per-index spread (rather than per-member keys) would
+      leak r-op's rows onto u2 here.
+    */
+    const { db, transaction } = makeDb(AE1_STORE);
+
+    const byUser = await competencySourcesByUser(db, ORG, ['u1', 'u2']);
+
+    expect(transaction).toHaveBeenCalledTimes(1); // one snapshot for the whole batch
+    expect(byUser.get('u1')!.required.size).toBe(8);
+    const u2 = byUser.get('u2')!;
+    expect(u2.required.size).toBe(4);
+    expect(u2.required.get('c-site')).toEqual([
+      { scope: 'location', scopeId: 'loc-a', scopeName: 'Location A' },
+    ]);
+    expect(u2.required.get('c-role-1')).toBeUndefined();
+    expect(u2.required.get('c-dept')).toBeUndefined();
+  });
+
+  it('maps every requested userId, empty maps by default — nobody is absent', async () => {
+    const { db } = makeDb(AE1_STORE);
+
+    const byUser = await competencySourcesByUser(db, ORG, ['u1', 'u-nobody']);
+
+    expect(byUser.has('u-nobody')).toBe(true);
+    expect(byUser.get('u-nobody')!.required.size).toBe(0);
+    expect(byUser.get('u-nobody')!.recommended.size).toBe(0);
+  });
+
+  it('scopes the LEGACY derivation per member — a colleague’s tool row captions nothing (KTD3)', async () => {
+    // u1 holds r1 (legacy tool requirement), u2 holds r2 (no requirements).
+    // The batch reads every legacy row for both roles at once; u2 must not
+    // inherit r1's caption from the shared read.
+    const { db } = makeDb({
+      memberships: [
+        { id: 'm1', orgId: ORG, userId: 'u1' },
+        { id: 'm2', orgId: ORG, userId: 'u2' },
+      ],
+      membershipRoles: [
+        { membershipId: 'm1', roleId: 'r1', withdrawnAt: null },
+        { membershipId: 'm2', roleId: 'r2', withdrawnAt: null },
+      ],
+      jobRoles: [
+        { ...taxonomyRow('r1', 'Role One'), departmentId: 'dep-x' },
+        { ...taxonomyRow('r2', 'Role Two'), departmentId: 'dep-x' },
+      ],
+      organizations: [{ id: ORG, name: 'Org One' }],
+      roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'r1', toolId: 't1' }],
+      assessmentTools: [{ id: 't1', orgId: ORG, awardedCompetencyIds: ['c-dozer'] }],
+    });
+
+    const byUser = await competencySourcesByUser(db, ORG, ['u1', 'u2']);
+
+    expect(byUser.get('u1')!.required.get('c-dozer')).toEqual([
+      { scope: 'role', scopeId: 'r1', scopeName: 'Role One' },
+    ]);
+    expect(byUser.get('u2')!.required.size).toBe(0);
+  });
+});
+
+describe('sourceRefs (the wire shape, U8)', () => {
+  it('drops scopeId and keeps the render order — names are what surfaces caption with (R5)', () => {
+    expect(
+      sourceRefs([
+        { scope: 'org', scopeId: null, scopeName: 'Org One' },
+        { scope: 'location', scopeId: 'loc-a', scopeName: 'Location A' },
+      ]),
+    ).toEqual([
+      { scope: 'org', name: 'Org One' },
+      { scope: 'location', name: 'Location A' },
+    ]);
+    // Undefined in, empty out — "no scope names it" is a fact, not an error.
+    expect(sourceRefs(undefined)).toEqual([]);
   });
 });

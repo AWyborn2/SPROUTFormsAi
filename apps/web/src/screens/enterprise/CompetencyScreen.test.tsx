@@ -276,6 +276,31 @@ describe('CompetencyScreen holder register', () => {
     expect(screen.getByText('Optional')).toBeDefined();
   });
 
+  it('renders BOTH source scopes on a holder under a location AND a role requirement (U8, R5)', () => {
+    // The register's dual-source rendering: the row says WHY it stands, in
+    // the one comma-joined spelling every surface shares.
+    competencies.data = [TRACK_DOZER];
+    holdersResult.data = [
+      holder({
+        userId: 'req',
+        name: 'Ida Required',
+        standing: 'required',
+        sources: [
+          { scope: 'location', name: 'Boddington' },
+          { scope: 'role', name: 'Dozer Operator' },
+        ],
+      }),
+      // The gated shape: sources ABSENT — the row renders no source line at
+      // all rather than an empty "from".
+      holder({ userId: 'gated', name: 'Bo Gated', standing: 'required' }),
+    ];
+    render(<CompetencyScreen />);
+    openRegister();
+
+    expect(screen.getByText('Required — from Boddington and Dozer Operator')).toBeDefined();
+    expect(screen.getAllByText(/— from/)).toHaveLength(1);
+  });
+
   it('labels a recommended holder "Recommended" — never collapsed to Optional (U7, R12, KTD7)', () => {
     // The standing map is exhaustive over the union: the third tier gets its
     // own label, end to end from the API's standingOf to this register row.

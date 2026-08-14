@@ -84,21 +84,33 @@ function fakeDb(opts: {
   tools?: unknown[];
   /** Templates backing the KTD2 published-version filter. Default: t1's is published. */
   templates?: unknown[];
+  /** Location placements and their value rows — the unplaced-member marker reads these (U8, KTD4). */
+  membershipLocations?: unknown[];
+  locations?: unknown[];
 }) {
   const db = {
     query: {
-      organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: 'enterprise' }) },
+      organizations: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: 'enterprise' }),
+        // The U8 sources read resolves the ORG NAME for org-scope captions.
+        findMany: vi.fn().mockResolvedValue([{ id: 'org-1', name: 'Org One' }]),
+      },
       memberships: {
         findMany: vi.fn().mockResolvedValue(
           opts.memberships ?? [{ id: 'm1', userId: 'u1', orgId: 'org-1', status: 'active' }],
         ),
       },
       membershipRoles: { findMany: vi.fn().mockResolvedValue([{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }]) },
+      // Role NAME rows — the sources read captions role-scope gaps from these.
+      jobRoles: {
+        findMany: vi.fn().mockResolvedValue([{ id: 'r1', orgId: 'org-1', name: 'Role One', status: 'active' }]),
+      },
       // Scope expansion (U2) reads the placement axes and their taxonomy
-      // values too; these fixtures stay role-shaped, so all default empty.
-      membershipLocations: { findMany: vi.fn().mockResolvedValue([]) },
+      // values too; role-shaped fixtures leave them empty — which also means
+      // the default member has NO location placement (the U8 marker's case).
+      membershipLocations: { findMany: vi.fn().mockResolvedValue(opts.membershipLocations ?? []) },
       membershipDepartments: { findMany: vi.fn().mockResolvedValue([]) },
-      locations: { findMany: vi.fn().mockResolvedValue([]) },
+      locations: { findMany: vi.fn().mockResolvedValue(opts.locations ?? []) },
       departments: { findMany: vi.fn().mockResolvedValue([]) },
       roleRequiredAssessments: {
         findMany: vi.fn().mockResolvedValue(
@@ -558,5 +570,117 @@ describe('GET /compliance — read alignment with the KTD2 resolver (U8)', () =>
     expect(after).toEqual(before);
     expect(after.expired).toEqual([]);
     expect(after.optionalLapses.map((g) => g.competencyId)).toEqual([COMP_OPT]);
+  });
+});
+
+describe('GET /compliance — source scopes and the unplaced-member marker (U8)', () => {
+  type SourcedGap = {
+    competencyId: string;
+    hasAwardingAssessment: boolean;
+    sources: Array<{ scope: string; name: string }>;
+    noLocationPlacement: boolean;
+  };
+  type Report = { expired: SourcedGap[]; expiring: SourcedGap[]; neverHeld: SourcedGap[]; optionalLapses: SourcedGap[] };
+  const getReport = async (base: string): Promise<Report> =>
+    (await (await fetch(`${base}/compliance`, { headers: authHeader(admin) })).json()) as Report;
+
+  it('captions a role-derived gap with its role, legacy derivation included (R5)', async () => {
+    // The default fixture is the pre-round shape: r1 → t1 → COMP, no direct
+    // link anywhere. R5 allows no requirement without a source, so even the
+    // legacy derivation names the role that carries it.
+    mockDbValue = fakeDb({ holders: [] });
+    const { server, base } = startApp();
+    const body = await getReport(base);
+    expect(body.neverHeld).toHaveLength(1);
+    expect(body.neverHeld[0]!.sources).toEqual([{ scope: 'role', name: 'Role One' }]);
+    server.close();
+  });
+
+  it('AE6: an org-scope evidence-only requirement gaps with its org source and no booking', async () => {
+    // Licence-type competency required org-wide: nothing awards it, so the
+    // gap is evidence-based — and its source scope is the organisation.
+    const COMP_LICENCE = 'comp-licence';
+    mockDbValue = fakeDb({
+      holders: [],
+      legacyRequirements: [],
+      tools: [],
+      roleLinks: [
+        { orgId: 'org-1', roleId: null, locationId: null, departmentId: null, competencyId: COMP_LICENCE, tier: 'required' },
+      ],
+      competencies: [{ id: COMP_LICENCE, orgId: 'org-1', name: 'Driver Licence', validForMonths: null }],
+    });
+    const { server, base } = startApp();
+    const body = await getReport(base);
+    expect(body.neverHeld).toHaveLength(1);
+    expect(body.neverHeld[0]!.competencyId).toBe(COMP_LICENCE);
+    expect(body.neverHeld[0]!.hasAwardingAssessment).toBe(false);
+    expect(body.neverHeld[0]!.sources).toEqual([{ scope: 'org', name: 'Org One' }]);
+    server.close();
+  });
+
+  it('AE4: a competency required at org scope AND a role gaps ONCE, carrying both sources', async () => {
+    // The union dedupes, so compliance counts one gap — and the row explains
+    // itself with every contributing scope rather than picking a winner.
+    mockDbValue = fakeDb({
+      holders: [],
+      legacyRequirements: [],
+      tools: [],
+      roleLinks: [
+        { orgId: 'org-1', roleId: 'r1', locationId: null, departmentId: null, competencyId: COMP, tier: 'required' },
+        { orgId: 'org-1', roleId: null, locationId: null, departmentId: null, competencyId: COMP, tier: 'required' },
+      ],
+      competencies: [{ id: COMP, orgId: 'org-1', name: 'Track Dozer', validForMonths: 36 }],
+    });
+    const { server, base } = startApp();
+    const body = await getReport(base);
+    expect(body.neverHeld).toHaveLength(1); // once, not twice
+    expect(body.neverHeld[0]!.sources).toEqual([
+      { scope: 'org', name: 'Org One' },
+      { scope: 'role', name: 'Role One' },
+    ]);
+    server.close();
+  });
+
+  it('marks every gap row of a member with NO location placement as unschedulable (KTD4)', async () => {
+    // The assignment engine plans no case with nowhere to assess, so this gap
+    // can never book itself — the row must name its own fix (a placement),
+    // not sit in "book the assessment" forever.
+    mockDbValue = fakeDb({ holders: [] }); // default member: no placement rows
+    const { server, base } = startApp();
+    const body = await getReport(base);
+    expect(body.neverHeld).toHaveLength(1);
+    expect(body.neverHeld[0]!.noLocationPlacement).toBe(true);
+    server.close();
+  });
+
+  it('does not mark a member placed at an ACTIVE location', async () => {
+    mockDbValue = fakeDb({
+      holders: [],
+      membershipLocations: [{ membershipId: 'm1', locationId: 'loc-1' }],
+      locations: [{ id: 'loc-1', orgId: 'org-1', name: 'Location A', status: 'active' }],
+    });
+    const { server, base } = startApp();
+    const body = await getReport(base);
+    expect(body.neverHeld).toHaveLength(1);
+    expect(body.neverHeld[0]!.noLocationPlacement).toBe(false);
+    server.close();
+  });
+
+  it('still marks a member whose ONLY placement is a retired location — retired confers nothing', async () => {
+    /*
+      The marker reads the SAME expansion the resolver uses
+      (scopeKeysForMemberships), where a retired location has already stopped
+      applying — so a member stranded on a closed site reads as unplaced here,
+      consistent with the requirement resolution rather than the raw rows.
+    */
+    mockDbValue = fakeDb({
+      holders: [],
+      membershipLocations: [{ membershipId: 'm1', locationId: 'loc-gone' }],
+      locations: [], // the status='active' read returns nothing for it
+    });
+    const { server, base } = startApp();
+    const body = await getReport(base);
+    expect(body.neverHeld[0]!.noLocationPlacement).toBe(true);
+    server.close();
   });
 });

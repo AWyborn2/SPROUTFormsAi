@@ -479,6 +479,13 @@ export interface CompetencyHolder {
    * currency is about the date.
    */
   standing: Standing;
+  /**
+   * WHICH scopes require/recommend the viewed competency of this holder (U8,
+   * R5) — both render on a member under a location AND a role requirement.
+   * ABSENT (not empty) on rows the caller may not read sources for, under the
+   * same per-holder gate as the licence columns.
+   */
+  sources?: CompetencySourceRef[];
   /** Still satisfies a requirement — held, expiring or grace, and not revoked. */
   current: boolean;
   /** Wording for a status worth saying out loud; null when there is nothing. */
@@ -596,12 +603,34 @@ export interface TighteningReviewItem {
   heldRoles: Array<{ id: string; name: string }>;
 }
 
+/**
+ * One scope that requires or recommends a competency of a person (R5, U8) —
+ * "Required — from Boddington, Operations and Dozer Operator". Names only:
+ * captions never show ids, and the org scope renders as "org-wide" rather
+ * than by its name.
+ */
+export interface CompetencySourceRef {
+  scope: 'org' | 'location' | 'department' | 'role';
+  name: string;
+}
+
 /** One person-competency gap on the compliance report (U20). */
 export interface ComplianceGap {
   userId: string;
   name: string;
   competencyId: string;
   competencyName: string;
+  /**
+   * WHICH scopes require it, by name (R5, U8) — every contributor on a
+   * cross-scope duplicate. Optional only for rolling-deploy tolerance; the
+   * API always sends it (empty on an optional lapse: nothing requires those).
+   */
+  sources?: CompetencySourceRef[];
+  /**
+   * The KTD4 marker: this member has NO location placement, so the gap can
+   * never book itself — "cannot be scheduled" until somebody places them.
+   */
+  noLocationPlacement?: boolean;
   /**
    * Whether a BOOKABLE assessment awards this competency, from the shared
    * KTD2 resolver server-side (U8, R7). False is the evidence-only case — a
@@ -789,6 +818,8 @@ export interface RecommendedCompetency {
    * nothing to self-start.
    */
   requestableToolId: string | null;
+  /** The scopes recommending it, by name — "Recommended — from <Location>" (AE5, U8). */
+  sources?: CompetencySourceRef[];
 }
 
 /**
@@ -884,6 +915,14 @@ export interface HeldCompetencyRow {
   licenceNumber: string | null;
   status: CompetencyStatus;
   standing: Standing;
+  /**
+   * The scopes producing that standing, by name (R5, U8). ABSENT — not empty
+   * — when the viewer gate withholds them: sources enumerate the subject's
+   * placement, so the API omits the field from a caller reading a colleague's
+   * record without `profiles.view_competencies` at 'all'. Empty means the
+   * true fact "no scope names this" (an optional entry).
+   */
+  sources?: CompetencySourceRef[];
   /** True while it still satisfies a requirement — held, expiring or grace. */
   current: boolean;
   expiresAt: string | null;

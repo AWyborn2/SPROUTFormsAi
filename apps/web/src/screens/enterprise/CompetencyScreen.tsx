@@ -20,6 +20,7 @@ import {
   useUnlinkedTools,
 } from '../../lib/data/hooks.js';
 import { useInlineCompetencyCreate } from '../../lib/data/use-inline-competency-create.js';
+import { sourcesLine } from '../../lib/competency-sources.js';
 
 /**
  * How each status reads, and how loudly.
@@ -257,6 +258,18 @@ function HolderRegister({ competency }: { competency: Competency }) {
                         ? 'No expiry set'
                         : `${past ? 'Expired' : 'Expires'} ${onDate(h.expiresAt)}`}
                 </div>
+                {/*
+                  WHY it stands for this holder (R5, U8): the scopes that
+                  require/recommend the viewed competency of them — a member
+                  under a location AND a role requirement shows both, comma-
+                  joined. Absent where the API withheld sources (the same
+                  per-holder gate as the licence columns) — no line, no guess.
+                */}
+                {sourcesLine(h.standing, h.sources) && (
+                  <div className="text-[10.5px] text-text-tertiary">
+                    {sourcesLine(h.standing, h.sources)}
+                  </div>
+                )}
               </div>
               {/*
                 STANDING AND CURRENCY, TWO MARKS (R108). Standing — required,
