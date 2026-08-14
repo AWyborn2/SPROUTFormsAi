@@ -72,6 +72,17 @@ export const organizations = pgTable('organizations', {
   allowMultipleLocations: boolean('allow_multiple_locations').notNull().default(false),
   allowMultipleDepartments: boolean('allow_multiple_departments').notNull().default(false),
   /**
+   * Whether a candidate may SELF-START training for a competency their Role
+   * merely RECOMMENDS (R14, KTD6). Default OFF: recommended is visible but
+   * never actionable until the organisation opts in. Consumed by a later unit
+   * (the candidate-facing "request this training" affordance and the
+   * training-request POST's relevance check); the column lands with the links
+   * table so the whole recommended tier ships one migration.
+   */
+  candidateSelfStartRecommended: boolean('candidate_self_start_recommended')
+    .notNull()
+    .default(false),
+  /**
    * Whether a qualified assessor may run and certify their OWN assessment
    * case. Industry practice differs by organisation — some registered
    * training setups permit self-assessment, most do not — so it is a policy

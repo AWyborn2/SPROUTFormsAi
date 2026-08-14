@@ -187,7 +187,25 @@ function GapSection({
               className="flex items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-1.5 text-[12.5px]"
             >
               <span className="truncate font-medium">{g.name}</span>
-              <span className="truncate text-text-tertiary">{g.competencyName}</span>
+              <span className="flex min-w-0 flex-none items-center gap-2">
+                <span className="truncate text-text-tertiary">{g.competencyName}</span>
+                {/*
+                  EVIDENCE-ONLY GAPS SAY SO (U8, R7). The section hint says
+                  "book the assessment", but no assessment awards this
+                  competency — a licence-type requirement — so booking is a
+                  dead end and the way out is recording evidence: an imported
+                  or manual grant (R11). Read from the KTD2 resolver
+                  server-side, never guessed here.
+                */}
+                {!g.hasAwardingAssessment && (
+                  <span
+                    className="flex-none rounded-sm bg-surface-card px-1.5 py-0.5 text-[10.5px] font-medium text-text-secondary"
+                    title="No assessment awards this competency. Clear the gap by recording evidence — an imported or manual grant."
+                  >
+                    Evidence-based — record evidence
+                  </span>
+                )}
+              </span>
             </li>
           ))}
         </ul>

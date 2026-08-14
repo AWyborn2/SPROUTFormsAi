@@ -34,6 +34,51 @@ function insertResult(rows: unknown[]) {
   return awaitable;
 }
 
+/*
+  Keys that hang schema metadata off a column node — walking them loops back
+  through the table and blows the stack.
+*/
+const WHERE_SKIP_KEYS = new Set([
+  'table',
+  'config',
+  'encoder',
+  'decoder',
+  'session',
+  'dialect',
+  'default',
+]);
+
+/**
+ * Does this drizzle WHERE carry an `is null` predicate?
+ *
+ * The only column any competency-holder read asks that of is `revokedAt`, and
+ * asking it is what "live grants only" MEANS: the DELETE dependency check, the
+ * eligibility lookup and the recommended read all filter it, while the holder
+ * register deliberately does not (R108 — a revoked holder stays visible,
+ * marked). A fake that returned every seeded row to both would leave the
+ * revoked-grant EXCLUSION — the thing that stops audit history blocking a
+ * tidy-up forever — asserted by nothing.
+ */
+function wantsUnrevoked(node: unknown, depth = 0): boolean {
+  if (!node || typeof node !== 'object' || depth > 12) return false;
+  const rec = node as Record<string, unknown>;
+  const chunks = rec.queryChunks;
+  if (Array.isArray(chunks)) {
+    const text = chunks
+      .map((c) => {
+        const v = (c as { value?: unknown } | null)?.value;
+        return Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '';
+      })
+      .join('');
+    if (text.includes('is null')) return true;
+  }
+  for (const [k, v] of Object.entries(rec)) {
+    if (WHERE_SKIP_KEYS.has(k)) continue;
+    if (wantsUnrevoked(v, depth + 1)) return true;
+  }
+  return false;
+}
+
 function fakeDb(opts: {
   competenciesFindFirst?: unknown;
   competenciesFindMany?: unknown[];
@@ -54,8 +99,12 @@ function fakeDb(opts: {
   membershipRolesFindMany?: unknown[];
   roleRequiredAssessmentsFindMany?: unknown[];
   assessmentToolsFindMany?: unknown[];
+  /** Direct Role → competency links (KTD1): the dual read's second half, and DELETE's dependency check. */
+  roleRequiredCompetenciesFindMany?: unknown[];
   /** Every route is gated by requirePlanFeature('competencyGating'). */
   planTier?: string;
+  /** The org's candidate self-start toggle (U7, R14). Default OFF — the stored default. */
+  selfStart?: boolean;
   /** The caller's stored permission matrix; absent falls back to the role default. */
   matrix?: PermissionMatrix;
 }) {
@@ -66,7 +115,11 @@ function fakeDb(opts: {
   const db = {
     query: {
       organizations: {
-        findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: opts.planTier ?? 'enterprise' }),
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'org-1',
+          planTier: opts.planTier ?? 'enterprise',
+          candidateSelfStartRecommended: opts.selfStart ?? false,
+        }),
       },
       rolePermissions: {
         findFirst: vi.fn().mockResolvedValue(opts.matrix ? { matrix: opts.matrix } : undefined),
@@ -89,7 +142,14 @@ function fakeDb(opts: {
       },
       competencyHolders: {
         findFirst: vi.fn().mockResolvedValue(opts.competencyHoldersFindFirst),
-        findMany: vi.fn().mockResolvedValue(opts.competencyHoldersFindMany ?? []),
+        // revokedAt-AWARE, unlike a flat mock: a caller that asks for live
+        // grants only gets live grants only (see `wantsUnrevoked`).
+        findMany: vi.fn((args?: { where?: unknown }) => {
+          const rows = (opts.competencyHoldersFindMany ?? []) as { revokedAt?: unknown }[];
+          return Promise.resolve(
+            wantsUnrevoked(args?.where) ? rows.filter((r) => r.revokedAt == null) : rows,
+          );
+        }),
       },
       memberships: {
         findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst),
@@ -103,6 +163,34 @@ function fakeDb(opts: {
       },
       assessmentTools: {
         findMany: vi.fn().mockResolvedValue(opts.assessmentToolsFindMany ?? []),
+      },
+      roleRequiredCompetencies: {
+        /*
+          TIER-AWARE, unlike the other mocks: the loaders filter tier in the
+          WHERE clause ('required' for the dual read, 'recommended' for its
+          sibling), and a mock that returned every seeded row to both would
+          let a recommended link read as required — masking exactly the R13
+          regression these tests exist to catch. The tier literal is dug out
+          of the query's bound params.
+        */
+        findMany: vi.fn((args?: { where?: unknown }) => {
+          const rows = (opts.roleRequiredCompetenciesFindMany ?? []) as { tier?: string }[];
+          const seen = new Set<unknown>();
+          const stack: unknown[] = [args?.where];
+          let tier: string | null = null;
+          while (stack.length && !tier) {
+            const n = stack.pop();
+            if (!n || typeof n !== 'object' || seen.has(n)) continue;
+            seen.add(n);
+            const rec = n as Record<string, unknown>;
+            if (rec.value === 'required' || rec.value === 'recommended') {
+              tier = rec.value as string;
+              break;
+            }
+            for (const v of Object.values(rec)) if (v && typeof v === 'object') stack.push(v);
+          }
+          return Promise.resolve(tier ? rows.filter((r) => r.tier === tier) : rows);
+        }),
       },
     },
     select: vi.fn(() => ({
@@ -130,6 +218,10 @@ function fakeDb(opts: {
       },
     })),
   } as unknown as Db;
+  // The dual standing read runs inside db.transaction (KTD3); the fake hands
+  // the same surface back, since these mocks have no snapshot to isolate.
+  (db as { transaction?: unknown }).transaction = async (fn: (tx: unknown) => Promise<unknown>) =>
+    fn(db);
 
   return { db, deleteWhere, updateSet, insertValues };
 }
@@ -508,6 +600,213 @@ describe('PATCH /competencies/:id', () => {
   });
 });
 
+/*
+  WHO MAY WRITE THE REGISTER (KTD8). These gates land in the same round that
+  raises the blast radius: once Roles point at competencies directly, a rename
+  relabels every requiring Role and a delete would cascade through the links.
+  NOTE the gate is the access-level ROLE on the session, not the permission
+  matrix — DEFAULT_ROLE_PERMISSIONS covers profile reads and is not what
+  decides these 403s.
+*/
+describe('competency write gates (KTD8)', () => {
+  const builder = { userId: 'u-builder', orgId: 'org-1', role: 'builder' as const };
+  const assessor = { userId: 'u-assessor', orgId: 'org-1', role: 'assessor' as const };
+  const candidateCaller = { userId: 'u-cand', orgId: 'org-1', role: 'candidate' as const };
+  const as = (t: { userId: string; orgId: string; role: string }) => ({
+    cookie: `fai_session=${sealSession(t)}`,
+  });
+
+  it('403s a builder creating a competency — form authorship never implied taxonomy authorship', async () => {
+    const { db, insertValues } = fakeDb({});
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies`, {
+        method: 'POST',
+        headers: { ...as(builder), 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Forklift' }),
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe('forbidden');
+      expect(insertValues).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets an assessor create one — the register is their working surface (201)', async () => {
+    mockDbValue = fakeDb({
+      insertedCompetency: { id: 'c-new', name: 'Forklift', code: null, holders: 0 },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies`, {
+        method: 'POST',
+        headers: { ...as(assessor), 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Forklift' }),
+      });
+      expect(res.status).toBe(201);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a candidate PATCH before it reads anything', async () => {
+    const { db, updateSet } = fakeDb({
+      competenciesFindFirst: { id: 'c1', orgId: 'org-1', name: 'Forklift', code: null },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1`, {
+        method: 'PATCH',
+        headers: { ...as(candidateCaller), 'content-type': 'application/json' },
+        body: JSON.stringify({ validForMonths: 36 }),
+      });
+      expect(res.status).toBe(403);
+      expect(updateSet).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a non-admin DELETE — even the assessor tier that may create (KTD8)', async () => {
+    const { db, deleteWhere } = fakeDb({
+      competenciesFindFirst: { id: 'c1', orgId: 'org-1', name: 'Forklift', code: null },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1`, {
+        method: 'DELETE',
+        headers: as(assessor),
+      });
+      expect(res.status).toBe(403);
+      expect(deleteWhere).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  /*
+    GRANTING AND REVOKING CARRY THE SAME GATE AS DEFINING (KTD8), and for a
+    sharper reason: HOLDING is what `standingOf` reads and what closes a Role's
+    required gap (R5, R10), so an ungated grant let any member self-certify
+    into compliance and an ungated revoke moved someone out of it. Both sit on
+    owner/admin/assessor, matching POST '/' and PATCH '/:id'.
+  */
+  const grantable = { id: 'c1', orgId: 'org-1', name: 'Track Dozer', code: 'Q34666893', holders: 0 };
+
+  it('403s a candidate GRANTING a competency — self-certification into compliance', async () => {
+    const { db, insertValues } = fakeDb({
+      competenciesFindFirst: grantable,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...as(candidateCaller), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe('forbidden');
+      // Refused BEFORE the write, not after it.
+      expect(insertValues).not.toHaveBeenCalledWith(schema.competencyHolders, expect.anything());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a builder GRANTING — the form tiers never implied register authority', async () => {
+    const { db, insertValues } = fakeDb({
+      competenciesFindFirst: grantable,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...as(builder), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+      expect(res.status).toBe(403);
+      expect(insertValues).not.toHaveBeenCalledWith(schema.competencyHolders, expect.anything());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets an ASSESSOR grant — recording who passed is their working surface', async () => {
+    const { db, insertValues } = fakeDb({
+      competenciesFindFirst: grantable,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+      competencyHoldersFindFirst: undefined,
+      holderCount: 1,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...as(assessor), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+      expect(res.status).toBe(201);
+      expect(insertValues).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ competencyId: 'c1', userId: HOLDER_ID }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a builder REVOKING — taking a ticket away moves someone OUT of compliance', async () => {
+    const { db, updateSet } = fakeDb({
+      competenciesFindFirst: grantable,
+      competencyHoldersFindMany: [],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders/${HOLDER_ID}`, {
+        method: 'DELETE',
+        headers: as(builder),
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe('forbidden');
+      expect(updateSet).not.toHaveBeenCalledWith(schema.competencyHolders, expect.anything());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets an ASSESSOR revoke — same authority as granting', async () => {
+    const { db, updateSet } = fakeDb({
+      competenciesFindFirst: grantable,
+      competencyHoldersFindMany: [],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders/${HOLDER_ID}`, {
+        method: 'DELETE',
+        headers: as(assessor),
+      });
+      expect(res.status).toBe(200);
+      expect(updateSet).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ revokedAt: expect.any(Date) }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('DELETE /competencies/:id', () => {
   it('404s for a competency outside the caller org', async () => {
     mockDbValue = fakeDb({ competenciesFindFirst: undefined }).db;
@@ -515,6 +814,90 @@ describe('DELETE /competencies/:id', () => {
     try {
       const res = await fetch(`${base}/competencies/missing`, { method: 'DELETE', headers: authHeader() });
       expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('409s competency_in_use, naming every dependency kind, instead of cascading (KTD8)', async () => {
+    // One of each: a Role requiring it, a Role recommending it, a tool
+    // awarding it, a live grant of it. The FK cascade must be unreachable
+    // while any of these stand.
+    const { db, deleteWhere } = fakeDb({
+      competenciesFindFirst: { id: 'c1', orgId: 'org-1', name: 'Track Dozer', code: 'Q34666893' },
+      roleRequiredCompetenciesFindMany: [
+        { roleId: 'r1', competencyId: 'c1', tier: 'required' },
+        { roleId: 'r2', competencyId: 'c1', tier: 'recommended' },
+      ],
+      assessmentToolsFindMany: [
+        { id: 't1', orgId: 'org-1', awardedCompetencyIds: ['c1'] },
+        // A tool awarding something ELSE is not a dependency of c1.
+        { id: 't2', orgId: 'org-1', awardedCompetencyIds: ['c-other'] },
+      ],
+      competencyHoldersFindMany: [{ userId: HOLDER_ID, competencyId: 'c1', revokedAt: null }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1`, { method: 'DELETE', headers: authHeader() });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: 'competency_in_use',
+        roles: 1,
+        recommendedBy: 1,
+        tools: 1,
+        grants: 1,
+      });
+      expect(deleteWhere).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('deletes despite a REVOKED grant — audit history is not a dependency (KTD8)', async () => {
+    /*
+      A revoked grant confers nothing, and the dependency query says so by
+      asking `revokedAt IS NULL`. If it counted, a competency granted once and
+      taken away would be undeletable forever, with no exit: revoking again
+      changes nothing and un-requiring is not the blocker. The only seeded row
+      here is revoked, so a fake that ignored the predicate would 409 and this
+      test would catch it.
+    */
+    const { db, deleteWhere } = fakeDb({
+      competenciesFindFirst: { id: 'c1', orgId: 'org-1', name: 'Track Dozer', code: 'Q34666893' },
+      competencyHoldersFindMany: [
+        { userId: HOLDER_ID, competencyId: 'c1', revokedAt: new Date('2026-01-01T00:00:00Z') },
+      ],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1`, { method: 'DELETE', headers: authHeader() });
+
+      expect(res.status).toBe(204);
+      expect(deleteWhere).toHaveBeenCalledWith(schema.competencies, expect.anything());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('deletes an orphan competency and records an audit entry', async () => {
+    const { db, deleteWhere, insertValues } = fakeDb({
+      competenciesFindFirst: { id: 'c1', orgId: 'org-1', name: 'Track Dozer', code: 'Q34666893' },
+      // No links, no awarding tools, no live grants — nothing depends on it.
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1`, { method: 'DELETE', headers: authHeader() });
+
+      expect(res.status).toBe(204);
+      expect(deleteWhere).toHaveBeenCalledWith(schema.competencies, expect.anything());
+      const audit = insertValues.mock.calls.find(
+        ([, v]) => (v as { action?: string }).action === 'Deleted competency',
+      );
+      expect(audit?.[1]).toMatchObject({ target: 'Q34666893' });
     } finally {
       server.close();
     }
@@ -1209,6 +1592,70 @@ describe('competency holders', () => {
     }
   });
 
+  it('reports required from a DIRECT role→competency link, no tool involved (R5, R7)', async () => {
+    // The licence case: nothing awards c1 and no legacy tool requirement
+    // exists — the direct link alone obliges.
+    mockDbValue = fakeDb({
+      competencyHoldersFindMany: [{ competencyId: 'c1', grantedAt: daysAgo(365) }],
+      competenciesFindMany: [{ id: 'c1', name: 'Driver Licence', validForMonths: 36 }],
+      membershipsFindMany: [{ id: 'm1', userId: HOLDER_ID }],
+      membershipRolesFindMany: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
+      roleRequiredCompetenciesFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'required' }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { standing: string }[];
+      expect(row!.standing).toBe('required');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reads one requirement, not two, when the legacy row and its converted link coexist (KTD3)', async () => {
+    // Mid-transition: both halves name c1. The union is a set, so standing
+    // still reads plain 'required' — never a doubled obligation.
+    mockDbValue = fakeDb({
+      competencyHoldersFindMany: [{ competencyId: 'c1', grantedAt: daysAgo(365) }],
+      competenciesFindMany: [{ id: 'c1', name: 'ATO - Track Dozer', validForMonths: 36 }],
+      membershipsFindMany: [{ id: 'm1', userId: HOLDER_ID }],
+      membershipRolesFindMany: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
+      roleRequiredAssessmentsFindMany: [{ roleId: 'r1', toolId: 't1' }],
+      assessmentToolsFindMany: [{ id: 't1', awardedCompetencyIds: ['c1'] }],
+      roleRequiredCompetenciesFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'required' }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+
+      const rows = (await res.json()) as { standing: string }[];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.standing).toBe('required');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports a held competency a Role merely recommends as recommended, never required (R6, R12, R13)', async () => {
+    mockDbValue = fakeDb({
+      competencyHoldersFindMany: [{ competencyId: 'c1', grantedAt: daysAgo(365) }],
+      competenciesFindMany: [{ id: 'c1', name: 'First Aid', validForMonths: 36 }],
+      membershipsFindMany: [{ id: 'm1', userId: HOLDER_ID }],
+      membershipRolesFindMany: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
+      roleRequiredCompetenciesFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'recommended' }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+
+      const [row] = (await res.json()) as { standing: string }[];
+      expect(row!.standing).toBe('recommended');
+    } finally {
+      server.close();
+    }
+  });
+
   it('reports a held ticket no Role requires as optional but still current (R91, R105)', async () => {
     // Standing optional, currency current — the two answers stay independent: an
     // optional ticket that is in date still satisfies a prerequisite on its
@@ -1604,6 +2051,113 @@ describe('GET /competencies/:id/holders', () => {
 
       const [row] = (await res.json()) as { standing: string }[];
       expect(row!.standing).toBe('optional');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('GET /competencies/recommended (U7 — R12, R14, KTD2)', () => {
+  // Self-scope: the caller is the subject, so the read works for a candidate.
+  const cand = { userId: HOLDER_ID, orgId: 'org-1', role: 'candidate' as const };
+  const asUser = (t: { userId: string; orgId: string; role: string }) => ({
+    cookie: `fai_session=${sealSession(t)}`,
+  });
+  const ago = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
+  /** One held Role recommending First Aid — the caller's own recommendation. */
+  const recommendedFixture = {
+    membershipsFindMany: [{ id: 'm1', userId: HOLDER_ID }],
+    membershipRolesFindMany: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
+    roleRequiredCompetenciesFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'recommended' }],
+    competenciesFindMany: [
+      { id: 'c1', orgId: 'org-1', name: 'First Aid', code: 'HLTAID011', validForMonths: 36 },
+    ],
+  };
+
+  it('lists an unheld recommendation with its bookable awarding tool and the toggle (KTD2, R14)', async () => {
+    mockDbValue = fakeDb({
+      ...recommendedFixture,
+      selfStart: true,
+      assessmentToolsFindMany: [
+        {
+          id: 't1',
+          orgId: 'org-1',
+          templateId: 'tpl-1',
+          awardedCompetencyIds: ['c1'],
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ],
+      formTemplatesFindMany: [{ id: 'tpl-1', orgId: 'org-1', currentVersionId: 'v1' }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/recommended`, { headers: asUser(cand) });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        selfStartEnabled: true,
+        items: [
+          { competencyId: 'c1', name: 'First Aid', code: 'HLTAID011', held: false, requestableToolId: 't1' },
+        ],
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reads held from the caller’s own live grant, and null tool for evidence-only (R7)', async () => {
+    // Nothing awards First Aid — there is no assessment to self-start, only
+    // evidence to record; and the caller already holds it current.
+    mockDbValue = fakeDb({
+      ...recommendedFixture,
+      competencyHoldersFindMany: [{ competencyId: 'c1', userId: HOLDER_ID, grantedAt: ago(100), revokedAt: null }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/recommended`, { headers: asUser(cand) });
+      const body = (await res.json()) as { selfStartEnabled: boolean; items: Array<Record<string, unknown>> };
+      expect(body.selfStartEnabled).toBe(false); // the stored default (R14)
+      expect(body.items).toEqual([
+        { competencyId: 'c1', name: 'First Aid', code: 'HLTAID011', held: true, requestableToolId: null },
+      ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reads an UNPUBLISHED awarding tool as nothing to request — the KTD2 filter, not raw awards', async () => {
+    mockDbValue = fakeDb({
+      ...recommendedFixture,
+      assessmentToolsFindMany: [
+        {
+          id: 't1',
+          orgId: 'org-1',
+          templateId: 'tpl-1',
+          awardedCompetencyIds: ['c1'],
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ],
+      // No published version → the tool cannot carry a case → evidence-only.
+      formTemplatesFindMany: [{ id: 'tpl-1', orgId: 'org-1', currentVersionId: null }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/recommended`, { headers: asUser(cand) });
+      const body = (await res.json()) as { items: Array<{ requestableToolId: string | null }> };
+      expect(body.items[0]!.requestableToolId).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('resolves as its own route with nothing recommended — an empty list, never a 404 (:id ordering)', async () => {
+    // Pins the registration order: '/recommended' must never be swallowed as
+    // a parameterised sibling's :id, even for a caller with no roles at all.
+    mockDbValue = fakeDb({}).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/recommended`, { headers: asUser(cand) });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ selfStartEnabled: false, items: [] });
     } finally {
       server.close();
     }

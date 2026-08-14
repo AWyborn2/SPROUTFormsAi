@@ -485,6 +485,43 @@ export interface CompetencyHolder {
   note: string | null;
 }
 
+/**
+ * One assessment tool still awarding NOTHING — a row on the one-time backfill
+ * worklist (U4, R3, KTD5).
+ *
+ * An award-less tool is INERT competency machinery: the engine treats its empty
+ * awards list as vacuously satisfied (no case is ever assigned for it) and
+ * sign-off grants nothing. New tools cannot be created this way any more (U2
+ * requires exactly one award at create), so this list only ever shrinks.
+ */
+export interface UnlinkedTool {
+  id: string;
+  name: string;
+  templateId: string;
+  /**
+   * The server's one confident guess — an exact case-insensitive match of the
+   * tool's name against a competency's name or code — or null. Never fuzzier
+   * than that (R3): linking activates assignment, so a wrong match accepted by
+   * reflex would assign the wrong assessment to real people.
+   */
+  suggestion: { competencyId: string; name: string } | null;
+}
+
+/**
+ * What a FIRST award link converts and activates (U2/U4, KTD10): legacy Role →
+ * tool requirements that become competency links, the people those Roles
+ * cover, and the cases the activation creates. The preview and the apply
+ * return the same shape from the same computation, which is what lets the
+ * panel promise "links N, creates M" before anything lands.
+ */
+export interface AwardLinkEffects {
+  rolesLinked: number;
+  affected: number;
+  created: number;
+  /** True when the tool already awards this competency — a no-op, not an error. */
+  alreadyLinked?: boolean;
+}
+
 /** A rule gating one form section behind a required competency. */
 export interface CompetencyRule {
   id: string;
@@ -565,6 +602,14 @@ export interface ComplianceGap {
   name: string;
   competencyId: string;
   competencyName: string;
+  /**
+   * Whether a BOOKABLE assessment awards this competency, from the shared
+   * KTD2 resolver server-side (U8, R7). False is the evidence-only case — a
+   * licence-type competency nothing awards — where "book the assessment" is a
+   * dead end and the remedy is recording evidence (an imported or manual
+   * grant, R11). The screen words each row accordingly.
+   */
+  hasAwardingAssessment: boolean;
 }
 
 /** How the workforce stands, as an auditor reads it (U20). */
@@ -666,6 +711,77 @@ export interface TaxonomySettings {
   notificationLeadDays: number;
   /** How the organisation writes an ambiguous slash-separated date. */
   dateFormat: DateFormat;
+  /**
+   * Whether a candidate may SELF-START recommended training through the
+   * voluntary request flow (U7, R14, KTD6). Default OFF. Gates the candidate
+   * affordance only — assessors and admins assign regardless, and required
+   * gaps are always requestable (AE5).
+   */
+  candidateSelfStartRecommended: boolean;
+}
+
+/* ── Role requirements in competency terms (U6 — R5, R6, R8, KTD9) ────────── */
+
+/**
+ * A Role's stored requirement state, as the editor reads and writes it.
+ *
+ * The PATH still says `required-assessments` (renaming it would strand a
+ * deployed client), but the payload speaks competencies: two tiers plus the
+ * legacy tool rows still deriving the old way.
+ */
+export interface RoleRequirements {
+  /**
+   * The STORED fact (R50), never a row count: a Role emptied of requirements
+   * is configured; one nobody set up is not. Flips only when the REQUIRED
+   * tier is authored — a recommended-only save leaves it false (KTD9).
+   */
+  configured: boolean;
+  /** Competency ids the Role REQUIRES — compliance-bearing (R5). */
+  required: string[];
+  /** Competency ids the Role RECOMMENDS — visible, never enforced (R6, R13). */
+  recommended: string[];
+  /**
+   * Legacy tool ids still deriving requirements the old way (R15) — tools
+   * whose award has not been linked yet. Each exits via the backfill
+   * conversion or the explicit fingerprint-guarded remove (KTD9).
+   */
+  awaitingLink: string[];
+  /** The KTD9 stale-edit guard: every write echoes it, a stale echo 409s. */
+  fingerprint: string;
+}
+
+/** The preview/PUT body's tier halves, as the editor sends them. */
+export interface RoleRequirementTiers {
+  required: string[];
+  recommended: string[];
+}
+
+/* ── Recommended surfaces (U7 — R12, R14) ─────────────────────────────────── */
+
+/** One competency the caller's held Roles recommend, on their own surfaces. */
+export interface RecommendedCompetency {
+  competencyId: string;
+  name: string;
+  code: string | null;
+  /** Whether the caller already holds it current — held rows need no action. */
+  held: boolean;
+  /**
+   * The ONE bookable assessment awarding it, per the shared KTD2 resolver —
+   * exactly the tool an approval would assign. Null is evidence-only (R7):
+   * nothing to self-start.
+   */
+  requestableToolId: string | null;
+}
+
+/**
+ * The self-scope recommended read (`GET /competencies/recommended`). The
+ * toggle rides the payload because the request affordance needs BOTH facts —
+ * toggle ON and a requestable tool (R14, AE5) — and a candidate has no other
+ * read for the org setting.
+ */
+export interface RecommendedCompetencies {
+  selfStartEnabled: boolean;
+  items: RecommendedCompetency[];
 }
 
 /** The whole taxonomy in one read, for the settings screen. */

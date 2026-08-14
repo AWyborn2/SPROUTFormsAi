@@ -16,6 +16,7 @@ import { useOnboarding } from '../lib/onboarding.js';
 import { MOD_LABEL } from '../lib/keyboard/platform.js';
 import { CaseStateBadge } from './statusBadges.js';
 import { complianceTileCounts, type ComplianceTileCounts } from './dashboard-compliance.js';
+import { RecommendedTrainingList } from './recommended-training.js';
 
 /**
  * Dashboard — one route, three shapes, chosen by WHO is looking.
@@ -173,8 +174,30 @@ function CandidateDashboard({ session }: { session: SessionInfo }) {
             </div>
           )}
         </div>
+
+        <RecommendedTrainingCard />
       </div>
     </div>
+  );
+}
+
+/**
+ * Unheld recommendations on the candidate's landing page (U7, R12) — the
+ * shared `RecommendedTrainingList` owns the hooks, the unheld filter and the
+ * rows; this wrapper is only the dashboard's card chrome. Absent — not an
+ * empty shell — when every recommendation is held or none exists.
+ */
+function RecommendedTrainingCard() {
+  return (
+    <RecommendedTrainingList
+      row="div"
+      render={(rows) => (
+        <div className="rounded-lg border border-border bg-surface-card p-5 shadow-xs lg:col-span-2">
+          <div className="mb-3 font-heading text-[15px] font-bold">Recommended for your roles</div>
+          <div className="flex flex-col gap-1.5">{rows}</div>
+        </div>
+      )}
+    />
   );
 }
 

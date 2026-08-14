@@ -45,8 +45,8 @@ describe('ComplianceScreen (U20)', () => {
   it('lists an expired required competency under expired, and a never-held one separately (R103)', () => {
     report.data = {
       ...EMPTY,
-      expired: [{ userId: 'u1', name: 'Bo Worker', competencyId: 'c1', competencyName: 'Track Dozer' }],
-      neverHeld: [{ userId: 'u2', name: 'Cy Trainee', competencyId: 'c2', competencyName: 'First Aid' }],
+      expired: [{ userId: 'u1', name: 'Bo Worker', competencyId: 'c1', competencyName: 'Track Dozer', hasAwardingAssessment: true }],
+      neverHeld: [{ userId: 'u2', name: 'Cy Trainee', competencyId: 'c2', competencyName: 'First Aid', hasAwardingAssessment: true }],
     };
     render(<ComplianceScreen />);
     expect(screen.getByText('Required competencies expired')).toBeDefined();
@@ -58,7 +58,7 @@ describe('ComplianceScreen (U20)', () => {
   it('shows an optional lapse as informational, not a failure (R102)', () => {
     report.data = {
       ...EMPTY,
-      optionalLapses: [{ userId: 'u1', name: 'Bo Worker', competencyId: 'c9', competencyName: 'Voluntary Ticket' }],
+      optionalLapses: [{ userId: 'u1', name: 'Bo Worker', competencyId: 'c9', competencyName: 'Voluntary Ticket', hasAwardingAssessment: true }],
     };
     render(<ComplianceScreen />);
     expect(screen.getByText('Optional lapses')).toBeDefined();
@@ -68,7 +68,7 @@ describe('ComplianceScreen (U20)', () => {
   it('lists expiring required competencies as their own bookable-runway section', () => {
     report.data = {
       ...EMPTY,
-      expiring: [{ userId: 'u3', name: 'Ada Fitter', competencyId: 'c3', competencyName: 'Working at Heights' }],
+      expiring: [{ userId: 'u3', name: 'Ada Fitter', competencyId: 'c3', competencyName: 'Working at Heights', hasAwardingAssessment: true }],
     };
     render(<ComplianceScreen />);
     expect(screen.getByText('Required competencies expiring or in grace')).toBeDefined();
@@ -79,8 +79,8 @@ describe('ComplianceScreen (U20)', () => {
     searchParams = new URLSearchParams({ status: 'expiring' });
     report.data = {
       ...EMPTY,
-      expiring: [{ userId: 'u3', name: 'Ada Fitter', competencyId: 'c3', competencyName: 'Working at Heights' }],
-      expired: [{ userId: 'u1', name: 'Bo Worker', competencyId: 'c1', competencyName: 'Track Dozer' }],
+      expiring: [{ userId: 'u3', name: 'Ada Fitter', competencyId: 'c3', competencyName: 'Working at Heights', hasAwardingAssessment: true }],
+      expired: [{ userId: 'u1', name: 'Bo Worker', competencyId: 'c1', competencyName: 'Track Dozer', hasAwardingAssessment: true }],
     };
     render(<ComplianceScreen />);
     expect(screen.getByText('Required competencies expiring or in grace')).toBeDefined();
@@ -100,13 +100,30 @@ describe('ComplianceScreen (U20)', () => {
     report.data = {
       ...EMPTY,
       expiring: [
-        { userId: 'u1', name: 'Ada Fitter', competencyId: 'c1', competencyName: 'Heights' },
-        { userId: 'u1', name: 'Ada Fitter', competencyId: 'c2', competencyName: 'Dozer' },
-        { userId: 'u2', name: 'Bo Worker', competencyId: 'c1', competencyName: 'Heights' },
+        { userId: 'u1', name: 'Ada Fitter', competencyId: 'c1', competencyName: 'Heights', hasAwardingAssessment: true },
+        { userId: 'u1', name: 'Ada Fitter', competencyId: 'c2', competencyName: 'Dozer', hasAwardingAssessment: true },
+        { userId: 'u2', name: 'Bo Worker', competencyId: 'c1', competencyName: 'Heights', hasAwardingAssessment: true },
       ],
     };
     render(<ComplianceScreen />);
     expect(screen.getByText('2 people · 3 tickets')).toBeDefined();
+  });
+
+  it('words an evidence-only gap as evidence to record, not an assessment to book (U8, R7, AE1)', () => {
+    // The Dozer ATO gap is bookable; the driver's licence gap is not — no
+    // assessment awards it, so its row must not send an admin hunting for a
+    // booking that cannot exist. An imported grant is the remedy (R11).
+    report.data = {
+      ...EMPTY,
+      neverHeld: [
+        { userId: 'u1', name: 'Bo Worker', competencyId: 'c1', competencyName: 'Track Dozer', hasAwardingAssessment: true },
+        { userId: 'u1', name: 'Bo Worker', competencyId: 'c2', competencyName: 'Driver Licence', hasAwardingAssessment: false },
+      ],
+    };
+    render(<ComplianceScreen />);
+    // Exactly one evidence marker — the bookable row carries none.
+    expect(screen.getAllByText(/record evidence/i)).toHaveLength(1);
+    expect(screen.getByText('Driver Licence')).toBeDefined();
   });
 
   it('ignores an unknown status param rather than rendering a blank page', () => {

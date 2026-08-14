@@ -7,6 +7,7 @@ import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
 import { assignToolToMembership } from '../lib/assignment.js';
+import { recommendedCompetencyIdsFor, requiredCompetencyIdsFor } from '../lib/standing.js';
 import { db } from '../db.js';
 
 /**
@@ -26,6 +27,22 @@ const GATE = [requireTenant, requirePlanFeature('assessments')] as const;
 function isAdmin(role: string): boolean {
   return role === 'admin' || role === 'owner';
 }
+
+/*
+  WHO MAY SELF-REQUEST ANYTHING IN THE CATALOGUE (KTD6). An ALLOWLIST, not a
+  candidate-shaped denylist: owner and admin already assign work to anyone, and
+  an assessor's own upskilling is theirs to ask for, so the relevance check
+  buys nothing on those three. Every other tier — candidate, and equally the
+  builder/reviewer/viewer tiers — is scoped to what their own Roles require or
+  recommend.
+
+  Written this way round because the previous `role === 'candidate'` test
+  failed OPEN: a builder could self-request the assessor skill set today, and
+  a tier added to the enum tomorrow would arrive unrestricted with nothing to
+  say so. An allowlist makes a new tier restricted until somebody decides
+  otherwise here, in one line, on purpose.
+*/
+const SELF_SERVE_UNRESTRICTED = new Set(['owner', 'admin', 'assessor']);
 
 function requestDto(r: typeof schema.trainingRequests.$inferSelect) {
   return {
@@ -70,6 +87,48 @@ trainingRequestsRouter.post(
       res.status(404).json({ error: 'tool_not_found' });
       return;
     }
+
+    /*
+      THE RELEVANCE CHECK (KTD6 — R14, AE5). A restricted caller's request is
+      validated against THEIR OWN roles, closing the open-catalogue abuse (a
+      candidate — or a builder — self-requesting the assessor skill set) while
+      keeping the voluntary flow intact for the three unrestricted tiers above,
+      whose requests are untouched; the admin assignment path remains the
+      ordinary New Case flow.
+
+      Relevance is read in COMPETENCY terms, through the same dual-read standing
+      resolvers every other surface uses (KTD2/KTD3):
+        - a tool that awards a competency the caller's roles REQUIRE is always
+          requestable — the toggle hides nothing for a required gap (AE5, the
+          R94 voluntary flow survives for required work);
+        - a tool that awards a merely RECOMMENDED competency is requestable
+          only while the org's self-start toggle is ON (R14) — OFF, the
+          caller's relevant set is required-only, so the request reads as not
+          relevant rather than as a distinct refusal;
+        - anything else 403s `tool_not_relevant`.
+      An award-less tool intersects neither set and is refused too — it is
+      inert competency machinery (sign-off grants nothing), so self-starting it
+      could never close any gap.
+    */
+    if (!SELF_SERVE_UNRESTRICTED.has(tenant.role)) {
+      const awards = tool.awardedCompetencyIds ?? [];
+      const required = await requiredCompetencyIdsFor(db, tenant.orgId, tenant.userId);
+      const fillsRequiredGap = awards.some((a) => required.has(a));
+      if (!fillsRequiredGap) {
+        const org = await db.query.organizations.findFirst({
+          where: eq(schema.organizations.id, tenant.orgId),
+        });
+        const selfStart = org?.candidateSelfStartRecommended ?? false;
+        const recommended = selfStart
+          ? await recommendedCompetencyIdsFor(db, tenant.orgId, tenant.userId)
+          : new Set<string>();
+        if (!awards.some((a) => recommended.has(a))) {
+          res.status(403).json({ error: 'tool_not_relevant' });
+          return;
+        }
+      }
+    }
+
     const existing = await db.query.trainingRequests.findFirst({
       where: and(
         eq(schema.trainingRequests.userId, tenant.userId),

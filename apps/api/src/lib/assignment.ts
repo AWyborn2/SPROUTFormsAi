@@ -19,9 +19,34 @@ import {
   type HeldCompetencyState,
 } from '@formai/shared';
 import { db } from '../db.js';
+import { requiredToolIdsByRole } from './requirement-links.js';
+import type { Reader } from './standing.js';
 import { DEACTIVATED_STATUS } from '../middleware/tenant.js';
 
 type Database = NonNullable<typeof db>;
+/*
+  READ-ONLY HELPERS TAKE `Reader`, NOT `Database`. The award-link and
+  requirement-change applies now compute INSIDE their own transaction (so the
+  plan and the write share one snapshot), which means the planners below are
+  handed a transaction handle rather than the root client. A transaction is not
+  assignable to `Db` — it carries no `$client` — so the read-only half of this
+  module is typed on the surface it actually uses. Everything that WRITES keeps
+  `Database`.
+*/
+
+/**
+ * Optional knobs for a PLANNING run.
+ *
+ * `awardsOverride` substitutes a tool's awards list for the duration of the
+ * plan — the award-link preview's whole mechanism (U2, KTD10): the tool in the
+ * database still awards nothing (vacuously satisfied, so the engine would plan
+ * zero cases), and the preview must count the world AFTER the link lands. The
+ * override injects the pending award without writing it, so preview and apply
+ * count through the same engine.
+ */
+export interface PlanOptions {
+  awardsOverride?: ReadonlyMap<string, readonly string[]>;
+}
 
 /** One case a plan would create, with the published version it would carry. */
 export interface PlannedCase {
@@ -49,7 +74,7 @@ interface MembershipAssignmentContext {
 
 /** Every competency a user holds now, each resolved to its current status. */
 export async function heldCompetencyStates(
-  database: Database,
+  database: Reader,
   orgId: string,
   userId: string,
   now: Date,
@@ -105,11 +130,12 @@ export interface AssignmentResult {
  * report for as long as the record is retained.
  */
 async function loadMembershipContext(
-  database: Database,
+  database: Reader,
   orgId: string,
   membershipId: string,
   toolIds: readonly string[],
   now: Date,
+  options: PlanOptions = {},
 ): Promise<MembershipAssignmentContext | null> {
   const membership = await database.query.memberships.findFirst({
     where: and(eq(schema.memberships.id, membershipId), eq(schema.memberships.orgId, orgId)),
@@ -141,7 +167,9 @@ async function loadMembershipContext(
       const manifest = t.manifest as AssessmentToolManifest;
       tools[t.id] = {
         toolId: t.id,
-        awardedCompetencyIds: t.awardedCompetencyIds ?? [],
+        // A pending award injected by the caller wins over the stored list —
+        // that is how the award-link preview plans the post-link world (U2).
+        awardedCompetencyIds: options.awardsOverride?.get(t.id) ?? t.awardedCompetencyIds ?? [],
         allPartKeys: orderedParts(manifest).map((p) => p.key),
         locationPartKeys: t.locationPartKeys ?? {},
         assessorStreamCompetencyIds: t.assessorStreamCompetencyIds ?? {},
@@ -283,17 +311,19 @@ export async function assignForMembership(
   const roleIds = roleRows.map((r) => r.roleId);
   if (roleIds.length === 0) return { createdCaseIds: [] };
 
-  const reqRows = await database.query.roleRequiredAssessments.findMany({
-    where: and(
-      eq(schema.roleRequiredAssessments.orgId, orgId),
-      inArray(schema.roleRequiredAssessments.roleId, roleIds),
-    ),
-  });
+  /*
+    The SHARED resolver (KTD2), not a direct `roleRequiredAssessments` read:
+    a Role's requirement now lives as a competency link, and this seam — which
+    the sweep, placement change, import and training-request approval all flow
+    through — must see BOTH sources or a direct-link-only Role would silently
+    assign nothing. The resolver returns per-role TOOL arrays (legacy rows plus
+    each required link resolved to its awarding tool), so everything below it
+    is unchanged.
+  */
+  const toolIdsByRole = await requiredToolIdsByRole(database, orgId, roleIds);
   // One array per Role — the engine unions and deduplicates (R48, R49).
-  const roleRequirements = roleIds.map((roleId) =>
-    reqRows.filter((r) => r.roleId === roleId).map((r) => r.toolId),
-  );
-  const toolIds = [...new Set(reqRows.map((r) => r.toolId))];
+  const roleRequirements = roleIds.map((roleId) => toolIdsByRole.get(roleId) ?? []);
+  const toolIds = [...new Set(roleRequirements.flat())];
   if (toolIds.length === 0) return { createdCaseIds: [] };
 
   const ctx = await loadMembershipContext(database, orgId, membershipId, toolIds, now);
@@ -358,11 +388,12 @@ export async function assignToolToMembership(
  * of a proposed change that has not been saved.
  */
 export async function planAssignmentsForRole(
-  database: Database,
+  database: Reader,
   orgId: string,
   roleId: string,
   scopeToolIds: readonly string[],
   now: Date = new Date(),
+  options: PlanOptions = {},
 ): Promise<MembershipPlan[]> {
   const holders = await database.query.membershipRoles.findMany({
     where: and(
@@ -373,7 +404,7 @@ export async function planAssignmentsForRole(
   const membershipIds = [...new Set(holders.map((h) => h.membershipId))];
   const plans: MembershipPlan[] = [];
   for (const membershipId of membershipIds) {
-    const ctx = await loadMembershipContext(database, orgId, membershipId, scopeToolIds, now);
+    const ctx = await loadMembershipContext(database, orgId, membershipId, scopeToolIds, now, options);
     if (!ctx) continue;
     plans.push({ membershipId, userId: ctx.userId, cases: planFromContext(ctx, [[...scopeToolIds]]) });
   }

@@ -152,7 +152,12 @@ export const apiClient = {
     request<T>('POST', path, body, opts?.timeoutMs),
   patch: <T>(path: string, body?: unknown): Promise<T> => request<T>('PATCH', path, body),
   put: <T>(path: string, body?: unknown): Promise<T> => request<T>('PUT', path, body),
-  delete: <T>(path: string): Promise<T> => request<T>('DELETE', path),
+  /*
+    DELETE accepts an optional body: the awaitingLink remove (U6, KTD9) is a
+    guarded destructive act and must echo the requirement fingerprint, which a
+    bare URL cannot carry.
+  */
+  delete: <T>(path: string, body?: unknown): Promise<T> => request<T>('DELETE', path, body),
   /** POST to an endpoint that answers with a binary body (e.g. a PDF) instead of JSON. */
   postForBlob: (path: string, body?: unknown): Promise<Blob> =>
     send('POST', path, body).then((res) => res.blob()),

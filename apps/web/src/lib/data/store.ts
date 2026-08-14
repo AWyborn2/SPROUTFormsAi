@@ -45,9 +45,11 @@ import type {
   BrandEditProposal,
   BrandPdfScan,
   BrandScanProposal,
+  AwardLinkEffects,
   Competency,
   CompetencyHolder,
   CompetencyRule,
+  UnlinkedTool,
   DashboardSummary,
   FillLink,
   FormDetail,
@@ -84,6 +86,9 @@ import type {
   TrainingRequest,
   TaxonomySettings,
   TemplateStatus,
+  RecommendedCompetencies,
+  RoleRequirements,
+  RoleRequirementTiers,
 } from './types.js';
 import type {
   AssessmentToolManifest,
@@ -629,8 +634,50 @@ export const store = {
     templateId: string;
     name: string;
     manifest: AssessmentToolManifest;
+    /**
+     * The ONE competency passing this tool awards (U5, R1, KTD4). Required and
+     * exactly one element — the API 400s `invalid_award` on zero, two, or an id
+     * the org does not own. The plural spelling rides the existing jsonb
+     * column; strictly-one is enforced at the boundary, not the schema.
+     */
+    awardedCompetencyIds: string[];
   }): Promise<{ id: string }> {
     return apiClient.post<{ id: string }>('/assessment-tools', input);
+  },
+
+  /**
+   * The tools still awarding nothing — the one-time backfill worklist (U4, R3,
+   * KTD5). Admin-gated server-side (403 below admin): reading the worklist
+   * sits on the same gate as acting on it, so callers must not fetch this for
+   * roles the endpoint would refuse.
+   */
+  listUnlinkedTools(): Promise<UnlinkedTool[]> {
+    return apiClient.get<UnlinkedTool[]>('/assessment-tools/unlinked');
+  },
+
+  /**
+   * What a FIRST award link would convert and activate, computed without
+   * committing (U4, KTD10) — the same computation the apply runs, so the
+   * counts shown before are the counts reported after.
+   *
+   * The backfill panel only performs first links (its rows are, by
+   * definition, tools with no award), so neither this nor the apply below
+   * ever sends the re-link fields (`confirm`, `carryRoleLinks`).
+   */
+  previewAwardLink(toolId: string, competencyId: string): Promise<AwardLinkEffects> {
+    return apiClient.post<AwardLinkEffects>(`/assessment-tools/${toolId}/award/preview`, {
+      competencyId,
+    });
+  },
+
+  /**
+   * Link the one competency an existing tool awards (U4, R3, R15). In one
+   * server transaction this writes the award, converts every legacy
+   * Role → tool requirement into a direct competency link, and creates the
+   * activated cases — exactly what the preview counted.
+   */
+  applyAwardLink(toolId: string, competencyId: string): Promise<AwardLinkEffects> {
+    return apiClient.put<AwardLinkEffects>(`/assessment-tools/${toolId}/award`, { competencyId });
   },
 
   publishFormVersion(input: { formId: string; versionId: string }): Promise<FormSummary> {
@@ -1110,21 +1157,46 @@ export const store = {
       replacementDepartmentId,
     });
   },
-  getRoleRequiredAssessments(roleId: string): Promise<{ configured: boolean; toolIds: string[] }> {
+  /*
+    A Role's requirements now travel in COMPETENCY terms (U6, U3): two tiers
+    plus the legacy `awaitingLink` rows and the KTD9 fingerprint. The PATH is
+    unchanged — renaming it would 404 a deployed client mid-rollout.
+  */
+  getRoleRequiredAssessments(roleId: string): Promise<RoleRequirements> {
     return apiClient.get(`/taxonomy/roles/${roleId}/required-assessments`);
   },
-  /** The blast radius of a proposed change, computed without committing (U12). */
+  /**
+   * The blast radius of a proposed change, computed without committing (U12,
+   * KTD10). No fingerprint — a preview cannot go stale. `removeLegacyToolIds`
+   * routes the awaitingLink exit through the SAME door (KTD9), so a legacy-row
+   * removal is previewed by the identical computation its apply runs.
+   */
   previewRoleRequiredAssessments(
     roleId: string,
-    toolIds: string[],
+    body: RoleRequirementTiers & { removeLegacyToolIds?: string[] },
   ): Promise<{ effects: RequiredAssessmentsChangeEffects }> {
-    return apiClient.post(`/taxonomy/roles/${roleId}/required-assessments/preview`, { toolIds });
+    return apiClient.post(`/taxonomy/roles/${roleId}/required-assessments/preview`, body);
   },
+  /** Replace both tiers. Echoes the GET's fingerprint; a stale one 409s `requirements_changed` (KTD9). */
   setRoleRequiredAssessments(
     roleId: string,
-    toolIds: string[],
-  ): Promise<{ configured: boolean; toolIds: string[]; effects: RequiredAssessmentsChangeEffects }> {
-    return apiClient.put(`/taxonomy/roles/${roleId}/required-assessments`, { toolIds });
+    body: RoleRequirementTiers & { fingerprint: string },
+  ): Promise<RoleRequirements & { effects: RequiredAssessmentsChangeEffects }> {
+    return apiClient.put(`/taxonomy/roles/${roleId}/required-assessments`, body);
+  },
+  /**
+   * Remove ONE awaitingLink legacy row — the exit for a tool that will never
+   * be linked (KTD9). Fingerprint-guarded like the PUT; previewed beforehand
+   * through `previewRoleRequiredAssessments` with `removeLegacyToolIds`.
+   */
+  removeLegacyRequirement(
+    roleId: string,
+    toolId: string,
+    fingerprint: string,
+  ): Promise<{ awaitingLink: string[]; effects: RequiredAssessmentsChangeEffects; fingerprint: string }> {
+    return apiClient.delete(`/taxonomy/roles/${roleId}/required-assessments/${toolId}`, {
+      fingerprint,
+    });
   },
   updateTaxonomySettings(patch: Partial<TaxonomySettings>): Promise<TaxonomySettings> {
     return apiClient.patch<TaxonomySettings>('/taxonomy/settings', patch);
@@ -1137,6 +1209,14 @@ export const store = {
    */
   getHeldCompetencies(userId: string): Promise<HeldCompetencyRow[]> {
     return apiClient.get<HeldCompetencyRow[]>(`/competencies/held/${userId}`);
+  },
+  /**
+   * The caller's OWN recommended competencies (U7, R12) — a self-scope read.
+   * Carries the org's self-start toggle beside the rows because the request
+   * affordance needs both facts (toggle ON and a requestable tool, R14/AE5).
+   */
+  listMyRecommended(): Promise<RecommendedCompetencies> {
+    return apiClient.get<RecommendedCompetencies>('/competencies/recommended');
   },
   /**
    * What an induction submission would seed onto a profile, and whether it may

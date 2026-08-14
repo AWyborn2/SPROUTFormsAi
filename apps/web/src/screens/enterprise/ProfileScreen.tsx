@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Avatar, Badge, Button, Card, Icon } from '@formai/ui';
+import { Avatar, Badge, Button, Card, Icon, type BadgeVariant } from '@formai/ui';
 import {
   PROFILE_FIELDS,
   isTerminalCaseState,
   profileField,
   type ProfileFieldSpec,
+  type Standing,
 } from '@formai/shared';
 import {
   useAssessmentCases,
@@ -19,6 +20,7 @@ import {
   useTaxonomy,
 } from '../../lib/data/hooks.js';
 import { CaseStateBadge } from '../statusBadges.js';
+import { RecommendedTrainingList } from '../recommended-training.js';
 import type { HeldCompetencyRow, MemberProfile, ProfileAccess } from '../../lib/data/types.js';
 
 /**
@@ -146,6 +148,10 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
       ) : (
         <WithheldCard title="Competencies" />
       )}
+
+      {/* Recommended-but-unheld, on the candidate's OWN record only (U7, R12):
+          the held tier already shows through the standing badge above. */}
+      {candidateSelf && <RecommendedCard />}
 
       {editing && targetId ? (
         <ProfileForm
@@ -570,13 +576,47 @@ function CompetenciesCard({
               </span>
             </span>
             <span className="flex flex-none items-center gap-1.5">
-              <Badge variant={c.standing === 'required' ? 'info' : 'neutral'}>{c.standing}</Badge>
+              <Badge variant={STANDING_TONE[c.standing]}>{c.standing}</Badge>
               <Badge variant={currencyTone(c.status)}>{c.status}</Badge>
             </span>
           </li>
         ))}
       </ul>
     </Card>
+  );
+}
+
+/**
+ * The standing badge's tone, EXHAUSTIVE over the union (U7, KTD7): a
+ * recommended competency is marked distinct from required AND from merely-held
+ * (R12) — the accent tone, where the old two-branch ternary would have
+ * collapsed it into the neutral "optional" look by omission.
+ */
+const STANDING_TONE: Record<Standing, BadgeVariant> = {
+  required: 'info',
+  recommended: 'accent',
+  optional: 'neutral',
+};
+
+/**
+ * What the candidate's Roles RECOMMEND that they do not yet hold (U7, R12) —
+ * the shared `RecommendedTrainingList` owns the hooks, the unheld filter and
+ * the rows; this wrapper is only the profile's card chrome.
+ */
+function RecommendedCard() {
+  return (
+    <RecommendedTrainingList
+      row="li"
+      render={(rows) => (
+        <Card className="p-5">
+          <h3 className="font-ui text-sm font-semibold">Recommended for your roles</h3>
+          <p className="mt-1 text-[12px] text-text-tertiary">
+            Worth holding for the roles you carry — never required, and never counted against you.
+          </p>
+          <ul className="mt-3 flex flex-col gap-1.5">{rows}</ul>
+        </Card>
+      )}
+    />
   );
 }
 

@@ -1,14 +1,16 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Button, Icon } from '@formai/ui';
+import { Button, Icon, Select } from '@formai/ui';
 import { ApiError } from '../../../../lib/data/api-client.js';
 import { assessmentsApi } from '../../../../lib/data/assessments.js';
 import {
+  useCompetencies,
   useCreateAssessmentTool,
   useCreateDraftForm,
   usePublishFormVersion,
   useSaveVersionFields,
 } from '../../../../lib/data/hooks.js';
+import { useInlineCompetencyCreate } from '../../../../lib/data/use-inline-competency-create.js';
 import { store } from '../../../../lib/data/store.js';
 import { checkPublish, composeRevisionManifest, publishSummary } from '../builder-publish.js';
 import { workflowFromStructure } from '../builder-workflow.js';
@@ -73,6 +75,110 @@ function publishFailureText(err: unknown, fallbackSuffix: string): string {
     : `Publishing stopped before it finished. ${fallbackSuffix}`;
 }
 
+/**
+ * What passing this assessment AWARDS (U5, R1, R2 — AE2).
+ *
+ * Scoped by ACTION, not by the revision flag: this control is mounted on every
+ * path that CREATES a tool — the fresh publish and the deleted-form recovery —
+ * and on neither of the paths that update one. Creating requires exactly one
+ * awarded competency (U2 400s `invalid_award` without it), while a republish
+ * edits a tool whose award already stands; changing THAT is the API's own
+ * guarded re-link operation (KTD10), deliberately not a builder afterthought.
+ *
+ * Mounting this component is also the decision to fetch the register — the
+ * republish path never mounts it, so a revision author costs no request.
+ */
+function AwardControl({
+  title,
+  value,
+  onChange,
+}: {
+  /** The assessment's name — the inline create's one-step default (AE2). */
+  title: string;
+  value: string;
+  onChange: (competencyId: string) => void;
+}) {
+  const { data: competencies = [] } = useCompetencies();
+  /**
+   * Inline create with the created competency kept locally pickable
+   * IMMEDIATELY (the shared hook): the register cache refetches in the
+   * background, and a picker that cannot see the competency it just created
+   * would strand the author at the last step of the flow.
+   */
+  const inlineCreate = useInlineCompetencyCreate(competencies);
+  const [createFailed, setCreateFailed] = useState(false);
+
+  const options = inlineCreate.options;
+
+  /*
+    The one-step default (AE2): building "ATO - Grader" with no matching
+    competency offers creating it under exactly that name. Offered only while
+    NO exact case-insensitive match exists — creating a second "ATO - Grader"
+    beside an existing one would seed the duplicate mess the register's own
+    create form guards against, and the backfill's suggestion logic matches on.
+  */
+  const wanted = title.trim().toLowerCase();
+  const hasMatch = wanted !== '' && options.some((c) => c.name.trim().toLowerCase() === wanted);
+
+  function onCreateInline() {
+    setCreateFailed(false);
+    // Perpetual by default (the shared hook creates without validity):
+    // validity is the register's decision, made on the Competencies screen
+    // where its retroactive reach is explained. This flow's job is the LINK,
+    // not the whole record.
+    inlineCreate.create(
+      title.trim(),
+      null,
+      (added) => {
+        // Creating IS choosing — one step links the competency and the
+        // assessment (AE2), rather than create-then-find-it-in-the-picker.
+        onChange(added.id);
+      },
+      () => setCreateFailed(true),
+    );
+  }
+
+  return (
+    <div className="rounded-[14px] border border-border bg-surface-card p-4">
+      <span className="block text-[13.5px] font-semibold">What passing this awards</span>
+      <p className="mb-2.5 mt-0.5 text-[11.5px] text-text-tertiary">
+        Exactly one competency, granted on sign-off with the case as evidence. Role requirements
+        and auto-assignment run on this link — an assessment awarding nothing would assess nobody.
+      </p>
+      <div className="flex flex-wrap items-end gap-2.5">
+        <div className="w-[260px]">
+          <Select
+            label="This assessment awards"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            options={[
+              { value: '', label: '— pick a competency —' },
+              ...options.map((c) => ({ value: c.id, label: c.name })),
+            ]}
+          />
+        </div>
+        {!hasMatch && wanted !== '' && (
+          <Button
+            size="sm"
+            variant="outline"
+            leadingIcon="plus"
+            disabled={inlineCreate.isPending}
+            onClick={onCreateInline}
+          >
+            {`Create competency: ${title}`}
+          </Button>
+        )}
+      </div>
+      {createFailed && (
+        <p className="mt-2 text-[11.5px] text-warning-text">
+          Could not create the competency — pick one from the register instead, or add it on the
+          Competencies screen.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function WorkflowStep({ draft }: WorkflowStepProps) {
   const { fields, keys, manifest, structure, parts, formId, versionId, title } = draft;
   const isRevision = Boolean(draft.revisionOfToolId);
@@ -85,6 +191,15 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
   } | null>(null);
   const [openCases, setOpenCases] = useState<Array<{ id: string }> | null>(null);
   const [formGone, setFormGone] = useState(false);
+  /**
+   * The one competency this assessment awards (U5, R1). Required on every
+   * path that CREATES a tool — the API 400s `invalid_award` without exactly
+   * one — so both create arms (fresh publish, formGone recovery) gate on it.
+   * Lives here rather than in AwardControl because the publish functions
+   * send it; the control is mounted in two mutually exclusive places and
+   * must not lose the pick if the author moves between them.
+   */
+  const [awardCompetencyId, setAwardCompetencyId] = useState('');
   /** The structured republish refusal — rendered as a fix, not a dead end. */
   const [refusal, setRefusal] = useState<{
     danglingRules: Array<{ locationName: string; partLabel: string }>;
@@ -215,7 +330,10 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
    * chose it from the formGone dialog, knowing it creates rather than revises.
    */
   const publishAsNewTool = async () => {
-    if (!manifest) return;
+    // This arm CREATES a tool, whatever the revision flag says — so it needs
+    // the award like any create (U5): without it the createTool below would
+    // 400 `invalid_award` at the very end of an already-broken recovery.
+    if (!manifest || !awardCompetencyId) return;
     setFailure(null);
     setFormGone(false);
     try {
@@ -233,6 +351,7 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
           ...manifest,
           workflow: workflowFromStructure(structure, parts, manifest, check.fields),
         },
+        awardedCompetencyIds: [awardCompetencyId],
       });
       setDone({ toolId: tool.id });
     } catch (err) {
@@ -252,7 +371,9 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
 
   const publish = async () => {
     if (isRevision) return republish();
-    if (!formId || !versionId || !manifest) return;
+    // The award gates a FRESH publish only (U5): the button below is already
+    // disabled without one, and this guard keeps a programmatic call honest.
+    if (!formId || !versionId || !manifest || !awardCompetencyId) return;
     setFailure(null);
     try {
       let activeFormId = formId;
@@ -288,6 +409,9 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
           ...manifest,
           workflow: workflowFromStructure(structure, parts, manifest, check.fields),
         },
+        // The one competency passing this awards (U5, R1) — required at
+        // create, so the tool is competency machinery from its first second.
+        awardedCompetencyIds: [awardCompetencyId],
       });
       setDone({ toolId: tool.id });
     } catch (err) {
@@ -353,6 +477,21 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
           </p>
         )}
       </div>
+
+      {/*
+        THE AWARD, ON THE CREATE PATH ONLY (U5). A republish updates a tool
+        whose award already stands — re-pointing that is the API's own guarded
+        re-link (KTD10), never a builder side-effect — so `isRevision` hides
+        the control here; the formGone recovery below re-mounts it because
+        that arm creates.
+      */}
+      {!isRevision && (
+        <AwardControl
+          title={title ?? ''}
+          value={awardCompetencyId}
+          onChange={setAwardCompetencyId}
+        />
+      )}
 
       {!formId && (
         <p className="rounded-[10px] border border-warning bg-warning-soft p-[8px_10px] text-[11.5px] text-warning-text">
@@ -492,7 +631,23 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
             original tool any more — you can publish this work as a NEW tool instead, which
             creates a fresh form and tool rather than revising the old one.
           </p>
-          <Button size="sm" variant="outline" leadingIcon="plus" onClick={() => void publishAsNewTool()}>
+          {/*
+            A NEW tool needs its award like any other create (U5): this is the
+            one revision arm that calls createTool, and without the control it
+            would 400 `invalid_award` after the author already lost the form.
+          */}
+          <AwardControl
+            title={title ?? ''}
+            value={awardCompetencyId}
+            onChange={setAwardCompetencyId}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            leadingIcon="plus"
+            disabled={!awardCompetencyId || busy}
+            onClick={() => void publishAsNewTool()}
+          >
             Publish as a new tool
           </Button>
         </div>
@@ -631,7 +786,10 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
 
       <button
         type="button"
-        disabled={!ready || busy}
+        // A fresh publish additionally waits on the award (U5, R1): letting
+        // the click through would 400 `invalid_award` on the last step of a
+        // seven-step flow. A republish never needs one — its award stands.
+        disabled={!ready || busy || (!isRevision && !awardCompetencyId)}
         onClick={() => void publish()}
         className="inline-flex h-[34px] items-center justify-center gap-1.5 self-start rounded-lg bg-accent px-4 text-[12.5px] font-semibold text-accent-contrast disabled:opacity-50"
       >
