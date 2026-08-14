@@ -1,21 +1,24 @@
 /**
- * The blast radius of a retrospective change to a Role's requirements (U12,
- * KTD10 — reworked into COMPETENCY terms by the role-competency links round),
- * plus the award-link computations that share its compute-then-apply shape (U2,
- * KTD3, KTD10).
+ * The blast radius of a retrospective change to a SCOPE's requirements (U12,
+ * KTD10 — reworked into COMPETENCY terms by the role-competency links round,
+ * scope-generalised by the requirement inheritance round, U4/KTD5), plus the
+ * award-link computations that share its compute-then-apply shape (U2, KTD3,
+ * KTD10 — those stay ROLE-scoped, KTD2: legacy rows only ever lived on roles).
  *
  * ONE function computes the effects AND the write plan, reading only. The
  * preview endpoint runs it and discards the plan; the apply endpoint runs the
  * SAME function and then executes the plan. Because `created` is the length of
  * the plan the apply inserts, the previewed and applied counts agree on
- * unchanged data — the guarantee KTD10 exists to give.
+ * unchanged data — the guarantee KTD10 exists to give. Preview == apply now
+ * holds at all FOUR scopes (R6): an org-level save's preview covers every
+ * active membership in the org.
  *
  * The removal effects (R55, R56) are computed PER HOLDER against each person's
- * post-change required set — their other Roles' requirements (from BOTH
- * sources: direct links and remaining legacy tool rows) plus this Role's
- * desired set — because R56 is "required by no Role THEIR HOLDER still
- * carries", and an org-wide count is a different, wrong number for that
- * wording.
+ * post-change required set — the union of the holder's OTHER scopes (their
+ * other roles' links and legacy rows, their placed locations and departments,
+ * the org scope) plus the edited scope's desired set — so AE4 falls out of
+ * the same computation: removing a competency from a role while the org still
+ * requires it demotes nothing, and the preview says so (KTD5).
  */
 import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
@@ -25,9 +28,20 @@ import {
   isTerminalCaseState,
   type RequiredAssessmentsChangeEffects,
 } from '@formai/shared';
-import { heldCompetencyStates, planAssignmentsForRole, type PlannedCase } from './assignment.js';
+import {
+  heldCompetencyStatesByUser,
+  planAssignmentsForMemberships,
+  planAssignmentsForRole,
+  type PlannedCase,
+} from './assignment.js';
 import { awardingToolByCompetency } from './requirement-links.js';
-import type { Reader } from './standing.js';
+import {
+  requirementIndexForScopes,
+  scopeKeysForMemberships,
+  type MembershipScopeKeys,
+  type Reader,
+  type RequirementScopeRef,
+} from './standing.js';
 
 /*
   EVERY COMPUTE BELOW IS READ-ONLY AND TYPED ON `Reader` — the root client OR an
@@ -68,35 +82,112 @@ export interface RequiredCompetencyChange {
   requiredCompetencyIds: readonly string[];
   /**
    * Legacy `role_required_assessments` rows this change explicitly removes —
-   * the awaitingLink exit (KTD9). The requirement PUT never touches legacy
-   * rows; only the explicit remove action names ids here.
+   * the awaitingLink exit (KTD9). ROLE SCOPE ONLY (KTD6): legacy rows never
+   * existed at the other scopes, and the routes refuse the field elsewhere.
+   * The requirement PUT never touches legacy rows; only the explicit remove
+   * action names ids here.
    */
   removeLegacyToolIds?: readonly string[];
 }
 
+/** Re-exported so route code can name a scope without importing standing.ts. */
+export type { RequirementScopeRef };
+
 /**
- * The effects of changing a Role's required competencies to the desired set
- * (and/or removing named legacy rows), and the cases an apply would create.
- * Reads only — safe to run at the top of an apply transaction, before any
- * write.
+ * The `competency_requirements` rows OF one scope — the single definition of
+ * "scope-local" every read below and the route's `loadRequirementState`
+ * share (KTD7: a fingerprint hashes exactly these rows and nothing inherited).
+ * The org scope is the CHECK-enforced all-null shape, never a sentinel (KTD1).
+ */
+export function requirementScopeWhere(orgId: string, scope: RequirementScopeRef) {
+  const cr = schema.competencyRequirements;
+  switch (scope.kind) {
+    case 'role':
+      return and(eq(cr.orgId, orgId), eq(cr.roleId, scope.id));
+    case 'location':
+      return and(eq(cr.orgId, orgId), eq(cr.locationId, scope.id));
+    case 'department':
+      return and(eq(cr.orgId, orgId), eq(cr.departmentId, scope.id));
+    case 'org':
+      return and(
+        eq(cr.orgId, orgId),
+        isNull(cr.roleId),
+        isNull(cr.locationId),
+        isNull(cr.departmentId),
+      );
+  }
+}
+
+/**
+ * The memberships a scope's requirements REACH — the KTD5 holder expansion,
+ * one query per scope kind:
+ *   role       → `membership_roles` still held (withdrawnAt IS NULL, R52)
+ *   department → `membership_departments` (placement, R3)
+ *   location   → `membership_locations` (placement, R3)
+ *   org        → every ACTIVE membership of the organisation (R6/AE3 — the
+ *                blast radius an org save previews is everyone active; a
+ *                deactivated membership plans nothing anyway, R64).
+ */
+export async function membershipIdsForScope(
+  database: Database,
+  orgId: string,
+  scope: RequirementScopeRef,
+): Promise<string[]> {
+  switch (scope.kind) {
+    case 'role': {
+      const rows = await database.query.membershipRoles.findMany({
+        where: and(
+          eq(schema.membershipRoles.roleId, scope.id),
+          isNull(schema.membershipRoles.withdrawnAt),
+        ),
+      });
+      return [...new Set(rows.map((r) => r.membershipId))];
+    }
+    case 'department': {
+      const rows = await database.query.membershipDepartments.findMany({
+        where: eq(schema.membershipDepartments.departmentId, scope.id),
+      });
+      return [...new Set(rows.map((r) => r.membershipId))];
+    }
+    case 'location': {
+      const rows = await database.query.membershipLocations.findMany({
+        where: eq(schema.membershipLocations.locationId, scope.id),
+      });
+      return [...new Set(rows.map((r) => r.membershipId))];
+    }
+    case 'org': {
+      const rows = await database.query.memberships.findMany({
+        where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
+      });
+      return rows.map((r) => r.id);
+    }
+  }
+}
+
+/**
+ * The effects of changing ONE SCOPE's required competencies to the desired set
+ * (and/or, at role scope, removing named legacy rows), and the cases an apply
+ * would create. Reads only — safe to run at the top of an apply transaction,
+ * before any write.
  *
- * The diff runs over the DIRECT required links only: the PUT owns nothing but
- * `competency_requirements` (KTD9), so a competency a remaining legacy row
- * still derives keeps obliging through the dual read regardless of what this
+ * The diff runs over the scope's DIRECT required links only: the PUT owns
+ * nothing but this scope's `competency_requirements` rows (KTD9, KTD7), so a
+ * competency a remaining legacy row still derives — or another scope still
+ * names (KTD2) — keeps obliging through the union regardless of what this
  * change does to the links.
  */
 export async function computeRequiredAssessmentsChange(
   database: Database,
   orgId: string,
-  role: { id: string },
+  scope: RequirementScopeRef,
   desired: RequiredCompetencyChange,
   now: Date,
 ): Promise<RequiredAssessmentsChangePlan> {
   const desiredRequired = new Set(desired.requiredCompetencyIds);
 
-  // 1. Diff current vs desired, in competency terms.
+  // 1. Diff current vs desired, in competency terms — this scope's rows only.
   const currentLinks = await database.query.competencyRequirements.findMany({
-    where: eq(schema.competencyRequirements.roleId, role.id),
+    where: requirementScopeWhere(orgId, scope),
   });
   const currentRequired = new Set(
     currentLinks.filter((l) => l.tier === 'required').map((l) => l.competencyId),
@@ -104,11 +195,16 @@ export async function computeRequiredAssessmentsChange(
   const addedCompetencyIds = [...desiredRequired].filter((id) => !currentRequired.has(id));
   const removedLinkCompetencyIds = [...currentRequired].filter((id) => !desiredRequired.has(id));
 
-  // The Role's legacy rows, and which of them this change removes. Filtered to
-  // rows that actually exist so a stale id cannot inflate the effect counts.
-  const legacyRows = await database.query.roleRequiredAssessments.findMany({
-    where: eq(schema.roleRequiredAssessments.roleId, role.id),
-  });
+  // The Role's legacy rows, and which of them this change removes — ROLE SCOPE
+  // ONLY (KTD2/KTD6): the other three scopes never had a legacy derivation, so
+  // for them both lists are simply empty. Filtered to rows that actually exist
+  // so a stale id cannot inflate the effect counts.
+  const legacyRows =
+    scope.kind === 'role'
+      ? await database.query.roleRequiredAssessments.findMany({
+          where: eq(schema.roleRequiredAssessments.roleId, scope.id),
+        })
+      : [];
   const legacyToolIds = [...new Set(legacyRows.map((r) => r.toolId))];
   const removedLegacyToolIds = [
     ...new Set((desired.removeLegacyToolIds ?? []).filter((id) => legacyToolIds.includes(id))),
@@ -137,20 +233,16 @@ export async function computeRequiredAssessmentsChange(
     ...new Set([...removedLinkCompetencyIds, ...removedLegacyAwardIds]),
   ].filter((id) => !desiredRequired.has(id));
 
-  // 2. Holders / affected — every current holder of the Role (a headcount).
-  const holderRows = await database.query.membershipRoles.findMany({
-    where: and(
-      eq(schema.membershipRoles.roleId, role.id),
-      isNull(schema.membershipRoles.withdrawnAt),
-    ),
-  });
-  const membershipIds = [...new Set(holderRows.map((h) => h.membershipId))];
+  // 2. Holders / affected — every membership the scope reaches (KTD5 headcount).
+  const membershipIds = await membershipIdsForScope(database, orgId, scope);
   const affected = membershipIds.length;
 
   // 3. Addition plan — each ADDED competency resolved to its awarding tool
   //    through the SHARED resolver (KTD2), so the preview and the apply cannot
   //    name different tools. A competency with no awarding tool plans nothing
-  //    (R7, R9 — evidence-only); `created` is a case count.
+  //    (R7, R9 — evidence-only); `created` is a case count. The plan itself is
+  //    batched set-wise over the holders (`planAssignmentsForMemberships`,
+  //    U4's org-scale discipline) — an org save must not loop contexts.
   //
   //    ONE resolver scan serves the whole change: the resolver reads every org
   //    tool and template per call, and each competency resolves independently
@@ -168,7 +260,13 @@ export async function computeRequiredAssessmentsChange(
       ...new Set(addedCompetencyIds.flatMap((c) => (awarding.has(c) ? [awarding.get(c)!] : []))),
     ];
     if (addedToolIds.length > 0) {
-      const plans = await planAssignmentsForRole(database, orgId, role.id, addedToolIds, now);
+      const plans = await planAssignmentsForMemberships(
+        database,
+        orgId,
+        membershipIds,
+        addedToolIds,
+        now,
+      );
       casesToInsert = plans.flatMap((p) =>
         p.cases.map((c) => ({ ...c, orgId, candidateUserId: p.userId })),
       );
@@ -183,7 +281,7 @@ export async function computeRequiredAssessmentsChange(
     const removal = await computeRemovalEffects(
       database,
       orgId,
-      role.id,
+      scope,
       {
         desiredRequired,
         remainingLegacyToolIds,
@@ -214,15 +312,15 @@ export async function computeRequiredAssessmentsChange(
 async function computeRemovalEffects(
   database: Database,
   orgId: string,
-  roleId: string,
+  scope: RequirementScopeRef,
   ctx: {
-    /** This Role's post-change direct required competencies. */
+    /** The edited scope's post-change direct required competencies. */
     desiredRequired: ReadonlySet<string>;
-    /** This Role's legacy rows surviving the change. */
+    /** The edited Role's legacy rows surviving the change (role scope only). */
     remainingLegacyToolIds: readonly string[];
     /** The competencies leaving required standing (links + removed-legacy awards). */
     removedCompetencyIds: readonly string[];
-    /** Legacy tool rows this change explicitly removes. */
+    /** Legacy tool rows this change explicitly removes (role scope only). */
     removedLegacyToolIds: readonly string[];
   },
   membershipIds: readonly string[],
@@ -242,57 +340,72 @@ async function computeRemovalEffects(
   if (holderUserIds.length === 0) return { inFlightContinuing: 0, competenciesDemoting: 0 };
 
   /*
-    Post-change requirements PER HOLDER, from BOTH sources: the edited Role's
-    desired links and surviving legacy rows, plus every OTHER non-withdrawn
-    Role's current requirements — its direct required links AND its legacy
-    derivation. `requiredCompetencyIdsByUser` reads the same dual sources but
-    against the STORED state of every role including this one, so the desired
-    substitution is assembled here instead.
+    Post-change requirements PER HOLDER — the edited scope's desired set (and,
+    at role scope, its surviving legacy rows) plus the UNION OF THE HOLDER'S
+    OTHER SCOPES (KTD5): their other held roles' links and legacy derivation,
+    their placed locations, their placed departments, and the org scope. The
+    edited scope's own key is SUBTRACTED per membership and the desired set
+    substituted, which is what makes AE4 fall out: a competency the org still
+    requires cannot demote when a role drops it, and vice versa.
+
+    The expansion reuses `scopeKeysForMemberships` — so the U4 retirement
+    split holds here exactly as it does in standing: a retired location or
+    department contributes NOTHING to a post-change set (its requirements
+    stopped applying), while a retired-but-held role keeps contributing
+    (R119 posture; withdrawal is what ends its obligations).
+
+    BATCHED SET-WISE throughout (U4's org-scale discipline): one expansion,
+    one requirement-index read over the union of keys, one legacy read, one
+    tool read, one case read, one held-competency pair — never a per-holder
+    loop of queries.
   */
-  const holderRoleRows = await database.query.membershipRoles.findMany({
-    where: and(
-      inArray(schema.membershipRoles.membershipId, [...membershipIds]),
-      isNull(schema.membershipRoles.withdrawnAt),
-    ),
-  });
-  const otherRoleIds = [...new Set(holderRoleRows.map((r) => r.roleId).filter((id) => id !== roleId))];
-  const [otherLegacyRows, otherLinkRows] = await Promise.all([
-    otherRoleIds.length
-      ? database.query.roleRequiredAssessments.findMany({
-          where: and(
-            eq(schema.roleRequiredAssessments.orgId, orgId),
-            inArray(schema.roleRequiredAssessments.roleId, otherRoleIds),
-          ),
-        })
-      : Promise.resolve([]),
-    otherRoleIds.length
-      ? database.query.competencyRequirements.findMany({
-          where: and(
-            eq(schema.competencyRequirements.orgId, orgId),
-            inArray(schema.competencyRequirements.roleId, otherRoleIds),
-            eq(schema.competencyRequirements.tier, 'required'),
-          ),
-        })
-      : Promise.resolve([]),
-  ]);
+  const keysByMembership = await scopeKeysForMemberships(database, orgId, membershipIds);
+  // Subtract the edited scope's own key from each membership's expansion.
+  const otherKeysByMembership = new Map<string, MembershipScopeKeys>();
+  for (const [membershipId, keys] of keysByMembership) {
+    otherKeysByMembership.set(membershipId, {
+      roleIds: scope.kind === 'role' ? keys.roleIds.filter((id) => id !== scope.id) : keys.roleIds,
+      locationIds:
+        scope.kind === 'location'
+          ? keys.locationIds.filter((id) => id !== scope.id)
+          : keys.locationIds,
+      departmentIds:
+        scope.kind === 'department'
+          ? keys.departmentIds.filter((id) => id !== scope.id)
+          : keys.departmentIds,
+    });
+  }
+  const unionOtherKeys: MembershipScopeKeys = { roleIds: [], locationIds: [], departmentIds: [] };
+  for (const keys of otherKeysByMembership.values()) {
+    unionOtherKeys.roleIds.push(...keys.roleIds);
+    unionOtherKeys.locationIds.push(...keys.locationIds);
+    unionOtherKeys.departmentIds.push(...keys.departmentIds);
+  }
+  unionOtherKeys.roleIds = [...new Set(unionOtherKeys.roleIds)];
+  unionOtherKeys.locationIds = [...new Set(unionOtherKeys.locationIds)];
+  unionOtherKeys.departmentIds = [...new Set(unionOtherKeys.departmentIds)];
+
+  // The OTHER scopes' direct required rows, via the one shared four-scope read
+  // (standing.ts) — org rows ride along and apply below unless the org scope
+  // is the one being edited (its contribution is `desiredRequired` then).
+  const otherIndex = await requirementIndexForScopes(database, orgId, unionOtherKeys, 'required');
+  const otherOrgCompetencyIds = scope.kind === 'org' ? [] : otherIndex.orgCompetencyIds;
+
+  // Legacy half of the other roles (KTD2 — role scope only ever had one). The
+  // edited role's own surviving rows arrive via `ctx.remainingLegacyToolIds`.
+  const otherLegacyRows = unionOtherKeys.roleIds.length
+    ? await database.query.roleRequiredAssessments.findMany({
+        where: and(
+          eq(schema.roleRequiredAssessments.orgId, orgId),
+          inArray(schema.roleRequiredAssessments.roleId, unionOtherKeys.roleIds),
+        ),
+      })
+    : [];
   const toolsByOtherRole = new Map<string, string[]>();
   for (const r of otherLegacyRows) {
     const list = toolsByOtherRole.get(r.roleId) ?? [];
     list.push(r.toolId);
     toolsByOtherRole.set(r.roleId, list);
-  }
-  const compsByOtherRole = new Map<string, string[]>();
-  for (const l of otherLinkRows) {
-    if (l.roleId === null) continue; // unreachable: the inArray above is role-keyed (KTD2); narrows the nullable scope column
-    const list = compsByOtherRole.get(l.roleId) ?? [];
-    list.push(l.competencyId);
-    compsByOtherRole.set(l.roleId, list);
-  }
-  const rolesByMembership = new Map<string, string[]>();
-  for (const r of holderRoleRows) {
-    const list = rolesByMembership.get(r.membershipId) ?? [];
-    list.push(r.roleId);
-    rolesByMembership.set(r.membershipId, list);
   }
 
   /*
@@ -335,9 +448,9 @@ async function computeRemovalEffects(
     : [];
   const awardsByTool = new Map(toolRows.map((t) => [t.id, [...(t.awardedCompetencyIds ?? [])]]));
 
-  // Collapse to per-USER post-change sets (a user may hold the Role via one
+  // Collapse to per-USER post-change sets (a user may reach the scope via one
   // membership): the legacy TOOLS still required, and the COMPETENCIES still
-  // required through either source.
+  // required through any surviving source — the AE4 subtraction's other half.
   const postToolsByUser = new Map<string, Set<string>>();
   const postCompsByUser = new Map<string, Set<string>>();
   for (const membershipId of membershipIds) {
@@ -345,11 +458,21 @@ async function computeRemovalEffects(
     if (!userId) continue;
     const tools = postToolsByUser.get(userId) ?? new Set<string>(ctx.remainingLegacyToolIds);
     const comps = postCompsByUser.get(userId) ?? new Set<string>(ctx.desiredRequired);
-    for (const rid of rolesByMembership.get(membershipId) ?? []) {
-      if (rid === roleId) continue;
+    const keys = otherKeysByMembership.get(membershipId);
+    for (const rid of keys?.roleIds ?? []) {
       for (const t of toolsByOtherRole.get(rid) ?? []) tools.add(t);
-      for (const c of compsByOtherRole.get(rid) ?? []) comps.add(c);
+      for (const c of otherIndex.byRole.get(rid) ?? []) comps.add(c);
     }
+    for (const lid of keys?.locationIds ?? []) {
+      for (const c of otherIndex.byLocation.get(lid) ?? []) comps.add(c);
+    }
+    for (const did of keys?.departmentIds ?? []) {
+      for (const c of otherIndex.byDepartment.get(did) ?? []) comps.add(c);
+    }
+    // Org scope applies to every membership unconditionally (R2) — unless the
+    // org scope is the very one being edited, whose post state is the desired
+    // set already seeded above.
+    for (const c of otherOrgCompetencyIds) comps.add(c);
     // Legacy tools still required derive their awards into the competency set.
     for (const t of tools) for (const c of awardsByTool.get(t) ?? []) comps.add(c);
     postToolsByUser.set(userId, tools);
@@ -388,10 +511,12 @@ async function computeRemovalEffects(
 
   // competenciesDemoting (R56): (holder, competency) pairs the holder holds
   // current, this change removes, and no surviving requirement still names.
+  // Batched (U4): one held-state read for the whole holder set, not per user.
   let competenciesDemoting = 0;
   if (ctx.removedCompetencyIds.length > 0) {
+    const heldByUser = await heldCompetencyStatesByUser(database, orgId, holderUserIds, now);
     for (const userId of holderUserIds) {
-      const held = await heldCompetencyStates(database, orgId, userId, now);
+      const held = heldByUser.get(userId) ?? [];
       const heldNow = new Set(held.filter((h) => countsAsHeld(h)).map((h) => h.competencyId));
       const postComps = postCompsByUser.get(userId) ?? new Set<string>();
       for (const c of ctx.removedCompetencyIds) {

@@ -36,6 +36,97 @@ function returningResult(rows: unknown[]) {
   return awaitable;
 }
 
+// ── WHERE-aware filtering for `competency_requirements` reads ────────────────
+// The scope routes (U4) address ONE scope's rows per query — role, location,
+// department, or the all-null org shape (KTD1) — and the load-bearing facts
+// (scope-local fingerprints, KTD7 commutation, the AE4 subtraction) live in
+// those clauses. A mock returning every seeded row to every query would let
+// an org save read role rows and still pass. Same machinery as
+// standing.test.ts: eq/inArray terms by bound value, `is null` by column.
+const SKIP_KEYS = new Set(['table', 'config', 'encoder', 'decoder', 'session', 'dialect', 'default']);
+
+function stringValues(node: unknown, out: string[] = [], depth = 0): string[] {
+  if (!node || depth > 10 || typeof node !== 'object') return out;
+  const rec = node as Record<string, unknown>;
+  if (typeof rec.value === 'string') out.push(rec.value);
+  for (const [k, v] of Object.entries(rec)) {
+    if (SKIP_KEYS.has(k)) continue;
+    if (Array.isArray(v)) v.forEach((n) => stringValues(n, out, depth + 1));
+    else stringValues(v, out, depth + 1);
+  }
+  return out;
+}
+
+function whereTerms(
+  node: unknown,
+  acc: { all: string[]; anyOf: string[][] } = { all: [], anyOf: [] },
+  depth = 0,
+): { all: string[]; anyOf: string[][] } {
+  if (!node || depth > 12 || typeof node !== 'object') return acc;
+  const rec = node as Record<string, unknown>;
+  const chunks = rec.queryChunks;
+  if (Array.isArray(chunks)) {
+    const text = chunks
+      .map((c) => {
+        const v = (c as { value?: unknown } | null)?.value;
+        return Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '';
+      })
+      .join('');
+    if (text.includes(' in ')) {
+      const group = stringValues(chunks);
+      if (group.length) acc.anyOf.push(group);
+      return acc;
+    }
+    for (const c of chunks) whereTerms(c, acc, depth + 1);
+    return acc;
+  }
+  if (typeof rec.value === 'string') acc.all.push(rec.value);
+  for (const [k, v] of Object.entries(rec)) {
+    if (SKIP_KEYS.has(k)) continue;
+    whereTerms(v, acc, depth + 1);
+  }
+  return acc;
+}
+
+function nullColumns(node: unknown, out = new Set<string>(), depth = 0): Set<string> {
+  if (!node || depth > 12 || typeof node !== 'object') return out;
+  const rec = node as Record<string, unknown>;
+  const chunks = rec.queryChunks;
+  if (Array.isArray(chunks)) {
+    for (let i = 0; i < chunks.length; i++) {
+      const v = (chunks[i] as { value?: unknown } | null)?.value;
+      const text = Array.isArray(v) ? v.filter((s) => typeof s === 'string').join('') : '';
+      if (text.includes('is null')) {
+        const col = chunks[i - 1] as { name?: unknown } | null;
+        if (col && typeof col.name === 'string') out.add(col.name);
+      } else {
+        nullColumns(chunks[i], out, depth + 1);
+      }
+    }
+    return out;
+  }
+  for (const [k, v] of Object.entries(rec)) {
+    if (SKIP_KEYS.has(k)) continue;
+    if (Array.isArray(v)) v.forEach((n) => nullColumns(n, out, depth + 1));
+    else nullColumns(v, out, depth + 1);
+  }
+  return out;
+}
+
+const camel = (snake: string) => snake.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+
+function matchesWhere(row: Record<string, unknown>, where: unknown): boolean {
+  if (!where) return true;
+  const { all, anyOf } = whereTerms(where);
+  const present = new Set(Object.values(row).filter((v) => typeof v === 'string'));
+  if (![...new Set(all)].every((w) => present.has(w))) return false;
+  if (!anyOf.every((group) => group.some((w) => present.has(w)))) return false;
+  for (const colName of nullColumns(where)) {
+    if (row[camel(colName)] != null) return false;
+  }
+  return true;
+}
+
 function fakeDb(opts: {
   planTier?: string;
   locationsFindFirst?: unknown;
@@ -106,7 +197,14 @@ function fakeDb(opts: {
         findMany: vi.fn().mockResolvedValue(opts.holders ?? []),
       },
       roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue(opts.currentRequirements ?? []) },
-      competencyRequirements: { findMany: vi.fn().mockResolvedValue(opts.roleLinks ?? []) },
+      // WHERE-honouring (U4): each scope's queries see ONLY their own rows —
+      // seed rows with explicit scope columns. `mockResolvedValueOnce` still
+      // overrides per-call where a test sequences reads by hand.
+      competencyRequirements: {
+        findMany: vi.fn(async (args?: { where?: unknown }) =>
+          (opts.roleLinks ?? []).filter((r) => matchesWhere(r as Record<string, unknown>, args?.where)),
+        ),
+      },
       memberships: {
         findFirst: vi.fn(async () => (opts.memberships ?? [])[0]),
         findMany: vi.fn().mockResolvedValue(opts.memberships ?? []),
@@ -785,6 +883,292 @@ describe('Requirement change preview & apply in competency terms (U12/U3)', () =
   });
 });
 
+describe('Scope-addressed requirements (U4 — KTD5, KTD6, KTD7)', () => {
+  const COMP_A = '00000000-0000-4000-8000-0000000000f1';
+  const COMP_B = '00000000-0000-4000-8000-0000000000f2';
+  const TOOL_A = '00000000-0000-4000-8000-0000000000a1';
+  const LOC = '00000000-0000-4000-8000-00000000c001';
+  const DEP = '00000000-0000-4000-8000-00000000b001';
+  const orgComps = [
+    { id: COMP_A, orgId: 'org-1', name: 'First Aid' },
+    { id: COMP_B, orgId: 'org-1', name: 'Site Induction' },
+  ];
+  /** Rows with EXPLICIT scope columns, so the WHERE-honouring fake separates scopes (KTD1). */
+  const orgRow = (competencyId: string, tier = 'required') => ({
+    id: `link-org-${competencyId}`, orgId: 'org-1', roleId: null, locationId: null, departmentId: null, competencyId, tier,
+  });
+  const roleRow = (competencyId: string, tier = 'required') => ({
+    id: `link-role-${competencyId}`, orgId: 'org-1', roleId: 'role-1', locationId: null, departmentId: null, competencyId, tier,
+  });
+  const locRow = (competencyId: string, tier = 'required') => ({
+    id: `link-loc-${competencyId}`, orgId: 'org-1', roleId: null, locationId: LOC, departmentId: null, competencyId, tier,
+  });
+
+  it('org GET returns only org-scope rows, with neither configured nor awaitingLink (KTD6)', async () => {
+    const { db } = fakeDb({ roleLinks: [orgRow(COMP_A), roleRow(COMP_B)] });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/requirements/org`, { headers: authHeader(admin) });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.required).toEqual([COMP_A]); // the role row never bleeds in
+    expect(body.recommended).toEqual([]);
+    expect(typeof body.fingerprint).toBe('string');
+    expect('configured' in body).toBe(false); // role-only fields stay role-only
+    expect('awaitingLink' in body).toBe(false);
+    server.close();
+  });
+
+  it('org PUT writes all-null scope rows, applies exactly the previewed cases, and audits under the organisation (AE3, R6)', async () => {
+    const { db, insertValues } = fakeDb({
+      roleLinks: [],
+      competencies: orgComps,
+      memberships: [{ id: 'm1', orgId: 'org-1', userId: 'u1', status: 'active' }],
+      heldLocations: [{ membershipId: 'm1', locationId: 'loc1', position: 0 }],
+      tools: [
+        {
+          id: TOOL_A, orgId: 'org-1', templateId: 'tpl-1', awardedCompetencyIds: [COMP_A],
+          manifest: { parts: [{ key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'] }] },
+          locationPartKeys: {}, assessorStreamCompetencyIds: {}, createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ],
+      templates: [{ id: 'tpl-1', orgId: 'org-1', currentVersionId: 'v1' }],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const state = (await (
+      await fetch(`${base}/taxonomy/requirements/org`, { headers: authHeader(admin) })
+    ).json()) as { fingerprint: string };
+    const res = await fetch(`${base}/taxonomy/requirements/org`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ required: [COMP_A], recommended: [], fingerprint: state.fingerprint }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown> & { effects: { affected: number; created: number } };
+    expect(body.effects.affected).toBe(1); // every active membership (AE3)
+    expect(body.effects.created).toBe(1);
+    expect('configured' in body).toBe(false);
+    // The link row lands with NO scope column — the all-null org shape (KTD1).
+    const linkCall = insertValues.mock.calls.find(([table]) => table === schema.competencyRequirements);
+    expect(linkCall).toBeDefined();
+    const [linkRow] = linkCall![1] as Record<string, unknown>[];
+    expect(linkRow).toMatchObject({ orgId: 'org-1', competencyId: COMP_A, tier: 'required' });
+    expect(linkRow!.roleId).toBeUndefined();
+    expect(linkRow!.locationId).toBeUndefined();
+    expect(linkRow!.departmentId).toBeUndefined();
+    // Apply == preview: exactly the counted case was inserted (KTD10 at org reach).
+    expect(insertValues).toHaveBeenCalledWith(schema.assessmentCases, expect.objectContaining({ toolId: TOOL_A }));
+    // The audit row names the act; the target is the organisation's own name.
+    expect(insertValues).toHaveBeenCalledWith(
+      schema.auditLogEntries,
+      expect.objectContaining({ action: 'Set organisation required competencies' }),
+    );
+    server.close();
+  });
+
+  it('location PUT writes locationId rows and audits under the location name', async () => {
+    const { db, insertValues } = fakeDb({
+      locationsFindFirst: { id: LOC, orgId: 'org-1', name: 'Boddington', status: 'active' },
+      roleLinks: [],
+      competencies: orgComps,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const state = (await (
+      await fetch(`${base}/taxonomy/requirements/location/${LOC}`, { headers: authHeader(admin) })
+    ).json()) as { fingerprint: string };
+    const res = await fetch(`${base}/taxonomy/requirements/location/${LOC}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ required: [COMP_B], recommended: [], fingerprint: state.fingerprint }),
+    });
+    expect(res.status).toBe(200);
+    expect(insertValues).toHaveBeenCalledWith(
+      schema.competencyRequirements,
+      expect.arrayContaining([
+        expect.objectContaining({ orgId: 'org-1', locationId: LOC, competencyId: COMP_B, tier: 'required' }),
+      ]),
+    );
+    expect(insertValues).toHaveBeenCalledWith(
+      schema.auditLogEntries,
+      expect.objectContaining({ action: 'Set location required competencies', target: 'Boddington' }),
+    );
+    server.close();
+  });
+
+  it('department PUT and role delegate PUT each audit under their own scope (U4 audit-per-scope)', async () => {
+    // Department scope.
+    const dept = fakeDb({
+      departmentsFindFirst: { id: DEP, orgId: 'org-1', name: 'Operations', status: 'active', allowsMultipleRoles: false },
+      roleLinks: [],
+      competencies: orgComps,
+    });
+    mockDbValue = dept.db;
+    let app = startApp();
+    let state = (await (
+      await fetch(`${app.base}/taxonomy/requirements/department/${DEP}`, { headers: authHeader(admin) })
+    ).json()) as { fingerprint: string };
+    let res = await fetch(`${app.base}/taxonomy/requirements/department/${DEP}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ required: [COMP_A], recommended: [], fingerprint: state.fingerprint }),
+    });
+    expect(res.status).toBe(200);
+    expect(dept.insertValues).toHaveBeenCalledWith(
+      schema.auditLogEntries,
+      expect.objectContaining({ action: 'Set department required competencies', target: 'Operations' }),
+    );
+    app.server.close();
+
+    // Role scope, through the NEW address — same handler as the delegate.
+    const role = fakeDb({
+      jobRolesFindFirst: { id: 'role-1', orgId: 'org-1', name: 'Dozer Operator', status: 'active', requirementsConfigured: true },
+      roleLinks: [],
+      competencies: orgComps,
+    });
+    mockDbValue = role.db;
+    app = startApp();
+    state = (await (
+      await fetch(`${app.base}/taxonomy/requirements/role/role-1`, { headers: authHeader(admin) })
+    ).json()) as { fingerprint: string };
+    res = await fetch(`${app.base}/taxonomy/requirements/role/role-1`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ required: [COMP_A], recommended: [], fingerprint: state.fingerprint }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect('configured' in body).toBe(true); // the role shape survives the new address
+    expect('awaitingLink' in body).toBe(true);
+    expect(role.insertValues).toHaveBeenCalledWith(
+      schema.auditLogEntries,
+      expect.objectContaining({ action: 'Set role required competencies', target: 'Dozer Operator' }),
+    );
+    app.server.close();
+  });
+
+  it('409s scope_retired on writes at a retired location, while the GET still reads (the split, write half)', async () => {
+    const { db, deleteWhere } = fakeDb({
+      locationsFindFirst: { id: LOC, orgId: 'org-1', name: 'Old Site', status: 'retired' },
+      roleLinks: [locRow(COMP_B)],
+      competencies: orgComps,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    // Read works — a retired value's list is still inspectable.
+    const get = await fetch(`${base}/taxonomy/requirements/location/${LOC}`, { headers: authHeader(admin) });
+    expect(get.status).toBe(200);
+    const { fingerprint } = (await get.json()) as { fingerprint: string };
+    // Preview and PUT both refuse: a preview an apply would 409 must 409 too.
+    const preview = await fetch(`${base}/taxonomy/requirements/location/${LOC}/preview`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ required: [], recommended: [] }),
+    });
+    expect(preview.status).toBe(409);
+    expect(await preview.json()).toMatchObject({ error: 'scope_retired' });
+    const put = await fetch(`${base}/taxonomy/requirements/location/${LOC}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ required: [], recommended: [], fingerprint }),
+    });
+    expect(put.status).toBe(409);
+    expect(await put.json()).toMatchObject({ error: 'scope_retired' });
+    expect(deleteWhere).not.toHaveBeenCalled();
+    server.close();
+  });
+
+  it('keeps fingerprints scope-local: an org row neither enters nor invalidates the role editor (KTD7 commute)', async () => {
+    // Same role rows, two worlds — one with an org-scope row landed beside
+    // them. The role fingerprint must not move, or every org save would 409
+    // every open role editor.
+    const without = fakeDb({
+      jobRolesFindFirst: { id: 'role-1', orgId: 'org-1', name: 'Dozer', status: 'active', requirementsConfigured: true },
+      roleLinks: [roleRow(COMP_B)],
+    });
+    mockDbValue = without.db;
+    let app = startApp();
+    const before = (await (
+      await fetch(`${app.base}/taxonomy/roles/role-1/required-assessments`, { headers: authHeader(admin) })
+    ).json()) as { fingerprint: string };
+    app.server.close();
+
+    const withOrg = fakeDb({
+      jobRolesFindFirst: { id: 'role-1', orgId: 'org-1', name: 'Dozer', status: 'active', requirementsConfigured: true },
+      roleLinks: [roleRow(COMP_B), orgRow(COMP_A)],
+      competencies: orgComps,
+    });
+    mockDbValue = withOrg.db;
+    app = startApp();
+    const after = (await (
+      await fetch(`${app.base}/taxonomy/roles/role-1/required-assessments`, { headers: authHeader(admin) })
+    ).json()) as { fingerprint: string };
+    expect(after.fingerprint).toBe(before.fingerprint); // scope-local hash (KTD7)
+
+    // And the role editor's stale-looking-but-actually-fresh echo still saves:
+    // the org row that landed in between is not this scope's state.
+    const put = await fetch(`${app.base}/taxonomy/roles/role-1/required-assessments`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ required: [COMP_B], recommended: [], fingerprint: before.fingerprint }),
+    });
+    expect(put.status).toBe(200);
+    app.server.close();
+  });
+
+  it('409s a stale fingerprint at org scope — the race guard holds per scope', async () => {
+    const { db, deleteWhere } = fakeDb({ roleLinks: [], competencies: orgComps });
+    const linksFindMany = (db as unknown as {
+      query: { competencyRequirements: { findMany: ReturnType<typeof vi.fn> } };
+    }).query.competencyRequirements.findMany;
+    linksFindMany.mockResolvedValueOnce([]); // the GET sees no org rows…
+    linksFindMany.mockResolvedValue([orgRow(COMP_B)]); // …then another admin's save lands
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const { fingerprint } = (await (
+      await fetch(`${base}/taxonomy/requirements/org`, { headers: authHeader(admin) })
+    ).json()) as { fingerprint: string };
+    const res = await fetch(`${base}/taxonomy/requirements/org`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ required: [COMP_A], recommended: [], fingerprint }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: 'requirements_changed' });
+    expect(deleteWhere).not.toHaveBeenCalled();
+    server.close();
+  });
+
+  it('400s removeLegacyToolIds outside role scope and 404s an unknown scope segment (KTD6)', async () => {
+    const { db } = fakeDb({
+      locationsFindFirst: { id: LOC, orgId: 'org-1', name: 'Boddington', status: 'active' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const preview = await fetch(`${base}/taxonomy/requirements/location/${LOC}/preview`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ required: [], recommended: [], removeLegacyToolIds: [TOOL_A] }),
+    });
+    expect(preview.status).toBe(400); // legacy rows are role machinery only
+    const unknown = await fetch(`${base}/taxonomy/requirements/team/${LOC}`, {
+      headers: authHeader(admin),
+    });
+    expect(unknown.status).toBe(404);
+    server.close();
+  });
+
+  it('refuses a Builder on the scope routes (R12 — the gate survives the generalisation)', async () => {
+    const { db } = fakeDb({});
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/requirements/org`, { headers: authHeader(builder) });
+    expect(res.status).toBe(403);
+    server.close();
+  });
+});
+
 describe('PATCH /taxonomy/settings (R24, R25, R40)', () => {
   it('persists the display-identifier choice', async () => {
     const { db, updateSet } = fakeDb({
@@ -1418,6 +1802,238 @@ describe('Department transfer (U18, R135)', () => {
       body: JSON.stringify({ replacementDepartmentId: DEP_Y }),
     });
     expect(res.status).toBe(403);
+    server.close();
+  });
+});
+
+// ── U5: placement writes re-plan; retirement carries its requirement fallout ─
+
+describe('Placement writes re-plan (U5 — KTD8, R7, AE2)', () => {
+  const LOC_X = '00000000-0000-4000-8000-00000000c001';
+  const LOC_Y = '00000000-0000-4000-8000-00000000c002';
+  const DEP_X = '00000000-0000-4000-8000-00000000b001';
+  const DEP_Y = '00000000-0000-4000-8000-00000000b002';
+  const ROLE_X = '00000000-0000-4000-8000-00000000d001';
+  const ROLE_Y = '00000000-0000-4000-8000-00000000d002';
+  const M1 = '00000000-0000-4000-8000-00000000e001';
+  const U1 = '00000000-0000-4000-8000-00000000f001';
+  const COMP = '00000000-0000-4000-8000-0000000000f1';
+  const TOOL = '00000000-0000-4000-8000-0000000000a1';
+  /** A published tool awarding COMP — what makes a requirement bookable. */
+  const bookable = {
+    tools: [
+      {
+        id: TOOL, orgId: 'org-1', templateId: 'tpl-1', awardedCompetencyIds: [COMP],
+        manifest: { parts: [{ key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'] }] },
+        locationPartKeys: {}, assessorStreamCompetencyIds: {}, createdAt: new Date('2026-01-01T00:00:00Z'),
+      },
+    ],
+    templates: [{ id: 'tpl-1', orgId: 'org-1', currentVersionId: 'v1' }],
+  };
+
+  it('AE2: a location transfer immediately plans the newly-required case', async () => {
+    // LOC_Y requires COMP. The fake has no live store, so the post-transfer
+    // world is seeded directly: the member's placement row already reads
+    // LOC_Y (the transfer's own holder read ignores the WHERE either way).
+    const { db, insertValues } = fakeDb({
+      locationsFindFirst: { id: LOC_X, orgId: 'org-1', name: 'Old Site', status: 'retired' },
+      locationsFindMany: [{ id: LOC_Y, orgId: 'org-1', name: 'New Site', status: 'active' }],
+      heldLocations: [{ membershipId: M1, locationId: LOC_Y, position: 0 }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+      roleLinks: [
+        { id: 'req-y', orgId: 'org-1', roleId: null, locationId: LOC_Y, departmentId: null, competencyId: COMP, tier: 'required' },
+      ],
+      ...bookable,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/locations/${LOC_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementLocationId: LOC_Y, caseOutcome: 'carry' }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ peopleMoved: 1 });
+    // The newly-required bookable competency got its case WITHOUT any admin
+    // touching a requirements screen (AE2) — the transfer re-planned.
+    expect(insertValues).toHaveBeenCalledWith(
+      schema.assessmentCases,
+      expect.objectContaining({ toolId: TOOL, candidateUserId: U1 }),
+    );
+    server.close();
+  });
+
+  it('a role transfer plans the REPLACEMENT role’s newly-required case (the third dark write site)', async () => {
+    const { db, insertValues } = fakeDb({
+      jobRolesFindFirst: { id: ROLE_X, orgId: 'org-1', name: 'Old Role', departmentId: DEP_X, status: 'retired', createdAt: new Date() },
+      // Post-transfer holding: the member now carries ROLE_Y (the transfer's
+      // own holder read ignores the WHERE, so one row serves both reads).
+      holders: [{ id: 'mr-y', membershipId: M1, roleId: ROLE_Y, withdrawnAt: null }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+      heldLocations: [{ membershipId: M1, locationId: LOC_Y, position: 0 }],
+      locationsFindMany: [{ id: LOC_Y, orgId: 'org-1', name: 'Site', status: 'active' }],
+      roleLinks: [
+        { id: 'req-role-y', orgId: 'org-1', roleId: ROLE_Y, locationId: null, departmentId: null, competencyId: COMP, tier: 'required' },
+      ],
+      ...bookable,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/roles/${ROLE_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementRoleId: ROLE_Y }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ peopleMoved: 1 });
+    expect(insertValues).toHaveBeenCalledWith(
+      schema.assessmentCases,
+      expect.objectContaining({ toolId: TOOL, candidateUserId: U1 }),
+    );
+    server.close();
+  });
+
+  it('a department transfer re-plans, and still withdraws the left department’s roles (regression)', async () => {
+    const { db, insertValues, updateSet } = fakeDb({
+      departmentsFindFirst: { id: DEP_X, orgId: 'org-1', name: 'Old Dept', status: 'retired', createdAt: new Date() },
+      heldDepartments: [{ id: 'md-y', membershipId: M1, departmentId: DEP_Y }],
+      departmentsFindMany: [{ id: DEP_Y, orgId: 'org-1', name: 'New Dept', status: 'active' }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+      heldLocations: [{ membershipId: M1, locationId: LOC_Y, position: 0 }],
+      locationsFindMany: [{ id: LOC_Y, orgId: 'org-1', name: 'Site', status: 'active' }],
+      // The retired Department's Role — withdrawn on the way out (R113).
+      jobRolesFindMany: [{ id: ROLE_X, orgId: 'org-1', departmentId: DEP_X, status: 'active' }],
+      holders: [{ id: 'mr-x', membershipId: M1, roleId: ROLE_X, withdrawnAt: null }],
+      roleLinks: [
+        { id: 'req-dep-y', orgId: 'org-1', roleId: null, locationId: null, departmentId: DEP_Y, competencyId: COMP, tier: 'required' },
+      ],
+      ...bookable,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/departments/${DEP_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementDepartmentId: DEP_Y }),
+    });
+    expect(res.status).toBe(200);
+    // Existing behaviour holds: the left Department's Role is withdrawn…
+    expect(updateSet).toHaveBeenCalledWith(
+      schema.membershipRoles,
+      expect.objectContaining({ withdrawnAt: expect.any(Date) }),
+    );
+    // …and the NEW behaviour rides beside it: the replacement Department's
+    // requirement is planned immediately.
+    expect(insertValues).toHaveBeenCalledWith(
+      schema.assessmentCases,
+      expect.objectContaining({ toolId: TOOL, candidateUserId: U1 }),
+    );
+    server.close();
+  });
+
+  it('a failed re-plan for one member never aborts the transfer (fail-soft pin)', async () => {
+    const { db } = fakeDb({
+      locationsFindFirst: { id: LOC_X, orgId: 'org-1', name: 'Old Site', status: 'retired' },
+      heldLocations: [{ membershipId: M1, locationId: LOC_X }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+    });
+    // The re-plan's requirement read blows up — the workforce-import posture
+    // says the committed transfer stays committed and the sweep catches up.
+    (db as unknown as {
+      query: { competencyRequirements: { findMany: ReturnType<typeof vi.fn> } };
+    }).query.competencyRequirements.findMany.mockRejectedValue(new Error('boom'));
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/locations/${LOC_X}/transfer`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ replacementLocationId: LOC_Y, caseOutcome: 'carry' }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ peopleMoved: 1 });
+    server.close();
+  });
+
+  it('a location status flip re-plans everyone placed there (KTD8 — retirement is not a dark write)', async () => {
+    // Returning a Location to ACTIVE restores its requirements: the flip must
+    // plan the restored cases itself, not leave them to the next sweep.
+    const { db, insertValues } = fakeDb({
+      locationsFindFirst: { id: LOC_Y, orgId: 'org-1', name: 'Site', status: 'retired' },
+      updated: { id: LOC_Y, name: 'Site', status: 'active', createdAt: new Date() },
+      heldLocations: [{ membershipId: M1, locationId: LOC_Y, position: 0 }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+      locationsFindMany: [{ id: LOC_Y, orgId: 'org-1', name: 'Site', status: 'active' }],
+      roleLinks: [
+        { id: 'req-y', orgId: 'org-1', roleId: null, locationId: LOC_Y, departmentId: null, competencyId: COMP, tier: 'required' },
+      ],
+      ...bookable,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/locations/${LOC_Y}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ status: 'active' }),
+    });
+    expect(res.status).toBe(200);
+    expect(insertValues).toHaveBeenCalledWith(
+      schema.assessmentCases,
+      expect.objectContaining({ toolId: TOOL, candidateUserId: U1 }),
+    );
+    server.close();
+  });
+
+  it('a rename-only PATCH re-plans nobody (the flip guard)', async () => {
+    const { db, insertValues } = fakeDb({
+      locationsFindFirst: { id: LOC_Y, orgId: 'org-1', name: 'Site', status: 'active' },
+      updated: { id: LOC_Y, name: 'Renamed', status: 'active', createdAt: new Date() },
+      heldLocations: [{ membershipId: M1, locationId: LOC_Y, position: 0 }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+      locationsFindMany: [{ id: LOC_Y, orgId: 'org-1', name: 'Site', status: 'active' }],
+      roleLinks: [
+        { id: 'req-y', orgId: 'org-1', roleId: null, locationId: LOC_Y, departmentId: null, competencyId: COMP, tier: 'required' },
+      ],
+      ...bookable,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/locations/${LOC_Y}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', ...authHeader(admin) },
+      body: JSON.stringify({ name: 'Renamed' }),
+    });
+    expect(res.status).toBe(200);
+    expect(insertValues).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());
+    server.close();
+  });
+
+  it('the retirement review reports "N required competencies stop applying" per retired location/department', async () => {
+    const { db } = fakeDb({
+      locationsFindMany: [{ id: LOC_X, orgId: 'org-1', name: 'Old Site', status: 'retired' }],
+      departmentsFindMany: [{ id: DEP_X, orgId: 'org-1', name: 'Old Dept', status: 'retired' }],
+      heldLocations: [{ membershipId: M1, locationId: LOC_X }],
+      heldDepartments: [{ membershipId: M1, departmentId: DEP_X }],
+      memberships: [{ id: M1, userId: U1, orgId: 'org-1', status: 'active' }],
+      usersFindMany: [{ id: U1, name: 'Bo Holder' }],
+      roleLinks: [
+        { id: 'r1', orgId: 'org-1', roleId: null, locationId: LOC_X, departmentId: null, competencyId: COMP, tier: 'required' },
+        { id: 'r2', orgId: 'org-1', roleId: null, locationId: LOC_X, departmentId: null, competencyId: '00000000-0000-4000-8000-0000000000f2', tier: 'required' },
+        // Recommended never counts — it was never enforced, so nothing "stops".
+        { id: 'r3', orgId: 'org-1', roleId: null, locationId: LOC_X, departmentId: null, competencyId: '00000000-0000-4000-8000-0000000000f3', tier: 'recommended' },
+      ],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await fetch(`${base}/taxonomy/retirement-review`, { headers: authHeader(admin) });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      locations: Array<{ id: string; requiredCompetenciesStopped: number; holders: unknown[] }>;
+      departments: Array<{ id: string; requiredCompetenciesStopped: number }>;
+      roles: Array<Record<string, unknown>>;
+    };
+    expect(body.locations[0]!.requiredCompetenciesStopped).toBe(2); // required tier only
+    expect(body.locations[0]!.holders).toHaveLength(1); // the M in "…to M placed people"
+    expect(body.departments[0]!.requiredCompetenciesStopped).toBe(0);
     server.close();
   });
 });

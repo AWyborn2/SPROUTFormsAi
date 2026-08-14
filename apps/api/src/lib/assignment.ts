@@ -82,34 +82,57 @@ export async function heldCompetencyStates(
   userId: string,
   now: Date,
 ): Promise<HeldCompetencyState[]> {
+  const byUser = await heldCompetencyStatesByUser(database, orgId, [userId], now);
+  return byUser.get(userId) ?? [];
+}
+
+/**
+ * The batched shape of `heldCompetencyStates` — TWO queries however many users
+ * are asked about (U4's org-scale discipline): one over the holder rows, one
+ * over the competencies that date them. An org-scope preview walks every
+ * active membership, and a per-user pair of reads inside an open write
+ * transaction would turn a few-hundred-member save into a thousand sequential
+ * queries. Every requested userId maps to an array (possibly empty).
+ */
+export async function heldCompetencyStatesByUser(
+  database: Reader,
+  orgId: string,
+  userIds: readonly string[],
+  now: Date,
+): Promise<Map<string, HeldCompetencyState[]>> {
+  const unique = [...new Set(userIds)];
+  const byUser = new Map<string, HeldCompetencyState[]>();
+  for (const userId of unique) byUser.set(userId, []);
+  if (unique.length === 0) return byUser;
+
   const holders = await database.query.competencyHolders.findMany({
     where: and(
-      eq(schema.competencyHolders.userId, userId),
+      inArray(schema.competencyHolders.userId, unique),
       eq(schema.competencyHolders.orgId, orgId),
     ),
   });
-  if (holders.length === 0) return [];
+  if (holders.length === 0) return byUser;
   const comps = await database.query.competencies.findMany({
     where: and(
       eq(schema.competencies.orgId, orgId),
-      inArray(
-        schema.competencies.id,
-        holders.map((h) => h.competencyId),
-      ),
+      inArray(schema.competencies.id, [...new Set(holders.map((h) => h.competencyId))]),
     ),
   });
   const validityById = new Map(comps.map((c) => [c.id, c]));
-  return holders.map((h) => {
+  for (const h of holders) {
     const validity = validityById.get(h.competencyId);
-    if (!validity) {
-      // A holder pointing at a competency the org no longer defines cannot be
-      // dated, so it proves nothing — mark it revoked so it never satisfies
-      // (the same not-held outcome R107 gives a genuinely revoked grant).
-      return { competencyId: h.competencyId, status: 'expired' as const, revoked: true };
-    }
-    const { status, revoked } = competencyCurrency(h, validity, now, 'assessor');
-    return { competencyId: h.competencyId, status, revoked };
-  });
+    const state = validity
+      ? (() => {
+          const { status, revoked } = competencyCurrency(h, validity, now, 'assessor');
+          return { competencyId: h.competencyId, status, revoked };
+        })()
+      : // A holder pointing at a competency the org no longer defines cannot be
+        // dated, so it proves nothing — mark it revoked so it never satisfies
+        // (the same not-held outcome R107 gives a genuinely revoked grant).
+        { competencyId: h.competencyId, status: 'expired' as const, revoked: true };
+    byUser.get(h.userId)?.push(state);
+  }
+  return byUser;
 }
 
 export interface AssignmentResult {
@@ -351,6 +374,135 @@ export async function assignToolToMembership(
   if (!ctx) return { createdCaseIds: [] };
   const planned = planFromContext(ctx, [[toolId]]);
   return { createdCaseIds: await insertPlannedCases(database, orgId, ctx.userId, planned) };
+}
+
+/**
+ * The cases a specific set of tools WOULD create for each given membership,
+ * without writing anything — the scope-keyed planning sibling of
+ * `planAssignmentsForRole` (KTD5), serving all four requirement scopes through
+ * `computeRequiredAssessmentsChange`. The requirement is INJECTED rather than
+ * read, so a preview projects a change that has not been saved.
+ *
+ * ORG-SCALE DISCIPLINE (U4, review-verified): every read here is batched
+ * SET-WISE across the memberships — one query per table for memberships,
+ * tools, templates, placements, open cases and held competencies — never a
+ * per-membership `loadMembershipContext` loop. An org-scope save at a few
+ * hundred members must not mean thousands of sequential queries inside an
+ * open write transaction; the query count stays FLAT as membership grows
+ * (pinned by test against the fake, not wall clock).
+ *
+ * Semantics match the per-membership loader exactly: a membership that is not
+ * the organisation's, or is DEACTIVATED (R64), plans nothing — a leaver must
+ * not be handed an assessment they cannot sign in to take.
+ */
+export async function planAssignmentsForMemberships(
+  database: Reader,
+  orgId: string,
+  membershipIds: readonly string[],
+  scopeToolIds: readonly string[],
+  now: Date,
+  options: PlanOptions = {},
+): Promise<MembershipPlan[]> {
+  const uniqueMembershipIds = [...new Set(membershipIds)];
+  if (uniqueMembershipIds.length === 0 || scopeToolIds.length === 0) return [];
+
+  const memberships = (
+    await database.query.memberships.findMany({
+      where: and(
+        eq(schema.memberships.orgId, orgId),
+        inArray(schema.memberships.id, uniqueMembershipIds),
+      ),
+    })
+  ).filter((m) => m.status !== DEACTIVATED_STATUS);
+  if (memberships.length === 0) return [];
+  const userIds = [...new Set(memberships.map((m) => m.userId))];
+
+  // Tool context — identical derivation to `loadMembershipContext`, loaded once
+  // for the whole batch (the tools are scope-wide, not per person).
+  const uniqueToolIds = [...new Set(scopeToolIds)];
+  const toolRows = await database.query.assessmentTools.findMany({
+    where: and(
+      eq(schema.assessmentTools.orgId, orgId),
+      inArray(schema.assessmentTools.id, uniqueToolIds),
+    ),
+  });
+  const templateIds = [...new Set(toolRows.map((t) => t.templateId))];
+  const templates = templateIds.length
+    ? await database.query.formTemplates.findMany({
+        where: and(
+          eq(schema.formTemplates.orgId, orgId),
+          inArray(schema.formTemplates.id, templateIds),
+        ),
+      })
+    : [];
+  const versionByTemplate = new Map(templates.map((t) => [t.id, t.currentVersionId]));
+  const tools: Record<string, AssignmentTool> = {};
+  const currentVersionByTool = new Map<string, string | null>();
+  for (const t of toolRows) {
+    const manifest = t.manifest as AssessmentToolManifest;
+    tools[t.id] = {
+      toolId: t.id,
+      // A pending award injected by the caller wins over the stored list —
+      // the same override contract the per-membership loader honours (U2).
+      awardedCompetencyIds: options.awardsOverride?.get(t.id) ?? t.awardedCompetencyIds ?? [],
+      allPartKeys: orderedParts(manifest).map((p) => p.key),
+      locationPartKeys: t.locationPartKeys ?? {},
+      assessorStreamCompetencyIds: t.assessorStreamCompetencyIds ?? {},
+    };
+    currentVersionByTool.set(t.id, versionByTemplate.get(t.templateId) ?? null);
+  }
+
+  // Placements, open cases and held competencies — one query per table.
+  const locRows = await database.query.membershipLocations.findMany({
+    where: inArray(
+      schema.membershipLocations.membershipId,
+      memberships.map((m) => m.id),
+    ),
+  });
+  const locationsByMembership = new Map<string, { locationId: string; position: number }[]>();
+  for (const row of locRows) {
+    const list = locationsByMembership.get(row.membershipId) ?? [];
+    list.push({ locationId: row.locationId, position: row.position });
+    locationsByMembership.set(row.membershipId, list);
+  }
+
+  // BOTH non-terminal states, the KTD16 idempotence guard — same filter as the
+  // per-membership loader.
+  const openCases = await database.query.assessmentCases.findMany({
+    where: and(
+      eq(schema.assessmentCases.orgId, orgId),
+      inArray(schema.assessmentCases.candidateUserId, userIds),
+      inArray(schema.assessmentCases.state, ['open', 'awaiting_sign_off']),
+    ),
+  });
+  const openToolsByUser = new Map<string, Set<string>>();
+  for (const c of openCases) {
+    const set = openToolsByUser.get(c.candidateUserId) ?? new Set<string>();
+    set.add(c.toolId);
+    openToolsByUser.set(c.candidateUserId, set);
+  }
+
+  const heldByUser = await heldCompetencyStatesByUser(database, orgId, userIds, now);
+
+  const plans: MembershipPlan[] = [];
+  for (const membership of memberships) {
+    const ctx: MembershipAssignmentContext = {
+      userId: membership.userId,
+      tools,
+      currentVersionByTool,
+      held: heldByUser.get(membership.userId) ?? [],
+      locationIds: (locationsByMembership.get(membership.id) ?? [])
+        .sort((a, b) => a.position - b.position)
+        .map((l) => l.locationId),
+      openCaseToolIds: [...(openToolsByUser.get(membership.userId) ?? [])],
+    };
+    plans.push({
+      membershipId: membership.id,
+      userId: membership.userId,
+      cases: planFromContext(ctx, [[...uniqueToolIds]]),
+    });
+  }
+  return plans;
 }
 
 /**

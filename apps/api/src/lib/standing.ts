@@ -451,6 +451,20 @@ export async function recommendedCompetencyIdsFor(
 
 export type RequirementScope = 'org' | 'location' | 'department' | 'role';
 
+/**
+ * A requirement scope, ADDRESSED (KTD5/KTD6): which one scope a preview, an
+ * apply or a route is talking about. The org scope carries no id — it is the
+ * organisation itself, and rows at it are the all-null shape (KTD1) — so the
+ * union is discriminated rather than a nullable id nobody could type-check.
+ * Lives here, beside `RequirementScope`, because both requirement-change and
+ * assignment speak it and each already imports this module.
+ */
+export type RequirementScopeRef =
+  | { kind: 'org' }
+  | { kind: 'location'; id: string }
+  | { kind: 'department'; id: string }
+  | { kind: 'role'; id: string };
+
 /** One contributing scope, resolved to its display name. */
 export interface CompetencySource {
   scope: RequirementScope;

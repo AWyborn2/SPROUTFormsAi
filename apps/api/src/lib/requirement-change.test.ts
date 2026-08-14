@@ -21,7 +21,9 @@ const { requiredToolIdsByRole } = await import('./requirement-links.js');
 
 const ORG = 'org-1';
 const NOW = new Date('2026-06-01T00:00:00Z');
-const ROLE = { id: 'role-1' };
+// The compute is scope-addressed since U4 (KTD5); these suites exercise the
+// role scope, whose semantics the inheritance round promised unchanged (R11).
+const ROLE = { kind: 'role', id: 'role-1' } as const;
 
 // ── a store-backed fake db that honours eq / and / inArray WHERE clauses ─────
 // The compute function is READ-ONLY, so only `query.<table>.findMany/findFirst`
@@ -76,22 +78,61 @@ function whereTerms(
   return acc;
 }
 
+/** Column names the WHERE demands be NULL — how `isNull(...)` is honoured
+ * (same machinery as standing.test.ts): the org-scope requirement shape and
+ * the held-role filter live in those clauses, so a fake that ignored them
+ * would pass with the filters deleted. */
+function nullColumns(node: unknown, out = new Set<string>(), depth = 0): Set<string> {
+  if (!node || depth > 12 || typeof node !== 'object') return out;
+  const rec = node as Record<string, unknown>;
+  const chunks = rec.queryChunks;
+  if (Array.isArray(chunks)) {
+    for (let i = 0; i < chunks.length; i++) {
+      const v = (chunks[i] as { value?: unknown } | null)?.value;
+      const text = Array.isArray(v) ? v.filter((s) => typeof s === 'string').join('') : '';
+      if (text.includes('is null')) {
+        const col = chunks[i - 1] as { name?: unknown } | null;
+        if (col && typeof col.name === 'string') out.add(col.name);
+      } else {
+        nullColumns(chunks[i], out, depth + 1);
+      }
+    }
+    return out;
+  }
+  for (const [k, v] of Object.entries(rec)) {
+    if (SKIP_KEYS.has(k)) continue;
+    if (Array.isArray(v)) v.forEach((n) => nullColumns(n, out, depth + 1));
+    else nullColumns(v, out, depth + 1);
+  }
+  return out;
+}
+
+const camel = (snake: string) => snake.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+
 function matchesWhere(row: Record<string, unknown>, where: unknown): boolean {
   if (!where) return true;
   const { all, anyOf } = whereTerms(where);
   const present = new Set(Object.values(row).filter((v) => typeof v === 'string'));
   if (![...new Set(all)].every((w) => present.has(w))) return false;
-  return anyOf.every((group) => group.some((w) => present.has(w)));
+  if (!anyOf.every((group) => group.some((w) => present.has(w)))) return false;
+  for (const colName of nullColumns(where)) {
+    if (row[camel(colName)] != null) return false;
+  }
+  return true;
 }
 
 type Store = Record<string, Record<string, unknown>[]>;
 
-function makeDb(store: Store) {
+function makeDb(store: Store, counter?: { reads: number }) {
   const table = (name: string) => ({
-    findMany: async (args?: { where?: unknown }) =>
-      (store[name] ?? []).filter((r) => matchesWhere(r, args?.where)),
-    findFirst: async (args?: { where?: unknown }) =>
-      (store[name] ?? []).find((r) => matchesWhere(r, args?.where)),
+    findMany: async (args?: { where?: unknown }) => {
+      if (counter) counter.reads++;
+      return (store[name] ?? []).filter((r) => matchesWhere(r, args?.where));
+    },
+    findFirst: async (args?: { where?: unknown }) => {
+      if (counter) counter.reads++;
+      return (store[name] ?? []).find((r) => matchesWhere(r, args?.where));
+    },
   });
   return {
     query: {
@@ -102,6 +143,11 @@ function makeDb(store: Store) {
       assessmentTools: table('assessmentTools'),
       formTemplates: table('formTemplates'),
       membershipLocations: table('membershipLocations'),
+      // The four-scope expansion (U4/KTD5) reads placements AND the status of
+      // the values they point at — the retired split lives in that join.
+      membershipDepartments: table('membershipDepartments'),
+      locations: table('locations'),
+      departments: table('departments'),
       assessmentCases: table('assessmentCases'),
       competencyHolders: table('competencyHolders'),
       competencies: table('competencies'),
@@ -448,6 +494,221 @@ describe('computeRequiredAssessmentsChange — mixed', () => {
     expect(effects.created).toBe(1); // the tC case for u1
     expect(effects.inFlightContinuing).toBe(1); // the tB case
     expect(effects.competenciesDemoting).toBe(1); // cB now behind no requirement
+  });
+});
+
+// ── the four scopes (U4 — KTD5, AE3, AE4, and the retired split) ─────────────
+
+describe('computeRequiredAssessmentsChange — scope holder expansion (KTD5)', () => {
+  const orgLink = (competencyId: string, tier = 'required') => ({
+    id: `link-org-${competencyId}`,
+    orgId: ORG,
+    roleId: null,
+    locationId: null,
+    departmentId: null,
+    competencyId,
+    tier,
+  });
+  const locLink = (locationId: string, competencyId: string) => ({
+    id: `link-${locationId}-${competencyId}`,
+    orgId: ORG,
+    roleId: null,
+    locationId,
+    departmentId: null,
+    competencyId,
+    tier: 'required',
+  });
+  const deptLink = (departmentId: string, competencyId: string) => ({
+    id: `link-${departmentId}-${competencyId}`,
+    orgId: ORG,
+    roleId: null,
+    locationId: null,
+    departmentId,
+    competencyId,
+    tier: 'required',
+  });
+
+  it('AE3: an org-scope addition reaches every ACTIVE membership, and preview == apply', async () => {
+    // Three active memberships (one deactivated — outside the blast radius);
+    // u1 already holds cB, u2 and u3 do not. Affected counts every active
+    // membership; created counts the unmet — and is the plan's length by
+    // construction, which is the whole preview==apply guarantee (KTD10).
+    const store: Store = {
+      competencyRequirements: [],
+      memberships: [
+        { id: 'm1', orgId: ORG, userId: 'u1', status: 'active' },
+        { id: 'm2', orgId: ORG, userId: 'u2', status: 'active' },
+        { id: 'm3', orgId: ORG, userId: 'u3', status: 'active' },
+        { id: 'm4', orgId: ORG, userId: 'u4', status: 'deactivated' },
+      ],
+      membershipRoles: [], // NOBODY holds a role — the org scope needs none (R2)
+      membershipLocations: [
+        { membershipId: 'm1', locationId: 'loc1', position: 0 },
+        { membershipId: 'm2', locationId: 'loc2', position: 0 },
+        { membershipId: 'm3', locationId: 'loc3', position: 0 },
+      ],
+      assessmentTools: [tool('tB', ['cB'])],
+      formTemplates: [template('tpl-tB', 'v1')],
+      assessmentCases: [],
+      competencyHolders: [grant('u1', 'cB')],
+      competencies: [{ id: 'cB', orgId: ORG, validForMonths: null, gracePeriodDays: null }],
+    };
+    const { effects, casesToInsert } = await computeRequiredAssessmentsChange(
+      makeDb(store), ORG, { kind: 'org' }, { requiredCompetencyIds: ['cB'] }, NOW,
+    );
+
+    expect(effects.affected).toBe(3); // active only — never the leaver
+    expect(effects.created).toBe(2); // u2 and u3
+    expect(casesToInsert.map((c) => c.candidateUserId).sort()).toEqual(['u2', 'u3']);
+    expect(effects.created).toBe(casesToInsert.length); // preview == apply
+  });
+
+  it('expands LOCATION holders by placement and DEPARTMENT holders by placement (R3)', async () => {
+    // m1 is placed at loc-A; m2 is placed in dep-B; neither holds any role.
+    // The location change reaches only m1, the department change only m2.
+    const store: Store = {
+      competencyRequirements: [],
+      memberships: [
+        { id: 'm1', orgId: ORG, userId: 'u1', status: 'active' },
+        { id: 'm2', orgId: ORG, userId: 'u2', status: 'active' },
+      ],
+      membershipRoles: [],
+      membershipLocations: [{ membershipId: 'm1', locationId: 'loc-A', position: 0 }],
+      membershipDepartments: [{ membershipId: 'm2', departmentId: 'dep-B', position: 0 }],
+      assessmentTools: [tool('tB', ['cB'])],
+      formTemplates: [template('tpl-tB', 'v1')],
+      assessmentCases: [],
+      competencyHolders: [],
+      competencies: [],
+    };
+    const atLocation = await computeRequiredAssessmentsChange(
+      makeDb(store), ORG, { kind: 'location', id: 'loc-A' }, { requiredCompetencyIds: ['cB'] }, NOW,
+    );
+    expect(atLocation.effects.affected).toBe(1);
+    expect(atLocation.casesToInsert.map((c) => c.candidateUserId)).toEqual(['u1']);
+
+    const atDepartment = await computeRequiredAssessmentsChange(
+      makeDb(store), ORG, { kind: 'department', id: 'dep-B' }, { requiredCompetencyIds: ['cB'] }, NOW,
+    );
+    expect(atDepartment.effects.affected).toBe(1);
+    // m2 has no location placement, so nothing is bookable for them (KTD4's
+    // no-location skip) — the requirement lands in standing, not in a case.
+    expect(atDepartment.effects.created).toBe(0);
+  });
+
+  it('AE4: removing an org-duplicated competency from the ROLE alone changes nothing for holders, and the preview says so', async () => {
+    // cB is required at BOTH org scope and role-1. Dropping it from role-1:
+    // the holder's post-change set still carries cB through the org scope, so
+    // nothing demotes and the in-flight case is still obliged — zero standing
+    // changes, exactly what the confirm dialog must say (KTD5's subtraction).
+    const store: Store = {
+      competencyRequirements: [link('role-1', 'cB'), orgLink('cB')],
+      ...member('m1', 'u1', ['role-1']),
+      assessmentTools: [tool('tB', ['cB'])],
+      formTemplates: [template('tpl-tB')],
+      assessmentCases: [{ id: 'case-b', orgId: ORG, candidateUserId: 'u1', toolId: 'tB', state: 'open' }],
+      competencyHolders: [grant('u1', 'cB')],
+      competencies: [{ id: 'cB', orgId: ORG, validForMonths: null, gracePeriodDays: null }],
+    };
+    const { effects } = await computeRequiredAssessmentsChange(
+      makeDb(store), ORG, ROLE, { requiredCompetencyIds: [] }, NOW,
+    );
+
+    expect(effects.removedCompetencyIds).toEqual(['cB']); // it DOES leave this scope's list
+    expect(effects.competenciesDemoting).toBe(0); // …but the org scope still requires it
+    expect(effects.inFlightContinuing).toBe(0); // the case is still obliged, not orphaned
+    expect(effects.created).toBe(0);
+  });
+
+  it('pins the retired split: a retired LOCATION contributes nothing to the post-change set, a retired-but-held ROLE keeps contributing', async () => {
+    // Editing role-1 to drop cB. The holder's OTHER cover for cB is a
+    // location requirement — while that location is ACTIVE nothing demotes;
+    // the moment it is RETIRED its cover evaporates ("stops applying", U4
+    // split) and the demotion is real.
+    const base: Store = {
+      competencyRequirements: [link('role-1', 'cB'), locLink('loc-9', 'cB')],
+      ...member('m1', 'u1', ['role-1']),
+      assessmentTools: [tool('tB', ['cB'])],
+      formTemplates: [template('tpl-tB')],
+      assessmentCases: [],
+      competencyHolders: [grant('u1', 'cB')],
+      competencies: [{ id: 'cB', orgId: ORG, validForMonths: null, gracePeriodDays: null }],
+    };
+    base.membershipLocations = [{ membershipId: 'm1', locationId: 'loc-9', position: 0 }];
+
+    const activeWorld = { ...base, locations: [{ id: 'loc-9', orgId: ORG, status: 'active' }] };
+    const activeRun = await computeRequiredAssessmentsChange(
+      makeDb(activeWorld), ORG, ROLE, { requiredCompetencyIds: [] }, NOW,
+    );
+    expect(activeRun.effects.competenciesDemoting).toBe(0); // covered by the active location
+
+    const retiredWorld = { ...base, locations: [{ id: 'loc-9', orgId: ORG, status: 'retired' }] };
+    const retiredRun = await computeRequiredAssessmentsChange(
+      makeDb(retiredWorld), ORG, ROLE, { requiredCompetencyIds: [] }, NOW,
+    );
+    expect(retiredRun.effects.competenciesDemoting).toBe(1); // retired location covers nothing
+
+    // The ROLE half of the split: the other cover is a link on role-2, which
+    // the holder still HOLDS though the role itself is retired. Role
+    // retirement withdraws nobody (R119), so the expansion never reads
+    // jobRoles.status — the cover holds and nothing demotes.
+    const heldRetiredRole: Store = {
+      ...base,
+      membershipLocations: [],
+      competencyRequirements: [link('role-1', 'cB'), link('role-2', 'cB')],
+      membershipRoles: [
+        { membershipId: 'm1', roleId: 'role-1', withdrawnAt: null },
+        { membershipId: 'm1', roleId: 'role-2', withdrawnAt: null },
+      ],
+      jobRoles: [{ id: 'role-2', orgId: ORG, status: 'retired' }],
+    };
+    const heldRun = await computeRequiredAssessmentsChange(
+      makeDb(heldRetiredRole), ORG, ROLE, { requiredCompetencyIds: [] }, NOW,
+    );
+    expect(heldRun.effects.competenciesDemoting).toBe(0);
+  });
+
+  it('keeps the query count FLAT as the org grows — the batching pin (U4 org-scale discipline)', async () => {
+    // The same structural change (add cC, remove cB) against 2 members and
+    // against 6. Every read is batched set-wise, so the number of queries the
+    // compute issues must not depend on the membership count. Counted against
+    // the fake — wall clock proves nothing here.
+    const world = (memberCount: number): Store => {
+      const store: Store = {
+        competencyRequirements: [orgLink('cB')],
+        memberships: [],
+        membershipRoles: [],
+        membershipLocations: [],
+        assessmentTools: [tool('tB', ['cB']), tool('tC', ['cC'])],
+        formTemplates: [template('tpl-tB', 'v1'), template('tpl-tC', 'v1')],
+        assessmentCases: [],
+        competencyHolders: [],
+        competencies: [
+          { id: 'cB', orgId: ORG, validForMonths: null, gracePeriodDays: null },
+          { id: 'cC', orgId: ORG, validForMonths: null, gracePeriodDays: null },
+        ],
+      };
+      for (let i = 1; i <= memberCount; i++) {
+        store.memberships!.push({ id: `m${i}`, orgId: ORG, userId: `u${i}`, status: 'active' });
+        store.membershipLocations!.push({ membershipId: `m${i}`, locationId: `loc${i}`, position: 0 });
+        store.competencyHolders!.push(grant(`u${i}`, 'cB'));
+      }
+      return store;
+    };
+
+    const small = { reads: 0 };
+    await computeRequiredAssessmentsChange(
+      makeDb(world(2), small), ORG, { kind: 'org' }, { requiredCompetencyIds: ['cC'] }, NOW,
+    );
+    const large = { reads: 0 };
+    const result = await computeRequiredAssessmentsChange(
+      makeDb(world(6), large), ORG, { kind: 'org' }, { requiredCompetencyIds: ['cC'] }, NOW,
+    );
+
+    expect(result.effects.affected).toBe(6); // the large world really is larger
+    expect(result.effects.created).toBe(6);
+    expect(result.effects.competenciesDemoting).toBe(6); // and the removal path really ran
+    expect(large.reads).toBe(small.reads); // …at the same query count
   });
 });
 

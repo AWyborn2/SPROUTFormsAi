@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { validatePlacement, type PlacementContext } from './placement.js';
 
-// Operations allows several Roles; Maintenance allows one.
+// Operations allows several Roles; Maintenance allows one. Two active sites —
+// the offer set a location must be in since U5 (locations confer requirements).
 const ctx: PlacementContext = {
+  locations: [{ id: 'site-a' }, { id: 'site-b' }],
   departments: [
     { id: 'ops', allowsMultipleRoles: true },
     { id: 'maint', allowsMultipleRoles: false },
@@ -24,6 +26,31 @@ describe('validatePlacement — Location precondition (R21, U11)', () => {
 
   it('accepts a placement carrying a Location', () => {
     const r = validatePlacement({ locationIds: ['site-a'], departmentIds: ['ops'], roleIds: ['dozer'] }, ctx);
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe('validatePlacement — Location offer set (U5)', () => {
+  it('refuses a Location outside the offer set — retired reads the same as unknown', () => {
+    // Locations confer requirements now (R3), and a retired one confers
+    // nothing (the U4 split) — so a NEW placement onto one is refused rather
+    // than silently written; the escape hatch for a member already there is
+    // the caller's held-value widening, not this validator.
+    const r = validatePlacement(
+      { locationIds: ['site-a', 'site-retired'], departmentIds: ['ops'], roleIds: ['dozer'] },
+      ctx,
+    );
+    expect(r).toEqual({ ok: false, error: { code: 'unknown_location', subjectId: 'site-retired' } });
+  });
+
+  it('accepts a held retired Location the caller widened into the context', () => {
+    // The admitHeldRoles-mirroring widening: the caller unions what the member
+    // already holds into the offer set, so the same input passes.
+    const widened = { ...ctx, locations: [...ctx.locations, { id: 'site-retired' }] };
+    const r = validatePlacement(
+      { locationIds: ['site-a', 'site-retired'], departmentIds: ['ops'], roleIds: ['dozer'] },
+      widened,
+    );
     expect(r.ok).toBe(true);
   });
 });
