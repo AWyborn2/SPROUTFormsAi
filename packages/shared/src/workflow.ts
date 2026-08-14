@@ -22,9 +22,22 @@ import { fieldsInPart, partMarkFieldIds, signOffMarkFieldIds } from './assessmen
 import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 
-/** Roles that can be assigned work. Ordered — the builder renders them in turn. */
-export const WORKFLOW_ROLES = ['candidate', 'assessor', 'supervisor'] as const;
+/**
+ * Roles that can be assigned work. Ordered — the builder renders them in turn.
+ *
+ * `supervisor` and `sme` (subject-matter expert) are sign-off parties, not new
+ * logins: a logbook is countersigned by whoever supervised the shift, and a
+ * practical may be verified by an SME — often the same on-case staff member
+ * signing on their behalf, exactly as they do on paper. Which of them a part is
+ * signed by is set per-field in the workflow; whether their signature may be
+ * applied by on-case staff (labelled) or must be their own login is an ORG
+ * policy. Adding one is a value in this array, as the doctrine above promises.
+ */
+export const WORKFLOW_ROLES = ['candidate', 'assessor', 'supervisor', 'sme'] as const;
 export type WorkflowRole = (typeof WORKFLOW_ROLES)[number];
+
+/** The sign-off parties that are staff, not the candidate — the labelled set. */
+export const STAFF_WORKFLOW_ROLES = ['assessor', 'supervisor', 'sme'] as const;
 
 /**
  * What one role may do with a section or field.

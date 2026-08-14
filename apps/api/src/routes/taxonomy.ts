@@ -103,6 +103,7 @@ taxonomyRouter.get(
         allowMultipleLocations: org?.allowMultipleLocations ?? false,
         allowMultipleDepartments: org?.allowMultipleDepartments ?? false,
         allowSelfAssessment: org?.allowSelfAssessment ?? false,
+        allowLabelledSignoff: org?.allowLabelledSignoff ?? true,
         displayIdentifier: org?.displayIdentifier ?? 'employee_number',
         pooledCaseOverdueDays: org?.pooledCaseOverdueDays ?? 14,
         notificationLeadDays: org?.notificationLeadDays ?? 30,
@@ -1559,6 +1560,9 @@ const settingsBody = z.object({
   // Whether a qualified assessor may run and certify their own case. Policy
   // differs by organisation; the default is the stricter reading.
   allowSelfAssessment: z.boolean().optional(),
+  // Whether a supervisor's/SME's sign-off may be applied as a labelled
+  // signature by on-case staff, rather than requiring that person's own login.
+  allowLabelledSignoff: z.boolean().optional(),
   displayIdentifier: z.enum(['employee_number', 'swipe_card_number']).optional(),
   // At least a day, so a zero/negative threshold cannot mark every fresh pooled
   // case overdue (U13, R63).
@@ -1599,6 +1603,9 @@ taxonomyRouter.patch(
         ...(parsed.data.allowSelfAssessment !== undefined
           ? { allowSelfAssessment: parsed.data.allowSelfAssessment }
           : {}),
+        ...(parsed.data.allowLabelledSignoff !== undefined
+          ? { allowLabelledSignoff: parsed.data.allowLabelledSignoff }
+          : {}),
         ...(parsed.data.displayIdentifier ? { displayIdentifier: parsed.data.displayIdentifier } : {}),
         ...(parsed.data.pooledCaseOverdueDays !== undefined
           ? { pooledCaseOverdueDays: parsed.data.pooledCaseOverdueDays }
@@ -1623,6 +1630,7 @@ taxonomyRouter.patch(
       allowMultipleLocations: row?.allowMultipleLocations ?? false,
       allowMultipleDepartments: row?.allowMultipleDepartments ?? false,
       allowSelfAssessment: row?.allowSelfAssessment ?? false,
+      allowLabelledSignoff: row?.allowLabelledSignoff ?? true,
       displayIdentifier: row?.displayIdentifier ?? 'employee_number',
       pooledCaseOverdueDays: row?.pooledCaseOverdueDays ?? 14,
       notificationLeadDays: row?.notificationLeadDays ?? 30,

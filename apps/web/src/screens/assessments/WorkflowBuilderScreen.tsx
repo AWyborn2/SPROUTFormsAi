@@ -6,6 +6,7 @@ import {
   PROFILE_PREFILL_KEYS,
   PROFILE_PREFILL_LABELS,
   VALUE_SOURCES,
+  WORKFLOW_ROLES,
   effectiveAccess,
   fieldsInPart,
   orderedParts,
@@ -53,7 +54,32 @@ const ROLE_LABELS: Record<WorkflowRole, string> = {
   candidate: 'Candidate',
   assessor: 'Assessor',
   supervisor: 'Supervisor',
+  sme: 'SME',
 };
+
+/** Sign-off parties an author opts a workflow into; candidate + assessor are always present. */
+const OPTIONAL_ROLES: readonly WorkflowRole[] = ['supervisor', 'sme'];
+
+/**
+ * Add or drop an optional sign-off role. Adding restores canonical role order so
+ * columns read the same however they were toggled. Dropping also strips the
+ * role from every section's access — a role named in `access` but absent from
+ * `roles` is a hard `validateWorkflow` problem, so the two must move together.
+ */
+function toggleRole(w: AssessmentWorkflow, role: WorkflowRole, on: boolean): void {
+  if (on) {
+    const set = new Set([...w.roles, role]);
+    w.roles = WORKFLOW_ROLES.filter((r) => set.has(r));
+    return;
+  }
+  w.roles = w.roles.filter((r) => r !== role);
+  for (const s of w.sections) {
+    delete s.access[role];
+    if (s.fieldAccess) {
+      for (const fid of Object.keys(s.fieldAccess)) delete s.fieldAccess[fid]![role];
+    }
+  }
+}
 
 const ACCESS_LABELS: Record<AccessLevel, string> = {
   hidden: 'Hidden',
@@ -292,6 +318,39 @@ export function WorkflowBuilderScreen() {
             The order below is the order the work HAPPENS. It does not move anything on the printed
             document — that stays as the paper prints it.
           </p>
+          {/*
+            Which sign-off parties this workflow uses. Candidate and assessor are
+            always present; turning on Supervisor or SME adds an access column so
+            an author can say who signs a given part (its signature field set to
+            that role's Fill). Whether that signature may be applied by on-case
+            staff or must be the person's own login is the org's policy.
+          */}
+          <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-text-tertiary">Sign-off roles</span>
+            {OPTIONAL_ROLES.map((role) => {
+              const on = workflow.roles.includes(role);
+              return (
+                <button
+                  key={role}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={on}
+                  aria-label={`Use the ${ROLE_LABELS[role]} sign-off role`}
+                  onClick={() => edit((w) => toggleRole(w, role, !on))}
+                  className={`rounded-lg border px-2.5 py-1 text-[11px] ${
+                    on
+                      ? 'border-accent bg-surface-accent-soft font-semibold text-text-accent'
+                      : 'border-border text-text-secondary hover:bg-surface-hover'
+                  }`}
+                >
+                  {ROLE_LABELS[role]}
+                </button>
+              );
+            })}
+            <span className="text-[11px] text-text-tertiary">
+              — adds a column to set who signs a part
+            </span>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {/*

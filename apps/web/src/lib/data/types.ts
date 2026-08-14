@@ -704,6 +704,11 @@ export interface TaxonomySettings {
   allowMultipleDepartments: boolean;
   /** Whether a qualified assessor may run and certify their own case. */
   allowSelfAssessment: boolean;
+  /**
+   * Whether a supervisor's/SME's part sign-off may be applied as a labelled
+   * signature by on-case staff, rather than requiring that person's own login.
+   */
+  allowLabelledSignoff: boolean;
   displayIdentifier: DisplayIdentifier;
   /** Days before a pooled case reads as overdue (U13, R63). */
   pooledCaseOverdueDays: number;
