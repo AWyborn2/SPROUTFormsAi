@@ -433,6 +433,12 @@ const partSchema = z.object({
   startFieldId: z.string().min(1),
   minimumHours: z.number().positive().optional(),
   durationColumnKey: z.string().optional(),
+  taskMinimums: z
+    .object({
+      columnKey: z.string().min(1),
+      targets: z.array(z.object({ value: z.string().min(1), minimumHours: z.number().positive() })),
+    })
+    .optional(),
   checklistMark: declaredMarkSchema.optional(),
   assessorNameFieldId: z.string().optional(),
   signedDateFieldId: z.string().optional(),

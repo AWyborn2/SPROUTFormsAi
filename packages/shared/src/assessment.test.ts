@@ -286,6 +286,93 @@ describe('validateManifest', () => {
     expect(validateManifest(manifest, fields).some((p) => p.includes('minimumHours'))).toBe(true);
   });
 
+  describe('logbook per-task minimums', () => {
+    const LOG_COLUMNS: FormField['columns'] = [
+      { key: 'task', label: 'Task', type: 'dropdown', options: ['Topsoil', 'Gravel'] },
+      { key: 'duration', label: 'Duration', type: 'number' },
+    ];
+    const table = (columns = LOG_COLUMNS): FormField => ({
+      id: 'log-table',
+      type: 'repeating_group',
+      label: 'Log',
+      required: false,
+      source: 'imported',
+      columns,
+    });
+    /** A valid logbook part except for whatever the test puts in taskMinimums. */
+    function check(
+      taskMinimums: NonNullable<AssessmentPart['taskMinimums']>,
+      columns = LOG_COLUMNS,
+    ): string[] {
+      const manifest: AssessmentToolManifest = {
+        parts: [
+          part({
+            key: 'log',
+            ordinal: 1,
+            kind: 'logbook',
+            minimumHours: 50,
+            durationColumnKey: 'duration',
+            pathways: ['new'],
+            taskMinimums,
+          }),
+        ],
+      };
+      return validateManifest(manifest, [header('h1'), table(columns)]);
+    }
+
+    it('accepts targets that name real options with positive hours', () => {
+      expect(
+        check({
+          columnKey: 'task',
+          targets: [
+            { value: 'Topsoil', minimumHours: 10 },
+            { value: 'Gravel', minimumHours: 10 },
+          ],
+        }),
+      ).toEqual([]);
+    });
+
+    it('rejects a task column that is not in the table', () => {
+      const problems = check({ columnKey: 'ghost', targets: [{ value: 'Topsoil', minimumHours: 10 }] });
+      expect(problems.some((p) => p.includes('task column "ghost"') && p.includes('not a column'))).toBe(true);
+    });
+
+    it('rejects a task column with no options to choose from', () => {
+      const columns: FormField['columns'] = [
+        { key: 'task', label: 'Task', type: 'text' },
+        { key: 'duration', label: 'Duration', type: 'number' },
+      ];
+      const problems = check({ columnKey: 'task', targets: [{ value: 'Topsoil', minimumHours: 10 }] }, columns);
+      expect(problems.some((p) => p.includes('has no options'))).toBe(true);
+    });
+
+    it('rejects a target value the dropdown never offers', () => {
+      const problems = check({ columnKey: 'task', targets: [{ value: 'Stockpile', minimumHours: 10 }] });
+      expect(problems.some((p) => p.includes('task target "Stockpile"') && p.includes('not one of'))).toBe(true);
+    });
+
+    it('rejects a non-positive per-task minimum', () => {
+      const problems = check({ columnKey: 'task', targets: [{ value: 'Topsoil', minimumHours: 0 }] });
+      expect(problems.some((p) => p.includes('task "Topsoil"') && p.includes('positive minimumHours'))).toBe(true);
+    });
+
+    it('rejects the same task listed twice', () => {
+      const problems = check({
+        columnKey: 'task',
+        targets: [
+          { value: 'Topsoil', minimumHours: 10 },
+          { value: 'Topsoil', minimumHours: 5 },
+        ],
+      });
+      expect(problems.some((p) => p.includes('"Topsoil"') && p.includes('more than once'))).toBe(true);
+    });
+
+    it('rejects task minimums declared with no targets at all', () => {
+      const problems = check({ columnKey: 'task', targets: [] });
+      expect(problems.some((p) => p.includes('no targets'))).toBe(true);
+    });
+  });
+
   it('rejects a part belonging to no pathway', () => {
     const manifest: AssessmentToolManifest = {
       parts: [part({ key: 'orphan', ordinal: 1, pathways: [] })],
