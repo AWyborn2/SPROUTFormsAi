@@ -23,7 +23,7 @@
  * plus a path bug that made the list fetch `/builder-drafts` while the router
  * is mounted at `/assessment-tool-drafts`, so it was always empty.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { resolveBuilderStep, type BuilderStep } from '@formai/shared';
 import { useBuilderDraft, useSaveBuilderDraft } from '../../../lib/data/hooks.js';
 import {
@@ -86,11 +86,24 @@ export function useBuilderResume(draftId: string | undefined): BuilderResume {
   };
 }
 
+/**
+ * Where the draft stands relative to what is on the server.
+ *
+ * `idle` is "nothing worth saving yet" — before a document is uploaded. The
+ * other three are the loop an author needs to trust: an edit lands (`unsaved`),
+ * the debounce fires (`saving`), the write returns (`saved`). Making that loop
+ * VISIBLE is the whole point — a silent autosave and a silent failure look
+ * identical, which is exactly the doubt this resolves.
+ */
+export type SaveStatus = 'idle' | 'unsaved' | 'saving' | 'saved';
+
 export interface BuilderAutosave {
   /** The row this session writes to, once one exists. */
   savedDraftId?: string;
   /** When the last write landed. */
   savedAt?: Date;
+  /** Where the draft stands relative to the server — drives the save chip. */
+  status: SaveStatus;
 }
 
 /**
@@ -109,6 +122,14 @@ export function useBuilderAutosave(
 ): BuilderAutosave {
   const save = useSaveBuilderDraft();
   const [savedDraftId, setSavedDraftId] = useState<string | undefined>(draftId);
+  /*
+    The snapshot reference last written successfully. The snapshot is memoized
+    in the state hook — a new object ONLY when an edit lands — so a plain
+    reference check is exactly "has anything changed since we saved". This is
+    what tells `unsaved` from `saved` without a second copy of the state to
+    diff against.
+  */
+  const [savedSnapshot, setSavedSnapshot] = useState<BuilderSnapshot | null>(null);
 
   /*
     The step and the mutation are read at FIRE time rather than depended on.
@@ -119,43 +140,101 @@ export function useBuilderAutosave(
   const latest = useRef({ step, save });
   latest.current = { step, save };
 
+  /** One write path, shared by the debounce and the unmount flush. */
+  const write = useCallback(
+    (snap: BuilderSnapshot) => {
+      const { step: at, save: mutation } = latest.current;
+      return mutation.mutateAsync({
+        name: draftName(snap),
+        assetId: snap.assetId!,
+        step: at,
+        state: toDraftState(snap) as Record<string, unknown>,
+        formId: snap.formId ?? null,
+        versionId: snap.versionId ?? null,
+        // The COLUMN, not just state: the server enforces one revision
+        // draft per tool through it.
+        revisionOfToolId: snap.revisionOfToolId ?? null,
+      });
+    },
+    [],
+  );
+
+  /*
+    A RESUMED DRAFT OPENS ALREADY SAVED. Its first saveable snapshot IS the
+    server's state, so seeding it as the baseline shows "Saved" straight away
+    rather than a "Unsaved changes" flash on a draft the author has not
+    touched — and stops the mount from writing an identical row back.
+  */
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (seeded.current || !draftId) return;
+    if (ready && isSaveable(snapshot)) {
+      seeded.current = true;
+      setSavedSnapshot(snapshot);
+    }
+  }, [draftId, ready, snapshot]);
+
+  /*
+    The pending edit, held so an unmount can FLUSH it rather than drop it.
+    The debounce timer's own cleanup cancels the write, so closing or leaving
+    the builder inside the two-second window would otherwise lose the last
+    edit silently — the exact shape of "the autosave didn't register".
+  */
+  const pending = useRef<BuilderSnapshot | null>(null);
+
   useEffect(() => {
     if (!ready || !isSaveable(snapshot)) return;
+    // Nothing changed since the last successful write — do not re-post it.
+    if (snapshot === savedSnapshot) return;
+    pending.current = snapshot;
 
     const timer = setTimeout(() => {
-      const { step: at, save: mutation } = latest.current;
-      void mutation
-        .mutateAsync({
-          name: draftName(snapshot),
-          assetId: snapshot.assetId!,
-          step: at,
-          state: toDraftState(snapshot) as Record<string, unknown>,
-          formId: snapshot.formId ?? null,
-          versionId: snapshot.versionId ?? null,
-          // The COLUMN, not just state: the server enforces one revision
-          // draft per tool through it.
-          revisionOfToolId: snapshot.revisionOfToolId ?? null,
-        })
+      const snap = snapshot;
+      pending.current = null;
+      void write(snap)
         .then((row) => {
           // The id is what makes THIS tab resumable: the screen puts it in the
           // URL, so a refresh from here reopens the draft rather than a blank
           // builder.
           setSavedDraftId((prev) => prev ?? row.id);
+          setSavedSnapshot(snap);
         })
         .catch(() => {
           /*
             Swallowed deliberately. A failed autosave must not interrupt
             authoring with an error the author cannot act on, and the next edit
-            retries. The "Saved HH:MM" stamp not moving is the honest signal —
-            which is why the screen shows it.
+            retries. The status chip staying on "Unsaved changes" is the honest
+            signal — which is why the screen shows it.
           */
         });
     }, AUTOSAVE_DELAY_MS);
 
     return () => clearTimeout(timer);
-  }, [snapshot, ready]);
+  }, [snapshot, ready, savedSnapshot, write]);
+
+  /*
+    FLUSH ON UNMOUNT. Empty deps, so this cleanup runs only when the builder
+    itself goes away — not on every snapshot change the way the debounce
+    cleanup does. A pending edit is written best-effort; no state is touched
+    on the way out, so there is nothing to set on an unmounted component.
+  */
+  useEffect(() => {
+    return () => {
+      const snap = pending.current;
+      if (snap) void write(snap).catch(() => {});
+    };
+  }, [write]);
+
+  const status: SaveStatus = save.isPending
+    ? 'saving'
+    : ready && isSaveable(snapshot) && snapshot !== savedSnapshot
+      ? 'unsaved'
+      : savedSnapshot
+        ? 'saved'
+        : 'idle';
 
   return {
+    status,
     ...(savedDraftId ? { savedDraftId } : {}),
     ...(save.data ? { savedAt: new Date(save.data.updatedAt) } : {}),
   };
