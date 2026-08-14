@@ -3055,6 +3055,8 @@ assessmentCasesRouter.get(
       // Resolved, never raw: a manifest naming nothing means the default,
       // and `?? null` here spelled that as "stacked" on the fill surface.
       theoryRendering: theoryRenderingOf(manifest),
+      theoryAllowRetry: manifest.theoryAllowRetry ?? false,
+      theoryPassPercent: manifest.theoryPassPercent ?? null,
       attemptNumber: attempt.attemptNumber,
       outcome: attempt.outcome,
       submittedAt: attempt.submittedAt,
@@ -3251,6 +3253,7 @@ async function setSubmitted(
     untouched: hand-in still just parks it for marking.
   */
   let marked: Awaited<ReturnType<typeof resolveAttemptOutcome>> | null = null;
+  let theoryScore: { correctCount: number; totalCount: number } | null = null;
   if (submitting && tool && part) {
     /*
       A DECLARATION COMPLETES AT HAND-IN. Signing it IS the act — there is no
@@ -3276,7 +3279,13 @@ async function setSubmitted(
       // Unstripped on purpose — marking must see answerKey/outcomeTarget.
       const fields = await fieldsForVersion(db, attempt.templateVersionId);
       if (isSelfMarking(fields, tool.manifest, part.key)) {
-        const computed = markTheory({ fields, values: attempt.values, part });
+        const computed = markTheory({
+          fields,
+          values: attempt.values,
+          part,
+          passPercent: tool.manifest.theoryPassPercent,
+        });
+        theoryScore = { correctCount: computed.correctCount, totalCount: computed.totalCount };
         marked = await resolveAttemptOutcome(db, tenant, {
           row,
           attempt,
@@ -3297,6 +3306,7 @@ async function setSubmitted(
     id: attempt.id,
     submittedAt,
     ...(marked ? { outcome: marked.outcome, caseState: marked.nextState } : {}),
+    ...(theoryScore ?? {}),
   });
 }
 
@@ -3311,6 +3321,103 @@ assessmentCasesRouter.post(
   ...GATE,
   withErrorHandling((req, res) => setSubmitted(req, res, false)),
 );
+
+/*
+  CHECK A SINGLE QUESTION — interactive theory feedback.
+
+  Returns whether one answer is correct, plus the author's hint when the
+  answer is wrong. Does NOT save the answer — that is still the save route's
+  job. The answer key never reaches the client; correctness is computed here
+  and only the boolean is returned.
+*/
+const checkQuestionBody = z.object({
+  fieldId: z.string(),
+  value: z.unknown(),
+});
+
+assessmentCasesRouter.post(
+  '/:id/attempts/:attemptId/check-question',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'edit');
+    if (scope === 'none') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const attempt = await db.query.assessmentPartAttempts.findFirst({
+      where: and(
+        eq(schema.assessmentPartAttempts.id, req.params.attemptId!),
+        eq(schema.assessmentPartAttempts.caseId, row.id),
+      ),
+    });
+    if (!attempt) {
+      res.status(404).json({ error: 'attempt_not_found' });
+      return;
+    }
+    if (attempt.outcome !== null) {
+      res.status(409).json({ error: 'attempt_resolved' });
+      return;
+    }
+
+    const parsed = checkQuestionBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_body' });
+      return;
+    }
+    const { fieldId, value } = parsed.data;
+
+    // Load the UNSTRIPPED fields so answerKey is visible.
+    const fields = await fieldsForVersion(db, attempt.templateVersionId);
+    const field = fields.find((f) => f.id === fieldId);
+    if (!field || !field.answerKey || field.answerKey.length === 0) {
+      res.status(400).json({ error: 'not_a_keyed_question' });
+      return;
+    }
+
+    // Same exact-set-match as markTheory — duplicated to stay a thin check.
+    const selected = normalizeSelected(value);
+    const correct =
+      selected !== undefined && setEquals(selected, field.answerKey);
+
+    res.status(200).json({
+      correct,
+      ...(correct ? {} : { hint: field.answerHint ?? null }),
+    });
+  }),
+);
+
+function normalizeSelected(value: unknown): string[] | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (Array.isArray(value)) {
+    const opts = (value as unknown[])
+      .filter((v) => typeof v !== 'object' || v === null)
+      .map(String)
+      .filter((s) => s !== '');
+    return opts.length > 0 ? opts : undefined;
+  }
+  if (typeof value === 'boolean') return [value ? 'true' : 'false'];
+  if (typeof value === 'number') return [String(value)];
+  if (typeof value === 'string') return [value];
+  return undefined;
+}
+
+function setEquals(a: readonly string[], b: readonly string[]): boolean {
+  const left = new Set(a);
+  const right = new Set(b);
+  if (left.size !== right.size) return false;
+  for (const item of left) if (!right.has(item)) return false;
+  return true;
+}
 
 const saveValuesBody = z.object({ values: z.record(z.string(), z.unknown()) });
 
