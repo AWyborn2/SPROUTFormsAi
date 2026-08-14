@@ -720,38 +720,56 @@ export interface TaxonomySettings {
   candidateSelfStartRecommended: boolean;
 }
 
-/* ── Role requirements in competency terms (U6 — R5, R6, R8, KTD9) ────────── */
+/* ── Scope requirements in competency terms (U6 — R1, R5, R6, R9, KTD6) ───── */
+
+/** The four requirement scopes (R1). No others exist. */
+export type RequirementScope = 'org' | 'location' | 'department' | 'role';
 
 /**
- * A Role's stored requirement state, as the editor reads and writes it.
- *
- * The PATH still says `required-assessments` (renaming it would strand a
- * deployed client), but the payload speaks competencies: two tiers plus the
- * legacy tool rows still deriving the old way.
+ * Addresses ONE scope's requirement list (KTD6): the org scope carries no id
+ * (`/taxonomy/requirements/org`), every other scope is `scope + scopeId`
+ * (`/taxonomy/requirements/:scope/:scopeId`).
  */
-export interface RoleRequirements {
+export interface RequirementScopeRef {
+  scope: RequirementScope;
+  /** Present for location/department/role; absent at org scope (KTD6). */
+  scopeId?: string;
+}
+
+/**
+ * A scope's stored requirement state, as the editor reads and writes it.
+ * One shape at all four scopes (KTD6), with the two role-only fields optional:
+ * only roles carry the R50 configured flag and the legacy tool derivation.
+ */
+export interface ScopeRequirementsState {
   /**
-   * The STORED fact (R50), never a row count: a Role emptied of requirements
-   * is configured; one nobody set up is not. Flips only when the REQUIRED
-   * tier is authored — a recommended-only save leaves it false (KTD9).
+   * ROLE SCOPE ONLY — the STORED fact (R50), never a row count: a Role
+   * emptied of requirements is configured; one nobody set up is not. Flips
+   * only when the REQUIRED tier is authored — a recommended-only save leaves
+   * it false. Absent at the other scopes, whose row count is unambiguous
+   * (KTD9 of the inheritance round).
    */
-  configured: boolean;
-  /** Competency ids the Role REQUIRES — compliance-bearing (R5). */
+  configured?: boolean;
+  /** Competency ids the scope REQUIRES — compliance-bearing (R5 prior round; R1/R2 now). */
   required: string[];
-  /** Competency ids the Role RECOMMENDS — visible, never enforced (R6, R13). */
+  /** Competency ids the scope RECOMMENDS — visible, never enforced (R8). */
   recommended: string[];
   /**
-   * Legacy tool ids still deriving requirements the old way (R15) — tools
-   * whose award has not been linked yet. Each exits via the backfill
-   * conversion or the explicit fingerprint-guarded remove (KTD9).
+   * ROLE SCOPE ONLY — legacy tool ids still deriving requirements the old way.
+   * Each exits via the backfill conversion or the explicit fingerprint-guarded
+   * remove. No other scope ever had legacy rows (KTD2/KTD6).
    */
-  awaitingLink: string[];
-  /** The KTD9 stale-edit guard: every write echoes it, a stale echo 409s. */
+  awaitingLink?: string[];
+  /**
+   * The stale-edit guard: every write echoes it, a stale echo 409s. SCOPE-LOCAL
+   * (KTD7) — it hashes only this scope's own rows, so an org save never
+   * invalidates an open role editor.
+   */
   fingerprint: string;
 }
 
-/** The preview/PUT body's tier halves, as the editor sends them. */
-export interface RoleRequirementTiers {
+/** The preview/PUT body's tier halves, as any scope editor sends them. */
+export interface RequirementTiers {
   required: string[];
   recommended: string[];
 }

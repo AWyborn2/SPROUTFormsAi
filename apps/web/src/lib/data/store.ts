@@ -87,8 +87,9 @@ import type {
   TaxonomySettings,
   TemplateStatus,
   RecommendedCompetencies,
-  RoleRequirements,
-  RoleRequirementTiers,
+  RequirementScopeRef,
+  RequirementTiers,
+  ScopeRequirementsState,
 } from './types.js';
 import type {
   AssessmentToolManifest,
@@ -432,6 +433,17 @@ function toCompetencyRule(dto: CompetencyRuleDto): CompetencyRule {
     competency: dto.competency,
     enabled: dto.enabled,
   };
+}
+
+/**
+ * The scope address for requirement reads and writes (KTD6): the org scope has
+ * no id, every other scope rides `scope/scopeId`. Spelled once so the GET,
+ * preview POST and PUT can never drift onto different addresses.
+ */
+function requirementsPath(ref: RequirementScopeRef): string {
+  return ref.scope === 'org'
+    ? '/taxonomy/requirements/org'
+    : `/taxonomy/requirements/${ref.scope}/${ref.scopeId}`;
 }
 
 export const store = {
@@ -1158,43 +1170,50 @@ export const store = {
     });
   },
   /*
-    A Role's requirements now travel in COMPETENCY terms (U6, U3): two tiers
-    plus the legacy `awaitingLink` rows and the KTD9 fingerprint. The PATH is
-    unchanged — renaming it would 404 a deployed client mid-rollout.
+    A SCOPE's requirements travel in COMPETENCY terms at four scopes since the
+    inheritance round (R1, KTD6): org | location | department | role, each
+    addressed at `/taxonomy/requirements/...` (org carries no id). The old
+    `/taxonomy/roles/:id/required-assessments` paths still answer as delegates
+    for deployed clients, but this client speaks the scope addresses (U6).
   */
-  getRoleRequiredAssessments(roleId: string): Promise<RoleRequirements> {
-    return apiClient.get(`/taxonomy/roles/${roleId}/required-assessments`);
+  getScopeRequirements(ref: RequirementScopeRef): Promise<ScopeRequirementsState> {
+    return apiClient.get(requirementsPath(ref));
   },
   /**
-   * The blast radius of a proposed change, computed without committing (U12,
-   * KTD10). No fingerprint — a preview cannot go stale. `removeLegacyToolIds`
-   * routes the awaitingLink exit through the SAME door (KTD9), so a legacy-row
-   * removal is previewed by the identical computation its apply runs.
+   * The blast radius of a proposed change, computed without committing (R6,
+   * KTD5). No fingerprint — a preview cannot go stale. `removeLegacyToolIds`
+   * routes the awaitingLink exit through the SAME door and is legal at ROLE
+   * scope only (the API 400s it elsewhere — KTD6).
    */
-  previewRoleRequiredAssessments(
-    roleId: string,
-    body: RoleRequirementTiers & { removeLegacyToolIds?: string[] },
+  previewScopeRequirements(
+    ref: RequirementScopeRef,
+    body: RequirementTiers & { removeLegacyToolIds?: string[] },
   ): Promise<{ effects: RequiredAssessmentsChangeEffects }> {
-    return apiClient.post(`/taxonomy/roles/${roleId}/required-assessments/preview`, body);
+    return apiClient.post(`${requirementsPath(ref)}/preview`, body);
   },
-  /** Replace both tiers. Echoes the GET's fingerprint; a stale one 409s `requirements_changed` (KTD9). */
-  setRoleRequiredAssessments(
-    roleId: string,
-    body: RoleRequirementTiers & { fingerprint: string },
-  ): Promise<RoleRequirements & { effects: RequiredAssessmentsChangeEffects }> {
-    return apiClient.put(`/taxonomy/roles/${roleId}/required-assessments`, body);
+  /**
+   * Replace both tiers at one scope. Echoes the GET's fingerprint; a stale one
+   * 409s `requirements_changed`. The fingerprint is SCOPE-LOCAL (KTD7), so
+   * saves at different scopes never 409 each other.
+   */
+  setScopeRequirements(
+    ref: RequirementScopeRef,
+    body: RequirementTiers & { fingerprint: string },
+  ): Promise<ScopeRequirementsState & { effects: RequiredAssessmentsChangeEffects }> {
+    return apiClient.put(requirementsPath(ref), body);
   },
   /**
    * Remove ONE awaitingLink legacy row — the exit for a tool that will never
-   * be linked (KTD9). Fingerprint-guarded like the PUT; previewed beforehand
-   * through `previewRoleRequiredAssessments` with `removeLegacyToolIds`.
+   * be linked. ROLE SCOPE ONLY (KTD6): no other scope ever had legacy rows.
+   * Fingerprint-guarded like the PUT; previewed beforehand through
+   * `previewScopeRequirements` with `removeLegacyToolIds`.
    */
   removeLegacyRequirement(
     roleId: string,
     toolId: string,
     fingerprint: string,
   ): Promise<{ awaitingLink: string[]; effects: RequiredAssessmentsChangeEffects; fingerprint: string }> {
-    return apiClient.delete(`/taxonomy/roles/${roleId}/required-assessments/${toolId}`, {
+    return apiClient.delete(`/taxonomy/requirements/role/${roleId}/${toolId}`, {
       fingerprint,
     });
   },

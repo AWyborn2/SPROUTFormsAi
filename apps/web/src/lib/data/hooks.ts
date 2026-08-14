@@ -45,7 +45,8 @@ import type {
   SubmissionDetail,
   SubmissionRow,
   TaxonomySettings,
-  RoleRequirementTiers,
+  RequirementScopeRef,
+  RequirementTiers,
 } from './types.js';
 import type { TaxonomyStatus } from '@formai/shared';
 
@@ -120,8 +121,15 @@ export const keys = {
    * tool list every role can read.
    */
   unlinkedTools: ['unlinkedTools'] as const,
-  /** A Role's required-assessment list (U10). Keyed by role so each editor caches apart. */
-  roleRequiredAssessments: (roleId: string) => ['roleRequiredAssessments', roleId] as const,
+  /**
+   * ONE scope's requirement list (U6 of the inheritance round — R1, KTD6).
+   * Keyed by (scope, scopeId) so each of the four editors caches apart AND so
+   * an editor's read-only inherited context (a role editor reading the org
+   * and its department, U6/R9) shares the cache entry of the scope it mirrors:
+   * a save at any scope invalidates exactly the editors displaying it.
+   */
+  scopeRequirements: (ref: RequirementScopeRef) =>
+    ['scopeRequirements', ref.scope, ref.scopeId ?? ''] as const,
   /** The people a Department tightening still has to resolve (U17). Keyed by department. */
   tighteningReview: (departmentId: string) => ['tighteningReview', departmentId] as const,
   /** The people still holding any retired value (U18). */
@@ -1118,9 +1126,10 @@ export function useApplyAwardLink() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: keys.unlinkedTools });
       qc.invalidateQueries({ queryKey: keys.assessmentTools });
-      // Prefix match reaches every per-role editor cache — the conversion
-      // moved that role's requirement from the legacy rows to a direct link.
-      qc.invalidateQueries({ queryKey: ['roleRequiredAssessments'] });
+      // Prefix match reaches every scope editor cache — the conversion moved
+      // a role's requirement from the legacy rows to a direct link, and the
+      // role editors' inherited displays read the same keys (KTD6/U6).
+      qc.invalidateQueries({ queryKey: ['scopeRequirements'] });
       qc.invalidateQueries({ queryKey: keys.assessmentCases });
       qc.invalidateQueries({ queryKey: keys.assessorQueue });
       qc.invalidateQueries({ queryKey: keys.workingList });
@@ -1615,40 +1624,53 @@ export function useUpdateTaxonomySettings() {
 }
 
 /**
- * A Role's requirements in COMPETENCY terms (U6, U3): two tiers, the legacy
- * `awaitingLink` rows, and the KTD9 fingerprint every write must echo.
- * `configured` distinguishes never-set from emptied (R50).
+ * ONE scope's requirements in COMPETENCY terms (R1, KTD6): two tiers, the
+ * fingerprint every write must echo, and — at role scope only — `configured`
+ * (never-set vs emptied, R50) and the legacy `awaitingLink` rows. Serves both
+ * the scope being EDITED and the read-only inherited context another editor
+ * displays (U6/R9): `enabled` lets the editor keep its lazy-on-expand posture
+ * while the key stays stable, so a collapsed row keeps showing the summary it
+ * already fetched (KTD9's pragmatic collapsed-summary choice).
  */
-export function useRoleRequiredAssessments(roleId: string | undefined) {
+export function useScopeRequirements(
+  ref: RequirementScopeRef | undefined,
+  options?: { enabled?: boolean },
+) {
   return useQuery({
-    queryKey: keys.roleRequiredAssessments(roleId ?? ''),
-    queryFn: () => store.getRoleRequiredAssessments(roleId!),
-    enabled: Boolean(roleId),
+    queryKey: ref ? keys.scopeRequirements(ref) : (['scopeRequirements', 'none', ''] as const),
+    queryFn: () => store.getScopeRequirements(ref!),
+    enabled:
+      (options?.enabled ?? true) && Boolean(ref && (ref.scope === 'org' || ref.scopeId)),
   });
 }
 
 /**
- * Project a proposed change's blast radius without committing it (U12, KTD10).
- * Takes both tiers plus optional legacy removals — the awaitingLink exit
- * previews through this same door (KTD9).
+ * Project a proposed change's blast radius without committing it (R6, KTD5) —
+ * at any scope; an org preview counts every active membership (AE3). Takes
+ * both tiers plus optional legacy removals (role scope only — the
+ * awaitingLink exit previews through this same door).
  */
-export function usePreviewRoleRequiredAssessments(roleId: string) {
+export function usePreviewScopeRequirements(ref: RequirementScopeRef) {
   return useMutation({
-    mutationFn: (body: RoleRequirementTiers & { removeLegacyToolIds?: string[] }) =>
-      store.previewRoleRequiredAssessments(roleId, body),
+    mutationFn: (body: RequirementTiers & { removeLegacyToolIds?: string[] }) =>
+      store.previewScopeRequirements(ref, body),
   });
 }
 
 /** The invalidation sweep both requirement writes share — what a save or legacy removal goes stale. */
-function useRequirementWriteInvalidation(roleId: string) {
+function useRequirementWriteInvalidation(ref: RequirementScopeRef) {
   const qc = useQueryClient();
   return () => {
-    void qc.invalidateQueries({ queryKey: keys.roleRequiredAssessments(roleId) });
+    // The written scope's own key — which is ALSO every other editor's
+    // inherited display of this scope (same cache entry, KTD6/U6), so a
+    // department save refreshes the role editors showing it as context.
+    void qc.invalidateQueries({ queryKey: keys.scopeRequirements(ref) });
     // The taxonomy read carries each Role's configured flag; a new case can
     // reach the case list AND the progress dashboard (a deliberate sibling key,
     // so it must be swept explicitly); the audit feed logs the change. The
-    // recommended surfaces derive from the same links (U7), and standing feeds
-    // the compliance numbers (U8), so both refetch too.
+    // recommended surfaces derive from the same links, and standing feeds
+    // the compliance numbers, so both refetch too (as shipped — the sweep
+    // survives the scope generalisation unchanged, R11).
     void qc.invalidateQueries({ queryKey: keys.taxonomy });
     void qc.invalidateQueries({ queryKey: keys.assessmentCases });
     void qc.invalidateQueries({ queryKey: keys.assessorQueue });
@@ -1659,23 +1681,26 @@ function useRequirementWriteInvalidation(roleId: string) {
   };
 }
 
-/** Replace both tiers, echoing the fingerprint (KTD9 — a stale echo 409s `requirements_changed`). */
-export function useSetRoleRequiredAssessments(roleId: string) {
-  const invalidate = useRequirementWriteInvalidation(roleId);
+/**
+ * Replace both tiers at one scope, echoing the fingerprint (a stale echo 409s
+ * `requirements_changed`; fingerprints are scope-local, KTD7).
+ */
+export function useSetScopeRequirements(ref: RequirementScopeRef) {
+  const invalidate = useRequirementWriteInvalidation(ref);
   return useMutation({
-    mutationFn: (body: RoleRequirementTiers & { fingerprint: string }) =>
-      store.setRoleRequiredAssessments(roleId, body),
+    mutationFn: (body: RequirementTiers & { fingerprint: string }) =>
+      store.setScopeRequirements(ref, body),
     onSuccess: invalidate,
   });
 }
 
 /**
- * Remove ONE awaitingLink legacy row (U6, KTD9) — the exit for a tool that
- * will never be linked. Fingerprint-guarded like the PUT, and confirmed
- * through the same preview before the editor calls this.
+ * Remove ONE awaitingLink legacy row — the exit for a tool that will never be
+ * linked. ROLE SCOPE ONLY (KTD6). Fingerprint-guarded like the PUT, and
+ * confirmed through the same preview before the editor calls this.
  */
 export function useRemoveLegacyRequirement(roleId: string) {
-  const invalidate = useRequirementWriteInvalidation(roleId);
+  const invalidate = useRequirementWriteInvalidation({ scope: 'role', scopeId: roleId });
   return useMutation({
     mutationFn: (input: { toolId: string; fingerprint: string }) =>
       store.removeLegacyRequirement(roleId, input.toolId, input.fingerprint),
