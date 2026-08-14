@@ -15,6 +15,7 @@ import {
   moveColumn,
   removeColumn,
   renameColumn,
+  setColumnAutoStamp,
   setColumnCalc,
   setColumnRequired,
   setColumnOptions,
@@ -41,6 +42,7 @@ export const importSessionColumnActions: ColumnActions = {
   removeColumn,
   moveColumn,
   setColumnCalc,
+  setColumnAutoStamp,
 };
 
 /** Pre-publish: the condition is written into the reviewed field list. */
@@ -190,6 +192,20 @@ export function builderColumnActions(
           if (c.key !== columnKey) return c;
           const { calc: _dropped, ...rest } = c;
           return calc ? { ...rest, calc } : rest;
+        }),
+      });
+    },
+    setColumnAutoStamp: (_id, columnKey, autoStamp) => {
+      const columns = cols();
+      if (!columns.some((c) => c.key === columnKey)) return;
+      // Off removes the key rather than storing `false`, so an unused table
+      // carries no flag — matching how `setColumnCalc` clears.
+      update({
+        columns: columns.map((c) => {
+          if (c.key !== columnKey) return c;
+          if (autoStamp) return { ...c, autoStamp: true };
+          const { autoStamp: _dropped, ...rest } = c;
+          return rest;
         }),
       });
     },

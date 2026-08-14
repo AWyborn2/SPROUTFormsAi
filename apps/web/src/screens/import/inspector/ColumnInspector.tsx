@@ -71,6 +71,11 @@ export interface ColumnActions {
   moveColumn(fieldId: string, columnKey: string, dir: -1 | 1): void;
   /** Set (or clear, with null) a column's auto-calculation. */
   setColumnCalc(fieldId: string, columnKey: string, calc: ColumnCalc | null): void;
+  /**
+   * Turn a date/time column's auto-stamp on or off — seed each new row's cell
+   * with today's date / the current time instead of leaving it blank.
+   */
+  setColumnAutoStamp(fieldId: string, columnKey: string, autoStamp: boolean): void;
 }
 
 /** Types a table cell can sensibly take (a column is never a section header). */
@@ -294,6 +299,27 @@ export function ColumnInspector({ field, actions }: ColumnInspectorProps) {
                   aria-label={`Column required: ${row.column.label}`}
                 />
               </div>
+            )}
+
+            {!row.isLabel && (row.column.type === 'date' || row.column.type === 'time') && (
+              <label className="mt-1.5 flex items-center gap-2 rounded-sm border border-border-subtle bg-surface-card p-[8px_9px]">
+                <Switch
+                  checked={row.column.autoStamp ?? false}
+                  onChange={(e) => actions.setColumnAutoStamp(field.id, row.column.key, e.target.checked)}
+                  aria-label={`Auto-fill ${row.column.label} on each new row`}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[11.5px] font-medium text-text-primary">
+                    {row.column.type === 'date'
+                      ? "Auto-fill with today's date"
+                      : 'Auto-fill with the current time'}
+                  </span>
+                  <span className="block text-[10.5px] text-text-tertiary">
+                    Each new row starts stamped — still editable, so a shift logged later can be
+                    corrected.
+                  </span>
+                </span>
+              </label>
             )}
 
             {!row.isLabel && CHOICE_COLUMN_TYPES.has(row.column.type) && (

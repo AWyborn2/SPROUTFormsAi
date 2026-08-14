@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { SubmissionValue } from '@formai/shared';
-import { Button, Icon, useToast } from '@formai/ui';
+import { Button, Icon, todayISODate, useToast } from '@formai/ui';
 import { ApiError } from '../../lib/data/api-client.js';
+import { dateFieldToStamp } from './signature-date-stamp.js';
 import {
   useAssessmentAttempt,
   useOpenAttempt,
@@ -163,9 +164,21 @@ export function CasePartFillScreen() {
     read-only until somebody configures it.
   */
   const writable = new Set(attempt.writableFieldIds ?? []);
+  // Captured so the closure below keeps the non-null narrowing from the early
+  // return above — TS widens `attempt` back to possibly-undefined inside a
+  // nested function.
+  const partFields = attempt.fields;
 
   function setValue(fieldId: string, v: SubmissionValue) {
-    setValues((prev) => ({ ...prev, [fieldId]: v }));
+    setValues((prev) => {
+      const next = { ...prev, [fieldId]: v };
+      // Drawing a sign-off signature stamps the date it was signed on — but only
+      // a date this party may fill, so a companion the workflow made read-only is
+      // left to whoever owns it.
+      const dateId = dateFieldToStamp(partFields, prev, fieldId, v);
+      if (dateId && writable.has(dateId)) next[dateId] = todayISODate();
+      return next;
+    });
     setDirty(true);
   }
 

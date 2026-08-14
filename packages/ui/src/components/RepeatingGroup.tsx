@@ -22,6 +22,12 @@ export interface RepeatingGroupColumn {
    * direct edits, exactly as answer-set semantics are resolved by the caller.
    */
   computed?: boolean;
+  /**
+   * `date` / `time` cells only — seed with today's date / the current time when
+   * a new row is added, and offer a one-tap re-stamp button. Editable, not
+   * locked. Structurally compatible with @formai/shared's `RepeatingColumn`.
+   */
+  autoStamp?: boolean;
 }
 
 /**
@@ -94,13 +100,28 @@ function emptyRow(
   for (const c of columns) {
     // A member of an answer set starts null, never false: false is "not this
     // option", and a whole row of falses is indistinguishable from an answer.
-    row[c.key] = groupedKeys.has(c.key)
-      ? null
-      : // A check/cross cell seeds `null` in EVERY mode, unlike yes/no. Its
-        // `false` means "assessed and failed" — seeding it would record a
-        // fail on every untouched row of an audit table, which is the one
-        // value this type must never invent.
-        c.type === 'check_cross'
+    if (groupedKeys.has(c.key)) {
+      row[c.key] = null;
+      continue;
+    }
+    // Auto-stamp date/time columns the moment the row exists: the entry is
+    // being added to log something happening now, so the value the filler would
+    // type is the one the app already holds. Left editable for honest
+    // back-dating of a prior shift.
+    if (c.autoStamp && c.type === 'date') {
+      row[c.key] = todayISODate();
+      continue;
+    }
+    if (c.autoStamp && c.type === 'time') {
+      row[c.key] = currentTimeHHMM();
+      continue;
+    }
+    // A check/cross cell seeds `null` in EVERY mode, unlike yes/no. Its
+    // `false` means "assessed and failed" — seeding it would record a fail on
+    // every untouched row of an audit table, which is the one value this type
+    // must never invent.
+    row[c.key] =
+      c.type === 'check_cross'
         ? null
         : c.type === 'boolean_yes_no'
           ? fixedMode
@@ -528,6 +549,16 @@ export function currentTimeHHMM(): string {
 }
 
 /**
+ * Today's date as `YYYY-MM-DD` in LOCAL time — the native date input's value
+ * format. Local, not `toISOString()`: an evening entry in a positive-UTC-offset
+ * zone would otherwise stamp tomorrow, dating a shift a day out.
+ */
+export function todayISODate(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+}
+
+/**
  * Two-state column types and the labels their buttons carry.
  *
  * `check_cross` exists so an audit's pass/fail reads as pass/fail rather than
@@ -666,6 +697,35 @@ function RepeatingCell({
         >
           <Icon name="clock" size={13} />
           Now
+        </button>
+      </span>
+    );
+  }
+
+  if (column.type === 'date') {
+    // The date twin of the time cell: the value auto-seeds to today when the
+    // row is added (see `emptyRow`), and this button re-stamps it in one tap
+    // after any manual change. Present on every date cell, exactly as "Now" is
+    // on every time cell.
+    return (
+      <span className="flex items-center gap-1">
+        <input
+          type="date"
+          value={String(value ?? '')}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={column.label}
+          aria-invalid={invalid || undefined}
+          className={cn(cellClass, 'min-w-[130px]')}
+        />
+        <button
+          type="button"
+          onClick={() => onChange(todayISODate())}
+          aria-label={`Stamp today's date: ${column.label}`}
+          title="Stamp today's date"
+          className="flex h-9 flex-none items-center gap-1 rounded-md border border-border-strong bg-surface-card px-2 text-[12px] font-semibold text-text-secondary hover:bg-surface-hover focus-visible:shadow-focus"
+        >
+          <Icon name="calendar" size={13} />
+          Today
         </button>
       </span>
     );
