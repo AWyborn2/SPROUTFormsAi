@@ -439,6 +439,13 @@ const partSchema = z.object({
       targets: z.array(z.object({ value: z.string().min(1), minimumHours: z.number().positive() })),
     })
     .optional(),
+  logbookRouting: z
+    .object({
+      sourceFieldId: z.string().min(1),
+      columnKey: z.string().min(1),
+      routes: z.array(z.object({ value: z.string().min(1), fieldId: z.string().min(1) })),
+    })
+    .optional(),
   checklistMark: declaredMarkSchema.optional(),
   assessorNameFieldId: z.string().optional(),
   signedDateFieldId: z.string().optional(),

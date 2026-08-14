@@ -13,7 +13,13 @@
  * threshold's old fallback would have counted.
  */
 import { describe, expect, it } from 'vitest';
-import { hoursByTask, logbookRows, logbookTaskProgress, totalLoggedHours } from './assessment.js';
+import {
+  hoursByTask,
+  logbookRows,
+  logbookTaskProgress,
+  rowsByTask,
+  totalLoggedHours,
+} from './assessment.js';
 import type { FormField } from './form-field.js';
 
 const header = (id: string): FormField => ({
@@ -155,6 +161,34 @@ describe('hoursByTask', () => {
     ];
     // 0.1 + 0.2 would be 0.30000000000000004 unrounded.
     expect(hoursByTask(rows, 'task', 'duration').get('Topsoil')).toBe(0.3);
+  });
+});
+
+describe('rowsByTask', () => {
+  const ROWS = [
+    { __key: 'r1', task: 'Topsoil', duration: 4 },
+    { __key: 'r2', task: 'Gravel', duration: 6 },
+    { __key: 'r3', task: 'Topsoil', duration: 2 },
+  ];
+
+  it('groups rows by task, each group in first-seen order', () => {
+    const groups = rowsByTask(ROWS, 'task');
+    expect(groups.get('Topsoil')).toEqual([
+      { __key: 'r1', task: 'Topsoil', duration: 4 },
+      { __key: 'r3', task: 'Topsoil', duration: 2 },
+    ]);
+    expect(groups.get('Gravel')).toEqual([{ __key: 'r2', task: 'Gravel', duration: 6 }]);
+  });
+
+  it('leaves a blank-task row out of every group — it belongs to no task table', () => {
+    const groups = rowsByTask([...ROWS, { __key: 'r4', task: '   ', duration: 9 }], 'task');
+    expect([...groups.keys()].sort()).toEqual(['Gravel', 'Topsoil']);
+    expect([...groups.values()].flat()).toHaveLength(3);
+  });
+
+  it('keeps the caller’s row objects by reference — the exporter forwards them as-is', () => {
+    const groups = rowsByTask(ROWS, 'task');
+    expect(groups.get('Gravel')![0]).toBe(ROWS[1]);
   });
 });
 

@@ -688,3 +688,74 @@ export function logbookColumnsFor(
   const table = fieldsInSection(fields, part.startFieldId).find((f) => f.type === 'repeating_group');
   return (table?.columns ?? []).map((c) => ({ key: c.key, label: c.label ?? c.key }));
 }
+
+/**
+ * The choice columns of a logbook part's table — the ones a task-type minimum
+ * can key off, because the target values must be an option a filler can pick.
+ *
+ * A per-task minimum on a free-text column could never be met reliably (a typo
+ * makes the hours land nowhere), which is why the picker is scoped to columns
+ * that actually offer options — the same rule `validateManifest` enforces.
+ */
+export function logbookChoiceColumnsFor(
+  part: Pick<AssessmentPart, 'startFieldId'>,
+  fields: readonly FormField[],
+): { key: string; label: string; options: string[] }[] {
+  const table = fieldsInSection(fields, part.startFieldId).find((f) => f.type === 'repeating_group');
+  return (table?.columns ?? [])
+    .filter((c) => (c.options?.length ?? 0) > 0)
+    .map((c) => ({ key: c.key, label: c.label ?? c.key, options: [...c.options!] }));
+}
+
+/**
+ * Minimum hours read off a task label like "Overburden Removal – Topsoil (min
+ * 10 hours)", or null when it carries none.
+ *
+ * The Scraper's paper writes the target INTO each task heading, so an author
+ * who names the dropdown options after the paper gets the minimums prefilled
+ * rather than re-keyed — the same figure, transcribed once by the machine
+ * instead of six times by a person.
+ */
+export function parseTaskMinimumHours(label: string): number | null {
+  const m = /\(\s*min(?:imum)?\s+(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b/i.exec(label);
+  if (!m) return null;
+  const n = Number.parseFloat(m[1]!);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+type TaskMinimums = NonNullable<AssessmentPart['taskMinimums']>;
+
+/**
+ * The initial per-task minimums for a freshly-picked task column: one target
+ * per option whose label declares a minimum, prefilled from that label. Options
+ * with no declared minimum are left out — an author sets those by hand, or the
+ * option is one like "General items" that is not hours-gated at all.
+ */
+export function taskMinimumsFromColumn(columnKey: string, options: readonly string[]): TaskMinimums {
+  const targets = options
+    .map((value) => ({ value, minimumHours: parseTaskMinimumHours(value) }))
+    .filter((t): t is { value: string; minimumHours: number } => t.minimumHours !== null);
+  return { columnKey, targets };
+}
+
+/**
+ * Set (or clear) one task's minimum, returning the updated config. Zero, blank
+ * (NaN) or negative clears the target rather than storing an unmeetable one —
+ * matching the validator, which rejects a non-positive minimum. Targets keep
+ * the column's option order so the builder list and the candidate's chips read
+ * top-to-bottom the same.
+ */
+export function withTaskTargetHours(
+  current: TaskMinimums,
+  options: readonly string[],
+  value: string,
+  hours: number,
+): TaskMinimums {
+  const byValue = new Map(current.targets.map((t) => [t.value, t.minimumHours]));
+  if (Number.isFinite(hours) && hours > 0) byValue.set(value, hours);
+  else byValue.delete(value);
+  const targets = options
+    .filter((o) => byValue.has(o))
+    .map((o) => ({ value: o, minimumHours: byValue.get(o)! }));
+  return { columnKey: current.columnKey, targets };
+}

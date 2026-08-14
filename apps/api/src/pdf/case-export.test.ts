@@ -192,6 +192,65 @@ describe('assembleCaseValues', () => {
 
     expect(out.values.entries).toHaveLength(40);
   });
+
+  describe('multi-stage logbook row routing', () => {
+    const routed = (): AssessmentToolManifest => ({
+      ...MANIFEST,
+      parts: MANIFEST.parts.map((p) =>
+        p.key === 'p3'
+          ? {
+              ...p,
+              logbookRouting: {
+                sourceFieldId: 'log-table',
+                columnKey: 'task',
+                routes: [
+                  { value: 'Topsoil', fieldId: 'tgt-topsoil' },
+                  { value: 'Gravel', fieldId: 'tgt-gravel' },
+                  { value: 'Stockpile', fieldId: 'tgt-stockpile' },
+                ],
+              },
+            }
+          : p,
+      ),
+    });
+    const rows = [
+      { __key: 'r1', task: 'Topsoil', duration: 4 },
+      { __key: 'r2', task: 'Gravel', duration: 6 },
+      { __key: 'r3', task: 'Topsoil', duration: 2 },
+    ];
+
+    it('partitions the one filled table into each task’s printed table', () => {
+      const out = assembleCaseValues({
+        manifest: routed(),
+        pathway: 'new',
+        attempts: [
+          attempt('p1', 1, 'satisfactory', { a: 'yes' }),
+          attempt('p2', 1, 'satisfactory', { b: 'yes' }),
+          attempt('p3', 1, 'satisfactory', { 'log-table': rows }),
+          attempt('p4', 1, 'satisfactory', { d: 'yes' }),
+        ],
+      });
+
+      expect(out.values['tgt-topsoil']).toEqual([rows[0], rows[2]]);
+      expect(out.values['tgt-gravel']).toEqual([rows[1]]);
+      // A routed task with no matching rows gets an empty list, never left holding
+      // a stale value from a prior export.
+      expect(out.values['tgt-stockpile']).toEqual([]);
+      // The source table keeps the whole log — the candidate's record is intact.
+      expect(out.values['log-table']).toEqual(rows);
+    });
+
+    it('does nothing when the source part did not render (no attempt)', () => {
+      const out = assembleCaseValues({
+        manifest: routed(),
+        pathway: 'new',
+        attempts: [attempt('p1', 1, 'satisfactory', { a: 'yes' })],
+      });
+
+      // No source rows to route, so no target field is invented.
+      expect(out.values['tgt-topsoil']).toBeUndefined();
+    });
+  });
 });
 
 describe('exportCasePdf', () => {
