@@ -223,10 +223,10 @@ function applyMarks(
  * skip no-op copies.
  */
 export function stripMarkingSecrets(fields: readonly FormField[]): FormField[] {
-  if (!fields.some((f) => f.answerKey || f.outcomeTarget)) return fields as FormField[];
+  if (!fields.some((f) => f.answerKey || f.outcomeTarget || f.answerHint)) return fields as FormField[];
   return fields.map((f) => {
-    if (!f.answerKey && !f.outcomeTarget) return f;
-    const { answerKey: _key, outcomeTarget: _target, ...rest } = f;
+    if (!f.answerKey && !f.outcomeTarget && !f.answerHint) return f;
+    const { answerKey: _key, outcomeTarget: _target, answerHint: _hint, ...rest } = f;
     return rest;
   });
 }
@@ -302,6 +302,12 @@ export interface MarkTheoryInput {
     AssessmentPart,
     'mandatoryFieldIds' | 'outcomeSatisfactory' | 'outcomeNotSatisfactory' | 'furtherActionFieldId'
   >;
+  /**
+   * Pass threshold as a percentage (1–100). When set, the part is satisfactory
+   * if `correctCount / totalCount >= passPercent / 100`. Absent or undefined
+   * means the pre-existing mandatory-all-correct rule applies instead.
+   */
+  passPercent?: number;
 }
 
 /**
@@ -312,7 +318,7 @@ export interface MarkTheoryInput {
  * part unsatisfactory. That mirrors the paper, where the must-pass section is
  * the gate and the location-specific sets are evidence.
  */
-export function markTheory({ fields, values, part }: MarkTheoryInput): TheoryMarkingResult {
+export function markTheory({ fields, values, part, passPercent }: MarkTheoryInput): TheoryMarkingResult {
   // An untouched attempt has no map. Marking it is meaningful — every question
   // is unanswered — so normalize rather than refusing, which would have made an
   // assessor unable to fail a candidate who wrote nothing.
@@ -374,7 +380,28 @@ export function markTheory({ fields, values, part }: MarkTheoryInput): TheoryMar
   */
   const gate = mandatoryMarks.length > 0 ? mandatoryMarks : marks;
   const mandatoryAllCorrect = gate.length > 0 && gate.every((m) => m.correct);
-  const outcome: PartOutcome = mandatoryAllCorrect ? 'satisfactory' : 'not_satisfactory';
+
+  /*
+    PERCENTAGE PASS RULE — when the author chose `overall_percentage`.
+
+    The percentage gate replaces mandatory-all-correct: the part passes when
+    `correctCount / totalCount >= passPercent / 100`. The mandatory set is
+    still marked and reported, but it is not the gate — the overall score is.
+
+    Absent passPercent means the pre-existing rule, so no stored tool changes.
+  */
+  const passedByPercent =
+    passPercent !== undefined && marks.length > 0
+      ? correctCount / marks.length >= passPercent / 100
+      : undefined;
+  const outcome: PartOutcome =
+    passedByPercent !== undefined
+      ? passedByPercent
+        ? 'satisfactory'
+        : 'not_satisfactory'
+      : mandatoryAllCorrect
+        ? 'satisfactory'
+        : 'not_satisfactory';
 
   const derivedValues = applyMarks(marks, answers);
 

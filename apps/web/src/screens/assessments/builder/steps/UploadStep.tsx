@@ -324,10 +324,22 @@ export function UploadStep({ draft }: { draft: BuilderDraftState }) {
               </Chip>
             </div>
             {setup.passRule === 'overall_percentage' && (
-              <p className="mt-2 text-[11.5px] text-warning-text">
-                Recorded, but not yet applied: marking gates on the must-pass set today. The tool
-                will behave as if the first option were chosen until that lands.
-              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <label className="text-[11.5px] text-text-secondary">Pass threshold</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={setup.passPercentage ?? 100}
+                  onChange={(e) =>
+                    draft.setSetup({
+                      passPercentage: Math.max(1, Math.min(100, Number(e.target.value) || 100)),
+                    })
+                  }
+                  className="h-[28px] w-16 rounded-lg border border-border bg-surface-page px-2 text-center text-[12px]"
+                />
+                <span className="text-[11.5px] text-text-tertiary">%</span>
+              </div>
             )}
           </div>
 
@@ -351,6 +363,16 @@ export function UploadStep({ draft }: { draft: BuilderDraftState }) {
                 A single stacked form
               </Chip>
             </div>
+            {setup.theoryRendering === 'one_per_screen' && (
+              <label className="mt-2 inline-flex items-center gap-1.5 text-[11.5px] text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={!!setup.theoryAllowRetry}
+                  onChange={(e) => draft.setSetup({ theoryAllowRetry: e.target.checked })}
+                />
+                Allow candidates to retry incorrect questions before moving on
+              </label>
+            )}
           </div>
 
           <div>

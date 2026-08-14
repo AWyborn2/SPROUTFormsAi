@@ -178,6 +178,10 @@ export interface AttemptFillView {
    * part rendered as before this existed.
    */
   theoryRendering?: TheoryRendering | null;
+  /** Whether candidates can retry individual questions after feedback. */
+  theoryAllowRetry?: boolean;
+  /** Pass threshold percentage (1–100), or null for mandatory-all-correct. */
+  theoryPassPercent?: number | null;
   attemptNumber: number;
   outcome: PartOutcome | null;
   /** Null until the candidate hands it in. */
@@ -391,12 +395,20 @@ export const assessmentsApi = {
       submittedAt: string | null;
       outcome?: PartOutcome;
       caseState?: AssessmentCaseState;
+      correctCount?: number;
+      totalCount?: number;
     }>(`/assessment-cases/${caseId}/attempts/${attemptId}/submit`, {}),
 
   reopenAttempt: (caseId: string, attemptId: string) =>
     apiClient.post<{ id: string; submittedAt: string | null }>(
       `/assessment-cases/${caseId}/attempts/${attemptId}/reopen`,
       {},
+    ),
+
+  checkQuestion: (caseId: string, attemptId: string, fieldId: string, value: SubmissionValue) =>
+    apiClient.post<{ correct: boolean; hint?: string | null }>(
+      `/assessment-cases/${caseId}/attempts/${attemptId}/check-question`,
+      { fieldId, value },
     ),
 
   /** Opens a new attempt, or returns the one already open for that part. */

@@ -624,7 +624,7 @@ export function buildManifest(
     ExtractedField,
     'id' | 'label' | 'type' | 'options' | 'coverSection' | 'columns' | 'fixedRows'
   >[],
-  setup?: Pick<SetupAnswers, 'theoryRendering'>,
+  setup?: Pick<SetupAnswers, 'theoryRendering' | 'passRule' | 'passPercentage' | 'theoryAllowRetry'>,
 ): AssessmentToolManifest {
   const completionMarks = proposePartCompletionMarks(parts, extracted);
   return {
@@ -671,6 +671,10 @@ export function buildManifest(
       default a manifest naming nothing resolves to.
     */
     ...(setup?.theoryRendering === 'stacked' ? { theoryRendering: 'stacked' as const } : {}),
+    ...(setup?.passRule === 'overall_percentage' && setup.passPercentage
+      ? { theoryPassPercent: setup.passPercentage }
+      : {}),
+    ...(setup?.theoryAllowRetry ? { theoryAllowRetry: true } : {}),
   };
 }
 

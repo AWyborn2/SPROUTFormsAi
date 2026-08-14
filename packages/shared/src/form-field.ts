@@ -450,6 +450,13 @@ export interface FormField {
   assessorVerdict?: boolean;
 
   /**
+   * Shown to the candidate when they answer this question incorrectly in
+   * interactive theory mode. Optional — absent means no hint is shown.
+   * Authored in the builder's Answer Key step.
+   */
+  answerHint?: string;
+
+  /**
    * Where this question's derived ✓/✗ is written. Required whenever
    * `answerKey` is set — a key with nowhere to land would compute a mark that
    * never reaches the page, which on an evidence document reads as an

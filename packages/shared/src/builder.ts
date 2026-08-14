@@ -164,6 +164,11 @@ export interface SetupAnswers {
   passPercentage?: number;
   theoryRendering: TheoryRendering;
   thresholdBehaviour: ThresholdBehaviour;
+  /**
+   * Whether a candidate may retry individual questions after seeing feedback
+   * in interactive theory mode (`one_per_screen`). Defaults to false.
+   */
+  theoryAllowRetry?: boolean;
 }
 
 export const DEFAULT_SETUP_ANSWERS: SetupAnswers = {
