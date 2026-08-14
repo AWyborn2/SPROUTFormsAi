@@ -92,6 +92,17 @@ export const organizations = pgTable('organizations', {
    */
   allowSelfAssessment: boolean('allow_self_assessment').notNull().default(false),
   /**
+   * Whether a supervisor's or SME's sign-off on a part may be applied as a
+   * LABELLED signature by on-case staff (the assessor signing on their behalf,
+   * as on paper) rather than requiring that person's own login. Defaults on:
+   * the labelled model is the one that ships first and never blocks the flow —
+   * a part is never held waiting for a third party to authenticate. Turning it
+   * off will require the named signer to log in themselves (a stricter,
+   * audit-grade attribution that arrives with that capability); until then it
+   * only ever gates the labelled union access in the fill surface.
+   */
+  allowLabelledSignoff: boolean('allow_labelled_signoff').notNull().default(true),
+  /**
    * Which of the two workforce numbers identifies a person on screen (R40).
    * Defaults to the employee number; the swipe card number is the alternative.
    * The numbers themselves are profile fields owned by the candidate profile

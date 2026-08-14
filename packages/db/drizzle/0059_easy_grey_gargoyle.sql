@@ -1,0 +1,1 @@
+ALTER TABLE "organizations" ADD COLUMN "allow_labelled_signoff" boolean DEFAULT true NOT NULL;

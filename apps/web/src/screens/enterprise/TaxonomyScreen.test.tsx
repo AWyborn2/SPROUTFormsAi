@@ -128,6 +128,7 @@ function base(): Taxonomy {
       allowMultipleLocations: false,
       allowMultipleDepartments: false,
       allowSelfAssessment: false,
+      allowLabelledSignoff: true,
       displayIdentifier: 'employee_number',
       pooledCaseOverdueDays: 14,
       notificationLeadDays: 30,

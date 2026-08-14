@@ -23,6 +23,7 @@ import {
   ACCESS_LEVELS,
   VALUE_SOURCES,
   WORKFLOW_ROLES,
+  STAFF_WORKFLOW_ROLES,
   orderedParts,
   requiredParts,
   resolveAssessorRequirements,
@@ -147,6 +148,41 @@ async function selfAssessmentAllowed(database: Database, orgId: string): Promise
     where: eq(schema.organizations.id, orgId),
   });
   return org?.allowSelfAssessment ?? false;
+}
+
+/**
+ * The org's labelled-sign-off policy: whether on-case staff may apply a
+ * supervisor's or SME's signature on their behalf (defaults on). Off means
+ * those parts wait for that person's own login — a capability not yet built,
+ * so off currently just leaves supervisor/SME-assigned fields to nobody, as
+ * before this feature.
+ */
+async function labelledSignoffAllowed(database: Database, orgId: string): Promise<boolean> {
+  const org = await database.query.organizations.findFirst({
+    where: eq(schema.organizations.id, orgId),
+  });
+  return org?.allowLabelledSignoff ?? true;
+}
+
+/**
+ * The workflow parties whose fill access this caller holds on a part.
+ *
+ * The candidate is only ever the candidate. On-case STAFF hold the assessor's
+ * access and — when the org allows labelled sign-off — the supervisor's and
+ * SME's too, so one person can apply those signatures the way they sign the
+ * paper on someone's behalf. A self-assessor is both the candidate and staff.
+ * With labelled sign-off off, staff resolve to the assessor alone, so a
+ * supervisor/SME field is left to nobody rather than signed by the wrong party.
+ */
+export function fillParties(opts: {
+  party: WorkflowRole;
+  selfAssessing: boolean;
+  labelled: boolean;
+}): WorkflowRole[] {
+  const staff: WorkflowRole[] = opts.labelled ? [...STAFF_WORKFLOW_ROLES] : ['assessor'];
+  if (opts.selfAssessing) return ['candidate', ...staff];
+  if (opts.party === 'candidate') return ['candidate'];
+  return staff;
 }
 
 /**
@@ -2903,11 +2939,12 @@ assessmentCasesRouter.get(
       person on the other side of this assessment", and an admin opening a case
       to fill in for an assessor is doing exactly that.
 
-      A supervisor is not yet distinguishable — nothing on the case names one —
-      so a workflow that assigns them work resolves to no writable fields rather
-      than to somebody else's. That is the safe direction: a section nobody can
-      currently fill is visible as stuck, where guessing would let the wrong
-      person sign a logbook.
+      Supervisor and SME sign-offs are applied by on-case staff as LABELLED
+      signatures when the org allows it (`fillParties`) — the assessor signing
+      on their behalf, as on paper. With that policy off, staff resolve to the
+      assessor alone, so a supervisor/SME-assigned field is left to nobody
+      rather than signed by the wrong party — the safe direction until
+      login-based attribution ships.
     */
     const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
     // The FIELDS matter here: a question's ✓/✗ cell is declared on the question,
@@ -2922,10 +2959,19 @@ assessmentCasesRouter.get(
     */
     const workflow = workflowOf(manifest, allFields);
     const partFields = fieldsInPart(allFields, manifest, attempt.partKey);
-    // A self-assessor is both ends of the paper: union access (org policy).
-    const access = (await isSelfAssessing(db, tenant, row.candidateUserId))
-      ? unionPartFieldAccess(workflow, attempt.partKey, partFields, ['candidate', 'assessor'])
-      : partFieldAccess(workflow, attempt.partKey, partFields, party);
+    // The parties this caller may fill as: candidate, on-case staff (assessor
+    // plus labelled supervisor/SME), or both when self-assessing — all by org
+    // policy. `unionPartFieldAccess` over one party equals `partFieldAccess`.
+    const access = unionPartFieldAccess(
+      workflow,
+      attempt.partKey,
+      partFields,
+      fillParties({
+        party,
+        selfAssessing: await isSelfAssessing(db, tenant, row.candidateUserId),
+        labelled: await labelledSignoffAllowed(db, tenant.orgId),
+      }),
+    );
     const hidden = new Set(access.hidden);
     const visibleFields = partFields.filter((f) => !hidden.has(f.id));
 
@@ -3378,21 +3424,14 @@ assessmentCasesRouter.patch(
     // The same union the attempt GET serves — a self-assessor must be able to
     // SAVE every field the surface showed them as writable.
     const selfAssessing = tool ? await isSelfAssessing(db, tenant, row.candidateUserId) : false;
+    const labelled = tool ? await labelledSignoffAllowed(db, tenant.orgId) : false;
     const allowed = tool
       ? new Set(
-          (selfAssessing
-            ? unionPartFieldAccess(
-                workflowOf(tool.manifest, versionFields),
-                attempt.partKey,
-                fieldsInPart(versionFields, tool.manifest, attempt.partKey),
-                ['candidate', 'assessor'],
-              )
-            : partFieldAccess(
-                workflowOf(tool.manifest, versionFields),
-                attempt.partKey,
-                fieldsInPart(versionFields, tool.manifest, attempt.partKey),
-                party,
-              )
+          unionPartFieldAccess(
+            workflowOf(tool.manifest, versionFields),
+            attempt.partKey,
+            fieldsInPart(versionFields, tool.manifest, attempt.partKey),
+            fillParties({ party, selfAssessing, labelled }),
           ).writable,
         )
       : null;
