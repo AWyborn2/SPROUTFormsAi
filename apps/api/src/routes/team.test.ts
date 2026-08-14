@@ -59,7 +59,7 @@ function fakeDb(opts: {
   membershipRolesFindMany?: unknown[];
   roleRequiredAssessmentsFindMany?: unknown[];
   /** Direct Role → competency links (KTD1) — the dual read's second half. */
-  roleRequiredCompetenciesFindMany?: unknown[];
+  competencyRequirementsFindMany?: unknown[];
   assessmentToolsFindMany?: unknown[];
   competencyHoldersFindMany?: unknown[];
   competenciesFindMany?: unknown[];
@@ -144,8 +144,8 @@ function fakeDb(opts: {
     },
     // The dual read's direct half (KTD1). Empty keeps these fixtures on the
     // legacy derivation the counts were written against.
-    roleRequiredCompetencies: {
-      findMany: vi.fn().mockResolvedValue(opts.roleRequiredCompetenciesFindMany ?? []),
+    competencyRequirements: {
+      findMany: vi.fn().mockResolvedValue(opts.competencyRequirementsFindMany ?? []),
     },
     assessmentTools: { findMany: vi.fn().mockResolvedValue(opts.assessmentToolsFindMany ?? []) },
     competencyHolders: {

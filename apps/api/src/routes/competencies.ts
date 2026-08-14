@@ -338,10 +338,10 @@ competenciesRouter.delete(
       async (tx) => {
         // Both tiers in one read, split below — a recommendation is a real
         // dependency too (a Role's editor would show a dangling entry).
-        const links = await tx.query.roleRequiredCompetencies.findMany({
+        const links = await tx.query.competencyRequirements.findMany({
           where: and(
-            eq(schema.roleRequiredCompetencies.orgId, tenant.orgId),
-            eq(schema.roleRequiredCompetencies.competencyId, row.id),
+            eq(schema.competencyRequirements.orgId, tenant.orgId),
+            eq(schema.competencyRequirements.competencyId, row.id),
           ),
         });
         // `awardedCompetencyIds` is jsonb with no FK, so containment is
@@ -360,12 +360,36 @@ competenciesRouter.delete(
           ),
         });
 
-        const roles = links.filter((l) => l.tier === 'required').length;
-        const recommendedBy = links.filter((l) => l.tier === 'recommended').length;
+        /*
+          SCOPE-AWARE BREAKDOWN (KTD2, U1). The read above is by competencyId
+          alone — deliberately: a requirement at ANY of the four scopes blocks
+          deletion, since an org or location requiring a competency is exactly
+          as real a dependency as a role requiring it. But the payload must not
+          launder an org-wide requirement as a "role": `roles`/`recommendedBy`
+          keep counting ROLE rows only, and the other scopes get their own
+          counts so the 409 names what actually stands in the way.
+        */
+        const roleLinks = links.filter((l) => l.roleId != null);
+        const roles = roleLinks.filter((l) => l.tier === 'required').length;
+        const recommendedBy = roleLinks.filter((l) => l.tier === 'recommended').length;
+        const locations = links.filter((l) => l.locationId != null).length;
+        const departments = links.filter((l) => l.departmentId != null).length;
+        const orgWide = links.filter(
+          (l) => l.roleId == null && l.locationId == null && l.departmentId == null,
+        ).length;
         const tools = orgTools.filter((t) => (t.awardedCompetencyIds ?? []).includes(row.id)).length;
         const grants = liveGrants.length;
-        if (roles + recommendedBy + tools + grants > 0) {
-          return { deleted: false as const, roles, recommendedBy, tools, grants };
+        if (links.length + tools + grants > 0) {
+          return {
+            deleted: false as const,
+            roles,
+            recommendedBy,
+            locations,
+            departments,
+            orgWide,
+            tools,
+            grants,
+          };
         }
         await tx.delete(schema.competencies).where(eq(schema.competencies.id, row.id));
         return { deleted: true as const };
@@ -374,9 +398,19 @@ competenciesRouter.delete(
     );
     if (!verdict.deleted) {
       // Counts, not ids: enough to say WHAT stands in the way and how much,
-      // without this error payload becoming a second register read.
-      const { roles, recommendedBy, tools, grants } = verdict;
-      res.status(409).json({ error: 'competency_in_use', roles, recommendedBy, tools, grants });
+      // without this error payload becoming a second register read. The
+      // requirement counts are per scope (KTD2): `roles` is role rows only.
+      const { roles, recommendedBy, locations, departments, orgWide, tools, grants } = verdict;
+      res.status(409).json({
+        error: 'competency_in_use',
+        roles,
+        recommendedBy,
+        locations,
+        departments,
+        orgWide,
+        tools,
+        grants,
+      });
       return;
     }
 

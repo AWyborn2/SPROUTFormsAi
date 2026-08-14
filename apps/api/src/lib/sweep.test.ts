@@ -71,7 +71,7 @@ function makeDb(opts: DbOpts) {
       roleRequiredAssessments: { findMany: async () => opts.roleReqs ?? [] },
       // The resolver asks for tier 'required' only (R13); this lean fake does
       // not parse WHEREs, so the load-bearing filter is honoured manually.
-      roleRequiredCompetencies: {
+      competencyRequirements: {
         findMany: async () => (opts.roleLinks ?? []).filter((l) => l.tier === 'required'),
       },
       assessmentTools: { findMany: async () => opts.tools ?? [] },
@@ -250,7 +250,7 @@ describe('sweepOrganization — assignment pass through the shared resolver (KTD
     /*
       The end-to-end proof the resolver swap demands (U3): the sweep reaches
       the engine through assignForMembership, and a Role whose requirement
-      exists solely as a role_required_competencies row must still assign the
+      exists solely as a competency_requirements row must still assign the
       awarding tool to a holder who lacks the competency. Before the swap this
       exact fixture created nothing — roleRequiredAssessments is empty.
     */

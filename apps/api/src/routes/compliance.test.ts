@@ -112,7 +112,7 @@ function fakeDb(opts: {
         every seeded row to both reads would let a recommended link count as
         required, masking exactly the R13/AE4 regression pinned below.
       */
-      roleRequiredCompetencies: {
+      competencyRequirements: {
         findMany: vi.fn((args?: { where?: unknown }) => {
           const rows = (opts.roleLinks ?? []) as { tier?: string }[];
           const seen = new Set<unknown>();

@@ -32,10 +32,10 @@ function makeDb(rows: Rows) {
         with the filter deleted — so it is honoured manually, like the
         in-flight case read below.
       */
-      roleRequiredCompetencies: {
+      competencyRequirements: {
         findMany: async () =>
-          (rows.roleRequiredCompetencies ?? []).filter((l) => l.tier === 'required'),
-        findFirst: async () => (rows.roleRequiredCompetencies ?? [])[0],
+          (rows.competencyRequirements ?? []).filter((l) => l.tier === 'required'),
+        findFirst: async () => (rows.competencyRequirements ?? [])[0],
       },
       assessmentTools: table('assessmentTools'),
       formTemplates: table('formTemplates'),
@@ -217,7 +217,7 @@ describe('assignForMembership', () => {
     // invisible to the engine.
     const rows = baseRows({
       roleRequiredAssessments: [],
-      roleRequiredCompetencies: [
+      competencyRequirements: [
         { id: 'link-1', orgId: ORG, roleId: 'r1', competencyId: 'c1', tier: 'required' },
       ],
     });
@@ -232,7 +232,7 @@ describe('assignForMembership', () => {
   it('assigns nothing for a RECOMMENDED link — the never-enforced tier (R13)', async () => {
     const rows = baseRows({
       roleRequiredAssessments: [],
-      roleRequiredCompetencies: [
+      competencyRequirements: [
         { id: 'link-1', orgId: ORG, roleId: 'r1', competencyId: 'c1', tier: 'recommended' },
       ],
     });

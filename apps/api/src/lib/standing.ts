@@ -9,7 +9,7 @@
  *
  * REQUIRED standing is a DUAL READ during the transition (KTD3): the union of
  * (a) the legacy derivation — Role → required tools → each tool's awarded
- * competencies — and (b) direct `role_required_competencies` rows with tier
+ * competencies — and (b) direct `competency_requirements` rows with tier
  * 'required'. Conversion moves a requirement from (a) to (b) one tool at a
  * time, and the union keeps it visible whichever side it currently lives on.
  *
@@ -69,7 +69,7 @@ async function heldRolesByUser(reader: Reader, orgId: string, uniqueUserIds: rea
 
 /**
  * The set of competency ids each given user is OBLIGED to hold — everything a
- * held Role requires DIRECTLY (a `role_required_competencies` row, tier
+ * held Role requires DIRECTLY (a `competency_requirements` row, tier
  * 'required') plus everything awarded by a tool a held Role still requires the
  * legacy way. A user with no membership, no held Role or no requirement maps to
  * an empty set rather than being absent, so a caller can look every user up.
@@ -135,15 +135,16 @@ export async function requiredCompetencyIdsByUser(
 
       // Direct half: tier 'required' links only. Recommended NEVER enters this
       // set — it is the never-enforced tier (R13), read by its own sibling below.
-      const linkRows = await tx.query.roleRequiredCompetencies.findMany({
+      const linkRows = await tx.query.competencyRequirements.findMany({
         where: and(
-          eq(schema.roleRequiredCompetencies.orgId, orgId),
-          inArray(schema.roleRequiredCompetencies.roleId, roleIds),
-          eq(schema.roleRequiredCompetencies.tier, 'required'),
+          eq(schema.competencyRequirements.orgId, orgId),
+          inArray(schema.competencyRequirements.roleId, roleIds),
+          eq(schema.competencyRequirements.tier, 'required'),
         ),
       });
       const directByRole = new Map<string, string[]>();
       for (const l of linkRows) {
+        if (l.roleId === null) continue; // unreachable: the inArray above is role-keyed (KTD2); narrows the nullable scope column
         const list = directByRole.get(l.roleId) ?? [];
         list.push(l.competencyId);
         directByRole.set(l.roleId, list);
@@ -171,7 +172,7 @@ export async function requiredCompetencyIdsByUser(
 
 /**
  * The set of competency ids each given user's held Roles RECOMMEND — direct
- * `role_required_competencies` rows with tier 'recommended', nothing else.
+ * `competency_requirements` rows with tier 'recommended', nothing else.
  * There is no legacy half: the legacy world had no recommended tier, so this
  * read has a single source and needs no KTD3 transaction — nothing can move a
  * recommendation between tables mid-request. Same contract as the required
@@ -191,15 +192,16 @@ export async function recommendedCompetencyIdsByUser(
   if (!held) return byUser;
   const { memberships, roleIdsByMembership, roleIds } = held;
 
-  const linkRows = await database.query.roleRequiredCompetencies.findMany({
+  const linkRows = await database.query.competencyRequirements.findMany({
     where: and(
-      eq(schema.roleRequiredCompetencies.orgId, orgId),
-      inArray(schema.roleRequiredCompetencies.roleId, roleIds),
-      eq(schema.roleRequiredCompetencies.tier, 'recommended'),
+      eq(schema.competencyRequirements.orgId, orgId),
+      inArray(schema.competencyRequirements.roleId, roleIds),
+      eq(schema.competencyRequirements.tier, 'recommended'),
     ),
   });
   const byRole = new Map<string, string[]>();
   for (const l of linkRows) {
+    if (l.roleId === null) continue; // unreachable: the inArray above is role-keyed (KTD2); narrows the nullable scope column
     const list = byRole.get(l.roleId) ?? [];
     list.push(l.competencyId);
     byRole.set(l.roleId, list);

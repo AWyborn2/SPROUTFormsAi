@@ -106,7 +106,7 @@ function fakeDb(opts: {
         findMany: vi.fn().mockResolvedValue(opts.holders ?? []),
       },
       roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue(opts.currentRequirements ?? []) },
-      roleRequiredCompetencies: { findMany: vi.fn().mockResolvedValue(opts.roleLinks ?? []) },
+      competencyRequirements: { findMany: vi.fn().mockResolvedValue(opts.roleLinks ?? []) },
       memberships: {
         findFirst: vi.fn(async () => (opts.memberships ?? [])[0]),
         findMany: vi.fn().mockResolvedValue(opts.memberships ?? []),
@@ -380,10 +380,10 @@ describe('Role requirements in competency terms (U3 — R5, R6, R50, KTD9)', () 
     });
     // The links table is replaced; the LEGACY table is never touched by a PUT
     // (KTD9 — legacy rows exit via conversion or the explicit remove only).
-    expect(deleteWhere).toHaveBeenCalledWith(schema.roleRequiredCompetencies, expect.anything());
+    expect(deleteWhere).toHaveBeenCalledWith(schema.competencyRequirements, expect.anything());
     expect(deleteWhere).not.toHaveBeenCalledWith(schema.roleRequiredAssessments, expect.anything());
     expect(insertValues).toHaveBeenCalledWith(
-      schema.roleRequiredCompetencies,
+      schema.competencyRequirements,
       expect.arrayContaining([
         expect.objectContaining({ roleId: 'role-1', competencyId: COMP_A, tier: 'required' }),
         expect.objectContaining({ roleId: 'role-1', competencyId: COMP_B, tier: 'recommended' }),
@@ -406,8 +406,8 @@ describe('Role requirements in competency terms (U3 — R5, R6, R50, KTD9)', () 
       competencies: orgComps,
     });
     const linksFindMany = (db as unknown as {
-      query: { roleRequiredCompetencies: { findMany: ReturnType<typeof vi.fn> } };
-    }).query.roleRequiredCompetencies.findMany;
+      query: { competencyRequirements: { findMany: ReturnType<typeof vi.fn> } };
+    }).query.competencyRequirements.findMany;
     linksFindMany.mockResolvedValueOnce([]); // the GET sees no links…
     linksFindMany.mockResolvedValue([link(COMP_B, 'required')]); // …then the conversion lands
     mockDbValue = db;
@@ -422,7 +422,7 @@ describe('Role requirements in competency terms (U3 — R5, R6, R50, KTD9)', () 
     expect(await res.json()).toMatchObject({ error: 'requirements_changed' });
     // The converted link survives: nothing was deleted or inserted.
     expect(deleteWhere).not.toHaveBeenCalled();
-    expect(insertValues).not.toHaveBeenCalledWith(schema.roleRequiredCompetencies, expect.anything());
+    expect(insertValues).not.toHaveBeenCalledWith(schema.competencyRequirements, expect.anything());
     server.close();
   });
 
@@ -479,7 +479,7 @@ describe('Role requirements in competency terms (U3 — R5, R6, R50, KTD9)', () 
     expect(await res.json()).toMatchObject({ configured: false, recommended: [COMP_B] });
     // The recommended row IS written; the configured flag is NOT.
     expect(insertValues).toHaveBeenCalledWith(
-      schema.roleRequiredCompetencies,
+      schema.competencyRequirements,
       expect.arrayContaining([expect.objectContaining({ competencyId: COMP_B, tier: 'recommended' })]),
     );
     expect(updateSet).not.toHaveBeenCalledWith(
@@ -688,7 +688,7 @@ describe('Requirement change preview & apply in competency terms (U12/U3)', () =
     expect(body.effects.created).toBe(1);
     // The link row AND the holder's case (for the resolved tool) are written.
     expect(insertValues).toHaveBeenCalledWith(
-      schema.roleRequiredCompetencies,
+      schema.competencyRequirements,
       expect.arrayContaining([expect.objectContaining({ competencyId: COMP_A, tier: 'required' })]),
     );
     expect(insertValues).toHaveBeenCalledWith(schema.assessmentCases, expect.objectContaining({ toolId: TOOL_A }));
@@ -753,7 +753,7 @@ describe('Requirement change preview & apply in competency terms (U12/U3)', () =
     expect(body.effects.created).toBe(0);
     // The links are rewritten, but NO assessment case is created, deleted or
     // updated — a removal never touches a case (R55).
-    expect(deleteWhere).toHaveBeenCalledWith(schema.roleRequiredCompetencies, expect.anything());
+    expect(deleteWhere).toHaveBeenCalledWith(schema.competencyRequirements, expect.anything());
     expect(insertValues).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());
     expect(deleteWhere).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());
     expect(updateSet).not.toHaveBeenCalledWith(schema.assessmentCases, expect.anything());

@@ -17,7 +17,7 @@
  * carries", and an org-wide count is a different, wrong number for that
  * wording.
  */
-import { and, eq, inArray, isNull } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import {
   CASE_STATES,
@@ -81,7 +81,7 @@ export interface RequiredCompetencyChange {
  * write.
  *
  * The diff runs over the DIRECT required links only: the PUT owns nothing but
- * `role_required_competencies` (KTD9), so a competency a remaining legacy row
+ * `competency_requirements` (KTD9), so a competency a remaining legacy row
  * still derives keeps obliging through the dual read regardless of what this
  * change does to the links.
  */
@@ -95,8 +95,8 @@ export async function computeRequiredAssessmentsChange(
   const desiredRequired = new Set(desired.requiredCompetencyIds);
 
   // 1. Diff current vs desired, in competency terms.
-  const currentLinks = await database.query.roleRequiredCompetencies.findMany({
-    where: eq(schema.roleRequiredCompetencies.roleId, role.id),
+  const currentLinks = await database.query.competencyRequirements.findMany({
+    where: eq(schema.competencyRequirements.roleId, role.id),
   });
   const currentRequired = new Set(
     currentLinks.filter((l) => l.tier === 'required').map((l) => l.competencyId),
@@ -266,11 +266,11 @@ async function computeRemovalEffects(
         })
       : Promise.resolve([]),
     otherRoleIds.length
-      ? database.query.roleRequiredCompetencies.findMany({
+      ? database.query.competencyRequirements.findMany({
           where: and(
-            eq(schema.roleRequiredCompetencies.orgId, orgId),
-            inArray(schema.roleRequiredCompetencies.roleId, otherRoleIds),
-            eq(schema.roleRequiredCompetencies.tier, 'required'),
+            eq(schema.competencyRequirements.orgId, orgId),
+            inArray(schema.competencyRequirements.roleId, otherRoleIds),
+            eq(schema.competencyRequirements.tier, 'required'),
           ),
         })
       : Promise.resolve([]),
@@ -283,6 +283,7 @@ async function computeRemovalEffects(
   }
   const compsByOtherRole = new Map<string, string[]>();
   for (const l of otherLinkRows) {
+    if (l.roleId === null) continue; // unreachable: the inArray above is role-keyed (KTD2); narrows the nullable scope column
     const list = compsByOtherRole.get(l.roleId) ?? [];
     list.push(l.competencyId);
     compsByOtherRole.set(l.roleId, list);
@@ -489,7 +490,7 @@ export interface RoleLinkStep {
   /**
    * `insert` — no (role, competency) row exists yet.
    * `upgrade` — a RECOMMENDED row exists; conversion promotes its tier, never
-   *   inserts a second row (role_required_competencies_uq).
+   *   inserts a second row (competency_requirements_role_uq).
    * `exists` — a required row already exists; nothing to write.
    */
   action: 'insert' | 'upgrade' | 'exists';
@@ -533,11 +534,11 @@ export async function computeAwardLinkChange(
 
   // Existing (role, competency) links decide insert-vs-upgrade per role.
   const existingLinks = roleIds.length
-    ? await database.query.roleRequiredCompetencies.findMany({
+    ? await database.query.competencyRequirements.findMany({
         where: and(
-          eq(schema.roleRequiredCompetencies.orgId, orgId),
-          inArray(schema.roleRequiredCompetencies.roleId, roleIds),
-          eq(schema.roleRequiredCompetencies.competencyId, competencyId),
+          eq(schema.competencyRequirements.orgId, orgId),
+          inArray(schema.competencyRequirements.roleId, roleIds),
+          eq(schema.competencyRequirements.competencyId, competencyId),
         ),
       })
     : [];
@@ -639,23 +640,33 @@ export async function computeAwardRelinkChange(
     ),
   });
 
-  const outgoingLinks = await database.query.roleRequiredCompetencies.findMany({
+  // ROLE-SCOPE ROWS ONLY (KTD2): award-link conversion is inherently
+  // role-scoped — legacy rows only ever lived on roles — so an org/location/
+  // department requirement of the outgoing competency is neither carried nor
+  // counted; without this filter the carry plan would ingest null-roleId rows.
+  const outgoingRows = await database.query.competencyRequirements.findMany({
     where: and(
-      eq(schema.roleRequiredCompetencies.orgId, orgId),
-      eq(schema.roleRequiredCompetencies.competencyId, outgoingCompetencyId),
-      eq(schema.roleRequiredCompetencies.tier, 'required'),
+      eq(schema.competencyRequirements.orgId, orgId),
+      eq(schema.competencyRequirements.competencyId, outgoingCompetencyId),
+      eq(schema.competencyRequirements.tier, 'required'),
+      isNotNull(schema.competencyRequirements.roleId),
     ),
   });
+  // The WHERE guarantees roleId; the flatMap narrows what TS cannot see, so a
+  // CarryStep can keep its non-null roleId contract.
+  const outgoingLinks = outgoingRows.flatMap((l) =>
+    l.roleId === null ? [] : [{ ...l, roleId: l.roleId }],
+  );
   const roleIds = [...new Set(outgoingLinks.map((l) => l.roleId))];
 
   // What each carried role already says about the INCOMING competency —
   // the dedupe/upgrade against the unique (roleId, competencyId) index.
   const incomingLinks = roleIds.length
-    ? await database.query.roleRequiredCompetencies.findMany({
+    ? await database.query.competencyRequirements.findMany({
         where: and(
-          eq(schema.roleRequiredCompetencies.orgId, orgId),
-          inArray(schema.roleRequiredCompetencies.roleId, roleIds),
-          eq(schema.roleRequiredCompetencies.competencyId, incomingCompetencyId),
+          eq(schema.competencyRequirements.orgId, orgId),
+          inArray(schema.competencyRequirements.roleId, roleIds),
+          eq(schema.competencyRequirements.competencyId, incomingCompetencyId),
         ),
       })
     : [];

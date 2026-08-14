@@ -88,7 +88,7 @@ function makeDb(store: Store, { withTransaction = true } = {}) {
     });
     return {
       roleRequiredAssessments: table('roleRequiredAssessments'),
-      roleRequiredCompetencies: table('roleRequiredCompetencies'),
+      competencyRequirements: table('competencyRequirements'),
       assessmentTools: table('assessmentTools'),
       formTemplates: table('formTemplates'),
     };
@@ -175,7 +175,7 @@ describe('requiredToolIdsByRole', () => {
     // awards. One tool, not two entries.
     const { db } = makeDb({
       roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'r1', toolId: 't1' }],
-      roleRequiredCompetencies: [link('r1', 'c1'), link('r1', 'c2')],
+      competencyRequirements: [link('r1', 'c1'), link('r1', 'c2')],
       assessmentTools: [
         tool('t1', ['c1'], AT('2026-01-01T00:00:00Z')),
         tool('t2', ['c2'], AT('2026-01-02T00:00:00Z')),
@@ -190,7 +190,7 @@ describe('requiredToolIdsByRole', () => {
 
   it('keeps an evidence-only requirement OUT of the tool set and recommended links out entirely (R7, R13)', async () => {
     const { db } = makeDb({
-      roleRequiredCompetencies: [
+      competencyRequirements: [
         link('r1', 'c-licence', 'required'), // nothing awards it
         link('r1', 'c1', 'recommended'), // never enforced
       ],
@@ -213,7 +213,7 @@ describe('requiredToolIdsByRole', () => {
   it('pins every read of the dual derivation to ONE REPEATABLE READ transaction (KTD3)', async () => {
     const { db, transaction, reads } = makeDb({
       roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'r1', toolId: 't1' }],
-      roleRequiredCompetencies: [link('r1', 'c2')],
+      competencyRequirements: [link('r1', 'c2')],
       assessmentTools: [
         tool('t1', [], AT('2026-01-01T00:00:00Z')),
         tool('t2', ['c2'], AT('2026-01-02T00:00:00Z')),
@@ -244,7 +244,7 @@ describe('requiredToolIdsByRole', () => {
   it('still reads correctly on a surface with no transaction (lean read-only callers)', async () => {
     const { db } = makeDb(
       {
-        roleRequiredCompetencies: [link('r1', 'c1')],
+        competencyRequirements: [link('r1', 'c1')],
         assessmentTools: [tool('t1', ['c1'], AT('2026-01-01T00:00:00Z'))],
         formTemplates: [template('tpl-t1', 'v1')],
       },

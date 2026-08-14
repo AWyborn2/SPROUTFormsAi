@@ -98,7 +98,7 @@ function makeDb(store: Store) {
       memberships: table('memberships'),
       membershipRoles: table('membershipRoles'),
       roleRequiredAssessments: table('roleRequiredAssessments'),
-      roleRequiredCompetencies: table('roleRequiredCompetencies'),
+      competencyRequirements: table('competencyRequirements'),
       assessmentTools: table('assessmentTools'),
       formTemplates: table('formTemplates'),
       membershipLocations: table('membershipLocations'),
@@ -163,7 +163,7 @@ describe('computeRequiredAssessmentsChange — additions', () => {
     // Three holders of role-1; the change adds competency cB (awarded by tB).
     // Two hold cB current, one does not — so affected 3, created 1.
     const store: Store = {
-      roleRequiredCompetencies: [link('role-1', 'cA')], // current required {cA}
+      competencyRequirements: [link('role-1', 'cA')], // current required {cA}
       membershipRoles: [
         { membershipId: 'm1', roleId: 'role-1', withdrawnAt: null },
         { membershipId: 'm2', roleId: 'role-1', withdrawnAt: null },
@@ -201,7 +201,7 @@ describe('computeRequiredAssessmentsChange — additions', () => {
 
   it('creates nothing for a holder who already has an open case for the awarding tool (KTD16)', async () => {
     const store: Store = {
-      roleRequiredCompetencies: [],
+      competencyRequirements: [],
       ...member('m1', 'u1', ['role-1']),
       assessmentTools: [tool('tB', ['cB'])],
       formTemplates: [template('tpl-tB', 'v1')],
@@ -223,7 +223,7 @@ describe('computeRequiredAssessmentsChange — additions', () => {
     // required standing with no case — they are evidence-based gaps.
     const FIVE = ['c-ato', 'c-licence', 'c-sme', 'c-grade', 'c-tip'];
     const store: Store = {
-      roleRequiredCompetencies: [],
+      competencyRequirements: [],
       ...member('m1', 'u1', ['role-1']),
       assessmentTools: [tool('t-ato', ['c-ato'])],
       formTemplates: [template('tpl-t-ato', 'v1')],
@@ -247,7 +247,7 @@ describe('computeRequiredAssessmentsChange — additions', () => {
     // tool, or the previewed count would describe a different write.
     const shared = new Date('2026-03-01T00:00:00Z');
     const store: Store = {
-      roleRequiredCompetencies: [],
+      competencyRequirements: [],
       ...member('m1', 'u1', ['role-1']),
       assessmentTools: [
         tool('t-zz', ['cB'], { createdAt: shared }),
@@ -272,7 +272,7 @@ describe('computeRequiredAssessmentsChange — additions', () => {
 
   it('skips a candidate tool whose template has no published version (KTD2)', async () => {
     const store: Store = {
-      roleRequiredCompetencies: [],
+      competencyRequirements: [],
       ...member('m1', 'u1', ['role-1']),
       assessmentTools: [tool('tB', ['cB'])],
       formTemplates: [template('tpl-tB', null)], // never published — unbookable
@@ -296,7 +296,7 @@ describe('computeRequiredAssessmentsChange — removals', () => {
     // has an in-flight case for cB's awarding tool and holds cB; nothing left
     // requires cB.
     const store: Store = {
-      roleRequiredCompetencies: [link('role-1', 'cA'), link('role-1', 'cB')],
+      competencyRequirements: [link('role-1', 'cA'), link('role-1', 'cB')],
       ...member('m1', 'u1', ['role-1']),
       assessmentTools: [tool('tA', ['cA']), tool('tB', ['cB'])],
       formTemplates: [template('tpl-tA'), template('tpl-tB')],
@@ -320,7 +320,7 @@ describe('computeRequiredAssessmentsChange — removals', () => {
     // legacy-requires tB — whose award is cB. The post-change read must see
     // the legacy half or it would report a demotion that is not happening.
     const store: Store = {
-      roleRequiredCompetencies: [link('role-1', 'cB')],
+      competencyRequirements: [link('role-1', 'cB')],
       roleRequiredAssessments: [{ orgId: ORG, roleId: 'role-2', toolId: 'tB' }],
       ...member('m1', 'u1', ['role-1', 'role-2']),
       assessmentTools: [tool('tB', ['cB'])],
@@ -340,7 +340,7 @@ describe('computeRequiredAssessmentsChange — removals', () => {
 
   it('does not demote a competency another Role requires through a DIRECT link (R56, cross-role)', async () => {
     const store: Store = {
-      roleRequiredCompetencies: [link('role-1', 'cB'), link('role-2', 'cB')],
+      competencyRequirements: [link('role-1', 'cB'), link('role-2', 'cB')],
       ...member('m1', 'u1', ['role-1', 'role-2']),
       assessmentTools: [tool('tB', ['cB'])],
       formTemplates: [template('tpl-tB')],
@@ -356,7 +356,7 @@ describe('computeRequiredAssessmentsChange — removals', () => {
 
   it('counts a non-terminal awaiting_sign_off case as in flight, and ignores a competent one', async () => {
     const store: Store = {
-      roleRequiredCompetencies: [link('role-1', 'cB')],
+      competencyRequirements: [link('role-1', 'cB')],
       ...member('m1', 'u1', ['role-1']),
       assessmentTools: [tool('tB', ['cB'])],
       formTemplates: [template('tpl-tB')],
@@ -382,7 +382,7 @@ describe('computeRequiredAssessmentsChange — legacy-row removal', () => {
     // legacy row is the whole change: cB leaves required standing for u1, and
     // the in-flight tB case continues rather than being cancelled.
     const store: Store = {
-      roleRequiredCompetencies: [],
+      competencyRequirements: [],
       roleRequiredAssessments: [{ orgId: ORG, roleId: 'role-1', toolId: 'tB' }],
       ...member('m1', 'u1', ['role-1']),
       assessmentTools: [tool('tB', ['cB'])],
@@ -405,7 +405,7 @@ describe('computeRequiredAssessmentsChange — legacy-row removal', () => {
     // The usual awaitingLink case: the tool awards nothing yet. Its removal
     // frees no competency (there is none) but its live case still continues.
     const store: Store = {
-      roleRequiredCompetencies: [],
+      competencyRequirements: [],
       roleRequiredAssessments: [{ orgId: ORG, roleId: 'role-1', toolId: 'tU' }],
       ...member('m1', 'u1', ['role-1']),
       assessmentTools: [tool('tU', [])],
@@ -431,7 +431,7 @@ describe('computeRequiredAssessmentsChange — mixed', () => {
     // current links {cA, cB}; desired {cA, cC}: drops cB, adds cC. u1 holds cB
     // and has an in-flight case for cB's tool, and does not hold cC.
     const store: Store = {
-      roleRequiredCompetencies: [link('role-1', 'cA'), link('role-1', 'cB')],
+      competencyRequirements: [link('role-1', 'cA'), link('role-1', 'cB')],
       ...member('m1', 'u1', ['role-1']),
       assessmentTools: [tool('tA', ['cA']), tool('tB', ['cB']), tool('tC', ['cC'])],
       formTemplates: [template('tpl-tA'), template('tpl-tB'), template('tpl-tC', 'v1')],
@@ -463,7 +463,7 @@ describe('computeAwardLinkChange', () => {
         { orgId: ORG, roleId: 'role-1', toolId: 'tB' },
         { orgId: ORG, roleId: 'role-2', toolId: 'tB' },
       ],
-      roleRequiredCompetencies: [link('role-2', 'cB', 'recommended')],
+      competencyRequirements: [link('role-2', 'cB', 'recommended')],
       memberships: [
         { id: 'm1', orgId: ORG, userId: 'u1' },
         { id: 'm2', orgId: ORG, userId: 'u2' },
@@ -516,7 +516,7 @@ describe('computeAwardLinkChange', () => {
     */
     const store: Store = {
       roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'role-1', toolId: 't-late' }],
-      roleRequiredCompetencies: [],
+      competencyRequirements: [],
       ...member('m1', 'u1', ['role-1']),
       assessmentTools: [
         tool('t-early', ['cB'], { createdAt: new Date('2026-01-01T00:00:00Z') }),
@@ -539,7 +539,7 @@ describe('computeAwardLinkChange', () => {
     (store.assessmentTools!.find((t) => t.id === 't-late') as { awardedCompetencyIds: string[] })
       .awardedCompetencyIds = ['cB'];
     store.roleRequiredAssessments = [];
-    store.roleRequiredCompetencies = [link('role-1', 'cB')];
+    store.competencyRequirements = [link('role-1', 'cB')];
 
     const byRole = await requiredToolIdsByRole(db as never, ORG, ['role-1']);
     expect(byRole.get('role-1')).toEqual(['t-early']);
@@ -554,7 +554,7 @@ describe('computeAwardLinkChange', () => {
         { orgId: ORG, roleId: 'role-1', toolId: 'tB' },
         { orgId: ORG, roleId: 'role-2', toolId: 'tB' },
       ],
-      roleRequiredCompetencies: [],
+      competencyRequirements: [],
       ...member('m1', 'u1', ['role-1', 'role-2']),
       assessmentTools: [tool('tB', [])],
       formTemplates: [template('tpl-tB', 'v1')],

@@ -1,7 +1,7 @@
 /**
  * The standing LOADERS (U1 of the role-competency links round): required
  * standing is a DUAL READ — legacy Role → tool → awards derivation unioned
- * with direct `role_required_competencies` links (KTD3) — and recommended is
+ * with direct `competency_requirements` links (KTD3) — and recommended is
  * its single-source sibling that never bleeds into required (R13).
  *
  * The fake db here honours the WHERE clauses the loaders actually issue
@@ -134,7 +134,7 @@ function makeDb(store: Store) {
       membershipRoles: table('membershipRoles'),
       roleRequiredAssessments: table('roleRequiredAssessments'),
       assessmentTools: table('assessmentTools'),
-      roleRequiredCompetencies: table('roleRequiredCompetencies'),
+      competencyRequirements: table('competencyRequirements'),
     };
   };
   const tx = { query: tables('tx') };
@@ -171,7 +171,7 @@ describe('requiredCompetencyIdsByUser', () => {
     // the direct link alone makes it required.
     const { db } = makeDb({
       ...member('m1', 'u1', ['r1']),
-      roleRequiredCompetencies: [link('r1', 'c-licence', 'required')],
+      competencyRequirements: [link('r1', 'c-licence', 'required')],
     });
 
     const byUser = await requiredCompetencyIdsByUser(db, ORG, ['u1']);
@@ -198,7 +198,7 @@ describe('requiredCompetencyIdsByUser', () => {
       ...member('m1', 'u1', ['r1']),
       roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'r1', toolId: 't1' }],
       assessmentTools: [{ id: 't1', orgId: ORG, awardedCompetencyIds: ['c-dozer'] }],
-      roleRequiredCompetencies: [
+      competencyRequirements: [
         link('r1', 'c-dozer', 'required'),
         link('r1', 'c-licence', 'required'),
       ],
@@ -212,7 +212,7 @@ describe('requiredCompetencyIdsByUser', () => {
   it('never lets a recommended link enter the required set (R13)', async () => {
     const { db } = makeDb({
       ...member('m1', 'u1', ['r1']),
-      roleRequiredCompetencies: [
+      competencyRequirements: [
         link('r1', 'c-dozer', 'required'),
         link('r1', 'c-first-aid', 'recommended'),
       ],
@@ -230,7 +230,7 @@ describe('requiredCompetencyIdsByUser', () => {
       ...member('m1', 'u1', ['r1'], ['r1']),
       roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'r1', toolId: 't1' }],
       assessmentTools: [{ id: 't1', orgId: ORG, awardedCompetencyIds: ['c-dozer'] }],
-      roleRequiredCompetencies: [link('r1', 'c-licence', 'required')],
+      competencyRequirements: [link('r1', 'c-licence', 'required')],
     });
 
     const byUser = await requiredCompetencyIdsByUser(db, ORG, ['u1']);
@@ -247,7 +247,7 @@ describe('requiredCompetencyIdsByUser', () => {
       ...member('m1', 'u1', ['r1']),
       roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'r1', toolId: 't1' }],
       assessmentTools: [{ id: 't1', orgId: ORG, awardedCompetencyIds: ['c-dozer'] }],
-      roleRequiredCompetencies: [link('r1', 'c-licence', 'required')],
+      competencyRequirements: [link('r1', 'c-licence', 'required')],
     });
 
     await requiredCompetencyIdsByUser(db, ORG, ['u1']);
@@ -264,7 +264,7 @@ describe('requiredCompetencyIdsByUser', () => {
     const FIVE = ['c-ato', 'c-licence', 'c-sme', 'c-grade', 'c-tip'];
     const { db } = makeDb({
       ...member('m1', 'u1', ['r1']),
-      roleRequiredCompetencies: FIVE.map((c) => link('r1', c, 'required')),
+      competencyRequirements: FIVE.map((c) => link('r1', c, 'required')),
       assessmentTools: [{ id: 't-ato', orgId: ORG, awardedCompetencyIds: ['c-ato'] }],
     });
 
@@ -276,7 +276,7 @@ describe('requiredCompetencyIdsByUser', () => {
   it('maps every requested userId, empty set by default — nobody is absent', async () => {
     const { db } = makeDb({
       ...member('m1', 'u1', ['r1']),
-      roleRequiredCompetencies: [link('r1', 'c-dozer', 'required')],
+      competencyRequirements: [link('r1', 'c-dozer', 'required')],
     });
 
     const byUser = await requiredCompetencyIdsByUser(db, ORG, ['u1', 'u-nobody']);
@@ -289,7 +289,7 @@ describe('requiredCompetencyIdsByUser', () => {
   it('serves the single-user shape through the same batch path', async () => {
     const { db } = makeDb({
       ...member('m1', 'u1', ['r1']),
-      roleRequiredCompetencies: [link('r1', 'c-dozer', 'required')],
+      competencyRequirements: [link('r1', 'c-dozer', 'required')],
     });
 
     expect([...(await requiredCompetencyIdsFor(db, ORG, 'u1'))]).toEqual(['c-dozer']);
@@ -301,7 +301,7 @@ describe('recommendedCompetencyIdsByUser', () => {
   it('reads recommended links only — required never bleeds in (R6, R13)', async () => {
     const { db } = makeDb({
       ...member('m1', 'u1', ['r1']),
-      roleRequiredCompetencies: [
+      competencyRequirements: [
         link('r1', 'c-dozer', 'required'),
         link('r1', 'c-first-aid', 'recommended'),
       ],
@@ -315,7 +315,7 @@ describe('recommendedCompetencyIdsByUser', () => {
   it('lets a withdrawn Role recommend nothing (R52)', async () => {
     const { db } = makeDb({
       ...member('m1', 'u1', ['r1'], ['r1']),
-      roleRequiredCompetencies: [link('r1', 'c-first-aid', 'recommended')],
+      competencyRequirements: [link('r1', 'c-first-aid', 'recommended')],
     });
 
     const byUser = await recommendedCompetencyIdsByUser(db, ORG, ['u1']);

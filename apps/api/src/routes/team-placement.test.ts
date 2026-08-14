@@ -57,7 +57,7 @@ function fakeDb(opts: {
         Empty on both sides keeps the assignment a no-op, as above.
       */
       roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue([]) },
-      roleRequiredCompetencies: { findMany: vi.fn().mockResolvedValue([]) },
+      competencyRequirements: { findMany: vi.fn().mockResolvedValue([]) },
     },
   };
   // Order is deterministic: `loadPlacementContext` fires the active query first,
@@ -89,7 +89,7 @@ function fakeDb(opts: {
       // requirements FROM EITHER SOURCE (legacy rows or direct competency
       // links, KTD2) it is a no-op, which is all these placement tests need.
       roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue([]) },
-      roleRequiredCompetencies: { findMany: vi.fn().mockResolvedValue([]) },
+      competencyRequirements: { findMany: vi.fn().mockResolvedValue([]) },
     },
     insert: () => ({ values: () => Promise.resolve(undefined) }),
     transaction: vi.fn(async (cb: (t: typeof tx) => Promise<void>) => cb(tx)),

@@ -1539,22 +1539,22 @@ assessmentToolsRouter.put(
           for (const step of plan.carryPlan) {
             if (step.action === 'repoint') {
               await tx
-                .update(schema.roleRequiredCompetencies)
+                .update(schema.competencyRequirements)
                 .set({ competencyId: body.competencyId })
-                .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
+                .where(eq(schema.competencyRequirements.id, step.linkId));
             } else if (step.action === 'merge-upgrade' && step.targetLinkId) {
               await tx
-                .update(schema.roleRequiredCompetencies)
+                .update(schema.competencyRequirements)
                 .set({ tier: 'required' })
-                .where(eq(schema.roleRequiredCompetencies.id, step.targetLinkId));
+                .where(eq(schema.competencyRequirements.id, step.targetLinkId));
               await tx
-                .delete(schema.roleRequiredCompetencies)
-                .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
+                .delete(schema.competencyRequirements)
+                .where(eq(schema.competencyRequirements.id, step.linkId));
             } else {
               // merge-delete: the role already requires the incoming competency.
               await tx
-                .delete(schema.roleRequiredCompetencies)
-                .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
+                .delete(schema.competencyRequirements)
+                .where(eq(schema.competencyRequirements.id, step.linkId));
             }
           }
           for (const c of plan.casesToInsert) {
@@ -1601,7 +1601,7 @@ async function applyFirstLink(
     .where(eq(schema.assessmentTools.id, toolId));
   for (const step of plan.roleLinkPlan) {
     if (step.action === 'insert') {
-      await tx.insert(schema.roleRequiredCompetencies).values({
+      await tx.insert(schema.competencyRequirements).values({
         orgId,
         roleId: step.roleId,
         competencyId,
@@ -1609,11 +1609,11 @@ async function applyFirstLink(
       });
     } else if (step.action === 'upgrade' && step.existingLinkId) {
       // A recommended row already names this pair — promote its tier;
-      // inserting would collide with role_required_competencies_uq.
+      // inserting would collide with competency_requirements_role_uq.
       await tx
-        .update(schema.roleRequiredCompetencies)
+        .update(schema.competencyRequirements)
         .set({ tier: 'required' })
-        .where(eq(schema.roleRequiredCompetencies.id, step.existingLinkId));
+        .where(eq(schema.competencyRequirements.id, step.existingLinkId));
     }
     // 'exists': already required — nothing to write.
   }

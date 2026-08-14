@@ -100,7 +100,7 @@ function fakeDb(opts: {
   roleRequiredAssessmentsFindMany?: unknown[];
   assessmentToolsFindMany?: unknown[];
   /** Direct Role → competency links (KTD1): the dual read's second half, and DELETE's dependency check. */
-  roleRequiredCompetenciesFindMany?: unknown[];
+  competencyRequirementsFindMany?: unknown[];
   /** Every route is gated by requirePlanFeature('competencyGating'). */
   planTier?: string;
   /** The org's candidate self-start toggle (U7, R14). Default OFF — the stored default. */
@@ -164,7 +164,7 @@ function fakeDb(opts: {
       assessmentTools: {
         findMany: vi.fn().mockResolvedValue(opts.assessmentToolsFindMany ?? []),
       },
-      roleRequiredCompetencies: {
+      competencyRequirements: {
         /*
           TIER-AWARE, unlike the other mocks: the loaders filter tier in the
           WHERE clause ('required' for the dual read, 'recommended' for its
@@ -174,7 +174,7 @@ function fakeDb(opts: {
           of the query's bound params.
         */
         findMany: vi.fn((args?: { where?: unknown }) => {
-          const rows = (opts.roleRequiredCompetenciesFindMany ?? []) as { tier?: string }[];
+          const rows = (opts.competencyRequirementsFindMany ?? []) as { tier?: string }[];
           const seen = new Set<unknown>();
           const stack: unknown[] = [args?.where];
           let tier: string | null = null;
@@ -825,7 +825,7 @@ describe('DELETE /competencies/:id', () => {
     // while any of these stand.
     const { db, deleteWhere } = fakeDb({
       competenciesFindFirst: { id: 'c1', orgId: 'org-1', name: 'Track Dozer', code: 'Q34666893' },
-      roleRequiredCompetenciesFindMany: [
+      competencyRequirementsFindMany: [
         { roleId: 'r1', competencyId: 'c1', tier: 'required' },
         { roleId: 'r2', competencyId: 'c1', tier: 'recommended' },
       ],
@@ -846,8 +846,50 @@ describe('DELETE /competencies/:id', () => {
         error: 'competency_in_use',
         roles: 1,
         recommendedBy: 1,
+        locations: 0,
+        departments: 0,
+        orgWide: 0,
         tools: 1,
         grants: 1,
+      });
+      expect(deleteWhere).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('blocks on a NON-role requirement row and reports it per scope, never as a role (KTD2, U1)', async () => {
+    /*
+      The requirements table now carries four scopes, and the dependency read
+      is by competencyId alone — so an org-scope or location-scope requirement
+      must still 409 a delete. But the payload's `roles` key is a promise about
+      ROLE rows: an org-wide requirement laundered into it would send the admin
+      hunting through role editors for a dependency none of them holds. Scope
+      rows land in their own counts.
+    */
+    const { db, deleteWhere } = fakeDb({
+      competenciesFindFirst: { id: 'c1', orgId: 'org-1', name: 'Track Dozer', code: 'Q34666893' },
+      competencyRequirementsFindMany: [
+        { roleId: null, locationId: null, departmentId: null, competencyId: 'c1', tier: 'required' },
+        { roleId: null, locationId: 'loc-1', departmentId: null, competencyId: 'c1', tier: 'required' },
+        { roleId: null, locationId: null, departmentId: 'dep-1', competencyId: 'c1', tier: 'recommended' },
+      ],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1`, { method: 'DELETE', headers: authHeader() });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: 'competency_in_use',
+        roles: 0,
+        recommendedBy: 0,
+        locations: 1,
+        departments: 1,
+        orgWide: 1,
+        tools: 0,
+        grants: 0,
       });
       expect(deleteWhere).not.toHaveBeenCalled();
     } finally {
@@ -1600,7 +1642,7 @@ describe('competency holders', () => {
       competenciesFindMany: [{ id: 'c1', name: 'Driver Licence', validForMonths: 36 }],
       membershipsFindMany: [{ id: 'm1', userId: HOLDER_ID }],
       membershipRolesFindMany: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
-      roleRequiredCompetenciesFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'required' }],
+      competencyRequirementsFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'required' }],
     }).db;
     const { server, base } = startApp();
     try {
@@ -1623,7 +1665,7 @@ describe('competency holders', () => {
       membershipRolesFindMany: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
       roleRequiredAssessmentsFindMany: [{ roleId: 'r1', toolId: 't1' }],
       assessmentToolsFindMany: [{ id: 't1', awardedCompetencyIds: ['c1'] }],
-      roleRequiredCompetenciesFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'required' }],
+      competencyRequirementsFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'required' }],
     }).db;
     const { server, base } = startApp();
     try {
@@ -1643,7 +1685,7 @@ describe('competency holders', () => {
       competenciesFindMany: [{ id: 'c1', name: 'First Aid', validForMonths: 36 }],
       membershipsFindMany: [{ id: 'm1', userId: HOLDER_ID }],
       membershipRolesFindMany: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
-      roleRequiredCompetenciesFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'recommended' }],
+      competencyRequirementsFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'recommended' }],
     }).db;
     const { server, base } = startApp();
     try {
@@ -2068,7 +2110,7 @@ describe('GET /competencies/recommended (U7 — R12, R14, KTD2)', () => {
   const recommendedFixture = {
     membershipsFindMany: [{ id: 'm1', userId: HOLDER_ID }],
     membershipRolesFindMany: [{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }],
-    roleRequiredCompetenciesFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'recommended' }],
+    competencyRequirementsFindMany: [{ roleId: 'r1', competencyId: 'c1', tier: 'recommended' }],
     competenciesFindMany: [
       { id: 'c1', orgId: 'org-1', name: 'First Aid', code: 'HLTAID011', validForMonths: 36 },
     ],

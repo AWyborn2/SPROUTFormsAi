@@ -225,19 +225,27 @@ function stringValues(node: unknown, out: string[] = [], depth = 0): string[] {
 
 /**
  * A drizzle where-clause reduced to what the fake db matches on: `all` are the
- * operands that must every one be present (an `and` of `eq`s), and each `anyOf`
- * group is an `inArray` where the row matching ANY one operand is a match.
+ * operands that must every one be present (an `and` of `eq`s), each `anyOf`
+ * group is an `inArray` where the row matching ANY one operand is a match, and
+ * `notNull` are columns an `isNotNull` demands a value in.
  *
  * `inArray` renders as `col in $params`, so its operands are an OR â€” collecting
  * them into `all` like the eqs would demand a single row hold every id at once
- * and match nothing. Enough structure to model these routes' reads without
- * importing a SQL engine.
+ * and match nothing. `isNotNull` binds NO value at all, so a value-only matcher
+ * is blind to it â€” which is exactly the term the KTD2 role-scope filters hang
+ * on, so the column name is lifted from the clause and checked against the row
+ * (snake_case column to the store's camelCase key). Enough structure to model
+ * these routes' reads without importing a SQL engine.
  */
 function whereTerms(
   node: unknown,
-  acc: { all: string[]; anyOf: string[][] } = { all: [], anyOf: [] },
+  acc: { all: string[]; anyOf: string[][]; notNull: string[] } = {
+    all: [],
+    anyOf: [],
+    notNull: [],
+  },
   depth = 0,
-): { all: string[]; anyOf: string[][] } {
+): { all: string[]; anyOf: string[][]; notNull: string[] } {
   if (!node || depth > 10) return acc;
   if (Array.isArray(node)) {
     for (const n of node) whereTerms(n, acc, depth + 1);
@@ -254,6 +262,15 @@ function whereTerms(
         return Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '';
       })
       .join('');
+    if (text.includes(' is not null')) {
+      for (const c of chunks) {
+        const name = (c as { name?: unknown } | null)?.name;
+        if (typeof name === 'string') {
+          acc.notNull.push(name.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase()));
+        }
+      }
+      return acc;
+    }
     if (text.includes(' in ')) {
       const group = stringValues(chunks);
       if (group.length) acc.anyOf.push(group);
@@ -270,9 +287,10 @@ function whereTerms(
 
 function matchesWhere(row: Record<string, unknown>, where: unknown): boolean {
   if (!where) return true;
-  const { all, anyOf } = whereTerms(where);
+  const { all, anyOf, notNull } = whereTerms(where);
   const present = new Set(Object.values(row).filter((v) => typeof v === 'string'));
   if (![...new Set(all)].every((w) => present.has(w))) return false;
+  if (!notNull.every((key) => row[key] !== null && row[key] !== undefined)) return false;
   return anyOf.every((group) => group.some((w) => present.has(w)));
 }
 
@@ -317,7 +335,7 @@ function makeDb(
     assessmentTools: [],
     assessmentToolDrafts: [],
     roleRequiredAssessments: [],
-    roleRequiredCompetencies: [],
+    competencyRequirements: [],
     // The award-link plan walks a legacy role's holders and their Locations
     // (U2) — empty by default, seeded by the award tests.
     membershipRoles: [],
@@ -754,7 +772,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       expect(previewed).toEqual({ rolesLinked: 1, affected: 1, created: 1 });
       // A preview writes nothing.
       expect(rows(store, 'assessmentCases')).toHaveLength(0);
-      expect(rows(store, 'roleRequiredCompetencies')).toHaveLength(0);
+      expect(rows(store, 'competencyRequirements')).toHaveLength(0);
 
       const applied = await award(base, tool.id, { competencyId: COMPETENCY });
       expect(applied.status).toBe(200);
@@ -763,7 +781,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       // One transaction: award set, link inserted, legacy drained, case live.
       const toolRow = rows(store, 'assessmentTools').find((t) => t.id === tool.id)!;
       expect(toolRow.awardedCompetencyIds).toEqual([COMPETENCY]);
-      expect(rows(store, 'roleRequiredCompetencies')).toEqual([
+      expect(rows(store, 'competencyRequirements')).toEqual([
         expect.objectContaining({ roleId: ROLE_1, competencyId: COMPETENCY, tier: 'required' }),
       ]);
       expect(rows(store, 'roleRequiredAssessments')).toHaveLength(0);
@@ -788,7 +806,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
         toolId: tool.id,
       });
       const existingLinkId = nextId();
-      rows(store, 'roleRequiredCompetencies').push({
+      rows(store, 'competencyRequirements').push({
         id: existingLinkId,
         orgId: ORG,
         roleId: ROLE_2,
@@ -799,7 +817,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       const applied = await award(base, tool.id, { competencyId: COMPETENCY });
       expect(applied.status).toBe(200);
 
-      const links = rows(store, 'roleRequiredCompetencies');
+      const links = rows(store, 'competencyRequirements');
       expect(links).toHaveLength(1); // upgraded IN PLACE — never a second row
       expect(links[0]).toMatchObject({ id: existingLinkId, tier: 'required' });
     } finally {
@@ -827,7 +845,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       expect(repeat.status).toBe(200);
       expect(await repeat.json()).toMatchObject({ rolesLinked: 0, affected: 0, created: 0 });
       expect(rows(store, 'assessmentCases')).toHaveLength(1); // no duplicate case
-      expect(rows(store, 'roleRequiredCompetencies')).toHaveLength(1);
+      expect(rows(store, 'competencyRequirements')).toHaveLength(1);
     } finally {
       server.close();
     }
@@ -880,7 +898,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       }
       // One role requires the outgoing competency; its holder lacks COMP_2.
       const linkId = nextId();
-      rows(store, 'roleRequiredCompetencies').push({
+      rows(store, 'competencyRequirements').push({
         id: linkId,
         orgId: ORG,
         roleId: ROLE_1,
@@ -908,7 +926,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       expect(await applied.json()).toEqual(previewed); // preview == apply (KTD10)
 
       // The role link is RE-POINTED in place; the grants are untouched.
-      const links = rows(store, 'roleRequiredCompetencies');
+      const links = rows(store, 'competencyRequirements');
       expect(links).toHaveLength(1);
       expect(links[0]).toMatchObject({ id: linkId, competencyId: COMP_2, tier: 'required' });
       const grants = rows(store, 'competencyHolders');
@@ -925,6 +943,69 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
     }
   });
 
+  it('RE-LINK ignores a NON-role requirement of the outgoing competency — neither carried nor counted (KTD2)', async () => {
+    /*
+      The requirements table now holds four scopes, and the outgoing-links read
+      selects by competencyId — so without its role filter the carry would
+      ingest an org-scope row the moment the table generalised: a null roleId
+      in the carry plan, an inflated rolesRequiringOutgoing on the confirm
+      dialog, and a repoint that could collide with the org-scope partial
+      unique index. Award-link conversion is inherently role-scoped (legacy
+      rows only ever lived on roles), so the org-scope row must sit this out
+      entirely: not counted, not re-pointed, still naming the OUTGOING
+      competency after the apply.
+    */
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base); // awards COMPETENCY (the outgoing)
+      rows(store, 'competencies').push({ id: COMP_2, orgId: ORG, name: 'Grader Operator', holders: 0 });
+      const roleLinkId = nextId();
+      const orgScopeId = nextId();
+      rows(store, 'competencyRequirements').push(
+        { id: roleLinkId, orgId: ORG, roleId: ROLE_1, competencyId: COMPETENCY, tier: 'required' },
+        // The org itself requires the outgoing competency — all scope columns null.
+        {
+          id: orgScopeId,
+          orgId: ORG,
+          roleId: null,
+          locationId: null,
+          departmentId: null,
+          competencyId: COMPETENCY,
+          tier: 'required',
+        },
+      );
+      placeHolder(store, OTHER_CANDIDATE, ROLE_1);
+
+      const previewed = (await (
+        await preview(base, tool.id, { competencyId: COMP_2, carryRoleLinks: true })
+      ).json()) as Record<string, number>;
+      // ONE role requires the outgoing competency. The org-scope row is not a role.
+      expect(previewed).toEqual({ outgoingGrants: 0, rolesRequiringOutgoing: 1, created: 1 });
+
+      const applied = await award(base, tool.id, {
+        competencyId: COMP_2,
+        carryRoleLinks: true,
+        confirm: true,
+      });
+      expect(applied.status).toBe(200);
+      expect(await applied.json()).toEqual(previewed); // preview == apply (KTD10)
+
+      // The role link travelled; the org-scope row did not move an inch.
+      const links = rows(store, 'competencyRequirements');
+      expect(links).toHaveLength(2);
+      expect(links.find((l) => l.id === roleLinkId)).toMatchObject({ competencyId: COMP_2 });
+      expect(links.find((l) => l.id === orgScopeId)).toMatchObject({
+        competencyId: COMPETENCY,
+        roleId: null,
+        tier: 'required',
+      });
+    } finally {
+      server.close();
+    }
+  });
+
   it('RE-LINK with carry MERGES into an existing incoming link instead of colliding (unique index)', async () => {
     const { db, store } = makeDb();
     mockDbValue = db;
@@ -933,7 +1014,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       const tool = await seedTool(base);
       rows(store, 'competencies').push({ id: COMP_2, orgId: ORG, name: 'Grader Operator', holders: 0 });
       // The role ALREADY requires the incoming competency alongside the outgoing.
-      rows(store, 'roleRequiredCompetencies').push(
+      rows(store, 'competencyRequirements').push(
         { id: nextId(), orgId: ORG, roleId: ROLE_1, competencyId: COMPETENCY, tier: 'required' },
         { id: nextId(), orgId: ORG, roleId: ROLE_1, competencyId: COMP_2, tier: 'required' },
       );
@@ -945,7 +1026,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       });
       expect(applied.status).toBe(200);
 
-      const links = rows(store, 'roleRequiredCompetencies');
+      const links = rows(store, 'competencyRequirements');
       expect(links).toHaveLength(1); // the outgoing row deleted, never re-pointed into a clash
       expect(links[0]).toMatchObject({ roleId: ROLE_1, competencyId: COMP_2, tier: 'required' });
     } finally {
@@ -973,7 +1054,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       const tool = await seedTool(base); // awards COMPETENCY (the outgoing)
       rows(store, 'competencies').push({ id: COMP_2, orgId: ORG, name: 'Grader Operator', holders: 0 });
       const linkId = nextId();
-      rows(store, 'roleRequiredCompetencies').push({
+      rows(store, 'competencyRequirements').push({
         id: linkId,
         orgId: ORG,
         roleId: ROLE_1,
@@ -995,7 +1076,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       const toolRow = rows(store, 'assessmentTools').find((t) => t.id === tool.id)!;
       expect(toolRow.awardedCompetencyIds).toEqual([COMP_2]);
       // …and nothing else did.
-      const links = rows(store, 'roleRequiredCompetencies');
+      const links = rows(store, 'competencyRequirements');
       expect(links).toHaveLength(1);
       expect(links[0]).toMatchObject({ id: linkId, competencyId: COMPETENCY, tier: 'required' });
       expect(rows(store, 'assessmentCases')).toHaveLength(0);
@@ -1009,7 +1090,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       The third carry action (`merge-upgrade`), and the only one the unique
       index makes unavoidable: the role already names the incoming competency,
       but merely as a RECOMMENDATION. Re-pointing the outgoing row onto it
-      would collide with role_required_competencies_uq, and deleting the
+      would collide with competency_requirements_role_uq, and deleting the
       outgoing row alone would quietly DEMOTE a required competency to
       recommended. So the recommended row is promoted in place and the outgoing
       row deleted — one row, tier 'required', requirement preserved.
@@ -1022,7 +1103,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       rows(store, 'competencies').push({ id: COMP_2, orgId: ORG, name: 'Grader Operator', holders: 0 });
       const outgoingLinkId = nextId();
       const recommendedLinkId = nextId();
-      rows(store, 'roleRequiredCompetencies').push(
+      rows(store, 'competencyRequirements').push(
         { id: outgoingLinkId, orgId: ORG, roleId: ROLE_1, competencyId: COMPETENCY, tier: 'required' },
         { id: recommendedLinkId, orgId: ORG, roleId: ROLE_1, competencyId: COMP_2, tier: 'recommended' },
       );
@@ -1034,7 +1115,7 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
       });
       expect(applied.status).toBe(200);
 
-      const links = rows(store, 'roleRequiredCompetencies');
+      const links = rows(store, 'competencyRequirements');
       expect(links).toHaveLength(1);
       expect(links[0]).toMatchObject({
         id: recommendedLinkId, // promoted IN PLACE, never a second row

@@ -675,8 +675,8 @@ function requirementsFingerprint(
  */
 async function loadRequirementState(database: Reader, roleId: string) {
   const [links, legacyRows] = await Promise.all([
-    database.query.roleRequiredCompetencies.findMany({
-      where: eq(schema.roleRequiredCompetencies.roleId, roleId),
+    database.query.competencyRequirements.findMany({
+      where: eq(schema.competencyRequirements.roleId, roleId),
     }),
     database.query.roleRequiredAssessments.findMany({
       where: eq(schema.roleRequiredAssessments.roleId, roleId),
@@ -879,8 +879,8 @@ taxonomyRouter.put(
           );
 
           await tx
-            .delete(schema.roleRequiredCompetencies)
-            .where(eq(schema.roleRequiredCompetencies.roleId, role.id));
+            .delete(schema.competencyRequirements)
+            .where(eq(schema.competencyRequirements.roleId, role.id));
           const rows = [
             ...tiers.required.map((competencyId) => ({
               orgId: tenant.orgId,
@@ -896,7 +896,7 @@ taxonomyRouter.put(
             })),
           ];
           if (rows.length > 0) {
-            await tx.insert(schema.roleRequiredCompetencies).values(rows);
+            await tx.insert(schema.competencyRequirements).values(rows);
           }
           /*
             `requirementsConfigured` flips only when the REQUIRED tier is

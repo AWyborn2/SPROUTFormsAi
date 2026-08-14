@@ -85,7 +85,7 @@ function fakeDb(opts: {
       membershipLocations: { findMany: vi.fn().mockResolvedValue(opts.heldLocations ?? []) },
       membershipRoles: { findMany: vi.fn().mockResolvedValue(opts.membershipRoles ?? []) },
       roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue(opts.roleRequirements ?? []) },
-      roleRequiredCompetencies: {
+      competencyRequirements: {
         /*
           TIER-AWARE, same as the competencies-route fake: the standing loaders
           filter tier in the WHERE clause ('required' for the dual read,

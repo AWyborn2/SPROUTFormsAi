@@ -1,7 +1,7 @@
 /**
  * The SHARED resolver that inverts the requirement derivation (KTD2).
  *
- * Roles now store requirements as competencies (`role_required_competencies`),
+ * Roles now store requirements as competencies (`competency_requirements`),
  * but the assignment engine still speaks in TOOLS — a case is opened for the
  * assessment that awards the missing competency. This module is the one place
  * that translation happens, called from every real read site (the assignment
@@ -136,11 +136,11 @@ export async function requiredToolIdsByRole(
       ),
     });
     // Direct half: tier 'required' only — recommended never assigns (R13).
-    const linkRows = await reader.query.roleRequiredCompetencies.findMany({
+    const linkRows = await reader.query.competencyRequirements.findMany({
       where: and(
-        eq(schema.roleRequiredCompetencies.orgId, orgId),
-        inArray(schema.roleRequiredCompetencies.roleId, uniqueRoleIds),
-        eq(schema.roleRequiredCompetencies.tier, 'required'),
+        eq(schema.competencyRequirements.orgId, orgId),
+        inArray(schema.competencyRequirements.roleId, uniqueRoleIds),
+        eq(schema.competencyRequirements.tier, 'required'),
       ),
     });
     const awarding = await awardingToolByCompetency(
