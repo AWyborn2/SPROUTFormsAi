@@ -465,6 +465,26 @@ export interface AssessmentPart {
     targets: Array<{ value: string; minimumHours: number }>;
   };
   /**
+   * Logbook parts only — where each task type's rows PRINT on the evidence PDF.
+   *
+   * The multi-stage logbook fills ONE table (the source, carrying the task-type
+   * column), but the paper prints a separate grid per task type. At export the
+   * source's rows are partitioned by task value and written into the print-only
+   * table field each task maps to — so the renderer, which draws every field
+   * against its own geometry, needs no notion of tasks at all, and the export
+   * path stays untouched. A task whose rows exceed its printed grid's row count
+   * prints what fits; the hours still count, and the full record lives in the
+   * system.
+   */
+  logbookRouting?: {
+    /** The filled source table — the one carrying the task-type column. */
+    sourceFieldId: string;
+    /** That table's task-type column. */
+    columnKey: string;
+    /** Each task value → the print-only table field its rows render into. */
+    routes: Array<{ value: string; fieldId: string }>;
+  };
+  /**
    * The page-one assessment-method entry this part ticks once it passes.
    *
    * Replaces the bare `checklistFieldId`, which named a field but not what to
@@ -1029,6 +1049,68 @@ export function validateManifest(
           }
         }
       }
+
+      /*
+        Row routing to the printed task grids. Every pointer checked here, at
+        authoring time: a route to a field that is not a table, or to the same
+        table as another task, would silently drop or overwrite a task's rows on
+        the evidence document — and a route onto the source itself would replace
+        the candidate's own logbook with one task's slice of it.
+      */
+      if (part.logbookRouting) {
+        const r = part.logbookRouting;
+        const source = byFieldId.get(r.sourceFieldId);
+        if (!source || source.type !== 'repeating_group') {
+          problems.push(
+            `Logbook part "${part.key}" routing source "${r.sourceFieldId}" is not a table in this version.`,
+          );
+        }
+        const col = source?.columns?.find((c) => c.key === r.columnKey);
+        if (source?.columns && !col) {
+          problems.push(
+            `Logbook part "${part.key}" routing column "${r.columnKey}" is not a column of its source table.`,
+          );
+        }
+        if (col && (col.options?.length ?? 0) === 0) {
+          problems.push(
+            `Logbook part "${part.key}" routing column "${r.columnKey}" has no options to route on.`,
+          );
+        }
+        if (r.routes.length === 0) {
+          problems.push(`Logbook part "${part.key}" declares routing with no routes.`);
+        }
+        const seenValues = new Set<string>();
+        const seenTargets = new Set<string>();
+        for (const route of r.routes) {
+          if (col?.options && col.options.length > 0 && !col.options.includes(route.value)) {
+            problems.push(
+              `Logbook part "${part.key}" routes task "${route.value}", which is not an option of column "${r.columnKey}".`,
+            );
+          }
+          if (seenValues.has(route.value)) {
+            problems.push(`Logbook part "${part.key}" routes task "${route.value}" more than once.`);
+          }
+          seenValues.add(route.value);
+
+          const target = byFieldId.get(route.fieldId);
+          if (!target || target.type !== 'repeating_group') {
+            problems.push(
+              `Logbook part "${part.key}" routes task "${route.value}" to "${route.fieldId}", which is not a table in this version.`,
+            );
+          }
+          if (route.fieldId === r.sourceFieldId) {
+            problems.push(
+              `Logbook part "${part.key}" routes task "${route.value}" onto its own source table, which would overwrite the candidate's log.`,
+            );
+          }
+          if (seenTargets.has(route.fieldId)) {
+            problems.push(
+              `Logbook part "${part.key}" routes two tasks to the same table "${route.fieldId}" — their rows would overwrite each other.`,
+            );
+          }
+          seenTargets.add(route.fieldId);
+        }
+      }
     }
 
     /*
@@ -1444,6 +1526,31 @@ export function totalLoggedHours(
     if (Number.isFinite(value) && value > 0) total += value;
   }
   return Math.round(total * 100) / 100;
+}
+
+/**
+ * Logbook rows grouped by task type, each group in first-seen order.
+ *
+ * The partition behind BOTH per-task hours and the evidence PDF's row routing:
+ * export sends each task's rows to its own printed grid, and the same grouping
+ * underlies the per-task totals. A row with a blank task is left out of every
+ * group — an unclassified entry belongs to no task table. Generic over the row
+ * type so the caller keeps its own row shape (the exporter needs
+ * `RepeatingRowValue[]` back, not `Record`s).
+ */
+export function rowsByTask<T extends Record<string, unknown>>(
+  rows: readonly T[],
+  taskColumnKey: string,
+): Map<string, T[]> {
+  const out = new Map<string, T[]>();
+  for (const row of rows) {
+    const task = row?.[taskColumnKey];
+    if (typeof task !== 'string' || task.trim() === '') continue;
+    const list = out.get(task);
+    if (list) list.push(row);
+    else out.set(task, [row]);
+  }
+  return out;
 }
 
 /**

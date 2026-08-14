@@ -373,6 +373,130 @@ describe('validateManifest', () => {
     });
   });
 
+  describe('logbook row routing', () => {
+    const table = (id: string, columns?: FormField['columns']): FormField => ({
+      id,
+      type: 'repeating_group',
+      label: id,
+      required: false,
+      source: 'imported',
+      ...(columns ? { columns } : {}),
+    });
+    const SRC_COLUMNS: FormField['columns'] = [
+      { key: 'task', label: 'Task', type: 'dropdown', options: ['Topsoil', 'Gravel'] },
+      { key: 'duration', label: 'Duration', type: 'number' },
+    ];
+    // h1 anchors the part; src is the first table (so durationColumnKey resolves),
+    // then two print-only target tables.
+    const routingFields = (): FormField[] => [
+      header('h1'),
+      table('src', SRC_COLUMNS),
+      table('tgt-topsoil'),
+      table('tgt-gravel'),
+    ];
+    function check(
+      routing: NonNullable<AssessmentPart['logbookRouting']>,
+      fields = routingFields(),
+    ): string[] {
+      const manifest: AssessmentToolManifest = {
+        parts: [
+          part({
+            key: 'log',
+            ordinal: 1,
+            kind: 'logbook',
+            minimumHours: 50,
+            durationColumnKey: 'duration',
+            pathways: ['new'],
+            logbookRouting: routing,
+          }),
+        ],
+      };
+      return validateManifest(manifest, fields);
+    }
+
+    it('accepts routes to real tables on real option values', () => {
+      expect(
+        check({
+          sourceFieldId: 'src',
+          columnKey: 'task',
+          routes: [
+            { value: 'Topsoil', fieldId: 'tgt-topsoil' },
+            { value: 'Gravel', fieldId: 'tgt-gravel' },
+          ],
+        }),
+      ).toEqual([]);
+    });
+
+    it('rejects a source that is not a table', () => {
+      const problems = check({
+        sourceFieldId: 'h1',
+        columnKey: 'task',
+        routes: [{ value: 'Topsoil', fieldId: 'tgt-topsoil' }],
+      });
+      expect(problems.some((p) => p.includes('routing source') && p.includes('not a table'))).toBe(true);
+    });
+
+    it('rejects a routing column not on the source', () => {
+      const problems = check({
+        sourceFieldId: 'src',
+        columnKey: 'ghost',
+        routes: [{ value: 'Topsoil', fieldId: 'tgt-topsoil' }],
+      });
+      expect(problems.some((p) => p.includes('routing column "ghost"'))).toBe(true);
+    });
+
+    it('rejects a task value the column never offers', () => {
+      const problems = check({
+        sourceFieldId: 'src',
+        columnKey: 'task',
+        routes: [{ value: 'Stockpile', fieldId: 'tgt-topsoil' }],
+      });
+      expect(problems.some((p) => p.includes('routes task "Stockpile"'))).toBe(true);
+    });
+
+    it('rejects a target that is not a table', () => {
+      const problems = check({
+        sourceFieldId: 'src',
+        columnKey: 'task',
+        routes: [{ value: 'Topsoil', fieldId: 'h1' }],
+      });
+      expect(problems.some((p) => p.includes('to "h1"') && p.includes('not a table'))).toBe(true);
+    });
+
+    it('rejects routing a task onto the source table itself', () => {
+      const problems = check({
+        sourceFieldId: 'src',
+        columnKey: 'task',
+        routes: [{ value: 'Topsoil', fieldId: 'src' }],
+      });
+      expect(problems.some((p) => p.includes('onto its own source table'))).toBe(true);
+    });
+
+    it('rejects two tasks routed to the same table — one would overwrite the other', () => {
+      const problems = check({
+        sourceFieldId: 'src',
+        columnKey: 'task',
+        routes: [
+          { value: 'Topsoil', fieldId: 'tgt-topsoil' },
+          { value: 'Gravel', fieldId: 'tgt-topsoil' },
+        ],
+      });
+      expect(problems.some((p) => p.includes('same table'))).toBe(true);
+    });
+
+    it('rejects the same task value routed twice', () => {
+      const problems = check({
+        sourceFieldId: 'src',
+        columnKey: 'task',
+        routes: [
+          { value: 'Topsoil', fieldId: 'tgt-topsoil' },
+          { value: 'Topsoil', fieldId: 'tgt-gravel' },
+        ],
+      });
+      expect(problems.some((p) => p.includes('routes task "Topsoil" more than once'))).toBe(true);
+    });
+  });
+
   it('rejects a part belonging to no pathway', () => {
     const manifest: AssessmentToolManifest = {
       parts: [part({ key: 'orphan', ordinal: 1, pathways: [] })],

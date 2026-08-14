@@ -6,6 +6,7 @@ import {
   markTheory,
   moreCoachingRequired,
   requiredParts,
+  rowsByTask,
   validateManifest,
   type AssessmentPathway,
   type AssessmentToolManifest,
@@ -327,6 +328,27 @@ export function assembleCaseValues({
         values[fieldId],
       );
       if (rows.length > 0) values[fieldId] = rows;
+    }
+  }
+
+  /*
+    MULTI-STAGE LOGBOOK ROW ROUTING. The candidate fills ONE table carrying a
+    task-type column; the paper prints a separate grid per task. Partition the
+    source's rows by task and write each group under the print-only field that
+    task maps to, so the renderer draws each grid from its own field with no
+    notion of tasks — the export path itself is untouched. Written over whatever
+    the target field held. A task with more rows than its grid prints what fits
+    (the renderer's fixed row bands); the hours are counted elsewhere, so nothing
+    is lost to the record.
+  */
+  for (const part of manifest.parts) {
+    const routing = part.logbookRouting;
+    if (!routing) continue;
+    const source = values[routing.sourceFieldId];
+    if (!Array.isArray(source)) continue;
+    const byTask = rowsByTask(source as RepeatingRowValue[], routing.columnKey);
+    for (const route of routing.routes) {
+      values[route.fieldId] = byTask.get(route.value) ?? [];
     }
   }
 
