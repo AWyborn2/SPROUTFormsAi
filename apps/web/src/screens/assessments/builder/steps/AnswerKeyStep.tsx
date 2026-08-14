@@ -380,6 +380,26 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                 )}
               </label>
             )}
+
+            {!question.assessorVerdict && key && (
+              <div className="mt-2.5">
+                <label className="text-[11px] text-text-tertiary">
+                  Hint when incorrect
+                  <span className="ml-1 text-text-quaternary">(optional — shown in interactive quiz mode)</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Review Module 5: Safety Data Sheets"
+                  value={question.answerHint ?? ''}
+                  onChange={(e) =>
+                    draft.fieldOps.patch(question.id, {
+                      answerHint: e.target.value || undefined,
+                    })
+                  }
+                  className="mt-1 h-[30px] w-full rounded-lg border border-border bg-surface-page px-2.5 text-[11.5px] text-text-primary placeholder:text-text-quaternary"
+                />
+              </div>
+            )}
           </div>
         );
       })}

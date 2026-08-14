@@ -1348,6 +1348,13 @@ export function useSetAttemptSubmitted(caseId: string) {
   });
 }
 
+export function useCheckQuestion(caseId: string, attemptId: string | undefined) {
+  return useMutation({
+    mutationFn: (input: { fieldId: string; value: SubmissionValue }) =>
+      assessmentsApi.checkQuestion(caseId, attemptId!, input.fieldId, input.value),
+  });
+}
+
 export function useRecordOutcome(caseId: string) {
   const qc = useQueryClient();
   return useMutation({

@@ -8,6 +8,7 @@ import { dateFieldToStamp } from './signature-date-stamp.js';
 import { LogbookProgress } from './LogbookProgress.js';
 import {
   useAssessmentAttempt,
+  useCheckQuestion,
   useOpenAttempt,
   useSaveAttempt,
   useSetAttemptSubmitted,
@@ -16,6 +17,7 @@ import { partVisibility } from '../../lib/assessment-fill.js';
 import { fillSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
 import { answeredPages, theoryPages } from '../../lib/theory-pages.js';
+import { TheoryQuiz } from './TheoryQuiz.js';
 
 /**
  * Completing one part of an assessment case — the candidate's working surface.
@@ -43,6 +45,7 @@ export function CasePartFillScreen() {
   const save = useSaveAttempt(caseId ?? '');
   const setSubmitted = useSetAttemptSubmitted(caseId ?? '');
   const openAttempt = useOpenAttempt(caseId ?? '');
+  const checkQuestion = useCheckQuestion(caseId ?? '', attemptId);
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   const [dirty, setDirty] = useState(false);
@@ -209,6 +212,62 @@ export function CasePartFillScreen() {
         },
         onError: () => toast({ variant: 'danger', message: "Couldn't save — try again." }),
       },
+    );
+  }
+
+  if (paged && !readOnly && pages.length > 0) {
+    return (
+      <TheoryQuiz
+        pages={pages}
+        values={values}
+        writable={writable}
+        allowRetry={!!attempt.theoryAllowRetry}
+        passPercent={attempt.theoryPassPercent ?? 100}
+        partLabel={attempt.partLabel}
+        partKey={attempt.partKey}
+        caseId={caseId!}
+        attemptId={attemptId!}
+        onValueChange={setValue}
+        onCheckQuestion={(fieldId, value) => checkQuestion.mutateAsync({ fieldId, value })}
+        onSave={() =>
+          new Promise<void>((resolve, reject) =>
+            save.mutate(
+              { attemptId: attemptId!, values },
+              { onSuccess: () => { setDirty(false); resolve(); }, onError: reject },
+            ),
+          )
+        }
+        onSubmit={() =>
+          new Promise((resolve, reject) =>
+            setSubmitted.mutate(
+              { attemptId: attemptId!, submitted: true },
+              {
+                onSuccess: (r) => {
+                  setDirty(false);
+                  const outcome = 'outcome' in r ? (r.outcome as string) : undefined;
+                  const correctCount = 'correctCount' in r ? (r.correctCount as number) : undefined;
+                  const totalCount = 'totalCount' in r ? (r.totalCount as number) : undefined;
+                  resolve({ outcome, correctCount, totalCount });
+                },
+                onError: reject,
+              },
+            ),
+          )
+        }
+        onTryAgain={() =>
+          openAttempt.mutate(attempt.partKey, {
+            onSuccess: (r) => navigate(`/app/assessments/${caseId}/attempts/${r.id}`),
+            onError: () =>
+              toast({
+                variant: 'warning',
+                message: "Couldn't open another attempt — your assessor may need to.",
+              }),
+          })
+        }
+        onBack={() => navigate(`/app/assessments/${caseId}`)}
+        submitting={setSubmitted.isPending}
+        saving={save.isPending}
+      />
     );
   }
 

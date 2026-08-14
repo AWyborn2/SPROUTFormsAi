@@ -663,6 +663,22 @@ export interface AssessmentToolManifest {
    */
   theoryRendering?: TheoryRendering;
   /**
+   * The percentage of questions that must be correct for a theory part to be
+   * satisfactory, when the author chose `overall_percentage` as the pass rule.
+   *
+   * 100 = every question correct (the default). 80 = 80% required, etc.
+   * Absent means mandatory-all-correct, which is the pre-existing rule and
+   * what every tool authored before this existed still uses.
+   */
+  theoryPassPercent?: number;
+  /**
+   * Whether a candidate may retry individual questions after seeing feedback
+   * in interactive theory mode. When false (the default), they see
+   * correct/incorrect feedback and move on; the score reflects first answers.
+   * When true, they can change their answer and resubmit before proceeding.
+   */
+  theoryAllowRetry?: boolean;
+  /**
    * The front page's certification block.
    *
    * Manifest-level, not part-level, because the front page belongs to no part:
