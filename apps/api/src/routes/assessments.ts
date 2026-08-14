@@ -829,6 +829,14 @@ const republishBody = z.object({
     })
     .strict()
     .optional(),
+  /**
+   * The author's EXPLICIT choice to untick removed parts from every Location
+   * rule that still requires them, in the same transaction as the publish.
+   * Never defaulted on: silently changing which parts a Location requires is
+   * a policy edit nobody made. The publish step offers it as a labelled
+   * button once the refusal has named the rules.
+   */
+  dropDanglingLocationRules: z.boolean().optional(),
 });
 
 /**
@@ -944,15 +952,32 @@ assessmentToolsRouter.post(
       ruleLocationIds.length > 0
         ? await locationNamesByIdFor(db, tenant.orgId, ruleLocationIds)
         : new Map<string, string>();
+    const danglingRules: Array<{
+      locationId: string;
+      locationName: string;
+      partKey: string;
+      partLabel: string;
+    }> = [];
     for (const [locationId, keys] of Object.entries(tool.locationPartKeys ?? {})) {
       for (const key of keys) {
         if (!partKeys.has(key)) {
-          const location = ruleLocationNames.get(locationId) ?? locationId;
-          const label = oldPartLabels.get(key) ?? key;
-          problems.push(
-            `${location} requires "${label}", which this revision removes. Untick it under Where each part applies in the tool's workflow, or keep the part in this revision.`,
-          );
+          danglingRules.push({
+            locationId,
+            locationName: ruleLocationNames.get(locationId) ?? locationId,
+            partKey: key,
+            partLabel: oldPartLabels.get(key) ?? key,
+          });
         }
+      }
+    }
+    // With the author's explicit say-so the danglings are the fix, not the
+    // refusal: the rules are trimmed in the same transaction as the publish.
+    const trimRules = parsed.data.dropDanglingLocationRules === true && danglingRules.length > 0;
+    if (!trimRules) {
+      for (const dangling of danglingRules) {
+        problems.push(
+          `${dangling.locationName} requires "${dangling.partLabel}", which this revision removes. Untick it under Where each part applies in the tool's workflow, or keep the part in this revision.`,
+        );
       }
     }
 
@@ -972,6 +997,8 @@ assessmentToolsRouter.post(
       why it is refused here, where the author can still keep the part.
     */
     const removedKeys = [...oldPartLabels.keys()].filter((k) => !partKeys.has(k));
+    const attemptedParts: Array<{ key: string; label: string }> = [];
+    const openCaseAttemptWarnings: string[] = [];
     if (removedKeys.length > 0 && cases.length > 0) {
       const priorAttempts = await db.query.assessmentPartAttempts.findMany({
         where: inArray(
@@ -979,18 +1006,58 @@ assessmentToolsRouter.post(
           cases.map((c) => c.id),
         ),
       });
-      const touched = new Set(
-        priorAttempts.filter((a) => removedKeys.includes(a.partKey)).map((a) => a.partKey),
+      /*
+        SIGNED EVIDENCE KEEPS ITS PART; an open case's progress is the
+        author's to spend. A CONSOLIDATION — the part's fields folded into a
+        neighbouring section, still printed, still filled — is a legitimate
+        revision, and blocking it because a live test case touched the old
+        part would freeze every tool the moment anyone tried it. So only
+        attempts on TERMINAL cases (certified or closed evidence) refuse;
+        attempts on open cases are reported as a warning on the publish.
+      */
+      const terminalCaseIds = new Set(
+        cases.filter((c) => isTerminalCaseState(c.state as AssessmentCaseState)).map((c) => c.id),
       );
-      for (const key of touched) {
+      const touchedTerminal = new Set(
+        priorAttempts
+          .filter((a) => removedKeys.includes(a.partKey) && terminalCaseIds.has(a.caseId))
+          .map((a) => a.partKey),
+      );
+      for (const key of touchedTerminal) {
+        attemptedParts.push({ key, label: oldPartLabels.get(key) ?? key });
         problems.push(
-          `Part "${oldPartLabels.get(key) ?? key}" has recorded attempts, so this revision cannot remove it — those cases' evidence would no longer export. Keep the part (it can stop being required at any Location instead).`,
+          `Part "${oldPartLabels.get(key) ?? key}" has evidence on completed cases, so this revision cannot remove it — that evidence would no longer export. Keep the part (it can stop being required at any Location instead).`,
+        );
+      }
+      for (const key of new Set(
+        priorAttempts
+          .filter(
+            (a) =>
+              removedKeys.includes(a.partKey) &&
+              !terminalCaseIds.has(a.caseId) &&
+              !touchedTerminal.has(a.partKey),
+          )
+          .map((a) => a.partKey),
+      )) {
+        openCaseAttemptWarnings.push(
+          `Open cases have attempts on "${oldPartLabels.get(key) ?? key}", which this revision removes — that progress will not count against the revised parts.`,
         );
       }
     }
 
     if (problems.length > 0) {
-      res.status(400).json({ error: 'invalid_manifest', problems });
+      /*
+        STRUCTURED alongside prose, so the publish step can OFFER the fix
+        rather than narrate it: `danglingRules` is what the one-click untick
+        resolves; `attemptedParts` is what no click can — evidence keeps its
+        part.
+      */
+      res.status(400).json({
+        error: 'invalid_manifest',
+        problems,
+        danglingRules: trimRules ? [] : danglingRules,
+        attemptedParts,
+      });
       return;
     }
 
@@ -1044,6 +1111,23 @@ assessmentToolsRouter.post(
         .set({
           manifest,
           ...(parsed.data.name ? { name: parsed.data.name } : {}),
+          /*
+            The author's chosen untick, applied with the publish it belongs
+            to. Rules keep every part the revised manifest still declares;
+            only the removed parts' entries go — and a Location whose list
+            empties keeps an empty list, which "requires every part" does NOT
+            mean here: an explicit rule row means the author has narrowed it.
+          */
+          ...(trimRules
+            ? {
+                locationPartKeys: Object.fromEntries(
+                  Object.entries(tool.locationPartKeys ?? {}).map(([locationId, keys]) => [
+                    locationId,
+                    keys.filter((k) => partKeys.has(k)),
+                  ]),
+                ),
+              }
+            : {}),
         })
         .where(eq(schema.assessmentTools.id, tool.id));
       // The revision shipped — free the one-revision-per-tool slot so next
@@ -1073,8 +1157,9 @@ assessmentToolsRouter.post(
       versionId: version.id,
       versionLabel: version.versionLabel,
       // The same unplaced-box audit create-time publishing surfaces — a
-      // warning, never a gate (R8).
-      warnings: unplacedMarkDestinations(manifest, fields),
+      // warning, never a gate (R8) — plus the open-case progress this
+      // revision's removed parts strand.
+      warnings: [...unplacedMarkDestinations(manifest, fields), ...openCaseAttemptWarnings],
     });
   }),
 );

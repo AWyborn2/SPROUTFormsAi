@@ -271,6 +271,8 @@ export const assessmentsApi = {
     manifest: AssessmentToolManifest;
     name?: string;
     revisionIdentity?: { code?: string; reviewedOn?: string; note?: string };
+    /** The author's explicit untick of removed parts from Location rules. */
+    dropDanglingLocationRules?: boolean;
   }) =>
     apiClient.post<{ id: string; templateId: string; versionId: string; versionLabel: string; warnings: string[] }>(
       `/assessment-tools/${input.toolId}/republish`,
@@ -281,6 +283,7 @@ export const assessmentsApi = {
         manifest: input.manifest,
         ...(input.name ? { name: input.name } : {}),
         ...(input.revisionIdentity ? { revisionIdentity: input.revisionIdentity } : {}),
+        ...(input.dropDanglingLocationRules ? { dropDanglingLocationRules: true } : {}),
       },
     ),
 

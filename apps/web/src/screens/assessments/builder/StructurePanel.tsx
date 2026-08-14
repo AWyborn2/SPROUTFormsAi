@@ -80,6 +80,8 @@ export interface StructurePanelProps {
    * it, because a field that vanishes is one nobody notices is missing.
    */
   onDissolve: (key: string) => void;
+  /** Clone the section — fields, geometry and all — for multi-stage papers. */
+  onDuplicate: (key: string) => void;
   onMoveField: (
     fieldId: string,
     toSectionKey: string,
@@ -133,6 +135,7 @@ export function StructurePanel({
   onSetColumns,
   onToggleOwnPage,
   onDissolve,
+  onDuplicate,
   onMoveField,
   onCycleSpan,
   onSetFieldType,
@@ -484,6 +487,16 @@ export function StructurePanel({
                       but nothing is lost: their fields move to the section
                       before, exactly as `dissolveSection` has always worked.
                     */}
+                    <button
+                      type="button"
+                      onClick={() => onDuplicate(section.key)}
+                      title="Duplicate this section — every field is cloned onto the same printed boxes, ready to rename and trim per stage"
+                      aria-label={`Duplicate section ${section.label}`}
+                      className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-[3px] text-[9.5px] font-semibold text-text-tertiary hover:border-border-accent hover:text-text-accent"
+                    >
+                      <Icon name="copy" size={10} />
+                      Duplicate
+                    </button>
                     <button
                       type="button"
                       onClick={() => onDissolve(section.key)}
