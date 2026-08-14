@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { SubmissionValue } from '@formai/shared';
+import { logbookRows } from '@formai/shared';
 import { Button, Icon, todayISODate, useToast } from '@formai/ui';
 import { ApiError } from '../../lib/data/api-client.js';
 import { dateFieldToStamp } from './signature-date-stamp.js';
+import { LogbookProgress } from './LogbookProgress.js';
 import {
   useAssessmentAttempt,
   useOpenAttempt,
@@ -182,6 +184,20 @@ export function CasePartFillScreen() {
     setDirty(true);
   }
 
+  /*
+    The logbook's rows as they stand right now, so the progress panel moves as
+    the candidate types. `logbookRows` carries the same table-finding (and
+    unexpected-key fallback) the server totals with, so what the candidate sees
+    accruing is what the threshold reads.
+  */
+  const logbookHourRows = attempt.durationColumnKey
+    ? logbookRows(
+        partFields,
+        { startFieldId: partFields[0]?.id ?? '', durationColumnKey: attempt.durationColumnKey },
+        values,
+      )
+    : [];
+
   function onSave() {
     if (!attemptId || readOnly) return;
     save.mutate(
@@ -292,6 +308,13 @@ export function CasePartFillScreen() {
           </span>
         </div>
       )}
+
+      <LogbookProgress
+        rows={logbookHourRows}
+        taskMinimums={attempt.taskMinimums}
+        durationColumnKey={attempt.durationColumnKey}
+        minimumHours={attempt.minimumHours}
+      />
 
       <div className="grid grid-cols-12 gap-[16px]">
         {shown.map((f) => (

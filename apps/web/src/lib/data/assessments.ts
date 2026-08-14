@@ -193,6 +193,12 @@ export interface AttemptFillView {
   streamField: FormField | null;
   minimumHours: number | null;
   durationColumnKey: string | null;
+  /**
+   * Per-task-type hour targets, when this logbook part declares them. Drives
+   * the live per-task progress on the fill surface; a soft target, never a
+   * gate.
+   */
+  taskMinimums: NonNullable<AssessmentToolManifest['parts'][number]['taskMinimums']> | null;
   /** Everything this caller may SEE. Hidden fields are already absent. */
   fields: FormField[];
   /**

@@ -3028,6 +3028,10 @@ assessmentCasesRouter.get(
         : null,
       minimumHours: part.minimumHours ?? null,
       durationColumnKey: part.durationColumnKey ?? null,
+      // Per-task-type hour targets, so the fill surface can show live per-task
+      // progress. A soft target, like minimumHours — sent for display, never a
+      // gate on what the candidate may submit.
+      taskMinimums: part.taskMinimums ?? null,
       fields: stripMarkingSecrets(visibleFields).map((f) =>
         f.id === manifest.candidateSignatureFieldId && f.type === 'text'
           ? { ...f, type: 'signature' as const }
