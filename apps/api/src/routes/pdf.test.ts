@@ -5,9 +5,11 @@ const tenant = { userId: 'u1', orgId: 'org-1', role: 'admin' as const };
 let sealSession: (t: typeof tenant) => string;
 
 const mockExtractForm = vi.fn();
+const mockAuditForm = vi.fn();
 const mockRoundTripExport = vi.fn();
 vi.mock('../pdf/index.js', () => ({
   extractForm: (...args: unknown[]) => mockExtractForm(...args),
+  auditForm: (...args: unknown[]) => mockAuditForm(...args),
   roundTripExport: (...args: unknown[]) => mockRoundTripExport(...args),
 }));
 
@@ -237,6 +239,122 @@ describe('POST /pdf/extract', () => {
         body: JSON.stringify({ fileName: 'a.pdf', assetId: 'org-2/x.pdf' }),
       });
       expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * The secondary-extraction pass. Same PDF-in contract as `/extract` (inline
+ * base64 XOR a stored assetId), plus the captured-label list it audits against,
+ * returning the boxes the first pass missed.
+ */
+describe('POST /pdf/audit', () => {
+  function post(base: string, body: unknown) {
+    return fetch(`${base}/pdf/audit`, {
+      method: 'POST',
+      headers: { ...authHeader(), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('400s when neither pdfBase64 nor assetId is present', async () => {
+    const { server, base } = startApp();
+    try {
+      expect((await post(base, { fileName: 'a.pdf', knownLabels: [] })).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s when both pdfBase64 and assetId are present', async () => {
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, {
+        fileName: 'a.pdf',
+        pdfBase64: 'AAA=',
+        assetId: 'org-1/x.pdf',
+      });
+      expect(res.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('audits inline base64 and passes the captured labels through', async () => {
+    mockAuditForm.mockResolvedValue({ missedInputs: [{ label: 'Assessor signature', type: 'text' }] });
+
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, {
+        fileName: 'a.pdf',
+        pdfBase64: 'AAA=',
+        knownLabels: ['Candidate name'],
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        missedInputs: [{ label: 'Assessor signature', type: 'text' }],
+      });
+      expect(mockAuditForm).toHaveBeenCalledWith(
+        Buffer.from('AAA=', 'base64'),
+        expect.objectContaining({ knownLabels: ['Candidate name'] }),
+      );
+      expect(mockDownloadPdf).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('defaults knownLabels to empty when omitted', async () => {
+    mockAuditForm.mockResolvedValue({ missedInputs: [] });
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { fileName: 'a.pdf', pdfBase64: 'AAA=' });
+      expect(res.status).toBe(200);
+      expect(mockAuditForm).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ knownLabels: [] }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('audits from a storage assetId', async () => {
+    mockGetStorageClient.mockReturnValue(fakeStorageClient());
+    mockDownloadPdf.mockResolvedValue(Buffer.from('pdf-bytes'));
+    mockAuditForm.mockResolvedValue({ missedInputs: [] });
+
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { fileName: 'a.pdf', assetId: 'org-1/x.pdf', knownLabels: [] });
+      expect(res.status).toBe(200);
+      expect(mockDownloadPdf).toHaveBeenCalledWith('org-1', 'org-1/x.pdf');
+      expect(mockAuditForm).toHaveBeenCalledWith(Buffer.from('pdf-bytes'), expect.anything());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s when the asset is missing or belongs to another org', async () => {
+    mockGetStorageClient.mockReturnValue(fakeStorageClient());
+    mockDownloadPdf.mockResolvedValue(null);
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { fileName: 'a.pdf', assetId: 'org-2/x.pdf', knownLabels: [] });
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('surfaces a missing key as 422, not 500', async () => {
+    mockAuditForm.mockRejectedValue(new Error('extraction_unavailable: flat PDF requires a key'));
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, { fileName: 'a.pdf', pdfBase64: 'AAA=', knownLabels: [] });
+      expect(res.status).toBe(422);
     } finally {
       server.close();
     }

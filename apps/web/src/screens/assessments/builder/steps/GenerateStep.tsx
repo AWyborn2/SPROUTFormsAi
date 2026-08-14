@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Icon } from '@formai/ui';
 import { StructurePanel } from '../StructurePanel.js';
 import { ArtifactPager } from '../ArtifactPager.js';
+import { MissedBoxAudit } from '../MissedBoxAudit.js';
 import { resolveStructure } from '../builder-structure.js';
 import type { BuilderDraftState } from '../use-builder-draft.js';
 
@@ -112,6 +113,14 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
             </span>
           </div>
         )}
+
+        {/*
+          THE SECOND LOOK. After the orphan check (fields with no section), the
+          audit answers the opposite question — printed boxes with no field —
+          so the two failure directions of the arrangement are both surfaced
+          here, where the author is looking at the arrangement.
+        */}
+        <MissedBoxAudit draft={draft} />
 
         <ArtifactPager
           structure={draft.structure}

@@ -35,6 +35,7 @@ import {
 } from './assessments.js';
 import type {
   FormDetail,
+  AuditFormInput,
   FormSummary,
   OrgBilling,
   PermAction,
@@ -601,6 +602,17 @@ export function useSaveBuilderDraft() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.builderDrafts });
     },
+  });
+}
+
+/**
+ * The secondary-extraction pass — a review-only lookup, so it caches nothing
+ * and invalidates nothing. The author runs it, reads the result, and adds any
+ * genuinely-missed field by hand; there is no server state to keep in sync.
+ */
+export function useAuditForm() {
+  return useMutation({
+    mutationFn: async (input: AuditFormInput) => store.auditForm(input),
   });
 }
 

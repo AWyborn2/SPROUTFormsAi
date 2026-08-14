@@ -8,7 +8,7 @@ import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { getAnthropic } from '../anthropic.js';
-import { extractForm, roundTripExport } from '../pdf/index.js';
+import { auditForm, extractForm, roundTripExport } from '../pdf/index.js';
 import { getStorageClient } from '../storage/index.js';
 import { env } from '../env.js';
 
@@ -130,6 +130,76 @@ pdfRouter.post(
     } catch (err) {
       const message = err instanceof Error ? err.message : 'extraction_failed';
       // Flat PDFs with no configured key surface as a 422, not a 500.
+      const status = message.startsWith('extraction_unavailable') ? 422 : 500;
+      res.status(status).json({ error: message });
+    }
+  }),
+);
+
+const auditBody = z
+  .object({
+    fileName: z.string().min(1),
+    /** Base64-encoded PDF bytes. Mutually exclusive with `assetId`. */
+    pdfBase64: z.string().min(1).optional(),
+    /** An id returned by `POST /pdf/upload`. Mutually exclusive with `pdfBase64`. */
+    assetId: z.string().min(1).optional(),
+    /**
+     * The labels already captured in the draft. The second pass is told these
+     * so it does not re-report them, and they filter the result besides. An
+     * empty list is legal — it just means the model reports everything fillable.
+     */
+    knownLabels: z.array(z.string()).max(2000).default([]),
+    documentType: z.enum(DOCUMENT_TYPES).optional(),
+  })
+  .refine((v) => (v.pdfBase64 ? 1 : 0) + (v.assetId ? 1 : 0) === 1, {
+    message: 'exactly one of pdfBase64 or assetId is required',
+  });
+
+/**
+ * The secondary-extraction pass (U-review). A SECOND look for printed input
+ * areas the primary extraction produced no field for — surfaced to the author
+ * as a review aid, never applied on its own. Opt-in on purpose: a second AI
+ * call per import would double cost for the common case where nothing is missed.
+ */
+pdfRouter.post(
+  '/audit',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    const parsed = auditBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tenant = req.tenant!;
+    let bytes: Buffer;
+    if (parsed.data.assetId) {
+      const client = getStorageClient();
+      if (!client) {
+        res.status(503).json({ error: 'storage_unavailable' });
+        return;
+      }
+      const downloaded = await client.download(tenant.orgId, parsed.data.assetId);
+      if (!downloaded) {
+        res.status(404).json({ error: 'asset_not_found' });
+        return;
+      }
+      bytes = downloaded;
+    } else {
+      bytes = Buffer.from(parsed.data.pdfBase64!, 'base64');
+    }
+
+    try {
+      const anthropic = getAnthropic() ?? undefined;
+      const result = await auditForm(bytes, {
+        fileName: parsed.data.fileName,
+        knownLabels: parsed.data.knownLabels,
+        documentType: parsed.data.documentType,
+        anthropic,
+        model: env.ANTHROPIC_EXTRACTION_MODEL,
+      });
+      res.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'audit_failed';
       const status = message.startsWith('extraction_unavailable') ? 422 : 500;
       res.status(status).json({ error: message });
     }
