@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Badge, Button, Card, Icon, Input, Select, Switch, useToast } from '@formai/ui';
 import {
   DATE_FORMAT_LABELS,
@@ -9,11 +10,13 @@ import {
 } from '@formai/shared';
 import {
   useAssessmentTools,
+  useCompetencies,
   useCreateDepartment,
   useCreateLocation,
   useCreateRole,
   usePreviewLocationTransfer,
   usePreviewRoleRequiredAssessments,
+  useRemoveLegacyRequirement,
   useResolveTightening,
   useRetirementReview,
   useRoleRequiredAssessments,
@@ -30,7 +33,10 @@ import {
   useUpdateTaxonomySettings,
 } from '../../lib/data/hooks.js';
 import type {
+  Competency,
   RetiredValueReview,
+  // Aliased: `RoleRequirements` here is the editor COMPONENT below.
+  RoleRequirements as RoleRequirementsData,
   Taxonomy,
   TaxDepartment,
   TaxLocation,
@@ -38,6 +44,7 @@ import type {
   TighteningReviewItem,
 } from '../../lib/data/types.js';
 import { ApiError } from '../../lib/data/api-client.js';
+import { useInlineCompetencyCreate } from '../../lib/data/use-inline-competency-create.js';
 
 /**
  * Locations & roles — the organisation's own taxonomy. Departments are the
@@ -362,6 +369,7 @@ function SettingsPanel({
     pooledCaseOverdueDays: number;
     notificationLeadDays: number;
     dateFormat: DateFormat;
+    candidateSelfStartRecommended: boolean;
   };
   onError: (e: unknown) => void;
 }) {
@@ -404,6 +412,23 @@ function SettingsPanel({
             checked={settings.allowSelfAssessment}
             aria-label="Assessors can assess themselves"
             onChange={(e) => update.mutate({ allowSelfAssessment: e.target.checked }, { onError })}
+          />
+        </label>
+        <label className="flex items-center justify-between gap-4">
+          <span className="text-sm">
+            Candidates can self-start recommended training
+            <span className="block text-[12px] text-text-tertiary">
+              Adds a request button beside a Role&rsquo;s recommendations (R14). Off, the
+              recommendation is still visible — assessors and admins can always assign it, and a
+              required gap can always be requested.
+            </span>
+          </span>
+          <Switch
+            checked={settings.candidateSelfStartRecommended}
+            aria-label="Candidates can self-start recommended training"
+            onChange={(e) =>
+              update.mutate({ candidateSelfStartRecommended: e.target.checked }, { onError })
+            }
           />
         </label>
         <label className="flex items-center justify-between gap-4">
@@ -770,67 +795,241 @@ function TighteningRow({
   );
 }
 
-// ── A Role's required assessments (U10) ───────────────────────────────────────
+// ── A Role's requirements, in COMPETENCY terms (U6 — R5, R6, R8, KTD9) ───────
+
+type RequirementTier = 'required' | 'recommended';
 
 /**
- * The assessments a Role requires (R43). Collapsed by default — a Department can
- * offer many Roles and each carries its own list. `configured` is read straight
- * from the server so "nobody has set this up" and "set up, requires nothing" read
- * apart (R50); both still oblige nobody until a tool is added. A retired Role is
- * shown read-only, because it takes on no new requirements (R121) — the server
- * enforces the same, this just does not offer the action.
+ * The competencies a Role requires and recommends (R5, R6). Collapsed by
+ * default — a Department can offer many Roles and each carries its own editor.
+ * `configured` is read straight from the server so "nobody has set this up"
+ * and "set up, requires nothing" read apart (R50) — and it follows the
+ * REQUIRED tier alone: a recommended-only save leaves a fresh Role reading
+ * never-configured (KTD9).
+ *
+ * REQUIRED edits travel preview → confirm (R8): the blast radius is shown in
+ * competency terms before anything lands. RECOMMENDED-only edits save
+ * directly — the tier enforces nothing, so there is no blast radius to
+ * confirm (R13). Every write echoes the GET's fingerprint; a 409
+ * `requirements_changed` means someone else's change (a backfill conversion,
+ * another editor) landed in between, and the editor reloads rather than
+ * silently overwriting it (KTD9).
+ *
+ * A retired Role is shown read-only (R121) — the server enforces the same,
+ * this just does not offer the action.
  */
 function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unknown) => void }) {
   const { toast } = useToast();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const { data: competencies } = useCompetencies();
+  // Tool NAMES for the awaitingLink rows — a legacy row is a tool id, and the
+  // editor must not print raw ids.
   const { data: tools } = useAssessmentTools();
-  const { data: current } = useRoleRequiredAssessments(open ? role.id : undefined);
+  const requirements = useRoleRequiredAssessments(open ? role.id : undefined);
+  const current = requirements.data;
   const preview = usePreviewRoleRequiredAssessments(role.id);
   const save = useSetRoleRequiredAssessments(role.id);
-  const [draft, setDraft] = useState<Set<string> | null>(null);
-  // The blast radius of the pending change, once previewed — the confirmation
-  // gate (U12, R84–R86). Null means nothing is awaiting confirmation.
-  const [pending, setPending] = useState<RequiredAssessmentsChangeEffects | null>(null);
+  const removeLegacy = useRemoveLegacyRequirement(role.id);
+  /**
+   * Inline create with the created competencies kept locally pickable BEFORE
+   * the register cache refetches — the shared hook, same posture the backfill
+   * row takes.
+   */
+  const inlineCreate = useInlineCompetencyCreate(competencies ?? []);
 
-  const selected = draft ?? new Set(current?.toolIds ?? []);
+  const [draft, setDraft] = useState<{ required: Set<string>; recommended: Set<string> } | null>(
+    null,
+  );
+  // The blast radius of the pending REQUIRED change, once previewed — the
+  // confirmation gate (R8, R84–R86). Null means nothing awaits confirmation.
+  const [pending, setPending] = useState<RequiredAssessmentsChangeEffects | null>(null);
+  // An awaitingLink removal awaiting its confirm — previewed through the same
+  // door (KTD9, KTD10).
+  const [pendingRemove, setPendingRemove] = useState<{
+    toolId: string;
+    effects: RequiredAssessmentsChangeEffects;
+  } | null>(null);
+  // Set when a write 409'd `requirements_changed`: the editor reloaded and the
+  // admin re-decides against the fresh state rather than over someone else's
+  // change (KTD9).
+  const [stale, setStale] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newCode, setNewCode] = useState('');
+
+  const selected = draft ?? {
+    required: new Set(current?.required ?? []),
+    recommended: new Set(current?.recommended ?? []),
+  };
   const dirty = draft !== null;
   const retired = role.status === 'retired';
+  const sameSet = (a: ReadonlySet<string>, b: readonly string[]) =>
+    a.size === b.length && b.every((id) => a.has(id));
+  // Only a REQUIRED-tier change carries a blast radius; a recommended-only
+  // edit saves without a preview (R13).
+  const requiredChanged = dirty && current !== undefined && !sameSet(selected.required, current.required);
 
-  function toggle(toolId: string) {
-    // Changing the selection abandons any preview shown for the old selection.
+  const options = inlineCreate.options;
+
+  function resetFlow() {
     setPending(null);
+    setPendingRemove(null);
+  }
+
+  function toggle(tier: RequirementTier, competencyId: string) {
+    // Changing the selection abandons any preview shown for the old selection.
+    resetFlow();
     setDraft((prev) => {
-      const next = new Set(prev ?? current?.toolIds ?? []);
-      if (next.has(toolId)) next.delete(toolId);
-      else next.add(toolId);
+      const base = prev ?? {
+        required: new Set(current?.required ?? []),
+        recommended: new Set(current?.recommended ?? []),
+      };
+      const next = { required: new Set(base.required), recommended: new Set(base.recommended) };
+      const other: RequirementTier = tier === 'required' ? 'recommended' : 'required';
+      if (next[tier].has(competencyId)) {
+        next[tier].delete(competencyId);
+      } else {
+        next[tier].add(competencyId);
+        /*
+          THE CLIENT-SIDE OVERLAP BLOCK: one row per (role, competency) — the
+          tier is a column (KTD1), so a competency cannot be both. Selecting it
+          in one tier moves it out of the other, structurally, instead of
+          letting the save find the 400 `tiers_overlap`.
+        */
+        next[other].delete(competencyId);
+      }
       return next;
     });
   }
 
+  /** A write refused because the requirements moved underneath us (KTD9). */
+  function isStaleWrite(err: unknown): boolean {
+    return (
+      err instanceof ApiError &&
+      err.status === 409 &&
+      (err.body as { error?: string } | undefined)?.error === 'requirements_changed'
+    );
+  }
+
+  function onWriteError(err: unknown) {
+    if (isStaleWrite(err)) {
+      // Reload the editor: the fresh GET carries the other change and a new
+      // fingerprint, and the notice explains why the draft was dropped.
+      setStale(true);
+      setDraft(null);
+      resetFlow();
+      void requirements.refetch();
+      return;
+    }
+    onError(err);
+  }
+
   function onReview() {
-    // Show the blast radius before committing (R84, R85); the change is not
-    // written until confirmed.
-    preview.mutate([...selected], { onSuccess: (r) => setPending(r.effects), onError });
+    // The blast radius before committing (R8, R84, R85), in competency terms;
+    // nothing is written until confirmed.
+    resetFlow();
+    preview.mutate(
+      { required: [...selected.required], recommended: [...selected.recommended] },
+      { onSuccess: (r) => setPending(r.effects), onError },
+    );
   }
 
-  function onConfirm() {
-    save.mutate([...selected], {
-      onSuccess: () => {
-        setDraft(null);
-        setPending(null);
-        toast({ variant: 'success', message: 'Requirements updated.' });
+  function doSave() {
+    if (!current) return;
+    save.mutate(
+      {
+        required: [...selected.required],
+        recommended: [...selected.recommended],
+        fingerprint: current.fingerprint,
       },
-      onError,
-    });
+      {
+        onSuccess: () => {
+          setDraft(null);
+          resetFlow();
+          setStale(false);
+          toast({ variant: 'success', message: 'Requirements updated.' });
+        },
+        onError: onWriteError,
+      },
+    );
   }
 
-  const summary = !current
-    ? ''
-    : !current.configured
-      ? 'not set up'
-      : current.toolIds.length === 0
-        ? 'requires nothing'
-        : `${current.toolIds.length} required`;
+  function onRemoveLegacy(toolId: string) {
+    if (!current) return;
+    // The awaitingLink exit previews through the SAME preview POST (KTD9):
+    // current tiers unchanged, this one legacy row removed.
+    resetFlow();
+    preview.mutate(
+      {
+        required: current.required,
+        recommended: current.recommended,
+        removeLegacyToolIds: [toolId],
+      },
+      { onSuccess: (r) => setPendingRemove({ toolId, effects: r.effects }), onError },
+    );
+  }
+
+  function onConfirmRemove() {
+    if (!current || !pendingRemove) return;
+    removeLegacy.mutate(
+      { toolId: pendingRemove.toolId, fingerprint: current.fingerprint },
+      {
+        onSuccess: () => {
+          resetFlow();
+          setStale(false);
+          toast({ variant: 'success', message: 'Legacy requirement removed.' });
+        },
+        onError: onWriteError,
+      },
+    );
+  }
+
+  function onCreate(tier: RequirementTier) {
+    const trimmedName = newName.trim();
+    if (!trimmedName) {
+      toast({ variant: 'warning', message: 'A competency needs a name.' });
+      return;
+    }
+    // No validity asked here (the shared hook creates perpetual) — this flow's
+    // job is naming the requirement without leaving it (R5).
+    inlineCreate.create(
+      trimmedName,
+      newCode.trim() || null,
+      (added) => {
+        toggle(tier, added.id);
+        setCreating(false);
+        setNewName('');
+        setNewCode('');
+        toast({ variant: 'success', message: `${added.name} added to the register.` });
+      },
+      () => toast({ variant: 'warning', message: 'Could not add the competency.' }),
+    );
+  }
+
+  const summary = requirementSummary(current);
+
+  const chip = (tier: RequirementTier, c: Competency) => {
+    const on = selected[tier].has(c.id);
+    return (
+      <button
+        key={c.id}
+        type="button"
+        aria-pressed={on}
+        aria-label={`${tier === 'required' ? 'Require' : 'Recommend'} ${c.name} for ${role.name}`}
+        disabled={retired}
+        onClick={() => toggle(tier, c.id)}
+        className={`inline-flex items-center gap-1.5 rounded-sm border px-2 py-1 text-[11px] font-medium transition-colors ${
+          on
+            ? 'border-success bg-success-soft text-success-text'
+            : 'border-border bg-surface-card text-text-tertiary'
+        } ${retired ? 'cursor-default opacity-60' : 'cursor-pointer'}`}
+      >
+        {c.name}
+        {c.code && <span className="font-mono text-[9.5px] uppercase opacity-70">{c.code}</span>}
+      </button>
+    );
+  };
 
   return (
     <div className="pl-3">
@@ -838,11 +1037,11 @@ function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unkno
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        aria-label={`Required assessments for ${role.name}`}
+        aria-label={`Requirements for ${role.name}`}
         className="flex items-center gap-1.5 py-0.5 text-[11.5px] text-text-tertiary hover:text-text-secondary"
       >
         <Icon name={open ? 'chevron-down' : 'chevron-right'} size={11} />
-        Required assessments{summary ? ` · ${summary}` : ''}
+        Required competencies{summary ? ` · ${summary}` : ''}
       </button>
 
       {open && (
@@ -852,49 +1051,175 @@ function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unkno
               A retired Role takes on no new requirements.
             </p>
           )}
-          {(tools ?? []).length === 0 ? (
-            <p className="text-[11.5px] text-text-tertiary">No assessment tools to require yet.</p>
+          {stale && (
+            <p className="mb-1.5 rounded-sm border border-warning bg-warning-soft p-[6px_8px] text-[11px] text-warning-text">
+              Requirements changed elsewhere — this editor reloaded with the latest state. Re-apply
+              your change if it still applies.
+            </p>
+          )}
+
+          {options.length === 0 ? (
+            <p className="text-[11.5px] text-text-tertiary">
+              No competencies on the register yet — create one below.
+            </p>
           ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {(tools ?? []).map((tool) => {
-                const on = selected.has(tool.id);
-                return (
-                  <button
-                    key={tool.id}
-                    type="button"
-                    aria-pressed={on}
-                    disabled={retired}
-                    onClick={() => toggle(tool.id)}
-                    className={`rounded-sm border px-2 py-1 text-[11px] font-medium transition-colors ${
-                      on
-                        ? 'border-success bg-success-soft text-success-text'
-                        : 'border-border bg-surface-card text-text-tertiary'
-                    } ${retired ? 'cursor-default opacity-60' : 'cursor-pointer'}`}
-                  >
-                    {tool.name}
-                  </button>
-                );
-              })}
+            <div className="flex flex-col gap-2">
+              <div>
+                <div className="mb-1 text-[10.5px] font-semibold uppercase tracking-wide text-text-tertiary">
+                  Required — compliance-tracked (R5)
+                </div>
+                <div className="flex flex-wrap gap-1.5">{options.map((c) => chip('required', c))}</div>
+              </div>
+              <div>
+                <div className="mb-1 text-[10.5px] font-semibold uppercase tracking-wide text-text-tertiary">
+                  Recommended — worth holding, never enforced (R6, R13)
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {options.map((c) => chip('recommended', c))}
+                </div>
+              </div>
             </div>
           )}
+
+          {!retired && (
+            <div className="mt-2">
+              {creating ? (
+                <div className="flex flex-wrap items-end gap-2 border-t border-border-subtle pt-2">
+                  <div className="min-w-[180px] flex-1">
+                    <Input
+                      label="Competency name"
+                      value={newName}
+                      onChange={(e) => setNewName(e.target.value)}
+                    />
+                  </div>
+                  <div className="w-[130px]">
+                    <Input
+                      label="Code (optional)"
+                      placeholder="Q34666893"
+                      value={newCode}
+                      onChange={(e) => setNewCode(e.target.value)}
+                    />
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => onCreate('required')}
+                    disabled={inlineCreate.isPending}
+                  >
+                    Create &amp; require
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onCreate('recommended')}
+                    disabled={inlineCreate.isPending}
+                  >
+                    Create &amp; recommend
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setCreating(false)}>
+                    Cancel
+                  </Button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setCreating(true)}
+                  aria-label={`Create a competency for ${role.name}`}
+                  className="fai-chip-btn inline-flex items-center gap-1 rounded-sm py-1 text-[11px] font-medium text-text-accent hover:underline"
+                >
+                  <Icon name="plus" size={12} />
+                  Create competency
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Legacy rows still deriving the old way (R15, KTD9): each exits via
+              the backfill (link the award on the register) or the explicit,
+              previewed remove below. */}
+          {current && current.awaitingLink.length > 0 && (
+            <div className="mt-2 border-t border-border-subtle pt-2">
+              <div className="flex items-center gap-1.5 text-[11px] font-semibold text-warning-text">
+                <Icon name="shield-alert" size={12} />
+                Awaiting link — still counted the old way
+              </div>
+              <p className="mt-0.5 text-[10.5px] text-text-tertiary">
+                These assessments award nothing yet, so this Role still requires them as tools.
+                Link each one to its competency on the register, or remove the requirement.
+              </p>
+              <ul className="mt-1.5 flex flex-col gap-1">
+                {current.awaitingLink.map((toolId) => {
+                  const name = (tools ?? []).find((t) => t.id === toolId)?.name ?? 'Unknown assessment';
+                  return (
+                    <li key={toolId} className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate text-[11.5px] font-medium">{name}</span>
+                      <span className="flex flex-none items-center gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`Link the award for ${name}`}
+                          onClick={() => navigate('/app/competency')}
+                        >
+                          Link the award
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`Remove legacy requirement ${name}`}
+                          disabled={dirty || preview.isPending}
+                          onClick={() => onRemoveLegacy(toolId)}
+                        >
+                          Remove
+                        </Button>
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
           {!retired && (
             <div className="mt-2 flex flex-col gap-2">
-              {pending ? (
+              {pendingRemove ? (
+                <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[9px_11px] text-[11.5px] text-text-secondary">
+                  <EffectsSummary effects={pendingRemove.effects} />
+                  <div className="mt-2 flex justify-end gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={resetFlow}
+                      disabled={removeLegacy.isPending}
+                    >
+                      Cancel
+                    </Button>
+                    <Button size="sm" onClick={onConfirmRemove} disabled={removeLegacy.isPending}>
+                      Confirm removal
+                    </Button>
+                  </div>
+                </div>
+              ) : pending ? (
                 <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[9px_11px] text-[11.5px] text-text-secondary">
                   <EffectsSummary effects={pending} />
                   <div className="mt-2 flex justify-end gap-2">
-                    <Button size="sm" variant="ghost" onClick={() => setPending(null)} disabled={save.isPending}>
+                    <Button size="sm" variant="ghost" onClick={resetFlow} disabled={save.isPending}>
                       Cancel
                     </Button>
-                    <Button size="sm" onClick={onConfirm} disabled={save.isPending}>
+                    <Button size="sm" onClick={doSave} disabled={save.isPending}>
                       Confirm change
                     </Button>
                   </div>
                 </div>
+              ) : requiredChanged ? (
+                <div className="flex justify-end">
+                  <Button size="sm" onClick={onReview} disabled={preview.isPending}>
+                    Review change
+                  </Button>
+                </div>
               ) : (
                 <div className="flex justify-end">
-                  <Button size="sm" onClick={onReview} disabled={!dirty || preview.isPending}>
-                    {dirty ? 'Review change' : 'Saved'}
+                  {/* A recommended-only edit enforces nothing, so it saves
+                      without the preview gate (R13). */}
+                  <Button size="sm" onClick={doSave} disabled={!dirty || save.isPending}>
+                    {dirty ? 'Save' : 'Saved'}
                   </Button>
                 </div>
               )}
@@ -907,29 +1232,52 @@ function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unkno
 }
 
 /**
- * The blast radius of a pending requirement change, in words (U12). An addition
- * says who it affects and how many cases it creates (R84); a removal says who it
- * affects, how many cases already in progress will run to completion, and how
- * many competencies become optional (R85) — never a creation count. A save that
- * both adds and removes shows both.
+ * The collapsed row's one-line summary. Empty while the editor has not loaded;
+ * "not set up" and "requires nothing" read apart because `configured` is the
+ * stored fact, never a row count (R50).
+ */
+function requirementSummary(current: RoleRequirementsData | undefined): string {
+  if (!current) return '';
+  if (!current.configured) return 'not set up';
+  if (current.required.length === 0) return 'requires nothing';
+  const recommended =
+    current.recommended.length > 0 ? ` · ${current.recommended.length} recommended` : '';
+  return `${current.required.length} required${recommended}`;
+}
+
+/**
+ * The blast radius of a pending requirement change, in COMPETENCY terms (U6).
+ * An addition says who it affects and how many cases the awarding assessments
+ * create (R84) — an evidence-only competency contributes "0 cases", which is a
+ * real answer (R7). A removal says who it affects, how many cases already in
+ * progress run to completion, and how many standings become optional (R85) —
+ * never a creation count. A save that both adds and removes shows both, and an
+ * awaitingLink removal of an UNLINKED tool (no competency moves at all) still
+ * names its continuing cases.
  */
 function EffectsSummary({ effects }: { effects: RequiredAssessmentsChangeEffects }) {
   const people = (n: number) => `${n} ${n === 1 ? 'person' : 'people'}`;
   const cases = (n: number) => `${n} ${n === 1 ? 'case' : 'cases'}`;
+  const competencies = (n: number) => `${n} ${n === 1 ? 'competency' : 'competencies'}`;
   const lines: string[] = [];
-  if (effects.addedToolIds.length > 0) {
-    const n = effects.addedToolIds.length;
+  if (effects.addedCompetencyIds.length > 0) {
     lines.push(
-      `Adds ${n} assessment${n === 1 ? '' : 's'}: affects ${people(effects.affected)}, creating ${cases(effects.created)}.`,
+      `Adds ${competencies(effects.addedCompetencyIds.length)}: affects ${people(effects.affected)}, creating ${cases(effects.created)}.`,
     );
   }
-  if (effects.removedToolIds.length > 0) {
-    const n = effects.removedToolIds.length;
+  if (effects.removedCompetencyIds.length > 0) {
     const demoting = effects.competenciesDemoting;
     lines.push(
-      `Removes ${n} assessment${n === 1 ? '' : 's'}: affects ${people(effects.affected)}. ` +
+      `Removes ${competencies(effects.removedCompetencyIds.length)}: affects ${people(effects.affected)}. ` +
         `${cases(effects.inFlightContinuing)} already in progress will run to completion, and ` +
         `${demoting} competency standing${demoting === 1 ? '' : 's'} become optional.`,
+    );
+  }
+  if (lines.length === 0 && effects.inFlightContinuing > 0) {
+    // The unlinked-legacy removal: the tool awarded nothing, so no competency
+    // leaves required standing — but its cases keep running (R55).
+    lines.push(
+      `${cases(effects.inFlightContinuing)} already in progress will run to completion; nothing new is created.`,
     );
   }
   if (lines.length === 0) lines.push('This changes nothing.');

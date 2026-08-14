@@ -30,6 +30,8 @@ const ADMIN = '00000000-0000-4000-8000-00000000000a';
 const CANDIDATE = '00000000-0000-4000-8000-00000000000c';
 const TEMPLATE = '00000000-0000-4000-8000-000000000001';
 const VERSION = '00000000-0000-4000-8000-000000000002';
+// Tool creation now requires its one awarded competency (U2, R1).
+const COMPETENCY = '00000000-0000-4000-8000-0000000000f1';
 
 const admin = { userId: ADMIN, orgId: ORG, role: 'admin' as const };
 
@@ -143,7 +145,7 @@ function makeDb() {
     competencyHolders: [],
     auditLogEntries: [],
     users: [{ id: CANDIDATE, name: 'Dale Rivers', email: 'dale@x.io' }],
-    competencies: [],
+    competencies: [{ id: COMPETENCY, orgId: ORG, name: 'Track Dozer Operator', holders: 0 }],
     // Case creation checks the candidate belongs to this org.
     memberships: [
       { id: nextId(), orgId: ORG, userId: ADMIN, role: 'admin', status: 'active' },
@@ -244,7 +246,7 @@ async function loggedCaseSentBack(base: string, rows = WEEK_ONE) {
     await fetch(`${base}/assessment-tools`, {
       method: 'POST',
       headers: auth(),
-      body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST }),
+      body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST, awardedCompetencyIds: [COMPETENCY] }),
     })
   ).json()) as { id: string };
 
@@ -411,7 +413,7 @@ describe('a logbook sent back for more hours', () => {
         await fetch(`${base}/assessment-tools`, {
           method: 'POST',
           headers: auth(),
-          body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST }),
+          body: JSON.stringify({ templateId: TEMPLATE, name: 'Track Dozer', manifest: MANIFEST, awardedCompetencyIds: [COMPETENCY] }),
         })
       ).json()) as { id: string };
       const kase = (await (

@@ -45,6 +45,7 @@ import type {
   SubmissionDetail,
   SubmissionRow,
   TaxonomySettings,
+  RoleRequirementTiers,
 } from './types.js';
 import type { TaxonomyStatus } from '@formai/shared';
 
@@ -112,6 +113,13 @@ export const keys = {
    */
   competencyHolders: (id: string) => ['competencies', id, 'holders'] as const,
   assessmentTools: ['assessmentTools'] as const,
+  /**
+   * The backfill worklist — tools awarding nothing (U4, R3, KTD5). A SIBLING
+   * of `assessmentTools`, not nested under it: the worklist is admin-only and
+   * must be invalidatable (and skippable) on its own, without sweeping the
+   * tool list every role can read.
+   */
+  unlinkedTools: ['unlinkedTools'] as const,
   /** A Role's required-assessment list (U10). Keyed by role so each editor caches apart. */
   roleRequiredAssessments: (roleId: string) => ['roleRequiredAssessments', roleId] as const,
   /** The people a Department tightening still has to resolve (U17). Keyed by department. */
@@ -163,6 +171,13 @@ export const keys = {
   profileSeed: (submissionId: string) => ['profiles', 'seed', submissionId] as const,
   /** One person's held competencies, keyed on the USER the grants belong to. */
   heldCompetencies: (userId: string) => ['competencies', 'held', userId] as const,
+  /**
+   * The caller's OWN recommended competencies (U7, R12). Nested under the
+   * `competencies` prefix on purpose: granting or creating a competency can
+   * change `held` and the rows themselves, and the register invalidations
+   * already sweep that prefix.
+   */
+  myRecommended: ['competencies', 'recommended', 'mine'] as const,
 };
 
 /**
@@ -364,12 +379,23 @@ export function useCreateDraftForm() {
   });
 }
 
-/** Create the assessment tool once its template version has published. */
+/**
+ * Create the assessment tool once its template version has published.
+ *
+ * `awardedCompetencyIds` is required with exactly one element (U5, R1): the
+ * API 400s `invalid_award` without it, so every path that creates a tool —
+ * the fresh publish AND the deleted-form recovery — must have asked the
+ * author what this assessment awards before calling this.
+ */
 export function useCreateAssessmentTool() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { templateId: string; name: string; manifest: AssessmentToolManifest }) =>
-      store.createAssessmentTool(input),
+    mutationFn: (input: {
+      templateId: string;
+      name: string;
+      manifest: AssessmentToolManifest;
+      awardedCompetencyIds: string[];
+    }) => store.createAssessmentTool(input),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: keys.forms });
     },
@@ -1044,6 +1070,66 @@ export function useSetCompetencyValidity() {
   });
 }
 
+/* ── Award backfill (U4 — R3, KTD5) ──────────────────────────────────────── */
+
+/**
+ * The tools still awarding nothing — the one-time backfill worklist.
+ *
+ * `enabled` matters here more than on most reads: the endpoint is admin-only
+ * (accepting a row converts Role requirements and creates cases), so a screen
+ * mounted for an assessor or candidate must pass `enabled: false` rather than
+ * fire a request the API would 403.
+ */
+export function useUnlinkedTools(options?: { enabled?: boolean; staleTime?: number }) {
+  return useQuery({
+    queryKey: keys.unlinkedTools,
+    queryFn: () => store.listUnlinkedTools(),
+    enabled: options?.enabled ?? true,
+    ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
+}
+
+/**
+ * Preview a first award link (U4, KTD10). Read-only on the server — the
+ * effects are shown for the admin to confirm, so there is nothing to
+ * invalidate. A mutation rather than a query because it runs per click, on
+ * a (tool, competency) pair the admin is actively considering.
+ */
+export function usePreviewAwardLink() {
+  return useMutation({
+    mutationFn: (input: { toolId: string; competencyId: string }) =>
+      store.previewAwardLink(input.toolId, input.competencyId),
+  });
+}
+
+/**
+ * Apply a first award link — the previewed conversion (U4, R3, R15).
+ *
+ * The invalidation sweep is wide because the write is: the tool gains its
+ * award (worklist + tool list), Roles gain direct links (every open role
+ * editor's cache), and the activation creates real cases (case list, queue,
+ * the admin working list, and the compliance numbers standing derives).
+ */
+export function useApplyAwardLink() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { toolId: string; competencyId: string }) =>
+      store.applyAwardLink(input.toolId, input.competencyId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: keys.unlinkedTools });
+      qc.invalidateQueries({ queryKey: keys.assessmentTools });
+      // Prefix match reaches every per-role editor cache — the conversion
+      // moved that role's requirement from the legacy rows to a direct link.
+      qc.invalidateQueries({ queryKey: ['roleRequiredAssessments'] });
+      qc.invalidateQueries({ queryKey: keys.assessmentCases });
+      qc.invalidateQueries({ queryKey: keys.assessorQueue });
+      qc.invalidateQueries({ queryKey: keys.workingList });
+      qc.invalidateQueries({ queryKey: keys.compliance });
+      qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
 export function useAddRule() {
   const qc = useQueryClient();
   return useMutation({
@@ -1528,7 +1614,11 @@ export function useUpdateTaxonomySettings() {
   );
 }
 
-/** A Role's required assessments (U10). `configured` distinguishes never-set from emptied. */
+/**
+ * A Role's requirements in COMPETENCY terms (U6, U3): two tiers, the legacy
+ * `awaitingLink` rows, and the KTD9 fingerprint every write must echo.
+ * `configured` distinguishes never-set from emptied (R50).
+ */
 export function useRoleRequiredAssessments(roleId: string | undefined) {
   return useQuery({
     queryKey: keys.roleRequiredAssessments(roleId ?? ''),
@@ -1537,29 +1627,69 @@ export function useRoleRequiredAssessments(roleId: string | undefined) {
   });
 }
 
-/** Project a proposed change's blast radius without committing it (U12). */
+/**
+ * Project a proposed change's blast radius without committing it (U12, KTD10).
+ * Takes both tiers plus optional legacy removals — the awaitingLink exit
+ * previews through this same door (KTD9).
+ */
 export function usePreviewRoleRequiredAssessments(roleId: string) {
   return useMutation({
-    mutationFn: (toolIds: string[]) => store.previewRoleRequiredAssessments(roleId, toolIds),
+    mutationFn: (body: RoleRequirementTiers & { removeLegacyToolIds?: string[] }) =>
+      store.previewRoleRequiredAssessments(roleId, body),
   });
 }
 
-export function useSetRoleRequiredAssessments(roleId: string) {
+/** The invalidation sweep both requirement writes share — what a save or legacy removal goes stale. */
+function useRequirementWriteInvalidation(roleId: string) {
   const qc = useQueryClient();
+  return () => {
+    void qc.invalidateQueries({ queryKey: keys.roleRequiredAssessments(roleId) });
+    // The taxonomy read carries each Role's configured flag; a new case can
+    // reach the case list AND the progress dashboard (a deliberate sibling key,
+    // so it must be swept explicitly); the audit feed logs the change. The
+    // recommended surfaces derive from the same links (U7), and standing feeds
+    // the compliance numbers (U8), so both refetch too.
+    void qc.invalidateQueries({ queryKey: keys.taxonomy });
+    void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    void qc.invalidateQueries({ queryKey: keys.assessorQueue });
+    void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
+    void qc.invalidateQueries({ queryKey: keys.myRecommended });
+    void qc.invalidateQueries({ queryKey: keys.compliance });
+    void qc.invalidateQueries({ queryKey: keys.auditLog });
+  };
+}
+
+/** Replace both tiers, echoing the fingerprint (KTD9 — a stale echo 409s `requirements_changed`). */
+export function useSetRoleRequiredAssessments(roleId: string) {
+  const invalidate = useRequirementWriteInvalidation(roleId);
   return useMutation({
-    mutationFn: (toolIds: string[]) => store.setRoleRequiredAssessments(roleId, toolIds),
-    onSuccess: () => {
-      void qc.invalidateQueries({ queryKey: keys.roleRequiredAssessments(roleId) });
-      // The taxonomy read carries each Role's configured flag; a new case can
-      // reach the case list AND the progress dashboard (a deliberate sibling key,
-      // so it must be swept explicitly); the audit feed logs the change.
-      void qc.invalidateQueries({ queryKey: keys.taxonomy });
-      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
-      void qc.invalidateQueries({ queryKey: keys.assessorQueue });
-      void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
-      void qc.invalidateQueries({ queryKey: keys.auditLog });
-    },
+    mutationFn: (body: RoleRequirementTiers & { fingerprint: string }) =>
+      store.setRoleRequiredAssessments(roleId, body),
+    onSuccess: invalidate,
   });
+}
+
+/**
+ * Remove ONE awaitingLink legacy row (U6, KTD9) — the exit for a tool that
+ * will never be linked. Fingerprint-guarded like the PUT, and confirmed
+ * through the same preview before the editor calls this.
+ */
+export function useRemoveLegacyRequirement(roleId: string) {
+  const invalidate = useRequirementWriteInvalidation(roleId);
+  return useMutation({
+    mutationFn: (input: { toolId: string; fingerprint: string }) =>
+      store.removeLegacyRequirement(roleId, input.toolId, input.fingerprint),
+    onSuccess: invalidate,
+  });
+}
+
+/**
+ * The caller's OWN recommended competencies (U7, R12) — powers the candidate
+ * record and dashboard. Self-scope, so no admin gate and no `enabled` dance:
+ * mounting the surface IS the decision to ask.
+ */
+export function useMyRecommended() {
+  return useQuery({ queryKey: keys.myRecommended, queryFn: () => store.listMyRecommended() });
 }
 
 export function useMemberPlacement(membershipId: string | undefined) {

@@ -8,6 +8,7 @@ import type {
   ProfileAccess,
   ProfileResponse,
   ProfileSeedResponse,
+  RecommendedCompetencies,
 } from '../../lib/data/types.js';
 
 /*
@@ -23,6 +24,8 @@ const state: {
   seed: ProfileSeedResponse | undefined;
   role: string;
   cases: Array<{ id: string; toolName: string; state: string; createdAt: string }>;
+  /** The candidate's own recommended read (U7). Undefined keeps the card absent. */
+  recommended: RecommendedCompetencies | undefined;
 } = {
   profile: { data: undefined, isLoading: false, isError: false },
   held: [],
@@ -30,7 +33,9 @@ const state: {
   seed: undefined,
   role: 'admin',
   cases: [],
+  recommended: undefined,
 };
+const requestTraining = vi.fn();
 
 /*
   No route params and no query string by default, so the screen takes its
@@ -73,6 +78,8 @@ vi.mock('../../lib/data/hooks.js', () => ({
     },
   }),
   useProfileSeed: () => ({ data: state.seed }),
+  useMyRecommended: () => ({ data: state.recommended }),
+  useRequestTraining: () => ({ mutate: requestTraining, isPending: false }),
   useSaveProfile: () => ({
     mutate: (
       input: { membershipId: string; values: Record<string, string> },
@@ -85,6 +92,14 @@ vi.mock('../../lib/data/hooks.js', () => ({
     isError: false,
   }),
 }));
+
+// The recommended card toasts on request outcomes; the provider is app chrome
+// these component tests do not mount.
+const toast = vi.fn();
+vi.mock('@formai/ui', async () => {
+  const actual = await vi.importActual<typeof import('@formai/ui')>('@formai/ui');
+  return { ...actual, useToast: () => ({ toast }) };
+});
 
 const { ProfileScreen } = await import('./ProfileScreen.js');
 
@@ -142,6 +157,7 @@ afterEach(() => {
   state.seed = undefined;
   state.role = 'admin';
   state.cases = [];
+  state.recommended = undefined;
   searchParams = new URLSearchParams();
 });
 
@@ -477,6 +493,60 @@ describe('ProfileScreen — the candidate-focused own view', () => {
     state.role = 'candidate';
     show({ isSubject: true });
     expect(screen.getByText(/Nothing due/)).toBeDefined();
+  });
+
+  it('shows an unheld recommendation with NO start action while self-start is OFF (AE5, R12)', () => {
+    state.role = 'candidate';
+    state.recommended = {
+      selfStartEnabled: false,
+      items: [
+        { competencyId: 'c1', name: 'First Aid', code: 'HLTAID011', held: false, requestableToolId: 't1' },
+      ],
+    };
+    show({ isSubject: true });
+    expect(screen.getByText('Recommended for your roles')).toBeDefined();
+    expect(screen.getByText('First Aid')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Request this training' })).toBeNull();
+  });
+
+  it('exposes the request action when the org flips self-start ON, posting { toolId } (AE5, R14)', () => {
+    state.role = 'candidate';
+    state.recommended = {
+      selfStartEnabled: true,
+      items: [
+        { competencyId: 'c1', name: 'First Aid', code: 'HLTAID011', held: false, requestableToolId: 't1' },
+      ],
+    };
+    show({ isSubject: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Request this training' }));
+    // The existing voluntary body — the request lands in the training-request
+    // queue, never enrols directly (R94, R96).
+    expect(requestTraining).toHaveBeenCalledWith('t1', expect.anything());
+  });
+
+  it('offers no request for an evidence-only recommendation, toggle regardless (R7)', () => {
+    state.role = 'candidate';
+    state.recommended = {
+      selfStartEnabled: true,
+      items: [
+        { competencyId: 'c2', name: 'Driver Licence', code: null, held: false, requestableToolId: null },
+      ],
+    };
+    show({ isSubject: true });
+    expect(screen.getByText('Driver Licence')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Request this training' })).toBeNull();
+  });
+
+  it('renders no recommended card on someone ELSE’s record — it is a self surface (R12)', () => {
+    state.role = 'admin';
+    state.recommended = {
+      selfStartEnabled: true,
+      items: [
+        { competencyId: 'c1', name: 'First Aid', code: null, held: false, requestableToolId: 't1' },
+      ],
+    };
+    show();
+    expect(screen.queryByText('Recommended for your roles')).toBeNull();
   });
 
   it('keeps the full record — placement and documents — for a non-candidate reader', () => {

@@ -8,6 +8,8 @@ const gap = (userId: string, competencyId = 'c1'): ComplianceGap => ({
   name: 'Bo Worker',
   competencyId,
   competencyName: 'Track Dozer',
+  // The tile counts people, not bookability — the flag is row furniture here (U8).
+  hasAwardingAssessment: true,
 });
 
 const report = (over: Partial<ComplianceReport> = {}): ComplianceReport => ({

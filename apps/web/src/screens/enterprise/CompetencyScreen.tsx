@@ -1,20 +1,25 @@
 import { useState } from 'react';
-import { describeValidity, type CompetencyStatus } from '@formai/shared';
+import { describeValidity, type CompetencyStatus, type Standing } from '@formai/shared';
 import { Badge, Button, Icon, Input, Select, Switch, useToast, type BadgeVariant } from '@formai/ui';
-import type { Competency } from '../../lib/data/types.js';
+import type { AwardLinkEffects, Competency, UnlinkedTool } from '../../lib/data/types.js';
 import { useForm, useForms } from '../../lib/data/hooks.js';
 import {
   useAddRule,
+  useApplyAwardLink,
   useCompetencies,
   useCompetencyHolders,
   useCompetencyRules,
   useCreateCompetency,
   useGrantCompetency,
   useMembers,
+  usePreviewAwardLink,
   useRemoveRule,
+  useSession,
   useSetCompetencyValidity,
   useToggleRule,
+  useUnlinkedTools,
 } from '../../lib/data/hooks.js';
+import { useInlineCompetencyCreate } from '../../lib/data/use-inline-competency-create.js';
 
 /**
  * How each status reads, and how loudly.
@@ -36,6 +41,21 @@ const STATUS_STYLE: Record<CompetencyStatus, { label: string; variant: BadgeVari
   grace: { label: 'In grace', variant: 'warning' },
   expired: { label: 'Expired', variant: 'danger' },
   undated: { label: 'Undated', variant: 'neutral' },
+};
+
+/**
+ * How each STANDING reads on the register (U7, KTD7) — an EXHAUSTIVE map over
+ * the union, not a two-branch ternary. The ternary this replaces rendered the
+ * recommended tier as "Optional", which is exactly the by-omission collapse
+ * KTD7's required third argument exists to make impossible: a tier the type
+ * grows next lands here as a compile error, never as a silently wrong label.
+ * Required is the compliance-bearing tier, so it is the louder mark;
+ * recommended sits between required and optional in visibility only (R12, R13).
+ */
+const STANDING_LABEL: Record<Standing, { label: string; className: string }> = {
+  required: { label: 'Required', className: 'text-text-secondary' },
+  recommended: { label: 'Recommended', className: 'text-text-secondary' },
+  optional: { label: 'Optional', className: 'text-text-tertiary' },
 };
 
 /** ISO instant → the date alone. Nobody schedules requalification by the hour. */
@@ -239,18 +259,18 @@ function HolderRegister({ competency }: { competency: Competency }) {
                 </div>
               </div>
               {/*
-                STANDING AND CURRENCY, TWO MARKS (R108). Standing — required or
-                optional for this person's Roles — sits beside the currency
-                badge, because they answer different questions: obligation
-                versus the date. A required competency is the one that counts
-                against compliance when it lapses, so it is the louder mark.
+                STANDING AND CURRENCY, TWO MARKS (R108). Standing — required,
+                recommended or optional for this person's Roles — sits beside
+                the currency badge, because they answer different questions:
+                obligation versus the date. A required competency is the one
+                that counts against compliance when it lapses, so it is the
+                louder mark; a recommended one is visible and never enforced
+                (R12, R13). The map is exhaustive over the union (KTD7).
               */}
               <span
-                className={`text-[10px] font-medium uppercase tracking-wide ${
-                  h.standing === 'required' ? 'text-text-secondary' : 'text-text-tertiary'
-                }`}
+                className={`text-[10px] font-medium uppercase tracking-wide ${STANDING_LABEL[h.standing].className}`}
               >
-                {h.standing === 'required' ? 'Required' : 'Optional'}
+                {STANDING_LABEL[h.standing].label}
               </span>
               {/*
                 Revocation is a MARK, not a status (R104): a revoked grant still
@@ -585,6 +605,237 @@ function NewCompetency({ existing }: { existing: Competency[] }) {
 }
 
 /**
+ * One row of the backfill worklist (U4, R3, KTD5 — AE3).
+ *
+ * The accept flow is deliberately two-step: pick a competency (the server's
+ * suggestion, the picker, or an inline create), PREVIEW what linking it does —
+ * "links N role requirements, creates M cases for A people" — and only then
+ * apply. Linking ACTIVATES assignment (the tool awarded nothing, so the engine
+ * planned no case for anyone until now); a one-click accept would land real
+ * cases on real people with nobody having seen the number.
+ */
+function UnlinkedToolRow({
+  tool,
+  competencies,
+}: {
+  tool: UnlinkedTool;
+  competencies: Competency[];
+}) {
+  const { toast } = useToast();
+  const preview = usePreviewAwardLink();
+  const apply = useApplyAwardLink();
+  /**
+   * Inline create with the created competency kept locally pickable
+   * IMMEDIATELY (the shared hook): the register cache invalidation refetches
+   * in the background, and a row whose picker cannot see the competency it
+   * just created would strand the admin mid-flow.
+   */
+  const inlineCreate = useInlineCompetencyCreate(competencies);
+
+  // The suggestion is PRE-PICKED, never pre-applied (R3): an exact
+  // name-or-code match is safe to offer as a default, but the preview and the
+  // confirm still stand between it and any write.
+  const [competencyId, setCompetencyId] = useState(tool.suggestion?.competencyId ?? '');
+  /** The previewed effects — only ever for the CURRENTLY picked competency. */
+  const [effects, setEffects] = useState<AwardLinkEffects | null>(null);
+  const [creating, setCreating] = useState(false);
+  // Prefilled from the tool (AE3): "Site Familiarisation v2" the tool almost
+  // certainly awards a competency of the same name, so accepting the default
+  // is the one-step path. Editable for the cases where it is not.
+  const [newName, setNewName] = useState(tool.name);
+  const [newCode, setNewCode] = useState('');
+
+  const options = inlineCreate.options;
+
+  function pick(id: string) {
+    setCompetencyId(id);
+    // A preview belongs to a (tool, competency) PAIR. Keeping it across a
+    // re-pick would let "Link award" apply counts the admin never saw.
+    setEffects(null);
+  }
+
+  function onPreview() {
+    if (!competencyId) return;
+    preview.mutate(
+      { toolId: tool.id, competencyId },
+      {
+        onSuccess: (result) => setEffects(result),
+        onError: () => toast({ variant: 'danger', message: 'Could not preview the link.' }),
+      },
+    );
+  }
+
+  function onApply() {
+    if (!competencyId || !effects) return;
+    const target = options.find((c) => c.id === competencyId);
+    apply.mutate(
+      { toolId: tool.id, competencyId },
+      {
+        onSuccess: (result) => {
+          // Report what actually LANDED — the applied counts, not the
+          // previewed ones, though KTD10 makes them agree on unchanged data.
+          toast({
+            variant: 'success',
+            message: `${tool.name} now awards ${target?.name ?? 'the competency'} — linked ${result.rolesLinked} role requirement${result.rolesLinked === 1 ? '' : 's'}, created ${result.created} case${result.created === 1 ? '' : 's'}.`,
+          });
+          // The invalidation sweep refetches the worklist; this row leaves it
+          // because the tool no longer has an empty awards list.
+        },
+        onError: () => toast({ variant: 'danger', message: 'Could not link the award.' }),
+      },
+    );
+  }
+
+  function onCreate() {
+    const trimmedName = newName.trim();
+    if (!trimmedName) {
+      toast({ variant: 'warning', message: 'A competency needs a name.' });
+      return;
+    }
+    // No validity asked here (the shared hook creates perpetual) — this
+    // flow's job is the LINK, not the whole record.
+    inlineCreate.create(
+      trimmedName,
+      newCode.trim() || null,
+      (added) => {
+        pick(added.id);
+        setCreating(false);
+        toast({ variant: 'success', message: `${added.name} added to the register.` });
+      },
+      () => toast({ variant: 'warning', message: 'Could not add the competency.' }),
+    );
+  }
+
+  return (
+    <div className="border-b border-border-subtle px-[18px] py-3 last:border-b-0">
+      <div className="flex flex-wrap items-end gap-2.5">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13.5px] font-semibold">{tool.name}</div>
+          {tool.suggestion ? (
+            <div className="mt-0.5 text-[11px] text-text-tertiary">
+              Suggested from an exact match: {tool.suggestion.name}
+            </div>
+          ) : (
+            <div className="mt-0.5 text-[11px] text-text-tertiary">
+              Nothing on the register matches this name — pick one, or create it.
+            </div>
+          )}
+        </div>
+        <div className="w-[220px]">
+          <Select
+            label={`What ${tool.name} awards`}
+            value={competencyId}
+            onChange={(e) => pick(e.target.value)}
+            options={[
+              { value: '', label: '— pick a competency —' },
+              ...options.map((c) => ({ value: c.id, label: c.name })),
+            ]}
+          />
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          aria-label={`Preview link for ${tool.name}`}
+          disabled={!competencyId || preview.isPending}
+          onClick={onPreview}
+        >
+          Preview link
+        </Button>
+        <button
+          onClick={() => setCreating((v) => !v)}
+          aria-label={`Create a competency for ${tool.name}`}
+          className="fai-chip-btn inline-flex items-center gap-1 rounded-sm py-1 text-[11px] font-medium text-text-accent hover:underline"
+        >
+          <Icon name="plus" size={12} />
+          Create competency
+        </button>
+      </div>
+
+      {creating && (
+        <div className="mt-2.5 flex flex-wrap items-end gap-2 border-t border-border-subtle pt-2.5">
+          <div className="min-w-[200px] flex-1">
+            <Input label="Competency name" value={newName} onChange={(e) => setNewName(e.target.value)} />
+          </div>
+          <div className="w-[140px]">
+            <Input
+              label="Competency code (optional)"
+              placeholder="Q34666893"
+              value={newCode}
+              onChange={(e) => setNewCode(e.target.value)}
+            />
+          </div>
+          <Button size="sm" onClick={onCreate} disabled={inlineCreate.isPending}>
+            Add &amp; pick
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setCreating(false)}>
+            Cancel
+          </Button>
+        </div>
+      )}
+
+      {effects && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-2.5 rounded-md border border-warning bg-warning-soft p-[8px_10px]">
+          <p className="min-w-0 flex-1 text-[11.5px] text-warning-text">
+            {/*
+              THE BLAST RADIUS, before anything lands (KTD5). "Creates 0 cases"
+              is a real and reassuring answer — it means everyone covered
+              already holds the competency or has a case in flight.
+            */}
+            Linking this converts and activates: links {effects.rolesLinked} role requirement
+            {effects.rolesLinked === 1 ? '' : 's'}, creates {effects.created} case
+            {effects.created === 1 ? '' : 's'} for {effects.affected}{' '}
+            {effects.affected === 1 ? 'person' : 'people'}.
+          </p>
+          <Button size="sm" onClick={onApply} disabled={apply.isPending}>
+            Link award
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setEffects(null)}>
+            Cancel
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The one-time backfill panel (U4, R3): assessments created before awards were
+ * required at create, still awarding nothing. Absent entirely when the
+ * worklist is empty — a permanent empty admin panel would read as a chore that
+ * never finishes — and never even FETCHED below admin, because the endpoint
+ * 403s there (reading the worklist sits on the same gate as acting on it).
+ */
+function BackfillPanel({ competencies }: { competencies: Competency[] }) {
+  const { data: session } = useSession();
+  const isAdmin = session?.role === 'owner' || session?.role === 'admin';
+  const { data: unlinked = [] } = useUnlinkedTools({ enabled: isAdmin });
+
+  if (!isAdmin || unlinked.length === 0) return null;
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-warning bg-surface-card shadow-xs md:col-span-2">
+      <div className="border-b border-border-subtle px-[18px] py-4">
+        <div className="flex items-center gap-2">
+          <Icon name="shield-alert" size={15} className="text-warning-text" />
+          <span className="font-heading text-[15px] font-bold">
+            {unlinked.length} assessment{unlinked.length === 1 ? '' : 's'} awarding nothing
+          </span>
+        </div>
+        <p className="mt-0.5 text-xs text-text-tertiary">
+          These were built before an assessment had to name what it awards, so signing them off
+          grants nothing and nobody is ever assigned them. Link each one to the competency it
+          awards — every link is previewed before it lands, because linking is what switches
+          assignment on.
+        </p>
+      </div>
+      {unlinked.map((tool) => (
+        <UnlinkedToolRow key={tool.id} tool={tool} competencies={competencies} />
+      ))}
+    </div>
+  );
+}
+
+/**
  * Competency gating — the rule builder (which competency unlocks which form
  * section) plus a "how fillers see it" locked-section preview. Rules drive the
  * gated rendering in the external fill view.
@@ -645,6 +896,12 @@ export function CompetencyScreen() {
 
   return (
     <div className="fai-rise mx-auto grid max-w-[1040px] grid-cols-1 items-start gap-5 p-[30px_28px_60px] md:grid-cols-[minmax(0,290px)_minmax(0,1fr)]">
+      {/*
+        The backfill worklist spans both columns and leads the page while any
+        tool still awards nothing (U4). It renders nothing at all otherwise.
+      */}
+      <BackfillPanel competencies={competencies} />
+
       {/* Left: competencies + filler preview */}
       <div className="flex flex-col gap-4">
         <div className="overflow-hidden rounded-lg border border-border bg-surface-card shadow-xs">

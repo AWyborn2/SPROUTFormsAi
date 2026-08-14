@@ -20,12 +20,19 @@ const AWARDS = {
   [TOOL_FIRST_AID]: [COMP_FIRST_AID],
 };
 
+/**
+ * Most scenarios recommend nothing — the pre-recommended world. The parameter
+ * stays REQUIRED on the resolver (KTD7), so even "nothing" is said explicitly.
+ */
+const NONE = new Set<string>();
+
 describe('resolveStanding', () => {
   it('reads required when a held Role requires a tool that awards it (R88, R90)', () => {
     const standing = resolveStanding({
       heldCompetencyIds: [COMP_DOZER],
       requiredToolIds: [TOOL_DOZER],
       awardsByTool: AWARDS,
+      recommendedCompetencyIds: NONE,
     });
 
     expect(standing[COMP_DOZER]).toBe('required');
@@ -38,6 +45,7 @@ describe('resolveStanding', () => {
       heldCompetencyIds: [COMP_FIRST_AID],
       requiredToolIds: [TOOL_DOZER],
       awardsByTool: AWARDS,
+      recommendedCompetencyIds: NONE,
     });
 
     expect(standing[COMP_FIRST_AID]).toBe('optional');
@@ -52,11 +60,13 @@ describe('resolveStanding', () => {
       heldCompetencyIds,
       requiredToolIds: [TOOL_DOZER],
       awardsByTool: AWARDS,
+      recommendedCompetencyIds: NONE,
     });
     const afterRoleGone = resolveStanding({
       heldCompetencyIds,
       requiredToolIds: [],
       awardsByTool: AWARDS,
+      recommendedCompetencyIds: NONE,
     });
 
     expect(whileRequired[COMP_DOZER]).toBe('required');
@@ -70,6 +80,7 @@ describe('resolveStanding', () => {
       heldCompetencyIds: [COMP_LEGACY],
       requiredToolIds: [TOOL_DOZER, TOOL_FIRST_AID],
       awardsByTool: AWARDS,
+      recommendedCompetencyIds: NONE,
     });
 
     expect(standing[COMP_LEGACY]).toBe('optional');
@@ -83,6 +94,7 @@ describe('resolveStanding', () => {
       heldCompetencyIds: [COMP_DOZER, COMP_FIRST_AID],
       requiredToolIds: [TOOL_FIRST_AID], // the dozer Role was withdrawn, so its tool is absent
       awardsByTool: AWARDS,
+      recommendedCompetencyIds: NONE,
     });
 
     expect(standing[COMP_DOZER]).toBe('optional');
@@ -94,6 +106,7 @@ describe('resolveStanding', () => {
       heldCompetencyIds: [COMP_DOZER, COMP_FIRST_AID, COMP_LEGACY],
       requiredToolIds: [TOOL_DOZER],
       awardsByTool: AWARDS,
+      recommendedCompetencyIds: NONE,
     });
 
     expect(standing).toEqual({
@@ -114,6 +127,7 @@ describe('resolveStanding', () => {
       heldCompetencyIds: [COMP_DOZER, COMP_FIRST_AID],
       requiredToolIds: [TOOL_DOZER],
       awardsByTool: AWARDS,
+      recommendedCompetencyIds: NONE,
     });
 
     expect(standing[COMP_DOZER]).toBe('required');
@@ -139,7 +153,52 @@ describe('standingOf', () => {
   it('is required exactly when the id is in the required set', () => {
     const required = new Set([COMP_DOZER]);
 
-    expect(standingOf(COMP_DOZER, required)).toBe('required');
-    expect(standingOf(COMP_FIRST_AID, required)).toBe('optional');
+    expect(standingOf(COMP_DOZER, required, NONE)).toBe('required');
+    expect(standingOf(COMP_FIRST_AID, required, NONE)).toBe('optional');
+  });
+
+  it('reads a held competency a Role merely recommends as recommended (R6, R12)', () => {
+    const recommended = new Set([COMP_FIRST_AID]);
+
+    expect(standingOf(COMP_FIRST_AID, NONE, recommended)).toBe('recommended');
+    // Recommended never leaks onto a competency nobody named.
+    expect(standingOf(COMP_LEGACY, NONE, recommended)).toBe('optional');
+  });
+
+  it('lets required win when one Role requires what another recommends', () => {
+    // The stronger obligation is the true one — rendering "recommended" here
+    // would hide a compliance-bearing fact behind a softer label (R13's
+    // never-enforced promise cuts the other way: recommended must never
+    // swallow required).
+    const required = new Set([COMP_DOZER]);
+    const recommended = new Set([COMP_DOZER]);
+
+    expect(standingOf(COMP_DOZER, required, recommended)).toBe('required');
+  });
+
+  it('never lets recommended enter the required set — the two inputs stay apart', () => {
+    // A recommended-only competency must not read as required from any
+    // combination of the inputs: the sets are separate parameters precisely so
+    // no union upstream can conflate them.
+    const recommended = new Set([COMP_FIRST_AID]);
+
+    expect(standingOf(COMP_FIRST_AID, NONE, recommended)).not.toBe('required');
+  });
+});
+
+describe('resolveStanding with a recommended set', () => {
+  it('resolves held-recommended to recommended, beside required and optional', () => {
+    const standing = resolveStanding({
+      heldCompetencyIds: [COMP_DOZER, COMP_FIRST_AID, COMP_LEGACY],
+      requiredToolIds: [TOOL_DOZER],
+      awardsByTool: AWARDS,
+      recommendedCompetencyIds: new Set([COMP_FIRST_AID]),
+    });
+
+    expect(standing).toEqual({
+      [COMP_DOZER]: 'required',
+      [COMP_FIRST_AID]: 'recommended',
+      [COMP_LEGACY]: 'optional',
+    });
   });
 });

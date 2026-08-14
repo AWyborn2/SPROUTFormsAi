@@ -24,6 +24,19 @@ function makeDb(rows: Rows) {
       memberships: table('memberships'),
       membershipRoles: table('membershipRoles'),
       roleRequiredAssessments: table('roleRequiredAssessments'),
+      /*
+        The dual read's second half (KTD2): direct competency links, resolved
+        to their awarding tool by the shared resolver. The tier predicate is
+        load-bearing (R13) — the resolver asks for 'required' only, and a
+        double returning every link would let a recommended link assign a case
+        with the filter deleted — so it is honoured manually, like the
+        in-flight case read below.
+      */
+      roleRequiredCompetencies: {
+        findMany: async () =>
+          (rows.roleRequiredCompetencies ?? []).filter((l) => l.tier === 'required'),
+        findFirst: async () => (rows.roleRequiredCompetencies ?? [])[0],
+      },
       assessmentTools: table('assessmentTools'),
       formTemplates: table('formTemplates'),
       membershipLocations: table('membershipLocations'),
@@ -190,6 +203,41 @@ describe('assignForMembership', () => {
 
   it('assigns nothing when the membership holds no Role', async () => {
     const { db, created } = makeDb(baseRows({ membershipRoles: [] }));
+    const result = await assignForMembership(db, ORG, 'm1', NOW);
+
+    expect(result.createdCaseIds).toEqual([]);
+    expect(created).toHaveLength(0);
+  });
+
+  it('assigns from a DIRECT competency link with no legacy row at all (KTD2, R9)', async () => {
+    // The inverted world: the Role names the competency, and the tool is
+    // derived through the shared resolver (t1 awards c1, published template).
+    // Before the resolver swap this membership had NO roleRequiredAssessments
+    // row and assignForMembership returned empty — the requirement was
+    // invisible to the engine.
+    const rows = baseRows({
+      roleRequiredAssessments: [],
+      roleRequiredCompetencies: [
+        { id: 'link-1', orgId: ORG, roleId: 'r1', competencyId: 'c1', tier: 'required' },
+      ],
+    });
+    (rows.assessmentTools![0] as Record<string, unknown>).createdAt = new Date('2026-01-01T00:00:00Z');
+    const { db, created } = makeDb(rows);
+    const result = await assignForMembership(db, ORG, 'm1', NOW);
+
+    expect(result.createdCaseIds).toHaveLength(1);
+    expect(created[0]).toMatchObject({ toolId: 't1', candidateUserId: USER, currentVersionId: 'v1' });
+  });
+
+  it('assigns nothing for a RECOMMENDED link — the never-enforced tier (R13)', async () => {
+    const rows = baseRows({
+      roleRequiredAssessments: [],
+      roleRequiredCompetencies: [
+        { id: 'link-1', orgId: ORG, roleId: 'r1', competencyId: 'c1', tier: 'recommended' },
+      ],
+    });
+    (rows.assessmentTools![0] as Record<string, unknown>).createdAt = new Date('2026-01-01T00:00:00Z');
+    const { db, created } = makeDb(rows);
     const result = await assignForMembership(db, ORG, 'm1', NOW);
 
     expect(result.createdCaseIds).toEqual([]);

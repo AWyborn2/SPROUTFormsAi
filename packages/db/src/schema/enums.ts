@@ -24,6 +24,16 @@ export const membershipStatusEnum = pgEnum('membership_status', [
 export const taxonomyStatusEnum = pgEnum('taxonomy_status', ['active', 'retired']);
 
 /**
+ * How strongly a Role binds a competency it names (KTD1). `required` is the
+ * compliance-bearing tier: it auto-assigns the awarding assessment and counts
+ * against the person while unheld. `recommended` is visible and never enforced
+ * (R6, R13) — it never flags compliance, never auto-assigns, never blocks.
+ * A tier CHANGE is an UPDATE on the one (roleId, competencyId) row, never a
+ * second row, so the two tiers can never disagree about the same link.
+ */
+export const requirementTierEnum = pgEnum('requirement_tier', ['required', 'recommended']);
+
+/**
  * A voluntary training request's lifecycle (U22). A person asks for an
  * assessment no Role obliges them to hold; it waits `pending` on the working
  * list until an Admin `approved` it (which assigns) or `declined` it.

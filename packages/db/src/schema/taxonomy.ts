@@ -9,8 +9,9 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { taxonomyStatusEnum } from './enums.ts';
+import { requirementTierEnum, taxonomyStatusEnum } from './enums.ts';
 import { memberships, organizations } from './organizations.ts';
+import { competencies } from './governance.ts';
 
 /**
  * The organisation's own taxonomy: Locations, Departments, and the Roles each
@@ -125,6 +126,68 @@ export const jobRoles = pgTable(
       .where(sql`${t.status} = 'active'`),
   ],
 );
+
+/**
+ * The competencies a Role names — its required set and its never-enforced
+ * recommended set (R5, R6, KTD1). This is the STORED requirement; the tool
+ * link becomes derived (via each assessment's awarded competency) rather than
+ * stored, which is what makes a licence-type requirement — a competency no
+ * assessment awards — expressible at all (R7).
+ *
+ * A REAL JOIN TABLE, not jsonb on the Role, for the same reason
+ * `role_required_assessments` is one: a Role's requirement is the blast radius
+ * a requirement-change preview has to count, so rows must be queryable by Role
+ * and by competency. One row per (roleId, competencyId) — the tier is a COLUMN
+ * and a tier change is an UPDATE, so required and recommended can never
+ * disagree about the same link (mirroring `role_required_assessments_uq`).
+ *
+ * The competency FK CASCADES on delete. That looks like the silent-disarm the
+ * jsonb awards list deliberately avoided, but the DELETE route itself gains a
+ * dependency check in the same round (KTD8): deleting a competency 409s while
+ * any row here depends on it, so the cascade is unreachable while depended-on
+ * and exists only to keep an orphaned link from surviving a forced cleanup.
+ */
+export const roleRequiredCompetencies = pgTable(
+  'role_required_competencies',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    orgId: uuid()
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    roleId: uuid('role_id')
+      .notNull()
+      .references(() => jobRoles.id, { onDelete: 'cascade' }),
+    competencyId: uuid('competency_id')
+      .notNull()
+      .references(() => competencies.id, { onDelete: 'cascade' }),
+    /** `required` or `recommended` — see `requirementTierEnum` for what each tier may do. */
+    tier: requirementTierEnum().notNull(),
+    createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    // A Role names a competency once; promoting recommended → required is an
+    // UPDATE of `tier` on this row, never a second row.
+    uniqueIndex('role_required_competencies_uq').on(t.roleId, t.competencyId),
+    index('role_required_competencies_org_idx').on(t.orgId),
+    index('role_required_competencies_role_idx').on(t.roleId),
+    index('role_required_competencies_competency_idx').on(t.competencyId),
+  ],
+);
+
+export const roleRequiredCompetenciesRelations = relations(roleRequiredCompetencies, ({ one }) => ({
+  org: one(organizations, {
+    fields: [roleRequiredCompetencies.orgId],
+    references: [organizations.id],
+  }),
+  role: one(jobRoles, {
+    fields: [roleRequiredCompetencies.roleId],
+    references: [jobRoles.id],
+  }),
+  competency: one(competencies, {
+    fields: [roleRequiredCompetencies.competencyId],
+    references: [competencies.id],
+  }),
+}));
 
 export const locationsRelations = relations(locations, ({ one }) => ({
   org: one(organizations, { fields: [locations.orgId], references: [organizations.id] }),

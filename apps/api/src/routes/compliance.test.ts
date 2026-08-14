@@ -49,8 +49,16 @@ function fakeDb(opts: {
   profiles?: unknown[];
   /** Overrides the default user row — pass `passwordHash` to give somebody a login. */
   users?: unknown[];
+  /** Legacy Role → tool rows. Default: r1 requires t1 (which awards COMP). */
+  legacyRequirements?: unknown[];
+  /** Direct Role → competency links (KTD1) — the dual read's second half. */
+  roleLinks?: unknown[];
+  /** The org's tools, for the legacy derivation AND the KTD2 bookability read (U8). */
+  tools?: unknown[];
+  /** Templates backing the KTD2 published-version filter. Default: t1's is published. */
+  templates?: unknown[];
 }) {
-  return {
+  const db = {
     query: {
       organizations: { findFirst: vi.fn().mockResolvedValue({ id: 'org-1', planTier: 'enterprise' }) },
       memberships: {
@@ -59,8 +67,29 @@ function fakeDb(opts: {
         ),
       },
       membershipRoles: { findMany: vi.fn().mockResolvedValue([{ membershipId: 'm1', roleId: 'r1', withdrawnAt: null }]) },
-      roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue([{ orgId: 'org-1', roleId: 'r1', toolId: 't1' }]) },
-      assessmentTools: { findMany: vi.fn().mockResolvedValue([{ id: 't1', orgId: 'org-1', awardedCompetencyIds: [COMP] }]) },
+      roleRequiredAssessments: {
+        findMany: vi.fn().mockResolvedValue(
+          opts.legacyRequirements ?? [{ orgId: 'org-1', roleId: 'r1', toolId: 't1' }],
+        ),
+      },
+      assessmentTools: {
+        findMany: vi.fn().mockResolvedValue(
+          opts.tools ?? [
+            {
+              id: 't1',
+              orgId: 'org-1',
+              templateId: 'tpl-1',
+              awardedCompetencyIds: [COMP],
+              createdAt: new Date('2026-01-01T00:00:00Z'),
+            },
+          ],
+        ),
+      },
+      formTemplates: {
+        findMany: vi.fn().mockResolvedValue(
+          opts.templates ?? [{ id: 'tpl-1', orgId: 'org-1', currentVersionId: 'v1' }],
+        ),
+      },
       /*
         No `passwordHash` by default — an invited person who never completed
         their signup. That is the case where the mark alone decides, so the
@@ -77,8 +106,40 @@ function fakeDb(opts: {
         ),
       },
       competencyHolders: { findMany: vi.fn().mockResolvedValue(opts.holders ?? []) },
+      /*
+        The dual read's direct half (KTD1) — TIER-AWARE like the sibling route
+        fakes: the loaders filter tier in the WHERE clause, and a mock handing
+        every seeded row to both reads would let a recommended link count as
+        required, masking exactly the R13/AE4 regression pinned below.
+      */
+      roleRequiredCompetencies: {
+        findMany: vi.fn((args?: { where?: unknown }) => {
+          const rows = (opts.roleLinks ?? []) as { tier?: string }[];
+          const seen = new Set<unknown>();
+          const stack: unknown[] = [args?.where];
+          let tier: string | null = null;
+          while (stack.length && !tier) {
+            const n = stack.pop();
+            if (!n || typeof n !== 'object' || seen.has(n)) continue;
+            seen.add(n);
+            const rec = n as Record<string, unknown>;
+            if (rec.value === 'required' || rec.value === 'recommended') {
+              tier = rec.value as string;
+              break;
+            }
+            for (const v of Object.values(rec)) if (v && typeof v === 'object') stack.push(v);
+          }
+          return Promise.resolve(tier ? rows.filter((r) => r.tier === tier) : rows);
+        }),
+      },
     },
   } as unknown as Db;
+  // requiredCompetencyIdsByUser reads inside db.transaction (KTD3); hand the
+  // same surface back — these mocks have no snapshot to isolate.
+  (db as unknown as { transaction: unknown }).transaction = async (
+    fn: (tx: unknown) => Promise<unknown>,
+  ) => fn(db);
+  return db;
 }
 
 afterEach(() => {
@@ -338,5 +399,118 @@ describe('GET /compliance (U20)', () => {
       expect(body.unreachable).toHaveLength(1);
       server.close();
     });
+  });
+});
+
+describe('GET /compliance — read alignment with the KTD2 resolver (U8)', () => {
+  const COMP_LICENCE = 'comp-licence';
+  type GapRow = { competencyId: string; hasAwardingAssessment: boolean };
+  type Report = {
+    expired: GapRow[];
+    expiring: GapRow[];
+    neverHeld: GapRow[];
+    optionalLapses: GapRow[];
+  };
+  const getReport = async (base: string): Promise<Report> =>
+    (await (await fetch(`${base}/compliance`, { headers: authHeader(admin) })).json()) as Report;
+
+  it('flags a bookable gap hasAwardingAssessment: true, and an evidence-only licence false (AE1, R7)', async () => {
+    // Dozer Operator requires the ATO (tool-awarded) AND a driver's licence
+    // nothing awards: the ATO gap is bookable, the licence gap is evidence-based.
+    mockDbValue = fakeDb({
+      holders: [],
+      roleLinks: [{ orgId: 'org-1', roleId: 'r1', competencyId: COMP_LICENCE, tier: 'required' }],
+      competencies: [
+        { id: COMP, orgId: 'org-1', name: 'Track Dozer', validForMonths: 36 },
+        { id: COMP_LICENCE, orgId: 'org-1', name: 'Driver Licence', validForMonths: null },
+      ],
+    });
+    const { server, base } = startApp();
+    const body = await getReport(base);
+    const byId = new Map(body.neverHeld.map((g) => [g.competencyId, g.hasAwardingAssessment]));
+    expect(byId.get(COMP)).toBe(true);
+    expect(byId.get(COMP_LICENCE)).toBe(false);
+    server.close();
+  });
+
+  it('reads a gap whose only awarding tool has NO published version as unbookable (KTD2)', async () => {
+    // "Book the assessment" for a tool that cannot carry a case is a dead end;
+    // the resolver's published-version filter is what this flag must read.
+    mockDbValue = fakeDb({
+      holders: [],
+      templates: [{ id: 'tpl-1', orgId: 'org-1', currentVersionId: null }],
+    });
+    const { server, base } = startApp();
+    const body = await getReport(base);
+    expect(body.neverHeld.map((g) => g.hasAwardingAssessment)).toEqual([false]);
+    server.close();
+  });
+
+  it('clears an evidence-only gap on an imported grant (R11)', async () => {
+    // The licence arrives as an imported LMS grant with its own expiry — the
+    // person is compliant, and no bucket names them.
+    mockDbValue = fakeDb({
+      legacyRequirements: [],
+      roleLinks: [{ orgId: 'org-1', roleId: 'r1', competencyId: COMP_LICENCE, tier: 'required' }],
+      competencies: [{ id: COMP_LICENCE, orgId: 'org-1', name: 'Driver Licence', validForMonths: null }],
+      holders: [grant(COMP_LICENCE, { expiresAt: daysAhead(400) })],
+      tools: [],
+    });
+    const { server, base } = startApp();
+    const body = await getReport(base);
+    expect(body.expired).toEqual([]);
+    expect(body.expiring).toEqual([]);
+    expect(body.neverHeld).toEqual([]);
+    server.close();
+  });
+
+  it('reports identical numbers for a legacy row and its converted link (KTD3 invariant)', async () => {
+    // The same requirement, expressed both ways: Role → tool (legacy) versus
+    // Role → competency (converted, the tool now awards it). Conversion must
+    // not move a single person between buckets — the chips and the tile read
+    // this response, so equal buckets IS the pre-inversion match.
+    const holders = [grant(COMP, { expiresAt: daysAgo(10) })];
+    mockDbValue = fakeDb({ holders }); // legacy: r1 → t1, t1 awards COMP
+    let app = startApp();
+    const legacy = await getReport(app.base);
+    app.server.close();
+
+    mockDbValue = fakeDb({
+      holders,
+      legacyRequirements: [],
+      roleLinks: [{ orgId: 'org-1', roleId: 'r1', competencyId: COMP, tier: 'required' }],
+    });
+    app = startApp();
+    const converted = await getReport(app.base);
+    app.server.close();
+
+    expect(converted).toEqual(legacy);
+    expect(converted.expired.map((g) => g.competencyId)).toEqual([COMP]);
+  });
+
+  it('keeps a RECOMMENDED lapse out of every compliance number — the report is unchanged by recommending (AE4, R13)', async () => {
+    // First Aid lapsed, and no Role requires it. Before the recommendation it
+    // read as an optional lapse; recommending it must change NOTHING here —
+    // recommended never flags compliance, so the two responses are equal.
+    const holders = [
+      grant(COMP, { expiresAt: daysAhead(400) }), // required, current → compliant
+      grant(COMP_OPT, { expiresAt: daysAgo(10) }), // lapsed, never required
+    ];
+    mockDbValue = fakeDb({ holders });
+    let app = startApp();
+    const before = await getReport(app.base);
+    app.server.close();
+
+    mockDbValue = fakeDb({
+      holders,
+      roleLinks: [{ orgId: 'org-1', roleId: 'r1', competencyId: COMP_OPT, tier: 'recommended' }],
+    });
+    app = startApp();
+    const after = await getReport(app.base);
+    app.server.close();
+
+    expect(after).toEqual(before);
+    expect(after.expired).toEqual([]);
+    expect(after.optionalLapses.map((g) => g.competencyId)).toEqual([COMP_OPT]);
   });
 });
