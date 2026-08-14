@@ -11,6 +11,7 @@ import type {
   CompetencyStatus,
   DateFormat,
   DisplayIdentifier,
+  DocumentType,
   ExtractionResult,
   FormContainer,
   FormField,
@@ -1069,4 +1070,19 @@ export interface SaveBuilderDraftInput {
   versionId?: string | null;
   /** Set when the draft revises a published tool — the server enforces one per tool. */
   revisionOfToolId?: string | null;
+}
+
+/**
+ * The body `POST /pdf/audit` accepts — the secondary-extraction pass.
+ *
+ * The PDF comes in exactly one of two ways (an uploaded `assetId` or inline
+ * base64), and `knownLabels` is what the draft has already captured, so the
+ * audit reports only what it does not already have.
+ */
+export interface AuditFormInput {
+  fileName: string;
+  assetId?: string;
+  pdfBase64?: string;
+  knownLabels: string[];
+  documentType?: DocumentType;
 }
