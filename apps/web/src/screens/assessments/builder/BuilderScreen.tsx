@@ -144,6 +144,52 @@ export function BuilderScreen() {
   );
 
   /*
+    THE SAVE SIGNAL, ON EVERY STEP — Generate and Placement included.
+
+    The hint above promises "your work saves as you go". A single "Saved HH:MM"
+    stamp made that uncheckable: it appeared only on success, ticked once a
+    minute so it looked frozen, and the compact chrome the structure editor runs
+    under never showed it at all — so on the very step where an author moves
+    fields between sections there was NO save feedback. This shows the whole
+    loop instead: an edit is Unsaved, the debounce is Saving, the write is Saved
+    at a second-precise time that visibly moves. A failure simply stays on
+    Unsaved, which is the honest tell it always should have been.
+  */
+  const saveIndicator =
+    draft.hasDocument && persisted.status !== 'idle' ? (
+      <span
+        className={`inline-flex flex-none items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium ${
+          persisted.status === 'unsaved'
+            ? 'bg-warning-soft text-warning-text'
+            : 'bg-surface-sunken text-text-tertiary'
+        }`}
+        title={
+          persisted.status === 'unsaved' ? 'Edits not saved yet — they save automatically' : undefined
+        }
+      >
+        {persisted.status === 'saving' ? (
+          <>
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-text-tertiary" />
+            Saving…
+          </>
+        ) : persisted.status === 'unsaved' ? (
+          <>
+            <span className="h-1.5 w-1.5 rounded-full bg-warning" />
+            Unsaved changes
+          </>
+        ) : persisted.savedAt ? (
+          `Saved ${persisted.savedAt.toLocaleTimeString(undefined, {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })}`
+        ) : (
+          'Saved'
+        )}
+      </span>
+    ) : null;
+
+  /*
     PUT THE DRAFT'S ID IN THE URL AS SOON AS ONE EXISTS.
 
     This is what makes the CURRENT tab survivable. Autosave alone protects the
@@ -261,23 +307,7 @@ export function BuilderScreen() {
             {draft.hasDocument && (
               <div className="flex flex-none items-center gap-2 pb-0.5">
                 {undoRedoControls}
-                {/*
-                  THE HINT ABOVE PROMISES "your work saves as you go", which was
-                  untrue until autosave existed. Showing when the last write
-                  landed is what makes the promise checkable rather than
-                  something an author has to take on faith — and it is the only
-                  signal that a save is failing, since a failed autosave is
-                  deliberately silent so it cannot interrupt authoring.
-                */}
-                {persisted.savedAt && (
-                  <span className="rounded-full bg-surface-sunken px-2.5 py-1 text-[12px] font-medium text-text-tertiary">
-                    Saved{' '}
-                    {persisted.savedAt.toLocaleTimeString(undefined, {
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
-                  </span>
-                )}
+                {saveIndicator}
                 <span className="rounded-full bg-surface-sunken px-2.5 py-1 text-[12px] font-medium text-text-secondary">
                   {draft.pageCount} pages
                 </span>
@@ -311,6 +341,7 @@ export function BuilderScreen() {
             Draft
           </span>
           {undoRedoControls}
+          {saveIndicator}
           <BuilderMiniSteps current={step} onGo={go} disabled={blocked} />
         </div>
       )}
