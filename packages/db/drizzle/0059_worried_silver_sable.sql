@@ -43,8 +43,12 @@ ALTER TABLE "competency_requirements" ADD CONSTRAINT "competency_requirements_on
 -- AND writing `role_required_competencies` until the new build is live: an
 -- insert through the view lands in `competency_requirements` with `role_id`
 -- set (old code always sets it) and the new columns null, which the CHECK
--- accepts. With the bridge, neither ordering of migrate-vs-redeploy breaks
--- anything. ONE RELEASE ONLY: the next round's first migration drops this view.
+-- accepts. THE BRIDGE COVERS ONE DIRECTION ONLY (U1, review-corrected): it
+-- saves OLD-CODE-AFTER-MIGRATE. New code deployed BEFORE this migration reads
+-- `competency_requirements`, a table that does not exist yet, and standing,
+-- compliance and assignment all break — so MIGRATE FIRST, THEN DEPLOY is a
+-- HARD RELEASE PRECONDITION, not a preference.
+-- ONE RELEASE ONLY: the next round's first migration drops this view.
 CREATE VIEW "role_required_competencies" AS
   SELECT "id", "org_id", "role_id", "competency_id", "tier", "created_at"
   FROM "competency_requirements"

@@ -22,7 +22,7 @@ import {
   type HeldCompetencyState,
 } from '@formai/shared';
 import { db } from '../db.js';
-import { requiredToolIdsForMembership } from './requirement-links.js';
+import { requiredToolIdsForMembership, runSnapshotted } from './requirement-links.js';
 import type { Reader } from './standing.js';
 import { DEACTIVATED_STATUS } from '../middleware/tenant.js';
 
@@ -140,6 +140,55 @@ export interface AssignmentResult {
 }
 
 /**
+ * The tool/version context the engine reads over `toolIds` — ONE derivation
+ * shared by the per-membership loader and the batched planner, so the two
+ * cannot drift on the manifest parts, the published-version lookup, or the
+ * awards-override contract (U2: a pending award injected by the caller wins
+ * over the stored list — that is how the award-link preview plans the
+ * post-link world). Zero tool ids reads nothing and returns empty context.
+ */
+async function buildToolContext(
+  database: Reader,
+  orgId: string,
+  toolIds: readonly string[],
+  options: PlanOptions = {},
+): Promise<{ tools: Record<string, AssignmentTool>; currentVersionByTool: Map<string, string | null> }> {
+  const tools: Record<string, AssignmentTool> = {};
+  const currentVersionByTool = new Map<string, string | null>();
+  const uniqueToolIds = [...new Set(toolIds)];
+  if (uniqueToolIds.length === 0) return { tools, currentVersionByTool };
+
+  const toolRows = await database.query.assessmentTools.findMany({
+    where: and(
+      eq(schema.assessmentTools.orgId, orgId),
+      inArray(schema.assessmentTools.id, uniqueToolIds),
+    ),
+  });
+  const templateIds = [...new Set(toolRows.map((t) => t.templateId))];
+  const templates = templateIds.length
+    ? await database.query.formTemplates.findMany({
+        where: and(
+          eq(schema.formTemplates.orgId, orgId),
+          inArray(schema.formTemplates.id, templateIds),
+        ),
+      })
+    : [];
+  const versionByTemplate = new Map(templates.map((t) => [t.id, t.currentVersionId]));
+  for (const t of toolRows) {
+    const manifest = t.manifest as AssessmentToolManifest;
+    tools[t.id] = {
+      toolId: t.id,
+      awardedCompetencyIds: options.awardsOverride?.get(t.id) ?? t.awardedCompetencyIds ?? [],
+      allPartKeys: orderedParts(manifest).map((p) => p.key),
+      locationPartKeys: t.locationPartKeys ?? {},
+      assessorStreamCompetencyIds: t.assessorStreamCompetencyIds ?? {},
+    };
+    currentVersionByTool.set(t.id, versionByTemplate.get(t.templateId) ?? null);
+  }
+  return { tools, currentVersionByTool };
+}
+
+/**
  * Load everything the engine reads for one membership, over `toolIds`.
  *
  * `toolIds` scopes the tool context — the whole of a membership's requirements
@@ -169,40 +218,9 @@ async function loadMembershipContext(
   if (!membership) return null;
   if (membership.status === DEACTIVATED_STATUS) return null;
 
-  const tools: Record<string, AssignmentTool> = {};
-  const currentVersionByTool = new Map<string, string | null>();
-  const uniqueToolIds = [...new Set(toolIds)];
-  if (uniqueToolIds.length > 0) {
-    const toolRows = await database.query.assessmentTools.findMany({
-      where: and(
-        eq(schema.assessmentTools.orgId, orgId),
-        inArray(schema.assessmentTools.id, uniqueToolIds),
-      ),
-    });
-    const templateIds = [...new Set(toolRows.map((t) => t.templateId))];
-    const templates = templateIds.length
-      ? await database.query.formTemplates.findMany({
-          where: and(
-            eq(schema.formTemplates.orgId, orgId),
-            inArray(schema.formTemplates.id, templateIds),
-          ),
-        })
-      : [];
-    const versionByTemplate = new Map(templates.map((t) => [t.id, t.currentVersionId]));
-    for (const t of toolRows) {
-      const manifest = t.manifest as AssessmentToolManifest;
-      tools[t.id] = {
-        toolId: t.id,
-        // A pending award injected by the caller wins over the stored list —
-        // that is how the award-link preview plans the post-link world (U2).
-        awardedCompetencyIds: options.awardsOverride?.get(t.id) ?? t.awardedCompetencyIds ?? [],
-        allPartKeys: orderedParts(manifest).map((p) => p.key),
-        locationPartKeys: t.locationPartKeys ?? {},
-        assessorStreamCompetencyIds: t.assessorStreamCompetencyIds ?? {},
-      };
-      currentVersionByTool.set(t.id, versionByTemplate.get(t.templateId) ?? null);
-    }
-  }
+  // The shared tool/version derivation — one definition with the batched
+  // planner below, override contract included (U2).
+  const { tools, currentVersionByTool } = await buildToolContext(database, orgId, toolIds, options);
 
   const locRows = await database.query.membershipLocations.findMany({
     where: eq(schema.membershipLocations.membershipId, membershipId),
@@ -333,26 +351,46 @@ export async function assignForMembership(
   now: Date = new Date(),
 ): Promise<AssignmentResult> {
   /*
-    THE MEMBERSHIP-SHAPED RESOLVER (KTD4), and NO zero-roles early return: an
-    org, Location or Department requirement reaches a member who holds no role
-    at all (R2, R3) — the admin placed at a site owes its induction before
-    they hold anything — so bailing on an empty role list would silently drop
-    every non-role scope, and the sweep would never be a backstop for scope
-    changes. The resolver expands the membership's placement to scope keys
-    (retired locations/departments dropped, withdrawn roles excluded, legacy
-    role rows still honoured — KTD2/KTD3 live inside it) and returns the flat
-    deduplicated tool set the engine has always reduced to anyway.
+    ONE SNAPSHOT OVER BOTH HALVES (KTD3, review-verified). WHAT is required and
+    WHERE it can be assessed are two reads of the same person, and they used to
+    take two snapshots: the resolver opened and CLOSED its own repeatable-read
+    transaction, then the context read ran on the root client afterwards. A
+    transfer committing in that gap produced a case for the OLD placement's tool
+    stamped with the NEW location — a booking at a site whose requirements never
+    named it, which no later run corrects because the open case then suppresses
+    re-planning (KTD16's skip rule). Both halves now run inside one
+    repeatable-read transaction; the resolver's own wrapper nests as a savepoint
+    on this snapshot rather than taking a fresh one (see `runSnapshotted`).
+
+    THE READS ONLY. The insert stays outside, on the root client, exactly where
+    it was: the plan is idempotent by construction, the callers that wrap this
+    are fail-soft per member, and holding a write transaction open across the
+    whole resolution would serialise the sweep against every placement edit for
+    no correctness gain.
   */
-  const toolIds = await requiredToolIdsForMembership(database, orgId, membershipId);
-  // Zero TOOLS stays an early return: nothing to plan, nothing to load. An
-  // evidence-only obligation (R7) lands here — visible in standing, no case.
-  if (toolIds.length === 0) return { createdCaseIds: [] };
+  const planned = await runSnapshotted(database, async (reader) => {
+    /*
+      THE MEMBERSHIP-SHAPED RESOLVER (KTD4), and NO zero-roles early return: an
+      org, Location or Department requirement reaches a member who holds no role
+      at all (R2, R3) — the admin placed at a site owes its induction before
+      they hold anything — so bailing on an empty role list would silently drop
+      every non-role scope, and the sweep would never be a backstop for scope
+      changes. The resolver expands the membership's placement to scope keys
+      (retired locations/departments dropped, withdrawn roles excluded, legacy
+      role rows still honoured — KTD2/KTD3 live inside it) and returns the flat
+      deduplicated tool set the engine has always reduced to anyway.
+    */
+    const toolIds = await requiredToolIdsForMembership(reader, orgId, membershipId);
+    // Zero TOOLS stays an early return: nothing to plan, nothing to load. An
+    // evidence-only obligation (R7) lands here — visible in standing, no case.
+    if (toolIds.length === 0) return null;
 
-  const ctx = await loadMembershipContext(database, orgId, membershipId, toolIds, now);
-  if (!ctx) return { createdCaseIds: [] };
-
-  const planned = planFromContext(ctx, [toolIds]);
-  return { createdCaseIds: await insertPlannedCases(database, orgId, ctx.userId, planned) };
+    const ctx = await loadMembershipContext(reader, orgId, membershipId, toolIds, now);
+    if (!ctx) return null;
+    return { userId: ctx.userId, cases: planFromContext(ctx, [toolIds]) };
+  });
+  if (!planned) return { createdCaseIds: [] };
+  return { createdCaseIds: await insertPlannedCases(database, orgId, planned.userId, planned.cases) };
 }
 
 /**
@@ -417,40 +455,16 @@ export async function planAssignmentsForMemberships(
   if (memberships.length === 0) return [];
   const userIds = [...new Set(memberships.map((m) => m.userId))];
 
-  // Tool context — identical derivation to `loadMembershipContext`, loaded once
-  // for the whole batch (the tools are scope-wide, not per person).
+  // Tool context — the SHARED derivation (`buildToolContext`), loaded once for
+  // the whole batch (the tools are scope-wide, not per person), honouring the
+  // same override contract as the per-membership loader (U2).
   const uniqueToolIds = [...new Set(scopeToolIds)];
-  const toolRows = await database.query.assessmentTools.findMany({
-    where: and(
-      eq(schema.assessmentTools.orgId, orgId),
-      inArray(schema.assessmentTools.id, uniqueToolIds),
-    ),
-  });
-  const templateIds = [...new Set(toolRows.map((t) => t.templateId))];
-  const templates = templateIds.length
-    ? await database.query.formTemplates.findMany({
-        where: and(
-          eq(schema.formTemplates.orgId, orgId),
-          inArray(schema.formTemplates.id, templateIds),
-        ),
-      })
-    : [];
-  const versionByTemplate = new Map(templates.map((t) => [t.id, t.currentVersionId]));
-  const tools: Record<string, AssignmentTool> = {};
-  const currentVersionByTool = new Map<string, string | null>();
-  for (const t of toolRows) {
-    const manifest = t.manifest as AssessmentToolManifest;
-    tools[t.id] = {
-      toolId: t.id,
-      // A pending award injected by the caller wins over the stored list —
-      // the same override contract the per-membership loader honours (U2).
-      awardedCompetencyIds: options.awardsOverride?.get(t.id) ?? t.awardedCompetencyIds ?? [],
-      allPartKeys: orderedParts(manifest).map((p) => p.key),
-      locationPartKeys: t.locationPartKeys ?? {},
-      assessorStreamCompetencyIds: t.assessorStreamCompetencyIds ?? {},
-    };
-    currentVersionByTool.set(t.id, versionByTemplate.get(t.templateId) ?? null);
-  }
+  const { tools, currentVersionByTool } = await buildToolContext(
+    database,
+    orgId,
+    uniqueToolIds,
+    options,
+  );
 
   // Placements, open cases and held competencies — one query per table.
   const locRows = await database.query.membershipLocations.findMany({

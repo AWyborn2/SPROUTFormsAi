@@ -234,8 +234,10 @@ export async function requirementIndexForScopes(
   return index;
 }
 
-/** Union every membership's keys — the whole-batch id lists the scoped reads take. */
-function unionKeys(keysByMembership: ReadonlyMap<string, MembershipScopeKeys>): MembershipScopeKeys {
+/** Union every membership's keys — the whole-batch id lists the scoped reads take.
+ * Exported for requirement-change's removal compute and the batched tool
+ * resolution (requirement-links), which take the same whole-batch union. */
+export function unionKeys(keysByMembership: ReadonlyMap<string, MembershipScopeKeys>): MembershipScopeKeys {
   const all = emptyKeys();
   for (const keys of keysByMembership.values()) {
     all.roleIds.push(...keys.roleIds);
@@ -247,6 +249,54 @@ function unionKeys(keysByMembership: ReadonlyMap<string, MembershipScopeKeys>): 
     locationIds: [...new Set(all.locationIds)],
     departmentIds: [...new Set(all.departmentIds)],
   };
+}
+
+/**
+ * The shared HEAD of the three batched per-user reads (required, recommended,
+ * provenance): resolve the given users' memberships, then expand each
+ * membership's placement to its scope keys. Empty membershipRows is the
+ * callers' early-return signal; the keys map is empty then, with no placement
+ * query issued.
+ *
+ * MUST RUN INSIDE THE CALLER'S REPEATABLE-READ TRANSACTION — this is the KTD3
+ * snapshot obligation, stated once. Conversion deletes a legacy
+ * `role_required_assessments` row and inserts the direct link in one commit;
+ * a location transfer moves placement rows; a scope save rewrites one
+ * scope's requirement rows. Run on the root client, any of those commits
+ * could land BETWEEN two of the reads and a requirement would be visible to
+ * neither side — a person reading compliant for the duration of a request
+ * purely because an admin clicked Accept at the wrong moment. A transaction
+ * pins every read — the placement tables included, they joined the dual read
+ * when scopes did — to one snapshot.
+ *
+ * REPEATABLE READ IS THE LOAD-BEARING HALF. Postgres defaults to READ
+ * COMMITTED, where every statement takes a FRESH snapshot — the transaction
+ * alone would be decorative. `repeatable read` fixes one snapshot for the
+ * whole block, which is the guarantee KTD3 actually asks for. Safe to ask
+ * for: these blocks only read, so they can never raise a serialization
+ * failure of their own.
+ */
+async function membershipsWithScopeKeys(
+  tx: Reader,
+  orgId: string,
+  userIds: readonly string[],
+): Promise<{
+  membershipRows: (typeof schema.memberships.$inferSelect)[];
+  keysByMembership: Map<string, MembershipScopeKeys>;
+}> {
+  const membershipRows = await tx.query.memberships.findMany({
+    where: and(
+      eq(schema.memberships.orgId, orgId),
+      inArray(schema.memberships.userId, [...userIds]),
+    ),
+  });
+  if (membershipRows.length === 0) return { membershipRows, keysByMembership: new Map() };
+  const keysByMembership = await scopeKeysForMemberships(
+    tx,
+    orgId,
+    membershipRows.map((m) => m.id),
+  );
+  return { membershipRows, keysByMembership };
 }
 
 /**
@@ -267,39 +317,16 @@ export async function requiredCompetencyIdsByUser(
   for (const userId of uniqueUserIds) byUser.set(userId, new Set());
   if (uniqueUserIds.length === 0) return byUser;
 
-  /*
-    ONE SNAPSHOT FOR EVERY SCOPE (KTD3). Conversion deletes a legacy
-    `role_required_assessments` row and inserts the direct link in one commit;
-    a location transfer moves placement rows; a scope save rewrites one
-    scope's requirement rows. Run on the root client, any of those commits
-    could land BETWEEN two of the reads below and a requirement would be
-    visible to neither side — a person reading compliant for the duration of a
-    request purely because an admin clicked Accept at the wrong moment. A
-    transaction pins every read here — the placement tables now included, they
-    joined the dual read when scopes did — to one snapshot.
-
-    REPEATABLE READ IS THE LOAD-BEARING HALF. Postgres defaults to READ
-    COMMITTED, where every statement takes a FRESH snapshot — the transaction
-    alone would be decorative here. `repeatable read` fixes one snapshot for
-    the whole block, which is the guarantee KTD3 actually asks for. Safe to
-    ask for: this block only reads, so it can never raise a serialization
-    failure of its own.
-  */
+  // ONE SNAPSHOT FOR EVERY SCOPE, at REPEATABLE READ — the KTD3 rationale
+  // lives on `membershipsWithScopeKeys`, the shared head of all three reads.
   return database.transaction(
     async (tx) => {
-      const membershipRows = await tx.query.memberships.findMany({
-        where: and(
-          eq(schema.memberships.orgId, orgId),
-          inArray(schema.memberships.userId, [...uniqueUserIds]),
-        ),
-      });
-      if (membershipRows.length === 0) return byUser;
-
-      const keysByMembership = await scopeKeysForMemberships(
+      const { membershipRows, keysByMembership } = await membershipsWithScopeKeys(
         tx,
         orgId,
-        membershipRows.map((m) => m.id),
+        uniqueUserIds,
       );
+      if (membershipRows.length === 0) return byUser;
       const allKeys = unionKeys(keysByMembership);
 
       // Legacy half — ROLE scope only; legacy rows never lived anywhere else.
@@ -386,19 +413,12 @@ export async function recommendedCompetencyIdsByUser(
 
   return database.transaction(
     async (tx) => {
-      const membershipRows = await tx.query.memberships.findMany({
-        where: and(
-          eq(schema.memberships.orgId, orgId),
-          inArray(schema.memberships.userId, [...uniqueUserIds]),
-        ),
-      });
-      if (membershipRows.length === 0) return byUser;
-
-      const keysByMembership = await scopeKeysForMemberships(
+      const { membershipRows, keysByMembership } = await membershipsWithScopeKeys(
         tx,
         orgId,
-        membershipRows.map((m) => m.id),
+        uniqueUserIds,
       );
+      if (membershipRows.length === 0) return byUser;
       const direct = await requirementIndexForScopes(
         tx,
         orgId,
@@ -528,30 +548,52 @@ export async function competencySourcesByUser(
   orgId: string,
   userIds: readonly string[],
 ): Promise<Map<string, CompetencySourcesForUser>> {
+  return (await competencySourcesExpansionByUser(database, orgId, userIds)).sourcesByUser;
+}
+
+/**
+ * The provenance batch PLUS the scope expansion it rode on. The maps' KEYS are
+ * the standing sets themselves — the required map carries the legacy role
+ * derivation exactly as `requiredCompetencyIdsByUser` does, the recommended
+ * map mirrors its sibling — so a caller that needs sources AND the id sets
+ * (compliance, the record reads) takes ONE org-wide expansion on one snapshot
+ * instead of two or three.
+ *
+ * INTERNAL. `keysByMembership` used to be threaded out to compliance's
+ * unplaced marker; that read moved to raw `membership_locations` because the
+ * ASSIGNMENT ENGINE does not apply the expansion's retired-value filter, and a
+ * marker derived from the filtered keys claimed "cannot be scheduled" about
+ * members whose case was already booked. Nothing outside this module needs the
+ * keys now — `competencySourcesByUser` is the exported shape.
+ */
+interface CompetencySourcesExpansion {
+  sourcesByUser: Map<string, CompetencySourcesForUser>;
+  /** membershipId → the scope keys the expansion used (retired values already dropped, U4). */
+  keysByMembership: Map<string, MembershipScopeKeys>;
+}
+
+async function competencySourcesExpansionByUser(
+  database: Database,
+  orgId: string,
+  userIds: readonly string[],
+): Promise<CompetencySourcesExpansion> {
   const uniqueUserIds = [...new Set(userIds)];
   const byUser = new Map<string, CompetencySourcesForUser>();
   for (const userId of uniqueUserIds) byUser.set(userId, emptySources());
-  if (uniqueUserIds.length === 0) return byUser;
+  if (uniqueUserIds.length === 0) return { sourcesByUser: byUser, keysByMembership: new Map() };
 
-  // Same KTD3 posture as the batch reads: one repeatable-read snapshot across
-  // placement, requirement, legacy and NAME reads — a rename or transfer
-  // committing mid-read must not caption one entry with the old world and the
-  // next with the new.
+  // Same KTD3 posture as the batch reads (see `membershipsWithScopeKeys`): one
+  // repeatable-read snapshot across placement, requirement, legacy and NAME
+  // reads — a rename or transfer committing mid-read must not caption one
+  // entry with the old world and the next with the new.
   return database.transaction(
     async (tx) => {
-      const membershipRows = await tx.query.memberships.findMany({
-        where: and(
-          eq(schema.memberships.orgId, orgId),
-          inArray(schema.memberships.userId, [...uniqueUserIds]),
-        ),
-      });
-      if (membershipRows.length === 0) return byUser;
-
-      const keysByMembership = await scopeKeysForMemberships(
+      const { membershipRows, keysByMembership } = await membershipsWithScopeKeys(
         tx,
         orgId,
-        membershipRows.map((m) => m.id),
+        uniqueUserIds,
       );
+      if (membershipRows.length === 0) return { sourcesByUser: byUser, keysByMembership };
       // The whole batch's keys — what the scoped reads and the name reads take.
       const keys = unionKeys(keysByMembership);
 
@@ -707,7 +749,7 @@ export async function competencySourcesByUser(
           }
         }
       }
-      return byUser;
+      return { sourcesByUser: byUser, keysByMembership };
     },
     { isolationLevel: 'repeatable read' },
   );

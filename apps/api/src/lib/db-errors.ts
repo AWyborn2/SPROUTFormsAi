@@ -1,3 +1,16 @@
+/**
+ * True for a Postgres SERIALIZATION FAILURE (error code 40001) — the abort a
+ * repeatable-read (or serializable) transaction takes when a concurrent commit
+ * made its snapshot untenable.
+ *
+ * It is never a bug in the statement that raised it: the correct response is
+ * always "re-read and decide again", which for a fingerprint-guarded write is
+ * exactly what the stale-echo 409 tells the client to do.
+ */
+export function isSerializationFailure(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === '40001';
+}
+
 /** True for a Postgres unique-constraint violation (error code 23505). */
 export function isUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505';

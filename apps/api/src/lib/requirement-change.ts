@@ -38,6 +38,7 @@ import { awardingToolByCompetency } from './requirement-links.js';
 import {
   requirementIndexForScopes,
   scopeKeysForMemberships,
+  unionKeys,
   type MembershipScopeKeys,
   type Reader,
   type RequirementScopeRef,
@@ -120,48 +121,73 @@ export function requirementScopeWhere(orgId: string, scope: RequirementScopeRef)
 
 /**
  * The memberships a scope's requirements REACH — the KTD5 holder expansion,
- * one query per scope kind:
+ * one placement query per scope kind:
  *   role       → `membership_roles` still held (withdrawnAt IS NULL, R52)
  *   department → `membership_departments` (placement, R3)
  *   location   → `membership_locations` (placement, R3)
- *   org        → every ACTIVE membership of the organisation (R6/AE3 — the
- *                blast radius an org save previews is everyone active; a
- *                deactivated membership plans nothing anyway, R64).
+ *   org        → every membership of the organisation
+ *
+ * …and then ONE membership read narrowing every arm to ACTIVE (R6/AE3, R64).
+ *
+ * ACTIVE AT ALL FOUR SCOPES, not just org (review-verified, two reviewers). The
+ * placement arms used to return raw placement rows, so a deactivated leaver
+ * still sitting on a location kept inflating `affected` — while `created`
+ * counted only the people `planAssignmentsForMemberships` would actually plan
+ * for, which excludes them. The preview then reported two different
+ * populations in one sentence ("affects 40 people, creating 31 cases" where 6
+ * of the 40 were leavers), and an org-scope save of the same competency
+ * reported a different headcount from a location-scope one for the same site.
+ * Placement rows outlive deactivation on purpose (the record is retained), so
+ * the filter belongs here rather than in the placement tables.
  */
 export async function membershipIdsForScope(
   database: Database,
   orgId: string,
   scope: RequirementScopeRef,
 ): Promise<string[]> {
-  switch (scope.kind) {
-    case 'role': {
-      const rows = await database.query.membershipRoles.findMany({
-        where: and(
-          eq(schema.membershipRoles.roleId, scope.id),
-          isNull(schema.membershipRoles.withdrawnAt),
-        ),
-      });
-      return [...new Set(rows.map((r) => r.membershipId))];
-    }
-    case 'department': {
-      const rows = await database.query.membershipDepartments.findMany({
-        where: eq(schema.membershipDepartments.departmentId, scope.id),
-      });
-      return [...new Set(rows.map((r) => r.membershipId))];
-    }
-    case 'location': {
-      const rows = await database.query.membershipLocations.findMany({
-        where: eq(schema.membershipLocations.locationId, scope.id),
-      });
-      return [...new Set(rows.map((r) => r.membershipId))];
-    }
-    case 'org': {
-      const rows = await database.query.memberships.findMany({
-        where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
-      });
-      return rows.map((r) => r.id);
-    }
+  if (scope.kind === 'org') {
+    const rows = await database.query.memberships.findMany({
+      where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
+    });
+    return rows.map((r) => r.id);
   }
+  const placedIds = await (async (): Promise<string[]> => {
+    switch (scope.kind) {
+      case 'role': {
+        const rows = await database.query.membershipRoles.findMany({
+          where: and(
+            eq(schema.membershipRoles.roleId, scope.id),
+            isNull(schema.membershipRoles.withdrawnAt),
+          ),
+        });
+        return [...new Set(rows.map((r) => r.membershipId))];
+      }
+      case 'department': {
+        const rows = await database.query.membershipDepartments.findMany({
+          where: eq(schema.membershipDepartments.departmentId, scope.id),
+        });
+        return [...new Set(rows.map((r) => r.membershipId))];
+      }
+      case 'location': {
+        const rows = await database.query.membershipLocations.findMany({
+          where: eq(schema.membershipLocations.locationId, scope.id),
+        });
+        return [...new Set(rows.map((r) => r.membershipId))];
+      }
+    }
+  })();
+  if (placedIds.length === 0) return [];
+  const active = await database.query.memberships.findMany({
+    where: and(
+      eq(schema.memberships.orgId, orgId),
+      inArray(schema.memberships.id, placedIds),
+      eq(schema.memberships.status, 'active'),
+    ),
+  });
+  // Filtered through the placement order, not the read's, so the holder list a
+  // preview and its apply expand stays identical between two runs.
+  const activeIds = new Set(active.map((m) => m.id));
+  return placedIds.filter((id) => activeIds.has(id));
 }
 
 /**
@@ -375,15 +401,7 @@ async function computeRemovalEffects(
           : keys.departmentIds,
     });
   }
-  const unionOtherKeys: MembershipScopeKeys = { roleIds: [], locationIds: [], departmentIds: [] };
-  for (const keys of otherKeysByMembership.values()) {
-    unionOtherKeys.roleIds.push(...keys.roleIds);
-    unionOtherKeys.locationIds.push(...keys.locationIds);
-    unionOtherKeys.departmentIds.push(...keys.departmentIds);
-  }
-  unionOtherKeys.roleIds = [...new Set(unionOtherKeys.roleIds)];
-  unionOtherKeys.locationIds = [...new Set(unionOtherKeys.locationIds)];
-  unionOtherKeys.departmentIds = [...new Set(unionOtherKeys.departmentIds)];
+  const unionOtherKeys = unionKeys(otherKeysByMembership);
 
   // The OTHER scopes' direct required rows, via the one shared four-scope read
   // (standing.ts) — org rows ride along and apply below unless the org scope

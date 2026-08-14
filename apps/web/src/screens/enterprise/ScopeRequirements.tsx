@@ -128,11 +128,21 @@ export function requirementSummary(
   inheritedRequired: number | null,
 ): string {
   if (!current) return '';
-  if (scope === 'role' && !current.configured) return 'not set up';
+  const inheritedSuffix =
+    inheritedRequired !== null && inheritedRequired > 0 ? ` · ${inheritedRequired} inherited` : '';
+  /*
+    NEVER-SET-UP IS STILL NOT THE WHOLE STORY (KTD9). "not set up" is the honest
+    fact about the Role's OWN list (R50 — the stored flag, never a row count),
+    but a role nobody has configured is precisely where the inherited stack is
+    doing all the work: an admin reading "not set up" alone concludes the holder
+    owes nothing, when the org and their site may owe them eight competencies.
+    So the inherited count rides along here too, the exact case KTD9 was written
+    for — the "not set up" half is unchanged, so a reader (and every matcher on
+    it) still sees the flag it always saw.
+  */
+  if (scope === 'role' && !current.configured) return `not set up${inheritedSuffix}`;
   if (current.required.length === 0) {
-    if (inheritedRequired !== null && inheritedRequired > 0) {
-      return `requires nothing of its own · ${inheritedRequired} inherited`;
-    }
+    if (inheritedSuffix) return `requires nothing of its own${inheritedSuffix}`;
     return 'requires nothing';
   }
   const recommended =
@@ -405,6 +415,83 @@ export function ScopeRequirements({
     competencyName(a.competencyId).localeCompare(competencyName(b.competencyId)),
   );
 
+  /*
+    The footer is ONE flow in four mutually-exclusive states, in precedence
+    order: a legacy removal awaiting its confirm, a previewed REQUIRED change
+    awaiting its confirm, a required change still needing its preview (R6),
+    else the plain save — which a recommended-only edit reaches directly (the
+    prior round's R13 rule, at every scope). Derived as a union here so the
+    panel render below is a flat switch rather than a nested ternary.
+  */
+  type FooterState =
+    | { kind: 'confirm-remove'; effects: RequiredAssessmentsChangeEffects }
+    | { kind: 'confirm-change'; effects: RequiredAssessmentsChangeEffects }
+    | { kind: 'review' }
+    | { kind: 'save' };
+  const footerState: FooterState = pendingRemove
+    ? { kind: 'confirm-remove', effects: pendingRemove.effects }
+    : pending
+      ? { kind: 'confirm-change', effects: pending }
+      : requiredChanged
+        ? { kind: 'review' }
+        : { kind: 'save' };
+
+  function footerPanel(state: FooterState) {
+    switch (state.kind) {
+      case 'confirm-remove':
+        return (
+          <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[9px_11px] text-[11.5px] text-text-secondary">
+            <EffectsSummary effects={state.effects} />
+            <div className="mt-2 flex justify-end gap-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={resetFlow}
+                disabled={removeLegacy.isPending}
+              >
+                Cancel
+              </Button>
+              <Button size="sm" onClick={onConfirmRemove} disabled={removeLegacy.isPending}>
+                Confirm removal
+              </Button>
+            </div>
+          </div>
+        );
+      case 'confirm-change':
+        return (
+          <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[9px_11px] text-[11.5px] text-text-secondary">
+            <EffectsSummary effects={state.effects} />
+            <div className="mt-2 flex justify-end gap-2">
+              <Button size="sm" variant="ghost" onClick={resetFlow} disabled={save.isPending}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={doSave} disabled={save.isPending}>
+                Confirm change
+              </Button>
+            </div>
+          </div>
+        );
+      case 'review':
+        return (
+          <div className="flex justify-end">
+            <Button size="sm" onClick={onReview} disabled={preview.isPending}>
+              Review change
+            </Button>
+          </div>
+        );
+      case 'save':
+        return (
+          <div className="flex justify-end">
+            {/* A recommended-only edit enforces nothing, so it saves
+                without the preview gate (R13 of the prior round). */}
+            <Button size="sm" onClick={doSave} disabled={!dirty || save.isPending}>
+              {dirty ? 'Save' : 'Saved'}
+            </Button>
+          </div>
+        );
+    }
+  }
+
   return (
     <div className="pl-3">
       <button
@@ -607,52 +694,7 @@ export function ScopeRequirements({
           )}
 
           {!retired && (
-            <div className="mt-2 flex flex-col gap-2">
-              {pendingRemove ? (
-                <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[9px_11px] text-[11.5px] text-text-secondary">
-                  <EffectsSummary effects={pendingRemove.effects} />
-                  <div className="mt-2 flex justify-end gap-2">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={resetFlow}
-                      disabled={removeLegacy.isPending}
-                    >
-                      Cancel
-                    </Button>
-                    <Button size="sm" onClick={onConfirmRemove} disabled={removeLegacy.isPending}>
-                      Confirm removal
-                    </Button>
-                  </div>
-                </div>
-              ) : pending ? (
-                <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[9px_11px] text-[11.5px] text-text-secondary">
-                  <EffectsSummary effects={pending} />
-                  <div className="mt-2 flex justify-end gap-2">
-                    <Button size="sm" variant="ghost" onClick={resetFlow} disabled={save.isPending}>
-                      Cancel
-                    </Button>
-                    <Button size="sm" onClick={doSave} disabled={save.isPending}>
-                      Confirm change
-                    </Button>
-                  </div>
-                </div>
-              ) : requiredChanged ? (
-                <div className="flex justify-end">
-                  <Button size="sm" onClick={onReview} disabled={preview.isPending}>
-                    Review change
-                  </Button>
-                </div>
-              ) : (
-                <div className="flex justify-end">
-                  {/* A recommended-only edit enforces nothing, so it saves
-                      without the preview gate (R13 of the prior round). */}
-                  <Button size="sm" onClick={doSave} disabled={!dirty || save.isPending}>
-                    {dirty ? 'Save' : 'Saved'}
-                  </Button>
-                </div>
-              )}
-            </div>
+            <div className="mt-2 flex flex-col gap-2">{footerPanel(footerState)}</div>
           )}
         </div>
       )}

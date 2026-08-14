@@ -184,6 +184,12 @@ describe('0059 migration — the SQL that carries the shape (U1)', () => {
       old code reads AND writes `role_required_competencies` through it, its
       inserts landing with role_id set and the new scope columns null (the
       CHECK accepts that). Dropped in the NEXT round's first migration.
+
+      ONE DIRECTION ONLY (review-corrected): the view saves old-code-AFTER-
+      migrate and nothing else. New code deployed BEFORE the migration reads a
+      table that does not exist. The migration file must SAY so, because the
+      release order is a hard precondition and a header that claims otherwise
+      is how a deploy gets sequenced wrong.
     */
     const sql = await read();
     const viewAt = sql.indexOf('CREATE VIEW "role_required_competencies"');
@@ -199,5 +205,9 @@ describe('0059 migration — the SQL that carries the shape (U1)', () => {
     expect(view).not.toMatch(/JOIN|GROUP BY|DISTINCT|UNION/i);
     // The drop-next-round intent is written into the migration itself.
     expect(sql).toMatch(/next round's first migration drops this view/i);
+    // …and so is the ordering precondition. The bridge is one-directional, so
+    // the header must not read as "either order is fine".
+    expect(sql).toMatch(/MIGRATE FIRST, THEN DEPLOY/i);
+    expect(sql).not.toMatch(/neither ordering/i);
   });
 });

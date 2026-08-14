@@ -19,9 +19,7 @@ import {
   competencySourcesByUser,
   competencySourcesFor,
   recommendedCompetencyIdsByUser,
-  recommendedCompetencyIdsFor,
   requiredCompetencyIdsByUser,
-  requiredCompetencyIdsFor,
   sourceRefs,
   type CompetencySourceRef,
   type CompetencySourcesForUser,
@@ -141,19 +139,42 @@ competenciesRouter.get(
       return;
     }
     const tenant = req.tenant!;
-    const [org, recommended] = await Promise.all([
+    const [org, mySources] = await Promise.all([
       db.query.organizations.findFirst({ where: eq(schema.organizations.id, tenant.orgId) }),
-      // Non-withdrawn roles only — heldRolesByUser filters withdrawn rows (R52).
-      recommendedCompetencyIdsFor(db, tenant.orgId, tenant.userId),
+      /*
+        ONE scope expansion serves the whole route (review-verified): the
+        provenance read's recommended map is keyed by exactly the set the
+        standing sibling would return — same expansion, same recommended-tier
+        index; the legacy derivation feeds required only — so the id set is
+        its keys rather than a second transactional read. Non-withdrawn roles
+        only — the expansion filters withdrawn rows (R52). WHICH scope
+        recommends each item rides along (U8, R5/AE5 — "Recommended — from
+        <Location>"). Own-record read: the subject IS the caller, so no
+        viewer gate applies — same footing as everything else on this route.
+      */
+      competencySourcesFor(db, tenant.orgId, tenant.userId),
     ]);
     const selfStartEnabled = org?.candidateSelfStartRecommended ?? false;
-    if (recommended.size === 0) {
+    const recommended = mySources.recommended;
+    /*
+      TIER PRECEDENCE ACROSS SCOPES (R2, `standingOf`'s rule): required beats
+      recommended, and the two maps are structural siblings of ONE expansion —
+      a competency required at org scope and recommended at a location appears
+      in BOTH. Reading the recommended keys raw would offer that competency as
+      "Recommended — request this training" while the compliance report counts
+      it as a REQUIRED gap and the engine has already booked its case: two
+      surfaces of one expansion disagreeing about the same obligation. The
+      union resolves in required's favour everywhere else (KTD3), so it
+      resolves here too — a required competency is simply absent from this
+      list, whichever scope recommended it.
+    */
+    const ids = [...recommended.keys()].filter((id) => !mySources.required.has(id));
+    if (ids.length === 0) {
       res.json({ selfStartEnabled, items: [] });
       return;
     }
 
-    const ids = [...recommended];
-    const [rows, grants, awarding, mySources] = await Promise.all([
+    const [rows, grants, awarding] = await Promise.all([
       db.query.competencies.findMany({
         where: and(eq(schema.competencies.orgId, tenant.orgId), inArray(schema.competencies.id, ids)),
       }),
@@ -167,10 +188,6 @@ competenciesRouter.get(
         ),
       }),
       awardingToolByCompetency(db, tenant.orgId, ids),
-      // WHICH scope recommends each item (U8, R5/AE5 — "Recommended — from
-      // <Location>"). Own-record read: the subject IS the caller, so no
-      // viewer gate applies — same footing as everything else on this route.
-      competencySourcesFor(db, tenant.orgId, tenant.userId),
     ]);
     const competencyById = new Map(rows.map((c) => [c.id, c]));
     const grantsByCompetency = new Map<string, (typeof grants)[number][]>();
@@ -851,14 +868,19 @@ competenciesRouter.get(
         ? 'candidate'
         : 'assessor';
 
-    // Standing beside currency (R108): which of these the person's held Roles
-    // oblige them to hold, and which they merely recommend (R12). Resolved once
-    // for the whole record. Revoked rows were already excluded above, so
-    // `current` never has to fold revocation in here.
-    const [required, recommended] = await Promise.all([
-      requiredCompetencyIdsFor(db, tenant.orgId, req.params.userId!),
-      recommendedCompetencyIdsFor(db, tenant.orgId, req.params.userId!),
-    ]);
+    /*
+      Standing beside currency (R108): which of these the person's scopes
+      oblige them to hold, and which they merely recommend (R12). ONE scope
+      expansion serves standing AND sources (review-verified): the provenance
+      maps are keyed by exactly the sets the standing reads would return —
+      the required map carries the legacy role derivation too — so both
+      tiers' sets derive from one transactional read instead of three.
+      Resolved once for the whole record. Revoked rows were already excluded
+      above, so `current` never has to fold revocation in here.
+    */
+    const subjectSources = await competencySourcesFor(db, tenant.orgId, req.params.userId!);
+    const required = new Set(subjectSources.required.keys());
+    const recommended = new Set(subjectSources.recommended.keys());
 
     // Licence numbers are sensitive profile data (R34): a caller sees them on
     // someone else's record only with the `profiles.view_competencies` grant —
@@ -871,15 +893,14 @@ competenciesRouter.get(
       VIEWER GATE ON SOURCES (U8, review-verified exposure). An entry's source
       scopes enumerate the subject's locations, departments and roles — vary
       the userId and an ungated field would hand any member a colleague's whole
-      placement. So sources are read only under the SAME gate as the licence
-      columns above: the caller's own record, or `profiles.view_competencies`
-      at 'all'. Gated readers get the field OMITTED (undefined), never an
-      empty array — `[]` would claim "no scope requires this", which is a
-      different statement from "you may not be told which scopes do".
+      placement. So the FIELD stays gated even though the standing sets above
+      derive from the same read — the SAME gate as the licence columns: the
+      caller's own record, or `profiles.view_competencies` at 'all'. Gated
+      readers get the field OMITTED (undefined), never an empty array — `[]`
+      would claim "no scope requires this", which is a different statement
+      from "you may not be told which scopes do".
     */
-    const sources = canSeeLicence
-      ? await competencySourcesFor(db, tenant.orgId, req.params.userId!)
-      : null;
+    const sources = canSeeLicence ? subjectSources : null;
 
     // One instant for the whole response, so two entries cannot disagree about
     // what "today" is.

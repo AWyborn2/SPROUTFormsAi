@@ -2520,6 +2520,42 @@ describe('GET /competencies/recommended (U7 — R12, R14, KTD2)', () => {
     }
   });
 
+  it('drops a competency REQUIRED at one scope and recommended at another — required wins (R2)', async () => {
+    /*
+      TIER PRECEDENCE ACROSS SCOPES. The org requires First Aid of everyone;
+      the site the caller is placed at also recommends it. Both maps of the one
+      expansion name it, and reading the recommended keys raw would offer
+      "request this training" for something compliance already counts as a
+      REQUIRED gap and the engine has already booked. `standingOf` resolves
+      required over recommended everywhere else — this route must agree.
+    */
+    mockDbValue = fakeDb({
+      membershipsFindMany: [{ id: 'm1', userId: HOLDER_ID }],
+      membershipLocationsFindMany: [{ membershipId: 'm1', locationId: 'loc-1' }],
+      locationsFindMany: [{ id: 'loc-1', orgId: 'org-1', name: 'Boddington', status: 'active' }],
+      competencyRequirementsFindMany: [
+        { roleId: null, locationId: null, departmentId: null, competencyId: 'c1', tier: 'required' },
+        { roleId: null, locationId: 'loc-1', departmentId: null, competencyId: 'c1', tier: 'recommended' },
+        // A genuinely recommended-only competency, so the empty result cannot
+        // be an accident of the whole read collapsing.
+        { roleId: null, locationId: 'loc-1', departmentId: null, competencyId: 'c2', tier: 'recommended' },
+      ],
+      competenciesFindMany: [
+        { id: 'c1', orgId: 'org-1', name: 'First Aid', code: 'HLTAID011', validForMonths: 36 },
+        { id: 'c2', orgId: 'org-1', name: 'Site Induction', code: 'IND-01', validForMonths: null },
+      ],
+      selfStart: true,
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/recommended`, { headers: asUser(cand) });
+      const body = (await res.json()) as { items: Array<{ competencyId: string }> };
+      expect(body.items.map((i) => i.competencyId)).toEqual(['c2']);
+    } finally {
+      server.close();
+    }
+  });
+
   it('resolves as its own route with nothing recommended — an empty list, never a 404 (:id ordering)', async () => {
     // Pins the registration order: '/recommended' must never be swallowed as
     // a parameterised sibling's :id, even for a caller with no roles at all.

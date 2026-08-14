@@ -586,6 +586,24 @@ describe('ScopeRequirements — the inherited display and the location lens (U6,
     expect(screen.getByText(/requires nothing of its own · 2 inherited/)).toBeDefined();
   });
 
+  it('appends the inherited count to "not set up" too — the case KTD9 was written for', () => {
+    /*
+      A never-configured role is EXACTLY where the inherited stack is doing all
+      the work. "not set up" alone reads as "this role owes nothing", which is
+      the false conclusion KTD9 named: the org and the department may already
+      oblige its holders. The flag half is unchanged — R50's never-set-up vs
+      deliberately-empty distinction still shows — the inherited count is added
+      beside it.
+    */
+    competencies.data = REGISTER;
+    statesByScope['role:role-1'] = requirementState({ configured: false, required: [] });
+    statesByScope['org:'] = bareState({ required: ['c-b'] });
+    statesByScope['department:dep-1'] = bareState({ required: ['c-a'] });
+    renderScope(ROLE_TARGET);
+
+    expect(screen.getByText(/not set up · 2 inherited/)).toBeDefined();
+  });
+
   it('keeps the plain "requires nothing" while the inherited sets are unfetched (KTD9 lazy)', () => {
     statesByScope['role:role-1'] = requirementState({ configured: true, required: [] });
     // No org/department states: the editor was never expanded, nothing

@@ -7,13 +7,20 @@ import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
-import { assignForMembership, assignmentCaseValues } from '../lib/assignment.js';
+import {
+  assignmentCaseValues,
+  insertPlannedCases,
+  planAssignmentsForMemberships,
+  type MembershipPlan,
+} from '../lib/assignment.js';
+import { requiredToolIdsByMembership, runSnapshotted } from '../lib/requirement-links.js';
 import {
   computeRequiredAssessmentsChange,
   requirementScopeWhere,
   type RequirementScopeRef,
 } from '../lib/requirement-change.js';
 import { withdrawRoleFromAllHolders } from '../lib/membership-placement.js';
+import { isSerializationFailure, isUniqueViolation } from '../lib/db-errors.js';
 import { db } from '../db.js';
 
 type Database = NonNullable<typeof db>;
@@ -202,20 +209,7 @@ taxonomyRouter.patch(
       requirements' cases. A rename re-plans nothing.
     */
     if (parsed.data.status && parsed.data.status !== existing.status) {
-      const placed = await db.query.membershipLocations.findMany({
-        where: eq(schema.membershipLocations.locationId, existing.id),
-      });
-      const placedIds = [...new Set(placed.map((p) => p.membershipId))];
-      const activeMemberships = placedIds.length
-        ? await db.query.memberships.findMany({
-            where: and(
-              eq(schema.memberships.orgId, tenant.orgId),
-              inArray(schema.memberships.id, placedIds),
-              eq(schema.memberships.status, 'active'),
-            ),
-          })
-        : [];
-      await replanMemberships(db, tenant.orgId, activeMemberships.map((m) => m.id));
+      await replanPlacedActiveMemberships(db, tenant.orgId, 'location', existing.id);
     }
     res.json(locationDto(row ?? existing));
   }),
@@ -310,20 +304,7 @@ taxonomyRouter.patch(
     // so each re-plans (fail-soft); a rename or count-rule change re-plans
     // nothing.
     if (parsed.data.status && parsed.data.status !== existing.status) {
-      const placed = await db.query.membershipDepartments.findMany({
-        where: eq(schema.membershipDepartments.departmentId, existing.id),
-      });
-      const placedIds = [...new Set(placed.map((p) => p.membershipId))];
-      const activeMemberships = placedIds.length
-        ? await db.query.memberships.findMany({
-            where: and(
-              eq(schema.memberships.orgId, tenant.orgId),
-              inArray(schema.memberships.id, placedIds),
-              eq(schema.memberships.status, 'active'),
-            ),
-          })
-        : [];
-      await replanMemberships(db, tenant.orgId, activeMemberships.map((m) => m.id));
+      await replanPlacedActiveMemberships(db, tenant.orgId, 'department', existing.id);
     }
     res.json(departmentDto(row ?? existing));
   }),
@@ -702,6 +683,117 @@ class RequirementsChangedError extends Error {
 }
 
 /**
+ * The scope retired UNDER the write, thrown from inside the apply transaction
+ * for the same reason `RequirementsChangedError` is (the only way out of a
+ * transaction callback without committing).
+ *
+ * `loadRequirementScope`'s retired check runs on the root client BEFORE the
+ * transaction opens, which makes it a check-then-act across two connections: a
+ * retirement committing in the gap let the save through, writing requirements
+ * onto a scope the resolver had just stopped consulting — a silent no-op the
+ * admin was told had succeeded. Re-checked inside the transaction, behind the
+ * advisory lock, the refusal is real. The CODE travels with it so the 409 body
+ * stays exactly what the pre-transaction check would have sent (`role_retired`
+ * for deployed clients, `scope_retired` elsewhere).
+ */
+class ScopeRetiredError extends Error {
+  constructor(readonly code: 'scope_retired' | 'role_retired') {
+    super(code);
+    this.name = 'ScopeRetiredError';
+  }
+}
+
+/**
+ * SERIALISE WRITERS OF ONE SCOPE (review-verified P1). The fingerprint guard is
+ * a lost-update guard, and inside a REPEATABLE READ transaction it protects
+ * nothing against a same-scope concurrent save: both admins' snapshots predate
+ * each other's commit, so both read the SAME pre-change rows, both compute the
+ * same fingerprint, and both pass. On a scope with existing rows the replace
+ * writes then collide on the partial unique index (a 23505, mapped below); on
+ * an EMPTY scope nothing collides at all — both deletes match nothing, both
+ * inserts succeed, and the scope ends up holding the UNION of two lists while
+ * each admin is told their exact list was saved. Nobody is warned, and the
+ * extra requirements silently book cases.
+ *
+ * A transaction-scoped advisory lock, taken as the FIRST statement, converts
+ * that into the intended sequence: the second writer blocks until the first
+ * commits, then reads the CHANGED rows, fails the fingerprint check, and gets
+ * the 409 it should always have got. Scope-keyed (org + kind + id), so it
+ * serialises only writers of the same list — KTD7's cross-scope commutation is
+ * untouched, and an org-scope save never blocks a role editor.
+ *
+ * `pg_advisory_xact_lock` releases on commit OR rollback with no unlock call to
+ * forget, which is what makes it safe to take inside a transaction that can
+ * throw its way out (both sentinels above do exactly that).
+ */
+function requirementLockKey(orgId: string, ref: RequirementScopeRef): string {
+  return `${orgId}:${ref.kind}:${ref.kind === 'org' ? '' : ref.id}`;
+}
+
+/**
+ * The two things every requirement WRITE must do before it reads anything:
+ * take the scope's advisory lock, then re-check that the scope is still
+ * writable on THIS snapshot. Shared by the PUT and the legacy DELETE so the
+ * two cannot drift on either guarantee.
+ */
+async function lockAndVerifyScope(
+  tx: Reader,
+  orgId: string,
+  ref: RequirementScopeRef,
+): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${requirementLockKey(orgId, ref)}))`);
+  switch (ref.kind) {
+    // The organisation cannot retire — there is nothing to re-check.
+    case 'org':
+      return;
+    case 'location': {
+      const row = await tx.query.locations.findFirst({
+        where: and(eq(schema.locations.id, ref.id), eq(schema.locations.orgId, orgId)),
+      });
+      if (row && row.status !== 'active') throw new ScopeRetiredError('scope_retired');
+      return;
+    }
+    case 'department': {
+      const row = await tx.query.departments.findFirst({
+        where: and(eq(schema.departments.id, ref.id), eq(schema.departments.orgId, orgId)),
+      });
+      if (row && row.status !== 'active') throw new ScopeRetiredError('scope_retired');
+      return;
+    }
+    case 'role': {
+      const row = await tx.query.jobRoles.findFirst({
+        where: and(eq(schema.jobRoles.id, ref.id), eq(schema.jobRoles.orgId, orgId)),
+      });
+      if (row && row.status !== 'active') throw new ScopeRetiredError('role_retired');
+      return;
+    }
+  }
+}
+
+/**
+ * Map an apply transaction's failure to its response, or re-throw.
+ *
+ * Both sentinels above are deliberate refusals. The two SQLSTATEs are belt and
+ * braces behind the advisory lock: 40001 (serialization failure) is what a
+ * repeatable-read transaction raises when a concurrent commit invalidated its
+ * snapshot, and 23505 is the partial unique index catching a same-scope
+ * duplicate the lock should already have prevented. Both mean exactly what the
+ * fingerprint means — "the world moved under you, re-read and decide again" —
+ * so both get the SAME 409 rather than a 500 the editor cannot act on. They
+ * are mapped and not merely tolerated because a 500 here would tell an admin
+ * their save broke the server when it simply lost a race.
+ */
+function requirementWriteFailure(
+  err: unknown,
+): { status: 409; body: { error: string } } | null {
+  if (err instanceof RequirementsChangedError) return { status: 409, body: { error: 'requirements_changed' } };
+  if (err instanceof ScopeRetiredError) return { status: 409, body: { error: err.code } };
+  if (isSerializationFailure(err) || isUniqueViolation(err))
+    return { status: 409, body: { error: 'requirements_changed' } };
+  return null;
+}
+
+/**
  * The fingerprint the GET serves and the PUT/DELETE echo (KTD9): a
  * deterministic hash over the Role's direct links (both tiers) AND its
  * remaining legacy rows. Any conversion, edit or legacy-row removal landing
@@ -1077,6 +1169,14 @@ async function handleRequirementsPut(
     and write now share one snapshot — REPEATABLE READ, because under the
     default READ COMMITTED each statement re-reads the newest commit and the
     snapshot would drift back apart between the check and the delete.
+
+    AND THE ADVISORY LOCK COMES BEFORE ALL OF IT (`lockAndVerifyScope`, see
+    its comment): repeatable read alone does not make the fingerprint a guard
+    against a SAME-SCOPE concurrent save, because both writers' snapshots
+    predate each other's commit and both pass the check. The lock is what
+    turns the second writer's pass into the 409 it should be. The retired
+    re-check rides the same call for the same reason — the pre-transaction one
+    is a check-then-act too.
   */
   const now = new Date();
   const role = loaded.role;
@@ -1085,6 +1185,7 @@ async function handleRequirementsPut(
   const applied = await db
     .transaction(
       async (tx) => {
+        await lockAndVerifyScope(tx, tenant.orgId, ref);
         const state = await loadRequirementState(tx, tenant.orgId, ref);
         if (state.fingerprint !== parsed.data.fingerprint) throw new RequirementsChangedError();
 
@@ -1149,12 +1250,14 @@ async function handleRequirementsPut(
       { isolationLevel: 'repeatable read' },
     )
     .catch((err: unknown) => {
-      // Stale echo → 409, the editor reloads and re-decides. Everything else
-      // is a real failure and keeps going to the error middleware.
-      if (err instanceof RequirementsChangedError) return { ok: false as const };
+      // Stale echo, a scope retired underneath, or a lost race the database
+      // itself caught → 409, the editor reloads and re-decides. Everything
+      // else is a real failure and keeps going to the error middleware.
+      const refusal = requirementWriteFailure(err);
+      if (refusal) return { ok: false as const, refusal };
       throw err;
     });
-  if (!applied.ok) return reply(res, 409, { error: 'requirements_changed' });
+  if (!applied.ok) return reply(res, applied.refusal.status, applied.refusal.body);
 
   // Every scope PUT audits, with a scope-derived target (U4): the location,
   // department or role name — or the organisation's OWN name at org scope.
@@ -1242,31 +1345,66 @@ async function handleLegacyRequirementDelete(
   if (!parsed.success)
     return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
 
-  const state = await loadRequirementState(db, tenant.orgId, ref);
-  if (!state.legacyToolIds.includes(toolId)) return reply(res, 404, { error: 'not_found' });
-  if (state.fingerprint !== parsed.data.fingerprint)
-    return reply(res, 409, { error: 'requirements_changed' });
-
-  // The same compute as the preview ran: current tiers unchanged, this one
-  // legacy row removed — so the effects reported here equal the previewed
-  // ones on unchanged data (KTD10).
+  /*
+    THE SAME TRANSACTION SHAPE AS THE PUT (review-verified). This guard used to
+    run on the root client with the delete following it as a separate
+    statement: load → compare fingerprint → compute → delete, four round trips
+    with three windows between them. A conversion (or the PUT itself) landing
+    mid-sequence passed a stale guard and then deleted a row the admin had not
+    seen the world for — the exact lost update the fingerprint exists to
+    prevent, left unguarded on the one route that removes a requirement source
+    outright. Load, guard, compute and delete now share ONE repeatable-read
+    transaction behind the SAME scope advisory lock the PUT takes, so the two
+    writers of a role's requirement state serialise against each other rather
+    than only against themselves. `recordAudit` stays AFTER the commit: an
+    audit row is a record of what happened, and a rolled-back delete did not.
+  */
   const now = new Date();
-  const { effects } = await computeRequiredAssessmentsChange(
-    db,
-    tenant.orgId,
-    ref,
-    { requiredCompetencyIds: state.required, removeLegacyToolIds: [toolId] },
-    now,
-  );
+  const outcome = await db
+    .transaction(
+      async (tx) => {
+        await lockAndVerifyScope(tx, tenant.orgId, ref);
+        const state = await loadRequirementState(tx, tenant.orgId, ref);
+        // Not a refusal — an address for a row that is not there. Nothing was
+        // written, so returning out of the callback simply commits nothing.
+        if (!state.legacyToolIds.includes(toolId)) return { kind: 'not_found' as const };
+        if (state.fingerprint !== parsed.data.fingerprint) throw new RequirementsChangedError();
 
-  await db
-    .delete(schema.roleRequiredAssessments)
-    .where(
-      and(
-        eq(schema.roleRequiredAssessments.roleId, role.id),
-        eq(schema.roleRequiredAssessments.toolId, toolId),
-      ),
-    );
+        // The same compute as the preview ran: current tiers unchanged, this
+        // one legacy row removed — so the effects reported here equal the
+        // previewed ones on unchanged data (KTD10).
+        const { effects } = await computeRequiredAssessmentsChange(
+          tx,
+          tenant.orgId,
+          ref,
+          { requiredCompetencyIds: state.required, removeLegacyToolIds: [toolId] },
+          now,
+        );
+
+        await tx
+          .delete(schema.roleRequiredAssessments)
+          .where(
+            and(
+              eq(schema.roleRequiredAssessments.roleId, role.id),
+              eq(schema.roleRequiredAssessments.toolId, toolId),
+            ),
+          );
+        return {
+          kind: 'done' as const,
+          effects,
+          links: state.links,
+          legacyToolIds: state.legacyToolIds,
+        };
+      },
+      { isolationLevel: 'repeatable read' },
+    )
+    .catch((err: unknown) => {
+      const refusal = requirementWriteFailure(err);
+      if (refusal) return { kind: 'refused' as const, refusal };
+      throw err;
+    });
+  if (outcome.kind === 'not_found') return reply(res, 404, { error: 'not_found' });
+  if (outcome.kind === 'refused') return reply(res, outcome.refusal.status, outcome.refusal.body);
 
   await recordAudit(db, tenant, {
     action: 'Removed legacy required assessment',
@@ -1274,11 +1412,11 @@ async function handleLegacyRequirementDelete(
     category: 'settings',
     icon: 'briefcase',
   });
-  const remainingLegacy = state.legacyToolIds.filter((id) => id !== toolId);
+  const remainingLegacy = outcome.legacyToolIds.filter((id) => id !== toolId);
   res.json({
     awaitingLink: remainingLegacy,
-    effects,
-    fingerprint: requirementsFingerprint(state.links, remainingLegacy),
+    effects: outcome.effects,
+    fingerprint: requirementsFingerprint(outcome.links, remainingLegacy),
   });
 }
 
@@ -1308,24 +1446,114 @@ const IN_FLIGHT_STATES = ['open', 'awaiting_sign_off'] as const;
  * Re-plan assignments for a set of memberships AFTER a placement-affecting
  * write commits (KTD8, R7): every transfer route and the location/department
  * status flips call this, so no placement write path silently skips the
- * re-plan. FAIL-SOFT PER MEMBER (the workforce-import posture,
- * workforce-import-run.ts): the placement change is already committed and
- * real, so one member's failed assignment must not undo the others' or fail
- * the request — the sweep assigns them on its next pass. `assignForMembership`
- * is idempotent (KTD16), so re-running is always safe.
+ * re-plan.
+ *
+ * BATCHED (U4's org-scale discipline): a status flip re-plans a whole
+ * placement's population, so the requirement resolution and the plan run as
+ * one set-wise pass — `requiredToolIdsByMembership` then
+ * `planAssignmentsForMemberships` over the union of everyone's tools — never
+ * a per-membership loop of transactions and scope expansions. Each
+ * membership's planned cases are then filtered back to ITS OWN required
+ * tools: the engine decides every tool independently (KTD16's skip rule is
+ * per tool), so the filtered batch plans exactly what a per-member run would
+ * have, and one member's placement never books another.
+ *
+ * ONE SNAPSHOT OVER BOTH HALVES (KTD3, review-verified — the batch shape of
+ * the pairing `assignForMembership` makes): the resolution and the plan are
+ * two reads of the same people, and run on separate snapshots a transfer
+ * committing between them books the OLD requirements at the NEW placement.
+ * `runSnapshotted` opens one repeatable-read transaction; the resolver's own
+ * wrapper nests as a savepoint inside it. The INSERTS stay outside it, on the
+ * root client — they must survive one another's failure (below), which a
+ * shared transaction would forbid.
+ *
+ * FAIL-SOFT (the workforce-import posture, workforce-import-run.ts): the
+ * placement change is already committed and real, so one member's failed
+ * case INSERT must not undo the others' or fail the request — and a failed
+ * batch PLAN fails all of them equally softly, for the same reason. The
+ * sweep assigns them on its next pass; the planning is read-only and the
+ * inserts idempotent by construction (KTD16), so re-running is always safe.
+ *
+ * FAIL-SOFT IS NOT FAIL-SILENT (review-verified). Both catches LOG — orgId and
+ * the membership id(s) with the error — matching the with-error-handling
+ * posture everywhere else in this file. A swallowed exception here means a
+ * placement changed and nobody was re-planned until the next sweep: recoverable,
+ * but the operator has to be able to find out it happened, and a bare `return`
+ * makes a systematic failure (a bad tool manifest, a dead resolver read)
+ * indistinguishable from "there was nothing to do".
  */
 async function replanMemberships(
   database: Database,
   orgId: string,
   membershipIds: Iterable<string>,
 ): Promise<void> {
-  for (const membershipId of membershipIds) {
+  const ids = [...new Set(membershipIds)];
+  if (ids.length === 0) return;
+  let planned: { ownToolIds: Map<string, string[]>; plans: MembershipPlan[] } | null;
+  try {
+    planned = await runSnapshotted(database, async (reader) => {
+      const ownToolIds = await requiredToolIdsByMembership(reader, orgId, ids);
+      const allToolIds = [...new Set([...ownToolIds.values()].flat())];
+      // Zero TOOLS anywhere stays an early return: nothing to plan, nothing to
+      // load. An evidence-only obligation (R7) lands here — visible in
+      // standing, no case.
+      if (allToolIds.length === 0) return null;
+      const plans = await planAssignmentsForMemberships(reader, orgId, ids, allToolIds, new Date());
+      return { ownToolIds, plans };
+    });
+  } catch (err) {
+    // Fail-soft: the sweep is the backstop (KTD8) — but say so.
+    console.error('replan: batch plan failed', { orgId, membershipIds: ids, err });
+    return;
+  }
+  if (!planned) return;
+  for (const plan of planned.plans) {
+    const own = new Set(planned.ownToolIds.get(plan.membershipId) ?? []);
     try {
-      await assignForMembership(database, orgId, membershipId);
-    } catch {
-      // Fail-soft: the sweep is the backstop (KTD8).
+      await insertPlannedCases(
+        database,
+        orgId,
+        plan.userId,
+        plan.cases.filter((c) => own.has(c.toolId)),
+      );
+    } catch (err) {
+      // Fail-soft per member: the sweep is the backstop (KTD8) — but say so.
+      console.error('replan: case insert failed', { orgId, membershipId: plan.membershipId, err });
     }
   }
+}
+
+/**
+ * The KTD8/U5 status-flip re-plan, shared by the location and department
+ * PATCH handlers (one definition parameterised by the placement axis — the
+ * `requiredCountByValue` posture): everyone PLACED at the flipped value,
+ * narrowed to ACTIVE memberships of this org, re-plans fail-soft.
+ */
+async function replanPlacedActiveMemberships(
+  database: Database,
+  orgId: string,
+  axis: 'location' | 'department',
+  valueId: string,
+): Promise<void> {
+  const placed =
+    axis === 'location'
+      ? await database.query.membershipLocations.findMany({
+          where: eq(schema.membershipLocations.locationId, valueId),
+        })
+      : await database.query.membershipDepartments.findMany({
+          where: eq(schema.membershipDepartments.departmentId, valueId),
+        });
+  const placedIds = [...new Set(placed.map((p) => p.membershipId))];
+  const activeMemberships = placedIds.length
+    ? await database.query.memberships.findMany({
+        where: and(
+          eq(schema.memberships.orgId, orgId),
+          inArray(schema.memberships.id, placedIds),
+          eq(schema.memberships.status, 'active'),
+        ),
+      })
+    : [];
+  await replanMemberships(database, orgId, activeMemberships.map((m) => m.id));
 }
 
 /** One active person still holding a retired value. */

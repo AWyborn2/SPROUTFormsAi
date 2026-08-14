@@ -10,8 +10,9 @@ import { describe, expect, it, vi } from 'vitest';
 // parameter, so a null module db is all this needs.
 vi.mock('../db.js', () => ({ db: null, getDbStatus: () => 'unconfigured' }));
 
-const { awardingToolByCompetency, awardingToolFor, requiredToolIdsByRole, requiredToolIdsForMembership } =
-  await import('./requirement-links.js');
+const { awardingToolByCompetency, awardingToolFor, requiredToolIdsForMembership } = await import(
+  './requirement-links.js'
+);
 
 const ORG = 'org-1';
 
@@ -141,7 +142,7 @@ function makeDb(store: Store, { withTransaction = true } = {}) {
   const db = {
     query: tables('root'),
     ...(withTransaction ? { transaction } : {}),
-  } as unknown as Parameters<typeof requiredToolIdsByRole>[0];
+  } as unknown as Parameters<typeof requiredToolIdsForMembership>[0];
   return { db, transaction, reads };
 }
 
@@ -207,96 +208,10 @@ describe('awardingToolByCompetency', () => {
   });
 });
 
-describe('requiredToolIdsByRole', () => {
-  it('unions legacy rows with resolved direct links, deduplicating a tool both name (KTD3)', async () => {
-    // Mid-transition: r1 legacy-requires t1 AND direct-requires c1, which t1
-    // awards. One tool, not two entries.
-    const { db } = makeDb({
-      roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'r1', toolId: 't1' }],
-      competencyRequirements: [link('r1', 'c1'), link('r1', 'c2')],
-      assessmentTools: [
-        tool('t1', ['c1'], AT('2026-01-01T00:00:00Z')),
-        tool('t2', ['c2'], AT('2026-01-02T00:00:00Z')),
-      ],
-      formTemplates: [template('tpl-t1', 'v1'), template('tpl-t2', 'v2')],
-    });
-
-    const byRole = await requiredToolIdsByRole(db, ORG, ['r1']);
-
-    expect([...byRole.get('r1')!].sort()).toEqual(['t1', 't2']);
-  });
-
-  it('keeps an evidence-only requirement OUT of the tool set and recommended links out entirely (R7, R13)', async () => {
-    const { db } = makeDb({
-      competencyRequirements: [
-        link('r1', 'c-licence', 'required'), // nothing awards it
-        link('r1', 'c1', 'recommended'), // never enforced
-      ],
-      assessmentTools: [tool('t1', ['c1'], AT('2026-01-01T00:00:00Z'))],
-      formTemplates: [template('tpl-t1', 'v1')],
-    });
-
-    const byRole = await requiredToolIdsByRole(db, ORG, ['r1']);
-
-    expect(byRole.get('r1')).toEqual([]);
-  });
-
-  it('maps every requested roleId, empty array by default', async () => {
-    const { db } = makeDb({});
-    const byRole = await requiredToolIdsByRole(db, ORG, ['r1', 'r2']);
-    expect(byRole.get('r1')).toEqual([]);
-    expect(byRole.get('r2')).toEqual([]);
-  });
-
-  it('pins every read of the dual derivation to ONE REPEATABLE READ transaction (KTD3)', async () => {
-    const { db, transaction, reads } = makeDb({
-      roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'r1', toolId: 't1' }],
-      competencyRequirements: [link('r1', 'c2')],
-      assessmentTools: [
-        tool('t1', [], AT('2026-01-01T00:00:00Z')),
-        tool('t2', ['c2'], AT('2026-01-02T00:00:00Z')),
-      ],
-      formTemplates: [template('tpl-t1', 'v1'), template('tpl-t2', 'v2')],
-    });
-
-    const byRole = await requiredToolIdsByRole(db, ORG, ['r1']);
-
-    expect([...byRole.get('r1')!].sort()).toEqual(['t1', 't2']);
-    expect(transaction).toHaveBeenCalledTimes(1);
-    expect(reads.length).toBeGreaterThan(0);
-    expect(reads.every((r) => r.surface === 'tx')).toBe(true);
-    /*
-      THE ISOLATION LEVEL IS THE GUARANTEE, not the transaction. Postgres
-      defaults to READ COMMITTED, where each statement inside a transaction
-      takes a FRESH snapshot — a conversion committing between the legacy read
-      and the direct read would still be seen half-way, which is the exact
-      interleaving KTD3 exists to exclude. Without this assertion the wrapper
-      could be reduced to a decorative BEGIN/COMMIT and every other test here
-      would stay green.
-    */
-    expect(transaction).toHaveBeenCalledWith(expect.any(Function), {
-      isolationLevel: 'repeatable read',
-    });
-  });
-
-  it('still reads correctly on a surface with no transaction (lean read-only callers)', async () => {
-    const { db } = makeDb(
-      {
-        competencyRequirements: [link('r1', 'c1')],
-        assessmentTools: [tool('t1', ['c1'], AT('2026-01-01T00:00:00Z'))],
-        formTemplates: [template('tpl-t1', 'v1')],
-      },
-      { withTransaction: false },
-    );
-
-    const byRole = await requiredToolIdsByRole(db, ORG, ['r1']);
-
-    expect(byRole.get('r1')).toEqual(['t1']);
-  });
-});
-
-// ── the membership-shaped read that replaces the per-role one at the ─────────
-// ── assignment seam (U2, KTD4): scope expansion → union → tool resolution ────
+// ── the ONE membership-shaped read at the assignment seam (U2, KTD4): ────────
+// ── scope expansion → union → tool resolution. The per-ROLE dual read that ───
+// ── this replaced is deleted, not merely unused (review-verified: no ─────────
+// ── production caller survived U3), so nothing here pins it any more. ────────
 
 /** One-scope link rows (KTD1) — explicit nulls so the org query's `is null` bites. */
 const scoped = (

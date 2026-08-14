@@ -666,12 +666,18 @@ describe('GET /compliance — source scopes and the unplaced-member marker (U8)'
     server.close();
   });
 
-  it('still marks a member whose ONLY placement is a retired location — retired confers nothing', async () => {
+  it('does NOT mark a member placed only at a RETIRED location — the engine still books there (KTD4)', async () => {
     /*
-      The marker reads the SAME expansion the resolver uses
-      (scopeKeysForMemberships), where a retired location has already stopped
-      applying — so a member stranded on a closed site reads as unplaced here,
-      consistent with the requirement resolution rather than the raw rows.
+      The marker answers "can a case land anywhere for this person", and the
+      engine reads placement rows RAW: `loadMembershipContext` and
+      `planAssignmentsForMemberships` take `membership_locations` with no
+      status filter, so a member stranded on a closed site still has a case
+      booked at it. Deriving the marker from the scope expansion instead — where
+      the retired key is already dropped, because a retired site confers no
+      REQUIREMENTS (the U4 split) — printed "cannot be scheduled — no location
+      placement" beside a gap whose case was already open. The two questions are
+      different: retirement governs what is required, not where it is assessed.
+      Pinned together with the assignment side in assignment.test.ts.
     */
     mockDbValue = fakeDb({
       holders: [],
@@ -680,7 +686,7 @@ describe('GET /compliance — source scopes and the unplaced-member marker (U8)'
     });
     const { server, base } = startApp();
     const body = await getReport(base);
-    expect(body.neverHeld[0]!.noLocationPlacement).toBe(true);
+    expect(body.neverHeld[0]!.noLocationPlacement).toBe(false);
     server.close();
   });
 });

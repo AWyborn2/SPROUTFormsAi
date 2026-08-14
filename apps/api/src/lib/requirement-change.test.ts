@@ -17,7 +17,7 @@ const { computeRequiredAssessmentsChange, computeAwardLinkChange } = await impor
 // The SHARED resolver the award link must agree with — imported here so the
 // "who ends up awarding this?" question is asked of the real read site rather
 // than restated by the test.
-const { requiredToolIdsByRole } = await import('./requirement-links.js');
+const { requiredToolIdsForMembership } = await import('./requirement-links.js');
 
 const ORG = 'org-1';
 const NOW = new Date('2026-06-01T00:00:00Z');
@@ -174,10 +174,15 @@ function tool(id: string, awards: string[], over: Record<string, unknown> = {}) 
 function template(id: string, currentVersionId: string | null = `v-${id}`) {
   return { id, orgId: ORG, currentVersionId };
 }
-/** Membership `m` for user `u`, holding roles `roleIds`, at one Location. */
-function member(m: string, u: string, roleIds: string[]) {
+/**
+ * Membership `m` for user `u`, holding roles `roleIds`, at one Location.
+ * ACTIVE by default: every scope's holder expansion narrows to active
+ * memberships now (not just the org arm), so a fixture with no status would
+ * expand to nobody and every effect count would silently read zero.
+ */
+function member(m: string, u: string, roleIds: string[], status = 'active') {
   return {
-    memberships: [{ id: m, orgId: ORG, userId: u }],
+    memberships: [{ id: m, orgId: ORG, userId: u, status }],
     membershipRoles: roleIds.map((roleId) => ({ membershipId: m, roleId, withdrawnAt: null })),
     membershipLocations: [{ membershipId: m, locationId: `loc-${m}`, position: 0 }],
   };
@@ -216,9 +221,9 @@ describe('computeRequiredAssessmentsChange — additions', () => {
         { membershipId: 'm3', roleId: 'role-1', withdrawnAt: null },
       ],
       memberships: [
-        { id: 'm1', orgId: ORG, userId: 'u1' },
-        { id: 'm2', orgId: ORG, userId: 'u2' },
-        { id: 'm3', orgId: ORG, userId: 'u3' },
+        { id: 'm1', orgId: ORG, userId: 'u1', status: 'active' },
+        { id: 'm2', orgId: ORG, userId: 'u2', status: 'active' },
+        { id: 'm3', orgId: ORG, userId: 'u3', status: 'active' },
       ],
       membershipLocations: [
         { membershipId: 'm1', locationId: 'loc1', position: 0 },
@@ -596,6 +601,54 @@ describe('computeRequiredAssessmentsChange — scope holder expansion (KTD5)', (
     expect(atDepartment.effects.created).toBe(0);
   });
 
+  it('counts ACTIVE memberships at the placement and role scopes too, never just at org', async () => {
+    /*
+      A leaver keeps their placement and role rows — the record is retained —
+      so the raw placement read still names them. Counting them as `affected`
+      while `created` plans only for the people the engine would actually book
+      reported two different populations in one preview sentence, and made an
+      org-scope save disagree with a location-scope one about the same site's
+      headcount. Every arm narrows to active.
+    */
+    const store: Store = {
+      competencyRequirements: [],
+      memberships: [
+        { id: 'm1', orgId: ORG, userId: 'u1', status: 'active' },
+        { id: 'm2', orgId: ORG, userId: 'u2', status: 'suspended' },
+      ],
+      membershipRoles: [
+        { membershipId: 'm1', roleId: 'role-1', withdrawnAt: null },
+        { membershipId: 'm2', roleId: 'role-1', withdrawnAt: null },
+      ],
+      membershipLocations: [
+        { membershipId: 'm1', locationId: 'loc-A', position: 0 },
+        { membershipId: 'm2', locationId: 'loc-A', position: 0 },
+      ],
+      membershipDepartments: [
+        { membershipId: 'm1', departmentId: 'dep-B', position: 0 },
+        { membershipId: 'm2', departmentId: 'dep-B', position: 0 },
+      ],
+      assessmentTools: [tool('tB', ['cB'])],
+      formTemplates: [template('tpl-tB', 'v1')],
+      assessmentCases: [],
+      competencyHolders: [],
+      competencies: [],
+    };
+    for (const scope of [
+      ROLE,
+      { kind: 'location', id: 'loc-A' } as const,
+      { kind: 'department', id: 'dep-B' } as const,
+      { kind: 'org' } as const,
+    ]) {
+      const { effects, casesToInsert } = await computeRequiredAssessmentsChange(
+        makeDb(store), ORG, scope, { requiredCompetencyIds: ['cB'] }, NOW,
+      );
+      expect(effects.affected).toBe(1);
+      expect(effects.created).toBe(1);
+      expect(casesToInsert.map((c) => c.candidateUserId)).toEqual(['u1']);
+    }
+  });
+
   it('AE4: removing an org-duplicated competency from the ROLE alone changes nothing for holders, and the preview says so', async () => {
     // cB is required at BOTH org scope and role-1. Dropping it from role-1:
     // the holder's post-change set still carries cB through the org scope, so
@@ -726,8 +779,8 @@ describe('computeAwardLinkChange', () => {
       ],
       competencyRequirements: [link('role-2', 'cB', 'recommended')],
       memberships: [
-        { id: 'm1', orgId: ORG, userId: 'u1' },
-        { id: 'm2', orgId: ORG, userId: 'u2' },
+        { id: 'm1', orgId: ORG, userId: 'u1', status: 'active' },
+        { id: 'm2', orgId: ORG, userId: 'u2', status: 'active' },
       ],
       membershipRoles: [
         { membershipId: 'm1', roleId: 'role-1', withdrawnAt: null },
@@ -802,11 +855,14 @@ describe('computeAwardLinkChange', () => {
     store.roleRequiredAssessments = [];
     store.competencyRequirements = [link('role-1', 'cB')];
 
-    const byRole = await requiredToolIdsByRole(db as never, ORG, ['role-1']);
-    expect(byRole.get('role-1')).toEqual(['t-early']);
+    // Asked of the MEMBERSHIP-shaped read — the one resolver left at the
+    // assignment seam since the per-role dual read was deleted (KTD4). m1
+    // holds role-1 and nothing else, so its union is exactly that role's.
+    const toolIds = await requiredToolIdsForMembership(db as never, ORG, 'm1');
+    expect(toolIds).toEqual(['t-early']);
     // The invariant in one line: the case created is FOR the tool the resolver
     // keeps naming.
-    expect(byRole.get('role-1')).toEqual([...new Set(plan.casesToInsert.map((c) => c.toolId))]);
+    expect(toolIds).toEqual([...new Set(plan.casesToInsert.map((c) => c.toolId))]);
   });
 
   it('plans one case for a holder of TWO linked roles, not two (dedupe by membership)', async () => {
