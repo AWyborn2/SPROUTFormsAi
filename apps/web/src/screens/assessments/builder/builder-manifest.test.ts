@@ -26,14 +26,18 @@ import {
   derivePartsFromStructure,
   findDurationColumn,
   inferKind,
+  logbookChoiceColumnsFor,
   logbookColumnsFor,
   movePart,
+  parseTaskMinimumHours,
   proposeCoverPointers,
   proposePartMarks,
   proposeProfilePrefill,
   proposeSignOff,
   setPathways,
+  taskMinimumsFromColumn,
   updatePart,
+  withTaskTargetHours,
 } from './builder-manifest.js';
 
 function field(over: Partial<FormField> & { id: string }): FormField {
@@ -444,6 +448,85 @@ describe('logbookColumnsFor', () => {
     expect(logbookColumnsFor({ startFieldId: 'lead' }, withLead)).toEqual([
       { key: 'duration', label: 'Hours' },
     ]);
+  });
+});
+
+describe('per-task minimum authoring', () => {
+  // The start field is the section header; fieldsInSection reads what FOLLOWS
+  // it, so the table sits after the header the part starts at.
+  const tableFields = (columns: NonNullable<FormField['columns']>): FormField[] => [
+    field({ id: 'h', type: 'section_header' }),
+    field({ id: 'tbl', type: 'repeating_group', columns }),
+  ];
+
+  describe('logbookChoiceColumnsFor', () => {
+    it('offers only columns that carry options — a target value must be pickable', () => {
+      const fields = tableFields([
+        { key: 'date', label: 'Date', type: 'date' },
+        { key: 'task', label: 'Task', type: 'dropdown', options: ['Topsoil', 'Gravel'] },
+        { key: 'duration', label: 'Duration', type: 'number' },
+      ]);
+      expect(logbookChoiceColumnsFor({ startFieldId: 'h' }, fields)).toEqual([
+        { key: 'task', label: 'Task', options: ['Topsoil', 'Gravel'] },
+      ]);
+    });
+
+    it('is empty when no column offers a choice', () => {
+      const fields = tableFields([{ key: 'note', label: 'Note', type: 'text' }]);
+      expect(logbookChoiceColumnsFor({ startFieldId: 'h' }, fields)).toEqual([]);
+    });
+  });
+
+  describe('parseTaskMinimumHours', () => {
+    it('reads the minimum a task label declares', () => {
+      expect(parseTaskMinimumHours('Overburden Removal – Topsoil (min 10 hours)')).toBe(10);
+      expect(parseTaskMinimumHours('Layer strip (minimum 7.5 hrs)')).toBe(7.5);
+    });
+
+    it('returns null for a label that declares none, or declares zero', () => {
+      expect(parseTaskMinimumHours('General items — coached exercise on each')).toBeNull();
+      expect(parseTaskMinimumHours('Something (min 0 hours)')).toBeNull();
+    });
+  });
+
+  describe('taskMinimumsFromColumn', () => {
+    it('prefills a target for each option whose label declares a minimum, skipping the rest', () => {
+      // The Scraper's shape: five hours-gated tasks and a coached "General
+      // items" that carries no minimum and gets no target.
+      const options = [
+        'Overburden Removal – Topsoil (min 10 hours)',
+        'Overburden Removal – Gravel (min 10 hours)',
+        'General items',
+      ];
+      expect(taskMinimumsFromColumn('task', options)).toEqual({
+        columnKey: 'task',
+        targets: [
+          { value: 'Overburden Removal – Topsoil (min 10 hours)', minimumHours: 10 },
+          { value: 'Overburden Removal – Gravel (min 10 hours)', minimumHours: 10 },
+        ],
+      });
+    });
+  });
+
+  describe('withTaskTargetHours', () => {
+    const base = { columnKey: 'task', targets: [{ value: 'Topsoil', minimumHours: 10 }] };
+    const options = ['Topsoil', 'Gravel', 'Rehabilitation'];
+
+    it('adds a target and keeps the column’s option order', () => {
+      const next = withTaskTargetHours(base, options, 'Rehabilitation', 8);
+      expect(next.targets).toEqual([
+        { value: 'Topsoil', minimumHours: 10 },
+        { value: 'Rehabilitation', minimumHours: 8 },
+      ]);
+      // Gravel (no target) stays out; Rehabilitation follows Topsoil because
+      // that is the option order, not the edit order.
+    });
+
+    it('clears a target set to zero, blank (NaN) or negative — never an unmeetable minimum', () => {
+      expect(withTaskTargetHours(base, options, 'Topsoil', 0).targets).toEqual([]);
+      expect(withTaskTargetHours(base, options, 'Topsoil', Number.NaN).targets).toEqual([]);
+      expect(withTaskTargetHours(base, options, 'Topsoil', -3).targets).toEqual([]);
+    });
   });
 });
 

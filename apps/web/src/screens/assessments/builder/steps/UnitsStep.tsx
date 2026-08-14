@@ -5,7 +5,12 @@ import {
   type AssessmentPathway,
   type PartKind,
 } from '@formai/shared';
-import { logbookColumnsFor } from '../builder-manifest.js';
+import {
+  logbookChoiceColumnsFor,
+  logbookColumnsFor,
+  taskMinimumsFromColumn,
+  withTaskTargetHours,
+} from '../builder-manifest.js';
 import type { BuilderDraftState } from '../use-builder-draft.js';
 
 /**
@@ -106,6 +111,9 @@ export function UnitsStep({ draft }: UnitsStepProps) {
 
       {parts.map((part, i) => {
         const columns = logbookColumnsFor(part, fields);
+        const choiceColumns = logbookChoiceColumnsFor(part, fields);
+        const taskMin = part.taskMinimums ?? null;
+        const taskColumn = taskMin ? choiceColumns.find((c) => c.key === taskMin.columnKey) : undefined;
         return (
           <div key={part.key} className="rounded-[14px] border border-border bg-surface-card p-4">
             <div className="flex items-start gap-2">
@@ -236,6 +244,88 @@ export function UnitsStep({ draft }: UnitsStepProps) {
                     This part has no table with columns to total hours from.
                   </span>
                 )}
+              </div>
+            )}
+
+            {part.kind === 'logbook' && (
+              <div className="mt-2.5 rounded-lg border border-border-subtle bg-surface-sunken p-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11.5px] font-semibold text-text-secondary">
+                    Per-task minimums
+                  </span>
+                  <label className="ml-auto inline-flex items-center gap-1.5 text-[11px] text-text-tertiary">
+                    Task type column
+                    <select
+                      aria-label={`Task type column for ${part.label}`}
+                      value={taskMin?.columnKey ?? ''}
+                      onChange={(e) => {
+                        const key = e.target.value;
+                        if (!key) {
+                          partOps.update(part.key, { taskMinimums: undefined });
+                          return;
+                        }
+                        const col = choiceColumns.find((c) => c.key === key);
+                        // Picking a column seeds a target for every option whose
+                        // label already declares "(min N hours)" — the Scraper's
+                        // paper writes them in, so the author confirms rather than
+                        // re-keys.
+                        partOps.update(part.key, {
+                          taskMinimums: taskMinimumsFromColumn(key, col?.options ?? []),
+                        });
+                      }}
+                      className="h-[28px] rounded-lg border border-border bg-surface-page px-2 text-[11.5px]"
+                    >
+                      <option value="">— none —</option>
+                      {choiceColumns.map((c) => (
+                        <option key={c.key} value={c.key}>
+                          {c.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                {choiceColumns.length === 0 ? (
+                  <p className="mt-1.5 text-[11px] text-text-tertiary">
+                    Add a dropdown column to the table — the “Task type” the candidate picks per row —
+                    to set an hours target per task.
+                  </p>
+                ) : taskColumn ? (
+                  <div className="mt-2 flex flex-col gap-1.5">
+                    <p className="text-[11px] text-text-tertiary">
+                      A minimum per task, on top of the overall{' '}
+                      {part.minimumHours ? `${part.minimumHours} hour` : ''} target. Leave a task
+                      blank if it has no hours target. Targets never block hand-in — they guide the
+                      candidate and the assessor.
+                    </p>
+                    {taskColumn.options.map((opt) => (
+                      <label
+                        key={opt}
+                        className="flex items-center gap-2 text-[11.5px] text-text-secondary"
+                      >
+                        <span className="min-w-0 flex-1 truncate">{opt}</span>
+                        <input
+                          type="number"
+                          min={0}
+                          aria-label={`Minimum hours for ${opt}`}
+                          value={taskMin?.targets.find((t) => t.value === opt)?.minimumHours ?? ''}
+                          onChange={(e) =>
+                            partOps.update(part.key, {
+                              taskMinimums: withTaskTargetHours(
+                                taskMin ?? { columnKey: taskColumn.key, targets: [] },
+                                taskColumn.options,
+                                opt,
+                                e.target.value === '' ? Number.NaN : Number(e.target.value),
+                              ),
+                            })
+                          }
+                          className="h-[26px] w-16 flex-none rounded-lg border border-border bg-surface-page px-2 text-[11.5px]"
+                        />
+                        <span className="w-6 flex-none text-[10.5px] text-text-tertiary">hrs</span>
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             )}
           </div>
