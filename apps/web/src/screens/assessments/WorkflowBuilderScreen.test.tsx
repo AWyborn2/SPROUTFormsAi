@@ -25,7 +25,11 @@ const toolResult: { data: AssessmentToolDetail | undefined; isLoading: boolean; 
 };
 const saveMutate = vi.fn();
 const setLocationPartsMutate = vi.fn();
+const updateSettingsMutate = vi.fn();
 const sessionResult: { data: { role: string } | undefined } = { data: { role: 'admin' } };
+const taxonomyResult: { data: { settings: { allowLabelledSignoff: boolean } } | undefined } = {
+  data: { settings: { allowLabelledSignoff: true } },
+};
 
 vi.mock('react-router-dom', () => ({
   useParams: () => ({ toolId: 'tool-1' }),
@@ -38,6 +42,8 @@ vi.mock('../../lib/data/hooks.js', () => ({
   useSaveWorkflow: () => ({ mutate: saveMutate, isPending: false }),
   useSetLocationParts: () => ({ mutate: setLocationPartsMutate, isPending: false }),
   useSession: () => sessionResult,
+  useTaxonomy: () => taxonomyResult,
+  useUpdateTaxonomySettings: () => ({ mutate: updateSettingsMutate, isPending: false }),
 }));
 
 const toast = vi.fn();
@@ -101,6 +107,7 @@ afterEach(() => {
   toolResult.isLoading = false;
   toolResult.isError = false;
   sessionResult.data = { role: 'admin' };
+  taxonomyResult.data = { settings: { allowLabelledSignoff: true } };
 });
 
 describe('WorkflowBuilderScreen', () => {
@@ -238,6 +245,55 @@ describe('WorkflowBuilderScreen', () => {
     render(<WorkflowBuilderScreen />);
 
     expect(screen.getByText(/Could not load/)).toBeDefined();
+  });
+});
+
+describe('WorkflowBuilderScreen — labelled sign-off policy (both places)', () => {
+  const withLabelledRole = (over: Partial<AssessmentToolDetail> = {}) =>
+    tool({ workflow: { ...WORKFLOW, roles: ['candidate', 'assessor', 'sme'] }, ...over });
+
+  it('stays hidden until a supervisor or SME role is on — noise otherwise', () => {
+    // Candidate + assessor never apply a signature on someone's behalf.
+    toolResult.data = tool();
+    render(<WorkflowBuilderScreen />);
+    expect(screen.queryByText(/Labelled sign-off/)).toBeNull();
+  });
+
+  it('shows the org policy beside the sign-off roles once one is on', () => {
+    toolResult.data = withLabelledRole();
+    render(<WorkflowBuilderScreen />);
+    expect(screen.getByText(/Labelled sign-off/)).toBeDefined();
+    expect(screen.getByText(/organisation-wide/)).toBeDefined();
+  });
+
+  it('writes the SAME org-wide setting the Settings card does', () => {
+    toolResult.data = withLabelledRole();
+    render(<WorkflowBuilderScreen />);
+
+    // Checked (allowed) → clicking turns it off, org-wide.
+    fireEvent.click(screen.getByLabelText('Supervisor / SME sign-off by labelled signature'));
+    expect(updateSettingsMutate).toHaveBeenCalledWith(
+      { allowLabelledSignoff: false },
+      expect.objectContaining({ onError: expect.any(Function) }),
+    );
+  });
+
+  it('reflects the OFF policy in words — the case waits for a login', () => {
+    taxonomyResult.data = { settings: { allowLabelledSignoff: false } };
+    toolResult.data = withLabelledRole();
+    render(<WorkflowBuilderScreen />);
+    expect(screen.getByText(/must be the named person/)).toBeDefined();
+  });
+
+  it('is read-only for a non-admin (R73)', () => {
+    sessionResult.data = { role: 'builder' };
+    toolResult.data = withLabelledRole();
+    render(<WorkflowBuilderScreen />);
+
+    expect(
+      screen.getByLabelText('Supervisor / SME sign-off by labelled signature'),
+    ).toHaveProperty('disabled', true);
+    expect(screen.getByText(/Only an admin or owner can change this/)).toBeDefined();
   });
 });
 
