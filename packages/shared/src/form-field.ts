@@ -326,6 +326,20 @@ export interface RepeatingColumn {
   required?: boolean;
   /** Present ⇒ the cell auto-computes and is read-only on fill surfaces. */
   calc?: ColumnCalc;
+  /**
+   * `date` / `time` columns only — seed the cell with today's date (or the
+   * current time) the MOMENT a new row is added, instead of leaving it blank
+   * for manual entry. The value stays editable: a shift logged the morning
+   * after can be corrected, and a "Today" / "Now" button re-stamps it. Opt-in,
+   * so a table without it keeps blank-on-add.
+   *
+   * The point on a task logbook: an operator adds a row to start logging what
+   * they are on right now, and the date they started is exactly today — asking
+   * them to type it is a step that only ever produces the value the app already
+   * knows. Not a hard timestamp: it is a default, not a lock, because honest
+   * back-dating of a prior shift must stay possible.
+   */
+  autoStamp?: boolean;
 }
 
 export interface FormField {

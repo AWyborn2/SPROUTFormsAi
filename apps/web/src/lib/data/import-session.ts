@@ -1168,6 +1168,24 @@ export function setColumnCalc(id: string, key: string, calc: ColumnCalc | null):
   dispatchStructural({ t: 'update', id, patch: { columns: next } });
 }
 
+/**
+ * Turn a date/time column's auto-stamp on or off. On seeds each new row's cell
+ * with today's date / the current time; off clears the flag entirely (rather
+ * than storing `false`) so an unused table carries none. The builder host does
+ * the same — the two must agree.
+ */
+export function setColumnAutoStamp(id: string, key: string, autoStamp: boolean): void {
+  const columns = columnsOf(id);
+  if (!columns.some((c) => c.key === key)) return;
+  const next = columns.map((c) => {
+    if (c.key !== key) return c;
+    if (autoStamp) return { ...c, autoStamp: true };
+    const { autoStamp: _dropped, ...rest } = c;
+    return rest;
+  });
+  dispatchStructural({ t: 'update', id, patch: { columns: next } });
+}
+
 /** One column of a reviewed repeating field, by key. */
 function columnOf(id: string, key: string) {
   return editorField(id)?.columns?.find((c) => c.key === key);

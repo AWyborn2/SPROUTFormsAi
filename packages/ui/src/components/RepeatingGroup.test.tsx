@@ -3,6 +3,7 @@ import { render, screen, fireEvent, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import {
   RepeatingGroup,
+  todayISODate,
   type RepeatingGroupAnswerSet,
   type RepeatingGroupColumn,
   type RepeatingRow,
@@ -322,5 +323,66 @@ describe('check/cross cells', () => {
     // a single checkbox cannot say "assessed and failed".
     render(<Harness columns={columns} initialRows={[{}, {}]} />);
     expect(screen.getAllByRole('group', { name: 'Result' })).toHaveLength(2);
+  });
+});
+
+describe('auto-stamped date/time columns', () => {
+  const DATE_COL: RepeatingGroupColumn = { key: 'date', label: 'Date', type: 'date', autoStamp: true };
+  const PLAIN_DATE_COL: RepeatingGroupColumn = { key: 'date', label: 'Date', type: 'date' };
+
+  function addRow() {
+    fireEvent.click(screen.getByRole('button', { name: /Add row/ }));
+  }
+
+  it('seeds a new row with today when the date column auto-stamps', () => {
+    // The whole point: an operator adds an entry to log a task starting now, so
+    // the date is filled without a keystroke.
+    render(<Harness columns={[DATE_COL]} initialRows={[]} />);
+    addRow();
+
+    const input = screen.getByLabelText('Date') as HTMLInputElement;
+    expect(input.value).toBe(todayISODate());
+  });
+
+  it('leaves a new row blank when the date column does NOT auto-stamp', () => {
+    // Opt-in: a table that never asked for it keeps blank-on-add, so existing
+    // forms are unchanged.
+    render(<Harness columns={[PLAIN_DATE_COL]} initialRows={[]} />);
+    addRow();
+
+    expect((screen.getByLabelText('Date') as HTMLInputElement).value).toBe('');
+  });
+
+  it('re-stamps today with the Today button after a manual change', () => {
+    render(<Harness columns={[PLAIN_DATE_COL]} initialRows={[{ date: '2020-01-01' }]} />);
+    const input = () => screen.getByLabelText('Date') as HTMLInputElement;
+    expect(input().value).toBe('2020-01-01');
+
+    fireEvent.click(screen.getByRole('button', { name: /Stamp today's date/ }));
+    expect(input().value).toBe(todayISODate());
+  });
+
+  it('keeps the stamped date editable — it is a default, not a lock', () => {
+    // Honest back-dating of a prior shift must stay possible.
+    render(<Harness columns={[DATE_COL]} initialRows={[]} />);
+    addRow();
+    const input = screen.getByLabelText('Date') as HTMLInputElement;
+
+    fireEvent.change(input, { target: { value: '2026-08-01' } });
+    expect((screen.getByLabelText('Date') as HTMLInputElement).value).toBe('2026-08-01');
+  });
+
+  it('seeds the current time when a time column auto-stamps', () => {
+    render(
+      <Harness
+        columns={[{ key: 'started', label: 'Started', type: 'time', autoStamp: true }]}
+        initialRows={[]}
+      />,
+    );
+    addRow();
+
+    // Not compared to a re-read of the clock: a minute rollover between add and
+    // assertion would flake. The property is that it was seeded at all.
+    expect((screen.getByLabelText('Started') as HTMLInputElement).value).toMatch(/^\d{2}:\d{2}$/);
   });
 });
