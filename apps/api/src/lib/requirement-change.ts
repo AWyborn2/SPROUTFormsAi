@@ -27,9 +27,16 @@ import {
 } from '@formai/shared';
 import { heldCompetencyStates, planAssignmentsForRole, type PlannedCase } from './assignment.js';
 import { awardingToolByCompetency } from './requirement-links.js';
-import { db } from '../db.js';
+import type { Reader } from './standing.js';
 
-type Database = NonNullable<typeof db>;
+/*
+  EVERY COMPUTE BELOW IS READ-ONLY AND TYPED ON `Reader` — the root client OR an
+  open transaction. Both applies (the requirement PUT and the award link) now
+  open their transaction FIRST and compute inside it, so the plan and the write
+  it drives share one snapshot; a transaction handle is not assignable to `Db`,
+  so the parameter has to say so.
+*/
+type Database = Reader;
 
 /** A case the apply will insert — a planned case bound to its candidate and org. */
 export interface CaseToInsert extends PlannedCase {
@@ -144,9 +151,19 @@ export async function computeRequiredAssessmentsChange(
   //    through the SHARED resolver (KTD2), so the preview and the apply cannot
   //    name different tools. A competency with no awarding tool plans nothing
   //    (R7, R9 — evidence-only); `created` is a case count.
+  //
+  //    ONE resolver scan serves the whole change: the resolver reads every org
+  //    tool and template per call, and each competency resolves independently
+  //    of what else rides in the wanted set, so the union map answers the
+  //    addition plan here AND the removal scope below without a second
+  //    identical scan.
+  const changedCompetencyIds = [...new Set([...addedCompetencyIds, ...removedCompetencyIds])];
+  const awarding =
+    changedCompetencyIds.length > 0 && affected > 0
+      ? await awardingToolByCompetency(database, orgId, changedCompetencyIds)
+      : new Map<string, string>();
   let casesToInsert: CaseToInsert[] = [];
   if (addedCompetencyIds.length > 0 && affected > 0) {
-    const awarding = await awardingToolByCompetency(database, orgId, addedCompetencyIds);
     const addedToolIds = [
       ...new Set(addedCompetencyIds.flatMap((c) => (awarding.has(c) ? [awarding.get(c)!] : []))),
     ];
@@ -175,6 +192,7 @@ export async function computeRequiredAssessmentsChange(
       },
       membershipIds,
       now,
+      awarding,
     );
     inFlightContinuing = removal.inFlightContinuing;
     competenciesDemoting = removal.competenciesDemoting;
@@ -209,6 +227,12 @@ async function computeRemovalEffects(
   },
   membershipIds: readonly string[],
   now: Date,
+  /**
+   * A pre-resolved KTD2 map covering (at least) `ctx.removedCompetencyIds` —
+   * passed by `computeRequiredAssessmentsChange`, which already scanned the
+   * union of added and removed ids. Omitted, the scan runs here instead.
+   */
+  awardingByCompetency?: ReadonlyMap<string, string>,
 ): Promise<{ inFlightContinuing: number; competenciesDemoting: number }> {
   const memberships = await database.query.memberships.findMany({
     where: and(eq(schema.memberships.orgId, orgId), inArray(schema.memberships.id, [...membershipIds])),
@@ -277,9 +301,19 @@ async function computeRemovalEffects(
     the addition preview would plan name the same tool, KTD2). Their awards
     are needed to translate a case's tool back into competency terms.
   */
-  const removedAwarding = await awardingToolByCompetency(database, orgId, ctx.removedCompetencyIds);
+  const removedAwarding =
+    awardingByCompetency ??
+    (await awardingToolByCompetency(database, orgId, ctx.removedCompetencyIds));
   const removedScopeToolIds = [
-    ...new Set([...ctx.removedLegacyToolIds, ...removedAwarding.values()]),
+    ...new Set([
+      ...ctx.removedLegacyToolIds,
+      // Read through the REMOVED ids, not `.values()` — the caller's map may
+      // cover the added ids too, and their tools are not in the removal scope.
+      ...ctx.removedCompetencyIds.flatMap((c) => {
+        const toolId = removedAwarding.get(c);
+        return toolId ? [toolId] : [];
+      }),
+    ]),
   ];
 
   // Every tool whose awards feed a post-change set or the removal scope.
@@ -370,6 +404,85 @@ async function computeRemovalEffects(
 
 // ── award links (U2, KTD3, KTD10) ────────────────────────────────────────────
 
+/**
+ * The cases a pending award would ACTIVATE across the given roles' holders
+ * (KTD3): per role, the same engine semantics every other assignment path uses
+ * (open-case and location rules included), planned with the pending award
+ * INJECTED (`awardsOverride`) — the world after the link lands — while writing
+ * nothing, which is what keeps preview equal to apply (KTD10).
+ *
+ * `planToolId` is the tool the KTD2 resolver picks for the competency in that
+ * post-link world, which is NOT always the tool being linked — see
+ * `resolvePendingAward` below.
+ *
+ * Deduplicated by membership: a person holding two of the roles is one
+ * candidate for one tool, and each membership's plan over the same one-tool
+ * scope is identical, so the first plan is the plan.
+ *
+ * SEQUENTIAL over the roles on purpose — these reads may run inside a pinned
+ * transaction connection, which serves one query at a time.
+ */
+async function planActivationCases(
+  database: Database,
+  orgId: string,
+  roleIds: readonly string[],
+  planToolId: string,
+  awardsOverride: ReadonlyMap<string, readonly string[]>,
+  now: Date,
+): Promise<CaseToInsert[]> {
+  const casesToInsert: CaseToInsert[] = [];
+  const planned = new Set<string>();
+  for (const roleId of roleIds) {
+    const plans = await planAssignmentsForRole(database, orgId, roleId, [planToolId], now, {
+      awardsOverride,
+    });
+    for (const plan of plans) {
+      if (planned.has(plan.membershipId)) continue;
+      planned.add(plan.membershipId);
+      casesToInsert.push(
+        ...plan.cases.map((c) => ({ ...c, orgId, candidateUserId: plan.userId })),
+      );
+    }
+  }
+  return casesToInsert;
+}
+
+/**
+ * WHICH TOOL WILL ACTUALLY AWARD `competencyId` ONCE `toolId`'S LINK LANDS.
+ *
+ * The tool being linked is NOT automatically the answer. KTD2's resolver picks
+ * the FIRST candidate by (createdAt, id) ascending among the org's tools that
+ * award the competency and have a published current version — so when an
+ * EARLIER published tool already awards it, that earlier tool keeps winning
+ * after the link. Planning the activation against `toolId` regardless would
+ * create a case for a tool no read site ever names again: the converted role's
+ * `requiredToolIdsByRole` would resolve to the earlier tool, the case would
+ * satisfy nothing, and preview-equals-apply would hold only against a write
+ * the rest of the system disagrees with.
+ *
+ * So the pending award is injected into the SHARED resolver and the winner it
+ * returns is what gets planned. Refusing the link instead (409) was considered
+ * and rejected: KTD2 deliberately defines a deterministic winner for the
+ * many-tools case, and an admin's backfill must still work when a second tool
+ * happens to award the same ticket.
+ *
+ * Null means nothing bookable will award it — `toolId`'s own template has no
+ * published version and no other tool qualifies — which plans zero cases, the
+ * evidence-only outcome (R7).
+ */
+async function resolvePendingAward(
+  database: Database,
+  orgId: string,
+  toolId: string,
+  competencyId: string,
+): Promise<{ planToolId: string | null; awardsOverride: ReadonlyMap<string, readonly string[]> }> {
+  const awardsOverride = new Map<string, readonly string[]>([[toolId, [competencyId]]]);
+  const resolved = await awardingToolByCompetency(database, orgId, [competencyId], {
+    awardsOverride,
+  });
+  return { planToolId: resolved.get(competencyId) ?? null, awardsOverride };
+}
+
 /** How the conversion writes each legacy role's direct link (unique index!). */
 export interface RoleLinkStep {
   roleId: string;
@@ -448,29 +561,20 @@ export async function computeAwardLinkChange(
     : [];
   const membershipIds = [...new Set(holderRows.map((h) => h.membershipId))];
 
-  /*
-    The cases the link WOULD create: per linked role, the holders who do not
-    hold the competency and have no open case for this tool — the same engine
-    semantics every other assignment path uses (open-case and location rules
-    included). Deduplicated by membership: a person holding two of the linked
-    roles is one candidate for one tool, and each membership's plan over the
-    same one-tool scope is identical, so the first plan is the plan.
-  */
-  const casesToInsert: CaseToInsert[] = [];
-  const planned = new Set<string>();
-  const awardsOverride = new Map<string, readonly string[]>([[toolId, [competencyId]]]);
-  for (const roleId of roleIds) {
-    const plans = await planAssignmentsForRole(database, orgId, roleId, [toolId], now, {
-      awardsOverride,
-    });
-    for (const plan of plans) {
-      if (planned.has(plan.membershipId)) continue;
-      planned.add(plan.membershipId);
-      casesToInsert.push(
-        ...plan.cases.map((c) => ({ ...c, orgId, candidateUserId: plan.userId })),
-      );
-    }
-  }
+  // The cases the link WOULD create: per linked role, the holders who do not
+  // hold the competency and have no open case for the tool that will award it
+  // — the shared activation planner, pending award injected, deduplicated by
+  // membership. The tool planned for is the KTD2 WINNER, which is `toolId`
+  // only while no earlier published tool already awards this competency.
+  const { planToolId, awardsOverride } = await resolvePendingAward(
+    database,
+    orgId,
+    toolId,
+    competencyId,
+  );
+  const casesToInsert = planToolId
+    ? await planActivationCases(database, orgId, roleIds, planToolId, awardsOverride, now)
+    : [];
 
   return {
     effects: {
@@ -566,25 +670,27 @@ export async function computeAwardRelinkChange(
 
   // The cases the incoming competency would create for the carried roles'
   // holders — only when the links travel with it; without the carry the roles
-  // stop deriving this tool and nothing new is owed. Planned with the pending
-  // award injected, same as the first link, and deduplicated by membership.
-  const casesToInsert: CaseToInsert[] = [];
+  // stop deriving this tool and nothing new is owed. Planned by the shared
+  // activation planner against the KTD2 winner, same correction as the first
+  // link: another published tool may already award the INCOMING competency and
+  // would keep winning the resolution after this re-link.
+  let casesToInsert: CaseToInsert[] = [];
   if (carryRoleLinks && roleIds.length > 0) {
-    const planned = new Set<string>();
-    const awardsOverride = new Map<string, readonly string[]>([
-      [toolId, [incomingCompetencyId]],
-    ]);
-    for (const roleId of roleIds) {
-      const plans = await planAssignmentsForRole(database, orgId, roleId, [toolId], now, {
+    const { planToolId, awardsOverride } = await resolvePendingAward(
+      database,
+      orgId,
+      toolId,
+      incomingCompetencyId,
+    );
+    if (planToolId) {
+      casesToInsert = await planActivationCases(
+        database,
+        orgId,
+        roleIds,
+        planToolId,
         awardsOverride,
-      });
-      for (const plan of plans) {
-        if (planned.has(plan.membershipId)) continue;
-        planned.add(plan.membershipId);
-        casesToInsert.push(
-          ...plan.cases.map((c) => ({ ...c, orgId, candidateUserId: plan.userId })),
-        );
-      }
+        now,
+      );
     }
   }
 

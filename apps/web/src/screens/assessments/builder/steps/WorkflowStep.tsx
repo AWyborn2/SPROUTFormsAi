@@ -3,15 +3,14 @@ import { Link } from 'react-router-dom';
 import { Button, Icon, Select } from '@formai/ui';
 import { ApiError } from '../../../../lib/data/api-client.js';
 import { assessmentsApi } from '../../../../lib/data/assessments.js';
-import type { Competency } from '../../../../lib/data/types.js';
 import {
   useCompetencies,
   useCreateAssessmentTool,
-  useCreateCompetency,
   useCreateDraftForm,
   usePublishFormVersion,
   useSaveVersionFields,
 } from '../../../../lib/data/hooks.js';
+import { useInlineCompetencyCreate } from '../../../../lib/data/use-inline-competency-create.js';
 import { store } from '../../../../lib/data/store.js';
 import { checkPublish, composeRevisionManifest, publishSummary } from '../builder-publish.js';
 import { workflowFromStructure } from '../builder-workflow.js';
@@ -100,20 +99,16 @@ function AwardControl({
   onChange: (competencyId: string) => void;
 }) {
   const { data: competencies = [] } = useCompetencies();
-  const create = useCreateCompetency();
   /**
-   * A competency created inline, kept locally so it is pickable IMMEDIATELY:
-   * the register cache refetches in the background, and a picker that cannot
-   * see the competency it just created would strand the author at the last
-   * step of the flow.
+   * Inline create with the created competency kept locally pickable
+   * IMMEDIATELY (the shared hook): the register cache refetches in the
+   * background, and a picker that cannot see the competency it just created
+   * would strand the author at the last step of the flow.
    */
-  const [created, setCreated] = useState<Competency | null>(null);
+  const inlineCreate = useInlineCompetencyCreate(competencies);
   const [createFailed, setCreateFailed] = useState(false);
 
-  const options =
-    created && !competencies.some((c) => c.id === created.id)
-      ? [...competencies, created]
-      : competencies;
+  const options = inlineCreate.options;
 
   /*
     The one-step default (AE2): building "ATO - Grader" with no matching
@@ -127,20 +122,19 @@ function AwardControl({
 
   function onCreateInline() {
     setCreateFailed(false);
-    create.mutate(
-      // Perpetual by default: validity is the register's decision, made on the
-      // Competencies screen where its retroactive reach is explained. This
-      // flow's job is the LINK, not the whole record.
-      { name: title.trim(), code: null, validForMonths: null, gracePeriodDays: null },
-      {
-        onSuccess: (added) => {
-          setCreated(added);
-          // Creating IS choosing — one step links the competency and the
-          // assessment (AE2), rather than create-then-find-it-in-the-picker.
-          onChange(added.id);
-        },
-        onError: () => setCreateFailed(true),
+    // Perpetual by default (the shared hook creates without validity):
+    // validity is the register's decision, made on the Competencies screen
+    // where its retroactive reach is explained. This flow's job is the LINK,
+    // not the whole record.
+    inlineCreate.create(
+      title.trim(),
+      null,
+      (added) => {
+        // Creating IS choosing — one step links the competency and the
+        // assessment (AE2), rather than create-then-find-it-in-the-picker.
+        onChange(added.id);
       },
+      () => setCreateFailed(true),
     );
   }
 
@@ -168,7 +162,7 @@ function AwardControl({
             size="sm"
             variant="outline"
             leadingIcon="plus"
-            disabled={create.isPending}
+            disabled={inlineCreate.isPending}
             onClick={onCreateInline}
           >
             {`Create competency: ${title}`}

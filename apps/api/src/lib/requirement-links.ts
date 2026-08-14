@@ -18,11 +18,25 @@
  */
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
+import type { Reader } from './standing.js';
 import { db } from '../db.js';
 
 type Database = NonNullable<typeof db>;
-/** The root client OR an open transaction — the reads run on either surface. */
-type Reader = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
+
+/**
+ * Optional knobs for a resolution run.
+ *
+ * `awardsOverride` substitutes a tool's awards list for the duration of the
+ * resolution — the same mechanism `PlanOptions.awardsOverride` gives the
+ * assignment planner, and needed for the same reason (U2, KTD10): an award
+ * link that has not committed yet is invisible to this read, so a first-link
+ * preview asking "which tool will award this competency once I press save?"
+ * must inject the pending award. Without it the resolver would answer for the
+ * PRE-link world while the apply wrote the post-link one.
+ */
+export interface ResolveOptions {
+  awardsOverride?: ReadonlyMap<string, readonly string[]>;
+}
 
 /**
  * Resolve each given competency to its ONE awarding tool, per the KTD2 rule.
@@ -37,6 +51,7 @@ export async function awardingToolByCompetency(
   reader: Reader,
   orgId: string,
   competencyIds: readonly string[],
+  options: ResolveOptions = {},
 ): Promise<Map<string, string>> {
   const byCompetency = new Map<string, string>();
   const wanted = new Set(competencyIds);
@@ -45,9 +60,11 @@ export async function awardingToolByCompetency(
   const tools = await reader.query.assessmentTools.findMany({
     where: eq(schema.assessmentTools.orgId, orgId),
   });
-  const candidates = tools.filter((t) =>
-    (t.awardedCompetencyIds ?? []).some((c) => wanted.has(c)),
-  );
+  // A pending award injected by the caller WINS over the stored list, so the
+  // ordering below ranks the post-link world rather than the stored one.
+  const awardsOf = (t: { id: string; awardedCompetencyIds: string[] | null }): readonly string[] =>
+    options.awardsOverride?.get(t.id) ?? t.awardedCompetencyIds ?? [];
+  const candidates = tools.filter((t) => awardsOf(t).some((c) => wanted.has(c)));
   if (candidates.length === 0) return byCompetency;
 
   // Only a tool whose template has a PUBLISHED version can carry a case —
@@ -72,7 +89,7 @@ export async function awardingToolByCompetency(
         (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
     );
   for (const tool of ordered) {
-    for (const competencyId of tool.awardedCompetencyIds ?? []) {
+    for (const competencyId of awardsOf(tool)) {
       if (wanted.has(competencyId) && !byCompetency.has(competencyId)) {
         byCompetency.set(competencyId, tool.id);
       }
@@ -86,8 +103,9 @@ export async function awardingToolFor(
   reader: Reader,
   orgId: string,
   competencyId: string,
+  options: ResolveOptions = {},
 ): Promise<string | null> {
-  const byCompetency = await awardingToolByCompetency(reader, orgId, [competencyId]);
+  const byCompetency = await awardingToolByCompetency(reader, orgId, [competencyId], options);
   return byCompetency.get(competencyId) ?? null;
 }
 
@@ -157,10 +175,18 @@ export async function requiredToolIdsByRole(
     real one, an already-open transaction nests as a savepoint on the same
     snapshot — so the reads are always pinned. The guard tolerates the lean
     read-only fakes tests drive the callers with.
+
+    REPEATABLE READ, not the default READ COMMITTED: under READ COMMITTED each
+    statement takes a fresh snapshot and the wrapper pins nothing, so the
+    conversion's commit could still land between the two halves. Read-only, so
+    the stricter level cannot raise a serialization failure here. A NESTED call
+    becomes a savepoint and inherits the OUTER transaction's level — the option
+    is ignored there, which is why any caller wrapping this in its own
+    transaction must open that one at repeatable read too.
   */
   const transactional = database as Database;
   if (typeof transactional.transaction === 'function') {
-    return transactional.transaction((tx) => run(tx));
+    return transactional.transaction((tx) => run(tx), { isolationLevel: 'repeatable read' });
   }
   return run(database as Reader);
 }

@@ -24,7 +24,7 @@ import { db } from '../db.js';
 
 type Database = NonNullable<typeof db>;
 /** The root client OR an open transaction — the reads run on either surface. */
-type Reader = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
+export type Reader = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /**
  * The Roles each requested user currently HOLDS, resolved membership-first.
@@ -93,69 +93,80 @@ export async function requiredCompetencyIdsByUser(
     because an admin clicked Accept at the wrong moment. A transaction pins
     every read here to one snapshot, so a moving requirement is seen on exactly
     one side, always.
+
+    REPEATABLE READ IS THE LOAD-BEARING HALF. Postgres defaults to READ
+    COMMITTED, where every statement takes a FRESH snapshot — the transaction
+    alone would be decorative here, since the conversion's commit would still
+    become visible between the two reads. `repeatable read` fixes one snapshot
+    for the whole block, which is the guarantee KTD3 actually asks for. Safe to
+    ask for: this block only reads, so it can never raise a serialization
+    failure of its own.
   */
-  return database.transaction(async (tx) => {
-    const held = await heldRolesByUser(tx, orgId, uniqueUserIds);
-    if (!held) return byUser;
-    const { memberships, roleIdsByMembership, roleIds } = held;
+  return database.transaction(
+    async (tx) => {
+      const held = await heldRolesByUser(tx, orgId, uniqueUserIds);
+      if (!held) return byUser;
+      const { memberships, roleIdsByMembership, roleIds } = held;
 
-    // Legacy half: Role → required tools → each tool's awarded competencies.
-    const reqRows = await tx.query.roleRequiredAssessments.findMany({
-      where: and(
-        eq(schema.roleRequiredAssessments.orgId, orgId),
-        inArray(schema.roleRequiredAssessments.roleId, roleIds),
-      ),
-    });
-    const toolIdsByRole = new Map<string, string[]>();
-    for (const r of reqRows) {
-      const list = toolIdsByRole.get(r.roleId) ?? [];
-      list.push(r.toolId);
-      toolIdsByRole.set(r.roleId, list);
-    }
-    const toolIds = [...new Set(reqRows.map((r) => r.toolId))];
-    const toolRows = toolIds.length
-      ? await tx.query.assessmentTools.findMany({
-          where: and(
-            eq(schema.assessmentTools.orgId, orgId),
-            inArray(schema.assessmentTools.id, toolIds),
-          ),
-        })
-      : [];
-    const awardsByTool: Record<string, readonly string[]> = {};
-    for (const t of toolRows) awardsByTool[t.id] = t.awardedCompetencyIds ?? [];
-
-    // Direct half: tier 'required' links only. Recommended NEVER enters this
-    // set — it is the never-enforced tier (R13), read by its own sibling below.
-    const linkRows = await tx.query.roleRequiredCompetencies.findMany({
-      where: and(
-        eq(schema.roleRequiredCompetencies.orgId, orgId),
-        inArray(schema.roleRequiredCompetencies.roleId, roleIds),
-        eq(schema.roleRequiredCompetencies.tier, 'required'),
-      ),
-    });
-    const directByRole = new Map<string, string[]>();
-    for (const l of linkRows) {
-      const list = directByRole.get(l.roleId) ?? [];
-      list.push(l.competencyId);
-      directByRole.set(l.roleId, list);
-    }
-
-    // Per membership: the UNION of both halves across the held Roles. A Set,
-    // so a competency both halves name during transition counts once.
-    for (const membership of memberships) {
-      const heldRoleIds = roleIdsByMembership.get(membership.id) ?? [];
-      const requiredToolIds = [
-        ...new Set(heldRoleIds.flatMap((roleId) => toolIdsByRole.get(roleId) ?? [])),
-      ];
-      const union = requiredCompetencyIds(requiredToolIds, awardsByTool);
-      for (const roleId of heldRoleIds) {
-        for (const competencyId of directByRole.get(roleId) ?? []) union.add(competencyId);
+      // Legacy half: Role → required tools → each tool's awarded competencies.
+      const reqRows = await tx.query.roleRequiredAssessments.findMany({
+        where: and(
+          eq(schema.roleRequiredAssessments.orgId, orgId),
+          inArray(schema.roleRequiredAssessments.roleId, roleIds),
+        ),
+      });
+      const toolIdsByRole = new Map<string, string[]>();
+      for (const r of reqRows) {
+        const list = toolIdsByRole.get(r.roleId) ?? [];
+        list.push(r.toolId);
+        toolIdsByRole.set(r.roleId, list);
       }
-      byUser.set(membership.userId, union);
-    }
+      const toolIds = [...new Set(reqRows.map((r) => r.toolId))];
+      const toolRows = toolIds.length
+        ? await tx.query.assessmentTools.findMany({
+            where: and(
+              eq(schema.assessmentTools.orgId, orgId),
+              inArray(schema.assessmentTools.id, toolIds),
+            ),
+          })
+        : [];
+      const awardsByTool: Record<string, readonly string[]> = {};
+      for (const t of toolRows) awardsByTool[t.id] = t.awardedCompetencyIds ?? [];
 
-    return byUser;
-  });
+      // Direct half: tier 'required' links only. Recommended NEVER enters this
+      // set — it is the never-enforced tier (R13), read by its own sibling below.
+      const linkRows = await tx.query.roleRequiredCompetencies.findMany({
+        where: and(
+          eq(schema.roleRequiredCompetencies.orgId, orgId),
+          inArray(schema.roleRequiredCompetencies.roleId, roleIds),
+          eq(schema.roleRequiredCompetencies.tier, 'required'),
+        ),
+      });
+      const directByRole = new Map<string, string[]>();
+      for (const l of linkRows) {
+        const list = directByRole.get(l.roleId) ?? [];
+        list.push(l.competencyId);
+        directByRole.set(l.roleId, list);
+      }
+
+      // Per membership: the UNION of both halves across the held Roles. A Set,
+      // so a competency both halves name during transition counts once.
+      for (const membership of memberships) {
+        const heldRoleIds = roleIdsByMembership.get(membership.id) ?? [];
+        const requiredToolIds = [
+          ...new Set(heldRoleIds.flatMap((roleId) => toolIdsByRole.get(roleId) ?? [])),
+        ];
+        const union = requiredCompetencyIds(requiredToolIds, awardsByTool);
+        for (const roleId of heldRoleIds) {
+          for (const competencyId of directByRole.get(roleId) ?? []) union.add(competencyId);
+        }
+        byUser.set(membership.userId, union);
+      }
+
+      return byUser;
+    },
+    { isolationLevel: 'repeatable read' },
+  );
 }
 
 /**

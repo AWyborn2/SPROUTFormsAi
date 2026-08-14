@@ -11,7 +11,6 @@ import {
 import {
   useAssessmentTools,
   useCompetencies,
-  useCreateCompetency,
   useCreateDepartment,
   useCreateLocation,
   useCreateRole,
@@ -36,6 +35,8 @@ import {
 import type {
   Competency,
   RetiredValueReview,
+  // Aliased: `RoleRequirements` here is the editor COMPONENT below.
+  RoleRequirements as RoleRequirementsData,
   Taxonomy,
   TaxDepartment,
   TaxLocation,
@@ -43,6 +44,7 @@ import type {
   TighteningReviewItem,
 } from '../../lib/data/types.js';
 import { ApiError } from '../../lib/data/api-client.js';
+import { useInlineCompetencyCreate } from '../../lib/data/use-inline-competency-create.js';
 
 /**
  * Locations & roles — the organisation's own taxonomy. Departments are the
@@ -829,7 +831,12 @@ function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unkno
   const preview = usePreviewRoleRequiredAssessments(role.id);
   const save = useSetRoleRequiredAssessments(role.id);
   const removeLegacy = useRemoveLegacyRequirement(role.id);
-  const create = useCreateCompetency();
+  /**
+   * Inline create with the created competencies kept locally pickable BEFORE
+   * the register cache refetches — the shared hook, same posture the backfill
+   * row takes.
+   */
+  const inlineCreate = useInlineCompetencyCreate(competencies ?? []);
 
   const [draft, setDraft] = useState<{ required: Set<string>; recommended: Set<string> } | null>(
     null,
@@ -850,11 +857,6 @@ function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unkno
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newCode, setNewCode] = useState('');
-  /**
-   * Competencies created inline, kept locally so they are pickable BEFORE the
-   * register cache refetches — the same posture the backfill row takes.
-   */
-  const [createdLocal, setCreatedLocal] = useState<Competency[]>([]);
 
   const selected = draft ?? {
     required: new Set(current?.required ?? []),
@@ -868,8 +870,7 @@ function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unkno
   // edit saves without a preview (R13).
   const requiredChanged = dirty && current !== undefined && !sameSet(selected.required, current.required);
 
-  const register = competencies ?? [];
-  const options = [...register, ...createdLocal.filter((c) => !register.some((r) => r.id === c.id))];
+  const options = inlineCreate.options;
 
   function resetFlow() {
     setPending(null);
@@ -990,34 +991,23 @@ function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unkno
       toast({ variant: 'warning', message: 'A competency needs a name.' });
       return;
     }
-    create.mutate(
-      // No validity asked here — every competency starts perpetual, and the
-      // register's validity editor is where expiry gets decided. This flow's
-      // job is naming the requirement without leaving it (R5).
-      { name: trimmedName, code: newCode.trim() || null, validForMonths: null, gracePeriodDays: null },
-      {
-        onSuccess: (added) => {
-          setCreatedLocal((prev) => [...prev, added]);
-          toggle(tier, added.id);
-          setCreating(false);
-          setNewName('');
-          setNewCode('');
-          toast({ variant: 'success', message: `${added.name} added to the register.` });
-        },
-        onError: () => toast({ variant: 'warning', message: 'Could not add the competency.' }),
+    // No validity asked here (the shared hook creates perpetual) — this flow's
+    // job is naming the requirement without leaving it (R5).
+    inlineCreate.create(
+      trimmedName,
+      newCode.trim() || null,
+      (added) => {
+        toggle(tier, added.id);
+        setCreating(false);
+        setNewName('');
+        setNewCode('');
+        toast({ variant: 'success', message: `${added.name} added to the register.` });
       },
+      () => toast({ variant: 'warning', message: 'Could not add the competency.' }),
     );
   }
 
-  const summary = !current
-    ? ''
-    : !current.configured
-      ? 'not set up'
-      : current.required.length === 0
-        ? 'requires nothing'
-        : `${current.required.length} required${
-            current.recommended.length > 0 ? ` · ${current.recommended.length} recommended` : ''
-          }`;
+  const summary = requirementSummary(current);
 
   const chip = (tier: RequirementTier, c: Competency) => {
     const on = selected[tier].has(c.id);
@@ -1110,14 +1100,18 @@ function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unkno
                       onChange={(e) => setNewCode(e.target.value)}
                     />
                   </div>
-                  <Button size="sm" onClick={() => onCreate('required')} disabled={create.isPending}>
+                  <Button
+                    size="sm"
+                    onClick={() => onCreate('required')}
+                    disabled={inlineCreate.isPending}
+                  >
                     Create &amp; require
                   </Button>
                   <Button
                     size="sm"
                     variant="outline"
                     onClick={() => onCreate('recommended')}
-                    disabled={create.isPending}
+                    disabled={inlineCreate.isPending}
                   >
                     Create &amp; recommend
                   </Button>
@@ -1235,6 +1229,20 @@ function RoleRequirements({ role, onError }: { role: TaxRole; onError: (e: unkno
       )}
     </div>
   );
+}
+
+/**
+ * The collapsed row's one-line summary. Empty while the editor has not loaded;
+ * "not set up" and "requires nothing" read apart because `configured` is the
+ * stored fact, never a row count (R50).
+ */
+function requirementSummary(current: RoleRequirementsData | undefined): string {
+  if (!current) return '';
+  if (!current.configured) return 'not set up';
+  if (current.required.length === 0) return 'requires nothing';
+  const recommended =
+    current.recommended.length > 0 ? ` · ${current.recommended.length} recommended` : '';
+  return `${current.required.length} required${recommended}`;
 }
 
 /**

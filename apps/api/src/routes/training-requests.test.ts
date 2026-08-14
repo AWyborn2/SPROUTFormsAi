@@ -311,9 +311,10 @@ describe('POST /training-requests — the candidate-relevance check (U7, KTD6, R
     server.close();
   });
 
-  it('leaves a non-candidate request untouched — an assessor may request anything (KTD6)', async () => {
-    // The check scopes CANDIDATES only; assessor/admin requests keep the
-    // original open-request semantics, and assignment stays the New Case flow.
+  it('leaves an ALLOWLISTED tier untouched — an assessor may request anything (KTD6)', async () => {
+    // owner/admin/assessor are the three unrestricted tiers; their requests
+    // keep the original open-request semantics, and assignment stays the New
+    // Case flow.
     const { db } = fakeDb({
       tool: orgTool,
       insertedRequest: { ...inserted, userId: assessor.userId },
@@ -321,6 +322,47 @@ describe('POST /training-requests — the candidate-relevance check (U7, KTD6, R
     mockDbValue = db;
     const { server, base } = startApp();
     expect((await post(base, assessor)).status).toBe(201);
+    server.close();
+  });
+
+  /*
+    THE GATE IS AN ALLOWLIST, NOT A CANDIDATE CHECK. Keyed on
+    `role === 'candidate'` it failed OPEN for every other non-privileged tier:
+    a builder — whose authority is form authorship — kept the whole open
+    catalogue and could self-request the assessor skill set, the exact abuse
+    KTD6 exists to close. These two pin both directions on the builder tier, so
+    the allowlist cannot quietly narrow back to one role.
+  */
+  const builder = { userId: 'build-1', orgId: 'org-1', role: 'builder' as const };
+
+  it('403s a BUILDER requesting a tool none of their roles name (KTD6 fails safe)', async () => {
+    const { db, insertValues } = fakeDb({
+      tool: orgTool,
+      selfStart: true,
+      memberships: [{ id: 'm-build', userId: builder.userId, orgId: 'org-1' }],
+      membershipRoles: [{ membershipId: 'm-build', roleId: 'r1', withdrawnAt: null }],
+      roleLinks: [], // their role names nothing this tool awards
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await post(base, builder);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'tool_not_relevant' });
+    expect(insertValues).not.toHaveBeenCalled();
+    server.close();
+  });
+
+  it('201s a BUILDER whose own role requires the competency — scoped, not blocked', async () => {
+    const { db } = fakeDb({
+      tool: orgTool,
+      memberships: [{ id: 'm-build', userId: builder.userId, orgId: 'org-1' }],
+      membershipRoles: [{ membershipId: 'm-build', roleId: 'r1', withdrawnAt: null }],
+      roleLinks: [{ roleId: 'r1', competencyId: COMP, tier: 'required' }],
+      insertedRequest: { ...inserted, userId: builder.userId },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    expect((await post(base, builder)).status).toBe(201);
     server.close();
   });
 });

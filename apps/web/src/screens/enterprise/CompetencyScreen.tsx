@@ -19,6 +19,7 @@ import {
   useToggleRule,
   useUnlinkedTools,
 } from '../../lib/data/hooks.js';
+import { useInlineCompetencyCreate } from '../../lib/data/use-inline-competency-create.js';
 
 /**
  * How each status reads, and how loudly.
@@ -623,7 +624,13 @@ function UnlinkedToolRow({
   const { toast } = useToast();
   const preview = usePreviewAwardLink();
   const apply = useApplyAwardLink();
-  const create = useCreateCompetency();
+  /**
+   * Inline create with the created competency kept locally pickable
+   * IMMEDIATELY (the shared hook): the register cache invalidation refetches
+   * in the background, and a row whose picker cannot see the competency it
+   * just created would strand the admin mid-flow.
+   */
+  const inlineCreate = useInlineCompetencyCreate(competencies);
 
   // The suggestion is PRE-PICKED, never pre-applied (R3): an exact
   // name-or-code match is safe to offer as a default, but the preview and the
@@ -637,17 +644,8 @@ function UnlinkedToolRow({
   // is the one-step path. Editable for the cases where it is not.
   const [newName, setNewName] = useState(tool.name);
   const [newCode, setNewCode] = useState('');
-  /**
-   * A competency created inline, kept locally so it is pickable IMMEDIATELY:
-   * the register cache invalidation refetches in the background, and a row
-   * whose picker cannot see the competency it just created would strand the
-   * admin mid-flow.
-   */
-  const [created, setCreated] = useState<Competency | null>(null);
 
-  const options = created && !competencies.some((c) => c.id === created.id)
-    ? [...competencies, created]
-    : competencies;
+  const options = inlineCreate.options;
 
   function pick(id: string) {
     setCompetencyId(id);
@@ -694,20 +692,17 @@ function UnlinkedToolRow({
       toast({ variant: 'warning', message: 'A competency needs a name.' });
       return;
     }
-    create.mutate(
-      // No validity asked here: every competency starts perpetual, and the
-      // validity editor on the register is where expiry gets decided. This
-      // flow's job is the LINK, not the whole record.
-      { name: trimmedName, code: newCode.trim() || null, validForMonths: null, gracePeriodDays: null },
-      {
-        onSuccess: (added) => {
-          setCreated(added);
-          pick(added.id);
-          setCreating(false);
-          toast({ variant: 'success', message: `${added.name} added to the register.` });
-        },
-        onError: () => toast({ variant: 'warning', message: 'Could not add the competency.' }),
+    // No validity asked here (the shared hook creates perpetual) — this
+    // flow's job is the LINK, not the whole record.
+    inlineCreate.create(
+      trimmedName,
+      newCode.trim() || null,
+      (added) => {
+        pick(added.id);
+        setCreating(false);
+        toast({ variant: 'success', message: `${added.name} added to the register.` });
       },
+      () => toast({ variant: 'warning', message: 'Could not add the competency.' }),
     );
   }
 
@@ -769,7 +764,7 @@ function UnlinkedToolRow({
               onChange={(e) => setNewCode(e.target.value)}
             />
           </div>
-          <Button size="sm" onClick={onCreate} disabled={create.isPending}>
+          <Button size="sm" onClick={onCreate} disabled={inlineCreate.isPending}>
             Add &amp; pick
           </Button>
           <Button size="sm" variant="ghost" onClick={() => setCreating(false)}>

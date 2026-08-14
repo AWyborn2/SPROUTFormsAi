@@ -20,9 +20,19 @@ import {
 } from '@formai/shared';
 import { db } from '../db.js';
 import { requiredToolIdsByRole } from './requirement-links.js';
+import type { Reader } from './standing.js';
 import { DEACTIVATED_STATUS } from '../middleware/tenant.js';
 
 type Database = NonNullable<typeof db>;
+/*
+  READ-ONLY HELPERS TAKE `Reader`, NOT `Database`. The award-link and
+  requirement-change applies now compute INSIDE their own transaction (so the
+  plan and the write share one snapshot), which means the planners below are
+  handed a transaction handle rather than the root client. A transaction is not
+  assignable to `Db` — it carries no `$client` — so the read-only half of this
+  module is typed on the surface it actually uses. Everything that WRITES keeps
+  `Database`.
+*/
 
 /**
  * Optional knobs for a PLANNING run.
@@ -64,7 +74,7 @@ interface MembershipAssignmentContext {
 
 /** Every competency a user holds now, each resolved to its current status. */
 export async function heldCompetencyStates(
-  database: Database,
+  database: Reader,
   orgId: string,
   userId: string,
   now: Date,
@@ -120,7 +130,7 @@ export interface AssignmentResult {
  * report for as long as the record is retained.
  */
 async function loadMembershipContext(
-  database: Database,
+  database: Reader,
   orgId: string,
   membershipId: string,
   toolIds: readonly string[],
@@ -378,7 +388,7 @@ export async function assignToolToMembership(
  * of a proposed change that has not been saved.
  */
 export async function planAssignmentsForRole(
-  database: Database,
+  database: Reader,
   orgId: string,
   roleId: string,
   scopeToolIds: readonly string[],

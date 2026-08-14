@@ -34,6 +34,51 @@ function insertResult(rows: unknown[]) {
   return awaitable;
 }
 
+/*
+  Keys that hang schema metadata off a column node — walking them loops back
+  through the table and blows the stack.
+*/
+const WHERE_SKIP_KEYS = new Set([
+  'table',
+  'config',
+  'encoder',
+  'decoder',
+  'session',
+  'dialect',
+  'default',
+]);
+
+/**
+ * Does this drizzle WHERE carry an `is null` predicate?
+ *
+ * The only column any competency-holder read asks that of is `revokedAt`, and
+ * asking it is what "live grants only" MEANS: the DELETE dependency check, the
+ * eligibility lookup and the recommended read all filter it, while the holder
+ * register deliberately does not (R108 — a revoked holder stays visible,
+ * marked). A fake that returned every seeded row to both would leave the
+ * revoked-grant EXCLUSION — the thing that stops audit history blocking a
+ * tidy-up forever — asserted by nothing.
+ */
+function wantsUnrevoked(node: unknown, depth = 0): boolean {
+  if (!node || typeof node !== 'object' || depth > 12) return false;
+  const rec = node as Record<string, unknown>;
+  const chunks = rec.queryChunks;
+  if (Array.isArray(chunks)) {
+    const text = chunks
+      .map((c) => {
+        const v = (c as { value?: unknown } | null)?.value;
+        return Array.isArray(v) && typeof v[0] === 'string' ? v[0] : '';
+      })
+      .join('');
+    if (text.includes('is null')) return true;
+  }
+  for (const [k, v] of Object.entries(rec)) {
+    if (WHERE_SKIP_KEYS.has(k)) continue;
+    if (wantsUnrevoked(v, depth + 1)) return true;
+  }
+  return false;
+}
+
 function fakeDb(opts: {
   competenciesFindFirst?: unknown;
   competenciesFindMany?: unknown[];
@@ -97,7 +142,14 @@ function fakeDb(opts: {
       },
       competencyHolders: {
         findFirst: vi.fn().mockResolvedValue(opts.competencyHoldersFindFirst),
-        findMany: vi.fn().mockResolvedValue(opts.competencyHoldersFindMany ?? []),
+        // revokedAt-AWARE, unlike a flat mock: a caller that asks for live
+        // grants only gets live grants only (see `wantsUnrevoked`).
+        findMany: vi.fn((args?: { where?: unknown }) => {
+          const rows = (opts.competencyHoldersFindMany ?? []) as { revokedAt?: unknown }[];
+          return Promise.resolve(
+            wantsUnrevoked(args?.where) ? rows.filter((r) => r.revokedAt == null) : rows,
+          );
+        }),
       },
       memberships: {
         findFirst: vi.fn().mockResolvedValue(opts.membershipsFindFirst),
@@ -635,6 +687,124 @@ describe('competency write gates (KTD8)', () => {
       server.close();
     }
   });
+
+  /*
+    GRANTING AND REVOKING CARRY THE SAME GATE AS DEFINING (KTD8), and for a
+    sharper reason: HOLDING is what `standingOf` reads and what closes a Role's
+    required gap (R5, R10), so an ungated grant let any member self-certify
+    into compliance and an ungated revoke moved someone out of it. Both sit on
+    owner/admin/assessor, matching POST '/' and PATCH '/:id'.
+  */
+  const grantable = { id: 'c1', orgId: 'org-1', name: 'Track Dozer', code: 'Q34666893', holders: 0 };
+
+  it('403s a candidate GRANTING a competency — self-certification into compliance', async () => {
+    const { db, insertValues } = fakeDb({
+      competenciesFindFirst: grantable,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...as(candidateCaller), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe('forbidden');
+      // Refused BEFORE the write, not after it.
+      expect(insertValues).not.toHaveBeenCalledWith(schema.competencyHolders, expect.anything());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a builder GRANTING — the form tiers never implied register authority', async () => {
+    const { db, insertValues } = fakeDb({
+      competenciesFindFirst: grantable,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...as(builder), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+      expect(res.status).toBe(403);
+      expect(insertValues).not.toHaveBeenCalledWith(schema.competencyHolders, expect.anything());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets an ASSESSOR grant — recording who passed is their working surface', async () => {
+    const { db, insertValues } = fakeDb({
+      competenciesFindFirst: grantable,
+      membershipsFindFirst: { id: 'm1', userId: HOLDER_ID, orgId: 'org-1' },
+      competencyHoldersFindFirst: undefined,
+      holderCount: 1,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders`, {
+        method: 'POST',
+        headers: { ...as(assessor), 'content-type': 'application/json' },
+        body: JSON.stringify({ userId: HOLDER_ID }),
+      });
+      expect(res.status).toBe(201);
+      expect(insertValues).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ competencyId: 'c1', userId: HOLDER_ID }),
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a builder REVOKING — taking a ticket away moves someone OUT of compliance', async () => {
+    const { db, updateSet } = fakeDb({
+      competenciesFindFirst: grantable,
+      competencyHoldersFindMany: [],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders/${HOLDER_ID}`, {
+        method: 'DELETE',
+        headers: as(builder),
+      });
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error: string }).error).toBe('forbidden');
+      expect(updateSet).not.toHaveBeenCalledWith(schema.competencyHolders, expect.anything());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('lets an ASSESSOR revoke — same authority as granting', async () => {
+    const { db, updateSet } = fakeDb({
+      competenciesFindFirst: grantable,
+      competencyHoldersFindMany: [],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1/holders/${HOLDER_ID}`, {
+        method: 'DELETE',
+        headers: as(assessor),
+      });
+      expect(res.status).toBe(200);
+      expect(updateSet).toHaveBeenCalledWith(
+        schema.competencyHolders,
+        expect.objectContaining({ revokedAt: expect.any(Date) }),
+      );
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe('DELETE /competencies/:id', () => {
@@ -680,6 +850,33 @@ describe('DELETE /competencies/:id', () => {
         grants: 1,
       });
       expect(deleteWhere).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('deletes despite a REVOKED grant — audit history is not a dependency (KTD8)', async () => {
+    /*
+      A revoked grant confers nothing, and the dependency query says so by
+      asking `revokedAt IS NULL`. If it counted, a competency granted once and
+      taken away would be undeletable forever, with no exit: revoking again
+      changes nothing and un-requiring is not the blocker. The only seeded row
+      here is revoked, so a fake that ignored the predicate would 409 and this
+      test would catch it.
+    */
+    const { db, deleteWhere } = fakeDb({
+      competenciesFindFirst: { id: 'c1', orgId: 'org-1', name: 'Track Dozer', code: 'Q34666893' },
+      competencyHoldersFindMany: [
+        { userId: HOLDER_ID, competencyId: 'c1', revokedAt: new Date('2026-01-01T00:00:00Z') },
+      ],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/c1`, { method: 'DELETE', headers: authHeader() });
+
+      expect(res.status).toBe(204);
+      expect(deleteWhere).toHaveBeenCalledWith(schema.competencies, expect.anything());
     } finally {
       server.close();
     }

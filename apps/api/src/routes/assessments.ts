@@ -103,6 +103,8 @@ const GATE = [requireTenant, requirePlanFeature('assessments')] as const;
 // ── shared helpers ──────────────────────────────────────────────────────────
 
 type Database = NonNullable<typeof db>;
+/** The root client OR an open transaction — what a read-only helper accepts. */
+type Reader = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /*
   The Admin access level (R73). Declaring the parts rule reads the organisation's
@@ -114,7 +116,9 @@ function isAdmin(role: string): boolean {
   return role === 'admin' || role === 'owner';
 }
 
-async function loadTool(database: Database, toolId: string, orgId: string) {
+// `Reader`, not `Database`: the award apply re-reads the tool INSIDE its own
+// transaction, where the handle is a transaction rather than the root client.
+async function loadTool(database: Reader, toolId: string, orgId: string) {
   return (
     (await database.query.assessmentTools.findFirst({
       where: and(eq(schema.assessmentTools.id, toolId), eq(schema.assessmentTools.orgId, orgId)),
@@ -1338,54 +1342,58 @@ assessmentToolsRouter.put(
     }
 
     if (current.length === 0) {
-      // ── first link: convert and activate (compute-then-apply, KTD10) ──────
-      const plan = await computeAwardLinkChange(db, tenant.orgId, tool.id, body.competencyId, now);
-      await db.transaction(async (tx) => {
-        await tx
-          .update(schema.assessmentTools)
-          .set({ awardedCompetencyIds: [body.competencyId] })
-          .where(eq(schema.assessmentTools.id, tool.id));
-        for (const step of plan.roleLinkPlan) {
-          if (step.action === 'insert') {
-            await tx.insert(schema.roleRequiredCompetencies).values({
-              orgId: tenant.orgId,
-              roleId: step.roleId,
-              competencyId: body.competencyId,
-              tier: 'required',
-            });
-          } else if (step.action === 'upgrade' && step.existingLinkId) {
-            // A recommended row already names this pair — promote its tier;
-            // inserting would collide with role_required_competencies_uq.
-            await tx
-              .update(schema.roleRequiredCompetencies)
-              .set({ tier: 'required' })
-              .where(eq(schema.roleRequiredCompetencies.id, step.existingLinkId));
+      /*
+        ── first link: convert and activate (compute-then-apply, KTD10) ──────
+
+        THE TRANSACTION OPENS FIRST AND THE COMPUTE RUNS INSIDE IT. Computed on
+        the root client beforehand, two concurrent first-links for the same
+        tool both read an unlinked tool, both planned a full conversion, and
+        both applied it — a second set of activated cases against legacy rows
+        the first run had already drained. Re-reading the tool on `tx` puts the
+        race detection on the same snapshot as the write, at REPEATABLE READ so
+        that snapshot holds for the whole block rather than being re-taken per
+        statement.
+      */
+      const outcome = await db.transaction(
+        async (tx) => {
+          const fresh = await loadTool(tx, tool.id, tenant.orgId);
+          const freshAwards = fresh?.awardedCompetencyIds ?? [];
+          if (freshAwards.length > 0) {
+            /*
+              Another writer linked this tool between the gate's read and this
+              one. Whatever it chose, THIS call is no longer a first link:
+              converting again would re-run a conversion the winner already
+              performed. Answered with the existing idempotent already-linked
+              branch — a retried click must not 409, and the tool does hold an
+              award, which is what that branch reports. A caller that meant to
+              CHANGE the award re-issues the request and reaches the guarded
+              re-link door below, preview and confirm included.
+            */
+            return { kind: 'already' as const };
           }
-          // 'exists': already required — nothing to write.
-        }
-        // The legacy rows are DRAINED, not kept alongside the links: the dual
-        // read would deduplicate them, but leaving them makes every later
-        // requirement edit fingerprint-race against rows nobody owns (KTD9).
-        await tx
-          .delete(schema.roleRequiredAssessments)
-          .where(
-            and(
-              eq(schema.roleRequiredAssessments.orgId, tenant.orgId),
-              eq(schema.roleRequiredAssessments.toolId, tool.id),
-            ),
+          const plan = await computeAwardLinkChange(
+            tx,
+            tenant.orgId,
+            tool.id,
+            body.competencyId,
+            now,
           );
-        // The activation's cases — exactly the plan the preview counted.
-        for (const c of plan.casesToInsert) {
-          await tx.insert(schema.assessmentCases).values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
-        }
-      });
+          await applyFirstLink(tx, tenant.orgId, tool.id, body.competencyId, plan);
+          return { kind: 'applied' as const, effects: plan.effects };
+        },
+        { isolationLevel: 'repeatable read' },
+      );
+      if (outcome.kind === 'already') {
+        res.json({ rolesLinked: 0, affected: 0, created: 0, alreadyLinked: true });
+        return;
+      }
       await recordAudit(db, tenant, {
         action: 'Linked assessment award',
         target: `${tool.name} → ${competency.name}`,
         category: 'settings',
         icon: 'clipboard-check',
       });
-      res.json(plan.effects);
+      res.json(outcome.effects);
       return;
     }
 
@@ -1397,61 +1405,136 @@ assessmentToolsRouter.put(
       res.status(400).json({ error: 'confirm_required' });
       return;
     }
-    const outgoingCompetencyId = current[0]!;
     const carry = body.carryRoleLinks ?? false;
-    const plan = await computeAwardRelinkChange(
-      db,
-      tenant.orgId,
-      tool.id,
-      outgoingCompetencyId,
-      body.competencyId,
-      carry,
-      now,
-    );
-    await db.transaction(async (tx) => {
-      await tx
-        .update(schema.assessmentTools)
-        .set({ awardedCompetencyIds: [body.competencyId] })
-        .where(eq(schema.assessmentTools.id, tool.id));
-      if (carry) {
-        for (const step of plan.carryPlan) {
-          if (step.action === 'repoint') {
-            await tx
-              .update(schema.roleRequiredCompetencies)
-              .set({ competencyId: body.competencyId })
-              .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
-          } else if (step.action === 'merge-upgrade' && step.targetLinkId) {
-            await tx
-              .update(schema.roleRequiredCompetencies)
-              .set({ tier: 'required' })
-              .where(eq(schema.roleRequiredCompetencies.id, step.targetLinkId));
-            await tx
-              .delete(schema.roleRequiredCompetencies)
-              .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
-          } else {
-            // merge-delete: the role already requires the incoming competency.
-            await tx
-              .delete(schema.roleRequiredCompetencies)
-              .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
+    /*
+      SAME POSTURE AS THE FIRST LINK: transaction first, compute inside, tool
+      re-read on the same snapshot. The re-read also catches the case where the
+      award moved out from under this caller since the gate read it — the
+      preview they confirmed described the OLD outgoing competency, so applying
+      would carry role links the admin never saw named.
+    */
+    const outcome = await db.transaction(
+      async (tx) => {
+        const fresh = await loadTool(tx, tool.id, tenant.orgId);
+        const freshAwards = fresh?.awardedCompetencyIds ?? [];
+        if (freshAwards.includes(body.competencyId)) return { kind: 'already' as const };
+        const outgoingCompetencyId = freshAwards[0];
+        // Drained to nothing since the gate read it: this is a first link now,
+        // and a first link is not what was confirmed. The idempotent branch is
+        // the honest no-op; the caller re-issues and takes the first-link door.
+        if (!outgoingCompetencyId) return { kind: 'already' as const };
+
+        const plan = await computeAwardRelinkChange(
+          tx,
+          tenant.orgId,
+          tool.id,
+          outgoingCompetencyId,
+          body.competencyId,
+          carry,
+          now,
+        );
+        await tx
+          .update(schema.assessmentTools)
+          .set({ awardedCompetencyIds: [body.competencyId] })
+          .where(eq(schema.assessmentTools.id, tool.id));
+        if (carry) {
+          for (const step of plan.carryPlan) {
+            if (step.action === 'repoint') {
+              await tx
+                .update(schema.roleRequiredCompetencies)
+                .set({ competencyId: body.competencyId })
+                .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
+            } else if (step.action === 'merge-upgrade' && step.targetLinkId) {
+              await tx
+                .update(schema.roleRequiredCompetencies)
+                .set({ tier: 'required' })
+                .where(eq(schema.roleRequiredCompetencies.id, step.targetLinkId));
+              await tx
+                .delete(schema.roleRequiredCompetencies)
+                .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
+            } else {
+              // merge-delete: the role already requires the incoming competency.
+              await tx
+                .delete(schema.roleRequiredCompetencies)
+                .where(eq(schema.roleRequiredCompetencies.id, step.linkId));
+            }
+          }
+          for (const c of plan.casesToInsert) {
+            await tx.insert(schema.assessmentCases).values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
           }
         }
-        for (const c of plan.casesToInsert) {
-          await tx.insert(schema.assessmentCases).values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
-        }
-      }
-      // Grants of the outgoing competency are deliberately untouched (KTD10):
-      // they attest what was assessed at the time, and re-pointing the award
-      // must not rewrite anyone's history.
-    });
+        // Grants of the outgoing competency are deliberately untouched (KTD10):
+        // they attest what was assessed at the time, and re-pointing the award
+        // must not rewrite anyone's history.
+        return { kind: 'applied' as const, effects: plan.effects };
+      },
+      { isolationLevel: 'repeatable read' },
+    );
+    if (outcome.kind === 'already') {
+      res.json({ rolesLinked: 0, affected: 0, created: 0, alreadyLinked: true });
+      return;
+    }
     await recordAudit(db, tenant, {
       action: 'Linked assessment award',
       target: `${tool.name} → ${competency.name}`,
       category: 'settings',
       icon: 'clipboard-check',
     });
-    res.json(plan.effects);
+    res.json(outcome.effects);
   }),
 );
+
+/**
+ * The first link's writes, in the caller's transaction: the award, the
+ * conversion of every legacy `role_required_assessments` row into a direct
+ * required link, the drain of those rows, and the activated cases — exactly
+ * the plan the preview counted (KTD3, KTD10).
+ */
+async function applyFirstLink(
+  tx: Parameters<Parameters<Database['transaction']>[0]>[0],
+  orgId: string,
+  toolId: string,
+  competencyId: string,
+  plan: Awaited<ReturnType<typeof computeAwardLinkChange>>,
+): Promise<void> {
+  await tx
+    .update(schema.assessmentTools)
+    .set({ awardedCompetencyIds: [competencyId] })
+    .where(eq(schema.assessmentTools.id, toolId));
+  for (const step of plan.roleLinkPlan) {
+    if (step.action === 'insert') {
+      await tx.insert(schema.roleRequiredCompetencies).values({
+        orgId,
+        roleId: step.roleId,
+        competencyId,
+        tier: 'required',
+      });
+    } else if (step.action === 'upgrade' && step.existingLinkId) {
+      // A recommended row already names this pair — promote its tier;
+      // inserting would collide with role_required_competencies_uq.
+      await tx
+        .update(schema.roleRequiredCompetencies)
+        .set({ tier: 'required' })
+        .where(eq(schema.roleRequiredCompetencies.id, step.existingLinkId));
+    }
+    // 'exists': already required — nothing to write.
+  }
+  // The legacy rows are DRAINED, not kept alongside the links: the dual read
+  // would deduplicate them, but leaving them makes every later requirement
+  // edit fingerprint-race against rows nobody owns (KTD9).
+  await tx
+    .delete(schema.roleRequiredAssessments)
+    .where(
+      and(
+        eq(schema.roleRequiredAssessments.orgId, orgId),
+        eq(schema.roleRequiredAssessments.toolId, toolId),
+      ),
+    );
+  // The activation's cases — exactly the plan the preview counted.
+  for (const c of plan.casesToInsert) {
+    await tx.insert(schema.assessmentCases).values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
+  }
+}
 
 /**
  * One tool, with everything the workflow builder needs to render.

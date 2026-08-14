@@ -94,7 +94,12 @@ function makeDb(store: Store, { withTransaction = true } = {}) {
     };
   };
   const tx = { query: tables('tx') };
-  const transaction = vi.fn(async (fn: (t: unknown) => Promise<unknown>) => fn(tx));
+  // The config is captured, not ignored: the KTD3 pin is only real at
+  // `repeatable read`, and a mock that dropped the second argument would let
+  // the option be deleted without a single test noticing.
+  const transaction = vi.fn(
+    async (fn: (t: unknown) => Promise<unknown>, _config?: { isolationLevel?: string }) => fn(tx),
+  );
   const db = {
     query: tables('root'),
     ...(withTransaction ? { transaction } : {}),
@@ -205,7 +210,7 @@ describe('requiredToolIdsByRole', () => {
     expect(byRole.get('r2')).toEqual([]);
   });
 
-  it('pins every read of the dual derivation to ONE transaction when the client offers one (KTD3)', async () => {
+  it('pins every read of the dual derivation to ONE REPEATABLE READ transaction (KTD3)', async () => {
     const { db, transaction, reads } = makeDb({
       roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'r1', toolId: 't1' }],
       roleRequiredCompetencies: [link('r1', 'c2')],
@@ -222,6 +227,18 @@ describe('requiredToolIdsByRole', () => {
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(reads.length).toBeGreaterThan(0);
     expect(reads.every((r) => r.surface === 'tx')).toBe(true);
+    /*
+      THE ISOLATION LEVEL IS THE GUARANTEE, not the transaction. Postgres
+      defaults to READ COMMITTED, where each statement inside a transaction
+      takes a FRESH snapshot — a conversion committing between the legacy read
+      and the direct read would still be seen half-way, which is the exact
+      interleaving KTD3 exists to exclude. Without this assertion the wrapper
+      could be reduced to a decorative BEGIN/COMMIT and every other test here
+      would stay green.
+    */
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: 'repeatable read',
+    });
   });
 
   it('still reads correctly on a surface with no transaction (lean read-only callers)', async () => {

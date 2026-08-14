@@ -14,6 +14,10 @@ vi.mock('../db.js', () => ({ db: null, getDbStatus: () => 'unconfigured' }));
 const { computeRequiredAssessmentsChange, computeAwardLinkChange } = await import(
   './requirement-change.js'
 );
+// The SHARED resolver the award link must agree with — imported here so the
+// "who ends up awarding this?" question is asked of the real read site rather
+// than restated by the test.
+const { requiredToolIdsByRole } = await import('./requirement-links.js');
 
 const ORG = 'org-1';
 const NOW = new Date('2026-06-01T00:00:00Z');
@@ -493,6 +497,55 @@ describe('computeAwardLinkChange', () => {
         { roleId: 'role-2', action: 'upgrade', existingLinkId: 'link-role-2-cB' },
       ]),
     );
+  });
+
+  it('plans the case for the tool the KTD2 RESOLVER will keep naming, not the tool being linked', async () => {
+    /*
+      TWO TOOLS, ONE COMPETENCY. `t-early` is published and already awards cB;
+      `t-late` is the award-less tool an admin is backfilling onto the same cB.
+      KTD2's resolver picks the FIRST candidate by (createdAt, id) — so once
+      the link lands, every read site (assignment, standing, compliance) keeps
+      naming `t-early`.
+
+      Planning the activation against `t-late` regardless would open a case for
+      an assessment the converted Role no longer derives: the person would
+      carry work that satisfies nothing, and "preview == apply" would hold only
+      against a write the rest of the system disagrees with. So the plan must
+      name the resolver's winner, and this test pins the two answers TOGETHER
+      rather than asserting the plan alone.
+    */
+    const store: Store = {
+      roleRequiredAssessments: [{ id: 'rr1', orgId: ORG, roleId: 'role-1', toolId: 't-late' }],
+      roleRequiredCompetencies: [],
+      ...member('m1', 'u1', ['role-1']),
+      assessmentTools: [
+        tool('t-early', ['cB'], { createdAt: new Date('2026-01-01T00:00:00Z') }),
+        tool('t-late', [], { createdAt: new Date('2026-05-01T00:00:00Z') }),
+      ],
+      formTemplates: [template('tpl-t-early', 'v1'), template('tpl-t-late', 'v2')],
+      assessmentCases: [],
+      competencyHolders: [],
+      competencies: [{ id: 'cB', orgId: ORG, validForMonths: null, gracePeriodDays: null }],
+    };
+    const db = makeDb(store);
+    const plan = await computeAwardLinkChange(db as never, ORG, 't-late', 'cB', NOW);
+
+    expect(plan.effects).toEqual({ rolesLinked: 1, affected: 1, created: 1 });
+    expect(plan.casesToInsert.map((c) => c.toolId)).toEqual(['t-early']);
+
+    // Now APPLY the plan to the store — the award written, the legacy row
+    // converted to a direct link — and ask the resolver the same question the
+    // sweep and the compliance report will ask tomorrow.
+    (store.assessmentTools!.find((t) => t.id === 't-late') as { awardedCompetencyIds: string[] })
+      .awardedCompetencyIds = ['cB'];
+    store.roleRequiredAssessments = [];
+    store.roleRequiredCompetencies = [link('role-1', 'cB')];
+
+    const byRole = await requiredToolIdsByRole(db as never, ORG, ['role-1']);
+    expect(byRole.get('role-1')).toEqual(['t-early']);
+    // The invariant in one line: the case created is FOR the tool the resolver
+    // keeps naming.
+    expect(byRole.get('role-1')).toEqual([...new Set(plan.casesToInsert.map((c) => c.toolId))]);
   });
 
   it('plans one case for a holder of TWO linked roles, not two (dedupe by membership)', async () => {

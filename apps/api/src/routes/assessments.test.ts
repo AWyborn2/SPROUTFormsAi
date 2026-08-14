@@ -953,6 +953,100 @@ describe('award link: PUT /assessment-tools/:id/award and its preview (U2, KTD3,
     }
   });
 
+  it('RE-LINK with confirm but NO carry moves the award alone — links and cases untouched', async () => {
+    /*
+      THE LIKELY DEFAULT ADMIN ACTION, and until now the only award path with
+      no test at all. Without `carryRoleLinks` the correction is deliberately
+      narrow: the tool starts awarding the incoming competency and NOTHING else
+      moves. The role that required the outgoing competency keeps requiring it
+      — now with no awarding tool, i.e. an evidence-only requirement (R7) — and
+      because the roles stop deriving this tool, nobody is owed a new case.
+
+      The holder below is seeded precisely so a carry WOULD have created one:
+      `created: 0` is then a fact about the no-carry branch rather than about an
+      empty fixture.
+    */
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base); // awards COMPETENCY (the outgoing)
+      rows(store, 'competencies').push({ id: COMP_2, orgId: ORG, name: 'Grader Operator', holders: 0 });
+      const linkId = nextId();
+      rows(store, 'roleRequiredCompetencies').push({
+        id: linkId,
+        orgId: ORG,
+        roleId: ROLE_1,
+        competencyId: COMPETENCY,
+        tier: 'required',
+      });
+      placeHolder(store, OTHER_CANDIDATE, ROLE_1);
+
+      const previewed = (await (
+        await preview(base, tool.id, { competencyId: COMP_2 })
+      ).json()) as Record<string, number>;
+      expect(previewed).toEqual({ outgoingGrants: 0, rolesRequiringOutgoing: 1, created: 0 });
+
+      const applied = await award(base, tool.id, { competencyId: COMP_2, confirm: true });
+      expect(applied.status).toBe(200);
+      expect(await applied.json()).toEqual(previewed); // preview == apply (KTD10)
+
+      // The award moved…
+      const toolRow = rows(store, 'assessmentTools').find((t) => t.id === tool.id)!;
+      expect(toolRow.awardedCompetencyIds).toEqual([COMP_2]);
+      // …and nothing else did.
+      const links = rows(store, 'roleRequiredCompetencies');
+      expect(links).toHaveLength(1);
+      expect(links[0]).toMatchObject({ id: linkId, competencyId: COMPETENCY, tier: 'required' });
+      expect(rows(store, 'assessmentCases')).toHaveLength(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('RE-LINK with carry UPGRADES a RECOMMENDED incoming link and drops the outgoing row', async () => {
+    /*
+      The third carry action (`merge-upgrade`), and the only one the unique
+      index makes unavoidable: the role already names the incoming competency,
+      but merely as a RECOMMENDATION. Re-pointing the outgoing row onto it
+      would collide with role_required_competencies_uq, and deleting the
+      outgoing row alone would quietly DEMOTE a required competency to
+      recommended. So the recommended row is promoted in place and the outgoing
+      row deleted — one row, tier 'required', requirement preserved.
+    */
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base); // awards COMPETENCY (the outgoing)
+      rows(store, 'competencies').push({ id: COMP_2, orgId: ORG, name: 'Grader Operator', holders: 0 });
+      const outgoingLinkId = nextId();
+      const recommendedLinkId = nextId();
+      rows(store, 'roleRequiredCompetencies').push(
+        { id: outgoingLinkId, orgId: ORG, roleId: ROLE_1, competencyId: COMPETENCY, tier: 'required' },
+        { id: recommendedLinkId, orgId: ORG, roleId: ROLE_1, competencyId: COMP_2, tier: 'recommended' },
+      );
+
+      const applied = await award(base, tool.id, {
+        competencyId: COMP_2,
+        carryRoleLinks: true,
+        confirm: true,
+      });
+      expect(applied.status).toBe(200);
+
+      const links = rows(store, 'roleRequiredCompetencies');
+      expect(links).toHaveLength(1);
+      expect(links[0]).toMatchObject({
+        id: recommendedLinkId, // promoted IN PLACE, never a second row
+        competencyId: COMP_2,
+        tier: 'required',
+      });
+      expect(links.some((l) => l.id === outgoingLinkId)).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
   it('refuses a non-admin and a competency outside the organisation', async () => {
     const { db, store } = makeDb();
     mockDbValue = db;

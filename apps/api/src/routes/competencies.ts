@@ -322,42 +322,64 @@ competenciesRouter.delete(
       return;
     }
 
-    const [links, orgTools, liveGrants] = await Promise.all([
-      // Both tiers in one read, split below — a recommendation is a real
-      // dependency too (a Role's editor would show a dangling entry).
-      db.query.roleRequiredCompetencies.findMany({
-        where: and(
-          eq(schema.roleRequiredCompetencies.orgId, tenant.orgId),
-          eq(schema.roleRequiredCompetencies.competencyId, row.id),
-        ),
-      }),
-      // `awardedCompetencyIds` is jsonb with no FK, so containment is filtered
-      // in JS — the same way every award read in this codebase treats it.
-      db.query.assessmentTools.findMany({
-        where: eq(schema.assessmentTools.orgId, tenant.orgId),
-      }),
-      // Live grants only: a revoked grant is audit history, not a dependency —
-      // it confers nothing and must not block a tidy-up forever.
-      db.query.competencyHolders.findMany({
-        where: and(
-          eq(schema.competencyHolders.competencyId, row.id),
-          eq(schema.competencyHolders.orgId, tenant.orgId),
-          isNull(schema.competencyHolders.revokedAt),
-        ),
-      }),
-    ]);
-    const roles = links.filter((l) => l.tier === 'required').length;
-    const recommendedBy = links.filter((l) => l.tier === 'recommended').length;
-    const tools = orgTools.filter((t) => (t.awardedCompetencyIds ?? []).includes(row.id)).length;
-    const grants = liveGrants.length;
-    if (roles + recommendedBy + tools + grants > 0) {
+    /*
+      THE CHECK AND THE DELETE SHARE ONE SNAPSHOT (KTD8). Run as separate
+      statements, the dependency reads and the delete leave a window in which a
+      Role can start requiring this competency — and the FK cascade the check
+      exists to make unreachable fires anyway, stripping a requirement nobody
+      was warned about. One transaction at REPEATABLE READ pins the reads and
+      the delete to the same view of the world; a dependency created inside the
+      window makes the delete conflict rather than silently cascade.
+
+      The three reads are SEQUENTIAL, not `Promise.all`: a transaction is one
+      pinned connection and serves one query at a time.
+    */
+    const verdict = await db.transaction(
+      async (tx) => {
+        // Both tiers in one read, split below — a recommendation is a real
+        // dependency too (a Role's editor would show a dangling entry).
+        const links = await tx.query.roleRequiredCompetencies.findMany({
+          where: and(
+            eq(schema.roleRequiredCompetencies.orgId, tenant.orgId),
+            eq(schema.roleRequiredCompetencies.competencyId, row.id),
+          ),
+        });
+        // `awardedCompetencyIds` is jsonb with no FK, so containment is
+        // filtered in JS — the same way every award read in this codebase
+        // treats it.
+        const orgTools = await tx.query.assessmentTools.findMany({
+          where: eq(schema.assessmentTools.orgId, tenant.orgId),
+        });
+        // Live grants only: a revoked grant is audit history, not a dependency
+        // — it confers nothing and must not block a tidy-up forever.
+        const liveGrants = await tx.query.competencyHolders.findMany({
+          where: and(
+            eq(schema.competencyHolders.competencyId, row.id),
+            eq(schema.competencyHolders.orgId, tenant.orgId),
+            isNull(schema.competencyHolders.revokedAt),
+          ),
+        });
+
+        const roles = links.filter((l) => l.tier === 'required').length;
+        const recommendedBy = links.filter((l) => l.tier === 'recommended').length;
+        const tools = orgTools.filter((t) => (t.awardedCompetencyIds ?? []).includes(row.id)).length;
+        const grants = liveGrants.length;
+        if (roles + recommendedBy + tools + grants > 0) {
+          return { deleted: false as const, roles, recommendedBy, tools, grants };
+        }
+        await tx.delete(schema.competencies).where(eq(schema.competencies.id, row.id));
+        return { deleted: true as const };
+      },
+      { isolationLevel: 'repeatable read' },
+    );
+    if (!verdict.deleted) {
       // Counts, not ids: enough to say WHAT stands in the way and how much,
       // without this error payload becoming a second register read.
+      const { roles, recommendedBy, tools, grants } = verdict;
       res.status(409).json({ error: 'competency_in_use', roles, recommendedBy, tools, grants });
       return;
     }
 
-    await db.delete(schema.competencies).where(eq(schema.competencies.id, row.id));
     await recordAudit(db, tenant, {
       action: 'Deleted competency',
       target: row.code ?? row.name,
@@ -410,12 +432,28 @@ competenciesRouter.post(
       res.status(503).json({ error: 'db_unavailable' });
       return;
     }
+    const tenant = req.tenant!;
+    /*
+      THE SAME GATE THE DEFINITION CARRIES (KTD8), and for a sharper reason.
+      Authoring a competency only describes a ticket; HOLDING one is what
+      `standingOf` reads and what closes a role's required gap (R5, R10), so an
+      ungated grant let any member self-certify into compliance — the register
+      would say the Dozer operator holds their licence because they said so.
+      Owner/admin/assessor only, matching POST '/' and PATCH '/:id' above.
+
+      The two automatic grants are unaffected: sign-off and the workforce
+      import call `grantCompetency` in lib directly and never pass through
+      this route.
+    */
+    if (!canAuthorCompetencies(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const parsed = grantBody.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
       return;
     }
-    const tenant = req.tenant!;
 
     /*
       One implementation, shared with the automatic grant a signed-off
@@ -480,12 +518,18 @@ competenciesRouter.delete(
       res.status(503).json({ error: 'db_unavailable' });
       return;
     }
+    const tenant = req.tenant!;
+    // Same authority as granting: taking a ticket away moves someone OUT of
+    // compliance, so it belongs to the same owner/admin/assessor population.
+    if (!canAuthorCompetencies(tenant.role)) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const parsed = revokeBody.safeParse(req.body ?? {});
     if (!parsed.success) {
       res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
       return;
     }
-    const tenant = req.tenant!;
     const competency = await findOwnedCompetency(db, req.params.id!, tenant.orgId);
     if (!competency) {
       res.status(404).json({ error: 'not_found' });
@@ -592,8 +636,10 @@ competenciesRouter.get(
     // or merely recommend (R108, R12)? Batched into one query path rather than
     // per holder; the recommended set rides beside the required one because
     // standingOf demands both (KTD7).
-    const requiredByUser = await requiredCompetencyIdsByUser(db, tenant.orgId, holderUserIds);
-    const recommendedByUser = await recommendedCompetencyIdsByUser(db, tenant.orgId, holderUserIds);
+    const [requiredByUser, recommendedByUser] = await Promise.all([
+      requiredCompetencyIdsByUser(db, tenant.orgId, holderUserIds),
+      recommendedCompetencyIdsByUser(db, tenant.orgId, holderUserIds),
+    ]);
 
     // One instant for the whole response, so two holders cannot disagree about
     // what "today" is and sort inconsistently.
@@ -722,8 +768,10 @@ competenciesRouter.get(
     // oblige them to hold, and which they merely recommend (R12). Resolved once
     // for the whole record. Revoked rows were already excluded above, so
     // `current` never has to fold revocation in here.
-    const required = await requiredCompetencyIdsFor(db, tenant.orgId, req.params.userId!);
-    const recommended = await recommendedCompetencyIdsFor(db, tenant.orgId, req.params.userId!);
+    const [required, recommended] = await Promise.all([
+      requiredCompetencyIdsFor(db, tenant.orgId, req.params.userId!),
+      recommendedCompetencyIdsFor(db, tenant.orgId, req.params.userId!),
+    ]);
 
     // Licence numbers are sensitive profile data (R34): a caller sees them on
     // someone else's record only with the `profiles.view_competencies` grant —

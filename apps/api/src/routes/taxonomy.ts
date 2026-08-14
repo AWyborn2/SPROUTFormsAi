@@ -13,6 +13,8 @@ import { withdrawRoleFromAllHolders } from '../lib/membership-placement.js';
 import { db } from '../db.js';
 
 type Database = NonNullable<typeof db>;
+/** The root client OR an open transaction — what a read-only helper accepts. */
+type Reader = Database | Parameters<Parameters<Database['transaction']>[0]>[0];
 
 /**
  * The organisation's taxonomy — Locations, Departments and the Roles each
@@ -626,6 +628,22 @@ const requirementsPreviewBody = z.object({
 const legacyRemoveBody = z.object({ fingerprint: z.string().min(1) });
 
 /**
+ * The KTD9 stale-echo signal, THROWN from inside the apply transaction.
+ *
+ * The guard has to run on the same connection and snapshot as the write it
+ * protects, which means it cannot simply `return` a 409 — the only way out of
+ * a transaction callback without committing is to throw. This carries the
+ * refusal back to the handler, which maps it to the unchanged 409 body; every
+ * other error keeps propagating to the error middleware as a 500.
+ */
+class RequirementsChangedError extends Error {
+  constructor() {
+    super('requirements_changed');
+    this.name = 'RequirementsChangedError';
+  }
+}
+
+/**
  * The fingerprint the GET serves and the PUT/DELETE echo (KTD9): a
  * deterministic hash over the Role's direct links (both tiers) AND its
  * remaining legacy rows. Any conversion, edit or legacy-row removal landing
@@ -647,8 +665,15 @@ function requirementsFingerprint(
     .digest('hex');
 }
 
-/** The Role's stored requirement state — links, legacy rows, fingerprint. */
-async function loadRequirementState(database: Database, roleId: string) {
+/**
+ * The Role's stored requirement state — links, legacy rows, fingerprint.
+ *
+ * Takes a `Reader` because the PUT re-runs it INSIDE its apply transaction:
+ * the fingerprint comparison is the KTD9 lost-update guard, and a guard that
+ * reads on one connection while the write it protects runs on another is not
+ * a guard at all.
+ */
+async function loadRequirementState(database: Reader, roleId: string) {
   const [links, legacyRows] = await Promise.all([
     database.query.roleRequiredCompetencies.findMany({
       where: eq(schema.roleRequiredCompetencies.roleId, roleId),
@@ -813,25 +838,6 @@ taxonomyRouter.put(
     const tiers = await normalizeRequirementTiers(db, res, tenant.orgId, parsed.data);
     if (!tiers) return;
 
-    // KTD9: the fingerprint guard. A backfill conversion landing between this
-    // editor's GET and PUT rewrote the links; the replace-write below would
-    // silently erase it. Stale echo → 409, the editor reloads and re-decides.
-    const state = await loadRequirementState(db, role.id);
-    if (state.fingerprint !== parsed.data.fingerprint)
-      return reply(res, 409, { error: 'requirements_changed' });
-
-    // ONE code path (KTD10): the apply runs the SAME computation the preview did,
-    // so `effects.created` is exactly the number of cases it inserts. Its reads
-    // are of the PRE-change state, so running it before the write is correct.
-    const now = new Date();
-    const { effects, casesToInsert } = await computeRequiredAssessmentsChange(
-      db,
-      tenant.orgId,
-      role,
-      { requiredCompetencyIds: tiers.required },
-      now,
-    );
-
     /*
       Apply atomically, and to the LINKS TABLE ONLY (KTD9): legacy rows leave
       via conversion or the explicit remove below, never as a side effect of a
@@ -842,50 +848,88 @@ taxonomyRouter.put(
       never create the missing case. A transaction makes a partial failure
       roll the replacement back with it. Removing a competency leaves its
       in-flight cases untouched (R55) — nothing here cancels a case.
+
+      THE TRANSACTION OPENS FIRST, and the KTD9 fingerprint guard runs INSIDE
+      it. Read on the root client beforehand, the guard was a check-then-act
+      spanning two connections: two admins each holding the same fresh
+      fingerprint both passed it and both ran the replace-write, which is
+      exactly the lost update the fingerprint exists to prevent. Guard, plan
+      and write now share one snapshot — REPEATABLE READ, because under the
+      default READ COMMITTED each statement re-reads the newest commit and the
+      snapshot would drift back apart between the check and the delete.
     */
+    const now = new Date();
     const flipConfigured = !role.requirementsConfigured && tiers.required.length > 0;
-    await db.transaction(async (tx) => {
-      await tx
-        .delete(schema.roleRequiredCompetencies)
-        .where(eq(schema.roleRequiredCompetencies.roleId, role.id));
-      const rows = [
-        ...tiers.required.map((competencyId) => ({
-          orgId: tenant.orgId,
-          roleId: role.id,
-          competencyId,
-          tier: 'required' as const,
-        })),
-        ...tiers.recommended.map((competencyId) => ({
-          orgId: tenant.orgId,
-          roleId: role.id,
-          competencyId,
-          tier: 'recommended' as const,
-        })),
-      ];
-      if (rows.length > 0) {
-        await tx.insert(schema.roleRequiredCompetencies).values(rows);
-      }
-      /*
-        `requirementsConfigured` flips only when the REQUIRED tier is authored
-        (KTD9): a recommended-only save on a never-configured Role leaves it
-        reading never-configured, because recommending is not deciding what
-        the Role demands — R50's distinction is about the required set.
-      */
-      if (flipConfigured) {
-        await tx
-          .update(schema.jobRoles)
-          .set({ requirementsConfigured: true })
-          .where(eq(schema.jobRoles.id, role.id));
-      }
-      // The additions' cases, applied with no per-person action (R82, R83, R87).
-      // Exactly the plan `compute` counted, so the rows written equal
-      // `effects.created`.
-      for (const c of casesToInsert) {
-        await tx
-          .insert(schema.assessmentCases)
-          .values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
-      }
-    });
+    const applied = await db
+      .transaction(
+        async (tx) => {
+          const state = await loadRequirementState(tx, role.id);
+          if (state.fingerprint !== parsed.data.fingerprint) throw new RequirementsChangedError();
+
+          // ONE code path (KTD10): the apply runs the SAME computation the
+          // preview did, so `effects.created` is exactly the number of cases
+          // it inserts. Its reads are of the PRE-change state, so running it
+          // before the write — on this same `tx` — is correct.
+          const { effects, casesToInsert } = await computeRequiredAssessmentsChange(
+            tx,
+            tenant.orgId,
+            role,
+            { requiredCompetencyIds: tiers.required },
+            now,
+          );
+
+          await tx
+            .delete(schema.roleRequiredCompetencies)
+            .where(eq(schema.roleRequiredCompetencies.roleId, role.id));
+          const rows = [
+            ...tiers.required.map((competencyId) => ({
+              orgId: tenant.orgId,
+              roleId: role.id,
+              competencyId,
+              tier: 'required' as const,
+            })),
+            ...tiers.recommended.map((competencyId) => ({
+              orgId: tenant.orgId,
+              roleId: role.id,
+              competencyId,
+              tier: 'recommended' as const,
+            })),
+          ];
+          if (rows.length > 0) {
+            await tx.insert(schema.roleRequiredCompetencies).values(rows);
+          }
+          /*
+            `requirementsConfigured` flips only when the REQUIRED tier is
+            authored (KTD9): a recommended-only save on a never-configured Role
+            leaves it reading never-configured, because recommending is not
+            deciding what the Role demands — R50's distinction is about the
+            required set.
+          */
+          if (flipConfigured) {
+            await tx
+              .update(schema.jobRoles)
+              .set({ requirementsConfigured: true })
+              .where(eq(schema.jobRoles.id, role.id));
+          }
+          // The additions' cases, applied with no per-person action (R82, R83,
+          // R87). Exactly the plan `compute` counted, so the rows written equal
+          // `effects.created`.
+          for (const c of casesToInsert) {
+            await tx
+              .insert(schema.assessmentCases)
+              .values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
+          }
+          return { ok: true as const, effects, legacyToolIds: state.legacyToolIds };
+        },
+        { isolationLevel: 'repeatable read' },
+      )
+      .catch((err: unknown) => {
+        // Stale echo → 409, the editor reloads and re-decides. Everything else
+        // is a real failure and keeps going to the error middleware.
+        if (err instanceof RequirementsChangedError) return { ok: false as const };
+        throw err;
+      });
+    if (!applied.ok) return reply(res, 409, { error: 'requirements_changed' });
 
     await recordAudit(db, tenant, {
       action: 'Set role required competencies',
@@ -897,8 +941,8 @@ taxonomyRouter.put(
       configured: role.requirementsConfigured || flipConfigured,
       required: tiers.required,
       recommended: tiers.recommended,
-      awaitingLink: state.legacyToolIds,
-      effects,
+      awaitingLink: applied.legacyToolIds,
+      effects: applied.effects,
       // The post-write fingerprint, so the editor can save again without a
       // fresh GET.
       fingerprint: requirementsFingerprint(
@@ -906,7 +950,7 @@ taxonomyRouter.put(
           ...tiers.required.map((competencyId) => ({ competencyId, tier: 'required' })),
           ...tiers.recommended.map((competencyId) => ({ competencyId, tier: 'recommended' })),
         ],
-        state.legacyToolIds,
+        applied.legacyToolIds,
       ),
     });
   }),
