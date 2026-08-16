@@ -231,6 +231,36 @@ describe('derivePartsFromStructure', () => {
     expect(logbookColumnsFor(parts[0]!, fields)).toEqual([{ key: 'duration', label: 'Hours' }]);
   });
 
+  it('a header-less (grouped) logbook section resolves and validates', () => {
+    /*
+      The General Items regression. Grouped into its own section, it has no
+      heading and so anchors on its table. The duration column must resolve from
+      that table — not read as "not a column of its table" — and the picker must
+      offer the table's own columns, not a neighbour's.
+    */
+    const fields = [
+      field({
+        id: 'tbl',
+        type: 'repeating_group',
+        columns: [
+          { key: 'date', label: 'Date', type: 'date' as const },
+          { key: 'duration', label: 'Duration', type: 'text' as const },
+        ],
+      }),
+    ];
+    const parts = updatePart(derive([section('gen', 'General items', ['tbl'])], fields), 'gen', {
+      minimumHours: 10,
+    });
+
+    expect(parts[0]!.startFieldId).toBe('tbl');
+    expect(parts[0]!.durationColumnKey).toBe('duration');
+    expect(logbookColumnsFor(parts[0]!, fields).map((c) => c.key)).toEqual(['date', 'duration']);
+    const problems = validateManifest(buildManifest(parts, []), fields);
+    expect(problems.filter((p) => /not a column of its table|no repeating table/.test(p))).toEqual(
+      [],
+    );
+  });
+
   it('skips a section the author has emptied', () => {
     // A part with no start field is not a part; declaring one produces a
     // manifest the validator rejects for a reason the author cannot see.
@@ -434,18 +464,29 @@ describe('the derived manifest passes the real validator', () => {
 });
 
 describe('logbookColumnsFor', () => {
-  it('offers the same columns the validator checks against', () => {
+  const cols = [{ key: 'duration', label: 'Hours', type: 'text' as const }];
+
+  it('reads a header-less section’s own table — the one it anchors on', () => {
+    // A section an author built by grouping has no heading, so the part anchors
+    // on the table itself. The picker must still read THAT table's columns:
+    // skipping the anchor is what left General Items' Hours-column picker
+    // offering a neighbouring part's fields, with "Duration" absent.
+    const atTable = [field({ id: 'tbl', type: 'repeating_group', columns: cols })];
+    expect(logbookColumnsFor({ startFieldId: 'tbl' }, atTable)).toEqual([
+      { key: 'duration', label: 'Hours' },
+    ]);
+  });
+
+  it('reads the table that follows a section_header anchor', () => {
     // The list an author picks from and the list validateManifest checks have
     // to come from one slice, or the pick can fail validation.
-    const fields = [
-      field({ id: 'tbl', type: 'repeating_group', columns: [{ key: 'duration', label: 'Hours', type: 'text' as const }] }),
+    const withHeader = [
+      field({ id: 'lead', type: 'section_header' }),
+      field({ id: 'tbl', type: 'repeating_group', columns: cols }),
     ];
-    expect(logbookColumnsFor({ startFieldId: 'tbl' }, fields)).toEqual([]);
-
-    const withLead = [field({ id: 'lead' }), ...fields];
     // The picker offers key + label only; the column's own type is not the
     // author's choice here.
-    expect(logbookColumnsFor({ startFieldId: 'lead' }, withLead)).toEqual([
+    expect(logbookColumnsFor({ startFieldId: 'lead' }, withHeader)).toEqual([
       { key: 'duration', label: 'Hours' },
     ]);
   });

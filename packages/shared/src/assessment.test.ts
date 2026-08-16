@@ -15,6 +15,7 @@ import {
   CASE_STATES,
   caseProgress,
   fieldsInPart,
+  fieldsInSection,
   isCaseCompetent,
   isTerminalCaseState,
   moreCoachingRequired,
@@ -899,6 +900,48 @@ describe('fieldsInPart', () => {
     };
 
     expect(fieldsInPart(docFields, reversed, 'one').map((f) => f.id)).toEqual(['q1', 'q2', 'h-mid']);
+  });
+});
+
+describe('fieldsInSection', () => {
+  const table = (id: string): FormField => ({
+    id,
+    type: 'repeating_group',
+    label: id,
+    required: false,
+    source: 'imported',
+    columns: [
+      { key: 'date', label: 'Date', type: 'date' },
+      { key: 'duration', label: 'Duration', type: 'text' },
+    ],
+  });
+
+  it('excludes a section_header anchor and runs to the next header', () => {
+    const docFields = [header('h1'), question('q1'), question('q2'), header('h2'), question('q3')];
+    expect(fieldsInSection(docFields, 'h1').map((f) => f.id)).toEqual(['q1', 'q2']);
+  });
+
+  it('INCLUDES a non-header anchor — a header-less grouped section keeps its own table', () => {
+    /*
+      A section an author built by grouping has no printed heading, so its part
+      anchors on the table itself. Skipping the anchor left the table out of its
+      own section — the column picker offered a neighbour's fields and the
+      validator called the declared duration column missing. The table must be
+      the first repeating group the slice yields.
+    */
+    const docFields = [table('log'), question('after'), header('next'), question('q')];
+    const section = fieldsInSection(docFields, 'log');
+    expect(section.map((f) => f.id)).toEqual(['log', 'after']);
+    expect(section.find((f) => f.type === 'repeating_group')?.id).toBe('log');
+  });
+
+  it('a non-header anchor still stops at the next header', () => {
+    const docFields = [question('only'), header('next'), question('q')];
+    expect(fieldsInSection(docFields, 'only').map((f) => f.id)).toEqual(['only']);
+  });
+
+  it('returns nothing for an unknown anchor rather than the whole document', () => {
+    expect(fieldsInSection([header('h1'), question('q1')], 'ghost')).toEqual([]);
   });
 });
 
