@@ -7,9 +7,20 @@ import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { recordAudit } from '../audit/record.js';
-import { assignmentCaseValues } from '../lib/assignment.js';
-import { computeRequiredAssessmentsChange } from '../lib/requirement-change.js';
+import {
+  assignmentCaseValues,
+  insertPlannedCases,
+  planAssignmentsForMemberships,
+  type MembershipPlan,
+} from '../lib/assignment.js';
+import { requiredToolIdsByMembership, runSnapshotted } from '../lib/requirement-links.js';
+import {
+  computeRequiredAssessmentsChange,
+  requirementScopeWhere,
+  type RequirementScopeRef,
+} from '../lib/requirement-change.js';
 import { withdrawRoleFromAllHolders } from '../lib/membership-placement.js';
+import { isSerializationFailure, isUniqueViolation } from '../lib/db-errors.js';
 import { db } from '../db.js';
 
 type Database = NonNullable<typeof db>;
@@ -187,6 +198,20 @@ taxonomyRouter.patch(
       category: 'settings',
       icon: 'map-pin',
     });
+    /*
+      KTD8/U5: a STATUS FLIP is a requirement-affecting write under the
+      four-scope resolver — retiring drops this Location's requirements from
+      everyone placed here ("stops applying", the U4 split), and returning it
+      to active restores them. Retirement must not be the one write that
+      changes required sets with no re-plan (R6's spirit), so every placed
+      active member re-plans after the flip in EITHER direction: the
+      retire-side run is a harmless no-op today (removal never cancels a
+      case, R55), and the reactivate-side run is what plans the restored
+      requirements' cases. A rename re-plans nothing.
+    */
+    if (parsed.data.status && parsed.data.status !== existing.status) {
+      await replanPlacedActiveMemberships(db, tenant.orgId, 'location', existing.id);
+    }
     res.json(locationDto(row ?? existing));
   }),
 );
@@ -275,6 +300,13 @@ taxonomyRouter.patch(
       category: 'settings',
       icon: 'layers',
     });
+    // KTD8/U5: same posture as the location flip above — a status change moves
+    // this Department's requirements in or out of every placed member's union,
+    // so each re-plans (fail-soft); a rename or count-rule change re-plans
+    // nothing.
+    if (parsed.data.status && parsed.data.status !== existing.status) {
+      await replanPlacedActiveMemberships(db, tenant.orgId, 'department', existing.id);
+    }
     res.json(departmentDto(row ?? existing));
   }),
 );
@@ -601,15 +633,22 @@ taxonomyRouter.post(
   }),
 );
 
-// ── A Role's requirements, in COMPETENCY terms (U10/U12, reworked by U3 of the
-//    role-competency links round — R5, R6, R8, R43, R49, R50, R121, KTD9) ─────
+// ── A SCOPE's requirements, in COMPETENCY terms (U10/U12, reworked by U3 of
+//    the role-competency links round; scope-addressed by U4 of the requirement
+//    inheritance round — R1, R6, KTD5–KTD7, plus the shipped R5, R50, R121,
+//    KTD9 posture at role scope) ────────────────────────────────────────────
 
 /*
-  The PATH stays `/roles/:id/required-assessments` although the payload now
-  speaks competencies: the web store, its tests and the deployed client all
-  address this path, and renaming it would force the U6 web unit to land in
-  the same deploy or 404. The name is historical; the contract below is the
-  real interface.
+  TWO ADDRESSES, ONE CONTRACT (KTD6). The scope routes are the real interface:
+  `GET/PUT /taxonomy/requirements/org` and
+  `GET/PUT /taxonomy/requirements/:scope/:scopeId` (+ `/preview` POSTs, + the
+  role-only legacy DELETE) — same body/response shapes at every scope, with
+  `configured` and `awaitingLink` appearing at role scope only, because only
+  roles carry the R50 flag and the legacy derivation. The shipped
+  `/roles/:id/required-assessments` paths remain as THIN DELEGATES onto the
+  same handlers: the web store, its tests and the deployed client all address
+  them, and renaming would force the web rework to land in the same deploy or
+  404 (the prior round's KTD9 path-keeping posture).
 */
 
 const requirementTierShapes = {
@@ -645,6 +684,117 @@ class RequirementsChangedError extends Error {
 }
 
 /**
+ * The scope retired UNDER the write, thrown from inside the apply transaction
+ * for the same reason `RequirementsChangedError` is (the only way out of a
+ * transaction callback without committing).
+ *
+ * `loadRequirementScope`'s retired check runs on the root client BEFORE the
+ * transaction opens, which makes it a check-then-act across two connections: a
+ * retirement committing in the gap let the save through, writing requirements
+ * onto a scope the resolver had just stopped consulting — a silent no-op the
+ * admin was told had succeeded. Re-checked inside the transaction, behind the
+ * advisory lock, the refusal is real. The CODE travels with it so the 409 body
+ * stays exactly what the pre-transaction check would have sent (`role_retired`
+ * for deployed clients, `scope_retired` elsewhere).
+ */
+class ScopeRetiredError extends Error {
+  constructor(readonly code: 'scope_retired' | 'role_retired') {
+    super(code);
+    this.name = 'ScopeRetiredError';
+  }
+}
+
+/**
+ * SERIALISE WRITERS OF ONE SCOPE (review-verified P1). The fingerprint guard is
+ * a lost-update guard, and inside a REPEATABLE READ transaction it protects
+ * nothing against a same-scope concurrent save: both admins' snapshots predate
+ * each other's commit, so both read the SAME pre-change rows, both compute the
+ * same fingerprint, and both pass. On a scope with existing rows the replace
+ * writes then collide on the partial unique index (a 23505, mapped below); on
+ * an EMPTY scope nothing collides at all — both deletes match nothing, both
+ * inserts succeed, and the scope ends up holding the UNION of two lists while
+ * each admin is told their exact list was saved. Nobody is warned, and the
+ * extra requirements silently book cases.
+ *
+ * A transaction-scoped advisory lock, taken as the FIRST statement, converts
+ * that into the intended sequence: the second writer blocks until the first
+ * commits, then reads the CHANGED rows, fails the fingerprint check, and gets
+ * the 409 it should always have got. Scope-keyed (org + kind + id), so it
+ * serialises only writers of the same list — KTD7's cross-scope commutation is
+ * untouched, and an org-scope save never blocks a role editor.
+ *
+ * `pg_advisory_xact_lock` releases on commit OR rollback with no unlock call to
+ * forget, which is what makes it safe to take inside a transaction that can
+ * throw its way out (both sentinels above do exactly that).
+ */
+function requirementLockKey(orgId: string, ref: RequirementScopeRef): string {
+  return `${orgId}:${ref.kind}:${ref.kind === 'org' ? '' : ref.id}`;
+}
+
+/**
+ * The two things every requirement WRITE must do before it reads anything:
+ * take the scope's advisory lock, then re-check that the scope is still
+ * writable on THIS snapshot. Shared by the PUT and the legacy DELETE so the
+ * two cannot drift on either guarantee.
+ */
+async function lockAndVerifyScope(
+  tx: Reader,
+  orgId: string,
+  ref: RequirementScopeRef,
+): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${requirementLockKey(orgId, ref)}))`);
+  switch (ref.kind) {
+    // The organisation cannot retire — there is nothing to re-check.
+    case 'org':
+      return;
+    case 'location': {
+      const row = await tx.query.locations.findFirst({
+        where: and(eq(schema.locations.id, ref.id), eq(schema.locations.orgId, orgId)),
+      });
+      if (row && row.status !== 'active') throw new ScopeRetiredError('scope_retired');
+      return;
+    }
+    case 'department': {
+      const row = await tx.query.departments.findFirst({
+        where: and(eq(schema.departments.id, ref.id), eq(schema.departments.orgId, orgId)),
+      });
+      if (row && row.status !== 'active') throw new ScopeRetiredError('scope_retired');
+      return;
+    }
+    case 'role': {
+      const row = await tx.query.jobRoles.findFirst({
+        where: and(eq(schema.jobRoles.id, ref.id), eq(schema.jobRoles.orgId, orgId)),
+      });
+      if (row && row.status !== 'active') throw new ScopeRetiredError('role_retired');
+      return;
+    }
+  }
+}
+
+/**
+ * Map an apply transaction's failure to its response, or re-throw.
+ *
+ * Both sentinels above are deliberate refusals. The two SQLSTATEs are belt and
+ * braces behind the advisory lock: 40001 (serialization failure) is what a
+ * repeatable-read transaction raises when a concurrent commit invalidated its
+ * snapshot, and 23505 is the partial unique index catching a same-scope
+ * duplicate the lock should already have prevented. Both mean exactly what the
+ * fingerprint means — "the world moved under you, re-read and decide again" —
+ * so both get the SAME 409 rather than a 500 the editor cannot act on. They
+ * are mapped and not merely tolerated because a 500 here would tell an admin
+ * their save broke the server when it simply lost a race.
+ */
+function requirementWriteFailure(
+  err: unknown,
+): { status: 409; body: { error: string } } | null {
+  if (err instanceof RequirementsChangedError) return { status: 409, body: { error: 'requirements_changed' } };
+  if (err instanceof ScopeRetiredError) return { status: 409, body: { error: err.code } };
+  if (isSerializationFailure(err) || isUniqueViolation(err))
+    return { status: 409, body: { error: 'requirements_changed' } };
+  return null;
+}
+
+/**
  * The fingerprint the GET serves and the PUT/DELETE echo (KTD9): a
  * deterministic hash over the Role's direct links (both tiers) AND its
  * remaining legacy rows. Any conversion, edit or legacy-row removal landing
@@ -667,22 +817,27 @@ function requirementsFingerprint(
 }
 
 /**
- * The Role's stored requirement state — links, legacy rows, fingerprint.
+ * A scope's stored requirement state — links, legacy rows, fingerprint. The
+ * state is SCOPE-LOCAL (KTD7): only this scope's own rows are read and hashed
+ * (plus its legacy tool rows at role scope — the only scope that ever had
+ * them), so an org-level save does not invalidate an open role editor, and
+ * concurrent edits at different scopes commute on the requirement rows.
  *
  * Takes a `Reader` because the PUT re-runs it INSIDE its apply transaction:
  * the fingerprint comparison is the KTD9 lost-update guard, and a guard that
  * reads on one connection while the write it protects runs on another is not
  * a guard at all.
  */
-async function loadRequirementState(database: Reader, roleId: string) {
-  const [links, legacyRows] = await Promise.all([
-    database.query.roleRequiredCompetencies.findMany({
-      where: eq(schema.roleRequiredCompetencies.roleId, roleId),
-    }),
-    database.query.roleRequiredAssessments.findMany({
-      where: eq(schema.roleRequiredAssessments.roleId, roleId),
-    }),
-  ]);
+async function loadRequirementState(database: Reader, orgId: string, ref: RequirementScopeRef) {
+  const links = await database.query.competencyRequirements.findMany({
+    where: requirementScopeWhere(orgId, ref),
+  });
+  const legacyRows =
+    ref.kind === 'role'
+      ? await database.query.roleRequiredAssessments.findMany({
+          where: eq(schema.roleRequiredAssessments.roleId, ref.id),
+        })
+      : [];
   const legacyToolIds = [...new Set(legacyRows.map((r) => r.toolId))];
   return {
     links,
@@ -693,36 +848,110 @@ async function loadRequirementState(database: Reader, roleId: string) {
   };
 }
 
+/** The scope path segment → ref, or null for an address that names no scope. */
+function scopeRefFromParams(scope: string, scopeId: string): RequirementScopeRef | null {
+  if (scope === 'location') return { kind: 'location', id: scopeId };
+  if (scope === 'department') return { kind: 'department', id: scopeId };
+  if (scope === 'role') return { kind: 'role', id: scopeId };
+  return null;
+}
+
+/** A scope loaded for a requirement route: its ref, display name, and (role only) its row. */
+interface LoadedRequirementScope {
+  ref: RequirementScopeRef;
+  /** Audit target and copy — the organisation's OWN name at org scope (U4). */
+  name: string;
+  /** Present at role scope only: the R50 flag and legacy machinery live on it. */
+  role?: typeof schema.jobRoles.$inferSelect;
+}
+
 /**
  * The guard every requirement route shares, so they cannot drift on who may
- * change a Role's requirements: Admin (R73/R12 — the gate SURVIVES the
- * competency rework unchanged), and the Role is the organisation's and active
- * (R121). Sends the error response and returns null on any failure.
+ * change a scope's requirements: Admin (R73/R12 — the gate SURVIVES both
+ * reworks unchanged), the value is the organisation's, and — for a WRITE —
+ * the value is active. Editing at a retired scope 409s: `role_retired` at
+ * role scope (the shipped R121 code deployed clients read) and
+ * `scope_retired` at location/department scope (the same posture, named for
+ * the generalisation). The org scope cannot retire. Reads skip the retired
+ * check, as the shipped role GET always did — a retired value's list is
+ * still inspectable. Sends the error response and returns null on failure.
  */
-async function loadRequirementRole(
+async function loadRequirementScope(
   database: Database,
   req: Request,
   res: Response,
-): Promise<typeof schema.jobRoles.$inferSelect | null> {
+  ref: RequirementScopeRef,
+  opts: { write: boolean },
+): Promise<LoadedRequirementScope | null> {
   const tenant = req.tenant!;
   if (!isAdmin(tenant.role)) {
     reply(res, 403, { error: 'forbidden' });
     return null;
   }
-  const role = await database.query.jobRoles.findFirst({
-    where: and(eq(schema.jobRoles.id, req.params.id!), eq(schema.jobRoles.orgId, tenant.orgId)),
-  });
-  if (!role) {
-    reply(res, 404, { error: 'not_found' });
-    return null;
+  switch (ref.kind) {
+    case 'org': {
+      const org = await database.query.organizations.findFirst({
+        where: eq(schema.organizations.id, tenant.orgId),
+      });
+      return { ref, name: org?.name ?? '' };
+    }
+    case 'location': {
+      const row = await database.query.locations.findFirst({
+        where: and(eq(schema.locations.id, ref.id), eq(schema.locations.orgId, tenant.orgId)),
+      });
+      if (!row) {
+        reply(res, 404, { error: 'not_found' });
+        return null;
+      }
+      if (opts.write && row.status !== 'active') {
+        reply(res, 409, { error: 'scope_retired' });
+        return null;
+      }
+      return { ref, name: row.name };
+    }
+    case 'department': {
+      const row = await database.query.departments.findFirst({
+        where: and(eq(schema.departments.id, ref.id), eq(schema.departments.orgId, tenant.orgId)),
+      });
+      if (!row) {
+        reply(res, 404, { error: 'not_found' });
+        return null;
+      }
+      if (opts.write && row.status !== 'active') {
+        reply(res, 409, { error: 'scope_retired' });
+        return null;
+      }
+      return { ref, name: row.name };
+    }
+    case 'role': {
+      const role = await database.query.jobRoles.findFirst({
+        where: and(eq(schema.jobRoles.id, ref.id), eq(schema.jobRoles.orgId, tenant.orgId)),
+      });
+      if (!role) {
+        reply(res, 404, { error: 'not_found' });
+        return null;
+      }
+      // R121: a retired Role is frozen — a preview an apply would 409 must 409
+      // too. The shipped error code, kept for deployed clients.
+      if (opts.write && role.status !== 'active') {
+        reply(res, 409, { error: 'role_retired' });
+        return null;
+      }
+      return { ref, name: role.name, role };
+    }
   }
-  // R121: a retired Role is frozen — a preview an apply would 409 must 409 too.
-  if (role.status !== 'active') {
-    reply(res, 409, { error: 'role_retired' });
-    return null;
-  }
-  return role;
 }
+
+/** Audit copy per scope — the shipped role wording kept verbatim (R11). */
+const REQUIREMENTS_AUDIT: Record<
+  RequirementScopeRef['kind'],
+  { action: string; icon: string }
+> = {
+  org: { action: 'Set organisation required competencies', icon: 'settings' },
+  location: { action: 'Set location required competencies', icon: 'map-pin' },
+  department: { action: 'Set department required competencies', icon: 'layers' },
+  role: { action: 'Set role required competencies', icon: 'briefcase' },
+};
 
 /**
  * Normalise and validate the two tiers: deduplicate each, refuse an overlap
@@ -761,200 +990,334 @@ async function normalizeRequirementTiers(
   return { required, recommended };
 }
 
-taxonomyRouter.get(
-  '/roles/:id/required-assessments',
-  ...TAXONOMY_GATE,
-  withErrorHandling(async (req, res) => {
-    if (!db) return reply(res, 503, { error: 'db_unavailable' });
-    const tenant = req.tenant!;
-    if (!isAdmin(tenant.role)) return reply(res, 403, { error: 'forbidden' });
-    const role = await db.query.jobRoles.findFirst({
-      where: and(eq(schema.jobRoles.id, req.params.id!), eq(schema.jobRoles.orgId, tenant.orgId)),
-    });
-    if (!role) return reply(res, 404, { error: 'not_found' });
-    const state = await loadRequirementState(db, role.id);
+async function handleRequirementsGet(
+  req: Request,
+  res: Response,
+  ref: RequirementScopeRef,
+): Promise<void> {
+  if (!db) return reply(res, 503, { error: 'db_unavailable' });
+  const tenant = req.tenant!;
+  const loaded = await loadRequirementScope(db, req, res, ref, { write: false });
+  if (!loaded) return;
+  const state = await loadRequirementState(db, tenant.orgId, ref);
+  if (ref.kind === 'role') {
     // `configured` is the STORED fact (R50), never a row count: a Role emptied
     // of its requirements is still configured and reads differently from one
     // never set up. `awaitingLink` is the legacy rows still deriving the old
     // way (R15) — tools whose award has not been linked yet, listed so the
-    // editor can point at the backfill or remove them explicitly (KTD9).
+    // editor can point at the backfill or remove them explicitly (KTD9). Both
+    // fields are ROLE-SCOPE ONLY (KTD6/KTD9): the other scopes have no legacy
+    // ambiguity, so their row count is unambiguous and carries no flag.
     res.json({
-      configured: role.requirementsConfigured,
+      configured: loaded.role!.requirementsConfigured,
       required: state.required,
       recommended: state.recommended,
       awaitingLink: state.legacyToolIds,
       fingerprint: state.fingerprint,
     });
+    return;
+  }
+  res.json({
+    required: state.required,
+    recommended: state.recommended,
+    fingerprint: state.fingerprint,
+  });
+}
+
+// Scope-addressed reads (KTD6). `/requirements/org` registers BEFORE the
+// parameterised path so the org address never reads as scope='org' missing an
+// id; an unknown scope segment is an address that exists for nothing → 404.
+taxonomyRouter.get(
+  '/requirements/org',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => handleRequirementsGet(req, res, { kind: 'org' })),
+);
+taxonomyRouter.get(
+  '/requirements/:scope/:scopeId',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    const ref = scopeRefFromParams(req.params.scope!, req.params.scopeId!);
+    if (!ref) return reply(res, 404, { error: 'not_found' });
+    return handleRequirementsGet(req, res, ref);
   }),
+);
+// The shipped role path — a thin delegate (KTD6).
+taxonomyRouter.get(
+  '/roles/:id/required-assessments',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) =>
+    handleRequirementsGet(req, res, { kind: 'role', id: req.params.id! }),
+  ),
 );
 
 /**
- * The blast radius of a proposed change, BEFORE it commits (U12, R84–R86).
- * Computes the same effects the apply will, and writes nothing — the Admin sees
- * how many people are affected and what the change does, and may abandon it.
- * Takes the PUT body minus the fingerprint (a preview cannot go stale), plus
- * the optional legacy-row removals so the awaitingLink exit previews through
- * the same door.
+ * The blast radius of a proposed change, BEFORE it commits (U12, R84–R86; at
+ * all four scopes since U4, R6 — an org preview counts every active
+ * membership, AE3). Computes the same effects the apply will, and writes
+ * nothing — the Admin sees how many people are affected and what the change
+ * does, and may abandon it. Takes the PUT body minus the fingerprint (a
+ * preview cannot go stale), plus — at role scope only — the optional
+ * legacy-row removals so the awaitingLink exit previews through the same door.
  */
+async function handleRequirementsPreview(
+  req: Request,
+  res: Response,
+  ref: RequirementScopeRef,
+): Promise<void> {
+  if (!db) return reply(res, 503, { error: 'db_unavailable' });
+  const tenant = req.tenant!;
+  const loaded = await loadRequirementScope(db, req, res, ref, { write: true });
+  if (!loaded) return;
+  const parsed = requirementsPreviewBody.safeParse(req.body);
+  if (!parsed.success)
+    return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+  // Legacy rows are role-scope machinery only (KTD2/KTD6) — naming them at
+  // another scope is a malformed request, not a silently-ignored field.
+  if (ref.kind !== 'role' && parsed.data.removeLegacyToolIds !== undefined)
+    return reply(res, 400, {
+      error: 'invalid_request',
+      detail: 'removeLegacyToolIds applies to the role scope only',
+    });
+  const tiers = await normalizeRequirementTiers(db, res, tenant.orgId, parsed.data);
+  if (!tiers) return;
+  const { effects } = await computeRequiredAssessmentsChange(
+    db,
+    tenant.orgId,
+    ref,
+    {
+      requiredCompetencyIds: tiers.required,
+      ...(parsed.data.removeLegacyToolIds
+        ? { removeLegacyToolIds: parsed.data.removeLegacyToolIds }
+        : {}),
+    },
+    new Date(),
+  );
+  res.json({ effects });
+}
+
+taxonomyRouter.post(
+  '/requirements/org/preview',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => handleRequirementsPreview(req, res, { kind: 'org' })),
+);
+taxonomyRouter.post(
+  '/requirements/:scope/:scopeId/preview',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    const ref = scopeRefFromParams(req.params.scope!, req.params.scopeId!);
+    if (!ref) return reply(res, 404, { error: 'not_found' });
+    return handleRequirementsPreview(req, res, ref);
+  }),
+);
 taxonomyRouter.post(
   '/roles/:id/required-assessments/preview',
   ...TAXONOMY_GATE,
-  withErrorHandling(async (req, res) => {
-    if (!db) return reply(res, 503, { error: 'db_unavailable' });
-    const tenant = req.tenant!;
-    const role = await loadRequirementRole(db, req, res);
-    if (!role) return;
-    const parsed = requirementsPreviewBody.safeParse(req.body);
-    if (!parsed.success)
-      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
-    const tiers = await normalizeRequirementTiers(db, res, tenant.orgId, parsed.data);
-    if (!tiers) return;
-    const { effects } = await computeRequiredAssessmentsChange(
-      db,
-      tenant.orgId,
-      role,
-      {
-        requiredCompetencyIds: tiers.required,
-        ...(parsed.data.removeLegacyToolIds
-          ? { removeLegacyToolIds: parsed.data.removeLegacyToolIds }
-          : {}),
-      },
-      new Date(),
-    );
-    res.json({ effects });
-  }),
+  withErrorHandling(async (req, res) =>
+    handleRequirementsPreview(req, res, { kind: 'role', id: req.params.id! }),
+  ),
 );
 
-taxonomyRouter.put(
-  '/roles/:id/required-assessments',
-  ...TAXONOMY_GATE,
-  withErrorHandling(async (req, res) => {
-    if (!db) return reply(res, 503, { error: 'db_unavailable' });
-    const tenant = req.tenant!;
-    const role = await loadRequirementRole(db, req, res);
-    if (!role) return;
-    const parsed = requirementsPutBody.safeParse(req.body);
-    if (!parsed.success)
-      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
-    const tiers = await normalizeRequirementTiers(db, res, tenant.orgId, parsed.data);
-    if (!tiers) return;
+/** The scope columns one requirement row carries — exactly one non-null, or none at org scope (KTD1). */
+function scopeRowColumns(
+  ref: RequirementScopeRef,
+): Partial<Pick<typeof schema.competencyRequirements.$inferInsert, 'roleId' | 'locationId' | 'departmentId'>> {
+  switch (ref.kind) {
+    case 'role':
+      return { roleId: ref.id };
+    case 'location':
+      return { locationId: ref.id };
+    case 'department':
+      return { departmentId: ref.id };
+    case 'org':
+      return {};
+  }
+}
 
-    /*
-      Apply atomically, and to the LINKS TABLE ONLY (KTD9): legacy rows leave
-      via conversion or the explicit remove below, never as a side effect of a
-      requirement save. The full-replace posture carries over from the tool
-      era — `compute` derived the additions as a diff against the current
-      links, so if the link rows committed but a case insert then failed, a
-      retry would see the new rows as current, compute an empty diff, and
-      never create the missing case. A transaction makes a partial failure
-      roll the replacement back with it. Removing a competency leaves its
-      in-flight cases untouched (R55) — nothing here cancels a case.
+async function handleRequirementsPut(
+  req: Request,
+  res: Response,
+  ref: RequirementScopeRef,
+): Promise<void> {
+  if (!db) return reply(res, 503, { error: 'db_unavailable' });
+  const tenant = req.tenant!;
+  const loaded = await loadRequirementScope(db, req, res, ref, { write: true });
+  if (!loaded) return;
+  const parsed = requirementsPutBody.safeParse(req.body);
+  if (!parsed.success)
+    return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+  const tiers = await normalizeRequirementTiers(db, res, tenant.orgId, parsed.data);
+  if (!tiers) return;
 
-      THE TRANSACTION OPENS FIRST, and the KTD9 fingerprint guard runs INSIDE
-      it. Read on the root client beforehand, the guard was a check-then-act
-      spanning two connections: two admins each holding the same fresh
-      fingerprint both passed it and both ran the replace-write, which is
-      exactly the lost update the fingerprint exists to prevent. Guard, plan
-      and write now share one snapshot — REPEATABLE READ, because under the
-      default READ COMMITTED each statement re-reads the newest commit and the
-      snapshot would drift back apart between the check and the delete.
-    */
-    const now = new Date();
-    const flipConfigured = !role.requirementsConfigured && tiers.required.length > 0;
-    const applied = await db
-      .transaction(
-        async (tx) => {
-          const state = await loadRequirementState(tx, role.id);
-          if (state.fingerprint !== parsed.data.fingerprint) throw new RequirementsChangedError();
+  /*
+    Apply atomically, and to the LINKS TABLE ONLY (KTD9): legacy rows leave
+    via conversion or the explicit remove below, never as a side effect of a
+    requirement save. The full-replace posture carries over from the tool
+    era — `compute` derived the additions as a diff against the current
+    links, so if the link rows committed but a case insert then failed, a
+    retry would see the new rows as current, compute an empty diff, and
+    never create the missing case. A transaction makes a partial failure
+    roll the replacement back with it. Removing a competency leaves its
+    in-flight cases untouched (R55) — nothing here cancels a case. The
+    replace is SCOPE-LOCAL (KTD7): only this scope's rows are deleted and
+    rewritten, so two admins saving different scopes commute on the
+    requirement rows.
 
-          // ONE code path (KTD10): the apply runs the SAME computation the
-          // preview did, so `effects.created` is exactly the number of cases
-          // it inserts. Its reads are of the PRE-change state, so running it
-          // before the write — on this same `tx` — is correct.
-          const { effects, casesToInsert } = await computeRequiredAssessmentsChange(
-            tx,
-            tenant.orgId,
-            role,
-            { requiredCompetencyIds: tiers.required },
-            now,
-          );
+    THE TRANSACTION OPENS FIRST, and the KTD9 fingerprint guard runs INSIDE
+    it. Read on the root client beforehand, the guard was a check-then-act
+    spanning two connections: two admins each holding the same fresh
+    fingerprint both passed it and both ran the replace-write, which is
+    exactly the lost update the fingerprint exists to prevent. Guard, plan
+    and write now share one snapshot — REPEATABLE READ, because under the
+    default READ COMMITTED each statement re-reads the newest commit and the
+    snapshot would drift back apart between the check and the delete.
 
+    AND THE ADVISORY LOCK COMES BEFORE ALL OF IT (`lockAndVerifyScope`, see
+    its comment): repeatable read alone does not make the fingerprint a guard
+    against a SAME-SCOPE concurrent save, because both writers' snapshots
+    predate each other's commit and both pass the check. The lock is what
+    turns the second writer's pass into the 409 it should be. The retired
+    re-check rides the same call for the same reason — the pre-transaction one
+    is a check-then-act too.
+  */
+  const now = new Date();
+  const role = loaded.role;
+  const flipConfigured =
+    ref.kind === 'role' && !role!.requirementsConfigured && tiers.required.length > 0;
+  const applied = await db
+    .transaction(
+      async (tx) => {
+        await lockAndVerifyScope(tx, tenant.orgId, ref);
+        const state = await loadRequirementState(tx, tenant.orgId, ref);
+        if (state.fingerprint !== parsed.data.fingerprint) throw new RequirementsChangedError();
+
+        // ONE code path (KTD10): the apply runs the SAME computation the
+        // preview did, so `effects.created` is exactly the number of cases
+        // it inserts. Its reads are of the PRE-change state, so running it
+        // before the write — on this same `tx` — is correct.
+        const { effects, casesToInsert } = await computeRequiredAssessmentsChange(
+          tx,
+          tenant.orgId,
+          ref,
+          { requiredCompetencyIds: tiers.required },
+          now,
+        );
+
+        await tx
+          .delete(schema.competencyRequirements)
+          .where(requirementScopeWhere(tenant.orgId, ref));
+        const scopeColumns = scopeRowColumns(ref);
+        const rows = [
+          ...tiers.required.map((competencyId) => ({
+            orgId: tenant.orgId,
+            ...scopeColumns,
+            competencyId,
+            tier: 'required' as const,
+          })),
+          ...tiers.recommended.map((competencyId) => ({
+            orgId: tenant.orgId,
+            ...scopeColumns,
+            competencyId,
+            tier: 'recommended' as const,
+          })),
+        ];
+        if (rows.length > 0) {
+          await tx.insert(schema.competencyRequirements).values(rows);
+        }
+        /*
+          `requirementsConfigured` flips only when the REQUIRED tier is
+          authored (KTD9), and only at ROLE scope — the flag exists to split
+          never-set-up from deliberately-empty under the legacy ambiguity
+          (R50/KTD9 of this round), which the other scopes never had. A
+          recommended-only save on a never-configured Role leaves it reading
+          never-configured, because recommending is not deciding what the
+          Role demands.
+        */
+        if (flipConfigured) {
           await tx
-            .delete(schema.roleRequiredCompetencies)
-            .where(eq(schema.roleRequiredCompetencies.roleId, role.id));
-          const rows = [
-            ...tiers.required.map((competencyId) => ({
-              orgId: tenant.orgId,
-              roleId: role.id,
-              competencyId,
-              tier: 'required' as const,
-            })),
-            ...tiers.recommended.map((competencyId) => ({
-              orgId: tenant.orgId,
-              roleId: role.id,
-              competencyId,
-              tier: 'recommended' as const,
-            })),
-          ];
-          if (rows.length > 0) {
-            await tx.insert(schema.roleRequiredCompetencies).values(rows);
-          }
-          /*
-            `requirementsConfigured` flips only when the REQUIRED tier is
-            authored (KTD9): a recommended-only save on a never-configured Role
-            leaves it reading never-configured, because recommending is not
-            deciding what the Role demands — R50's distinction is about the
-            required set.
-          */
-          if (flipConfigured) {
-            await tx
-              .update(schema.jobRoles)
-              .set({ requirementsConfigured: true })
-              .where(eq(schema.jobRoles.id, role.id));
-          }
-          // The additions' cases, applied with no per-person action (R82, R83,
-          // R87). Exactly the plan `compute` counted, so the rows written equal
-          // `effects.created`.
-          for (const c of casesToInsert) {
-            await tx
-              .insert(schema.assessmentCases)
-              .values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
-          }
-          return { ok: true as const, effects, legacyToolIds: state.legacyToolIds };
-        },
-        { isolationLevel: 'repeatable read' },
-      )
-      .catch((err: unknown) => {
-        // Stale echo → 409, the editor reloads and re-decides. Everything else
-        // is a real failure and keeps going to the error middleware.
-        if (err instanceof RequirementsChangedError) return { ok: false as const };
-        throw err;
-      });
-    if (!applied.ok) return reply(res, 409, { error: 'requirements_changed' });
-
-    await recordAudit(db, tenant, {
-      action: 'Set role required competencies',
-      target: role.name,
-      category: 'settings',
-      icon: 'briefcase',
+            .update(schema.jobRoles)
+            .set({ requirementsConfigured: true })
+            .where(eq(schema.jobRoles.id, role!.id));
+        }
+        // The additions' cases, applied with no per-person action (R82, R83,
+        // R87). Exactly the plan `compute` counted, so the rows written equal
+        // `effects.created` — preview == apply at every scope (R6).
+        for (const c of casesToInsert) {
+          await tx
+            .insert(schema.assessmentCases)
+            .values(assignmentCaseValues(c.orgId, c.candidateUserId, c));
+        }
+        return { ok: true as const, effects, legacyToolIds: state.legacyToolIds };
+      },
+      { isolationLevel: 'repeatable read' },
+    )
+    .catch((err: unknown) => {
+      // Stale echo, a scope retired underneath, or a lost race the database
+      // itself caught → 409, the editor reloads and re-decides. Everything
+      // else is a real failure and keeps going to the error middleware.
+      const refusal = requirementWriteFailure(err);
+      if (refusal) return { ok: false as const, refusal };
+      throw err;
     });
+  if (!applied.ok) return reply(res, applied.refusal.status, applied.refusal.body);
+
+  // Every scope PUT audits, with a scope-derived target (U4): the location,
+  // department or role name — or the organisation's OWN name at org scope.
+  const audit = REQUIREMENTS_AUDIT[ref.kind];
+  await recordAudit(db, tenant, {
+    action: audit.action,
+    target: loaded.name,
+    category: 'settings',
+    icon: audit.icon,
+  });
+  // The post-write fingerprint, so the editor can save again without a
+  // fresh GET.
+  const fingerprint = requirementsFingerprint(
+    [
+      ...tiers.required.map((competencyId) => ({ competencyId, tier: 'required' })),
+      ...tiers.recommended.map((competencyId) => ({ competencyId, tier: 'recommended' })),
+    ],
+    applied.legacyToolIds,
+  );
+  if (ref.kind === 'role') {
+    // The shipped role response shape, kept verbatim for deployed clients.
     res.json({
-      configured: role.requirementsConfigured || flipConfigured,
+      configured: role!.requirementsConfigured || flipConfigured,
       required: tiers.required,
       recommended: tiers.recommended,
       awaitingLink: applied.legacyToolIds,
       effects: applied.effects,
-      // The post-write fingerprint, so the editor can save again without a
-      // fresh GET.
-      fingerprint: requirementsFingerprint(
-        [
-          ...tiers.required.map((competencyId) => ({ competencyId, tier: 'required' })),
-          ...tiers.recommended.map((competencyId) => ({ competencyId, tier: 'recommended' })),
-        ],
-        applied.legacyToolIds,
-      ),
+      fingerprint,
     });
+    return;
+  }
+  res.json({
+    required: tiers.required,
+    recommended: tiers.recommended,
+    effects: applied.effects,
+    fingerprint,
+  });
+}
+
+taxonomyRouter.put(
+  '/requirements/org',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => handleRequirementsPut(req, res, { kind: 'org' })),
+);
+taxonomyRouter.put(
+  '/requirements/:scope/:scopeId',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) => {
+    const ref = scopeRefFromParams(req.params.scope!, req.params.scopeId!);
+    if (!ref) return reply(res, 404, { error: 'not_found' });
+    return handleRequirementsPut(req, res, ref);
   }),
+);
+taxonomyRouter.put(
+  '/roles/:id/required-assessments',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) =>
+    handleRequirementsPut(req, res, { kind: 'role', id: req.params.id! }),
+  ),
 );
 
 /**
@@ -967,64 +1330,232 @@ taxonomyRouter.put(
  * in between changes the legacy set this row belongs to, and the stale
  * removal must 409 rather than fire against a world the admin never saw.
  */
+async function handleLegacyRequirementDelete(
+  req: Request,
+  res: Response,
+  roleId: string,
+  toolId: string,
+): Promise<void> {
+  if (!db) return reply(res, 503, { error: 'db_unavailable' });
+  const tenant = req.tenant!;
+  const ref: RequirementScopeRef = { kind: 'role', id: roleId };
+  const loaded = await loadRequirementScope(db, req, res, ref, { write: true });
+  if (!loaded) return;
+  const role = loaded.role!;
+  const parsed = legacyRemoveBody.safeParse(req.body);
+  if (!parsed.success)
+    return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
+
+  /*
+    THE SAME TRANSACTION SHAPE AS THE PUT (review-verified). This guard used to
+    run on the root client with the delete following it as a separate
+    statement: load → compare fingerprint → compute → delete, four round trips
+    with three windows between them. A conversion (or the PUT itself) landing
+    mid-sequence passed a stale guard and then deleted a row the admin had not
+    seen the world for — the exact lost update the fingerprint exists to
+    prevent, left unguarded on the one route that removes a requirement source
+    outright. Load, guard, compute and delete now share ONE repeatable-read
+    transaction behind the SAME scope advisory lock the PUT takes, so the two
+    writers of a role's requirement state serialise against each other rather
+    than only against themselves. `recordAudit` stays AFTER the commit: an
+    audit row is a record of what happened, and a rolled-back delete did not.
+  */
+  const now = new Date();
+  const outcome = await db
+    .transaction(
+      async (tx) => {
+        await lockAndVerifyScope(tx, tenant.orgId, ref);
+        const state = await loadRequirementState(tx, tenant.orgId, ref);
+        // Not a refusal — an address for a row that is not there. Nothing was
+        // written, so returning out of the callback simply commits nothing.
+        if (!state.legacyToolIds.includes(toolId)) return { kind: 'not_found' as const };
+        if (state.fingerprint !== parsed.data.fingerprint) throw new RequirementsChangedError();
+
+        // The same compute as the preview ran: current tiers unchanged, this
+        // one legacy row removed — so the effects reported here equal the
+        // previewed ones on unchanged data (KTD10).
+        const { effects } = await computeRequiredAssessmentsChange(
+          tx,
+          tenant.orgId,
+          ref,
+          { requiredCompetencyIds: state.required, removeLegacyToolIds: [toolId] },
+          now,
+        );
+
+        await tx
+          .delete(schema.roleRequiredAssessments)
+          .where(
+            and(
+              eq(schema.roleRequiredAssessments.roleId, role.id),
+              eq(schema.roleRequiredAssessments.toolId, toolId),
+            ),
+          );
+        return {
+          kind: 'done' as const,
+          effects,
+          links: state.links,
+          legacyToolIds: state.legacyToolIds,
+        };
+      },
+      { isolationLevel: 'repeatable read' },
+    )
+    .catch((err: unknown) => {
+      const refusal = requirementWriteFailure(err);
+      if (refusal) return { kind: 'refused' as const, refusal };
+      throw err;
+    });
+  if (outcome.kind === 'not_found') return reply(res, 404, { error: 'not_found' });
+  if (outcome.kind === 'refused') return reply(res, outcome.refusal.status, outcome.refusal.body);
+
+  await recordAudit(db, tenant, {
+    action: 'Removed legacy required assessment',
+    target: role.name,
+    category: 'settings',
+    icon: 'briefcase',
+  });
+  const remainingLegacy = outcome.legacyToolIds.filter((id) => id !== toolId);
+  res.json({
+    awaitingLink: remainingLegacy,
+    effects: outcome.effects,
+    fingerprint: requirementsFingerprint(outcome.links, remainingLegacy),
+  });
+}
+
+// The legacy exit exists at ROLE SCOPE ONLY (KTD6): no other scope ever had
+// `role_required_assessments` rows, so there is nothing to address elsewhere.
+taxonomyRouter.delete(
+  '/requirements/role/:scopeId/:toolId',
+  ...TAXONOMY_GATE,
+  withErrorHandling(async (req, res) =>
+    handleLegacyRequirementDelete(req, res, req.params.scopeId!, req.params.toolId!),
+  ),
+);
 taxonomyRouter.delete(
   '/roles/:id/required-assessments/:toolId',
   ...TAXONOMY_GATE,
-  withErrorHandling(async (req, res) => {
-    if (!db) return reply(res, 503, { error: 'db_unavailable' });
-    const tenant = req.tenant!;
-    const role = await loadRequirementRole(db, req, res);
-    if (!role) return;
-    const parsed = legacyRemoveBody.safeParse(req.body);
-    if (!parsed.success)
-      return reply(res, 400, { error: 'invalid_request', detail: parsed.error.flatten() });
-
-    const state = await loadRequirementState(db, role.id);
-    const toolId = req.params.toolId!;
-    if (!state.legacyToolIds.includes(toolId)) return reply(res, 404, { error: 'not_found' });
-    if (state.fingerprint !== parsed.data.fingerprint)
-      return reply(res, 409, { error: 'requirements_changed' });
-
-    // The same compute as the preview ran: current tiers unchanged, this one
-    // legacy row removed — so the effects reported here equal the previewed
-    // ones on unchanged data (KTD10).
-    const now = new Date();
-    const { effects } = await computeRequiredAssessmentsChange(
-      db,
-      tenant.orgId,
-      role,
-      { requiredCompetencyIds: state.required, removeLegacyToolIds: [toolId] },
-      now,
-    );
-
-    await db
-      .delete(schema.roleRequiredAssessments)
-      .where(
-        and(
-          eq(schema.roleRequiredAssessments.roleId, role.id),
-          eq(schema.roleRequiredAssessments.toolId, toolId),
-        ),
-      );
-
-    await recordAudit(db, tenant, {
-      action: 'Removed legacy required assessment',
-      target: role.name,
-      category: 'settings',
-      icon: 'briefcase',
-    });
-    const remainingLegacy = state.legacyToolIds.filter((id) => id !== toolId);
-    res.json({
-      awaitingLink: remainingLegacy,
-      effects,
-      fingerprint: requirementsFingerprint(state.links, remainingLegacy),
-    });
-  }),
+  withErrorHandling(async (req, res) =>
+    handleLegacyRequirementDelete(req, res, req.params.id!, req.params.toolId!),
+  ),
 );
 
 // ── U18: Retirement review and remediation ───────────────────────────────────
 
 /** A case is in flight while open (created, not settled) — awaiting review counts (R131). */
 const IN_FLIGHT_STATES = ['open', 'awaiting_sign_off'] as const;
+
+/**
+ * Re-plan assignments for a set of memberships AFTER a placement-affecting
+ * write commits (KTD8, R7): every transfer route and the location/department
+ * status flips call this, so no placement write path silently skips the
+ * re-plan.
+ *
+ * BATCHED (U4's org-scale discipline): a status flip re-plans a whole
+ * placement's population, so the requirement resolution and the plan run as
+ * one set-wise pass — `requiredToolIdsByMembership` then
+ * `planAssignmentsForMemberships` over the union of everyone's tools — never
+ * a per-membership loop of transactions and scope expansions. Each
+ * membership's planned cases are then filtered back to ITS OWN required
+ * tools: the engine decides every tool independently (KTD16's skip rule is
+ * per tool), so the filtered batch plans exactly what a per-member run would
+ * have, and one member's placement never books another.
+ *
+ * ONE SNAPSHOT OVER BOTH HALVES (KTD3, review-verified — the batch shape of
+ * the pairing `assignForMembership` makes): the resolution and the plan are
+ * two reads of the same people, and run on separate snapshots a transfer
+ * committing between them books the OLD requirements at the NEW placement.
+ * `runSnapshotted` opens one repeatable-read transaction; the resolver's own
+ * wrapper nests as a savepoint inside it. The INSERTS stay outside it, on the
+ * root client — they must survive one another's failure (below), which a
+ * shared transaction would forbid.
+ *
+ * FAIL-SOFT (the workforce-import posture, workforce-import-run.ts): the
+ * placement change is already committed and real, so one member's failed
+ * case INSERT must not undo the others' or fail the request — and a failed
+ * batch PLAN fails all of them equally softly, for the same reason. The
+ * sweep assigns them on its next pass; the planning is read-only and the
+ * inserts idempotent by construction (KTD16), so re-running is always safe.
+ *
+ * FAIL-SOFT IS NOT FAIL-SILENT (review-verified). Both catches LOG — orgId and
+ * the membership id(s) with the error — matching the with-error-handling
+ * posture everywhere else in this file. A swallowed exception here means a
+ * placement changed and nobody was re-planned until the next sweep: recoverable,
+ * but the operator has to be able to find out it happened, and a bare `return`
+ * makes a systematic failure (a bad tool manifest, a dead resolver read)
+ * indistinguishable from "there was nothing to do".
+ */
+async function replanMemberships(
+  database: Database,
+  orgId: string,
+  membershipIds: Iterable<string>,
+): Promise<void> {
+  const ids = [...new Set(membershipIds)];
+  if (ids.length === 0) return;
+  let planned: { ownToolIds: Map<string, string[]>; plans: MembershipPlan[] } | null;
+  try {
+    planned = await runSnapshotted(database, async (reader) => {
+      const ownToolIds = await requiredToolIdsByMembership(reader, orgId, ids);
+      const allToolIds = [...new Set([...ownToolIds.values()].flat())];
+      // Zero TOOLS anywhere stays an early return: nothing to plan, nothing to
+      // load. An evidence-only obligation (R7) lands here — visible in
+      // standing, no case.
+      if (allToolIds.length === 0) return null;
+      const plans = await planAssignmentsForMemberships(reader, orgId, ids, allToolIds, new Date());
+      return { ownToolIds, plans };
+    });
+  } catch (err) {
+    // Fail-soft: the sweep is the backstop (KTD8) — but say so.
+    console.error('replan: batch plan failed', { orgId, membershipIds: ids, err });
+    return;
+  }
+  if (!planned) return;
+  for (const plan of planned.plans) {
+    const own = new Set(planned.ownToolIds.get(plan.membershipId) ?? []);
+    try {
+      await insertPlannedCases(
+        database,
+        orgId,
+        plan.userId,
+        plan.cases.filter((c) => own.has(c.toolId)),
+      );
+    } catch (err) {
+      // Fail-soft per member: the sweep is the backstop (KTD8) — but say so.
+      console.error('replan: case insert failed', { orgId, membershipId: plan.membershipId, err });
+    }
+  }
+}
+
+/**
+ * The KTD8/U5 status-flip re-plan, shared by the location and department
+ * PATCH handlers (one definition parameterised by the placement axis — the
+ * `requiredCountByValue` posture): everyone PLACED at the flipped value,
+ * narrowed to ACTIVE memberships of this org, re-plans fail-soft.
+ */
+async function replanPlacedActiveMemberships(
+  database: Database,
+  orgId: string,
+  axis: 'location' | 'department',
+  valueId: string,
+): Promise<void> {
+  const placed =
+    axis === 'location'
+      ? await database.query.membershipLocations.findMany({
+          where: eq(schema.membershipLocations.locationId, valueId),
+        })
+      : await database.query.membershipDepartments.findMany({
+          where: eq(schema.membershipDepartments.departmentId, valueId),
+        });
+  const placedIds = [...new Set(placed.map((p) => p.membershipId))];
+  const activeMemberships = placedIds.length
+    ? await database.query.memberships.findMany({
+        where: and(
+          eq(schema.memberships.orgId, orgId),
+          inArray(schema.memberships.id, placedIds),
+          eq(schema.memberships.status, 'active'),
+        ),
+      })
+    : [];
+  await replanMemberships(database, orgId, activeMemberships.map((m) => m.id));
+}
 
 /** One active person still holding a retired value. */
 interface ReviewHolder {
@@ -1130,6 +1661,44 @@ taxonomyRouter.get(
     const byDepartment = holdersByValue(deptHolders, (r) => r.departmentId);
     const byRole = holdersByValue(roleHolders, (r) => r.roleId);
 
+    /*
+      REQUIREMENT FALLOUT (KTD8/U5): under the four-scope resolver, retiring a
+      Location or Department is a requirement-affecting act — its required
+      competencies STOP APPLYING to everyone placed there (the U4 split). The
+      review is where an Admin sees retirement's consequences, so each retired
+      value carries the count for "N required competencies stop applying to M
+      placed people" (M is the holders list already here). ROLES deliberately
+      carry none: a retired-but-held role keeps contributing (R119 posture),
+      so role retirement stops nothing — the transfer/withdraw flow is what
+      ends its obligations. One batched read per axis, counted from the same
+      rows the resolver reads, so the review and the resolution cannot
+      disagree.
+    */
+    const requiredCountByValue = async (
+      column: typeof schema.competencyRequirements.locationId | typeof schema.competencyRequirements.departmentId,
+      valueIds: string[],
+    ): Promise<Map<string, number>> => {
+      const counts = new Map<string, number>();
+      if (valueIds.length === 0) return counts;
+      const rows = await db!.query.competencyRequirements.findMany({
+        where: and(
+          eq(schema.competencyRequirements.orgId, orgId),
+          inArray(column, valueIds),
+          eq(schema.competencyRequirements.tier, 'required'),
+        ),
+      });
+      for (const row of rows) {
+        const key = column === schema.competencyRequirements.locationId ? row.locationId : row.departmentId;
+        if (!key) continue; // unreachable: the inArray above is keyed on the column
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      }
+      return counts;
+    };
+    const [locRequirementCounts, deptRequirementCounts] = await Promise.all([
+      requiredCountByValue(schema.competencyRequirements.locationId, locations.map((l) => l.id)),
+      requiredCountByValue(schema.competencyRequirements.departmentId, departments.map((d) => d.id)),
+    ]);
+
     const withHolders = <T extends { id: string; name: string }>(
       values: T[],
       map: Map<string, ReviewHolder[]>,
@@ -1140,8 +1709,12 @@ taxonomyRouter.get(
         .filter((v) => v.holders.length > 0);
 
     res.json({
-      locations: withHolders(locations, byLocation),
-      departments: withHolders(departments, byDepartment),
+      locations: withHolders(locations, byLocation, (l) => ({
+        requiredCompetenciesStopped: locRequirementCounts.get(l.id) ?? 0,
+      })),
+      departments: withHolders(departments, byDepartment, (d) => ({
+        requiredCompetenciesStopped: deptRequirementCounts.get(d.id) ?? 0,
+      })),
       roles: withHolders(roles, byRole, (r) => ({ departmentId: r.departmentId })),
     });
   }),
@@ -1311,6 +1884,11 @@ taxonomyRouter.post(
       category: 'settings',
       icon: 'map-pin',
     });
+    // KTD8/AE2: the move changed what each moved person's placement requires —
+    // the replacement Location's requirements apply the moment they land, so
+    // their newly-required bookable competencies get cases NOW, not on the
+    // next sweep. After the commit, fail-soft per member.
+    await replanMemberships(db, tenant.orgId, plan.movedMembershipIds);
     res.json({
       peopleMoved: plan.movedMembershipIds.length,
       casesRewritten: caseOutcome === 'rewrite' ? plan.inFlightCaseIds.length : 0,
@@ -1414,6 +1992,10 @@ taxonomyRouter.post(
       category: 'settings',
       icon: 'briefcase',
     });
+    // KTD8 (the review-verified THIRD dark write site): the replacement Role's
+    // requirements apply immediately, so each moved holder's newly-required
+    // cases are planned now rather than left to the sweep. Fail-soft per member.
+    await replanMemberships(db, tenant.orgId, activeIds);
     res.json({ peopleMoved: activeIds.size });
   }),
 );
@@ -1548,6 +2130,11 @@ taxonomyRouter.post(
       category: 'settings',
       icon: 'layers',
     });
+    // KTD8: the replacement Department's requirements follow placement (R3) and
+    // apply the moment the repoint commits — plan the newly-required cases now.
+    // Fail-soft per member; the role withdrawals above changed required sets
+    // too, and the idempotent run absorbs both in one pass.
+    await replanMemberships(db, tenant.orgId, activeIds);
     res.json({ peopleMoved: activeIds.size });
   }),
 );

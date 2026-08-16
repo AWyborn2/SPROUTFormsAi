@@ -1,13 +1,19 @@
 /**
  * The SHARED resolver that inverts the requirement derivation (KTD2).
  *
- * Roles now store requirements as competencies (`role_required_competencies`),
+ * Scopes now store requirements as competencies (`competency_requirements`),
  * but the assignment engine still speaks in TOOLS — a case is opened for the
- * assessment that awards the missing competency. This module is the one place
- * that translation happens, called from every real read site (the assignment
- * seam, the requirement-change compute, and — for standing — the sibling
- * derivation in standing.ts), so preview and apply cannot resolve a competency
- * to two different tools.
+ * assessment that awards the missing competency. `awardingToolByCompetency` is
+ * the one place that translation happens: the assignment seam, the
+ * requirement-change compute, the compliance bookability flag and the standing
+ * sibling all call it, so preview and apply cannot resolve a competency to two
+ * different tools.
+ *
+ * Above it sits exactly ONE membership-shaped read — `requiredToolIdsByMembership`
+ * (and its single-membership shape). The per-ROLE dual read that predated the
+ * scopes was deleted with its last caller (see the note above it): a role's
+ * requirements are only part of a person's obligation once location, department
+ * and org scopes exist, so a second resolver keyed by role could only drift.
  *
  * Resolution rule (KTD2, stated once, used everywhere): the candidate tools
  * for a competency are the organisation's assessment tools whose awards list
@@ -18,10 +24,56 @@
  */
 import { and, eq, inArray } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import type { Reader } from './standing.js';
+import {
+  requirementIndexForScopes,
+  scopeKeysForMemberships,
+  unionKeys,
+  type MembershipScopeKeys,
+  type Reader,
+  type ScopeRequirementIndex,
+} from './standing.js';
 import { db } from '../db.js';
 
 type Database = NonNullable<typeof db>;
+
+/*
+  ONE SNAPSHOT FOR EVERY READ A RESOLUTION MAKES (KTD3). An award conversion
+  deletes a legacy row and inserts the direct link in one commit — and since
+  U2 the membership-shaped reads span the PLACEMENT tables too, where a
+  location transfer could commit mid-read. Run on the root client, such a
+  commit could land between two of the reads and the requirement would vanish
+  from both halves (or the expansion would plan against half a world) for the
+  duration of a request. In production every surface handed in exposes
+  `.transaction` — the root client opens a real one, an already-open
+  transaction nests as a savepoint on the same snapshot — so the reads are
+  always pinned. The guard tolerates the lean read-only fakes tests drive the
+  callers with.
+
+  REPEATABLE READ, not the default READ COMMITTED: under READ COMMITTED each
+  statement takes a fresh snapshot and the wrapper pins nothing, so a
+  conversion's commit could still land between the two halves. Read-only, so
+  the stricter level cannot raise a serialization failure here. A NESTED call
+  becomes a savepoint and inherits the OUTER transaction's level — the option
+  is ignored there, which is why any caller wrapping these in its own
+  transaction must open that one at repeatable read too.
+
+  EXPORTED for exactly that reason. A caller that needs the tool resolution AND
+  a second read to agree — `assignForMembership` pairing it with the membership
+  context, `replanMemberships` pairing it with the batch plan — wraps BOTH in
+  one of these; the nested resolution then rides the outer snapshot as a
+  savepoint instead of taking a fresh one of its own. Sharing this helper is
+  what keeps "repeatable read" from being retyped (and mistyped) at each seam.
+*/
+export function runSnapshotted<T>(
+  database: Database | Reader,
+  run: (reader: Reader) => Promise<T>,
+): Promise<T> {
+  const transactional = database as Database;
+  if (typeof transactional.transaction === 'function') {
+    return transactional.transaction((tx) => run(tx), { isolationLevel: 'repeatable read' });
+  }
+  return run(database as Reader);
+}
 
 /**
  * Optional knobs for a resolution run.
@@ -109,84 +161,123 @@ export async function awardingToolFor(
   return byCompetency.get(competencyId) ?? null;
 }
 
+/*
+  THE PER-ROLE DUAL READ IS GONE (U3/KTD4, review-verified). `requiredToolIdsByRole`
+  was superseded by the membership-shaped read below the moment assignment
+  dropped its zero-roles early return: a role's tool list answers nobody's
+  obligation on its own, because location, department and org requirements are
+  placement-shaped (R3) and a role has no placement. It survived U3 with no
+  production caller and only its own tests proving it still worked — a dual read
+  that no read site uses is a second definition of resolution waiting to drift
+  from the one below. Deleted rather than kept "just in case": KTD2 exists so
+  preview and apply cannot name different tools, and that guarantee is weakest
+  when there are two resolvers.
+*/
+
 /**
- * The required TOOLS of each given Role — the dual read (KTD2, KTD3): every
- * remaining legacy `role_required_assessments` row, PLUS each direct
- * required-tier competency link resolved to its awarding tool. Every requested
- * roleId maps to an array (possibly empty), so callers can look each role up.
+ * The required TOOLS of each given membership across its FULL scope union
+ * (KTD4) — the ONE read at the assignment seam, BATCHED (U4's org-scale discipline at the KTD8 re-plan seam: a status
+ * flip or transfer re-plans whole placements, and a per-membership loop of
+ * transactions would issue thousands of queries). Each membership expands to
+ * its scope keys (org implicit, placed Locations and Departments with retired
+ * values dropped, held non-withdrawn Roles — the U4 split lives in the
+ * expansion, not here), the requirement rows union across them, and each
+ * required competency resolves to its ONE awarding tool by the KTD2 rule. The
+ * legacy `role_required_assessments` derivation rides along for the
+ * memberships' roles — legacy rows never existed at the other scopes, so the
+ * dual read stays role-shaped inside a scope-shaped union.
  *
- * Recommended-tier links never appear here: they are the never-enforced tier
- * (R13) and must not reach the assignment engine.
+ * The batch reads are set-wise over the UNION of every membership's keys —
+ * one query per table however many memberships are asked about — and each
+ * membership's tool set is then assembled from its OWN keys, so one member's
+ * placement never obliges another. Every requested membershipId maps to a
+ * FLAT deduplicated tool list (possibly empty) rather than a per-scope map:
+ * the consumer is the assignment engine, which has always flattened before
+ * deciding (KTD4 — `decideAssignments` unions the arrays), and a case records
+ * no scope anyway. Recommended-tier links never appear here: they are the
+ * never-enforced tier (R13) and must not reach the assignment engine.
+ * A competency with no awarding tool is evidence-only (R7): required standing
+ * tracks it, but there is no assessment to assign for it.
  */
-export async function requiredToolIdsByRole(
+export async function requiredToolIdsByMembership(
   database: Database | Reader,
   orgId: string,
-  roleIds: readonly string[],
+  membershipIds: readonly string[],
 ): Promise<Map<string, string[]>> {
-  const uniqueRoleIds = [...new Set(roleIds)];
-  const byRole = new Map<string, string[]>();
-  for (const roleId of uniqueRoleIds) byRole.set(roleId, []);
-  if (uniqueRoleIds.length === 0) return byRole;
+  const uniqueMembershipIds = [...new Set(membershipIds)];
+  const byMembership = new Map<string, string[]>();
+  for (const id of uniqueMembershipIds) byMembership.set(id, []);
+  if (uniqueMembershipIds.length === 0) return byMembership;
 
   const run = async (reader: Reader): Promise<Map<string, string[]>> => {
-    const legacyRows = await reader.query.roleRequiredAssessments.findMany({
-      where: and(
-        eq(schema.roleRequiredAssessments.orgId, orgId),
-        inArray(schema.roleRequiredAssessments.roleId, uniqueRoleIds),
-      ),
-    });
-    // Direct half: tier 'required' only — recommended never assigns (R13).
-    const linkRows = await reader.query.roleRequiredCompetencies.findMany({
-      where: and(
-        eq(schema.roleRequiredCompetencies.orgId, orgId),
-        inArray(schema.roleRequiredCompetencies.roleId, uniqueRoleIds),
-        eq(schema.roleRequiredCompetencies.tier, 'required'),
-      ),
-    });
-    const awarding = await awardingToolByCompetency(
-      reader,
-      orgId,
-      linkRows.map((l) => l.competencyId),
-    );
+    const keysByMembership = await scopeKeysForMemberships(reader, orgId, uniqueMembershipIds);
+    const allKeys = unionKeys(keysByMembership);
 
-    for (const roleId of uniqueRoleIds) {
-      // A Set per role: during transition a converted requirement can briefly
-      // be named by both halves, and one tool must not become two.
-      const toolIds = new Set<string>();
-      for (const row of legacyRows) if (row.roleId === roleId) toolIds.add(row.toolId);
-      for (const link of linkRows) {
-        if (link.roleId !== roleId) continue;
-        const toolId = awarding.get(link.competencyId);
-        // Absent → evidence-only (R7): required standing tracks it, but there
-        // is no assessment to assign for it.
-        if (toolId) toolIds.add(toolId);
-      }
-      byRole.set(roleId, [...toolIds]);
+    // Legacy half — ROLE scope only (KTD2); skipped entirely when no
+    // membership holds a role, whose whole obligation is then direct links.
+    const legacyRows = allKeys.roleIds.length
+      ? await reader.query.roleRequiredAssessments.findMany({
+          where: and(
+            eq(schema.roleRequiredAssessments.orgId, orgId),
+            inArray(schema.roleRequiredAssessments.roleId, allKeys.roleIds),
+          ),
+        })
+      : [];
+    const legacyToolIdsByRole = new Map<string, string[]>();
+    for (const row of legacyRows) {
+      const list = legacyToolIdsByRole.get(row.roleId) ?? [];
+      list.push(row.toolId);
+      legacyToolIdsByRole.set(row.roleId, list);
     }
-    return byRole;
+
+    // Direct half — the shared four-scope read (one definition, standing.ts),
+    // flattened here because only membership-level obligation matters to a plan.
+    const competencyIdsFor = (keys: MembershipScopeKeys, index: ScopeRequirementIndex) => [
+      ...new Set([
+        ...keys.roleIds.flatMap((roleId) => index.byRole.get(roleId) ?? []),
+        ...keys.locationIds.flatMap((locationId) => index.byLocation.get(locationId) ?? []),
+        ...keys.departmentIds.flatMap((departmentId) => index.byDepartment.get(departmentId) ?? []),
+        ...index.orgCompetencyIds,
+      ]),
+    ];
+    const index = await requirementIndexForScopes(reader, orgId, allKeys, 'required');
+    const awarding = await awardingToolByCompetency(reader, orgId, competencyIdsFor(allKeys, index));
+
+    for (const membershipId of uniqueMembershipIds) {
+      const keys: MembershipScopeKeys = keysByMembership.get(membershipId) ?? {
+        locationIds: [],
+        departmentIds: [],
+        roleIds: [],
+      };
+      // A Set: a tool the legacy row names AND a link resolves to — or that two
+      // scopes both require through their links — must not become two cases.
+      const toolIds = new Set<string>(
+        keys.roleIds.flatMap((roleId) => legacyToolIdsByRole.get(roleId) ?? []),
+      );
+      for (const competencyId of competencyIdsFor(keys, index)) {
+        const toolId = awarding.get(competencyId);
+        if (toolId) toolIds.add(toolId); // absent → evidence-only (R7)
+      }
+      byMembership.set(membershipId, [...toolIds]);
+    }
+    return byMembership;
   };
 
   /*
-    ONE SNAPSHOT FOR BOTH HALVES (KTD3). An award conversion deletes a legacy
-    row and inserts the direct link in one commit; read on the root client,
-    that commit could land between the two reads here and the requirement
-    would vanish from both halves for the duration of a request. In production
-    every surface handed in exposes `.transaction` — the root client opens a
-    real one, an already-open transaction nests as a savepoint on the same
-    snapshot — so the reads are always pinned. The guard tolerates the lean
-    read-only fakes tests drive the callers with.
-
-    REPEATABLE READ, not the default READ COMMITTED: under READ COMMITTED each
-    statement takes a fresh snapshot and the wrapper pins nothing, so the
-    conversion's commit could still land between the two halves. Read-only, so
-    the stricter level cannot raise a serialization failure here. A NESTED call
-    becomes a savepoint and inherits the OUTER transaction's level — the option
-    is ignored there, which is why any caller wrapping this in its own
-    transaction must open that one at repeatable read too.
+    ONE SNAPSHOT FOR THE WHOLE EXPANSION (KTD3) — see `runSnapshotted` above;
+    since U2 the snapshot covers the PLACEMENT tables too: a location transfer
+    or an award conversion committing between the scope-key read and the
+    requirement read would otherwise plan against half a world.
   */
-  const transactional = database as Database;
-  if (typeof transactional.transaction === 'function') {
-    return transactional.transaction((tx) => run(tx), { isolationLevel: 'repeatable read' });
-  }
-  return run(database as Reader);
+  return runSnapshotted(database, run);
+}
+
+/** The required tools of ONE membership — the single-membership shape of the batch. */
+export async function requiredToolIdsForMembership(
+  database: Database | Reader,
+  orgId: string,
+  membershipId: string,
+): Promise<string[]> {
+  const byMembership = await requiredToolIdsByMembership(database, orgId, [membershipId]);
+  return byMembership.get(membershipId) ?? [];
 }

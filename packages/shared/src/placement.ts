@@ -28,6 +28,16 @@ export interface PlacementInput {
 
 /** The offer sets and count rules the validator reads — the org's active taxonomy. */
 export interface PlacementContext {
+  /**
+   * Active Locations in the organisation — the location OFFER SET (U5/KTD8 of
+   * the requirement inheritance round). Locations confer requirements now, so
+   * a retired Location can no longer be silently written onto a membership:
+   * the asymmetry where retired roles/departments were refused but retired
+   * locations were not became indefensible. A member already AT a retired
+   * Location keeps it via the same held-value widening roles get
+   * (`admitHeldRoles`); only a NEW placement onto it is refused.
+   */
+  locations: Array<{ id: string }>;
   departments: Array<{ id: string; allowsMultipleRoles: boolean }>;
   /** Active Roles in the organisation, each with the Department that offers it. */
   roles: Array<{ id: string; departmentId: string }>;
@@ -35,6 +45,7 @@ export interface PlacementContext {
 
 export type PlacementErrorCode =
   | 'no_location'
+  | 'unknown_location'
   | 'unknown_role'
   | 'role_not_offered'
   | 'too_many_roles';
@@ -51,6 +62,17 @@ export function validatePlacement(input: PlacementInput, ctx: PlacementContext):
   // R21 / U11 precondition: a membership carries at least one Location.
   if (input.locationIds.length === 0) {
     return { ok: false, error: { code: 'no_location' } };
+  }
+
+  // Every Location must be in the offer set (U5): unknown and retired read the
+  // same way — the context carries active values plus whatever the caller's
+  // held-value widening admitted, so a retired Location the member already
+  // holds passes while a NEW placement onto one is refused.
+  const offeredLocations = new Set(ctx.locations.map((l) => l.id));
+  for (const locationId of input.locationIds) {
+    if (!offeredLocations.has(locationId)) {
+      return { ok: false, error: { code: 'unknown_location', subjectId: locationId } };
+    }
   }
 
   const deptById = new Map(ctx.departments.map((d) => [d.id, d]));

@@ -32,6 +32,33 @@ const TOOL = '00000000-0000-4000-8000-0000000000a1';
 const COMP = 'comp-x';
 const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
 
+/*
+  Does a WHERE carry an `is null` predicate? Of the four requirement scope
+  reads (U2), only the ORG one does (all three scope columns null, KTD1) —
+  how the competencyRequirements fake below tells it apart, so role-link
+  fixtures never leak into it as org-wide rows. Depth-limited and schema-key-
+  skipping, matching the other route fakes' where-walkers.
+*/
+const WHERE_SKIP = new Set(['table', 'config', 'encoder', 'decoder', 'session', 'dialect', 'default']);
+function hasIsNull(node: unknown, depth = 0): boolean {
+  if (!node || typeof node !== 'object' || depth > 12) return false;
+  const rec = node as Record<string, unknown>;
+  const chunks = rec.queryChunks;
+  if (Array.isArray(chunks)) {
+    for (const c of chunks) {
+      const v = (c as { value?: unknown } | null)?.value;
+      if (Array.isArray(v) && v.some((s) => typeof s === 'string' && s.includes('is null'))) return true;
+      if (hasIsNull(c, depth + 1)) return true;
+    }
+    return false;
+  }
+  for (const [k, v] of Object.entries(rec)) {
+    if (WHERE_SKIP.has(k)) continue;
+    if (hasIsNull(v, depth + 1)) return true;
+  }
+  return false;
+}
+
 function fakeDb(opts: {
   planTier?: string;
   /** The org's self-start toggle (R14, KTD6). Default OFF — the stored default. */
@@ -42,6 +69,8 @@ function fakeDb(opts: {
   membership?: unknown;
   templates?: unknown[];
   heldLocations?: unknown[];
+  /** Location VALUE rows — active ones make a placement confer requirements (U2/U8). */
+  locations?: unknown[];
   openCases?: unknown[];
   competencyHolders?: unknown[];
   competencies?: unknown[];
@@ -84,8 +113,16 @@ function fakeDb(opts: {
       formTemplates: { findMany: vi.fn().mockResolvedValue(opts.templates ?? []) },
       membershipLocations: { findMany: vi.fn().mockResolvedValue(opts.heldLocations ?? []) },
       membershipRoles: { findMany: vi.fn().mockResolvedValue(opts.membershipRoles ?? []) },
+      // Scope expansion (U2) reads the department axis and the taxonomy value
+      // tables too; these fixtures stay role-shaped, so all default empty.
+      // (heldLocations feeds the CASE-location read; with no `locations` rows
+      // the expansion treats them as inactive, which keeps these role-only
+      // relevance fixtures exactly as they were.)
+      membershipDepartments: { findMany: vi.fn().mockResolvedValue([]) },
+      locations: { findMany: vi.fn().mockResolvedValue(opts.locations ?? []) },
+      departments: { findMany: vi.fn().mockResolvedValue([]) },
       roleRequiredAssessments: { findMany: vi.fn().mockResolvedValue(opts.roleRequirements ?? []) },
-      roleRequiredCompetencies: {
+      competencyRequirements: {
         /*
           TIER-AWARE, same as the competencies-route fake: the standing loaders
           filter tier in the WHERE clause ('required' for the dual read,
@@ -110,7 +147,20 @@ function fakeDb(opts: {
             }
             for (const v of Object.values(rec)) if (v && typeof v === 'object') stack.push(v);
           }
-          return Promise.resolve(tier ? rows.filter((r) => r.tier === tier) : rows);
+          const byTier = tier ? rows.filter((r) => r.tier === tier) : rows;
+          // SCOPE-AWARE too (U2): only the ORG read carries an `is null`
+          // shape (KTD1's all-null org row), and these role-link fixtures
+          // must not answer it as org-wide rows.
+          return Promise.resolve(
+            hasIsNull(args?.where)
+              ? byTier.filter(
+                  (r) =>
+                    (r as Record<string, unknown>).roleId == null &&
+                    (r as Record<string, unknown>).locationId == null &&
+                    (r as Record<string, unknown>).departmentId == null,
+                )
+              : byTier,
+          );
         }),
       },
       assessmentCases: { findMany: vi.fn().mockResolvedValue(opts.openCases ?? []) },
@@ -363,6 +413,69 @@ describe('POST /training-requests — the candidate-relevance check (U7, KTD6, R
     mockDbValue = db;
     const { server, base } = startApp();
     expect((await post(base, builder)).status).toBe(201);
+    server.close();
+  });
+
+  /*
+    MULTI-SCOPE RE-PINS (U8, R11). The relevance check itself is UNCHANGED —
+    it reads the same unioned standing sets as every other surface — so these
+    pin that a recommendation or requirement arriving from a NON-role scope
+    behaves exactly as the role-scope cases above: the scope that names a
+    competency is invisible to the toggle logic.
+  */
+  const placedCandidate = {
+    memberships: [{ id: 'm-cand', userId: candidate.userId, orgId: 'org-1' }],
+    heldLocations: [{ membershipId: 'm-cand', locationId: 'loc-1', position: 0 }],
+    locations: [{ id: 'loc-1', orgId: 'org-1', name: 'Location A', status: 'active' }],
+  };
+
+  it('201s a LOCATION-scope recommended request while the toggle is ON — no role held at all (R8, AE5)', async () => {
+    const { db } = fakeDb({
+      tool: orgTool,
+      selfStart: true,
+      ...placedCandidate,
+      roleLinks: [
+        { roleId: null, locationId: 'loc-1', departmentId: null, competencyId: COMP, tier: 'recommended' },
+      ],
+      insertedRequest: inserted,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    expect((await post(base, candidate)).status).toBe(201);
+    server.close();
+  });
+
+  it('403s the same LOCATION-scope recommendation while the toggle is OFF (R14, AE5)', async () => {
+    const { db, insertValues } = fakeDb({
+      tool: orgTool,
+      selfStart: false,
+      ...placedCandidate,
+      roleLinks: [
+        { roleId: null, locationId: 'loc-1', departmentId: null, competencyId: COMP, tier: 'recommended' },
+      ],
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    const res = await post(base, candidate);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: 'tool_not_relevant' });
+    expect(insertValues).not.toHaveBeenCalled();
+    server.close();
+  });
+
+  it('201s an ORG-scope required gap with the toggle OFF — required hides behind nothing (R2, AE5)', async () => {
+    const { db } = fakeDb({
+      tool: orgTool,
+      selfStart: false,
+      memberships: [{ id: 'm-cand', userId: candidate.userId, orgId: 'org-1' }],
+      roleLinks: [
+        { roleId: null, locationId: null, departmentId: null, competencyId: COMP, tier: 'required' },
+      ],
+      insertedRequest: inserted,
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    expect((await post(base, candidate)).status).toBe(201);
     server.close();
   });
 });

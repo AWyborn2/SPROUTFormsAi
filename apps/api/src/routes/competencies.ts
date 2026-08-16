@@ -16,10 +16,13 @@ import {
   optionalCompetencyCode,
 } from '../lib/competency-create.js';
 import {
+  competencySourcesByUser,
+  competencySourcesFor,
   recommendedCompetencyIdsByUser,
-  recommendedCompetencyIdsFor,
   requiredCompetencyIdsByUser,
-  requiredCompetencyIdsFor,
+  sourceRefs,
+  type CompetencySourceRef,
+  type CompetencySourcesForUser,
 } from '../lib/standing.js';
 import { awardingToolByCompetency } from '../lib/requirement-links.js';
 import { permissionScope } from '../lib/permissions.js';
@@ -52,6 +55,28 @@ function canAuthorCompetencies(role: string): boolean {
 /** DELETE is narrower still (KTD8): destroying a register entry is admin work. */
 function isAdmin(role: string): boolean {
   return role === 'owner' || role === 'admin';
+}
+
+/**
+ * The source scopes captioning one entry, picked by the entry's STANDING (U8,
+ * R5): a required entry is explained by the scopes that require it, a
+ * recommended one by those that recommend it, and an optional one by nothing —
+ * its empty list is a fact ("no scope names this"), not an omission. Standing
+ * and provenance are read separately, so the tier pick keys off the standing
+ * the row actually reports rather than re-deriving it.
+ */
+function sourcesForStanding(
+  standing: string,
+  sources: CompetencySourcesForUser,
+  competencyId: string,
+): CompetencySourceRef[] {
+  return sourceRefs(
+    standing === 'required'
+      ? sources.required.get(competencyId)
+      : standing === 'recommended'
+        ? sources.recommended.get(competencyId)
+        : undefined,
+  );
 }
 
 competenciesRouter.get(
@@ -114,18 +139,41 @@ competenciesRouter.get(
       return;
     }
     const tenant = req.tenant!;
-    const [org, recommended] = await Promise.all([
+    const [org, mySources] = await Promise.all([
       db.query.organizations.findFirst({ where: eq(schema.organizations.id, tenant.orgId) }),
-      // Non-withdrawn roles only — heldRolesByUser filters withdrawn rows (R52).
-      recommendedCompetencyIdsFor(db, tenant.orgId, tenant.userId),
+      /*
+        ONE scope expansion serves the whole route (review-verified): the
+        provenance read's recommended map is keyed by exactly the set the
+        standing sibling would return — same expansion, same recommended-tier
+        index; the legacy derivation feeds required only — so the id set is
+        its keys rather than a second transactional read. Non-withdrawn roles
+        only — the expansion filters withdrawn rows (R52). WHICH scope
+        recommends each item rides along (U8, R5/AE5 — "Recommended — from
+        <Location>"). Own-record read: the subject IS the caller, so no
+        viewer gate applies — same footing as everything else on this route.
+      */
+      competencySourcesFor(db, tenant.orgId, tenant.userId),
     ]);
     const selfStartEnabled = org?.candidateSelfStartRecommended ?? false;
-    if (recommended.size === 0) {
+    const recommended = mySources.recommended;
+    /*
+      TIER PRECEDENCE ACROSS SCOPES (R2, `standingOf`'s rule): required beats
+      recommended, and the two maps are structural siblings of ONE expansion —
+      a competency required at org scope and recommended at a location appears
+      in BOTH. Reading the recommended keys raw would offer that competency as
+      "Recommended — request this training" while the compliance report counts
+      it as a REQUIRED gap and the engine has already booked its case: two
+      surfaces of one expansion disagreeing about the same obligation. The
+      union resolves in required's favour everywhere else (KTD3), so it
+      resolves here too — a required competency is simply absent from this
+      list, whichever scope recommended it.
+    */
+    const ids = [...recommended.keys()].filter((id) => !mySources.required.has(id));
+    if (ids.length === 0) {
       res.json({ selfStartEnabled, items: [] });
       return;
     }
 
-    const ids = [...recommended];
     const [rows, grants, awarding] = await Promise.all([
       db.query.competencies.findMany({
         where: and(eq(schema.competencies.orgId, tenant.orgId), inArray(schema.competencies.id, ids)),
@@ -169,6 +217,8 @@ competenciesRouter.get(
             code: competency.code,
             held,
             requestableToolId: awarding.get(competencyId) ?? null,
+            /** The scopes recommending it, resolved to names — AE5's caption. */
+            sources: sourceRefs(mySources.recommended.get(competencyId)),
           },
         ];
       })
@@ -338,10 +388,10 @@ competenciesRouter.delete(
       async (tx) => {
         // Both tiers in one read, split below — a recommendation is a real
         // dependency too (a Role's editor would show a dangling entry).
-        const links = await tx.query.roleRequiredCompetencies.findMany({
+        const links = await tx.query.competencyRequirements.findMany({
           where: and(
-            eq(schema.roleRequiredCompetencies.orgId, tenant.orgId),
-            eq(schema.roleRequiredCompetencies.competencyId, row.id),
+            eq(schema.competencyRequirements.orgId, tenant.orgId),
+            eq(schema.competencyRequirements.competencyId, row.id),
           ),
         });
         // `awardedCompetencyIds` is jsonb with no FK, so containment is
@@ -360,12 +410,36 @@ competenciesRouter.delete(
           ),
         });
 
-        const roles = links.filter((l) => l.tier === 'required').length;
-        const recommendedBy = links.filter((l) => l.tier === 'recommended').length;
+        /*
+          SCOPE-AWARE BREAKDOWN (KTD2, U1). The read above is by competencyId
+          alone — deliberately: a requirement at ANY of the four scopes blocks
+          deletion, since an org or location requiring a competency is exactly
+          as real a dependency as a role requiring it. But the payload must not
+          launder an org-wide requirement as a "role": `roles`/`recommendedBy`
+          keep counting ROLE rows only, and the other scopes get their own
+          counts so the 409 names what actually stands in the way.
+        */
+        const roleLinks = links.filter((l) => l.roleId != null);
+        const roles = roleLinks.filter((l) => l.tier === 'required').length;
+        const recommendedBy = roleLinks.filter((l) => l.tier === 'recommended').length;
+        const locations = links.filter((l) => l.locationId != null).length;
+        const departments = links.filter((l) => l.departmentId != null).length;
+        const orgWide = links.filter(
+          (l) => l.roleId == null && l.locationId == null && l.departmentId == null,
+        ).length;
         const tools = orgTools.filter((t) => (t.awardedCompetencyIds ?? []).includes(row.id)).length;
         const grants = liveGrants.length;
-        if (roles + recommendedBy + tools + grants > 0) {
-          return { deleted: false as const, roles, recommendedBy, tools, grants };
+        if (links.length + tools + grants > 0) {
+          return {
+            deleted: false as const,
+            roles,
+            recommendedBy,
+            locations,
+            departments,
+            orgWide,
+            tools,
+            grants,
+          };
         }
         await tx.delete(schema.competencies).where(eq(schema.competencies.id, row.id));
         return { deleted: true as const };
@@ -374,9 +448,19 @@ competenciesRouter.delete(
     );
     if (!verdict.deleted) {
       // Counts, not ids: enough to say WHAT stands in the way and how much,
-      // without this error payload becoming a second register read.
-      const { roles, recommendedBy, tools, grants } = verdict;
-      res.status(409).json({ error: 'competency_in_use', roles, recommendedBy, tools, grants });
+      // without this error payload becoming a second register read. The
+      // requirement counts are per scope (KTD2): `roles` is role rows only.
+      const { roles, recommendedBy, locations, departments, orgWide, tools, grants } = verdict;
+      res.status(409).json({
+        error: 'competency_in_use',
+        roles,
+        recommendedBy,
+        locations,
+        departments,
+        orgWide,
+        tools,
+        grants,
+      });
       return;
     }
 
@@ -641,6 +725,20 @@ competenciesRouter.get(
       recommendedCompetencyIdsByUser(db, tenant.orgId, holderUserIds),
     ]);
 
+    /*
+      WHICH scopes require/recommend THIS competency, per holder (U8, R5) — a
+      competency required at a location AND by a role renders both on the row.
+      Gated per holder exactly like the licence columns above, and for the same
+      exposure: a row's sources enumerate that holder's locations, departments
+      and roles, which this register must not hand any member for the whole
+      workforce. Subjects the caller may not see are never even read.
+    */
+    const sourceSubjectIds =
+      licenceScope === 'all' ? holderUserIds : holderUserIds.filter((id) => id === tenant.userId);
+    const sourcesByUser = sourceSubjectIds.length
+      ? await competencySourcesByUser(db, tenant.orgId, sourceSubjectIds)
+      : new Map<string, CompetencySourcesForUser>();
+
     // One instant for the whole response, so two holders cannot disagree about
     // what "today" is and sort inconsistently.
     const now = new Date();
@@ -648,6 +746,12 @@ competenciesRouter.get(
       const currency = competencyCurrency(r, competency, now, 'assessor');
       const expiry = expiryOf(r, competency);
       const user = userById.get(r.userId);
+      const standing = standingOf(
+        competency.id,
+        requiredByUser.get(r.userId) ?? new Set(),
+        recommendedByUser.get(r.userId) ?? new Set(),
+      );
+      const holderSources = canSeeLicence(r.userId) ? sourcesByUser.get(r.userId) : undefined;
       return {
         userId: r.userId,
         // A grant can outlive the user row it points at only if that row was
@@ -662,11 +766,11 @@ competenciesRouter.get(
         expiresAt: expiry ? expiry.toISOString() : null,
         status: currency.status,
         revoked: currency.revoked,
-        standing: standingOf(
-          competency.id,
-          requiredByUser.get(r.userId) ?? new Set(),
-          recommendedByUser.get(r.userId) ?? new Set(),
-        ),
+        standing,
+        // OMITTED — undefined, never [] — where the gate withholds it: an
+        // empty array would claim "no scope names this", false for a gated
+        // reader who simply may not be told which scopes do (U8).
+        ...(holderSources ? { sources: sourcesForStanding(standing, holderSources, competency.id) } : {}),
         current: countsAsHeld(currency),
         // A revoked grant's date is moot; the revoked mark says all there is.
         note: currency.revoked ? null : expiryNote(currency.status, expiry, competency.name),
@@ -764,14 +868,19 @@ competenciesRouter.get(
         ? 'candidate'
         : 'assessor';
 
-    // Standing beside currency (R108): which of these the person's held Roles
-    // oblige them to hold, and which they merely recommend (R12). Resolved once
-    // for the whole record. Revoked rows were already excluded above, so
-    // `current` never has to fold revocation in here.
-    const [required, recommended] = await Promise.all([
-      requiredCompetencyIdsFor(db, tenant.orgId, req.params.userId!),
-      recommendedCompetencyIdsFor(db, tenant.orgId, req.params.userId!),
-    ]);
+    /*
+      Standing beside currency (R108): which of these the person's scopes
+      oblige them to hold, and which they merely recommend (R12). ONE scope
+      expansion serves standing AND sources (review-verified): the provenance
+      maps are keyed by exactly the sets the standing reads would return —
+      the required map carries the legacy role derivation too — so both
+      tiers' sets derive from one transactional read instead of three.
+      Resolved once for the whole record. Revoked rows were already excluded
+      above, so `current` never has to fold revocation in here.
+    */
+    const subjectSources = await competencySourcesFor(db, tenant.orgId, req.params.userId!);
+    const required = new Set(subjectSources.required.keys());
+    const recommended = new Set(subjectSources.recommended.keys());
 
     // Licence numbers are sensitive profile data (R34): a caller sees them on
     // someone else's record only with the `profiles.view_competencies` grant —
@@ -779,6 +888,19 @@ competenciesRouter.get(
     const canSeeLicence =
       req.params.userId === tenant.userId ||
       (await permissionScope(tenant, 'profiles', 'view_competencies')) === 'all';
+
+    /*
+      VIEWER GATE ON SOURCES (U8, review-verified exposure). An entry's source
+      scopes enumerate the subject's locations, departments and roles — vary
+      the userId and an ungated field would hand any member a colleague's whole
+      placement. So the FIELD stays gated even though the standing sets above
+      derive from the same read — the SAME gate as the licence columns: the
+      caller's own record, or `profiles.view_competencies` at 'all'. Gated
+      readers get the field OMITTED (undefined), never an empty array — `[]`
+      would claim "no scope requires this", which is a different statement
+      from "you may not be told which scopes do".
+    */
+    const sources = canSeeLicence ? subjectSources : null;
 
     // One instant for the whole response, so two entries cannot disagree about
     // what "today" is.
@@ -789,6 +911,8 @@ competenciesRouter.get(
         const validity = competency ?? {};
         const currency = competencyCurrency(r, validity, now, audience);
         const expiry = expiryOf(r, validity);
+        /** Required, recommended or optional for this person, over the four-scope union (R108, R2). */
+        const standing = standingOf(r.competencyId, required, recommended);
         return {
           competencyId: r.competencyId,
           /*
@@ -804,8 +928,9 @@ competenciesRouter.get(
           licenceClass: canSeeLicence ? r.licenceClass : null,
           licenceNumber: canSeeLicence ? r.licenceNumber : null,
           status: currency.status,
-          /** Required, recommended or optional for this person, from their held Roles (R108, R12). */
-          standing: standingOf(r.competencyId, required, recommended),
+          standing,
+          /** The scopes producing that standing, by name (R5) — see the viewer gate above. */
+          ...(sources ? { sources: sourcesForStanding(standing, sources, r.competencyId) } : {}),
           /** True while it still satisfies a requirement — held, expiring or grace. */
           current: countsAsHeld(currency),
           expiresAt: expiry ? expiry.toISOString() : null,

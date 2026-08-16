@@ -126,6 +126,83 @@ describe('ComplianceScreen (U20)', () => {
     expect(screen.getByText('Driver Licence')).toBeDefined();
   });
 
+  it('names each gap’s source scopes in the shared comma-join spelling (U8, R5, AE1)', () => {
+    report.data = {
+      ...EMPTY,
+      neverHeld: [
+        {
+          userId: 'u1',
+          name: 'Bo Worker',
+          competencyId: 'c1',
+          competencyName: 'Site Induction',
+          hasAwardingAssessment: true,
+          sources: [
+            { scope: 'location', name: 'Boddington' },
+            { scope: 'role', name: 'Dozer Operator' },
+          ],
+          noLocationPlacement: false,
+        },
+        // AE6's shape: an org-scope requirement reads "org-wide", never the
+        // organisation's own name.
+        {
+          userId: 'u1',
+          name: 'Bo Worker',
+          competencyId: 'c2',
+          competencyName: 'First Aid',
+          hasAwardingAssessment: true,
+          sources: [{ scope: 'org', name: 'Org One' }],
+          noLocationPlacement: false,
+        },
+      ],
+    };
+    render(<ComplianceScreen />);
+    expect(screen.getByText('from Boddington and Dozer Operator')).toBeDefined();
+    expect(screen.getByText('org-wide')).toBeDefined();
+    expect(screen.queryByText(/Org One/)).toBeNull();
+  });
+
+  it('marks an UNPLACED member’s bookable gap "cannot be scheduled" (U8, KTD4)', () => {
+    report.data = {
+      ...EMPTY,
+      neverHeld: [
+        // Bookable but nowhere to assess — the marker names the fix.
+        {
+          userId: 'u1',
+          name: 'Bo Unplaced',
+          competencyId: 'c1',
+          competencyName: 'Track Dozer',
+          hasAwardingAssessment: true,
+          sources: [],
+          noLocationPlacement: true,
+        },
+        // Placed: no marker.
+        {
+          userId: 'u2',
+          name: 'Ada Placed',
+          competencyId: 'c1',
+          competencyName: 'Track Dozer',
+          hasAwardingAssessment: true,
+          sources: [],
+          noLocationPlacement: false,
+        },
+        // Unplaced but EVIDENCE-ONLY: the remedy is recording evidence,
+        // placed or not, so the scheduling marker would only mislead.
+        {
+          userId: 'u3',
+          name: 'Cy Licence',
+          competencyId: 'c2',
+          competencyName: 'Driver Licence',
+          hasAwardingAssessment: false,
+          sources: [],
+          noLocationPlacement: true,
+        },
+      ],
+    };
+    render(<ComplianceScreen />);
+    expect(screen.getAllByText('Cannot be scheduled — no location placement')).toHaveLength(1);
+    expect(screen.getAllByText(/record evidence/i)).toHaveLength(1);
+  });
+
   it('ignores an unknown status param rather than rendering a blank page', () => {
     searchParams = new URLSearchParams({ status: 'bogus' });
     report.data = EMPTY;

@@ -230,6 +230,77 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     expect(screen.queryByText('c-dozer')).toBeNull();
   });
 
+  it('renders each entry’s source scopes as ONE comma-joined line (AE1, R5, U8)', () => {
+    /*
+      The AE1 stack on the record: a required entry produced by three scopes
+      reads "Required — from <a>, <b> and <c>" — commas, "and" before the
+      last — and an org-scope entry reads "org-wide", never the org's name.
+    */
+    state.held = [
+      {
+        competencyId: 'c-site',
+        name: 'Site Induction',
+        code: null,
+        evidenceRef: null,
+        licenceClass: null,
+        licenceNumber: null,
+        status: 'held',
+        standing: 'required',
+        sources: [
+          { scope: 'location', name: 'Boddington' },
+          { scope: 'department', name: 'Operations' },
+          { scope: 'role', name: 'Dozer Operator' },
+        ],
+        current: true,
+        expiresAt: null,
+        note: null,
+      },
+      {
+        competencyId: 'c-org',
+        name: 'First Aid',
+        code: null,
+        evidenceRef: null,
+        licenceClass: null,
+        licenceNumber: null,
+        status: 'held',
+        standing: 'required',
+        sources: [{ scope: 'org', name: 'Org One' }],
+        current: true,
+        expiresAt: null,
+        note: null,
+      },
+    ];
+    show();
+    expect(
+      screen.getByText('Required — from Boddington, Operations and Dozer Operator'),
+    ).toBeDefined();
+    expect(screen.getByText('Required — org-wide')).toBeDefined();
+    expect(screen.queryByText(/Org One/)).toBeNull();
+  });
+
+  it('renders NO source line where the API withheld sources (the viewer gate, U8)', () => {
+    // A colleague read without `profiles.view_competencies`: the field is
+    // absent, and the row must not render a dangling or invented caption.
+    state.held = [
+      {
+        competencyId: 'c-dozer',
+        name: 'Track Dozer',
+        code: null,
+        evidenceRef: null,
+        licenceClass: null,
+        licenceNumber: null,
+        status: 'held',
+        standing: 'required',
+        current: true,
+        expiresAt: null,
+        note: null,
+      },
+    ];
+    show();
+    expect(screen.queryByText(/— from/)).toBeNull();
+    expect(screen.queryByText(/org-wide/)).toBeNull();
+  });
+
   it('does not render an expired OPTIONAL competency as a compliance failure (AE43, R102)', () => {
     /*
       Standing is obligation and follows the person's Roles; currency is
@@ -522,6 +593,25 @@ describe('ProfileScreen — the candidate-focused own view', () => {
     // The existing voluntary body — the request lands in the training-request
     // queue, never enrols directly (R94, R96).
     expect(requestTraining).toHaveBeenCalledWith('t1', expect.anything());
+  });
+
+  it('captions a recommendation with its recommending scope — "Recommended — from <Location>" (AE5, U8)', () => {
+    state.role = 'candidate';
+    state.recommended = {
+      selfStartEnabled: false,
+      items: [
+        {
+          competencyId: 'c1',
+          name: 'First Aid',
+          code: 'HLTAID011',
+          held: false,
+          requestableToolId: 't1',
+          sources: [{ scope: 'location', name: 'Boddington' }],
+        },
+      ],
+    };
+    show({ isSubject: true });
+    expect(screen.getByText('Recommended — from Boddington')).toBeDefined();
   });
 
   it('offers no request for an evidence-only recommendation, toggle regardless (R7)', () => {

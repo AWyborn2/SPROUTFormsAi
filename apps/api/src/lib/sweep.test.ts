@@ -28,11 +28,15 @@ interface DbOpts {
   memberships?: Record<string, unknown>[];
   membershipRoles?: Record<string, unknown>[];
   roleReqs?: Record<string, unknown>[];
-  /** Direct role→competency links (KTD2) — the dual read's second half. */
+  /** Direct scope→competency links (KTD2, four scopes since U2). */
   roleLinks?: Record<string, unknown>[];
   tools?: Record<string, unknown>[];
   templates?: Record<string, unknown>[];
   heldLocations?: Record<string, unknown>[];
+  heldDepartments?: Record<string, unknown>[];
+  /** Taxonomy value rows — scope expansion joins their status (U4 semantics). */
+  locations?: Record<string, unknown>[];
+  departments?: Record<string, unknown>[];
   openCases?: Record<string, unknown>[];
   holders?: Record<string, unknown>[];
   comps?: Record<string, unknown>[];
@@ -40,6 +44,23 @@ interface DbOpts {
   /** Profiles backing the unreachable-address read (U36, R98). Default: none marked. */
   profiles?: Record<string, unknown>[];
   holdersFindMany?: () => Promise<Record<string, unknown>[]>;
+}
+
+// Walk a drizzle WHERE for its bound string params (depth-limited; the column
+// nodes loop back through their table, so schema metadata keys are skipped).
+// Just enough for `memberships.findFirst` to pick the RIGHT member when the
+// sweep loads several contexts — everything else in this fake stays lean.
+const SKIP_KEYS = new Set(['table', 'config', 'encoder', 'decoder', 'session', 'dialect', 'default']);
+function stringValues(node: unknown, out: string[] = [], depth = 0): string[] {
+  if (!node || depth > 10 || typeof node !== 'object') return out;
+  const rec = node as Record<string, unknown>;
+  if (typeof rec.value === 'string') out.push(rec.value);
+  for (const [k, v] of Object.entries(rec)) {
+    if (SKIP_KEYS.has(k)) continue;
+    if (Array.isArray(v)) v.forEach((n) => stringValues(n, out, depth + 1));
+    else stringValues(v, out, depth + 1);
+  }
+  return out;
 }
 
 function makeDb(opts: DbOpts) {
@@ -64,14 +85,23 @@ function makeDb(opts: DbOpts) {
       organizations: { findMany: async () => opts.orgs ?? [org()] },
       memberships: {
         findMany: async () => opts.memberships ?? [],
-        // The assignment pass loads each membership's context by id.
-        findFirst: async () => (opts.memberships ?? [])[0],
+        // The assignment pass loads each membership's context BY ID, and the
+        // multi-member scenarios below need the right row back — so this one
+        // findFirst reads its WHERE's bound params instead of returning [0].
+        findFirst: async (args?: { where?: unknown }) => {
+          const wanted = new Set(stringValues(args?.where));
+          const all = opts.memberships ?? [];
+          return all.find((m) => wanted.has(m.id as string)) ?? all[0];
+        },
       },
       membershipRoles: { findMany: async () => opts.membershipRoles ?? [] },
+      membershipDepartments: { findMany: async () => opts.heldDepartments ?? [] },
+      locations: { findMany: async () => opts.locations ?? [] },
+      departments: { findMany: async () => opts.departments ?? [] },
       roleRequiredAssessments: { findMany: async () => opts.roleReqs ?? [] },
       // The resolver asks for tier 'required' only (R13); this lean fake does
       // not parse WHEREs, so the load-bearing filter is honoured manually.
-      roleRequiredCompetencies: {
+      competencyRequirements: {
         findMany: async () => (opts.roleLinks ?? []).filter((l) => l.tier === 'required'),
       },
       assessmentTools: { findMany: async () => opts.tools ?? [] },
@@ -250,7 +280,7 @@ describe('sweepOrganization — assignment pass through the shared resolver (KTD
     /*
       The end-to-end proof the resolver swap demands (U3): the sweep reaches
       the engine through assignForMembership, and a Role whose requirement
-      exists solely as a role_required_competencies row must still assign the
+      exists solely as a competency_requirements row must still assign the
       awarding tool to a holder who lacks the competency. Before the swap this
       exact fixture created nothing — roleRequiredAssessments is empty.
     */
@@ -283,6 +313,87 @@ describe('sweepOrganization — assignment pass through the shared resolver (KTD
     expect(result.casesCreated).toBe(1);
     expect(cases).toHaveLength(1);
     expect(cases[0]).toMatchObject({ toolId: 't1', candidateUserId: 'u1', locationId: 'loc1' });
+  });
+
+  it('creates a case for a ROLE-LESS member from a LOCATION-scope requirement (KTD4, R3)', async () => {
+    /*
+      The scope-inheritance mirror of the direct-link proof above (U3): the
+      sweep is the backstop for scope changes, and it only became effective for
+      role-less members when KTD4 removed the zero-roles early return. This
+      exact fixture — no membership_roles row anywhere, the requirement living
+      on the LOCATION the member is placed at — created nothing before U3.
+    */
+    const { db, cases } = makeDb({
+      memberships: [{ id: 'm1', orgId: 'org-1', userId: 'u1', status: 'active' }],
+      membershipRoles: [], // holds NOTHING — the placement is the whole reach
+      roleLinks: [
+        { id: 'l1', orgId: 'org-1', roleId: null, locationId: 'loc1', departmentId: null, competencyId: 'c1', tier: 'required' },
+      ],
+      locations: [{ id: 'loc1', orgId: 'org-1', status: 'active' }],
+      tools: [
+        {
+          id: 't1',
+          orgId: 'org-1',
+          templateId: 'tpl1',
+          awardedCompetencyIds: ['c1'],
+          manifest: { parts: [{ key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'] }] },
+          locationPartKeys: {},
+          assessorStreamCompetencyIds: {},
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ],
+      templates: [{ id: 'tpl1', orgId: 'org-1', currentVersionId: 'v1' }],
+      heldLocations: [{ membershipId: 'm1', locationId: 'loc1', position: 0 }],
+      holders: [],
+      comps: [COMP],
+      users: [USER],
+    });
+
+    const result = await sweepOrganization(db, org() as never, NOW);
+
+    expect(result.casesCreated).toBe(1);
+    expect(cases[0]).toMatchObject({ toolId: 't1', candidateUserId: 'u1', locationId: 'loc1' });
+  });
+
+  it('assigns an ORG-scope requirement to EVERY active member (R2 — AE3 reach, sweep side)', async () => {
+    // Two members, neither holding a role: the org row reaches them both, and
+    // each case lands on its own person.
+    const { db, cases } = makeDb({
+      memberships: [
+        { id: 'm1', orgId: 'org-1', userId: 'u1', status: 'active' },
+        { id: 'm2', orgId: 'org-1', userId: 'u2', status: 'active' },
+      ],
+      membershipRoles: [],
+      roleLinks: [
+        { id: 'l1', orgId: 'org-1', roleId: null, locationId: null, departmentId: null, competencyId: 'c1', tier: 'required' },
+      ],
+      locations: [{ id: 'loc1', orgId: 'org-1', status: 'active' }],
+      tools: [
+        {
+          id: 't1',
+          orgId: 'org-1',
+          templateId: 'tpl1',
+          awardedCompetencyIds: ['c1'],
+          manifest: { parts: [{ key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'] }] },
+          locationPartKeys: {},
+          assessorStreamCompetencyIds: {},
+          createdAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      ],
+      templates: [{ id: 'tpl1', orgId: 'org-1', currentVersionId: 'v1' }],
+      heldLocations: [
+        { membershipId: 'm1', locationId: 'loc1', position: 0 },
+        { membershipId: 'm2', locationId: 'loc1', position: 0 },
+      ],
+      holders: [],
+      comps: [COMP],
+      users: [USER, { id: 'u2', email: 'u2@example.com' }],
+    });
+
+    const result = await sweepOrganization(db, org() as never, NOW);
+
+    expect(result.casesCreated).toBe(2);
+    expect(cases.map((c) => c.candidateUserId).sort()).toEqual(['u1', 'u2']);
   });
 });
 

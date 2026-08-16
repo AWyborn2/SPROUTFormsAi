@@ -21,6 +21,7 @@ import {
 } from '../../lib/data/hooks.js';
 import { CaseStateBadge } from '../statusBadges.js';
 import { RecommendedTrainingList } from '../recommended-training.js';
+import { sourcesLine } from '../../lib/competency-sources.js';
 import type { HeldCompetencyRow, MemberProfile, ProfileAccess } from '../../lib/data/types.js';
 
 /**
@@ -574,6 +575,18 @@ function CompetenciesCard({
               <span className="block text-[11.5px] text-text-tertiary">
                 {competencySubline(c)}
               </span>
+              {/*
+                WHERE the obligation comes from (R5, U8): one comma-joined
+                line, "and" before the last — "Required — from Boddington,
+                Operations and Dozer Operator"; org-scope reads "org-wide".
+                Absent where the API withheld sources (the viewer gate) or
+                nothing names the entry — no line beats a false one.
+              */}
+              {sourcesLine(c.standing, c.sources) && (
+                <span className="block text-[11px] text-text-tertiary">
+                  {sourcesLine(c.standing, c.sources)}
+                </span>
+              )}
             </span>
             <span className="flex flex-none items-center gap-1.5">
               <Badge variant={STANDING_TONE[c.standing]}>{c.standing}</Badge>
