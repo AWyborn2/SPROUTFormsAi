@@ -139,6 +139,10 @@ async function loadImportContext(
     */
     competenciesByName: new Map(competencies.map((c) => [c.name.toLowerCase(), c.id])),
     placement: {
+      // Active Locations only, same as the name map above (U5): a retired
+      // Location is unofferable, and a row naming one was already rejected at
+      // name resolution — the validator's own check is defence-in-depth here.
+      locations: active(locations).map((l) => ({ id: l.id })),
       departments: activeDepartments.map((d) => ({
         id: d.id,
         allowsMultipleRoles: d.allowsMultipleRoles,

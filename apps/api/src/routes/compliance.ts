@@ -5,7 +5,7 @@ import { bestCurrency, competencyCurrency, countsAsHeld } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
-import { requiredCompetencyIdsByUser } from '../lib/standing.js';
+import { competencySourcesByUser, sourceRefs, type CompetencySourceRef } from '../lib/standing.js';
 import { awardingToolByCompetency } from '../lib/requirement-links.js';
 import { db } from '../db.js';
 
@@ -46,6 +46,31 @@ export interface ComplianceGap {
    * by booking an assessment that does not exist.
    */
   hasAwardingAssessment: boolean;
+  /**
+   * WHICH scopes require it of this person, by name (R5, U8) — org, location,
+   * department, role; every contributor on a cross-scope duplicate (AE4), the
+   * legacy role derivation included. Empty on an optional lapse: nothing
+   * requires those, which is exactly what the section says. No viewer gate
+   * here — this whole route is admin/owner-only (the isAdmin check below).
+   */
+  sources: CompetencySourceRef[];
+  /**
+   * The KTD4 visibility outcome: this member has NO location placement, so
+   * the assignment engine can plan no case for them anywhere — the gap is
+   * real but permanently unbookable until somebody places them.
+   *
+   * READ THE WAY THE ENGINE READS IT (review-corrected): raw
+   * `membership_locations`, ANY status. The scope EXPANSION drops retired
+   * locations because a retired site confers no requirements (the U4 split) —
+   * but `decideAssignments` never sees that filter: it takes the membership's
+   * placement rows as they stand, so a member placed only at a closed site
+   * still gets a case booked there. Deriving the marker from the expansion
+   * therefore told an admin "cannot be scheduled — no location placement"
+   * about somebody whose case already exists, which is the one claim this
+   * flag must never make. Retirement changes WHAT is required, not WHERE a
+   * booking can land.
+   */
+  noLocationPlacement: boolean;
 }
 
 /** A member no notification can reach: a flagged address AND no login (R98, R99). */
@@ -86,9 +111,52 @@ complianceRouter.get(
     }
     const userIds = [...new Set(memberships.map((m) => m.userId))];
 
-    // The obligation per person, from the SAME resolver the assignment engine
-    // reads (R103) — required competencies only (R101).
-    const requiredByUser = await requiredCompetencyIdsByUser(db, orgId, userIds);
+    /*
+      ONE ORG-WIDE EXPANSION SERVES THE OBLIGATION HALF OF THE REPORT
+      (review-verified). The batched provenance read answers two questions at
+      once, on one repeatable-read snapshot instead of the two split reads:
+        — WHY each obligation stands (R5, U8): the sources maps themselves,
+          one read for the whole workforce, never a per-member loop.
+        — The obligation per person (R103, required only, R101): the required
+          map's KEYS are exactly the resolver's set — same expansion, same
+          dual read, the legacy role derivation included — so the assignment
+          engine and this report still cannot disagree.
+      WHO CAN BE SCHEDULED is deliberately NOT one of them: it is a question
+      about placement rows, not about scopes. See the read below.
+    */
+    const sourcesByUser = await competencySourcesByUser(db, orgId, userIds);
+    const requiredByUser = new Map<string, Set<string>>();
+    for (const userId of userIds) {
+      requiredByUser.set(userId, new Set(sourcesByUser.get(userId)?.required.keys() ?? []));
+    }
+
+    /*
+      WHO CAN BE SCHEDULED (U8, KTD4) — read the way the ENGINE reads it: raw
+      `membership_locations` over this report's memberships, ANY location
+      status. A member with no placement keeps their gaps (the requirement is
+      real) but the engine can plan no case with nowhere to assess, so their
+      rows carry an explicit marker instead of silently never resolving.
+
+      NOT from the scope expansion (review-corrected). The expansion drops
+      RETIRED locations, because a retired site stops conferring requirements
+      (the U4 split) — but `decideAssignments` reads the membership's
+      placement rows unfiltered, so a member placed only at a retired site
+      still has a case booked there. Marking them "cannot be scheduled" while
+      their case sits open is the flag asserting the opposite of the truth.
+      Retirement governs WHAT is required, never WHERE it can be booked, and
+      this marker is a statement about the latter.
+    */
+    const placements = await db.query.membershipLocations.findMany({
+      where: inArray(
+        schema.membershipLocations.membershipId,
+        memberships.map((m) => m.id),
+      ),
+    });
+    const placedMembershipIds = new Set(placements.map((p) => p.membershipId));
+    const placedUserIds = new Set<string>();
+    for (const membership of memberships) {
+      if (placedMembershipIds.has(membership.id)) placedUserIds.add(membership.userId);
+    }
     const users = await db.query.users.findMany({ where: inArray(schema.users.id, userIds) });
     const nameByUser = new Map(users.map((u) => [u.id, u.name]));
 
@@ -130,6 +198,10 @@ complianceRouter.get(
       competencyId,
       competencyName,
       hasAwardingAssessment: awarding.has(competencyId),
+      // REQUIRED provenance only: gaps are required by definition, and an
+      // optional lapse's empty list is the true answer (nothing requires it).
+      sources: sourceRefs(sourcesByUser.get(userId)?.required.get(competencyId)),
+      noLocationPlacement: !placedUserIds.has(userId),
     });
 
     const expired: ComplianceGap[] = [];

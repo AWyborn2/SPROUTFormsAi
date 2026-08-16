@@ -480,6 +480,13 @@ export interface CompetencyHolder {
    * currency is about the date.
    */
   standing: Standing;
+  /**
+   * WHICH scopes require/recommend the viewed competency of this holder (U8,
+   * R5) — both render on a member under a location AND a role requirement.
+   * ABSENT (not empty) on rows the caller may not read sources for, under the
+   * same per-holder gate as the licence columns.
+   */
+  sources?: CompetencySourceRef[];
   /** Still satisfies a requirement — held, expiring or grace, and not revoked. */
   current: boolean;
   /** Wording for a status worth saying out loud; null when there is nothing. */
@@ -597,12 +604,34 @@ export interface TighteningReviewItem {
   heldRoles: Array<{ id: string; name: string }>;
 }
 
+/**
+ * One scope that requires or recommends a competency of a person (R5, U8) —
+ * "Required — from Boddington, Operations and Dozer Operator". Names only:
+ * captions never show ids, and the org scope renders as "org-wide" rather
+ * than by its name.
+ */
+export interface CompetencySourceRef {
+  scope: 'org' | 'location' | 'department' | 'role';
+  name: string;
+}
+
 /** One person-competency gap on the compliance report (U20). */
 export interface ComplianceGap {
   userId: string;
   name: string;
   competencyId: string;
   competencyName: string;
+  /**
+   * WHICH scopes require it, by name (R5, U8) — every contributor on a
+   * cross-scope duplicate. Optional only for rolling-deploy tolerance; the
+   * API always sends it (empty on an optional lapse: nothing requires those).
+   */
+  sources?: CompetencySourceRef[];
+  /**
+   * The KTD4 marker: this member has NO location placement, so the gap can
+   * never book itself — "cannot be scheduled" until somebody places them.
+   */
+  noLocationPlacement?: boolean;
   /**
    * Whether a BOOKABLE assessment awards this competency, from the shared
    * KTD2 resolver server-side (U8, R7). False is the evidence-only case — a
@@ -726,38 +755,56 @@ export interface TaxonomySettings {
   candidateSelfStartRecommended: boolean;
 }
 
-/* ── Role requirements in competency terms (U6 — R5, R6, R8, KTD9) ────────── */
+/* ── Scope requirements in competency terms (U6 — R1, R5, R6, R9, KTD6) ───── */
+
+/** The four requirement scopes (R1). No others exist. */
+export type RequirementScope = 'org' | 'location' | 'department' | 'role';
 
 /**
- * A Role's stored requirement state, as the editor reads and writes it.
- *
- * The PATH still says `required-assessments` (renaming it would strand a
- * deployed client), but the payload speaks competencies: two tiers plus the
- * legacy tool rows still deriving the old way.
+ * Addresses ONE scope's requirement list (KTD6): the org scope carries no id
+ * (`/taxonomy/requirements/org`), every other scope is `scope + scopeId`
+ * (`/taxonomy/requirements/:scope/:scopeId`).
  */
-export interface RoleRequirements {
+export interface RequirementScopeRef {
+  scope: RequirementScope;
+  /** Present for location/department/role; absent at org scope (KTD6). */
+  scopeId?: string;
+}
+
+/**
+ * A scope's stored requirement state, as the editor reads and writes it.
+ * One shape at all four scopes (KTD6), with the two role-only fields optional:
+ * only roles carry the R50 configured flag and the legacy tool derivation.
+ */
+export interface ScopeRequirementsState {
   /**
-   * The STORED fact (R50), never a row count: a Role emptied of requirements
-   * is configured; one nobody set up is not. Flips only when the REQUIRED
-   * tier is authored — a recommended-only save leaves it false (KTD9).
+   * ROLE SCOPE ONLY — the STORED fact (R50), never a row count: a Role
+   * emptied of requirements is configured; one nobody set up is not. Flips
+   * only when the REQUIRED tier is authored — a recommended-only save leaves
+   * it false. Absent at the other scopes, whose row count is unambiguous
+   * (KTD9 of the inheritance round).
    */
-  configured: boolean;
-  /** Competency ids the Role REQUIRES — compliance-bearing (R5). */
+  configured?: boolean;
+  /** Competency ids the scope REQUIRES — compliance-bearing (R5 prior round; R1/R2 now). */
   required: string[];
-  /** Competency ids the Role RECOMMENDS — visible, never enforced (R6, R13). */
+  /** Competency ids the scope RECOMMENDS — visible, never enforced (R8). */
   recommended: string[];
   /**
-   * Legacy tool ids still deriving requirements the old way (R15) — tools
-   * whose award has not been linked yet. Each exits via the backfill
-   * conversion or the explicit fingerprint-guarded remove (KTD9).
+   * ROLE SCOPE ONLY — legacy tool ids still deriving requirements the old way.
+   * Each exits via the backfill conversion or the explicit fingerprint-guarded
+   * remove. No other scope ever had legacy rows (KTD2/KTD6).
    */
-  awaitingLink: string[];
-  /** The KTD9 stale-edit guard: every write echoes it, a stale echo 409s. */
+  awaitingLink?: string[];
+  /**
+   * The stale-edit guard: every write echoes it, a stale echo 409s. SCOPE-LOCAL
+   * (KTD7) — it hashes only this scope's own rows, so an org save never
+   * invalidates an open role editor.
+   */
   fingerprint: string;
 }
 
-/** The preview/PUT body's tier halves, as the editor sends them. */
-export interface RoleRequirementTiers {
+/** The preview/PUT body's tier halves, as any scope editor sends them. */
+export interface RequirementTiers {
   required: string[];
   recommended: string[];
 }
@@ -777,6 +824,8 @@ export interface RecommendedCompetency {
    * nothing to self-start.
    */
   requestableToolId: string | null;
+  /** The scopes recommending it, by name — "Recommended — from <Location>" (AE5, U8). */
+  sources?: CompetencySourceRef[];
 }
 
 /**
@@ -872,6 +921,14 @@ export interface HeldCompetencyRow {
   licenceNumber: string | null;
   status: CompetencyStatus;
   standing: Standing;
+  /**
+   * The scopes producing that standing, by name (R5, U8). ABSENT — not empty
+   * — when the viewer gate withholds them: sources enumerate the subject's
+   * placement, so the API omits the field from a caller reading a colleague's
+   * record without `profiles.view_competencies` at 'all'. Empty means the
+   * true fact "no scope names this" (an optional entry).
+   */
+  sources?: CompetencySourceRef[];
   /** True while it still satisfies a requirement — held, expiring or grace. */
   current: boolean;
   expiresAt: string | null;

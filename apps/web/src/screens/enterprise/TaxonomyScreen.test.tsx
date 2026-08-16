@@ -2,9 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import type {
-  Competency,
   RetirementReview,
-  RoleRequirements,
   Taxonomy,
   TighteningReviewItem,
 } from '../../lib/data/types.js';
@@ -30,58 +28,6 @@ const updateSettings = vi.fn();
 const tighteningReview: { data: TighteningReviewItem[] | undefined } = { data: undefined };
 /** The retirement-review query result (U18); empty by default so no panel shows. */
 const retirementReview: { data: RetirementReview | undefined } = { data: undefined };
-const tools: { data: Array<{ id: string; name: string }> } = { data: [] };
-/** The org register the two toggle grids render over (U6). */
-const competencies: { data: Competency[] } = { data: [] };
-const roleRequirements: { data: RoleRequirements | undefined } = { data: undefined };
-const refetchRequirements = vi.fn();
-// The preview mutation resolves with the effects the confirmation panel shows
-// — COMPETENCY terms since U3's effects rename.
-const previewEffects: { value: Record<string, unknown> } = {
-  value: {
-    addedCompetencyIds: ['c-a'],
-    removedCompetencyIds: [],
-    affected: 3,
-    created: 2,
-    inFlightContinuing: 0,
-    competenciesDemoting: 0,
-  },
-};
-const previewRequirements = vi.fn(
-  (
-    _body: Record<string, unknown>,
-    opts?: { onSuccess?: (r: { effects: Record<string, unknown> }) => void },
-  ) => opts?.onSuccess?.({ effects: previewEffects.value }),
-);
-/** Set to make the next save/remove fail — e.g. the KTD9 stale 409. */
-const writeError: { value: unknown } = { value: null };
-const setRequirements = vi.fn(
-  (
-    _body: Record<string, unknown>,
-    opts?: { onSuccess?: () => void; onError?: (e: unknown) => void },
-  ) => (writeError.value ? opts?.onError?.(writeError.value) : opts?.onSuccess?.()),
-);
-const removeLegacy = vi.fn(
-  (
-    _input: Record<string, unknown>,
-    opts?: { onSuccess?: () => void; onError?: (e: unknown) => void },
-  ) => (writeError.value ? opts?.onError?.(writeError.value) : opts?.onSuccess?.()),
-);
-const createCompetency = vi.fn(
-  (
-    input: { name: string; code: string | null },
-    opts?: { onSuccess?: (added: Competency) => void },
-  ) =>
-    opts?.onSuccess?.({
-      id: 'c-new',
-      name: input.name,
-      code: input.code,
-      holders: 0,
-      validForMonths: null,
-      gracePeriodDays: null,
-      color: 'var(--accent)',
-    }),
-);
 
 vi.mock('../../lib/data/hooks.js', () => ({
   useTaxonomy: () => taxonomy,
@@ -99,18 +45,25 @@ vi.mock('../../lib/data/hooks.js', () => ({
   useTransferLocation: () => ({ mutate: transferLocation, isPending: false }),
   useTransferRole: () => ({ mutate: transferRole, isPending: false }),
   useUpdateTaxonomySettings: () => ({ mutate: updateSettings }),
-  useAssessmentTools: () => tools,
-  useCompetencies: () => competencies,
-  useCreateCompetency: () => ({ mutate: createCompetency, isPending: false }),
-  useRoleRequiredAssessments: () => ({ ...roleRequirements, refetch: refetchRequirements }),
-  usePreviewRoleRequiredAssessments: () => ({ mutate: previewRequirements, isPending: false }),
-  useSetRoleRequiredAssessments: () => ({ mutate: setRequirements, isPending: false }),
-  useRemoveLegacyRequirement: () => ({ mutate: removeLegacy, isPending: false }),
 }));
 
-/** The awaitingLink "link me" pointer navigates to the register's backfill panel (U6). */
-const navigate = vi.fn();
-vi.mock('react-router-dom', () => ({ useNavigate: () => navigate }));
+/*
+  The requirements editor is ITS OWN component since the U6 extraction — its
+  behaviour lives in ScopeRequirements.test.tsx. Here it is stubbed to a
+  marker so this suite pins exactly what the SCREEN owns: that an editor is
+  MOUNTED for every scope, addressed with the right target (R1, R9).
+*/
+vi.mock('./ScopeRequirements.js', () => ({
+  ScopeRequirements: ({
+    target,
+  }: {
+    target: { scope: string; scopeId?: string; name: string; departmentId?: string };
+  }) => (
+    <div>{`requirements-editor:${target.scope}:${target.scopeId ?? ''}:${target.name}${
+      target.departmentId ? `:dep=${target.departmentId}` : ''
+    }`}</div>
+  ),
+}));
 
 const toast = vi.fn();
 vi.mock('@formai/ui', async () => {
@@ -138,41 +91,12 @@ function base(): Taxonomy {
   };
 }
 
-/** A register entry for the requirement grids. */
-function comp(id: string, name: string, code: string | null = null): Competency {
-  return { id, name, code, holders: 0, validForMonths: null, gracePeriodDays: null, color: 'var(--accent)' };
-}
-
-/** An empty, never-configured requirement read with a stable fingerprint. */
-function requirementState(over: Partial<RoleRequirements> = {}): RoleRequirements {
-  return {
-    configured: false,
-    required: [],
-    recommended: [],
-    awaitingLink: [],
-    fingerprint: 'fp-1',
-    ...over,
-  };
-}
-
 afterEach(() => {
   vi.clearAllMocks();
   taxonomy.data = undefined;
   taxonomy.isLoading = false;
-  tools.data = [];
-  competencies.data = [];
-  roleRequirements.data = undefined;
   tighteningReview.data = undefined;
   retirementReview.data = undefined;
-  writeError.value = null;
-  previewEffects.value = {
-    addedCompetencyIds: ['c-a'],
-    removedCompetencyIds: [],
-    affected: 3,
-    created: 2,
-    inFlightContinuing: 0,
-    competenciesDemoting: 0,
-  };
 });
 
 const withOneRole = (roleOver: Record<string, unknown> = {}): Taxonomy => ({
@@ -286,238 +210,41 @@ describe('TaxonomyScreen', () => {
   });
 });
 
-describe('TaxonomyScreen — a Role’s requirements in competency terms (U6)', () => {
-  const openEditor = () =>
-    fireEvent.click(screen.getByLabelText('Requirements for Dozer Operator'));
-  const REGISTER = [comp('c-a', 'ATO - Track Dozer', 'Q34666893'), comp('c-b', 'First Aid')];
-
-  it('shows "not set up" apart from "requires nothing" (R50)', () => {
-    taxonomy.data = withOneRole();
-
-    roleRequirements.data = requirementState({ configured: false });
-    const { rerender } = render(<TaxonomyScreen />);
-    expect(screen.getByText(/not set up/)).toBeDefined();
-
-    roleRequirements.data = requirementState({ configured: true });
-    rerender(<TaxonomyScreen />);
-    expect(screen.getByText(/requires nothing/)).toBeDefined();
-  });
-
-  it('renders the two tiers over the register with the code chip (R5, R6)', () => {
-    taxonomy.data = withOneRole();
-    competencies.data = REGISTER;
-    roleRequirements.data = requirementState();
+describe('TaxonomyScreen — a requirements editor mounts at every scope (U6, R1, R9)', () => {
+  it('mounts the org editor in its own panel between Settings and Locations', () => {
+    taxonomy.data = base();
     render(<TaxonomyScreen />);
-    openEditor();
-
-    expect(screen.getByLabelText('Require ATO - Track Dozer for Dozer Operator')).toBeDefined();
-    expect(screen.getByLabelText('Recommend ATO - Track Dozer for Dozer Operator')).toBeDefined();
-    // The nationally-recognised code rides the chip (twice — once per tier).
-    expect(screen.getAllByText('Q34666893').length).toBe(2);
+    const heading = screen.getByText('Organisation-wide requirements');
+    expect(screen.getByText('requirements-editor:org::the organisation')).toBeDefined();
+    // Between Settings and Locations: after the settings heading, before the
+    // locations heading, in document order (U6's placement).
+    const settings = screen.getByText('Organisation settings');
+    const locations = screen.getByText('Locations');
+    expect(settings.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(heading.compareDocumentPosition(locations) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('previews a required change in competency terms, then applies with the fingerprint (R8, KTD9)', () => {
-    taxonomy.data = withOneRole();
-    competencies.data = REGISTER;
-    roleRequirements.data = requirementState();
-    render(<TaxonomyScreen />);
-    openEditor();
-
-    fireEvent.click(screen.getByLabelText('Require ATO - Track Dozer for Dozer Operator'));
-    // A required edit goes through a preview first — nothing is written yet.
-    fireEvent.click(screen.getByRole('button', { name: 'Review change' }));
-    expect(previewRequirements).toHaveBeenCalledWith(
-      { required: ['c-a'], recommended: [] },
-      expect.anything(),
-    );
-    expect(setRequirements).not.toHaveBeenCalled();
-
-    // The blast radius is shown in competency terms; confirming applies it,
-    // echoing the GET's fingerprint (KTD9).
-    expect(screen.getByText(/Adds 1 competency: affects 3 people, creating 2 cases/)).toBeDefined();
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm change' }));
-    expect(setRequirements).toHaveBeenCalledWith(
-      { required: ['c-a'], recommended: [], fingerprint: 'fp-1' },
-      expect.anything(),
-    );
-  });
-
-  it('abandons the change on cancel, writing nothing (R86)', () => {
-    taxonomy.data = withOneRole();
-    competencies.data = REGISTER;
-    roleRequirements.data = requirementState();
-    render(<TaxonomyScreen />);
-    openEditor();
-
-    fireEvent.click(screen.getByLabelText('Require ATO - Track Dozer for Dozer Operator'));
-    fireEvent.click(screen.getByRole('button', { name: 'Review change' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-
-    expect(setRequirements).not.toHaveBeenCalled();
-    // Back to the review affordance, nothing committed.
-    expect(screen.getByRole('button', { name: 'Review change' })).toBeDefined();
-  });
-
-  it('describes a removal by what it changes, not what it creates (R85)', () => {
-    previewEffects.value = {
-      addedCompetencyIds: [],
-      removedCompetencyIds: ['c-a'],
-      affected: 4,
-      created: 0,
-      inFlightContinuing: 2,
-      competenciesDemoting: 3,
+  it('mounts one editor per Location row, carrying its retired state', () => {
+    taxonomy.data = {
+      ...base(),
+      locations: [
+        { id: 'loc-1', name: 'Boddington', status: 'active', createdAt: '' },
+        { id: 'loc-2', name: 'Old Pit', status: 'retired', createdAt: '' },
+      ],
     };
-    taxonomy.data = withOneRole();
-    competencies.data = REGISTER;
-    roleRequirements.data = requirementState({ configured: true, required: ['c-a'] });
     render(<TaxonomyScreen />);
-    openEditor();
-
-    // Deselect the only required competency, then review.
-    fireEvent.click(screen.getByLabelText('Require ATO - Track Dozer for Dozer Operator'));
-    fireEvent.click(screen.getByRole('button', { name: 'Review change' }));
-
-    expect(screen.getByText(/2 cases already in progress will run to completion/)).toBeDefined();
-    expect(screen.getByText(/3 competency standings become optional/)).toBeDefined();
-    // A removal never advertises a creation count.
-    expect(screen.queryByText(/creating/)).toBeNull();
+    expect(screen.getByText('requirements-editor:location:loc-1:Boddington')).toBeDefined();
+    expect(screen.getByText('requirements-editor:location:loc-2:Old Pit')).toBeDefined();
   });
 
-  it('saves a recommended-only edit directly, with no preview gate (R13)', () => {
-    // Recommending enforces nothing — no blast radius exists to confirm — and
-    // on a fresh Role the save leaves `configured` alone server-side (KTD9);
-    // the client simply sends the tiers as edited.
+  it('mounts the Department editor above its Roles, and the Role editor named with its department (R3, R9)', () => {
     taxonomy.data = withOneRole();
-    competencies.data = REGISTER;
-    roleRequirements.data = requirementState({ configured: false });
     render(<TaxonomyScreen />);
-    openEditor();
-
-    fireEvent.click(screen.getByLabelText('Recommend First Aid for Dozer Operator'));
-    expect(screen.queryByRole('button', { name: 'Review change' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-
-    expect(previewRequirements).not.toHaveBeenCalled();
-    expect(setRequirements).toHaveBeenCalledWith(
-      { required: [], recommended: ['c-b'], fingerprint: 'fp-1' },
-      expect.anything(),
-    );
-  });
-
-  it('blocks a tier overlap client-side — selecting in one tier moves it out of the other (KTD1)', () => {
-    taxonomy.data = withOneRole();
-    competencies.data = REGISTER;
-    roleRequirements.data = requirementState();
-    render(<TaxonomyScreen />);
-    openEditor();
-
-    // Require it, then recommend it: one row per (role, competency), so the
-    // second click MOVES it rather than doubling it — the save can never hit
-    // the 400 `tiers_overlap`.
-    fireEvent.click(screen.getByLabelText('Require First Aid for Dozer Operator'));
-    fireEvent.click(screen.getByLabelText('Recommend First Aid for Dozer Operator'));
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-
-    expect(setRequirements).toHaveBeenCalledWith(
-      { required: [], recommended: ['c-b'], fingerprint: 'fp-1' },
-      expect.anything(),
-    );
-  });
-
-  it('reloads the editor with a notice on a stale-fingerprint 409 (KTD9)', () => {
-    writeError.value = new ApiError(409, { error: 'requirements_changed' });
-    taxonomy.data = withOneRole();
-    competencies.data = REGISTER;
-    roleRequirements.data = requirementState();
-    render(<TaxonomyScreen />);
-    openEditor();
-
-    fireEvent.click(screen.getByLabelText('Require ATO - Track Dozer for Dozer Operator'));
-    fireEvent.click(screen.getByRole('button', { name: 'Review change' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm change' }));
-
-    // The other change survives: the editor refetches, drops the draft, and
-    // says why — never a silent overwrite.
-    expect(refetchRequirements).toHaveBeenCalled();
-    expect(screen.getByText(/Requirements changed elsewhere/)).toBeDefined();
-    expect(screen.queryByRole('button', { name: 'Confirm change' })).toBeNull();
-  });
-
-  it('creates a competency inline and selects it in the chosen tier (R5)', () => {
-    taxonomy.data = withOneRole();
-    competencies.data = REGISTER;
-    roleRequirements.data = requirementState();
-    render(<TaxonomyScreen />);
-    openEditor();
-
-    fireEvent.click(screen.getByLabelText('Create a competency for Dozer Operator'));
-    fireEvent.change(screen.getByLabelText('Competency name'), { target: { value: 'Grade Control' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create & require' }));
-
-    expect(createCompetency).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'Grade Control', code: null }),
-      expect.anything(),
-    );
-    // Pickable immediately, and already selected in the required tier.
-    expect(
-      screen.getByLabelText('Require Grade Control for Dozer Operator').getAttribute('aria-pressed'),
-    ).toBe('true');
-  });
-
-  it('renders awaitingLink rows with link-me and a previewed remove (R15, KTD9)', () => {
-    previewEffects.value = {
-      addedCompetencyIds: [],
-      removedCompetencyIds: [],
-      affected: 2,
-      created: 0,
-      inFlightContinuing: 1,
-      competenciesDemoting: 0,
-    };
-    taxonomy.data = withOneRole();
-    competencies.data = REGISTER;
-    tools.data = [{ id: 'tool-l', name: 'Site Familiarisation v2' }];
-    roleRequirements.data = requirementState({ configured: true, awaitingLink: ['tool-l'] });
-    render(<TaxonomyScreen />);
-    openEditor();
-
-    // The legacy row is named by TOOL NAME, never a raw id.
-    expect(screen.getByText('Site Familiarisation v2')).toBeDefined();
-
-    // Link-me points the admin at the backfill panel on the register (U4) —
-    // one linking flow, not a duplicate here.
-    fireEvent.click(screen.getByLabelText('Link the award for Site Familiarisation v2'));
-    expect(navigate).toHaveBeenCalledWith('/app/competency');
-
-    // Remove confirms through the SAME preview door (KTD9, KTD10)…
-    fireEvent.click(screen.getByLabelText('Remove legacy requirement Site Familiarisation v2'));
-    expect(previewRequirements).toHaveBeenCalledWith(
-      { required: [], recommended: [], removeLegacyToolIds: ['tool-l'] },
-      expect.anything(),
-    );
-    expect(removeLegacy).not.toHaveBeenCalled();
-    expect(screen.getByText(/1 case already in progress will run to completion/)).toBeDefined();
-
-    // …and only the confirm calls the fingerprint-guarded DELETE.
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm removal' }));
-    expect(removeLegacy).toHaveBeenCalledWith(
-      { toolId: 'tool-l', fingerprint: 'fp-1' },
-      expect.anything(),
-    );
-  });
-
-  it('reads only for a retired Role — no toggles, no review (R121)', () => {
-    taxonomy.data = withOneRole({ status: 'retired' });
-    competencies.data = REGISTER;
-    roleRequirements.data = requirementState({ configured: true, required: ['c-a'] });
-    render(<TaxonomyScreen />);
-    openEditor();
-
-    expect(screen.getByText(/no new requirements/)).toBeDefined();
-    expect(screen.queryByRole('button', { name: 'Review change' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
-    expect(
-      screen.getByLabelText('Require ATO - Track Dozer for Dozer Operator'),
-    ).toHaveProperty('disabled', true);
+    const dep = screen.getByText('requirements-editor:department:dep-1:Operations');
+    // The role target carries departmentId — the inherited-population premise
+    // the role editor's locked context is modelled on (R3).
+    const role = screen.getByText('requirements-editor:role:role-1:Dozer Operator:dep=dep-1');
+    expect(dep.compareDocumentPosition(role) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 

@@ -1,6 +1,7 @@
 import type { ReactElement, ReactNode } from 'react';
 import { Button, useToast } from '@formai/ui';
 import { useMyRecommended, useRequestTraining } from '../lib/data/hooks.js';
+import { sourcesLine } from '../lib/competency-sources.js';
 
 /**
  * Unheld recommendations, shared by the two surfaces that show them — the
@@ -38,11 +39,23 @@ export function RecommendedTrainingList({
         key={r.competencyId}
         className="flex items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2"
       >
-        <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-[13px] font-semibold">{r.name}</span>
-          {r.code && (
-            <span className="flex-none font-mono text-[10.5px] uppercase tracking-wide text-text-tertiary">
-              {r.code}
+        <span className="min-w-0">
+          <span className="flex items-center gap-2">
+            <span className="truncate text-[13px] font-semibold">{r.name}</span>
+            {r.code && (
+              <span className="flex-none font-mono text-[10.5px] uppercase tracking-wide text-text-tertiary">
+                {r.code}
+              </span>
+            )}
+          </span>
+          {/*
+            WHO recommends it (AE5, R5): "Recommended — from <Location>". A
+            self-scope read, so the sources always arrive — but stay defensive
+            about an empty list rather than rendering a dangling "from".
+          */}
+          {sourcesLine('recommended', r.sources) && (
+            <span className="block text-[11px] text-text-tertiary">
+              {sourcesLine('recommended', r.sources)}
             </span>
           )}
         </span>

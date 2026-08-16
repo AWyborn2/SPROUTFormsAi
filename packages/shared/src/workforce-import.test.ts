@@ -24,6 +24,7 @@ const COMP_UNAWARDED = 'comp-hr-licence';
 /** Ops offers Dozer + Grader and allows a single Role; Raw Materials is the one Location. */
 function makeCtx(over: Partial<ImportContext> = {}): ImportContext {
   const placement: PlacementContext = {
+    locations: [{ id: LOC }],
     departments: [{ id: DEPT, allowsMultipleRoles: false }],
     roles: [
       { id: ROLE_DOZER, departmentId: DEPT },

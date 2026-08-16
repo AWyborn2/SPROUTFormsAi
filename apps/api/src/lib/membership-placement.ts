@@ -18,7 +18,13 @@ export interface PlacementInput {
 
 /** The organisation's ACTIVE taxonomy — the offer sets and count rules the validator reads. */
 export async function loadPlacementContext(db: DbOrTx, orgId: string): Promise<PlacementContext> {
-  const [departments, roles] = await Promise.all([
+  const [locations, departments, roles] = await Promise.all([
+    // Locations joined the offer set when they started conferring requirements
+    // (U5/KTD8): a retired Location must be refusable exactly like a retired
+    // Role, so the validator now needs to know which Locations are offerable.
+    db.query.locations.findMany({
+      where: and(eq(schema.locations.orgId, orgId), eq(schema.locations.status, 'active')),
+    }),
     db.query.departments.findMany({
       where: and(eq(schema.departments.orgId, orgId), eq(schema.departments.status, 'active')),
     }),
@@ -27,15 +33,17 @@ export async function loadPlacementContext(db: DbOrTx, orgId: string): Promise<P
     }),
   ]);
   return {
+    locations: locations.map((l) => ({ id: l.id })),
     departments: departments.map((d) => ({ id: d.id, allowsMultipleRoles: d.allowsMultipleRoles })),
     roles: roles.map((r) => ({ id: r.id, departmentId: r.departmentId })),
   };
 }
 
 /**
- * Widen a base taxonomy to also admit the Roles this member currently HOLDS
- * (withdrawnAt IS NULL) and the Departments those Roles belong to — regardless
- * of either's status.
+ * Widen a base taxonomy to also admit what this member currently HOLDS: their
+ * non-withdrawn Roles and the Departments those Roles belong to, and — since
+ * Locations joined the offer set (U5) — the Locations they are currently
+ * placed at. All regardless of status.
  *
  * Retiring a Role leaves it held on the record of anyone already placed in it
  * (R119: retirement withdraws nobody); it only bars NEW placements. So an Admin
@@ -45,6 +53,12 @@ export async function loadPlacementContext(db: DbOrTx, orgId: string): Promise<P
  * withdraw a Role retirement was never meant to remove. Admitting what the
  * member already holds keeps the edit idempotent for it, while a newly-added
  * retired Role — not held, so not admitted — is still refused.
+ *
+ * HELD LOCATIONS get the mirror-image treatment (U5): a member already AT a
+ * since-retired Location survives an unrelated placement edit — the retired
+ * Location rides along admitted — while placing anyone NEW onto it reads
+ * `unknown_location` (a 400), because a Location now confers requirements and
+ * a retired one confers nothing (the U4 split).
  *
  * The per-Department too_many_roles cap is unaffected: an admitted Department
  * carries its own allowsMultipleRoles setting, retired or not, so the count is
@@ -56,14 +70,27 @@ export async function admitHeldRoles(
   membershipId: string,
   base: PlacementContext,
 ): Promise<PlacementContext> {
+  const heldLocationRows = await db.query.membershipLocations.findMany({
+    where: eq(schema.membershipLocations.membershipId, membershipId),
+  });
   const held = await db.query.membershipRoles.findMany({
     where: and(
       eq(schema.membershipRoles.membershipId, membershipId),
       isNull(schema.membershipRoles.withdrawnAt),
     ),
   });
+
+  // Union by id: a value offered actively AND held collapses to one entry (both
+  // reads are the same row, so the overlay is a no-op there); a held-only value
+  // is what the widening adds. Locations need no status read at all — the id
+  // alone is the admission, since the context carries nothing else for one.
+  const locations = new Map(base.locations.map((l) => [l.id, l]));
+  for (const row of heldLocationRows) locations.set(row.locationId, { id: row.locationId });
+
   const heldRoleIds = held.map((r) => r.roleId);
-  if (heldRoleIds.length === 0) return base;
+  if (heldRoleIds.length === 0) {
+    return { ...base, locations: [...locations.values()] };
+  }
 
   const heldRoles = await db.query.jobRoles.findMany({
     where: and(eq(schema.jobRoles.orgId, orgId), inArray(schema.jobRoles.id, heldRoleIds)),
@@ -78,9 +105,6 @@ export async function admitHeldRoles(
       })
     : [];
 
-  // Union by id: a value offered actively AND held collapses to one entry (both
-  // reads are the same row, so the overlay is a no-op there); a held-only value
-  // is what the widening adds.
   const roles = new Map(base.roles.map((r) => [r.id, r]));
   for (const r of heldRoles) roles.set(r.id, { id: r.id, departmentId: r.departmentId });
 
@@ -89,7 +113,11 @@ export async function admitHeldRoles(
     departments.set(d.id, { id: d.id, allowsMultipleRoles: d.allowsMultipleRoles });
   }
 
-  return { departments: [...departments.values()], roles: [...roles.values()] };
+  return {
+    locations: [...locations.values()],
+    departments: [...departments.values()],
+    roles: [...roles.values()],
+  };
 }
 
 /** A member's current placement. Roles are the HELD set only (withdrawnAt IS NULL). */
