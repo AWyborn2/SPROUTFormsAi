@@ -892,13 +892,24 @@ export function resolveLocationParts(
 }
 
 /**
- * The fields belonging to the section opened by `headerFieldId` — everything
- * after that header up to the next `section_header`, header excluded.
+ * The fields belonging to the section anchored by `headerFieldId` — from the
+ * anchor up to the next `section_header`.
  *
- * This is the same header-to-next-header rule `visibility.ts` applies to
- * section scope. It lives here too because part membership and mandatory-section
+ * THE ANCHOR IS INCLUDED WHEN IT IS A REAL FIELD, EXCLUDED WHEN IT IS THE
+ * SECTION'S HEADING. A part anchors on its `section_header` where the section
+ * has one, and on its FIRST FILLABLE FIELD where it does not — a section an
+ * author built by grouping has no printed heading to point at. Slicing
+ * unconditionally from after the anchor was correct only for the header case:
+ * on a header-less logbook section the anchor IS the table, so skipping it left
+ * the table out of its own section — the column picker then offered a
+ * neighbour's fields and the validator reported the declared duration column
+ * "is not a column of its table". Keeping a non-header anchor puts the section's
+ * own first field back where it belongs.
+ *
+ * This mirrors the header-to-next-header rule `visibility.ts` applies to section
+ * scope. It lives here too because part membership and mandatory-section
  * membership are structural questions asked outside visibility evaluation, and
- * an unknown header returns nothing rather than the whole form: a manifest
+ * an unknown anchor returns nothing rather than the whole form: a manifest
  * pointing at a field that no longer exists must yield an empty section, never
  * silently claim every field in the document.
  */
@@ -909,10 +920,12 @@ export function fieldsInSection(
   const start = fields.findIndex((f) => f.id === headerFieldId);
   if (start < 0) return [];
 
+  const anchorIsHeader = fields[start]!.type === 'section_header';
   const out: FormField[] = [];
-  for (let i = start + 1; i < fields.length; i++) {
+  for (let i = anchorIsHeader ? start + 1 : start; i < fields.length; i++) {
     const field = fields[i]!;
-    if (field.type === 'section_header') break;
+    // The anchor never terminates its own section; only a LATER header does.
+    if (i !== start && field.type === 'section_header') break;
     out.push(field);
   }
   return out;
