@@ -418,8 +418,15 @@
     {
       "idx": 59,
       "version": "7",
-      "when": 1786687336946,
-      "tag": "0059_worried_silver_sable",
+      "when": 1786685614272,
+      "tag": "0059_easy_grey_gargoyle",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1786700000000,
+      "tag": "0060_worried_silver_sable",
       "breakpoints": true
     }
   ]

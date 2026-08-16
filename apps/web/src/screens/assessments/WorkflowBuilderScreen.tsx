@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { Button, Icon, useToast } from '@formai/ui';
+import { Button, Icon, Switch, useToast } from '@formai/ui';
 import {
   ACCESS_LEVELS,
   PROFILE_PREFILL_KEYS,
   PROFILE_PREFILL_LABELS,
   VALUE_SOURCES,
+  WORKFLOW_ROLES,
   effectiveAccess,
   fieldsInPart,
   orderedParts,
@@ -29,6 +30,8 @@ import {
   useSaveWorkflow,
   useSetLocationParts,
   useSession,
+  useTaxonomy,
+  useUpdateTaxonomySettings,
 } from '../../lib/data/hooks.js';
 import type { AssessmentToolDetail } from '../../lib/data/assessments.js';
 import { groupFieldsByHeading, totalFields } from './workflow-groups.js';
@@ -53,7 +56,32 @@ const ROLE_LABELS: Record<WorkflowRole, string> = {
   candidate: 'Candidate',
   assessor: 'Assessor',
   supervisor: 'Supervisor',
+  sme: 'SME',
 };
+
+/** Sign-off parties an author opts a workflow into; candidate + assessor are always present. */
+const OPTIONAL_ROLES: readonly WorkflowRole[] = ['supervisor', 'sme'];
+
+/**
+ * Add or drop an optional sign-off role. Adding restores canonical role order so
+ * columns read the same however they were toggled. Dropping also strips the
+ * role from every section's access — a role named in `access` but absent from
+ * `roles` is a hard `validateWorkflow` problem, so the two must move together.
+ */
+function toggleRole(w: AssessmentWorkflow, role: WorkflowRole, on: boolean): void {
+  if (on) {
+    const set = new Set([...w.roles, role]);
+    w.roles = WORKFLOW_ROLES.filter((r) => set.has(r));
+    return;
+  }
+  w.roles = w.roles.filter((r) => r !== role);
+  for (const s of w.sections) {
+    delete s.access[role];
+    if (s.fieldAccess) {
+      for (const fid of Object.keys(s.fieldAccess)) delete s.fieldAccess[fid]![role];
+    }
+  }
+}
 
 const ACCESS_LABELS: Record<AccessLevel, string> = {
   hidden: 'Hidden',
@@ -138,6 +166,17 @@ export function WorkflowBuilderScreen() {
   const { data: tool, isLoading, isError } = useAssessmentTool(toolId);
   const { data: session } = useSession();
   const save = useSaveWorkflow(toolId);
+  /*
+    THE ORG'S SIGN-OFF POLICY, MIRRORED WHERE SIGN-OFF IS ASSIGNED. The
+    labelled-signoff setting also lives on the Organisation settings card, but
+    an admin deciding who signs a part is exactly who needs to say whether that
+    signature can be applied on the person's behalf — so it is shown here too,
+    beside the roles that make it matter. It writes the same org-wide setting
+    from both places; there is no per-tool copy to drift.
+  */
+  const taxonomy = useTaxonomy();
+  const updateSettings = useUpdateTaxonomySettings();
+  const canEditSignoffPolicy = session?.role === 'admin' || session?.role === 'owner';
   /*
     WHERE EACH PREFILLED VALUE COMES FROM, held apart from the workflow draft.
 
@@ -292,6 +331,78 @@ export function WorkflowBuilderScreen() {
             The order below is the order the work HAPPENS. It does not move anything on the printed
             document — that stays as the paper prints it.
           </p>
+          {/*
+            Which sign-off parties this workflow uses. Candidate and assessor are
+            always present; turning on Supervisor or SME adds an access column so
+            an author can say who signs a given part (its signature field set to
+            that role's Fill). Whether that signature may be applied by on-case
+            staff or must be the person's own login is the org's policy.
+          */}
+          <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-text-tertiary">Sign-off roles</span>
+            {OPTIONAL_ROLES.map((role) => {
+              const on = workflow.roles.includes(role);
+              return (
+                <button
+                  key={role}
+                  type="button"
+                  role="checkbox"
+                  aria-checked={on}
+                  aria-label={`Use the ${ROLE_LABELS[role]} sign-off role`}
+                  onClick={() => edit((w) => toggleRole(w, role, !on))}
+                  className={`rounded-lg border px-2.5 py-1 text-[11px] ${
+                    on
+                      ? 'border-accent bg-surface-accent-soft font-semibold text-text-accent'
+                      : 'border-border text-text-secondary hover:bg-surface-hover'
+                  }`}
+                >
+                  {ROLE_LABELS[role]}
+                </button>
+              );
+            })}
+            <span className="text-[11px] text-text-tertiary">
+              — adds a column to set who signs a part
+            </span>
+          </div>
+          {/*
+            THE ORG POLICY, SHOWN WHERE IT BITES. Only once a labelled role is
+            in play — a workflow with just candidate and assessor never applies
+            a signature on someone's behalf, so the setting would be noise.
+            Admins edit it; everyone else sees the policy read-only.
+          */}
+          {OPTIONAL_ROLES.some((r) => workflow.roles.includes(r)) && taxonomy.data && (
+            <label className="mt-2 flex max-w-[62ch] items-start gap-2">
+              <Switch
+                checked={taxonomy.data.settings.allowLabelledSignoff}
+                disabled={!canEditSignoffPolicy || updateSettings.isPending}
+                aria-label="Supervisor / SME sign-off by labelled signature"
+                onChange={(e) =>
+                  updateSettings.mutate(
+                    { allowLabelledSignoff: e.target.checked },
+                    {
+                      onError: () =>
+                        toast({
+                          variant: 'warning',
+                          message: 'Could not change the sign-off policy — try again.',
+                        }),
+                    },
+                  )
+                }
+              />
+              <span className="text-[11.5px] leading-snug text-text-secondary">
+                <strong className="text-text-primary">Labelled sign-off</strong>{' '}
+                <span className="text-text-tertiary">(organisation-wide)</span> —{' '}
+                {taxonomy.data.settings.allowLabelledSignoff
+                  ? 'on-case staff can apply a supervisor’s or SME’s signature on their behalf, so the case never waits for a third person to log in.'
+                  : 'these signatures must be the named person’s own login (coming soon), so a part they sign waits for them.'}
+                {!canEditSignoffPolicy && (
+                  <span className="block text-text-tertiary">
+                    Only an admin or owner can change this.
+                  </span>
+                )}
+              </span>
+            </label>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/*

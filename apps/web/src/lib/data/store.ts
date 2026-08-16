@@ -18,6 +18,7 @@
  */
 import type { ImportSnapshot } from './import-draft-store.js';
 import type {
+  AuditResult,
   BrandingKit,
   FormBrand,
   FormBrandInput,
@@ -35,6 +36,7 @@ import { geometrySegments, ROLE_LABELS } from '@formai/shared';
 import { ApiError, apiClient } from './api-client.js';
 import { ROLE_NAMES } from './types.js';
 import type {
+  AuditFormInput,
   BuilderDraftDetail,
   BuilderDraftSummary,
   SaveBuilderDraftInput,
@@ -789,6 +791,15 @@ export const store = {
 
   discardBuilderDraft(id: string): Promise<void> {
     return apiClient.delete<void>(`${BUILDER_DRAFTS}/${id}`).then(() => undefined);
+  },
+
+  /**
+   * The secondary-extraction pass — ask the server for printed input areas the
+   * first extraction produced no field for, given the labels already in the
+   * draft. A review aid the author runs on demand; never applied on its own.
+   */
+  auditForm(input: AuditFormInput): Promise<AuditResult> {
+    return apiClient.post<AuditResult>('/pdf/audit', input);
   },
 
   archiveForm(id: string): Promise<FormSummary> {

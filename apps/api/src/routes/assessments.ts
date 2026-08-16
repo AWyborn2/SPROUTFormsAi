@@ -23,6 +23,7 @@ import {
   ACCESS_LEVELS,
   VALUE_SOURCES,
   WORKFLOW_ROLES,
+  STAFF_WORKFLOW_ROLES,
   orderedParts,
   requiredParts,
   resolveAssessorRequirements,
@@ -147,6 +148,41 @@ async function selfAssessmentAllowed(database: Database, orgId: string): Promise
     where: eq(schema.organizations.id, orgId),
   });
   return org?.allowSelfAssessment ?? false;
+}
+
+/**
+ * The org's labelled-sign-off policy: whether on-case staff may apply a
+ * supervisor's or SME's signature on their behalf (defaults on). Off means
+ * those parts wait for that person's own login — a capability not yet built,
+ * so off currently just leaves supervisor/SME-assigned fields to nobody, as
+ * before this feature.
+ */
+async function labelledSignoffAllowed(database: Database, orgId: string): Promise<boolean> {
+  const org = await database.query.organizations.findFirst({
+    where: eq(schema.organizations.id, orgId),
+  });
+  return org?.allowLabelledSignoff ?? true;
+}
+
+/**
+ * The workflow parties whose fill access this caller holds on a part.
+ *
+ * The candidate is only ever the candidate. On-case STAFF hold the assessor's
+ * access and — when the org allows labelled sign-off — the supervisor's and
+ * SME's too, so one person can apply those signatures the way they sign the
+ * paper on someone's behalf. A self-assessor is both the candidate and staff.
+ * With labelled sign-off off, staff resolve to the assessor alone, so a
+ * supervisor/SME field is left to nobody rather than signed by the wrong party.
+ */
+export function fillParties(opts: {
+  party: WorkflowRole;
+  selfAssessing: boolean;
+  labelled: boolean;
+}): WorkflowRole[] {
+  const staff: WorkflowRole[] = opts.labelled ? [...STAFF_WORKFLOW_ROLES] : ['assessor'];
+  if (opts.selfAssessing) return ['candidate', ...staff];
+  if (opts.party === 'candidate') return ['candidate'];
+  return staff;
 }
 
 /**
@@ -2903,11 +2939,12 @@ assessmentCasesRouter.get(
       person on the other side of this assessment", and an admin opening a case
       to fill in for an assessor is doing exactly that.
 
-      A supervisor is not yet distinguishable — nothing on the case names one —
-      so a workflow that assigns them work resolves to no writable fields rather
-      than to somebody else's. That is the safe direction: a section nobody can
-      currently fill is visible as stuck, where guessing would let the wrong
-      person sign a logbook.
+      Supervisor and SME sign-offs are applied by on-case staff as LABELLED
+      signatures when the org allows it (`fillParties`) — the assessor signing
+      on their behalf, as on paper. With that policy off, staff resolve to the
+      assessor alone, so a supervisor/SME-assigned field is left to nobody
+      rather than signed by the wrong party — the safe direction until
+      login-based attribution ships.
     */
     const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
     // The FIELDS matter here: a question's ✓/✗ cell is declared on the question,
@@ -2922,10 +2959,19 @@ assessmentCasesRouter.get(
     */
     const workflow = workflowOf(manifest, allFields);
     const partFields = fieldsInPart(allFields, manifest, attempt.partKey);
-    // A self-assessor is both ends of the paper: union access (org policy).
-    const access = (await isSelfAssessing(db, tenant, row.candidateUserId))
-      ? unionPartFieldAccess(workflow, attempt.partKey, partFields, ['candidate', 'assessor'])
-      : partFieldAccess(workflow, attempt.partKey, partFields, party);
+    // The parties this caller may fill as: candidate, on-case staff (assessor
+    // plus labelled supervisor/SME), or both when self-assessing — all by org
+    // policy. `unionPartFieldAccess` over one party equals `partFieldAccess`.
+    const access = unionPartFieldAccess(
+      workflow,
+      attempt.partKey,
+      partFields,
+      fillParties({
+        party,
+        selfAssessing: await isSelfAssessing(db, tenant, row.candidateUserId),
+        labelled: await labelledSignoffAllowed(db, tenant.orgId),
+      }),
+    );
     const hidden = new Set(access.hidden);
     const visibleFields = partFields.filter((f) => !hidden.has(f.id));
 
@@ -3009,6 +3055,8 @@ assessmentCasesRouter.get(
       // Resolved, never raw: a manifest naming nothing means the default,
       // and `?? null` here spelled that as "stacked" on the fill surface.
       theoryRendering: theoryRenderingOf(manifest),
+      theoryAllowRetry: manifest.theoryAllowRetry ?? false,
+      theoryPassPercent: manifest.theoryPassPercent ?? null,
       attemptNumber: attempt.attemptNumber,
       outcome: attempt.outcome,
       submittedAt: attempt.submittedAt,
@@ -3205,6 +3253,7 @@ async function setSubmitted(
     untouched: hand-in still just parks it for marking.
   */
   let marked: Awaited<ReturnType<typeof resolveAttemptOutcome>> | null = null;
+  let theoryScore: { correctCount: number; totalCount: number } | null = null;
   if (submitting && tool && part) {
     /*
       A DECLARATION COMPLETES AT HAND-IN. Signing it IS the act — there is no
@@ -3230,7 +3279,13 @@ async function setSubmitted(
       // Unstripped on purpose — marking must see answerKey/outcomeTarget.
       const fields = await fieldsForVersion(db, attempt.templateVersionId);
       if (isSelfMarking(fields, tool.manifest, part.key)) {
-        const computed = markTheory({ fields, values: attempt.values, part });
+        const computed = markTheory({
+          fields,
+          values: attempt.values,
+          part,
+          passPercent: tool.manifest.theoryPassPercent,
+        });
+        theoryScore = { correctCount: computed.correctCount, totalCount: computed.totalCount };
         marked = await resolveAttemptOutcome(db, tenant, {
           row,
           attempt,
@@ -3251,6 +3306,7 @@ async function setSubmitted(
     id: attempt.id,
     submittedAt,
     ...(marked ? { outcome: marked.outcome, caseState: marked.nextState } : {}),
+    ...(theoryScore ?? {}),
   });
 }
 
@@ -3265,6 +3321,103 @@ assessmentCasesRouter.post(
   ...GATE,
   withErrorHandling((req, res) => setSubmitted(req, res, false)),
 );
+
+/*
+  CHECK A SINGLE QUESTION — interactive theory feedback.
+
+  Returns whether one answer is correct, plus the author's hint when the
+  answer is wrong. Does NOT save the answer — that is still the save route's
+  job. The answer key never reaches the client; correctness is computed here
+  and only the boolean is returned.
+*/
+const checkQuestionBody = z.object({
+  fieldId: z.string(),
+  value: z.unknown(),
+});
+
+assessmentCasesRouter.post(
+  '/:id/attempts/:attemptId/check-question',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'edit');
+    if (scope === 'none') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const attempt = await db.query.assessmentPartAttempts.findFirst({
+      where: and(
+        eq(schema.assessmentPartAttempts.id, req.params.attemptId!),
+        eq(schema.assessmentPartAttempts.caseId, row.id),
+      ),
+    });
+    if (!attempt) {
+      res.status(404).json({ error: 'attempt_not_found' });
+      return;
+    }
+    if (attempt.outcome !== null) {
+      res.status(409).json({ error: 'attempt_resolved' });
+      return;
+    }
+
+    const parsed = checkQuestionBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_body' });
+      return;
+    }
+    const { fieldId, value } = parsed.data;
+
+    // Load the UNSTRIPPED fields so answerKey is visible.
+    const fields = await fieldsForVersion(db, attempt.templateVersionId);
+    const field = fields.find((f) => f.id === fieldId);
+    if (!field || !field.answerKey || field.answerKey.length === 0) {
+      res.status(400).json({ error: 'not_a_keyed_question' });
+      return;
+    }
+
+    // Same exact-set-match as markTheory — duplicated to stay a thin check.
+    const selected = normalizeSelected(value);
+    const correct =
+      selected !== undefined && setEquals(selected, field.answerKey);
+
+    res.status(200).json({
+      correct,
+      ...(correct ? {} : { hint: field.answerHint ?? null }),
+    });
+  }),
+);
+
+function normalizeSelected(value: unknown): string[] | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (Array.isArray(value)) {
+    const opts = (value as unknown[])
+      .filter((v) => typeof v !== 'object' || v === null)
+      .map(String)
+      .filter((s) => s !== '');
+    return opts.length > 0 ? opts : undefined;
+  }
+  if (typeof value === 'boolean') return [value ? 'true' : 'false'];
+  if (typeof value === 'number') return [String(value)];
+  if (typeof value === 'string') return [value];
+  return undefined;
+}
+
+function setEquals(a: readonly string[], b: readonly string[]): boolean {
+  const left = new Set(a);
+  const right = new Set(b);
+  if (left.size !== right.size) return false;
+  for (const item of left) if (!right.has(item)) return false;
+  return true;
+}
 
 const saveValuesBody = z.object({ values: z.record(z.string(), z.unknown()) });
 
@@ -3378,21 +3531,14 @@ assessmentCasesRouter.patch(
     // The same union the attempt GET serves — a self-assessor must be able to
     // SAVE every field the surface showed them as writable.
     const selfAssessing = tool ? await isSelfAssessing(db, tenant, row.candidateUserId) : false;
+    const labelled = tool ? await labelledSignoffAllowed(db, tenant.orgId) : false;
     const allowed = tool
       ? new Set(
-          (selfAssessing
-            ? unionPartFieldAccess(
-                workflowOf(tool.manifest, versionFields),
-                attempt.partKey,
-                fieldsInPart(versionFields, tool.manifest, attempt.partKey),
-                ['candidate', 'assessor'],
-              )
-            : partFieldAccess(
-                workflowOf(tool.manifest, versionFields),
-                attempt.partKey,
-                fieldsInPart(versionFields, tool.manifest, attempt.partKey),
-                party,
-              )
+          unionPartFieldAccess(
+            workflowOf(tool.manifest, versionFields),
+            attempt.partKey,
+            fieldsInPart(versionFields, tool.manifest, attempt.partKey),
+            fillParties({ party, selfAssessing, labelled }),
           ).writable,
         )
       : null;

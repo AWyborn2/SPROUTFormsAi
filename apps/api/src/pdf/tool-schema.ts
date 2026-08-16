@@ -139,3 +139,54 @@ export const extractFormFieldsTool = {
     required: ['fields'],
   },
 } as const;
+
+export const AUDIT_TOOL_NAME = 'report_missed_fields';
+
+/**
+ * The secondary-pass tool. The model is handed the PDF plus the labels the
+ * first pass ALREADY captured, and asked for the printed input areas that pass
+ * missed — nothing already in the list. Deliberately narrow: this is a review
+ * safety net, not a second extraction, so it returns a flat list of boxes to
+ * consider, never the full field structure.
+ */
+export const reportMissedFieldsTool = {
+  name: AUDIT_TOOL_NAME,
+  description:
+    'Report printed input areas a person is meant to FILL that are NOT already in the provided list of captured fields. A "missed" area is a blank line to write on, a tick or check box, a signature block, a date box, an initials box, or a table cell awaiting entry — anything the printed page leaves for a human to complete. Do NOT report anything that matches a captured field (compare by meaning, not exact wording). Do NOT report static printed text, headings, instructions, logos, or page furniture. Do NOT re-report the individual rows of a table already captured as one repeating group. When nothing was missed, return an empty list — that is the expected result on a clean extraction.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      missedInputs: {
+        type: 'array',
+        description: 'Printed fill-in areas not already captured. Empty when none were missed.',
+        items: {
+          type: 'object',
+          properties: {
+            label: {
+              type: 'string',
+              description:
+                'What the box is for, read off the page — the printed label beside it, or a short description of where it sits ("Assessor signature", "Date completed", "Second witness initials").',
+            },
+            type: {
+              type: 'string',
+              enum: [...FORM_FIELD_TYPES],
+              description: 'Best-guess field type for the box.',
+            },
+            page: {
+              type: 'integer',
+              minimum: 1,
+              description: 'The 1-based printed page the box is on, when you can tell.',
+            },
+            note: {
+              type: 'string',
+              description:
+                'Short reviewer context — where on the page it sits and why it looks fillable ("blank line under the declaration, no label").',
+            },
+          },
+          required: ['label', 'type'],
+        },
+      },
+    },
+    required: ['missedInputs'],
+  },
+} as const;

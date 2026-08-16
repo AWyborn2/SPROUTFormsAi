@@ -393,6 +393,7 @@ function SettingsPanel({
     allowMultipleLocations: boolean;
     allowMultipleDepartments: boolean;
     allowSelfAssessment: boolean;
+    allowLabelledSignoff: boolean;
     displayIdentifier: DisplayIdentifier;
     pooledCaseOverdueDays: number;
     notificationLeadDays: number;
@@ -440,6 +441,21 @@ function SettingsPanel({
             checked={settings.allowSelfAssessment}
             aria-label="Assessors can assess themselves"
             onChange={(e) => update.mutate({ allowSelfAssessment: e.target.checked }, { onError })}
+          />
+        </label>
+        <label className="flex items-center justify-between gap-4">
+          <span className="text-sm">
+            Supervisor / SME sign-off by labelled signature
+            <span className="block text-[12px] text-text-tertiary">
+              On, an assessor can apply a supervisor&rsquo;s or SME&rsquo;s signature on a part on
+              their behalf — the case never waits for a third person to log in. Off, that signature
+              must be the named person&rsquo;s own login (coming soon).
+            </span>
+          </span>
+          <Switch
+            checked={settings.allowLabelledSignoff}
+            aria-label="Supervisor / SME sign-off by labelled signature"
+            onChange={(e) => update.mutate({ allowLabelledSignoff: e.target.checked }, { onError })}
           />
         </label>
         <label className="flex items-center justify-between gap-4">

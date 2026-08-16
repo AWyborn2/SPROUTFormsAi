@@ -168,6 +168,9 @@ function taxonomyFixture(): Taxonomy {
       notificationLeadDays: 30,
       dateFormat: 'dmy',
       candidateSelfStartRecommended: false,
+      // Arrived with main's labelled-signoff round mid-merge; irrelevant to
+      // requirement editing but required by the TaxonomySettings shape.
+      allowLabelledSignoff: false,
     },
   };
 }

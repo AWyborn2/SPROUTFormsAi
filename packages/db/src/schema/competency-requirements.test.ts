@@ -20,7 +20,7 @@ import { getTableConfig, PgDialect } from 'drizzle-orm/pg-core';
 import { competencyRequirements } from './taxonomy.ts';
 
 const DRIZZLE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'drizzle');
-const MIGRATION = '0059_worried_silver_sable.sql';
+const MIGRATION = '0060_worried_silver_sable.sql';
 
 const dialect = new PgDialect();
 const config = getTableConfig(competencyRequirements);

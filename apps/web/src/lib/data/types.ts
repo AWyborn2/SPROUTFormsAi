@@ -11,6 +11,7 @@ import type {
   CompetencyStatus,
   DateFormat,
   DisplayIdentifier,
+  DocumentType,
   ExtractionResult,
   FormContainer,
   FormField,
@@ -733,6 +734,11 @@ export interface TaxonomySettings {
   allowMultipleDepartments: boolean;
   /** Whether a qualified assessor may run and certify their own case. */
   allowSelfAssessment: boolean;
+  /**
+   * Whether a supervisor's/SME's part sign-off may be applied as a labelled
+   * signature by on-case staff, rather than requiring that person's own login.
+   */
+  allowLabelledSignoff: boolean;
   displayIdentifier: DisplayIdentifier;
   /** Days before a pooled case reads as overdue (U13, R63). */
   pooledCaseOverdueDays: number;
@@ -1121,4 +1127,19 @@ export interface SaveBuilderDraftInput {
   versionId?: string | null;
   /** Set when the draft revises a published tool — the server enforces one per tool. */
   revisionOfToolId?: string | null;
+}
+
+/**
+ * The body `POST /pdf/audit` accepts — the secondary-extraction pass.
+ *
+ * The PDF comes in exactly one of two ways (an uploaded `assetId` or inline
+ * base64), and `knownLabels` is what the draft has already captured, so the
+ * audit reports only what it does not already have.
+ */
+export interface AuditFormInput {
+  fileName: string;
+  assetId?: string;
+  pdfBase64?: string;
+  knownLabels: string[];
+  documentType?: DocumentType;
 }
