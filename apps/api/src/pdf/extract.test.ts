@@ -775,6 +775,46 @@ describe('extractForm — assessment field properties survive normalization', ()
     expect(field?.matchLeft).toBeUndefined();
     expect(field?.matchRight).toBeUndefined();
   });
+
+  /*
+    Rule 18 — a short-answer question is a single free-text field with no
+    options. The normalizer must carry a textarea question through as-is: never
+    forcing options onto it, and still carrying its outcome-pairing ref. This is
+    the code half of "NEVER invent options for an open question".
+  */
+  it('carries a short-answer textarea question through without inventing options', async () => {
+    const field = await extractOne({
+      label: 'What action would you take if you found a Category A fault?',
+      type: 'textarea',
+      confidence: 0.9,
+      questionRef: 'Functional Tests Q3',
+    });
+
+    expect(field?.type).toBe('textarea');
+    expect(field?.options).toBeUndefined();
+    expect(field?.questionRef).toBe('Functional Tests Q3');
+  });
+
+  /*
+    Failure mode (c) — a stem containing the word "match" over ordinary lettered
+    choices is a `radio`, NOT a matching question. Rule 10 forbids emptying the
+    options of a question that printed them; the code half is that the normalizer
+    never strips options and never fabricates match sides, so a printed choice
+    list always survives into an answerable question.
+  */
+  it('keeps a lettered choice question answerable even when its stem says "match"', async () => {
+    const field = await extractOne({
+      label: 'Match the description that best fits a Category A fault.',
+      type: 'radio',
+      confidence: 0.85,
+      options: ['Immediate stop', 'Report at end of shift', 'Continue as normal'],
+    });
+
+    expect(field?.type).toBe('radio');
+    expect(field?.options).toEqual(['Immediate stop', 'Report at end of shift', 'Continue as normal']);
+    expect(field?.matchLeft).toBeUndefined();
+    expect(field?.matchRight).toBeUndefined();
+  });
 });
 
 /**

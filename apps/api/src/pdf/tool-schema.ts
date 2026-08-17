@@ -25,7 +25,10 @@ export const extractFormFieldsTool = {
             type: {
               type: 'string',
               enum: [...FORM_FIELD_TYPES],
-              description: 'The field type. Use repeating_group for tables, boolean_yes_no for single yes/no.',
+              description:
+                'The field type. Use repeating_group for tables, boolean_yes_no for single yes/no. ' +
+                'A numbered question that prints no lettered choices is a single textarea (or text ' +
+                'for a one-line answer), never a radio with invented options.',
             },
             confidence: {
               type: 'number',
@@ -47,7 +50,12 @@ export const extractFormFieldsTool = {
             selectionType: {
               type: 'string',
               enum: ['single', 'multiple'],
-              description: 'For checkbox_group only.',
+              description:
+                'For checkbox_group only. Default a lettered question to a single-answer radio; use ' +
+                'checkbox_group with "multiple" ONLY when the stem prints an explicit plural ' +
+                'instruction ("more than one answer", "select all that apply", "select correct ' +
+                'answers"). Tick boxes beside the choices, or a singular "circle/select the correct ' +
+                'answer", do not make it multiple.',
             },
             columns: {
               type: 'array',
@@ -101,7 +109,7 @@ export const extractFormFieldsTool = {
             questionRef: {
               type: 'string',
               description:
-                'A reference that identifies exactly ONE question in the pages you were given. Numbering restarts in every question set, so a bare printed number is not a reference on its own: build it from the set heading plus the printed number where that heading is in view ("General Q7", "BBM Q3", "RM Q10"), and prefix with the printed page number where it is not ("p.5 Q7"). Set the SAME string on the question and on its tick/cross outcome box — that string is what links the two, so the pair must match character for character. Omit on anything that is neither.',
+                'A reference that identifies exactly ONE question in the pages you were given. Numbering restarts in every question set, so a bare printed number is not a reference on its own: build it from the set heading plus the printed number where that heading is in view ("General Q7", "BBM Q3", "RM Q10"), and prefix with the printed page number where it is not ("p.5 Q7"). Where the set heading repeats verbatim across several runs (e.g. "Verbal Questions" restarting numbering each time), the heading cannot be the prefix — take it from the nearest distinctive heading (the numbered section the run falls under) or the printed page number, so the reference identifies exactly one question. Set the SAME string on the question and on its tick/cross outcome box — that string is what links the two, so the pair must match character for character. Omit on anything that is neither.',
             },
             coverSection: {
               type: 'string',
