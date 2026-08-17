@@ -582,3 +582,125 @@ describe('POST /pdf/round-trip', () => {
     }
   });
 });
+
+/**
+ * The learning loop's correction-diff store (2b). The review client posts the
+ * diff between the raw extraction and the published form at publish; the route
+ * validates and writes one org-scoped row.
+ */
+describe('POST /pdf/corrections', () => {
+  /** A db surface for this route: a capture-ownership lookup and an insert. */
+  function fakeCorrectionsDb(opts: { captureFindFirst?: unknown; insertedId?: string } = {}) {
+    const inserted: Record<string, unknown>[] = [];
+    const findFirst = vi.fn().mockResolvedValue(opts.captureFindFirst);
+    const db = {
+      query: { extractionCaptures: { findFirst } },
+      insert: vi.fn(() => ({
+        values: (row: Record<string, unknown>) => {
+          inserted.push(row);
+          return { returning: async () => [{ id: opts.insertedId ?? 'corr-1' }] };
+        },
+      })),
+    };
+    return { db, inserted, findFirst };
+  }
+
+  const WELL_FORMED = {
+    fieldCount: 10,
+    corrections: {
+      path: 'ai',
+      pageCount: 18,
+      documentType: 'assessment',
+      corrections: [
+        { kind: 'retype', fieldId: 'ai_1', from: 'radio', to: 'textarea' },
+        { kind: 'deleted', fieldId: 'ai_5', wasType: 'radio', wasLabel: 'c) x' },
+      ],
+    },
+  };
+
+  function post(base: string, body: unknown) {
+    return fetch(`${base}/pdf/corrections`, {
+      method: 'POST',
+      headers: { ...authHeader(), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('503s when the database is unavailable', async () => {
+    mockDbValue = null;
+    const { server, base } = startApp();
+    try {
+      expect((await post(base, WELL_FORMED)).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes an org-scoped row from a well-formed body, denormalising the counts', async () => {
+    const { db, inserted } = fakeCorrectionsDb({ insertedId: 'corr-99' });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, WELL_FORMED);
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ id: 'corr-99' });
+      expect(inserted).toHaveLength(1);
+      expect(inserted[0]).toMatchObject({
+        orgId: 'org-1',
+        documentType: 'assessment',
+        correctionCount: 2,
+        fieldCount: 10,
+        createdByUserId: 'u1',
+      });
+      expect((inserted[0]!.corrections as { corrections: unknown[] }).corrections).toHaveLength(2);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('links a captureId that belongs to the caller org', async () => {
+    const { db, inserted } = fakeCorrectionsDb({ captureFindFirst: { id: 'cap-1' } });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const body = { ...WELL_FORMED, corrections: { ...WELL_FORMED.corrections, captureId: 'cap-1' } };
+      const res = await post(base, body);
+      expect(res.status).toBe(201);
+      expect(inserted[0]).toMatchObject({ captureId: 'cap-1' });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('404s when the captureId names a capture in another org (never links across tenants)', async () => {
+    const { db, inserted } = fakeCorrectionsDb({ captureFindFirst: undefined });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const body = { ...WELL_FORMED, corrections: { ...WELL_FORMED.corrections, captureId: 'cap-other' } };
+      const res = await post(base, body);
+      expect(res.status).toBe(404);
+      expect(inserted).toHaveLength(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s on a malformed correction (an unknown kind)', async () => {
+    mockDbValue = fakeCorrectionsDb().db;
+    const { server, base } = startApp();
+    try {
+      const body = {
+        fieldCount: 1,
+        corrections: {
+          path: 'ai',
+          pageCount: 1,
+          corrections: [{ kind: 'not-a-real-kind', fieldId: 'ai_1' }],
+        },
+      };
+      expect((await post(base, body)).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+});
