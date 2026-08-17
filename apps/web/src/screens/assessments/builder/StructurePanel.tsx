@@ -122,6 +122,16 @@ export interface StructurePanelProps {
    * drives every host through exactly this patch shape.
    */
   onPatchField: (fieldId: string, patch: Partial<FormField>) => void;
+  /**
+   * Merge one checklist table's rows into another, removing the source.
+   *
+   * Extraction splits a printed checklist across a page or batch boundary into
+   * two tables — the same columns, the rest of the rows. This puts the stray
+   * table's rows back where they belong AS FIXED (locked) rows, which re-adding
+   * them by hand on the fill preview cannot: those become ad-hoc, editable rows
+   * a candidate can change, not the pre-printed checklist the paper shows.
+   */
+  onMergeTable: (sourceFieldId: string, targetFieldId: string) => void;
 }
 
 export function StructurePanel({
@@ -145,6 +155,7 @@ export function StructurePanel({
   onDeleteField,
   onFoldField,
   onPatchField,
+  onMergeTable,
 }: StructurePanelProps) {
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [selected, setSelected] = useState<Record<string, boolean>>({});
@@ -177,6 +188,8 @@ export function StructurePanel({
   const [typeMenuFor, setTypeMenuFor] = useState<string | null>(null);
   /** The repeating field whose column editor is expanded, if any. */
   const [columnsFor, setColumnsFor] = useState<string | null>(null);
+  /** The checklist table whose "merge into…" menu is open, if any. */
+  const [mergeFor, setMergeFor] = useState<string | null>(null);
   /**
    * The field being renamed, if any.
    *
@@ -197,6 +210,15 @@ export function StructurePanel({
   const [dragging, setDragging] = useState<string | null>(null);
 
   const byId = new Map(fields.map((f) => [f.id, f]));
+  /*
+    Checklist tables — a `repeating_group` WITH fixed rows — are the only valid
+    merge targets: the rows moving in are pre-printed labels that need a table
+    with a pre-printed label column to join. Computed once so each row's merge
+    menu just filters itself out.
+  */
+  const checklistTables = fields.filter(
+    (f) => f.type === 'repeating_group' && (f.fixedRows?.length ?? 0) > 0,
+  );
   /*
     Selected ids in ARRANGEMENT order, not tick order. Bulk move appends to the
     target section one by one, so iterating the author's tick order would
@@ -671,6 +693,34 @@ export function StructurePanel({
                                 <Icon name="table-2" size={10} />
                               </button>
                             )}
+                            {/*
+                              MERGE a mis-split checklist. Extraction breaks one
+                              printed checklist into two tables at a page or
+                              batch boundary; this sends THIS table's rows into
+                              another checklist as fixed (locked) rows and
+                              removes this one. Offered only on a checklist with
+                              somewhere to send its rows.
+                            */}
+                            {field?.type === 'repeating_group' &&
+                              (field.fixedRows?.length ?? 0) > 0 &&
+                              checklistTables.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setMergeFor((p) => (p === entry.id ? null : entry.id))
+                                  }
+                                  title="Merge this table's rows into another checklist"
+                                  aria-label={`Merge ${field?.label ?? entry.id} into another table`}
+                                  aria-expanded={mergeFor === entry.id}
+                                  className={`flex-none rounded border px-1 py-px ${
+                                    mergeFor === entry.id
+                                      ? 'border-border-accent bg-surface-accent-soft text-text-accent'
+                                      : 'border-border text-text-tertiary hover:bg-surface-hover'
+                                  }`}
+                                >
+                                  <Icon name="git-merge" size={10} />
+                                </button>
+                              )}
                             {section.cols > 1 && (
                               <button
                                 type="button"
@@ -759,6 +809,36 @@ export function StructurePanel({
                                   {opt.label}
                                 </button>
                               ))}
+                            </div>
+                          )}
+
+                          {mergeFor === entry.id && (
+                            <div className="mt-1 rounded-lg border border-border bg-surface-sunken p-1.5">
+                              <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
+                                Merge these rows into…
+                              </div>
+                              <div className="flex flex-col gap-1">
+                                {checklistTables
+                                  .filter((t) => t.id !== entry.id)
+                                  .map((t) => (
+                                    <button
+                                      key={t.id}
+                                      type="button"
+                                      onClick={() => {
+                                        onMergeTable(entry.id, t.id);
+                                        setMergeFor(null);
+                                      }}
+                                      className="flex items-center gap-1.5 rounded-md border border-border bg-surface-card px-2 py-1 text-left text-[11px] text-text-secondary hover:bg-surface-hover"
+                                    >
+                                      <Icon
+                                        name="table-2"
+                                        size={11}
+                                        className="flex-none text-text-tertiary"
+                                      />
+                                      <span className="min-w-0 flex-1 truncate">{t.label}</span>
+                                    </button>
+                                  ))}
+                              </div>
                             </div>
                           )}
                         </div>

@@ -31,6 +31,7 @@ import {
   deleteField,
   duplicateSection,
   mergeIntoDescription,
+  mergeRepeatingTable,
   renameField,
   setOutcomeTarget,
 } from './builder-fields.js';
@@ -276,6 +277,16 @@ export interface FieldOps {
    * step like any other field edit.
    */
   patch: (fieldId: string, patch: Partial<FormField>) => void;
+  /**
+   * Merge one checklist table's rows into another, removing the source.
+   *
+   * Extraction splits ONE printed checklist across a page or batch boundary
+   * into two `repeating_group` tables; this puts the stray table's rows back
+   * where they belong AS FIXED ROWS — pre-printed and locked, like the rows
+   * already there — rather than the ad-hoc, candidate-editable rows that
+   * re-adding them by hand on a fill surface would create.
+   */
+  mergeTable: (sourceFieldId: string, targetFieldId: string) => void;
 }
 
 export interface PartOps {
@@ -1031,6 +1042,8 @@ export function useBuilderDraftState({
         applyFieldEdit((st) => setOutcomeTarget(st, questionId, outcomeFieldId)),
       patch: (fieldId, patchValue) =>
         setFields((fs) => fs.map((f) => (f.id === fieldId ? { ...f, ...patchValue } : f))),
+      mergeTable: (sourceId, targetId) =>
+        applyFieldEdit((st) => mergeRepeatingTable(st, sourceId, targetId)),
     }),
     [applyFieldEdit],
   );

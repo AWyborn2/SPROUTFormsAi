@@ -21,6 +21,7 @@ import {
   setColumnOptions,
   setColumnType,
   setFieldCondition,
+  setTableFixedRows,
   setTableLabelColumn,
   ungroupAnswerSet,
 } from '../../../lib/data/import-session.js';
@@ -38,6 +39,7 @@ export const importSessionColumnActions: ColumnActions = {
   acceptAnswerSet,
   answerSetAccepted,
   setLabelColumn: setTableLabelColumn,
+  setFixedRows: setTableFixedRows,
   addColumn,
   removeColumn,
   moveColumn,
@@ -154,6 +156,10 @@ export function builderColumnActions(
           .filter((s) => s.columnKeys.length >= 2),
       });
     },
+    // Empty normalizes to undefined — the model never stores an empty
+    // `fixedRows`, and clearing every row turns a checklist back into an open
+    // table, the same end state `setLabelColumn(false)` reaches.
+    setFixedRows: (_id, rows) => update({ fixedRows: rows.length ? rows : undefined }),
     addColumn: () => {
       const columns = cols();
       const taken = new Set(columns.map((c) => c.key));
