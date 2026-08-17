@@ -252,6 +252,54 @@ describe('the assessment profile', () => {
     expect(p).toContain('WRAPS onto a second printed line is ONE');
   });
 
+  it('defaults a lettered question to a single answer, so an over-eager multiple cannot creep in', () => {
+    /*
+      Failure mode (b): the corpus marks multi-answer questions with an explicit
+      "(more than one answer)" / "select correct answers" and everything else is
+      one answer — but a lettered list drawn with tick boxes reads as multiple
+      unless the default is pinned. A single-answer question read as multiple
+      lets a candidate select every choice and still mark correct.
+    */
+    expect(p).toContain('DEFAULT SINGLE');
+    expect(p).toContain('do NOT make it multiple');
+  });
+
+  it('names the short-answer question as its own free-text field, not a choice field', () => {
+    /*
+      The dominant question type across the theory and familiarisation papers is
+      open-answer with no printed choices. Rule 1 speaks only of lettered
+      questions, so without rule 18 an open question is either given invented
+      options or read as the shape of the multiple-choice question above it.
+    */
+    expect(p).toContain('A NUMBERED QUESTION THAT PRINTS NO CHOICES IS ONE FREE-TEXT ANSWER');
+    expect(p).toContain('textarea');
+    expect(p).toContain('NEVER invent');
+    expect(p).toContain('read each on its own printed shape');
+  });
+
+  it('treats a bare orphaned lettered choice as a batch-boundary fragment, not a field', () => {
+    /*
+      Failure mode (a): a question straddling a page-batch boundary drops its
+      later choices into the next call with no stem above them. Emitted as a
+      field they manufacture a question the paper never asked and mis-number
+      everything after — the commonest way batching corrupts this class.
+    */
+    expect(p).toContain('A BARE LETTERED CHOICE WITH NO QUESTION ABOVE IT');
+    expect(p).toContain('EMIT NOTHING FOR IT');
+    expect(p).toContain('designNotes');
+  });
+
+  it('disambiguates a questionRef when the set heading repeats verbatim', () => {
+    /*
+      The familiarisation papers title every question run identically ("Verbal
+      Questions") and restart numbering under each, so a heading-plus-number
+      reference collides. The reference must single out one question in the pages
+      given — anchored to the nearest distinctive heading or the page number.
+    */
+    expect(p).toContain('WHERE THE SET HEADING REPEATS VERBATIM IT CANNOT BE THE PREFIX');
+    expect(p).toContain('single out ONE');
+  });
+
   it('names no employer, site or ticket code as a requirement', () => {
     /*
       Every example in this profile is illustrative of a printed SHAPE. A rule
