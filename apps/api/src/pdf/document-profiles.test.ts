@@ -10,7 +10,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import { DOCUMENT_TYPES } from '@formai/shared';
-import { hasProfile, profileFor } from './document-profiles.js';
+import {
+  appendLearnedExamples,
+  hasProfile,
+  learnedExamplesFor,
+  profileFor,
+} from './document-profiles.js';
 
 describe('profileFor', () => {
   it('gives generic no profile, so its behaviour is unchanged', () => {
@@ -309,6 +314,53 @@ describe('the assessment profile', () => {
     */
     for (const shouted of ['MUST BE BBM', 'always Q50001782', 'Worsley']) {
       expect(p).not.toContain(shouted);
+    }
+  });
+});
+
+/**
+ * The learned-examples promotion path (Phase F / U11) — the ONLY route from the
+ * loop's evidence to the prompt, and a human-gated one. These pin that the seam
+ * is byte-exact when nothing is promoted, that a promoted example actually
+ * reaches the prompt, and that the anti-forms discipline holds over promoted
+ * examples too — so a future promotion cannot smuggle a paper-specific rule in.
+ */
+describe('learned examples', () => {
+  it('leaves the base profile byte-identical when nothing is promoted', () => {
+    // The whole safety claim: adding this seam changed no existing prompt.
+    expect(appendLearnedExamples('BASE PROFILE TEXT', [])).toBe('BASE PROFILE TEXT');
+  });
+
+  it('appends one clearly-headed block carrying each promoted example', () => {
+    const out = appendLearnedExamples('BASE', ['first shape → reading', 'second shape → reading']);
+    expect(out.startsWith('BASE\n')).toBe(true);
+    expect(out).toContain('LEARNED EXAMPLES');
+    expect(out).toContain('1. first shape → reading');
+    expect(out).toContain('2. second shape → reading');
+  });
+
+  it('emits only the block when the base is empty (an untuned type given examples)', () => {
+    const out = appendLearnedExamples('', ['a shape → its reading']);
+    expect(out.startsWith('LEARNED EXAMPLES')).toBe(true);
+    expect(out).toContain('1. a shape → its reading');
+  });
+
+  it('promotes nothing yet, so every profile reads as its base', () => {
+    for (const t of DOCUMENT_TYPES) {
+      expect(learnedExamplesFor(t)).toEqual([]);
+      expect(profileFor(t)).not.toContain('LEARNED EXAMPLES');
+    }
+  });
+
+  it('holds the anti-forms guard over every promoted example, of every type', () => {
+    // Trivially true while nothing is promoted; the point is that it runs, so a
+    // future promotion naming an employer, site or ticket code fails CI here.
+    for (const t of DOCUMENT_TYPES) {
+      for (const example of learnedExamplesFor(t)) {
+        for (const shouted of ['MUST BE BBM', 'always Q50001782', 'Worsley']) {
+          expect(example).not.toContain(shouted);
+        }
+      }
     }
   });
 });
