@@ -9,6 +9,7 @@ import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { getAnthropic } from '../anthropic.js';
 import { auditForm, extractForm, roundTripExport } from '../pdf/index.js';
+import { captureExtraction } from '../pdf/capture.js';
 import { getStorageClient } from '../storage/index.js';
 import { env } from '../env.js';
 
@@ -125,6 +126,19 @@ pdfRouter.post(
         anthropic,
         model: env.ANTHROPIC_EXTRACTION_MODEL,
         pageBatchSize: env.ANTHROPIC_EXTRACTION_PAGE_BATCH,
+      });
+      // Capture the raw extraction as training signal for the (human-gated)
+      // correction loop. Best-effort — awaited so the row lands before we
+      // respond, but it cannot throw and cannot fail the import.
+      await captureExtraction(db, {
+        orgId: tenant.orgId,
+        assetId: parsed.data.assetId,
+        fileName: parsed.data.fileName,
+        documentType: parsed.data.documentType,
+        extractedByUserId: tenant.userId,
+        // The AcroForm path uses no model; only stamp one when the AI path ran.
+        model: result.path === 'ai' ? env.ANTHROPIC_EXTRACTION_MODEL : undefined,
+        result,
       });
       res.json(result);
     } catch (err) {
