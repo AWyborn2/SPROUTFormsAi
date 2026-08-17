@@ -70,6 +70,24 @@ import type { DocumentType } from '@formai/shared';
  *    as a fixed-item checklist it manufactures approval sign-offs on a
  *    compliance record. Rule 15's test is who fills it, not what shape it is.
  *
+ * Rules 18-19 were written against the WIDER corpus this class spans, not the
+ * single 18-page paper rules 8-17 came from — because most papers of this class
+ * are not shaped like that one:
+ *
+ *  - A WRITTEN QUESTIONNAIRE MIXES QUESTION TYPES UNDER ONE HEADING, and most of
+ *    it is short-answer. Rule 1 speaks only of lettered-choice questions; on a
+ *    theory or familiarisation paper the majority print no choices at all, and a
+ *    read anchored to rule 1 either invents options for them or reads them as
+ *    the shape of the multiple-choice question above. Rule 18 names the
+ *    open-answer question as its own field, and pins that single/True-False/open
+ *    are read each on its own printed shape.
+ *
+ *  - A LETTERED CHOICE CAN BE ORPHANED BY THE PAGE-BATCH BOUNDARY. The choices
+ *    of a question straddling a batch edge arrive with no stem above them; read
+ *    as a field they manufacture a question the paper never asked and mis-number
+ *    everything after. Rule 19 is the batching interaction rule 13 implies but
+ *    never states for the answer side.
+ *
  * Rules are stated as printed shapes rather than as facts about one paper, and
  * each is bounded so it cannot fire on a document of this class that does not
  * carry the structure. Where a rule cannot be satisfied from the pages in
@@ -84,7 +102,12 @@ const ASSESSMENT_PROFILE =
   '"more than one answer", "select all that apply" or similar. Put the choice text in `options`, ' +
   'in printed order, WITHOUT the a)/b)/c) prefix. Never collapse a run of questions into a ' +
   'repeating_group whose rows are the question text — that makes every one of them unanswerable, ' +
-  'and it is the single most damaging mistake on this document class.\n' +
+  'and it is the single most damaging mistake on this document class. DEFAULT SINGLE: a lettered ' +
+  'question is a `radio` unless its OWN stem prints one of the plural phrasings above. Tick or ' +
+  'circle boxes drawn beside the choices, and a "circle the correct answer" / "select the correct ' +
+  'answer" (singular) instruction, do NOT make it multiple — they are just how one answer is ' +
+  'marked. Reading a single-answer question as `multiple` lets a candidate over-select every choice ' +
+  'and still read as correct.\n' +
   '2. TRUE/FALSE questions are `radio` fields with options exactly ["True", "False"].\n' +
   '3. OUTCOME BOXES ARE SEPARATE FIELDS, LINKED BY QUESTION REFERENCE. A tick/cross box recording ' +
   'whether an answer was CORRECT is not one of the answer choices. Emit it as its own ' +
@@ -95,7 +118,13 @@ const ASSESSMENT_PROFILE =
   'given, build the reference from a short prefix taken from that heading plus the printed number ' +
   '("General Q7", "BBM Q3", "RM Q10"); where the heading is NOT in view, prefix with the printed ' +
   'page number instead ("p.5 Q7") and say so once in `designNotes`. NEVER PREFIX ONE SIDE OF A ' +
-  'PAIR AND NOT THE OTHER. Which questions have a box is settled by rule 11.\n' +
+  'PAIR AND NOT THE OTHER. WHERE THE SET HEADING REPEATS VERBATIM IT CANNOT BE THE PREFIX: some ' +
+  'papers title every question run identically ("Verbal Questions") and restart numbering under ' +
+  'each, so "Verbal Q1" names several different questions. The reference must single out ONE ' +
+  'question among all the questions in the pages you were given — so take the prefix from the ' +
+  'nearest heading that IS distinctive (the numbered observation section the run falls under, ' +
+  '"Functional Tests Q1"), or failing that the printed page number ("p.8 Q1"), never the repeated ' +
+  'run heading. Which questions have a box is settled by rule 11.\n' +
   '4. EMIT SECTION HEADERS for structural headings, as `section_header` fields carrying no answer: ' +
   'each PART heading ("PART 1 - THEORY", "PART 3 - DIRECT OBSERVATION LOG"), and each named ' +
   'question group inside a part ("Written or Verbal Questions (General)", "BBM Mining Only", ' +
@@ -267,7 +296,32 @@ const ASSESSMENT_PROFILE =
   'passes, which needs the rows to be addressable cells of ONE table — and `coverSection` is one ' +
   'value per field, so a run of loose checkboxes can neither be addressed nor say where it ' +
   'belongs. Keep every printed method, including one whose number is separated from the rest by a ' +
-  'rotated gutter label — that label is the block\u2019s heading (rule 13), never a method.';
+  'rotated gutter label — that label is the block\u2019s heading (rule 13), never a method.\n' +
+  '18. A NUMBERED QUESTION THAT PRINTS NO CHOICES IS ONE FREE-TEXT ANSWER, NOT A CHOICE FIELD. Much ' +
+  'of this class is short-answer: a numbered question with a blank space or ruled lines beneath it ' +
+  'and NO lettered choices ("What action would you take if you found a Category A fault?"). Emit it ' +
+  'as a single `textarea` (or `text` for a one-line answer) — NEVER a `radio`, and NEVER invent ' +
+  '`options` for it. Rule 1 governs only questions that actually print lettered choices; this rule ' +
+  'governs the rest, and the two together cover a set that MIXES both — a written questionnaire ' +
+  'often runs multiple-choice, True/False and open questions under one heading, so read each on its ' +
+  'own printed shape, not the shape of its neighbours. Where the question prints its own answer ' +
+  'sub-lines ("Name three Category A faults: 1.___ 2.___ 3.___") it is still ONE field: say how ' +
+  'many answers are expected in `description` rather than emitting one field per line. A ' +
+  'short-answer question still takes its own outcome box under rule 11 wherever the part marks its ' +
+  'questions. Inventing choices for an open question turns a written answer into a multiple-guess ' +
+  'nobody wrote.\n' +
+  '19. A BARE LETTERED CHOICE WITH NO QUESTION ABOVE IT IS THE TAIL OF A QUESTION YOU CANNOT SEE — ' +
+  'EMIT NOTHING FOR IT. Because you are reading a page range (rule 13), a question stem can ' +
+  'sit on a page you were not given while its later choices ("c) … d) … e) …") open your first ' +
+  'page, or its earlier choices print on your last page while the rest continue past your range. A ' +
+  'run of lettered lines with no numbered stem above them is NOT its own field, NOT a ' +
+  '`checkbox_group` and NOT a checklist: emit nothing for it and record the fragment verbatim in ' +
+  '`designNotes` ("page opens on orphan choices c)–e) with no stem — belongs to a question before ' +
+  'this range; merge in review"). An orphaned option emitted as a field manufactures an extra ' +
+  'answerable question the paper never asked, mis-numbers every field after it, and is the ' +
+  'commonest way a batch boundary corrupts this class. The same holds for a lone stem whose choices ' +
+  'all fall past your last page: emit the question with the choices you can see and note in ' +
+  '`designNotes` that its options may continue beyond the range.';
 
 const PROFILES: Partial<Record<DocumentType, string>> = {
   assessment: ASSESSMENT_PROFILE,
