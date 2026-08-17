@@ -327,9 +327,50 @@ const PROFILES: Partial<Record<DocumentType, string>> = {
   assessment: ASSESSMENT_PROFILE,
 };
 
+/**
+ * Human-PROMOTED correction examples, per document type — the ONLY path from the
+ * learning loop's evidence to the prompt.
+ *
+ * The loop stores how reviewers corrected each extraction and clusters the
+ * recurring corrections into content-free shapes (`correction-shapes.ts`, the
+ * `/pdf/corrections/candidates` surface). Nothing there touches the prompt. When
+ * a shape recurs enough to be worth teaching, a PERSON reads it and writes a
+ * general example HERE, in a PR the profile tests gate — including the anti-forms
+ * guard, which runs over these examples exactly as it runs over the profile. No
+ * code path mutates the prompt from stored data at runtime; that is the whole
+ * point of the human gate (plan R8).
+ *
+ * EMPTY IS THE HONEST DEFAULT. A type nobody has promoted an example for reads
+ * exactly as its base profile, byte for byte — see `appendLearnedExamples`. Each
+ * entry states a printed SHAPE and its correct reading, never a fact about one
+ * paper, so a promoted example generalises to a paper it has never seen.
+ */
+const LEARNED_EXAMPLES: Partial<Record<DocumentType, readonly string[]>> = {
+  // None promoted yet. Add entries here via a reviewed PR, never at runtime.
+};
+
+/** The promoted examples for a type, or an empty list. */
+export function learnedExamplesFor(type: DocumentType | undefined): readonly string[] {
+  return (type && LEARNED_EXAMPLES[type]) ?? [];
+}
+
+/**
+ * Append promoted examples to a base profile. Pure and byte-exact: an empty list
+ * returns the base UNCHANGED (so a type with nothing promoted is identical to
+ * before this seam existed), and a non-empty list adds one clearly-headed block.
+ */
+export function appendLearnedExamples(base: string, examples: readonly string[]): string {
+  if (examples.length === 0) return base;
+  const block =
+    'LEARNED EXAMPLES (promoted from real reviewer corrections — each is a printed shape and ' +
+    'its correct reading; apply them as you would the rules above):\n' +
+    examples.map((e, i) => `${i + 1}. ${e}`).join('\n');
+  return base ? `${base}\n${block}` : block;
+}
+
 /** The extra instructions for a document type, or empty when it has none. */
 export function profileFor(type: DocumentType | undefined): string {
-  return (type && PROFILES[type]) ?? '';
+  return appendLearnedExamples((type && PROFILES[type]) ?? '', learnedExamplesFor(type));
 }
 
 /** Whether a type carries tuned instructions, as opposed to base behaviour. */

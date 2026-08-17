@@ -2,14 +2,15 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { CORRECTION_KINDS, DOCUMENT_TYPES, shapeOf } from '@formai/shared';
-import type { ExtractionCorrections, FormField, SubmissionValue } from '@formai/shared';
+import { CORRECTION_KINDS, DOCUMENT_TYPES } from '@formai/shared';
+import type { FormField, SubmissionValue } from '@formai/shared';
 import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { getAnthropic } from '../anthropic.js';
 import { auditForm, extractForm, roundTripExport } from '../pdf/index.js';
 import { captureExtraction } from '../pdf/capture.js';
+import { aggregateCorrectionRows, candidateRules } from '../pdf/correction-insights.js';
 import { getStorageClient } from '../storage/index.js';
 import { env } from '../env.js';
 
@@ -434,42 +435,42 @@ pdfRouter.get(
       limit: 5000,
     });
 
-    const metricByType = new Map<string, { corrections: number; fields: number }>();
-    const shapeByKey = new Map<
-      string,
-      { documentType: string; shape: string; count: number; sampleCaptureIds: string[] }
-    >();
+    res.json(aggregateCorrectionRows(rows));
+  }),
+);
 
-    for (const row of rows) {
-      const documentType = row.documentType ?? 'unspecified';
-      const metric = metricByType.get(documentType) ?? { corrections: 0, fields: 0 };
-      metric.corrections += row.correctionCount;
-      metric.fields += row.fieldCount;
-      metricByType.set(documentType, metric);
-
-      const diff = row.corrections as ExtractionCorrections;
-      for (const correction of diff.corrections ?? []) {
-        const shape = shapeOf(correction);
-        const key = `${documentType}::${shape}`;
-        const entry = shapeByKey.get(key) ?? { documentType, shape, count: 0, sampleCaptureIds: [] };
-        entry.count += 1;
-        if (row.captureId && entry.sampleCaptureIds.length < 5 && !entry.sampleCaptureIds.includes(row.captureId)) {
-          entry.sampleCaptureIds.push(row.captureId);
-        }
-        shapeByKey.set(key, entry);
-      }
+/**
+ * The human-gated candidate-rules surface (2c / U10).
+ *
+ * ADMIN-ONLY, because acting on a candidate means writing a general profile rule
+ * (or promoting a LEARNED_EXAMPLE) — a maintainer's decision, not a candidate's.
+ * Returns the recurring correction shapes above a small threshold, each with the
+ * rule it suggests and a few of THIS org's example captures. It proposes; it
+ * changes nothing — promotion is always a reviewed code change (`LEARNED_EXAMPLES`).
+ */
+pdfRouter.get(
+  '/corrections/candidates',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    const tenant = req.tenant!;
+    if (tenant.role !== 'admin' && tenant.role !== 'owner') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
     }
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    // A shape must recur to be a candidate; one or two corrections are noise.
+    const rawMin = Number(req.query.minCount);
+    const minCount = Number.isInteger(rawMin) && rawMin >= 1 ? Math.min(rawMin, 100) : 3;
 
-    const metrics = [...metricByType.entries()]
-      .map(([documentType, m]) => ({
-        documentType,
-        corrections: m.corrections,
-        fields: m.fields,
-        rate: m.fields > 0 ? m.corrections / m.fields : 0,
-      }))
-      .sort((a, b) => b.rate - a.rate);
-    const shapes = [...shapeByKey.values()].sort((a, b) => b.count - a.count);
-
-    res.json({ metrics, shapes });
+    const rows = await db.query.extractionCorrections.findMany({
+      where: eq(schema.extractionCorrections.orgId, tenant.orgId),
+      columns: { documentType: true, correctionCount: true, fieldCount: true, corrections: true, captureId: true },
+      limit: 5000,
+    });
+    const { shapes } = aggregateCorrectionRows(rows);
+    res.json({ minCount, candidates: candidateRules(shapes, minCount) });
   }),
 );

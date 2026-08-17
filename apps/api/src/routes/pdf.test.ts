@@ -776,3 +776,85 @@ describe('GET /pdf/corrections/insights', () => {
     }
   });
 });
+
+/**
+ * The human-gated candidate-rules surface (Phase F / U10). Admin-only; returns
+ * recurring shapes above a threshold, each with a rule suggestion.
+ */
+describe('GET /pdf/corrections/candidates', () => {
+  function fakeInsightsDb(rows: unknown[]) {
+    return { query: { extractionCorrections: { findMany: vi.fn().mockResolvedValue(rows) } } };
+  }
+
+  // Four rows so retype:radio→textarea clears the default threshold of 3.
+  const ROWS = Array.from({ length: 4 }, (_, i) => ({
+    documentType: 'assessment',
+    correctionCount: 1,
+    fieldCount: 10,
+    captureId: `cap-${i}`,
+    corrections: { corrections: [{ kind: 'retype', fieldId: `ai_${i}`, from: 'radio', to: 'textarea' }] },
+  }));
+
+  function get(base: string, cookie: string, query = '') {
+    return fetch(`${base}/pdf/corrections/candidates${query}`, { headers: { cookie } });
+  }
+
+  it('403s for a non-admin caller', async () => {
+    mockDbValue = fakeInsightsDb(ROWS);
+    // A non-admin session. sealSession's param is typed to the admin fixture, so
+    // route a different role through `unknown` — this is test-only plumbing.
+    const candidateCookie = `fai_session=${sealSession({
+      userId: 'u1',
+      orgId: 'org-1',
+      role: 'candidate',
+    } as unknown as Parameters<typeof sealSession>[0])}`;
+    const { server, base } = startApp();
+    try {
+      expect((await get(base, candidateCookie)).status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('503s when the database is unavailable', async () => {
+    mockDbValue = null;
+    const { server, base } = startApp();
+    try {
+      expect((await get(base, `fai_session=${sealSession(tenant)}`)).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('returns recurring shapes above the threshold, each with a rule suggestion', async () => {
+    mockDbValue = fakeInsightsDb(ROWS);
+    const { server, base } = startApp();
+    try {
+      const res = await get(base, `fai_session=${sealSession(tenant)}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        minCount: number;
+        candidates: { shape: string; count: number; suggestion: string }[];
+      };
+      expect(body.minCount).toBe(3);
+      const retype = body.candidates.find((c) => c.shape === 'retype:radio→textarea');
+      expect(retype?.count).toBe(4);
+      expect(retype?.suggestion).toContain('rule 18');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('honours a higher minCount, dropping a shape below it', async () => {
+    mockDbValue = fakeInsightsDb(ROWS);
+    const { server, base } = startApp();
+    try {
+      const res = await get(base, `fai_session=${sealSession(tenant)}`, '?minCount=5');
+      const body = (await res.json()) as { minCount: number; candidates: unknown[] };
+      expect(body.minCount).toBe(5);
+      expect(body.candidates).toEqual([]);
+    } finally {
+      server.close();
+    }
+  });
+});
