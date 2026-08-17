@@ -15,6 +15,7 @@ export * from './answer-set.js';
 export * from './time-calc.js';
 export * from './visibility.js';
 export * from './extraction.js';
+export * from './extraction-corrections.js';
 export * from './template.js';
 export * from './submission.js';
 export * from './submission-validation.js';
