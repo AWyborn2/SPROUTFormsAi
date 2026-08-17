@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { DOCUMENT_TYPES } from '@formai/shared';
+import { CORRECTION_KINDS, DOCUMENT_TYPES } from '@formai/shared';
 import type { FormField, SubmissionValue } from '@formai/shared';
 import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
@@ -309,5 +309,95 @@ pdfRouter.post(
       const message = err instanceof Error ? err.message : 'round_trip_failed';
       res.status(500).json({ error: message });
     }
+  }),
+);
+
+/*
+  The corrections diff, validated at the boundary. The per-correction payload is
+  passthrough — the store keeps the whole `ExtractionCorrections` verbatim and
+  the shape's fine detail belongs to `diffExtraction`, not to a second copy of
+  the union here — but `kind` and `fieldId` are checked so a malformed body is a
+  400 at the edge rather than a bad row.
+*/
+const correctionSchema = z
+  .object({ kind: z.enum(CORRECTION_KINDS), fieldId: z.string().min(1) })
+  .passthrough();
+
+const correctionsBody = z.object({
+  /** Storage id of the source PDF, when one exists. */
+  assetId: z.string().min(1).optional(),
+  /** Provenance of the published AFTER. */
+  formId: z.string().min(1).optional(),
+  versionId: z.string().min(1).optional(),
+  /** Fields the raw extraction produced — the metric denominator. */
+  fieldCount: z.number().int().nonnegative(),
+  /** The `ExtractionCorrections` record from `diffExtraction`. */
+  corrections: z.object({
+    captureId: z.string().min(1).optional(),
+    documentType: z.enum(DOCUMENT_TYPES).optional(),
+    path: z.enum(['acroform', 'ai']),
+    pageCount: z.number().int().nonnegative(),
+    corrections: z.array(correctionSchema),
+  }),
+});
+
+/**
+ * Store the reviewer-correction diff for one published import — the learning
+ * loop's training signal (2b). Called by the review client at publish, its own
+ * request off the publish critical path; a failure here never blocks a publish.
+ *
+ * Org-scoped throughout: the row is written under the caller's org, and a
+ * `captureId`, if given, must name a capture in that same org — a caller cannot
+ * attach a correction to another tenant's raw extraction.
+ */
+pdfRouter.post(
+  '/corrections',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const parsed = correctionsBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tenant = req.tenant!;
+    const { corrections: diff } = parsed.data;
+
+    // A supplied capture link must belong to this org, or it is not the caller's
+    // to attach to — reject rather than silently dropping the link.
+    if (diff.captureId) {
+      const capture = await db.query.extractionCaptures.findFirst({
+        where: and(
+          eq(schema.extractionCaptures.id, diff.captureId),
+          eq(schema.extractionCaptures.orgId, tenant.orgId),
+        ),
+        columns: { id: true },
+      });
+      if (!capture) {
+        res.status(404).json({ error: 'capture_not_found' });
+        return;
+      }
+    }
+
+    const [row] = await db
+      .insert(schema.extractionCorrections)
+      .values({
+        orgId: tenant.orgId,
+        captureId: diff.captureId ?? null,
+        assetId: parsed.data.assetId ?? null,
+        documentType: diff.documentType ?? null,
+        formId: parsed.data.formId ?? null,
+        versionId: parsed.data.versionId ?? null,
+        corrections: diff,
+        correctionCount: diff.corrections.length,
+        fieldCount: parsed.data.fieldCount,
+        createdByUserId: tenant.userId,
+      })
+      .returning({ id: schema.extractionCorrections.id });
+
+    res.status(201).json({ id: row?.id });
   }),
 );
