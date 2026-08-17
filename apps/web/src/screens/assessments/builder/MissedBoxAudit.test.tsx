@@ -26,8 +26,21 @@ vi.mock('../../../lib/data/hooks.js', () => ({
 
 const { MissedBoxAudit } = await import('./MissedBoxAudit.js');
 
+const addField = vi.fn();
+
 function draft(over: Partial<BuilderDraftState> = {}): BuilderDraftState {
-  return { assetId: 'org-1/x.pdf', title: 'Scraper', fields: [], ...over } as BuilderDraftState;
+  return {
+    assetId: 'org-1/x.pdf',
+    title: 'Scraper',
+    fields: [],
+    structure: [
+      { key: 'sec_cover', label: 'Candidate declaration', cols: 1, fields: [{ id: 'sig' }], cover: true },
+      { key: 'sec_p1', label: 'PART 1 — THEORY', cols: 1, fields: [{ id: 'q1' }] },
+      { key: 'sec_p2', label: 'PART 2 — PRACTICAL', cols: 1, fields: [] },
+    ],
+    fieldOps: { add: addField },
+    ...over,
+  } as unknown as BuilderDraftState;
 }
 
 afterEach(() => {
@@ -97,5 +110,35 @@ describe('MissedBoxAudit', () => {
     auditState.isError = true;
     render(<MissedBoxAudit draft={draft()} />);
     expect(screen.getByText(/Could not check the document/)).toBeDefined();
+  });
+
+  it('adds a missed box as a field at the end of the chosen section, then marks it added', () => {
+    auditState.isSuccess = true;
+    auditState.data = { missedInputs: [{ label: 'Assessor signature', type: 'signature', page: 12 }] };
+    render(<MissedBoxAudit draft={draft()} />);
+
+    // Default target is the first NON-cover section (PART 1), which already
+    // holds q1 — so the field is added after it, at the section's end.
+    fireEvent.click(screen.getByRole('button', { name: /Add/ }));
+    expect(addField).toHaveBeenCalledWith('sec_p1', 'q1', 'signature', 'Assessor signature');
+
+    // The row flips to "Added" and offers no second add.
+    expect(screen.getByText(/Added to PART 1 — THEORY/)).toBeDefined();
+    expect(screen.queryByRole('button', { name: /Add/ })).toBeNull();
+  });
+
+  it('adds to a different section when one is picked, and never offers a cover section', () => {
+    auditState.isSuccess = true;
+    auditState.data = { missedInputs: [{ label: 'Second witness', type: 'text' }] };
+    render(<MissedBoxAudit draft={draft()} />);
+
+    const select = screen.getByLabelText('Section to add "Second witness" to') as HTMLSelectElement;
+    // Cover sections are addressed by the manifest, not added as part fields.
+    expect([...select.options].map((o) => o.value)).toEqual(['sec_p1', 'sec_p2']);
+
+    fireEvent.change(select, { target: { value: 'sec_p2' } });
+    fireEvent.click(screen.getByRole('button', { name: /Add/ }));
+    // PART 2 is empty, so the field is added first (afterFieldId null).
+    expect(addField).toHaveBeenCalledWith('sec_p2', null, 'text', 'Second witness');
   });
 });
