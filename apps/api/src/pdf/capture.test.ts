@@ -19,12 +19,13 @@ function aiResult(overrides: Partial<ExtractionResult> = {}): ExtractionResult {
 }
 
 /** A stub db that records the inserted row. */
-function recordingDb(): { db: CaptureDb; rows: unknown[] } {
+function recordingDb(insertedId = 'cap-1'): { db: CaptureDb; rows: unknown[] } {
   const rows: unknown[] = [];
   const db: CaptureDb = {
     insert: () => ({
-      values: async (row: unknown) => {
+      values: (row: unknown) => {
         rows.push(row);
+        return { returning: async () => [{ id: insertedId }] };
       },
     }),
   };
@@ -32,11 +33,19 @@ function recordingDb(): { db: CaptureDb; rows: unknown[] } {
 }
 
 describe('captureExtraction', () => {
-  it('no-ops without a database rather than throwing', async () => {
-    await expect(captureExtraction(null, { orgId: 'o', fileName: 'x.pdf', result: aiResult() })).resolves.toBeUndefined();
+  it('no-ops to null without a database rather than throwing', async () => {
+    await expect(
+      captureExtraction(null, { orgId: 'o', fileName: 'x.pdf', result: aiResult() }),
+    ).resolves.toBeNull();
     await expect(
       captureExtraction(undefined, { orgId: 'o', fileName: 'x.pdf', result: aiResult() }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeNull();
+  });
+
+  it('returns the new capture id on success, so the route can hand it to the client', async () => {
+    const { db } = recordingDb('cap-42');
+    const id = await captureExtraction(db, { orgId: 'o', fileName: 'x.pdf', result: aiResult() });
+    expect(id).toBe('cap-42');
   });
 
   it('derives path, pageCount and fieldCount off the result', async () => {
@@ -86,19 +95,21 @@ describe('captureExtraction', () => {
     });
   });
 
-  it('swallows an insert failure so an import can never fail on capture', async () => {
+  it('swallows an insert failure — returns null so an import can never fail on capture', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const db: CaptureDb = {
       insert: () => ({
-        values: async () => {
-          throw new Error('db exploded');
-        },
+        values: () => ({
+          returning: async () => {
+            throw new Error('db exploded');
+          },
+        }),
       }),
     };
 
     await expect(
       captureExtraction(db, { orgId: 'o', fileName: 'boom.pdf', result: aiResult() }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeNull();
     expect(warn).toHaveBeenCalledOnce();
     warn.mockRestore();
   });
