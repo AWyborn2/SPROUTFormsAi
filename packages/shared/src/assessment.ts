@@ -431,8 +431,24 @@ export interface AssessmentPart {
    * next part's start field, which needs no furniture in the document.
    */
   startFieldId: string;
-  /** Logbook parts only — hours before the next demonstration is prompted. */
+  /**
+   * Logbook parts only — the target amount, in the part's {@link durationUnit}.
+   * Named `minimumHours` for history; it holds minutes when the part's unit is
+   * minutes. Compared as a plain number against the logged Duration total, so
+   * the unit is a label, not a conversion.
+   */
   minimumHours?: number;
+  /**
+   * Logbook parts only — the unit the minimums and the logged Duration column
+   * are read in. Omitted means `hours`, which every existing tool uses and which
+   * keeps prior behaviour exactly. `minutes` changes only how the numbers are
+   * LABELLED and entered: the engine compares the logged Duration total to the
+   * minimums as plain numbers, so a part whose rows and minimums are both in
+   * minutes gates and progresses identically — only "hrs"/"min" differs. It is
+   * per part because one paper mixes them: the Scraper logs five task types in
+   * hours and its General Items coached exercises at ~15 minutes apiece.
+   */
+  durationUnit?: 'hours' | 'minutes';
   /**
    * Logbook parts only — the column of the part's table that carries each
    * entry's hours. Declared rather than assumed: an imported PDF may extract
@@ -1537,12 +1553,40 @@ export function logbookRows(
     | undefined ?? [];
 }
 
+/** A logbook part's duration unit, defaulting the omitted case to hours. */
+export type DurationUnit = 'hours' | 'minutes';
+
+/** Short unit label for a logged/target figure — "hrs" or "min". */
+export function durationUnitShort(unit: DurationUnit | undefined): string {
+  return unit === 'minutes' ? 'min' : 'hrs';
+}
+
+/** Long unit label, for prose like "Minimum 15 minutes". */
+export function durationUnitLong(unit: DurationUnit | undefined): string {
+  return unit === 'minutes' ? 'minutes' : 'hours';
+}
+
+/**
+ * Convert a duration figure between units, rounded to 2dp to keep float noise
+ * out of authored minimums (0.1h → 6min, 15min → 0.25h). Same unit is a no-op.
+ * Used when an author flips a part's unit so the meaning is preserved rather
+ * than the digits — the minimums and the logged column share one unit, so both
+ * move together.
+ */
+export function convertDurationValue(value: number, from: DurationUnit, to: DurationUnit): number {
+  if (from === to || !Number.isFinite(value)) return value;
+  const raw = to === 'minutes' ? value * 60 : value / 60;
+  return Math.round(raw * 100) / 100;
+}
+
 /**
  * Hours logged in a logbook part, summed from a duration column.
  *
- * Non-numeric cells contribute nothing rather than throwing: a logbook is
- * filled over weeks by someone in a cab, and one malformed row must not make
- * the whole total unreadable.
+ * "Hours" by name and by the default unit; a minutes part sums minutes the same
+ * way — the figure is in the part's own unit, compared to a minimum in that
+ * same unit. Non-numeric cells contribute nothing rather than throwing: a
+ * logbook is filled over weeks by someone in a cab, and one malformed row must
+ * not make the whole total unreadable.
  */
 export function totalLoggedHours(
   rows: readonly Record<string, unknown>[],

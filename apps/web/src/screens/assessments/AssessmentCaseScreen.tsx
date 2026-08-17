@@ -2,7 +2,12 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { CaseStateBadge } from '../statusBadges.js';
 import { Button, Icon, SignaturePad, useToast } from '@formai/ui';
-import { NS_DISPOSITIONS, type NotSatisfactoryDisposition, type PartState } from '@formai/shared';
+import {
+  NS_DISPOSITIONS,
+  durationUnitLong,
+  type NotSatisfactoryDisposition,
+  type PartState,
+} from '@formai/shared';
 import { ApiError } from '../../lib/data/api-client.js';
 import {
   useAssessmentCase,
@@ -376,7 +381,9 @@ function PartCard({
           <div className="font-heading text-[15px] font-bold">{part.label}</div>
           <div className="mt-0.5 text-[12.5px] text-text-tertiary">
             {KIND_HINT[part.kind]}
-            {part.minimumHours ? ` Minimum ${part.minimumHours} hours.` : ''}
+            {part.minimumHours
+              ? ` Minimum ${part.minimumHours} ${durationUnitLong(part.durationUnit ?? 'hours')}.`
+              : ''}
           </div>
         </div>
         <span

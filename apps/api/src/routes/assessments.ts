@@ -468,6 +468,8 @@ const partSchema = z.object({
   pathways: z.array(z.enum(ASSESSMENT_PATHWAYS)).min(1),
   startFieldId: z.string().min(1),
   minimumHours: z.number().positive().optional(),
+  // The unit the minimums and logged Duration are read in. Omitted = hours.
+  durationUnit: z.enum(['hours', 'minutes']).optional(),
   durationColumnKey: z.string().optional(),
   taskMinimums: z
     .object({
@@ -2642,6 +2644,7 @@ assessmentCasesRouter.get(
         kind: p.part.kind,
         ordinal: p.part.ordinal,
         minimumHours: p.part.minimumHours ?? null,
+        durationUnit: p.part.durationUnit ?? null,
         state: p.state,
         attempts: p.attempts,
         latestOutcome: p.latestOutcome,
@@ -3082,6 +3085,10 @@ assessmentCasesRouter.get(
         ? (allFields.find((f) => f.id === manifest.locationStreamFieldId) ?? null)
         : null,
       minimumHours: part.minimumHours ?? null,
+      // The unit the minimum and logged Duration are read in, so the fill
+      // surface labels "hrs"/"min" the same way the builder set it. Omitted =
+      // hours.
+      durationUnit: part.durationUnit ?? null,
       durationColumnKey: part.durationColumnKey ?? null,
       // Per-task-type hour targets, so the fill surface can show live per-task
       // progress. A soft target, like minimumHours — sent for display, never a

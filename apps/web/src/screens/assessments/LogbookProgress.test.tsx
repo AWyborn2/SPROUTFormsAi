@@ -77,6 +77,24 @@ describe('LogbookProgress', () => {
     expect(screen.getByText(/20 \/ 50 hrs/)).toBeTruthy();
   });
 
+  it('labels the readout in minutes when the part is a minutes part', () => {
+    render(
+      <LogbookProgress
+        rows={[{ task: 'Topsoil', duration: 15 }]}
+        taskMinimums={{ columnKey: 'task', targets: [{ value: 'Topsoil', minimumHours: 15 }] }}
+        durationColumnKey="duration"
+        minimumHours={30}
+        unit="minutes"
+      />,
+    );
+
+    expect(screen.getByRole('region', { name: 'Minutes logged' })).toBeTruthy();
+    expect(screen.getByText(/^15 \/ 30 min$/)).toBeTruthy(); // overall
+    expect(screen.getByText(/^15 \/ 15 min$/)).toBeTruthy(); // the Topsoil task
+    // No "hrs" anywhere on a minutes part.
+    expect(screen.queryByText(/hrs/)).toBeNull();
+  });
+
   it('renders nothing without a duration column — it is not a logbook to meter', () => {
     const { container } = render(
       <LogbookProgress rows={[]} taskMinimums={null} durationColumnKey={null} minimumHours={50} />,
