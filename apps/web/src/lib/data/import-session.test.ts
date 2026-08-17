@@ -37,6 +37,9 @@ import {
   acceptAnswerSet,
   addFixedRowItem,
   answerSetAccepted,
+  captureImportCorrections,
+  sendImportCorrections,
+  deleteField,
   adjustGeometryBand,
   adjustGeometryBoundary,
   changeFieldType,
@@ -1930,5 +1933,102 @@ describe('copying a placement between fields', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * The correction diff (Phase D). captureImportCorrections reads the raw
+ * extraction against the reviewer's edited fields; sendImportCorrections POSTs
+ * it at publish, fire-and-forget.
+ */
+describe('captureImportCorrections / sendImportCorrections', () => {
+  const AI_EXTRACTION: ExtractionResult = {
+    sourceType: 'pdf_import',
+    path: 'ai',
+    fileName: 'dozer.pdf',
+    pageCount: 18,
+    captureId: 'cap-1',
+    fields: [
+      { id: 'ai_1', label: 'Q1', type: 'radio', confidence: 0.9, options: ['a', 'b'] },
+      { id: 'ai_2', label: 'Site', type: 'text', confidence: 0.9 },
+    ],
+    designNotes: [],
+  };
+
+  /** Drive a session to `ready` seeded from the given extraction. */
+  async function seedReady(extraction: ExtractionResult) {
+    postMock.mockResolvedValueOnce({ assetId: 'asset-1' });
+    postMock.mockResolvedValueOnce(extraction);
+    await startExtraction(makeFile());
+    expect(getImportSession().status).toBe('ready');
+  }
+
+  it('returns null before an extraction has landed', () => {
+    expect(captureImportCorrections()).toBeNull();
+  });
+
+  it('carries the context and reports no corrections for an untouched review', async () => {
+    await seedReady(AI_EXTRACTION);
+    const corrections = captureImportCorrections();
+    expect(corrections).toMatchObject({
+      captureId: 'cap-1',
+      documentType: 'generic',
+      path: 'ai',
+      pageCount: 18,
+    });
+    expect(corrections?.corrections).toEqual([]);
+  });
+
+  it('records a retype and a deletion the reviewer made', async () => {
+    await seedReady(AI_EXTRACTION);
+    changeFieldType('ai_1', 'textarea');
+    deleteField('ai_2');
+
+    const corrections = captureImportCorrections()!.corrections;
+    expect(corrections).toContainEqual(
+      expect.objectContaining({ fieldId: 'ai_1', kind: 'retype', from: 'radio', to: 'textarea' }),
+    );
+    expect(corrections).toContainEqual(
+      expect.objectContaining({ fieldId: 'ai_2', kind: 'deleted', wasType: 'text' }),
+    );
+  });
+
+  it('POSTs the diff to /pdf/corrections with the field count and refs', async () => {
+    await seedReady(AI_EXTRACTION);
+    deleteField('ai_2');
+    postMock.mockClear();
+    postMock.mockResolvedValueOnce({ id: 'corr-1' });
+
+    sendImportCorrections({ assetId: 'asset-1', formId: 'form-9' });
+
+    expect(postMock).toHaveBeenCalledTimes(1);
+    const [path, body] = postMock.mock.calls[0]!;
+    expect(path).toBe('/pdf/corrections');
+    expect(body).toMatchObject({
+      fieldCount: 2,
+      assetId: 'asset-1',
+      formId: 'form-9',
+      corrections: expect.objectContaining({ captureId: 'cap-1', path: 'ai' }),
+    });
+  });
+
+  it('swallows a POST rejection so a publish can never fail on it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await seedReady(AI_EXTRACTION);
+    postMock.mockClear();
+    postMock.mockRejectedValueOnce(new Error('boom'));
+
+    expect(() => sendImportCorrections({ assetId: 'asset-1' })).not.toThrow();
+    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    warn.mockRestore();
+  });
+
+  it('does not POST for an abandoned session (no committed publish, no signal)', async () => {
+    await seedReady(AI_EXTRACTION);
+    resetImportSession();
+    postMock.mockClear();
+
+    sendImportCorrections({ assetId: 'asset-1' });
+    expect(postMock).not.toHaveBeenCalled();
   });
 });

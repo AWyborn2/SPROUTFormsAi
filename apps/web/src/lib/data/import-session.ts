@@ -15,6 +15,7 @@ import type {
   ColumnCalc,
   DocumentType,
   ExtractedField,
+  ExtractionCorrections,
   ExtractionResult,
   ExtractionStatus,
   FieldGeometry,
@@ -25,7 +26,7 @@ import type {
   RepeatingColumn,
   VisibilityCondition,
 } from '@formai/shared';
-import { isChoiceField, linkOutcomeTargets, statusForConfidence } from '@formai/shared';
+import { diffExtraction, isChoiceField, linkOutcomeTargets, statusForConfidence } from '@formai/shared';
 import type { BuilderAction, BuilderState } from '../field-editor/reducer.js';
 import { builderReducer, initialBuilderState } from '../field-editor/reducer.js';
 import { ApiError, apiClient } from './api-client.js';
@@ -1624,6 +1625,68 @@ export function reviewedToFields(fields: ReviewField[]): FormField[] {
       ? { outcomeTarget: { fieldId: outcomeByQuestion.get(f.id)! } }
       : {}),
   }));
+}
+
+/* ── correction diff, for the extraction learning loop (Phase D) ──────────────
+ *
+ * The raw extraction (`session.extraction`) and the reviewer's edited fields
+ * (`editor.fields`) only ever sit together HERE, at publish. The diff between
+ * them is what the learning loop learns from — see
+ * docs/plans/2026-08-17-001-feat-extraction-learning-loop-plan.md and shared
+ * `diffExtraction`.
+ */
+
+/**
+ * The correction diff for the current review, or null before an extraction has
+ * landed. Reads the raw extraction against the editor's fields, folding each
+ * field's review-side `questionRef` back in first — it rides in `reviewMeta`,
+ * not on the `FormField` the editor holds, so without this the diff would see a
+ * ref edit on every field that carried one.
+ */
+export function captureImportCorrections(): ExtractionCorrections | null {
+  if (!editor || !session.extraction) return null;
+  const reviewed = editor.fields.map((f) => {
+    const questionRef = reviewMeta.get(f.id)?.questionRef;
+    return questionRef !== undefined ? { ...f, questionRef } : f;
+  });
+  return diffExtraction(session.extraction.fields, reviewed, {
+    captureId: session.extraction.captureId,
+    documentType: heldDocumentType,
+    path: session.extraction.path,
+    pageCount: session.extraction.pageCount,
+  });
+}
+
+/**
+ * Send the correction diff for a just-published import, FIRE-AND-FORGET.
+ *
+ * Called from the publish success handlers, and ONLY from there: a correction is
+ * the reviewer's committed final answer, so an abandoned draft (no editor, or a
+ * reset session) yields nothing to send. The POST is never awaited by the
+ * caller and a rejection is swallowed — publishing must not wait on, or fail
+ * for, the training signal. Sent even when there are zero corrections, because a
+ * perfect extraction is signal too: the metric needs the field count either way.
+ */
+export function sendImportCorrections(ref: {
+  assetId?: string | null;
+  formId?: string;
+  versionId?: string;
+}): void {
+  const corrections = captureImportCorrections();
+  if (!corrections) return;
+  const fieldCount = session.extraction?.fields.length ?? 0;
+  void apiClient
+    .post('/pdf/corrections', {
+      corrections,
+      fieldCount,
+      ...(ref.assetId ? { assetId: ref.assetId } : {}),
+      ...(ref.formId ? { formId: ref.formId } : {}),
+      ...(ref.versionId ? { versionId: ref.versionId } : {}),
+    })
+    .catch((err: unknown) => {
+      // Telemetry, not operational state — never surfaced to the reviewer.
+      console.warn('failed to record extraction corrections', err);
+    });
 }
 
 /**
