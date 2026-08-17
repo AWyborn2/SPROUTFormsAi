@@ -24,18 +24,26 @@
 import type { AnswerSet, FormFieldType } from './form-field.js';
 import type { DocumentType } from './extraction.js';
 
-/** The correction kinds, one per way a reviewer changes an extracted field. */
-export type CorrectionKind =
-  | 'retype'
-  | 'selection-type-changed'
-  | 'options-edited'
-  | 'fixed-rows-edited'
-  | 'answer-sets-changed'
-  | 'label-rewritten'
-  | 'question-ref-edited'
-  | 'split'
-  | 'deleted'
-  | 'added';
+/**
+ * The correction kinds, one per way a reviewer changes an extracted field.
+ *
+ * A runtime array (not just a type) so the store route can validate an incoming
+ * correction's `kind` against it and the distiller can enumerate them, without
+ * either re-listing the set and drifting.
+ */
+export const CORRECTION_KINDS = [
+  'retype',
+  'selection-type-changed',
+  'options-edited',
+  'fixed-rows-edited',
+  'answer-sets-changed',
+  'label-rewritten',
+  'question-ref-edited',
+  'split',
+  'deleted',
+  'added',
+] as const;
+export type CorrectionKind = (typeof CORRECTION_KINDS)[number];
 
 /** The 1-based printed page range the raw field was extracted from, when known. */
 export interface SourcePages {

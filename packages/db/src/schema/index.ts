@@ -12,6 +12,7 @@ export * from './governance.ts';
 export * from './assessments.ts';
 export * from './import-drafts.ts';
 export * from './extraction-captures.ts';
+export * from './extraction-corrections.ts';
 export * from './builder-drafts.ts';
 export * from './taxonomy.ts';
 export * from './profiles.ts';
