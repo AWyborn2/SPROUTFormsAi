@@ -41,6 +41,7 @@ import type {
   BuilderDraftSummary,
   SaveBuilderDraftInput,
   ApiKey,
+  CorrectionCandidates,
   AuditCategory,
   AuditEntry,
   CreatedApiKey,
@@ -927,6 +928,12 @@ export const store = {
 
   listApiKeys(): Promise<ApiKey[]> {
     return apiClient.get<ApiKeyDto[]>('/api-keys').then((rows) => rows.map(toApiKey));
+  },
+
+  /** Recurring extraction-correction shapes surfaced as candidate rules (admin). */
+  listCorrectionCandidates(minCount?: number): Promise<CorrectionCandidates> {
+    const query = minCount ? `?minCount=${minCount}` : '';
+    return apiClient.get<CorrectionCandidates>(`/pdf/corrections/candidates${query}`);
   },
 
   /**

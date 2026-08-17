@@ -1143,3 +1143,22 @@ export interface AuditFormInput {
   knownLabels: string[];
   documentType?: DocumentType;
 }
+
+/**
+ * One recurring extraction-correction shape surfaced as a candidate rule — the
+ * read model behind the admin insights screen (learning loop 2c). Mirrors the
+ * API's `CandidateRule`: a content-free shape key, how often it recurred, a few
+ * of this org's example captures, and the rule it suggests looking at.
+ */
+export interface CorrectionCandidate {
+  documentType: string;
+  shape: string;
+  count: number;
+  sampleCaptureIds: string[];
+  suggestion: string;
+}
+
+export interface CorrectionCandidates {
+  minCount: number;
+  candidates: CorrectionCandidate[];
+}
