@@ -181,9 +181,32 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
           only the first left a freshly-extracted matching question labelled as
           a one-answer question and offered a type dropdown that cannot express
           it.
+
+          `notMatching` is the author's override for the reverse mistake — an
+          ordinary multiple-choice the extraction FALSE-read as matching. It
+          wins outright, because the whole point of it is to reach the type and
+          keying controls this flag otherwise hides.
         */
-        const matching = isMatchingQuestion(question.options) || (!!extracted && hasAnyMatchSide(extracted));
+        const matching =
+          !question.notMatching &&
+          (isMatchingQuestion(question.options) || (!!extracted && hasAnyMatchSide(extracted)));
         const open = pairingFor === question.id;
+
+        /*
+          "Not a matching question" — the escape hatch for a false positive.
+          Retype to a plain one-answer question (which clears any stale key and
+          reconciles options), flag it so the match signals stop firing, and
+          recover the choices from the prompt side the extraction read, since on
+          a mis-read multiple-choice that side IS the option list.
+        */
+        const stopMatching = () => {
+          const recovered = extracted?.matchLeft ?? [];
+          draft.structureOps.setFieldType(question.id, 'radio');
+          draft.fieldOps.patch(question.id, {
+            notMatching: true,
+            ...(recovered.length >= 2 ? { options: [...recovered] } : {}),
+          });
+        };
 
         return (
           <div key={question.id} className="rounded-[14px] border border-border bg-surface-card p-4">
@@ -261,6 +284,24 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
                       ? 'Build pairs'
                       : 'Edit pairs'}
               </button>
+              )}
+
+              {/*
+                THE ESCAPE HATCH FROM A FALSE-MATCHING READ. When the extraction
+                wrongly took an ordinary multiple-choice for a matching question,
+                every keying control above is hidden and the field is stuck in
+                the pair builder. This is the one way out — visible only while
+                the field IS being treated as matching.
+              */}
+              {matching && !open && (
+                <button
+                  type="button"
+                  onClick={stopMatching}
+                  className="inline-flex h-[28px] flex-none items-center gap-1.5 rounded-lg border border-border px-2.5 text-[11px] font-semibold text-text-secondary hover:bg-surface-hover"
+                >
+                  <Icon name="x" size={12} />
+                  Not matching
+                </button>
               )}
             </div>
 

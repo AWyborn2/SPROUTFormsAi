@@ -343,6 +343,42 @@ describe('AnswerKeyStep — matching questions the extraction found', () => {
     renderStep(result);
     expect(screen.queryByText('Match each sign to its meaning')).toBeNull();
   });
+
+  it('offers an escape hatch that turns a FALSE-matching read into a keyable question', async () => {
+    /*
+      The reverse of the defect above: extraction false-read an ordinary
+      multiple-choice as matching, which hid every keying control and stuck the
+      field in the pair builder. The hatch turns it back into a one-answer
+      question and recovers the choices from the prompt side the extraction read
+      — on a mis-read multiple-choice, that side IS the option list.
+    */
+    const result = await draftOf([matchingField()]);
+    renderStep(result);
+
+    fireEvent.click(screen.getByText('Not matching'));
+
+    const q = result.current.fields.find((f) => f.id === 'm1')!;
+    expect(q.notMatching).toBe(true);
+    expect(q.type).toBe('radio');
+    expect(q.options).toEqual(['Red triangle', 'Blue circle']);
+  });
+
+  it('offers no un-matching hatch on an ordinary question', async () => {
+    // Nothing to escape from — the field was never treated as matching.
+    const result = await draftOf([field({ id: 'q1', label: 'Ordinary question' })]);
+    renderStep(result);
+    expect(screen.queryByText('Not matching')).toBeNull();
+  });
+
+  it('shows the keying controls once a field is flagged not-matching', async () => {
+    // Proof the flag defeats BOTH match signals: the extraction's two sides no
+    // longer force matching mode, so the type dropdown returns.
+    const result = await draftOf([matchingField()]);
+    act(() => result.current.fieldOps.patch('m1', { notMatching: true }));
+    renderStep(result);
+    expect(screen.getByLabelText('Question type for Match each sign to its meaning')).toBeTruthy();
+    expect(screen.queryByText('Not matching')).toBeNull();
+  });
 });
 
 /**
