@@ -473,6 +473,20 @@ export interface FormField {
    * question nobody has chosen a presentation for.
    */
   matchPresentation?: MatchPresentation;
+
+  /**
+   * A builder-authoring override: this question is NOT a matching question,
+   * whatever the extraction read.
+   *
+   * The extraction can false-positive an ordinary multiple-choice as a matching
+   * question — it emits `matchLeft`/`matchRight` and empties `options` — and the
+   * Answer Key step then hides the type and keying controls, because a matching
+   * question is authored through the pair builder. That left the field
+   * unfixable: nothing on the editable copy could say "the extraction was
+   * wrong". This flag is that escape hatch. Builder-only; marking and export
+   * never read it.
+   */
+  notMatching?: boolean;
 }
 
 /**
