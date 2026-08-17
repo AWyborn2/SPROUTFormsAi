@@ -40,3 +40,6 @@ coverage/
 
 # workforce migration data — contains PII, never commit
 chc-*.csv
+
+# extraction-tuning corpus — real, safety-critical assessment PDFs, never commit
+corpus/
