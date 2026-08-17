@@ -2,8 +2,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { CORRECTION_KINDS, DOCUMENT_TYPES } from '@formai/shared';
-import type { FormField, SubmissionValue } from '@formai/shared';
+import { CORRECTION_KINDS, DOCUMENT_TYPES, shapeOf } from '@formai/shared';
+import type { ExtractionCorrections, FormField, SubmissionValue } from '@formai/shared';
 import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -401,5 +401,75 @@ pdfRouter.post(
       .returning({ id: schema.extractionCorrections.id });
 
     res.status(201).json({ id: row?.id });
+  }),
+);
+
+/**
+ * The correction-rate metric and shape clusters for this org's imports (2b/E).
+ *
+ * Two things, from the same rows: (1) the correction RATE per document type —
+ * corrections per extracted field, read off the denormalised counts, so a
+ * promoted extraction rule's effect is measurable; and (2) the recurring
+ * correction SHAPES, each a content-free `shapeOf` key with its count and a few
+ * example captures. The shape is the privacy boundary: it names types, counts
+ * and structural predicates, never field text — so even a cross-org view (a
+ * later platform surface) can show which mistakes recur without exposing what
+ * any one paper said. This endpoint stays ORG-SCOPED; the sample captures are
+ * the caller's own.
+ */
+pdfRouter.get(
+  '/corrections/insights',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const rows = await db.query.extractionCorrections.findMany({
+      where: eq(schema.extractionCorrections.orgId, tenant.orgId),
+      columns: { documentType: true, correctionCount: true, fieldCount: true, corrections: true, captureId: true },
+      // A cap, not a page: insights are an aggregate, and an org with more than
+      // this many imports has plenty of signal already. Paginate if it ever bites.
+      limit: 5000,
+    });
+
+    const metricByType = new Map<string, { corrections: number; fields: number }>();
+    const shapeByKey = new Map<
+      string,
+      { documentType: string; shape: string; count: number; sampleCaptureIds: string[] }
+    >();
+
+    for (const row of rows) {
+      const documentType = row.documentType ?? 'unspecified';
+      const metric = metricByType.get(documentType) ?? { corrections: 0, fields: 0 };
+      metric.corrections += row.correctionCount;
+      metric.fields += row.fieldCount;
+      metricByType.set(documentType, metric);
+
+      const diff = row.corrections as ExtractionCorrections;
+      for (const correction of diff.corrections ?? []) {
+        const shape = shapeOf(correction);
+        const key = `${documentType}::${shape}`;
+        const entry = shapeByKey.get(key) ?? { documentType, shape, count: 0, sampleCaptureIds: [] };
+        entry.count += 1;
+        if (row.captureId && entry.sampleCaptureIds.length < 5 && !entry.sampleCaptureIds.includes(row.captureId)) {
+          entry.sampleCaptureIds.push(row.captureId);
+        }
+        shapeByKey.set(key, entry);
+      }
+    }
+
+    const metrics = [...metricByType.entries()]
+      .map(([documentType, m]) => ({
+        documentType,
+        corrections: m.corrections,
+        fields: m.fields,
+        rate: m.fields > 0 ? m.corrections / m.fields : 0,
+      }))
+      .sort((a, b) => b.rate - a.rate);
+    const shapes = [...shapeByKey.values()].sort((a, b) => b.count - a.count);
+
+    res.json({ metrics, shapes });
   }),
 );
