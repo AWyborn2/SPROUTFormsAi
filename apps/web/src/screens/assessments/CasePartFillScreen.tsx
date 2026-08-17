@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { SubmissionValue } from '@formai/shared';
-import { logbookRows } from '@formai/shared';
+import { durationUnitLong, logbookRows } from '@formai/shared';
 import { Button, Icon, todayISODate, useToast } from '@formai/ui';
 import { ApiError } from '../../lib/data/api-client.js';
 import { dateFieldToStamp } from './signature-date-stamp.js';
@@ -286,7 +286,9 @@ export function CasePartFillScreen() {
         <h1 className="font-heading text-xl font-semibold">{attempt.partLabel}</h1>
         <p className="mt-1 text-[13px] text-text-secondary">
           Attempt {attempt.attemptNumber}
-          {attempt.minimumHours !== null && <> · {attempt.minimumHours} hours minimum</>}
+          {attempt.minimumHours !== null && (
+            <> · {attempt.minimumHours} {durationUnitLong(attempt.durationUnit ?? 'hours')} minimum</>
+          )}
           {attempt.locationStream && <> · {attempt.locationStream}</>}
         </p>
       </header>
@@ -373,6 +375,7 @@ export function CasePartFillScreen() {
         taskMinimums={attempt.taskMinimums}
         durationColumnKey={attempt.durationColumnKey}
         minimumHours={attempt.minimumHours}
+        unit={attempt.durationUnit}
       />
 
       <div className="grid grid-cols-12 gap-[16px]">

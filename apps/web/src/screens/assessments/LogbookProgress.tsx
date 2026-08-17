@@ -1,5 +1,5 @@
-import { logbookTaskProgress, totalLoggedHours } from '@formai/shared';
-import type { AssessmentToolManifest } from '@formai/shared';
+import { durationUnitLong, durationUnitShort, logbookTaskProgress, totalLoggedHours } from '@formai/shared';
+import type { AssessmentToolManifest, DurationUnit } from '@formai/shared';
 import { Icon } from '@formai/ui';
 
 type TaskMinimums = NonNullable<AssessmentToolManifest['parts'][number]['taskMinimums']>;
@@ -23,11 +23,14 @@ export function LogbookProgress({
   taskMinimums,
   durationColumnKey,
   minimumHours,
+  unit,
 }: {
   rows: readonly Record<string, unknown>[];
   taskMinimums: TaskMinimums | null;
   durationColumnKey: string | null;
   minimumHours: number | null;
+  /** The part's duration unit; null/omitted reads as hours. */
+  unit?: DurationUnit | null;
 }) {
   if (!durationColumnKey) return null;
   const perTask = taskMinimums ? logbookTaskProgress(rows, taskMinimums, durationColumnKey) : [];
@@ -36,28 +39,39 @@ export function LogbookProgress({
   if (minimumHours === null && perTask.length === 0) return null;
 
   const overall = totalLoggedHours(rows, durationColumnKey);
+  const u = unit ?? 'hours';
+  const short = durationUnitShort(u);
+  // Capitalised for the heading — "Hours logged" / "Minutes logged".
+  const long = durationUnitLong(u);
+  const heading = `${long.charAt(0).toUpperCase()}${long.slice(1)} logged`;
 
   return (
     <section
-      aria-label="Hours logged"
+      aria-label={heading}
       className="mb-4 rounded-[10px] border border-border bg-surface-card p-3.5"
     >
       <div className="mb-2.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
         <Icon name="clock" size={14} className="text-text-tertiary" />
-        <h2 className="text-[13px] font-semibold text-text-primary">Hours logged</h2>
+        <h2 className="text-[13px] font-semibold text-text-primary">{heading}</h2>
         <span className="ml-auto text-[11.5px] text-text-tertiary">
           Targets, not gates — log any task in any order
         </span>
       </div>
 
       {minimumHours !== null && (
-        <HoursRow label="Overall" logged={overall} target={minimumHours} strong />
+        <HoursRow label="Overall" logged={overall} target={minimumHours} unit={short} strong />
       )}
 
       {perTask.length > 0 && (
         <div className="mt-2.5 flex flex-col gap-2.5">
           {perTask.map((t) => (
-            <HoursRow key={t.value} label={t.value} logged={t.loggedHours} target={t.minimumHours} />
+            <HoursRow
+              key={t.value}
+              label={t.value}
+              logged={t.loggedHours}
+              target={t.minimumHours}
+              unit={short}
+            />
           ))}
         </div>
       )}
@@ -69,11 +83,13 @@ function HoursRow({
   label,
   logged,
   target,
+  unit,
   strong,
 }: {
   label: string;
   logged: number;
   target: number;
+  unit: string;
   strong?: boolean;
 }) {
   const met = logged >= target;
@@ -90,7 +106,7 @@ function HoursRow({
           {label}
         </span>
         <span className="flex-none tabular-nums text-text-secondary">
-          {logged} / {target} hrs
+          {logged} / {target} {unit}
         </span>
       </div>
       <span className="block h-1.5 w-full overflow-hidden rounded-full bg-surface-sunken">

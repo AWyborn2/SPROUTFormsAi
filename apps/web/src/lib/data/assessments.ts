@@ -18,6 +18,7 @@ import type {
   AssessmentPathway,
   AssessmentToolManifest,
   AssessmentWorkflow,
+  DurationUnit,
   FormField,
   NotSatisfactoryDisposition,
   AssessmentCaseState,
@@ -76,6 +77,8 @@ export interface CasePartView {
   kind: PartKind;
   ordinal: number;
   minimumHours: number | null;
+  /** The unit the minimum is read in; null reads as hours. */
+  durationUnit: DurationUnit | null;
   state: PartState;
   attempts: number;
   latestOutcome: PartOutcome | null;
@@ -196,6 +199,8 @@ export interface AttemptFillView {
   /** The stream question, for condition lookup — often outside this part. */
   streamField: FormField | null;
   minimumHours: number | null;
+  /** The unit the minimum and logged Duration are read in; null reads as hours. */
+  durationUnit: DurationUnit | null;
   durationColumnKey: string | null;
   /**
    * Per-task-type hour targets, when this logbook part declares them. Drives

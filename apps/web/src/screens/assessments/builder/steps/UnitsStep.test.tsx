@@ -62,6 +62,36 @@ function renderStep(result: { current: BuilderDraftState }) {
   return render(<Harness />);
 }
 
+/**
+ * A LIVE step for multi-step DOM flows: the hook and the step render in ONE
+ * tree, so a change that updates the draft re-renders the step and the next
+ * interaction sees fresh handlers. (`renderStep` above pairs a separate
+ * `renderHook` with a static render, which is fine for a single interaction but
+ * leaves later handlers closed over stale state.)
+ */
+async function renderLiveStep(fields: ExtractedField[]) {
+  post.mockReset();
+  post.mockResolvedValueOnce({ assetId: 'a' }).mockResolvedValueOnce({
+    sourceType: 'pdf_import',
+    path: 'ai',
+    fileName: 'assessment.pdf',
+    pageCount: 3,
+    fields,
+    designNotes: [],
+  });
+  const ref: { current: BuilderDraftState } = { current: null as unknown as BuilderDraftState };
+  function Host() {
+    const draft = useBuilderDraftState();
+    ref.current = draft;
+    return <UnitsStep draft={draft} />;
+  }
+  render(<Host />);
+  await act(async () => {
+    await ref.current.ingest(new File(['x'], 'assessment.pdf', { type: 'application/pdf' }));
+  });
+  return ref;
+}
+
 /** A paper: a theory part and a logbook part, under their printed headings. */
 const PAPER = [
   ex({ id: 'h1', type: 'section_header', label: 'PART 1 — THEORY' }),
@@ -73,6 +103,20 @@ const PAPER = [
     label: 'Operating log',
     columns: [
       { key: 'task', label: 'Task', type: 'text' },
+      { key: 'duration', label: 'Hours', type: 'number' },
+    ],
+  }),
+];
+
+/** A logbook whose task column is a dropdown, so per-task minimums are offered. */
+const PAPER_WITH_TASK_DROPDOWN = [
+  ex({ id: 'h2', type: 'section_header', label: 'PART 3 — LOG' }),
+  ex({
+    id: 'tbl',
+    type: 'repeating_group',
+    label: 'Operating log',
+    columns: [
+      { key: 'task', label: 'Task', type: 'dropdown', options: ['Alpha', 'Bravo'] },
       { key: 'duration', label: 'Hours', type: 'number' },
     ],
   }),
@@ -209,6 +253,51 @@ describe('UnitsStep', () => {
     renderStep(result);
 
     expect(screen.getByText(/Driver’s Licence C OR higher class/)).toBeTruthy();
+  });
+
+  it('flips the unit and converts the overall minimum, preserving the meaning', async () => {
+    const ref = await renderLiveStep(PAPER);
+    const logbook = ref.current.parts.find((p) => p.kind === 'logbook')!;
+    act(() => ref.current.partOps.update(logbook.key, { minimumHours: 1 }));
+
+    act(() => {
+      fireEvent.change(screen.getByLabelText(`Duration unit for ${logbook.label}`), {
+        target: { value: 'minutes' },
+      });
+    });
+
+    const after = ref.current.parts.find((p) => p.key === logbook.key)!;
+    expect(after.durationUnit).toBe('minutes');
+    expect(after.minimumHours).toBe(60); // 1 hour → 60 minutes, meaning kept
+    // The label follows the unit.
+    expect(screen.getByLabelText(`Minimum minutes for ${after.label}`)).toBeTruthy();
+  });
+
+  it('auto-sums the per-task minimums into the overall, which becomes read-only', async () => {
+    const ref = await renderLiveStep(PAPER_WITH_TASK_DROPDOWN);
+    const logbook = ref.current.parts.find((p) => p.kind === 'logbook')!;
+
+    act(() => {
+      fireEvent.change(screen.getByLabelText(`Task type column for ${logbook.label}`), {
+        target: { value: 'task' },
+      });
+    });
+    act(() => {
+      fireEvent.change(screen.getByLabelText('Minimum hours for Alpha'), {
+        target: { value: '0.25' },
+      });
+    });
+    act(() => {
+      fireEvent.change(screen.getByLabelText('Minimum hours for Bravo'), {
+        target: { value: '0.25' },
+      });
+    });
+
+    const after = ref.current.parts.find((p) => p.key === logbook.key)!;
+    expect(after.minimumHours).toBe(0.5); // 0.25 + 0.25, kept in step with the tasks
+    const overall = screen.getByLabelText(`Minimum hours for ${after.label}`) as HTMLInputElement;
+    expect(overall.readOnly).toBe(true);
+    expect(overall.value).toBe('0.5');
   });
 
   it('says so rather than rendering an empty list when there are no parts', async () => {

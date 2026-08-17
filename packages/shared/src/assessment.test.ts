@@ -14,6 +14,9 @@ import {
   type PartOutcome,
   CASE_STATES,
   caseProgress,
+  convertDurationValue,
+  durationUnitLong,
+  durationUnitShort,
   fieldsInPart,
   fieldsInSection,
   isCaseCompetent,
@@ -900,6 +903,24 @@ describe('fieldsInPart', () => {
     };
 
     expect(fieldsInPart(docFields, reversed, 'one').map((f) => f.id)).toEqual(['q1', 'q2', 'h-mid']);
+  });
+});
+
+describe('duration units', () => {
+  it('labels default to hours when the unit is omitted', () => {
+    expect(durationUnitShort(undefined)).toBe('hrs');
+    expect(durationUnitLong(undefined)).toBe('hours');
+    expect(durationUnitShort('hours')).toBe('hrs');
+    expect(durationUnitLong('minutes')).toBe('minutes');
+  });
+
+  it('converts a figure between units, rounded, meaning preserved', () => {
+    expect(convertDurationValue(0.25, 'hours', 'minutes')).toBe(15);
+    expect(convertDurationValue(15, 'minutes', 'hours')).toBe(0.25);
+    expect(convertDurationValue(0.1, 'hours', 'minutes')).toBe(6);
+    // Same unit is a no-op; non-finite passes through untouched.
+    expect(convertDurationValue(3, 'hours', 'hours')).toBe(3);
+    expect(convertDurationValue(Number.NaN, 'hours', 'minutes')).toBeNaN();
   });
 });
 
