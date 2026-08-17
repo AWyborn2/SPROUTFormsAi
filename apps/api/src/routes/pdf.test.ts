@@ -704,3 +704,75 @@ describe('POST /pdf/corrections', () => {
     }
   });
 });
+
+/**
+ * The correction-rate metric + shape clusters (Phase E). Aggregates the stored
+ * correction rows into a rate per document type and content-free shape counts.
+ */
+describe('GET /pdf/corrections/insights', () => {
+  function fakeInsightsDb(rows: unknown[]) {
+    return { query: { extractionCorrections: { findMany: vi.fn().mockResolvedValue(rows) } } };
+  }
+
+  const ROWS = [
+    {
+      documentType: 'assessment',
+      correctionCount: 2,
+      fieldCount: 10,
+      captureId: 'cap-1',
+      corrections: {
+        corrections: [
+          { kind: 'retype', fieldId: 'ai_1', from: 'radio', to: 'textarea' },
+          { kind: 'deleted', fieldId: 'ai_5', wasType: 'radio', wasLabel: 'c) x' },
+        ],
+      },
+    },
+    {
+      documentType: 'assessment',
+      correctionCount: 1,
+      fieldCount: 10,
+      captureId: 'cap-2',
+      corrections: {
+        corrections: [{ kind: 'retype', fieldId: 'ai_2', from: 'radio', to: 'textarea' }],
+      },
+    },
+  ];
+
+  function get(base: string) {
+    return fetch(`${base}/pdf/corrections/insights`, { headers: { ...authHeader() } });
+  }
+
+  it('503s when the database is unavailable', async () => {
+    mockDbValue = null;
+    const { server, base } = startApp();
+    try {
+      expect((await get(base)).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports the correction rate per type and the recurring shapes with samples', async () => {
+    mockDbValue = fakeInsightsDb(ROWS);
+    const { server, base } = startApp();
+    try {
+      const res = await get(base);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        metrics: { documentType: string; corrections: number; fields: number; rate: number }[];
+        shapes: { documentType: string; shape: string; count: number; sampleCaptureIds: string[] }[];
+      };
+
+      expect(body.metrics).toEqual([
+        { documentType: 'assessment', corrections: 3, fields: 20, rate: 0.15 },
+      ]);
+
+      const retype = body.shapes.find((s) => s.shape === 'retype:radio→textarea');
+      expect(retype).toMatchObject({ documentType: 'assessment', count: 2 });
+      expect(retype!.sampleCaptureIds.sort()).toEqual(['cap-1', 'cap-2']);
+      expect(body.shapes.find((s) => s.shape === 'deleted:orphan-option')?.count).toBe(1);
+    } finally {
+      server.close();
+    }
+  });
+});
