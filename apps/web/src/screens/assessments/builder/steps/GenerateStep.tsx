@@ -57,6 +57,7 @@ export function GenerateStep({ draft }: { draft: BuilderDraftState }) {
         onSetFieldType={draft.structureOps.setFieldType}
         onGroup={draft.structureOps.group}
         onPatchField={draft.fieldOps.patch}
+        onMergeTable={draft.fieldOps.mergeTable}
       />
 
       {/* The preview scrolls INSIDE this column, so the chrome above and the

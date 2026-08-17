@@ -73,6 +73,7 @@ function setup(over: Partial<StructurePanelProps> = {}) {
     onDeleteField: vi.fn(),
     onFoldField: vi.fn(),
     onPatchField: vi.fn(),
+    onMergeTable: vi.fn(),
     ...over,
   };
   return { props, ...render(<StructurePanel {...props} />) };
@@ -587,6 +588,60 @@ describe('column editing', () => {
         ],
       }),
     );
+  });
+});
+
+/*
+  The fixed (locked) rows of a checklist, editable through the same shared
+  inspector. Extraction mangles the ROWS the same ways it mangles columns — a
+  garbled item, a missed one, the wrong order — and until this there was no way
+  to correct one.
+*/
+describe('checklist rows', () => {
+  it('edits the fixed rows through the shared inspector', () => {
+    const { props } = setup();
+    expand('Part 2 — Practical');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit columns of Pre-start checks' }));
+
+    expect(screen.getByText('Checklist rows')).toBeTruthy();
+    expect((screen.getByLabelText('Checklist row 1') as HTMLInputElement).value).toBe('Oil');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add row' }));
+    expect(props.onPatchField).toHaveBeenCalledWith('tbl', { fixedRows: ['Oil', ''] });
+  });
+});
+
+/*
+  Merging a mis-split checklist. Extraction breaks one printed checklist into two
+  tables; this sends a stray table's rows into another checklist as fixed rows
+  and removes it. Offered only where there IS another checklist to merge into.
+*/
+describe('merging checklist tables', () => {
+  const TWO_TABLES: FormField[] = [
+    field({ id: 'ctrl', label: 'Operational controls', type: 'repeating_group', fixedRows: ['Service brake'] }),
+    field({ id: 'stray', label: 'Unnamed checklist', type: 'repeating_group', fixedRows: ['Differential lock'] }),
+  ];
+  const TWO_STRUCT: BuilderStructure = [
+    { key: 'p', label: 'Part 4 — Practical', cols: 1, fields: [{ id: 'ctrl' }, { id: 'stray' }] },
+  ];
+
+  it('offers no merge when a checklist stands alone', () => {
+    setup();
+    expand('Part 2 — Practical');
+    expect(
+      screen.queryByRole('button', { name: 'Merge Pre-start checks into another table' }),
+    ).toBeNull();
+  });
+
+  it('merges a stray table into the one the author picks', () => {
+    const { props } = setup({ fields: TWO_TABLES, structure: TWO_STRUCT });
+    expand('Part 4 — Practical');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Merge Unnamed checklist into another table' }));
+    // The menu lists the OTHER checklist as a target, not itself.
+    fireEvent.click(screen.getByRole('button', { name: 'Operational controls' }));
+
+    expect(props.onMergeTable).toHaveBeenCalledWith('stray', 'ctrl');
   });
 });
 

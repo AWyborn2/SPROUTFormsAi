@@ -358,3 +358,47 @@ export function duplicateSection(
     excluded,
   };
 }
+
+/**
+ * Merge one checklist table's rows into another, then delete the source.
+ *
+ * The shape this exists for: extraction splits ONE printed checklist across a
+ * page or batch boundary into two `repeating_group` tables — the same columns,
+ * the rest of the rows — or files a handful of rows under a stray second table.
+ * The author needs those rows back in the first table AS FIXED ROWS: pre-printed
+ * and locked, exactly like the rows already there. Re-adding them by hand on a
+ * fill surface makes AD-HOC rows instead — editable, deletable, and no part of
+ * the checklist — which is the opposite of what a printed item is.
+ *
+ * Only the LABELS move. `fixedRows` are the pre-printed item text in column 0;
+ * the target keeps its own columns and answer set, so every moved row adopts the
+ * target's cells. The source's columns are irrelevant — a template carries no
+ * row values yet — so the merge is robust whatever keys extraction gave the two
+ * tables, which is the norm since each was read as its own table.
+ *
+ * Both sides must be checklists (a `repeating_group` WITH `fixedRows`): the
+ * source has the rows to move, the target the pre-printed label column they join.
+ * Deletion goes through `deleteField`, so the source's keys, outcome targets and
+ * exclusion are cleaned up by the one implementation that knows them all.
+ */
+export function mergeRepeatingTable(
+  state: FieldEditState,
+  sourceId: string,
+  targetId: string,
+): FieldEditResult {
+  if (sourceId === targetId) return unchanged(state);
+  const source = state.fields.find((f) => f.id === sourceId);
+  const target = state.fields.find((f) => f.id === targetId);
+  if (!source || !target) return unchanged(state);
+  if (source.type !== 'repeating_group' || target.type !== 'repeating_group') {
+    return unchanged(state);
+  }
+  const moving = source.fixedRows ?? [];
+  const targetRows = target.fixedRows ?? [];
+  if (moving.length === 0 || targetRows.length === 0) return unchanged(state);
+
+  const withMerged = state.fields.map((f) =>
+    f.id === targetId ? { ...f, fixedRows: [...targetRows, ...moving] } : f,
+  );
+  return deleteField({ ...state, fields: withMerged }, sourceId);
+}

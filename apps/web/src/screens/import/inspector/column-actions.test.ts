@@ -284,4 +284,21 @@ describe('builderColumnActions', () => {
       expect(next.columns).toEqual(log.columns);
     });
   });
+
+  describe('setFixedRows', () => {
+    it('replaces the checklist rows verbatim', () => {
+      const next = afterAction(table, (a) =>
+        a.setFixedRows(table.id, ['Engine oil level', 'Coolant', 'Service brake']),
+      );
+      expect(next.fixedRows).toEqual(['Engine oil level', 'Coolant', 'Service brake']);
+    });
+
+    it('normalizes an empty list to undefined — the model never stores an empty fixedRows', () => {
+      // Clearing every row is how a checklist becomes an open table again; a
+      // stored empty array would be a checklist with no items, which nothing
+      // downstream expects.
+      const next = afterAction(table, (a) => a.setFixedRows(table.id, []));
+      expect(next.fixedRows).toBeUndefined();
+    });
+  });
 });

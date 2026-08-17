@@ -1425,6 +1425,19 @@ export function setTableLabelColumn(id: string, isLabel: boolean): void {
   });
 }
 
+/**
+ * Replace a checklist's pre-printed rows (the locked item labels).
+ *
+ * Empty normalizes to `undefined`: the model never stores an empty `fixedRows`,
+ * and a table with none is an open row-entry table, not a checklist holding
+ * nothing. Only a `repeating_group` has rows to set.
+ */
+export function setTableFixedRows(id: string, rows: string[]): void {
+  const field = editorField(id);
+  if (!field || field.type !== 'repeating_group') return;
+  dispatchStructural({ t: 'update', id, patch: { fixedRows: rows.length ? rows : undefined } });
+}
+
 /** Mint a column key unique within the table. */
 function nextColumnKey(columns: RepeatingColumn[]): string {
   const taken = new Set(columns.map((c) => c.key));
