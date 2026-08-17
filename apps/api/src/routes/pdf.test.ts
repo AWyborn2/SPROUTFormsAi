@@ -18,6 +18,13 @@ vi.mock('../anthropic.js', () => ({
   getAnthropic: () => mockGetAnthropic(),
 }));
 
+// The raw-extraction capture is a separate best-effort concern; the route's job
+// is only to surface the id it returns. capture.test.ts owns the id derivation.
+const mockCaptureExtraction = vi.fn<(...args: unknown[]) => Promise<string | null>>(async () => null);
+vi.mock('../pdf/capture.js', () => ({
+  captureExtraction: (...args: unknown[]) => mockCaptureExtraction(...args),
+}));
+
 const mockGetStorageClient = vi.fn();
 const mockUploadPdf = vi.fn();
 const mockDownloadPdf = vi.fn();
@@ -69,6 +76,7 @@ afterEach(() => {
   vi.clearAllMocks();
   mockGetStorageClient.mockReturnValue(null);
   mockGetAnthropic.mockReturnValue(undefined);
+  mockCaptureExtraction.mockResolvedValue(null);
   mockDbValue = null;
 });
 
@@ -188,6 +196,52 @@ describe('POST /pdf/extract', () => {
       expect(res.status).toBe(200);
       expect(mockExtractForm).toHaveBeenCalledTimes(1);
       expect(mockDownloadPdf).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('surfaces the capture id on the result when a capture was written', async () => {
+    mockExtractForm.mockResolvedValue({ path: 'ai', fields: [], pageCount: 1 });
+    mockCaptureExtraction.mockResolvedValue('cap-123');
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/pdf/extract`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ fileName: 'a.pdf', pdfBase64: 'AAA=' }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ captureId: 'cap-123' });
+      // The capture is handed the extraction result to persist. (The db arg is
+      // null here since none is configured — `expect.anything()` would reject
+      // that — so assert the params directly.)
+      expect(mockCaptureExtraction).toHaveBeenCalledTimes(1);
+      const captureArg = mockCaptureExtraction.mock.calls[0]![1] as {
+        orgId: string;
+        result: { path: string };
+      };
+      expect(captureArg.orgId).toBe('org-1');
+      expect(captureArg.result.path).toBe('ai');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('omits captureId when no capture was written (best-effort no-op)', async () => {
+    mockExtractForm.mockResolvedValue({ path: 'ai', fields: [], pageCount: 1 });
+    mockCaptureExtraction.mockResolvedValue(null);
+
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/pdf/extract`, {
+        method: 'POST',
+        headers: { ...authHeader(), 'content-type': 'application/json' },
+        body: JSON.stringify({ fileName: 'a.pdf', pdfBase64: 'AAA=' }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).not.toHaveProperty('captureId');
     } finally {
       server.close();
     }

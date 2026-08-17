@@ -129,8 +129,10 @@ pdfRouter.post(
       });
       // Capture the raw extraction as training signal for the (human-gated)
       // correction loop. Best-effort — awaited so the row lands before we
-      // respond, but it cannot throw and cannot fail the import.
-      await captureExtraction(db, {
+      // respond, but it cannot throw and cannot fail the import. The returned
+      // id (null when capture no-ops) rides back on the result so the review
+      // client can echo it at publish and link the correction diff to this raw.
+      const captureId = await captureExtraction(db, {
         orgId: tenant.orgId,
         assetId: parsed.data.assetId,
         fileName: parsed.data.fileName,
@@ -140,7 +142,7 @@ pdfRouter.post(
         model: result.path === 'ai' ? env.ANTHROPIC_EXTRACTION_MODEL : undefined,
         result,
       });
-      res.json(result);
+      res.json(captureId ? { ...result, captureId } : result);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'extraction_failed';
       // Flat PDFs with no configured key surface as a 422, not a 500.
