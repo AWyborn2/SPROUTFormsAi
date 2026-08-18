@@ -25,7 +25,9 @@ pnpm-debug.log*
 .vscode/*
 !.vscode/extensions.json
 .idea/
-.claude/
+.claude/*
+# launch.json is shareable project config (dev-server/preview), not local settings.
+!.claude/launch.json
 
 # design reference bundle (source of truth, not app source)
 High fidelity app prototype.zip
