@@ -16,6 +16,7 @@ import {
   isCaseCompetent,
   isTerminalCaseState,
   nextStepAfter,
+  deriveChecklistOutcome,
   isSelfMarking,
   moreCoachingRequired,
   type AssessmentCaseState,
@@ -3390,6 +3391,37 @@ async function setSubmitted(
           markingEligibilityWarnings: [],
           marker: { kind: 'automatic' },
         });
+      } else {
+        /*
+          A PRACTICAL PART WHOSE VERDICT THE AUTHOR LOCKED TO `auto` marks itself
+          from its Yes/No checklist at hand-in (B) — the assessor who ticked the
+          criteria need not also visit a marking form for a verdict the checklist
+          already states. Returns null for an ordinary judged part, which parks
+          for marking exactly as before.
+        */
+        const checklist = deriveChecklistOutcome(
+          fields,
+          tool.manifest,
+          part,
+          attempt.values,
+          sectionForPart(workflowOf(tool.manifest, fields), part.key)?.fieldSource,
+        );
+        if (checklist) {
+          marked = await resolveAttemptOutcome(db, tenant, {
+            row,
+            attempt,
+            manifest: tool.manifest,
+            outcome: checklist.outcome,
+            derivedValues: checklist.derivedValues,
+            disposition: checklist.outcome === 'not_satisfactory' ? 'coaching_then_retry' : null,
+            reason: null,
+            belowThresholdReason: null,
+            markingEligibilityWarnings: [],
+            // The assessor who filled the part IS the marker — a practical is
+            // judged by the person ticking it, not by nobody like a keyed paper.
+            marker: { kind: 'person', userId: tenant.userId, name: '' },
+          });
+        }
       }
     }
   }
@@ -4230,10 +4262,30 @@ assessmentCasesRouter.post(
     // `fieldsForVersion` is UNSTRIPPED — the gate must see answerKey/outcomeTarget.
     const computed = isSelfMarking(fields, tool.manifest, part.key);
 
+    /*
+      A PRACTICAL PART WHOSE VERDICT THE AUTHOR LOCKED TO `auto` marks itself from
+      its Yes/No checklist (B): every criterion ticked Yes is satisfactory, any No
+      or untouched box is not. Like a keyed part, the SYSTEM decides it — so the
+      assessor is not asked to re-pick a verdict the checklist already states, and
+      a manual `outcome` in the request is ignored in favour of the derivation.
+    */
+    const checklist = computed
+      ? null
+      : deriveChecklistOutcome(
+          fields,
+          tool.manifest,
+          part,
+          attempt.values,
+          sectionForPart(workflowOf(tool.manifest, fields), part.key)?.fieldSource,
+        );
+
     if (computed) {
       const marked = markTheory({ fields, values: attempt.values, part });
       outcome = marked.outcome;
       derivedValues = marked.derivedValues;
+    } else if (checklist) {
+      outcome = checklist.outcome;
+      derivedValues = checklist.derivedValues;
     } else if (!outcome) {
       res.status(400).json({ error: 'outcome_required' });
       return;
@@ -4266,7 +4318,10 @@ assessmentCasesRouter.post(
       because there the assessor really did decide something.
     */
     if (outcome === 'not_satisfactory') {
-      if (computed) {
+      if (computed || checklist) {
+        // A system-decided fail — keyed arithmetic or the checklist — needs no
+        // written reason: the missed questions or the un-ticked criteria are the
+        // reason, and it defaults to coach-and-retry like any computed fail.
         disposition = disposition ?? 'coaching_then_retry';
       } else if (!(disposition && reason)) {
         res.status(400).json({ error: 'disposition_and_reason_required' });

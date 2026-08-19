@@ -10,6 +10,7 @@ import type { AssessmentPart, AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 import {
+  deriveChecklistOutcome,
   incorrectQuestionsNote,
   isSelfMarking,
   markTheory,
@@ -678,5 +679,96 @@ describe('incorrectQuestionsNote', () => {
 
   it('is empty when nothing was missed, so the caller writes nothing', () => {
     expect(incorrectQuestionsNote(marksFor({ short: ['a'], long: ['a'] }), fields)).toBe('');
+  });
+});
+
+describe('deriveChecklistOutcome (B — a practical part auto-marks from its Yes/No checklist)', () => {
+  const yesno = (id: string): FormField => ({
+    id,
+    type: 'boolean_yes_no',
+    label: id,
+    required: true,
+    source: 'imported',
+  });
+  const verdict = (id: string, options: string[]): FormField => ({
+    id,
+    type: 'radio',
+    label: id,
+    required: false,
+    source: 'imported',
+    options,
+  });
+
+  const fields: FormField[] = [
+    header('prac'),
+    yesno('c1'),
+    yesno('c2'),
+    verdict('v', ['Candidate not yet Competent', 'Candidate Competent']),
+  ];
+  const manifest: AssessmentToolManifest = {
+    parts: [{ key: 'p', ordinal: 1, label: 'Practical', kind: 'practical', pathways: ['new'], startFieldId: 'prac' }],
+  };
+  const part = manifest.parts[0]!;
+  /** The author locked the verdict field to `auto` — the opt-in signal. */
+  const AUTO: Record<string, 'entry' | 'prefill' | 'auto'> = { v: 'auto' };
+
+  const derive = (
+    values: Record<string, SubmissionValue>,
+    source: Record<string, 'entry' | 'prefill' | 'auto'> | undefined = AUTO,
+  ) => deriveChecklistOutcome(fields, manifest, part, values, source);
+
+  it('is satisfactory and writes Competent when every criterion is Yes', () => {
+    const out = derive({ c1: 'Yes', c2: 'Yes' });
+    expect(out?.outcome).toBe('satisfactory');
+    expect(out?.derivedValues.v).toBe('Candidate Competent');
+  });
+
+  it('is not satisfactory and writes not-yet when any criterion is No', () => {
+    const out = derive({ c1: 'Yes', c2: 'No' });
+    expect(out?.outcome).toBe('not_satisfactory');
+    expect(out?.derivedValues.v).toBe('Candidate not yet Competent');
+  });
+
+  it('fails an untouched criterion — a blank box is not a pass', () => {
+    const out = derive({ c1: 'Yes' });
+    expect(out?.outcome).toBe('not_satisfactory');
+    expect(out?.derivedValues.v).toBe('Candidate not yet Competent');
+  });
+
+  it('leaves the part to the assessor when the verdict field is NOT locked to auto', () => {
+    expect(derive({ c1: 'Yes', c2: 'Yes' }, { v: 'entry' })).toBeNull();
+    // No fieldSource map at all — nothing is auto, so nothing derives. (Called
+    // directly: passing `undefined` through the helper would hit its default.)
+    expect(deriveChecklistOutcome(fields, manifest, part, { c1: 'Yes', c2: 'Yes' }, undefined)).toBeNull();
+  });
+
+  it('returns null when there are no Yes/No criteria to read', () => {
+    const noCriteria = [header('prac'), verdict('v', ['Candidate not yet Competent', 'Candidate Competent'])];
+    expect(deriveChecklistOutcome(noCriteria, manifest, part, {}, AUTO)).toBeNull();
+  });
+
+  it('does not count a keyed question’s ✓/✗ cell as a criterion', () => {
+    // A check_cross that is a question's outcomeTarget is furniture, not a
+    // pass/fail criterion — it must not gate the checklist verdict.
+    const withOutcomeCell: FormField[] = [
+      header('prac'),
+      yesno('c1'),
+      { id: 'q-out', type: 'check_cross', label: 'q-out', required: false, source: 'imported' },
+      {
+        id: 'q',
+        type: 'checkbox_group',
+        label: 'q',
+        required: true,
+        source: 'imported',
+        options: ['a'],
+        answerKey: ['a'],
+        outcomeTarget: { fieldId: 'q-out' },
+      },
+      verdict('v', ['Candidate not yet Competent', 'Candidate Competent']),
+    ];
+    // c1 = Yes and the q-out cell is left blank, but it is furniture — the part
+    // is still satisfactory on the one real criterion.
+    const out = deriveChecklistOutcome(withOutcomeCell, manifest, part, { c1: 'Yes' }, AUTO);
+    expect(out?.outcome).toBe('satisfactory');
   });
 });

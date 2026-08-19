@@ -31,8 +31,10 @@ import type {
   DeclaredMark,
   PartOutcome,
 } from './assessment.js';
+import { SELF_ANSWERING_TYPES, isChoiceField } from './form-field.js';
 import type { FormField, FormFieldType, OutcomeTarget } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
+import type { ValueSource } from './workflow.js';
 import { visibleFields, type VisibilityAnswers } from './visibility.js';
 
 /**
@@ -476,4 +478,100 @@ function writeDeclared(values: Record<string, SubmissionValue>, mark: DeclaredMa
     return;
   }
   values[mark.fieldId] = mark.value;
+}
+
+/*
+  ── The verdict vocabulary ─────────────────────────────────────────────────
+  Which printed option means "passed" and which means "not yet". Kept identical
+  to `markableValue` in `builder-manifest.ts`, which proposes the verdict pair at
+  build time, so the mark-time derivation below can never disagree with the
+  authoring layer about the single most consequential cell on a competency
+  record. If either moves, move both.
+*/
+const VERDICT_YES = /^(?:yes|satisfactory|competent|candidate competent|pass(?:ed)?)$/i;
+const VERDICT_NO = /^(?:no|not satisfactory|not yet competent|candidate not yet competent|fail(?:ed)?)$/i;
+
+/**
+ * The value that ticks a verdict field for a wanted outcome, or null if the
+ * field cannot carry it.
+ *
+ * A self-answering box (`check_cross` / `boolean_yes_no`) takes the boolean; a
+ * choice field takes the option whose printed words say so, and REQUIRES a hit
+ * — falling back to the first option would be a coin toss on the verdict.
+ */
+export function verdictValueFor(
+  field: Pick<FormField, 'type' | 'options'>,
+  want: boolean,
+): SubmissionValue | null {
+  if (SELF_ANSWERING_TYPES.includes(field.type)) return want;
+  const options = field.options ?? [];
+  if (options.length === 0) return null;
+  const wanted = options.find((o) => (want ? VERDICT_YES : VERDICT_NO).test(o.trim()));
+  return wanted ?? null;
+}
+
+/** Both halves of a verdict over one field, when the field can carry them both. */
+export function verdictPairOf(
+  field: Pick<FormField, 'type' | 'options'>,
+): { yes: SubmissionValue; no: SubmissionValue } | null {
+  const yes = verdictValueFor(field, true);
+  const no = verdictValueFor(field, false);
+  if (yes === null || no === null || yes === no) return null;
+  return { yes, no };
+}
+
+/** Whether a Yes/No (`boolean_yes_no`) or ✓/✗ (`check_cross`) box reads as passed. */
+export function isYesValue(value: SubmissionValue | undefined): boolean {
+  if (value === true) return true;
+  if (typeof value === 'string') return VERDICT_YES.test(value.trim());
+  return false;
+}
+
+/**
+ * Derive a practical part's outcome from its Yes/No checklist, when the author
+ * has LOCKED its verdict field to `auto`.
+ *
+ * The gap this fills: a practical demonstration is not keyed, so `markTheory`
+ * never runs, and setting the verdict field to `auto` locked it without ever
+ * filling it — the assessor was left with a blank, un-editable radio. Here every
+ * criterion ticked Yes makes the part satisfactory and writes the "Competent"
+ * value; any No, or a box left untouched, makes it not-satisfactory and writes
+ * "not yet Competent". A box left untouched fails on purpose — "satisfactory" on
+ * a criterion nobody judged is a finding nobody made.
+ *
+ * Returns null — leave the part to the assessor — unless BOTH hold: the part has
+ * a choice field whose options resolve to a competent / not-competent pair that
+ * the author set to `auto` (the deliberate "derive this" signal; an ordinary
+ * verdict the assessor still picks stays `entry`), and it has at least one Yes/No
+ * criterion to read. `verdictSource` is the part section's `fieldSource` map.
+ */
+export function deriveChecklistOutcome(
+  fields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+  part: AssessmentPart,
+  values: Record<string, SubmissionValue> | undefined,
+  verdictSource: Record<string, ValueSource> | undefined,
+): { outcome: PartOutcome; derivedValues: Record<string, SubmissionValue> } | null {
+  const answers = values ?? {};
+  const partFields = fieldsInPart(fields, manifest, part.key);
+
+  const verdictField = partFields.find(
+    (f) => isChoiceField(f.type) && verdictPairOf(f) !== null && verdictSource?.[f.id] === 'auto',
+  );
+  if (!verdictField) return null;
+  const pair = verdictPairOf(verdictField)!;
+
+  // The criteria: the part's Yes/No boxes, minus anything marking itself writes
+  // (a verdict pair, a question's own ✓/✗ cell) so nothing marks itself.
+  const written = new Set<string>(partMarkFieldIds(part));
+  for (const f of partFields) if (f.outcomeTarget) written.add(f.outcomeTarget.fieldId);
+  const criteria = partFields.filter(
+    (f) => SELF_ANSWERING_TYPES.includes(f.type) && !written.has(f.id),
+  );
+  if (criteria.length === 0) return null;
+
+  const allPass = criteria.every((c) => isYesValue(answers[c.id]));
+  const derivedValues: Record<string, SubmissionValue> = { ...answers };
+  writeDeclared(derivedValues, { fieldId: verdictField.id, value: allPass ? pair.yes : pair.no });
+  return { outcome: allPass ? 'satisfactory' : 'not_satisfactory', derivedValues };
 }
