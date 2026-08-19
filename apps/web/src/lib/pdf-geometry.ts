@@ -20,7 +20,7 @@
  * fixtures with no PDF in the loop.
  */
 import { resolveGeometry } from '@formai/shared';
-import type { FormFieldType, GeometryBand, PageBox, RepeatingColumn } from '@formai/shared';
+import type { FormFieldType, GeometryBand, GlyphKind, PageBox, RepeatingColumn } from '@formai/shared';
 import type { PrintedRect, RuleSpan } from '../screens/import/inspector/geometry-actions.js';
 
 /**
@@ -1125,6 +1125,58 @@ export function mergeWholeFieldBox(segments: readonly PageBox[], seg: PageBox): 
 /** Remove the whole-field table box on one page, keeping the table's other pages. */
 export function clearWholeFieldBoxOnPage(segments: readonly PageBox[], page: number): PageBox[] {
   return segments.filter((s) => !(isWholeFieldBox(s) && s.page === page));
+}
+
+/**
+ * Set (or clear, with `undefined`) the printed glyph on EVERY segment — the pure
+ * core of the placement inspector's "set all boxes to print X" bulk action.
+ *
+ * Each box's position and bands are untouched; only its `markStyle.glyph`
+ * changes. Clearing drops the whole `markStyle` rather than writing an empty
+ * one, exactly as the per-box picker does — absent is what the exporter reads as
+ * "the field's own default mark", so a cleared box carries no style at all.
+ */
+export function setGlyphOnAll(
+  segments: readonly PageBox[],
+  glyph: GlyphKind | undefined,
+): PageBox[] {
+  return segments.map((s) => {
+    const { markStyle: _drop, ...rest } = s;
+    return glyph ? { ...rest, markStyle: { ...s.markStyle, glyph } } : rest;
+  });
+}
+
+/**
+ * Divide a drawn box into one cell per option, top-to-bottom in printed order —
+ * the "sweep an area" auto-placer for a choice field whose option boxes the
+ * extraction missed.
+ *
+ * The author drags one box around the printed option list; each option gets an
+ * even horizontal band tagged with its own `optionKey` — exactly the per-option
+ * boxes the exporter marks, so it draws the chosen option's mark in its band.
+ * Even division rather than text detection, deliberately: it is predictable and
+ * the bands are then nudged into place, where a confident-looking guess in the
+ * wrong spot is the failure this whole screen exists to prevent. A field mark
+ * style on the drawn box carries onto every cell, so a swept-then-styled box
+ * lands as, say, a ring around each chosen option.
+ */
+export function distributeOptionCells(box: PageBox, options: readonly string[]): PageBox[] {
+  const n = options.length;
+  if (n === 0) return [];
+  const rowHeight = box.height / n;
+  return options.map((option, index) => ({
+    page: box.page,
+    x: box.x,
+    // Top-down: option 0 is the top band. PDF y grows upward, matching
+    // `proposeManualGrid`'s row bands.
+    y: box.y + box.height - rowHeight * (index + 1),
+    width: box.width,
+    height: rowHeight,
+    pageWidth: box.pageWidth,
+    pageHeight: box.pageHeight,
+    optionKey: option,
+    ...(box.markStyle ? { markStyle: box.markStyle } : {}),
+  }));
 }
 
 /**

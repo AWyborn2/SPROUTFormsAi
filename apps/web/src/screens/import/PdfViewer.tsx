@@ -228,6 +228,14 @@ interface PdfViewerProps {
   onTextLayer?: (pages: TextPage[]) => void;
   /** A proposed grid to draw over the page, for the selected field. */
   bandOverlay?: PageBox | null;
+  /**
+   * Other whole-field boxes of the selected field, drawn READ-ONLY on their own
+   * pages — a table spanning a page break carries one box per page, and only
+   * `bandOverlay` is editable, so these show every other page's divisions
+   * without drag handles. Their bands are already set; this is just so an author
+   * sees them and never mistakes a divided continuation for an unplaced one.
+   */
+  readonlyBands?: readonly PageBox[];
   /** Every box placed so far, on any field — drawn on whichever page it sits. */
   placements?: readonly PlacementMark[];
   /**
@@ -812,6 +820,7 @@ export function PdfViewer({
   onSelectField,
   onTextLayer,
   bandOverlay,
+  readonlyBands = [],
   placements,
   bandSnapTargets,
   bandSnapTargetsY,
@@ -1193,6 +1202,17 @@ export function PdfViewer({
                       />
                     );
                   })}
+                {/* Other pages' divisions, read-only (no handlers → no drag). */}
+                {readonlyBands
+                  .filter((seg) => seg.page === pageIndex)
+                  .map((seg) => (
+                    <BandGrid
+                      key={`ro-${seg.page}`}
+                      segment={seg}
+                      pageWidth={pageWidth}
+                      pageHeight={pageHeight}
+                    />
+                  ))}
                 {bandOverlay && bandOverlay.page === pageIndex && (
                   <BandGrid
                     segment={bandOverlay}
