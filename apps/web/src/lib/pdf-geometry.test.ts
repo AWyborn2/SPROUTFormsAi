@@ -1583,3 +1583,86 @@ describe('matchAnchorBoxAt', () => {
     expect(resolveGeometry({ geometry: { segments: [box] } }, 1).segments).toHaveLength(1);
   });
 });
+
+import {
+  clearWholeFieldBoxOnPage,
+  isWholeFieldBox,
+  mergeWholeFieldBox,
+} from './pdf-geometry.js';
+import type { PageBox } from '@formai/shared';
+
+describe('whole-field table boxes, one per page (a table that spans a page break)', () => {
+  /** A whole-field box on `page` — plain when `rows` is 0, divided otherwise. */
+  function whole(page: number, rows = 0): PageBox {
+    return {
+      page,
+      x: 30,
+      y: 200,
+      width: 500,
+      height: 300,
+      pageWidth: 595,
+      pageHeight: 842,
+      ...(rows > 0
+        ? {
+            rowBands: Array.from({ length: rows }, (_, i) => ({
+              key: `r${i + 1}`,
+              start: 200 + i,
+              end: 201 + i,
+            })),
+          }
+        : {}),
+    };
+  }
+  /** A single printed row's own cell — keyed `row:<index>`, never whole-field. */
+  function rowCell(page: number, index: number): PageBox {
+    return {
+      page,
+      x: 30,
+      y: 200,
+      width: 500,
+      height: 20,
+      pageWidth: 595,
+      pageHeight: 842,
+      rowBands: [{ key: `row:${index}`, start: 200, end: 220 }],
+    };
+  }
+
+  it('recognises a plain box and a divided grid, but not a row cell or an option cell', () => {
+    expect(isWholeFieldBox(whole(7))).toBe(true);
+    expect(isWholeFieldBox(whole(7, 6))).toBe(true);
+    expect(isWholeFieldBox(rowCell(7, 0))).toBe(false);
+    expect(isWholeFieldBox({ ...whole(7), optionKey: 'yes' })).toBe(false);
+  });
+
+  it('adds a continuation page WITHOUT wiping the first, kept in page order', () => {
+    // The whole bug: placing page 9's box used to replace page 8's.
+    const after = mergeWholeFieldBox([whole(7, 6)], whole(8, 5));
+    expect(after.map((s) => s.page)).toEqual([7, 8]);
+    expect(after[0]!.rowBands).toHaveLength(6);
+    expect(after[1]!.rowBands).toHaveLength(5);
+  });
+
+  it('replaces the box on the SAME page, leaving other pages alone', () => {
+    const after = mergeWholeFieldBox([whole(7, 6), whole(8, 5)], whole(7, 9));
+    expect(after.map((s) => s.page)).toEqual([7, 8]);
+    expect(after[0]!.rowBands).toHaveLength(9); // page 7 redrawn
+    expect(after[1]!.rowBands).toHaveLength(5); // page 8 untouched
+  });
+
+  it('never disturbs per-row or per-option cells', () => {
+    const row = rowCell(7, 0);
+    const opt: PageBox = { ...whole(7), optionKey: 'yes' };
+    const after = mergeWholeFieldBox([row, opt], whole(7, 6));
+    expect(after).toContain(row);
+    expect(after).toContain(opt);
+    expect(after.filter((s) => isWholeFieldBox(s))).toHaveLength(1);
+  });
+
+  it('clears one page and keeps the table’s other pages', () => {
+    expect(clearWholeFieldBoxOnPage([whole(7, 6), whole(8, 5)], 7).map((s) => s.page)).toEqual([8]);
+    // A per-row cell on the cleared page survives — it is not a whole-field box.
+    const withRow = clearWholeFieldBoxOnPage([whole(7, 6), rowCell(7, 0)], 7);
+    expect(withRow).toHaveLength(1);
+    expect(isWholeFieldBox(withRow[0]!)).toBe(false);
+  });
+});
