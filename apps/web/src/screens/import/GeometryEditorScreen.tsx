@@ -1,4 +1,10 @@
-import { useCallback, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import {
+  useCallback,
+  useMemo,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
 import {
@@ -43,6 +49,8 @@ import {
   isDeleteKey,
   keyMove,
   moveSegment,
+  NUDGE_POINTS,
+  NUDGE_POINTS_COARSE,
   removeSegment,
   replaceSegmentOnPage,
   moveBand,
@@ -2631,7 +2639,153 @@ function TablePageRow({
           Divide into rows
         </Button>
       </div>
+      <TableFineNudge seg={seg} onRestyle={onRestyle} />
       <GlyphRow box={seg} onChange={onRestyle} />
+    </div>
+  );
+}
+
+/** A single 1pt nudge button — a chevron in a square, matching the row steppers. */
+function NudgeButton({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: string;
+  label: string;
+  onClick: (e: ReactMouseEvent) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className="grid h-6 w-6 flex-none place-items-center rounded-sm border border-border text-text-tertiary hover:bg-surface-hover"
+    >
+      <Icon name={icon} size={11} />
+    </button>
+  );
+}
+
+/**
+ * Fine 1pt placement for one table page's box — the mouse-free control the
+ * screenshots asked for.
+ *
+ * A pointer drag over a preview scaled to ~2× cannot resolve a single point, and
+ * a band-edge drag SNAPS to the nearest printed rule, so "the whole grid is two
+ * points too high" or "this one line is a point off" had no precise fix — every
+ * mouse move jumped. These buttons step by exactly `NUDGE_POINTS` (hold Shift for
+ * a ten-point stride, the same coarse step the keyboard nudge uses) and write
+ * through the same page-scoped `onRestyle` a drag does.
+ *
+ * - Whole table: `moveSegment` slides the outline AND its bands together, for
+ *   positioning the grid over the printed table.
+ * - Per line: `moveBand` moves one column or row edge, refusing an inverting or
+ *   overlapping step, for squaring a single rule onto the page.
+ *
+ * PDF space is bottom-up, so a row band's `end` is its TOP edge and `start` its
+ * bottom; the row controls are labelled T/B and chevron up/down accordingly.
+ */
+function TableFineNudge({
+  seg,
+  onRestyle,
+}: {
+  seg: PageBox;
+  onRestyle: (next: PageBox) => void;
+}) {
+  const columns = seg.columnBands ?? [];
+  const rows = seg.rowBands ?? [];
+
+  const moveBox = (dx: number, dy: number) => (e: ReactMouseEvent) => {
+    const step = e.shiftKey ? NUDGE_POINTS_COARSE : NUDGE_POINTS;
+    const next = moveSegment(seg, dx * step, dy * step);
+    if (next !== seg) onRestyle(next);
+  };
+
+  const moveEdge =
+    (axis: 'column' | 'row', key: string, edge: 'start' | 'end', dir: -1 | 1) =>
+    (e: ReactMouseEvent) => {
+      const step = e.shiftKey ? NUDGE_POINTS_COARSE : NUDGE_POINTS;
+      const band = (axis === 'column' ? seg.columnBands : seg.rowBands)?.find((b) => b.key === key);
+      if (!band) return;
+      const next = moveBand(seg, axis, key, edge, band[edge] + dir * step);
+      if (next) onRestyle(next);
+    };
+
+  return (
+    <div className="mt-1.5 flex flex-col gap-1.5 rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+      <div className="text-[11px] font-semibold text-text-secondary">
+        Fine placement — 1pt per step (hold Shift for 10pt)
+      </div>
+
+      <div className="flex items-center gap-1.5">
+        <span className="min-w-0 flex-1 text-[11px] text-text-secondary">Whole table</span>
+        <NudgeButton icon="chevron-left" label="Move table left" onClick={moveBox(-1, 0)} />
+        <NudgeButton icon="chevron-up" label="Move table up" onClick={moveBox(0, 1)} />
+        <NudgeButton icon="chevron-down" label="Move table down" onClick={moveBox(0, -1)} />
+        <NudgeButton icon="chevron-right" label="Move table right" onClick={moveBox(1, 0)} />
+      </div>
+
+      {columns.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10.5px] font-semibold text-text-tertiary">Column lines</span>
+          {columns.map((band) => (
+            <div key={band.key} className="flex items-center gap-1.5">
+              <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-text-tertiary">
+                {band.key}
+              </span>
+              {(['start', 'end'] as const).map((edge) => (
+                <span key={edge} className="flex flex-none items-center gap-0.5">
+                  <span className="w-[14px] text-right font-mono text-[10px] text-text-tertiary">
+                    {edge === 'start' ? 'L' : 'R'}
+                  </span>
+                  <NudgeButton
+                    icon="chevron-left"
+                    label={`Move ${band.key} ${edge === 'start' ? 'left' : 'right'} edge left`}
+                    onClick={moveEdge('column', band.key, edge, -1)}
+                  />
+                  <NudgeButton
+                    icon="chevron-right"
+                    label={`Move ${band.key} ${edge === 'start' ? 'left' : 'right'} edge right`}
+                    onClick={moveEdge('column', band.key, edge, 1)}
+                  />
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10.5px] font-semibold text-text-tertiary">Row lines</span>
+          {rows.map((band) => (
+            <div key={band.key} className="flex items-center gap-1.5">
+              <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-text-tertiary">
+                {band.key}
+              </span>
+              {(['end', 'start'] as const).map((edge) => (
+                <span key={edge} className="flex flex-none items-center gap-0.5">
+                  <span className="w-[14px] text-right font-mono text-[10px] text-text-tertiary">
+                    {edge === 'end' ? 'T' : 'B'}
+                  </span>
+                  <NudgeButton
+                    icon="chevron-down"
+                    label={`Move ${band.key} ${edge === 'end' ? 'top' : 'bottom'} edge down`}
+                    onClick={moveEdge('row', band.key, edge, -1)}
+                  />
+                  <NudgeButton
+                    icon="chevron-up"
+                    label={`Move ${band.key} ${edge === 'end' ? 'top' : 'bottom'} edge up`}
+                    onClick={moveEdge('row', band.key, edge, 1)}
+                  />
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
