@@ -911,6 +911,12 @@ export interface ProfileAccess {
  * OPTIONAL competency as a compliance failure, which it is not (R102).
  */
 export interface HeldCompetencyRow {
+  /**
+   * The GRANT ROW's own id (not the competency's). Renewing a lapsed ticket
+   * attaches the new licence to this holding via
+   * `POST /competency-documents/:holderId`.
+   */
+  holderId: string;
   competencyId: string;
   /** The competency's display name — records never show a raw id. */
   name: string;

@@ -16,6 +16,7 @@ vi.mock('./api-client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api-client.js')>();
   return {
     ...actual,
+    uploadAttachment: vi.fn(),
     apiClient: {
       ...actual.apiClient,
       postForBlob: vi.fn(),
@@ -27,13 +28,14 @@ vi.mock('./api-client.js', async (importOriginal) => {
   };
 });
 
-import { ApiError, apiClient } from './api-client.js';
+import { ApiError, apiClient, uploadAttachment } from './api-client.js';
 import { store } from './store.js';
 import type { SubmissionDetail } from './types.js';
 
 const postForBlobMock = vi.mocked(apiClient.postForBlob);
 const postMock = vi.mocked(apiClient.post);
 const deleteMock = vi.mocked(apiClient.delete);
+const uploadAttachmentMock = vi.mocked(uploadAttachment);
 
 const SUMMARY_DTO = {
   id: 'form-1',
@@ -281,5 +283,25 @@ describe('granting a competency by hand', () => {
       evidenceRef: 'Licence sighted at induction',
       expiresAt: '2027-03-15T23:59:59.000Z',
     });
+  });
+
+  /*
+    Renewing a lapsed ticket files the new licence against the HOLDING, keyed on
+    the grant row's id — a different door from the by-competency grant above, and
+    the one with zero client code before task #43.
+  */
+  it('uploadCompetencyEvidence streams the file to the holding’s document endpoint', async () => {
+    uploadAttachmentMock.mockResolvedValue({ id: 'doc-1', fileName: 'licence.pdf' });
+    const file = new File(['%PDF-1.4'], 'licence.pdf', { type: 'application/pdf' });
+    const onProgress = vi.fn();
+
+    const res = await store.uploadCompetencyEvidence('holder-9', file, onProgress);
+
+    expect(uploadAttachmentMock).toHaveBeenCalledWith(
+      '/competency-documents/holder-9',
+      file,
+      onProgress,
+    );
+    expect(res).toEqual({ id: 'doc-1', fileName: 'licence.pdf' });
   });
 });

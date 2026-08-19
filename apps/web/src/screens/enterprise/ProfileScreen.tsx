@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Avatar, Badge, Button, Card, Icon, type BadgeVariant } from '@formai/ui';
+import { Avatar, Badge, Button, Card, Icon, Input, useToast, type BadgeVariant } from '@formai/ui';
 import {
   PROFILE_FIELDS,
   isTerminalCaseState,
@@ -15,6 +15,7 @@ import {
   useMyProfileMembership,
   useProfile,
   useProfileSeed,
+  useRenewCompetency,
   useSaveProfile,
   useSession,
   useTaxonomy,
@@ -93,6 +94,18 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
   const { profile, access, userId } = data;
   const canEdit = access.editableFields.length > 0;
   /*
+    Who may RENEW a held competency here — re-date a lapsed licence and file the
+    new evidence. It re-grants, so it takes the register's own authoring tier
+    (owner/admin/assessor), AND the evidence attach is an edit of this record, so
+    it needs edit access on a record that is not the caller's own. A candidate
+    fixing their own licence goes the replacement route, which waits for
+    approval; this is the assessor unblocking a sign-off.
+  */
+  const canRenewCompetencies =
+    canEdit &&
+    !access.isSubject &&
+    ['owner', 'admin', 'assessor'].includes(session.data?.role ?? '');
+  /*
     A candidate on their OWN record gets the focused layout: their details, the
     competencies they hold, and the assessments waiting on them. The placement
     and documents machinery is the organisation's bookkeeping — rendering it to
@@ -145,7 +158,11 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
       {candidateSelf && <MyAssessmentsCard />}
 
       {access.canViewCompetencies ? (
-        <CompetenciesCard userId={userId} ownRecord={access.isSubject} />
+        <CompetenciesCard
+          userId={userId}
+          ownRecord={access.isSubject}
+          canRenew={canRenewCompetencies}
+        />
       ) : (
         <WithheldCard title="Competencies" />
       )}
@@ -519,10 +536,13 @@ function PlacementCard({ membershipId }: { membershipId: string }) {
 function CompetenciesCard({
   userId,
   ownRecord = false,
+  canRenew = false,
 }: {
   userId: string | undefined;
   /** Changes only the copy — "you hold" reads differently from "they hold". */
   ownRecord?: boolean;
+  /** Whether the reader may renew a held ticket — re-date it and file evidence. */
+  canRenew?: boolean;
 }) {
   // Keyed on the USER, not the membership: a grant is recorded against the
   // person, and passing a membership id here validates as a UUID and then
@@ -561,41 +581,175 @@ function CompetenciesCard({
         {sorted.map((c) => (
           <li
             key={c.competencyId}
-            className="flex items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2"
+            className="flex flex-col gap-2 rounded-md bg-surface-sunken px-3 py-2"
           >
-            <span className="min-w-0">
-              <span className="flex items-center gap-2">
-                <span className="truncate text-[13px] font-semibold">{c.name}</span>
-                {c.code && (
-                  <span className="flex-none font-mono text-[10.5px] uppercase tracking-wide text-text-tertiary">
-                    {c.code}
+            <div className="flex items-center justify-between gap-3">
+              <span className="min-w-0">
+                <span className="flex items-center gap-2">
+                  <span className="truncate text-[13px] font-semibold">{c.name}</span>
+                  {c.code && (
+                    <span className="flex-none font-mono text-[10.5px] uppercase tracking-wide text-text-tertiary">
+                      {c.code}
+                    </span>
+                  )}
+                </span>
+                <span className="block text-[11.5px] text-text-tertiary">
+                  {competencySubline(c)}
+                </span>
+                {/*
+                  WHERE the obligation comes from (R5, U8): one comma-joined
+                  line, "and" before the last — "Required — from Boddington,
+                  Operations and Dozer Operator"; org-scope reads "org-wide".
+                  Absent where the API withheld sources (the viewer gate) or
+                  nothing names the entry — no line beats a false one.
+                */}
+                {sourcesLine(c.standing, c.sources) && (
+                  <span className="block text-[11px] text-text-tertiary">
+                    {sourcesLine(c.standing, c.sources)}
                   </span>
                 )}
               </span>
-              <span className="block text-[11.5px] text-text-tertiary">
-                {competencySubline(c)}
+              <span className="flex flex-none items-center gap-1.5">
+                <Badge variant={STANDING_TONE[c.standing]}>{c.standing}</Badge>
+                <Badge variant={currencyTone(c.status)}>{c.status}</Badge>
               </span>
-              {/*
-                WHERE the obligation comes from (R5, U8): one comma-joined
-                line, "and" before the last — "Required — from Boddington,
-                Operations and Dozer Operator"; org-scope reads "org-wide".
-                Absent where the API withheld sources (the viewer gate) or
-                nothing names the entry — no line beats a false one.
-              */}
-              {sourcesLine(c.standing, c.sources) && (
-                <span className="block text-[11px] text-text-tertiary">
-                  {sourcesLine(c.standing, c.sources)}
-                </span>
-              )}
-            </span>
-            <span className="flex flex-none items-center gap-1.5">
-              <Badge variant={STANDING_TONE[c.standing]}>{c.standing}</Badge>
-              <Badge variant={currencyTone(c.status)}>{c.status}</Badge>
-            </span>
+            </div>
+            {/* Renew — re-date a lapsed ticket and file the new evidence — for a
+                reader with the authority, on someone else's record. */}
+            {canRenew && userId && <RenewControl row={c} userId={userId} />}
           </li>
         ))}
       </ul>
     </Card>
+  );
+}
+
+/**
+ * Renew ONE held competency from the profile — the dead-end a sign-off hits when
+ * a prerequisite reads "expired" and the licence has since been renewed.
+ *
+ * Collapsed to a "Renew" link until opened, like the register's record-by-hand
+ * control. Two moves, either or both: a new expiry date re-dates the holding so
+ * the prerequisite it gates passes again, and an evidence file records the
+ * renewed licence against the same holding. At least one is required — an empty
+ * renewal would toast nothing done.
+ */
+function RenewControl({ row, userId }: { row: HeldCompetencyRow; userId: string }) {
+  const { toast } = useToast();
+  const renew = useRenewCompetency({
+    competencyId: row.competencyId,
+    userId,
+    holderId: row.holderId,
+  });
+  const [open, setOpen] = useState(false);
+  const [expires, setExpires] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  function reset() {
+    setExpires('');
+    setFile(null);
+    setProgress(null);
+    setOpen(false);
+  }
+
+  function onRenew() {
+    if (!expires && !file) {
+      toast({ variant: 'warning', message: 'Set a new expiry date, attach evidence, or both.' });
+      return;
+    }
+    renew.mutate(
+      {
+        // End of day, so a licence stays valid THROUGH its printed expiry date
+        // instead of lapsing the midnight that date begins — the same rule the
+        // register's grant-by-hand uses.
+        ...(expires ? { expiresAt: `${expires}T23:59:59.000Z` } : {}),
+        evidenceFile: file,
+        onProgress: setProgress,
+      },
+      {
+        onSuccess: () => {
+          toast({ variant: 'success', message: `Renewed ${row.name}.` });
+          reset();
+        },
+        onError: () => {
+          setProgress(null);
+          toast({ variant: 'danger', message: 'Could not renew this competency.' });
+        },
+      },
+    );
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="fai-chip-btn inline-flex w-fit items-center gap-1 rounded-sm text-[11px] font-medium text-text-accent hover:underline"
+      >
+        <Icon name="refresh-cw" size={12} />
+        Renew
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-border-subtle pt-2.5">
+      <Input
+        label="New expiry date"
+        type="date"
+        value={expires}
+        onChange={(e) => setExpires(e.target.value)}
+      />
+      <div>
+        <span className="block text-[12px] font-medium text-text-secondary">
+          Evidence (optional)
+        </span>
+        <div className="mt-1 flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => fileRef.current?.click()}
+            disabled={renew.isPending}
+          >
+            {file ? 'Change file' : 'Attach file'}
+          </Button>
+          {file && (
+            <span className="min-w-0 truncate text-[11.5px] text-text-tertiary">{file.name}</span>
+          )}
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,application/pdf"
+            className="sr-only"
+            tabIndex={-1}
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          />
+        </div>
+      </div>
+      <p className="text-[11px] text-text-tertiary">
+        Set the new expiry so the prerequisite passes again, and attach the renewed licence as
+        evidence. PNG, JPG, WebP or PDF, up to 10 MB.
+      </p>
+      {progress !== null && progress < 100 && (
+        <div className="h-1.5 overflow-hidden rounded-pill bg-surface-card">
+          {/* Scaled, not widened — `transform` composites where animating
+              `width` re-runs layout on every progress tick. */}
+          <div
+            className="h-full w-full origin-left bg-accent transition-transform duration-base"
+            style={{ transform: `scaleX(${Math.min(Math.max(progress / 100, 0), 1)})` }}
+          />
+        </div>
+      )}
+      <div className="flex gap-2">
+        <Button size="sm" onClick={onRenew} disabled={renew.isPending || (!expires && !file)}>
+          {renew.isPending ? 'Renewing…' : 'Renew'}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={reset} disabled={renew.isPending}>
+          Cancel
+        </Button>
+      </div>
+    </div>
   );
 }
 

@@ -914,6 +914,15 @@ competenciesRouter.get(
         /** Required, recommended or optional for this person, over the four-scope union (R108, R2). */
         const standing = standingOf(r.competencyId, required, recommended);
         return {
+          /*
+            The GRANT ROW's own id, not the competency's. Renewing a lapsed
+            ticket attaches the new licence to this holding via
+            POST /competency-documents/:holderId, and nothing else on the
+            record carries it. It is a random identifier, not sensitive — the
+            attach route enforces edit access of its own — so it rides every
+            reader's row rather than sitting behind the licence gate.
+          */
+          holderId: r.id,
           competencyId: r.competencyId,
           /*
             The display name rides the row so the record never shows a raw id.

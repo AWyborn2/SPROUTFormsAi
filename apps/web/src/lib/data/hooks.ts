@@ -1079,6 +1079,50 @@ export function useGrantCompetency(competencyId: string) {
   });
 }
 
+/**
+ * Renew ONE held competency on a person's record — the lapsed-licence path a
+ * sign-off dead-ends on when a prerequisite reads "expired".
+ *
+ * Two independent moves, either or both: a new expiry date (re-granting redates
+ * the holding and clears the lapse, so the prerequisite it gates passes again),
+ * and a fresh evidence file (the renewed licence, filed against the same
+ * holding). The holder id is stable across the re-grant — granting is an upsert
+ * keyed on (competency, person) — so uploading after granting is safe.
+ */
+export function useRenewCompetency(ctx: {
+  competencyId: string;
+  userId: string;
+  holderId: string;
+}) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      expiresAt?: string | null;
+      evidenceFile?: File | null;
+      onProgress?: (percent: number) => void;
+    }) => {
+      if (input.expiresAt) {
+        await store.grantCompetency({
+          competencyId: ctx.competencyId,
+          userId: ctx.userId,
+          expiresAt: input.expiresAt,
+        });
+      }
+      if (input.evidenceFile) {
+        await store.uploadCompetencyEvidence(ctx.holderId, input.evidenceFile, input.onProgress);
+      }
+    },
+    // onSettled, not onSuccess: the two moves are independent, so if the re-grant
+    // lands but the evidence upload then fails, the card must still refresh to
+    // show the new expiry that DID persist rather than a stale "expired".
+    // ['competencies'] is a prefix of ['competencies','held',userId], so one
+    // sweep refreshes the held card the renewal is shown on.
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: keys.competencies });
+    },
+  });
+}
+
 /** Set, change or clear how long a competency stays valid. */
 export function useSetCompetencyValidity() {
   const qc = useQueryClient();

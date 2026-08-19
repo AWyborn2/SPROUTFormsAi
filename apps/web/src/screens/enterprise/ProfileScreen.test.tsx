@@ -36,6 +36,11 @@ const state: {
   recommended: undefined,
 };
 const requestTraining = vi.fn();
+// Renewing invokes onSuccess so the control resets and toasts, the same shape
+// useSaveProfile's mock takes.
+const renewMutate = vi.fn((_input: unknown, opts?: { onSuccess?: () => void }) => {
+  opts?.onSuccess?.();
+});
 
 /*
   No route params and no query string by default, so the screen takes its
@@ -80,6 +85,7 @@ vi.mock('../../lib/data/hooks.js', () => ({
   useProfileSeed: () => ({ data: state.seed }),
   useMyRecommended: () => ({ data: state.recommended }),
   useRequestTraining: () => ({ mutate: requestTraining, isPending: false }),
+  useRenewCompetency: () => ({ mutate: renewMutate, isPending: false }),
   useSaveProfile: () => ({
     mutate: (
       input: { membershipId: string; values: Record<string, string> },
@@ -209,6 +215,7 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
   it('shows standing and currency as two separate facts', () => {
     state.held = [
       {
+        holderId: 'h-dozer',
         competencyId: 'c-dozer',
         name: 'Track Dozer',
         code: null,
@@ -238,6 +245,7 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     */
     state.held = [
       {
+        holderId: 'h-site',
         competencyId: 'c-site',
         name: 'Site Induction',
         code: null,
@@ -256,6 +264,7 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
         note: null,
       },
       {
+        holderId: 'h-org',
         competencyId: 'c-org',
         name: 'First Aid',
         code: null,
@@ -283,6 +292,7 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     // absent, and the row must not render a dangling or invented caption.
     state.held = [
       {
+        holderId: 'h-dozer',
         competencyId: 'c-dozer',
         name: 'Track Dozer',
         code: null,
@@ -310,6 +320,7 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     */
     state.held = [
       {
+        holderId: 'h-req',
         competencyId: 'c-req',
         name: 'Required Ticket',
         code: null,
@@ -323,6 +334,7 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
         note: null,
       },
       {
+        holderId: 'h-vol',
         competencyId: 'c-vol',
         name: 'Voluntary Ticket',
         code: null,
@@ -340,6 +352,76 @@ describe('ProfileScreen — competencies (R37, R104)', () => {
     expect(screen.getByText('optional')).toBeDefined();
     expect(screen.getByText('expired')).toBeDefined();
     expect(screen.getByText('Voluntary Ticket')).toBeDefined();
+  });
+
+  /*
+    RENEW (task #43): the sign-off dead-end. A lapsed licence blocks
+    certification, and until now there was no way to re-date it — the assessor
+    was stuck. On an editable record they can now set the new expiry and file the
+    renewed evidence from the person's own record.
+  */
+  const LAPSED_LICENCE: HeldCompetencyRow = {
+    holderId: 'h-lic',
+    competencyId: 'c-lic',
+    name: 'Driver Licence',
+    code: null,
+    evidenceRef: null,
+    licenceClass: 'C',
+    licenceNumber: null,
+    status: 'expired',
+    standing: 'required',
+    current: false,
+    expiresAt: '2025-01-01T00:00:00Z',
+    note: null,
+  };
+
+  it('renews a lapsed licence with the end-of-day expiry (task #43)', () => {
+    state.role = 'admin';
+    state.held = [LAPSED_LICENCE];
+    // A non-subject reader who may edit the record — both the re-grant and the
+    // evidence attach need that authority.
+    show({ editableFields: ['firstName'] });
+
+    // Collapsed until opened.
+    fireEvent.click(screen.getByRole('button', { name: /Renew/ }));
+    fireEvent.change(screen.getByLabelText('New expiry date'), {
+      target: { value: '2031-06-30' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Renew' }));
+
+    expect(renewMutate).toHaveBeenCalledTimes(1);
+    // End of day, so the licence stays valid THROUGH its printed expiry date.
+    expect(renewMutate.mock.calls[0]![0]).toMatchObject({
+      expiresAt: '2031-06-30T23:59:59.000Z',
+    });
+  });
+
+  it('does nothing with neither a new date nor a file — the submit stays disabled', () => {
+    state.role = 'admin';
+    state.held = [LAPSED_LICENCE];
+    show({ editableFields: ['firstName'] });
+    fireEvent.click(screen.getByRole('button', { name: /Renew/ }));
+
+    const submit = screen.getByRole('button', { name: 'Renew' }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.click(submit);
+    expect(renewMutate).not.toHaveBeenCalled();
+  });
+
+  it('offers no Renew on a read-only record', () => {
+    state.role = 'admin';
+    state.held = [LAPSED_LICENCE];
+    // READ_ONLY has no editable fields — the default access. No affordance.
+    show();
+    expect(screen.queryByRole('button', { name: /Renew/ })).toBeNull();
+  });
+
+  it('offers no Renew to the subject on their own record — that path is a replacement', () => {
+    state.role = 'assessor';
+    state.held = [LAPSED_LICENCE];
+    // Even with fields to edit, the subject may not attach held evidence here.
+    show({ isSubject: true, editableFields: ['firstName'] });
+    expect(screen.queryByRole('button', { name: /Renew/ })).toBeNull();
   });
 });
 
