@@ -16,6 +16,8 @@ import {
 import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../../lib/data/hooks.js';
 import type { FieldProposal, TableProposal, TextPage } from '../../lib/pdf-geometry.js';
 import {
+  clearWholeFieldBoxOnPage,
+  mergeWholeFieldBox,
   proposeManualGrid,
   proposeRectGrid,
   proposeRowCell,
@@ -653,6 +655,37 @@ export function GeometryEditorScreen({
   }
 
   /**
+   * Write ONE page's whole-field table box, keeping any box this table has on
+   * OTHER pages.
+   *
+   * A repeating table whose printed rows run across a page break carries one box
+   * per page. The exporter draws each on its own page and consumes value rows in
+   * printed order ACROSS them — `round-trip`'s `rowCursor` persists between
+   * segments in array order, so the segments are kept sorted by page (page 8's
+   * rows before page 9's). Replacing every segment, the way a scalar field's
+   * single box does, wiped the continuation the moment the author placed the
+   * next page — the reported "no way to place a table that spans two pages".
+   *
+   * A whole-field box is matched by page AND by being one (`rowCellIndex`
+   * null, no `optionKey`), so a table's per-row or per-option cells are never
+   * disturbed.
+   */
+  function setTablePageBox(fieldId: string, seg: PageBox) {
+    mutate(fieldId, (f) => ({
+      ...f,
+      geometry: { segments: mergeWholeFieldBox(f.geometry?.segments ?? [], seg) },
+    }));
+  }
+
+  /** Clear the whole-field box on ONE page, keeping the table's other pages. */
+  function clearTablePage(fieldId: string, page: number) {
+    mutate(fieldId, (f) => {
+      const kept = clearWholeFieldBoxOnPage(f.geometry?.segments ?? [], page);
+      return kept.length > 0 ? { ...f, geometry: { segments: kept } } : stripGeometry(f);
+    });
+  }
+
+  /**
    * A box drawn on a repeating table, subdivided from the checkboxes printed
    * inside it (bounded subdivision, U4).
    *
@@ -695,7 +728,9 @@ export function GeometryEditorScreen({
         ? null
         : { fieldId: field.id, title: 'Placed, but its rows were not measured', detail: result.detail },
     );
-    setScalarBox(field.id, result.ok ? result.proposal.segment : box);
+    // Merge by page, not replace: a box drawn on the continuation page must not
+    // wipe the one already placed on the page the table starts on.
+    setTablePageBox(field.id, result.ok ? result.proposal.segment : box);
   }
 
   /**
@@ -732,9 +767,12 @@ export function GeometryEditorScreen({
    * draggable edges through the band overlay, and reach the record only when
    * they save.
    */
-  function setManualGrid(field: FormField, rows: number) {
+  function setManualGrid(field: FormField, rows: number, page: number) {
+    // The whole-field box ON THIS PAGE. A table spanning a page break has one
+    // per page, each divided into its OWN rows (page 8's rows, then page 9's),
+    // so the divide has to name which one it is acting on.
     const box = (field.geometry?.segments ?? []).find(
-      (s) => rowCellIndex(s) === null && s.optionKey === undefined,
+      (s) => rowCellIndex(s) === null && s.optionKey === undefined && s.page === page,
     );
     if (!box) return;
     const result = proposeManualGrid({
@@ -746,7 +784,7 @@ export function GeometryEditorScreen({
     setGridRefusal(
       result.ok ? null : { fieldId: field.id, title: 'Not divided', detail: result.detail },
     );
-    if (result.ok) setScalarBox(field.id, result.segment);
+    if (result.ok) setTablePageBox(field.id, result.segment);
   }
 
   function clearRowBox(fieldId: string, rowIndex: number) {
@@ -1234,9 +1272,11 @@ export function GeometryEditorScreen({
               }
               onSetOptionBox={(optionKey, box) => setOptionBox(selected.id, optionKey, box)}
               onSetScalarBox={(box) => setScalarBox(selected.id, box)}
+              onSetTablePageBox={(seg) => setTablePageBox(selected.id, seg)}
+              onClearTablePage={(page) => clearTablePage(selected.id, page)}
               onClearRowBox={(rowIndex) => clearRowBox(selected.id, rowIndex)}
               onRestyleRowBox={(rowIndex, box) => restyleRowBox(selected.id, rowIndex, box)}
-              onDivideGrid={(rows) => setManualGrid(selected, rows)}
+              onDivideGrid={(rows, page) => setManualGrid(selected, rows, page)}
             />
           ) : (
             <p className="text-[12.5px] text-text-tertiary">
@@ -1651,6 +1691,8 @@ function PlacementPanel({
   onToggleDraw,
   onSetOptionBox,
   onSetScalarBox,
+  onSetTablePageBox,
+  onClearTablePage,
   onClearRowBox,
   onRestyleRowBox,
   onDivideGrid,
@@ -1661,9 +1703,13 @@ function PlacementPanel({
   onToggleDraw: (target: DrawTarget) => void;
   onSetOptionBox: (optionKey: string, box: PageBox | null) => void;
   onSetScalarBox: (box: PageBox | null) => void;
+  /** Merge one page's whole-field table box, keeping the table's other pages. */
+  onSetTablePageBox: (seg: PageBox) => void;
+  /** Clear the whole-field table box on one page. */
+  onClearTablePage: (page: number) => void;
   onClearRowBox: (rowIndex: number) => void;
   onRestyleRowBox: (rowIndex: number, box: PageBox) => void;
-  onDivideGrid: (rows: number) => void;
+  onDivideGrid: (rows: number, page: number) => void;
 }) {
   const perOption = isPerOptionField(field);
   const matchAnchorField = isMatchAnchorField(field);
@@ -1671,10 +1717,13 @@ function PlacementPanel({
   const wholeFieldBox = (field.geometry?.segments ?? []).find(
     (s) => rowCellIndex(s) === null && s.optionKey === undefined,
   );
-  /** Divide-into-rows count; seeded from the printed rows where declared. */
-  const [divideRows, setDivideRows] = useState(() =>
-    field.fixedRows?.length ? String(field.fixedRows.length) : '',
-  );
+  /**
+   * Every whole-field box, one per page, in page order — a table whose printed
+   * rows run across a page break carries one box on each page it appears on.
+   */
+  const wholeFieldBoxes = (field.geometry?.segments ?? [])
+    .filter((s) => rowCellIndex(s) === null && s.optionKey === undefined)
+    .sort((a, b) => a.page - b.page);
   /*
    * The per-row fallback is offered where it can mean something: a fixed-row
    * table with exactly ONE answer column. One drawn rectangle per row IS that
@@ -1763,7 +1812,7 @@ function PlacementPanel({
             variant="outline"
             leadingIcon="wand-sparkles"
             className="mt-1.5 w-full justify-center"
-            onClick={() => onSetScalarBox(tableProposal.segment)}
+            onClick={() => onSetTablePageBox(tableProposal.segment)}
           >
             Place this grid
           </Button>
@@ -1796,55 +1845,61 @@ function PlacementPanel({
             );
           })}
         </div>
+      ) : field.type === 'repeating_group' ? (
+        <>
+          {/*
+            THE WHOLE-FIELD BOX(ES), one per page. A table whose printed rows run
+            across a page break appears on more than one page; each page carries
+            its own box, divided into ITS rows, and the exporter consumes value
+            rows in printed order across them. Drawing merges by page, so a box
+            on the continuation page never wipes the one where the table starts.
+          */}
+          <TablePageBoxes
+            boxes={wholeFieldBoxes}
+            fixedRowCount={field.fixedRows?.length ?? 0}
+            armed={sameTarget(drawTarget, { fieldId: field.id, optionKey: null })}
+            onToggleDraw={() => onToggleDraw({ fieldId: field.id, optionKey: null })}
+            onSetPageBox={onSetTablePageBox}
+            onClearPage={onClearTablePage}
+            onDivide={onDivideGrid}
+          />
+          {rowFallback && (
+            <div className="flex flex-col gap-1.5">
+              <p className="text-[11px] leading-snug text-text-tertiary">
+                Or place each row&rsquo;s box yourself — for when the measured grid is wrong.
+                Drawing any row replaces the whole-grid box; a row left blank exports as recorded
+                data with no mark on the page.
+              </p>
+              {field.fixedRows!.map((rowLabel, index) => {
+                const target: DrawTarget = { fieldId: field.id, optionKey: null, rowIndex: index };
+                const box = (field.geometry?.segments ?? []).find(
+                  (s) => rowCellIndex(s) === index,
+                );
+                return (
+                  <BoxRow
+                    key={index}
+                    label={rowLabel || `Row ${index + 1}`}
+                    box={box}
+                    armed={sameTarget(drawTarget, target)}
+                    onToggleDraw={() => onToggleDraw(target)}
+                    onClear={() => onClearRowBox(index)}
+                    onRestyle={(next) => onRestyleRowBox(index, next)}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </>
       ) : (
         <>
           <BoxRow
             label="Answer box"
-            /*
-              The WHOLE-FIELD segment only. In per-row or yes/no-pair mode the
-              first stored segment is one cell of several, and labelling it
-              "Answer box · p1" would report a box nobody placed.
-            */
             box={wholeFieldBox}
             armed={sameTarget(drawTarget, { fieldId: field.id, optionKey: null })}
             onToggleDraw={() => onToggleDraw({ fieldId: field.id, optionKey: null })}
             onClear={() => onSetScalarBox(null)}
             onRestyle={onSetScalarBox}
           />
-          {/*
-            DIVIDE BY SAY-SO. When a page's printed shapes cannot be measured —
-            or measured the wrong table — the author still knows where the rows
-            are: divide the drawn box evenly, then drag the band edges to fit.
-            Offered only while a whole-field box exists to divide, on the page
-            THAT box sits on, which is the page the author drew it.
-          */}
-          {field.type === 'repeating_group' && wholeFieldBox && (
-            <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
-              <p className="text-[11px] leading-snug text-text-tertiary">
-                Rows not measured, or measured on the wrong page? Divide the drawn box into equal
-                rows, then drag the edges to fit the printed lines.
-              </p>
-              <div className="mt-1.5 flex items-center gap-1.5">
-                <input
-                  type="number"
-                  min={1}
-                  value={divideRows}
-                  onChange={(e) => setDivideRows(e.target.value)}
-                  aria-label="Number of printed rows"
-                  placeholder="rows"
-                  className="h-[28px] w-[64px] rounded-sm border border-border bg-surface-page px-1.5 text-[12px]"
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={!Number.isInteger(Number(divideRows)) || Number(divideRows) < 1}
-                  onClick={() => onDivideGrid(Number(divideRows))}
-                >
-                  Divide into rows
-                </Button>
-              </div>
-            </div>
-          )}
           {field.type === 'boolean_yes_no' && (
             <div className="flex flex-col gap-1.5">
               {/*
@@ -1870,32 +1925,6 @@ function PlacementPanel({
                     onToggleDraw={() => onToggleDraw(target)}
                     onClear={() => onSetOptionBox(key, null)}
                     onRestyle={(next) => onSetOptionBox(key, next)}
-                  />
-                );
-              })}
-            </div>
-          )}
-          {rowFallback && (
-            <div className="flex flex-col gap-1.5">
-              <p className="text-[11px] leading-snug text-text-tertiary">
-                Or place each row&rsquo;s box yourself — for when the measured grid is wrong.
-                Drawing any row replaces the whole-grid box; a row left blank exports as recorded
-                data with no mark on the page.
-              </p>
-              {field.fixedRows!.map((rowLabel, index) => {
-                const target: DrawTarget = { fieldId: field.id, optionKey: null, rowIndex: index };
-                const box = (field.geometry?.segments ?? []).find(
-                  (s) => rowCellIndex(s) === index,
-                );
-                return (
-                  <BoxRow
-                    key={index}
-                    label={rowLabel || `Row ${index + 1}`}
-                    box={box}
-                    armed={sameTarget(drawTarget, target)}
-                    onToggleDraw={() => onToggleDraw(target)}
-                    onClear={() => onClearRowBox(index)}
-                    onRestyle={(next) => onRestyleRowBox(index, next)}
                   />
                 );
               })}
@@ -2242,6 +2271,129 @@ function BoxRow({
       {/* Only once there is a box: a style with nowhere to print is a choice
           about nothing, and it would be lost the moment the box is drawn. */}
       {box && onRestyle && <GlyphRow box={box} onChange={onRestyle} />}
+    </div>
+  );
+}
+
+/**
+ * The whole-field answer box(es) of a repeating table — one per PAGE.
+ *
+ * A table whose printed rows run across a page break appears on more than one
+ * page, and each page needs its own box divided into ITS rows. Drawing is a
+ * single armed mode: a box drawn on a page replaces THAT page's box and leaves
+ * every other page's alone (the parent's write merges by page). Once boxes
+ * exist, each is listed below with its own row count and Clear — the exporter
+ * marks the first page's rows, then the next page's, in printed order.
+ */
+function TablePageBoxes({
+  boxes,
+  fixedRowCount,
+  armed,
+  onToggleDraw,
+  onSetPageBox,
+  onClearPage,
+  onDivide,
+}: {
+  boxes: readonly PageBox[];
+  fixedRowCount: number;
+  armed: boolean;
+  onToggleDraw: () => void;
+  onSetPageBox: (seg: PageBox) => void;
+  onClearPage: (page: number) => void;
+  onDivide: (rows: number, page: number) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+        <div className="mb-1.5 text-[12px] font-semibold">
+          {boxes.length > 1 ? 'Answer boxes' : 'Answer box'}
+        </div>
+        <Button
+          variant={armed ? 'primary' : 'outline'}
+          leadingIcon="square-dashed"
+          className="w-full justify-center"
+          onClick={onToggleDraw}
+        >
+          {armed
+            ? 'Drawing… (click to stop)'
+            : boxes.length > 0
+              ? 'Draw a box on another page'
+              : 'Draw the answer box'}
+        </Button>
+        <p className="mt-1.5 text-[11px] leading-snug text-text-tertiary">
+          Draw a box on each page this table&rsquo;s rows appear on, then divide each into its rows.
+          A table that runs onto the next page marks its first rows on one page and the rest on the
+          next, in printed order.
+        </p>
+      </div>
+      {boxes.map((seg) => (
+        <TablePageRow
+          key={seg.page}
+          seg={seg}
+          // Seed the divide count from the table's declared rows only when there
+          // is ONE box to fill; a split table's per-page count is the author's.
+          defaultRows={boxes.length === 1 ? fixedRowCount : 0}
+          onClear={() => onClearPage(seg.page)}
+          onRestyle={onSetPageBox}
+          onDivide={(rows) => onDivide(rows, seg.page)}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** One page's whole-field table box: its row count, a divide control, Clear, style. */
+function TablePageRow({
+  seg,
+  defaultRows,
+  onClear,
+  onRestyle,
+  onDivide,
+}: {
+  seg: PageBox;
+  defaultRows: number;
+  onClear: () => void;
+  onRestyle: (next: PageBox) => void;
+  onDivide: (rows: number) => void;
+}) {
+  const measured = seg.rowBands?.length ?? 0;
+  const [rows, setRows] = useState(() =>
+    measured > 0 ? String(measured) : defaultRows > 0 ? String(defaultRows) : '',
+  );
+  const count = Number(rows);
+  return (
+    <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold">
+          Page {seg.page + 1}
+        </span>
+        <span className="text-[10.5px] font-semibold text-text-tertiary">
+          {measured > 0 ? `${measured} row${measured === 1 ? '' : 's'}` : 'not divided'}
+        </span>
+        <Button variant="outline" size="sm" leadingIcon="trash-2" onClick={onClear}>
+          Clear
+        </Button>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <input
+          type="number"
+          min={1}
+          value={rows}
+          onChange={(e) => setRows(e.target.value)}
+          aria-label={`Rows on page ${seg.page + 1}`}
+          placeholder="rows"
+          className="h-[28px] w-[64px] rounded-sm border border-border bg-surface-page px-1.5 text-[12px]"
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!Number.isInteger(count) || count < 1}
+          onClick={() => onDivide(count)}
+        >
+          Divide into rows
+        </Button>
+      </div>
+      <GlyphRow box={seg} onChange={onRestyle} />
     </div>
   );
 }

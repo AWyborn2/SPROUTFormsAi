@@ -1097,6 +1097,37 @@ export function rowCellIndex(segment: PageBox): number | null {
 }
 
 /**
+ * A WHOLE-FIELD table box — the measured or hand-divided grid for the field as a
+ * whole, not a per-row cell (`row:<n>`) and not a per-option cell.
+ */
+export function isWholeFieldBox(segment: PageBox): boolean {
+  return rowCellIndex(segment) === null && segment.optionKey === undefined;
+}
+
+/**
+ * Merge one page's whole-field table box into a field's segments, keeping the
+ * table's boxes on OTHER pages.
+ *
+ * A repeating table whose printed rows run across a page break carries one
+ * whole-field box per page. The exporter draws each on its own page and consumes
+ * value rows in printed order ACROSS them, reading the segments in array order —
+ * so the result is kept sorted by page (page 8's rows before page 9's).
+ * Replacing every segment, the way a scalar field's single box does, wiped the
+ * continuation the moment the author placed the next page. The whole-field box
+ * on `seg.page` is replaced; per-row and per-option cells, and whole-field boxes
+ * on every other page, are left untouched.
+ */
+export function mergeWholeFieldBox(segments: readonly PageBox[], seg: PageBox): PageBox[] {
+  const others = segments.filter((s) => !(isWholeFieldBox(s) && s.page === seg.page));
+  return [...others, seg].sort((a, b) => a.page - b.page);
+}
+
+/** Remove the whole-field table box on one page, keeping the table's other pages. */
+export function clearWholeFieldBoxOnPage(segments: readonly PageBox[], page: number): PageBox[] {
+  return segments.filter((s) => !(isWholeFieldBox(s) && s.page === page));
+}
+
+/**
  * Divide an author's drawn box into a grid BY THEIR SAY-SO — the recourse when
  * the page's printed shapes cannot be measured at all.
  *
