@@ -7,6 +7,8 @@ export interface TheoryResultsProps {
   passPercent: number;
   outcome?: string;
   partLabel: string;
+  /** Whether a failed quiz may be taken again — the 'end' retry mode. */
+  allowReattempt: boolean;
   onTryAgain: () => void;
   onBack: () => void;
 }
@@ -23,6 +25,7 @@ export function TheoryResults({
   passPercent,
   outcome,
   partLabel,
+  allowReattempt,
   onTryAgain,
   onBack,
 }: TheoryResultsProps) {
@@ -161,7 +164,9 @@ export function TheoryResults({
       </p>
 
       <div className="mt-8 flex items-center gap-3">
-        {passed ? (
+        {passed || !allowReattempt ? (
+          // Passed, or a mode that does not offer another go — the assessor
+          // reopens a failed 'off'/'immediate' quiz if they choose to.
           <Button leadingIcon="arrow-left" onClick={onBack}>
             Back to case
           </Button>

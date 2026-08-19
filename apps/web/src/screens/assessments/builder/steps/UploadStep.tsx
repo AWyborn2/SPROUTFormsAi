@@ -107,6 +107,8 @@ function Stat({ value, label }: { value: number | string; label: string }) {
 
 export function UploadStep({ draft }: { draft: BuilderDraftState }) {
   const { phase, stats, extraction, setup } = draft;
+  // The retry mode, migrating a draft that still carries only the legacy boolean.
+  const retryMode = setup.theoryRetry ?? (setup.theoryAllowRetry ? 'immediate' : 'end');
 
   // A revision never re-extracts (KTD7) — its step 1 is the PDF decision, not
   // a dropzone into extraction.
@@ -364,14 +366,35 @@ export function UploadStep({ draft }: { draft: BuilderDraftState }) {
               </Chip>
             </div>
             {setup.theoryRendering === 'one_per_screen' && (
-              <label className="mt-2 inline-flex items-center gap-1.5 text-[11.5px] text-text-secondary">
-                <input
-                  type="checkbox"
-                  checked={!!setup.theoryAllowRetry}
-                  onChange={(e) => draft.setSetup({ theoryAllowRetry: e.target.checked })}
-                />
-                Allow candidates to retry incorrect questions before moving on
-              </label>
+              <div className="mt-3">
+                <div className="text-[12px] font-medium text-text-secondary">
+                  If a candidate gets a question wrong
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  <Chip
+                    on={retryMode === 'immediate'}
+                    onClick={() => draft.setSetup({ theoryRetry: 'immediate' })}
+                  >
+                    Retry it straight away
+                  </Chip>
+                  <Chip
+                    on={retryMode === 'end'}
+                    onClick={() => draft.setSetup({ theoryRetry: 'end' })}
+                  >
+                    Re-take the quiz at the end
+                  </Chip>
+                  <Chip on={retryMode === 'off'} onClick={() => draft.setSetup({ theoryRetry: 'off' })}>
+                    No retry
+                  </Chip>
+                </div>
+                <p className="mt-1.5 text-[11px] text-text-tertiary">
+                  {retryMode === 'immediate'
+                    ? 'They must get each question right before moving on.'
+                    : retryMode === 'end'
+                      ? 'They answer through to the end; a failed quiz can then be re-taken.'
+                      : 'One attempt — a wrong answer is final unless the assessor reopens it.'}
+                </p>
+              </div>
             )}
           </div>
 

@@ -399,7 +399,7 @@ export async function roundTripExport({
     const value = values[field.id];
 
     if (field.type === 'repeating_group' && Array.isArray(value)) {
-      drawRepeatingGroup(pages, font, field, value as RepeatingRowValue[], segments);
+      await drawRepeatingGroup(doc, pages, font, field, value as RepeatingRowValue[], segments);
       continue;
     }
 
@@ -931,13 +931,14 @@ function drawCheckboxOptions(
  * continue across a page break — each segment draws the rows its own bands
  * describe.
  */
-function drawRepeatingGroup(
+async function drawRepeatingGroup(
+  doc: import('pdf-lib').PDFDocument,
   pages: import('pdf-lib').PDFPage[],
   font: import('pdf-lib').PDFFont,
   field: FormField,
   rows: RepeatingRowValue[],
   segments: PageBox[],
-): void {
+): Promise<void> {
   const cols = field.columns ?? [];
   if (cols.length === 0 || rows.length === 0) return;
 
@@ -1040,6 +1041,30 @@ function drawRepeatingGroup(
         // free text drawn as-is.
         if (typeof raw === 'boolean') {
           if (raw) markTick(col.key);
+          continue;
+        }
+        // A drawn signature arrives as a PNG data URL — draw the IMAGE into the
+        // cell, never the data-URL string. Type-agnostic like the scalar path:
+        // extraction folds signature boxes into text columns, so the blob turns
+        // up typed `text` as often as `signature`.
+        const png = pngDataUrlBytes(raw);
+        if (png) {
+          const band = columnBandFor(segment, col.key);
+          if (band) {
+            const image = await doc.embedPng(png);
+            page.drawImage(
+              image,
+              fitInside(
+                {
+                  x: band.start,
+                  y: rowBand.start,
+                  width: band.end - band.start,
+                  height: rowBand.end - rowBand.start,
+                },
+                image,
+              ),
+            );
+          }
           continue;
         }
         const text = raw === null || raw === undefined ? '' : String(raw);

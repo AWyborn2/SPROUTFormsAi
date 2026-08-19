@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
-import type { FormField, SubmissionValue } from '@formai/shared';
+import type { FormField, SubmissionValue, TheoryRetryMode } from '@formai/shared';
 import { isChoiceField } from '@formai/shared';
 import { Button, Icon } from '@formai/ui';
 import { FieldInput } from '../fields/FieldRenderer.js';
@@ -18,7 +18,8 @@ export interface TheoryQuizProps {
   pages: TheoryPage[];
   values: Record<string, SubmissionValue>;
   writable: Set<string>;
-  allowRetry: boolean;
+  /** off = no retry; immediate = "Try again" on the spot; end = re-take on fail. */
+  retryMode: TheoryRetryMode;
   passPercent: number;
   partLabel: string;
   partKey: string;
@@ -51,7 +52,7 @@ export function TheoryQuiz({
   pages,
   values,
   writable,
-  allowRetry,
+  retryMode,
   passPercent,
   partLabel,
   onValueChange,
@@ -119,8 +120,10 @@ export function TheoryQuiz({
       .every((f) => isAnswered(f.id));
   }, [page, writable, isAnswered]);
 
+  // Only the immediate mode lets a wrong answer be retried on the spot. The
+  // 'end' mode instead offers a fresh whole-quiz attempt from the results screen.
   const canRetry =
-    allowRetry && currentFeedback && !currentFeedback.correct;
+    retryMode === 'immediate' && currentFeedback && !currentFeedback.correct;
 
   async function handleCheckAnswer() {
     if (!questionId || checking) return;
@@ -182,6 +185,9 @@ export function TheoryQuiz({
         passPercent={passPercent}
         outcome={results.outcome}
         partLabel={partLabel}
+        // A fresh whole-quiz attempt is offered on failure only in the 'end'
+        // mode; 'off' and 'immediate' leave a re-attempt to the assessor.
+        allowReattempt={retryMode === 'end'}
         onTryAgain={onTryAgain}
         onBack={onBack}
       />

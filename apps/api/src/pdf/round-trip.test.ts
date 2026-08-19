@@ -1051,6 +1051,32 @@ describe('roundTripExport — a drawn signature', () => {
     expect(bytesInclude(output, '/Image')).toBe(true);
   });
 
+  it('embeds a drawn signature in a repeating-table cell, not the data-URL text', async () => {
+    // The logbook's signature column stores the same PNG blob a scalar field
+    // does; a table cell must draw it as an image, never print the data URL.
+    const field: FormField = {
+      id: 'log',
+      type: 'repeating_group',
+      label: 'Observation log',
+      required: false,
+      source: 'imported',
+      columns: [
+        { key: 'task', label: 'Task', type: 'text' },
+        { key: 'sig', label: 'Operator signature', type: 'signature' },
+      ],
+      sourcePosition: { ...GROUPED_POS },
+      geometry: groupedGeometry(['task', 'sig'], 1),
+    };
+    const output = await roundTripExport({
+      originalPdf: await makeFlatPdf(),
+      fields: [field],
+      values: { log: [{ task: 'Layer stripping', sig: REAL_PNG }] },
+    });
+
+    expect(bytesInclude(output, '/Image')).toBe(true);
+    expect(bytesInclude(output, 'iVBORw0KGgo')).toBe(false);
+  });
+
   it('draws nothing at all for a malformed PNG', async () => {
     /*
       The payload below carries the PNG magic number but decodes to nothing

@@ -15,6 +15,7 @@ import type {
   PrerequisiteCheck,
   ProfilePrefillKey,
   TheoryRendering,
+  TheoryRetryMode,
   AssessmentPathway,
   AssessmentToolManifest,
   AssessmentWorkflow,
@@ -196,8 +197,8 @@ export interface AttemptFillView {
    * part rendered as before this existed.
    */
   theoryRendering?: TheoryRendering | null;
-  /** Whether candidates can retry individual questions after feedback. */
-  theoryAllowRetry?: boolean;
+  /** When a candidate may retry a wrong theory part — resolved by the server. */
+  theoryRetry?: TheoryRetryMode;
   /** Pass threshold percentage (1–100), or null for mandatory-all-correct. */
   theoryPassPercent?: number | null;
   attemptNumber: number;

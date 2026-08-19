@@ -557,6 +557,33 @@ describe('POST /assessment-tools', () => {
     }
   });
 
+  it('keeps theoryRetry and theoryPassPercent — the schema no longer strips them (task #45)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-tools`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          templateId: TEMPLATE,
+          name: 'Track Dozer',
+          manifest: { ...MANIFEST, theoryRetry: 'immediate', theoryPassPercent: 80 },
+          awardedCompetencyIds: [COMPETENCY],
+        }),
+      });
+      expect(res.status).toBe(201);
+      const m = rows(store, 'assessmentTools')[0]?.manifest as {
+        theoryRetry?: string;
+        theoryPassPercent?: number;
+      };
+      expect(m?.theoryRetry).toBe('immediate');
+      expect(m?.theoryPassPercent).toBe(80);
+    } finally {
+      server.close();
+    }
+  });
+
   it('creates a tool when the manifest matches the template', async () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();

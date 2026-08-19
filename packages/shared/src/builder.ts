@@ -25,7 +25,12 @@
  *    into anybody's data.
  */
 
-import type { AssessmentPathway, AssessmentToolManifest, TheoryRendering } from './assessment.js';
+import type {
+  AssessmentPathway,
+  AssessmentToolManifest,
+  TheoryRendering,
+  TheoryRetryMode,
+} from './assessment.js';
 import type { ExtractionResult } from './extraction.js';
 import { GLYPH_KINDS, type FieldGeometry, type FormField, type GlyphKind } from './form-field.js';
 import type { AssessmentWorkflow } from './workflow.js';
@@ -165,10 +170,16 @@ export interface SetupAnswers {
   theoryRendering: TheoryRendering;
   thresholdBehaviour: ThresholdBehaviour;
   /**
-   * Whether a candidate may retry individual questions after seeing feedback
-   * in interactive theory mode (`one_per_screen`). Defaults to false.
+   * @deprecated Superseded by `theoryRetry`; kept so a draft saved before the
+   * mode existed still loads. The UI migrates it to `theoryRetry` on edit.
    */
   theoryAllowRetry?: boolean;
+  /**
+   * When a candidate may retry a theory part they got wrong: `off`, on the spot
+   * (`immediate`, one-per-screen only), or a whole-quiz re-attempt at the end
+   * (`end`). Defaults to `end`, which is what a tool did before this existed.
+   */
+  theoryRetry?: TheoryRetryMode;
 }
 
 export const DEFAULT_SETUP_ANSWERS: SetupAnswers = {
@@ -177,6 +188,7 @@ export const DEFAULT_SETUP_ANSWERS: SetupAnswers = {
   passRule: 'mandatory_all_correct',
   theoryRendering: 'one_per_screen',
   thresholdBehaviour: 'notify',
+  theoryRetry: 'end',
 };
 
 /* ------------------------------------------------------------------ *

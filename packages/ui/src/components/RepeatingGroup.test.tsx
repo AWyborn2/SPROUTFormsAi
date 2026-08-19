@@ -386,3 +386,33 @@ describe('auto-stamped date/time columns', () => {
     expect((screen.getByLabelText('Started') as HTMLInputElement).value).toMatch(/^\d{2}:\d{2}$/);
   });
 });
+
+describe('signature cells', () => {
+  const columns: RepeatingGroupColumn[] = [
+    { key: 'name', label: 'Operator', type: 'text' },
+    { key: 'sig', label: 'Operator signature', type: 'signature' },
+  ];
+
+  it('renders a "Tap to sign" affordance, not a text box, for an empty signature', () => {
+    render(<Harness columns={columns} initialRows={[{ name: 'Ash', sig: '' }]} />);
+    expect(screen.getByRole('button', { name: /tap to sign/i })).toBeTruthy();
+    // Crucially NOT a plain text input, which is what a signature column used to
+    // fall through to.
+    expect(screen.queryByRole('textbox', { name: /Operator signature/ })).toBeNull();
+  });
+
+  it('opens a full drawing pad in a dialog when the cell is tapped', () => {
+    render(<Harness columns={columns} initialRows={[{ name: 'Ash', sig: '' }]} />);
+    fireEvent.click(screen.getByRole('button', { name: /tap to sign/i }));
+    const dialog = screen.getByRole('dialog');
+    // The pad is a canvas exposed as an image labelled by the column.
+    expect(within(dialog).getByRole('img', { name: /Operator signature/ })).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: /save signature/i })).toBeTruthy();
+  });
+
+  it('shows the captured signature as an image in read-only mode', () => {
+    const png = 'data:image/png;base64,AAAA';
+    render(<Harness columns={columns} initialRows={[{ name: 'Ash', sig: png }]} readOnly />);
+    expect((screen.getByAltText('Operator signature') as HTMLImageElement).src).toBe(png);
+  });
+});

@@ -624,9 +624,15 @@ export function buildManifest(
     ExtractedField,
     'id' | 'label' | 'type' | 'options' | 'coverSection' | 'columns' | 'fixedRows'
   >[],
-  setup?: Pick<SetupAnswers, 'theoryRendering' | 'passRule' | 'passPercentage' | 'theoryAllowRetry'>,
+  setup?: Pick<
+    SetupAnswers,
+    'theoryRendering' | 'passRule' | 'passPercentage' | 'theoryAllowRetry' | 'theoryRetry'
+  >,
 ): AssessmentToolManifest {
   const completionMarks = proposePartCompletionMarks(parts, extracted);
+  // Resolve the retry mode from either the new field or a draft that still
+  // carries only the legacy boolean, so re-publishing an old tool keeps it.
+  const retryMode = setup?.theoryRetry ?? (setup?.theoryAllowRetry ? 'immediate' : 'end');
   return {
     // `sectionKey` is builder bookkeeping and must not reach the stored record.
     parts: parts.map(({ sectionKey: _sectionKey, ...part }) => part),
@@ -674,7 +680,9 @@ export function buildManifest(
     ...(setup?.passRule === 'overall_percentage' && setup.passPercentage
       ? { theoryPassPercent: setup.passPercentage }
       : {}),
-    ...(setup?.theoryAllowRetry ? { theoryAllowRetry: true } : {}),
+    // Only a mode that differs from the resolved default ('end') is worth
+    // storing — the same rule theoryRendering follows above.
+    ...(retryMode !== 'end' ? { theoryRetry: retryMode } : {}),
   };
 }
 
