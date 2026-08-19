@@ -54,6 +54,14 @@ export interface AssessmentCaseRow {
   /** Null on a pooled case — shown as unassigned (U13). */
   assessorUserId: string | null;
   createdAt: string;
+  /** The part the case is at now — first not-yet-satisfactory. Null once competent. */
+  currentPartLabel: string | null;
+  /** 1-based position of that part among the pathway's required parts. */
+  currentPartIndex: number | null;
+  /** How many parts this pathway requires — the "of 6" in "Part 3 of 6". */
+  requiredPartCount: number;
+  /** Waiting on a person: a part handed in unmarked, or the final sign-off. */
+  awaitingAssessor: boolean;
 }
 
 /** One unowned case an eligible assessor may pull from the shared queue (U13). */

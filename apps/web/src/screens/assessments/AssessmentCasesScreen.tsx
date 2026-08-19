@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button, Icon } from '@formai/ui';
 import { ASSESSMENT_PATHWAYS, type AssessmentPathway } from '@formai/shared';
-import { CaseStateBadge } from '../statusBadges.js';
+import { CaseStatusCell } from '../statusBadges.js';
 import type { AssessmentToolSummary } from '../../lib/data/assessments.js';
 import {
   useAssessmentCases,
@@ -250,7 +250,13 @@ export function AssessmentCasesScreen() {
                     )}
                     <td className="p-[11px_14px] text-text-secondary">{PATHWAY_LABELS[c.pathway]}</td>
                     <td className="p-[11px_14px]">
-                      <CaseStateBadge state={c.state} />
+                      <CaseStatusCell
+                        state={c.state}
+                        awaitingAssessor={c.awaitingAssessor}
+                        currentPartLabel={c.currentPartLabel}
+                        currentPartIndex={c.currentPartIndex}
+                        requiredPartCount={c.requiredPartCount}
+                      />
                     </td>
                     <td className="p-[11px_14px] text-text-tertiary">
                       {new Date(c.createdAt).toLocaleDateString()}

@@ -439,6 +439,24 @@ function toAttemptFacts(rows: { partKey: string; attemptNumber: number; outcome:
   }));
 }
 
+/**
+ * Whether a case is waiting on an ASSESSOR to act — the one thing an assessor
+ * opens the case list to find.
+ *
+ * Two ways it happens: every required part has passed and the case sits in
+ * `awaiting_sign_off` for final approval, or a part has been handed in
+ * (`submittedAt` set) but not yet marked (`outcome` still null) — the marking a
+ * candidate cannot do for themselves. A part that auto-marked at hand-in already
+ * carries an outcome, so it is not a person's pending work and is not counted.
+ */
+export function caseAwaitsAssessor(
+  state: string,
+  attempts: readonly { submittedAt: unknown; outcome: string | null }[],
+): boolean {
+  if (state === 'awaiting_sign_off') return true;
+  return attempts.some((a) => a.submittedAt !== null && a.outcome === null);
+}
+
 // ── assessment tools ────────────────────────────────────────────────────────
 
 /*
@@ -2245,18 +2263,57 @@ assessmentCasesRouter.get(
     const nameById = new Map(candidates.map((u) => [u.id, u.name]));
     const caseIdentities = await loadDisplayIdentities(db, tenant.orgId, candidateIds);
 
+    /*
+      Attempts for these cases, so each row can name the STAGE it is at and
+      whether it is waiting on an assessor — the two things the case list is
+      scanned for. Loaded once for the page and bucketed by case, the same shape
+      the progress endpoint uses; the case-state computation stays server-side.
+    */
+    const caseIds = rows.map((r) => r.id);
+    const attemptRows = caseIds.length
+      ? await db.query.assessmentPartAttempts.findMany({
+          where: inArray(schema.assessmentPartAttempts.caseId, caseIds),
+          orderBy: (a, { asc }) => [asc(a.partKey), asc(a.attemptNumber)],
+        })
+      : [];
+    const attemptsByCase = new Map<string, typeof attemptRows>();
+    for (const a of attemptRows) {
+      const bucket = attemptsByCase.get(a.caseId);
+      if (bucket) bucket.push(a);
+      else attemptsByCase.set(a.caseId, [a]);
+    }
+
     res.json(
-      rows.map((c) => ({
-        id: c.id,
-        toolName: toolById.get(c.toolId)?.name ?? '',
-        candidateUserId: c.candidateUserId,
-        candidateName: identifyMember(caseIdentities, c.candidateUserId, nameById.get(c.candidateUserId) ?? '').name,
-        pathway: c.pathway,
-        state: c.state,
-        /** Null on a pooled case — the table shows it as unassigned (U13). */
-        assessorUserId: c.assessorUserId,
-        createdAt: c.createdAt,
-      })),
+      rows.map((c) => {
+        const tool = toolById.get(c.toolId);
+        const attempts = attemptsByCase.get(c.id) ?? [];
+        // The pathway's required parts with their derived states — the same
+        // computation the progress screen uses, so the two agree.
+        const progress = tool
+          ? caseProgress(tool.manifest, c.pathway as AssessmentPathway, toAttemptFacts(attempts))
+          : [];
+        // The stage: first part not yet satisfactory, and where it sits.
+        const current = progress.find((p) => p.state !== 'satisfactory');
+        return {
+          id: c.id,
+          toolName: tool?.name ?? '',
+          candidateUserId: c.candidateUserId,
+          candidateName: identifyMember(caseIdentities, c.candidateUserId, nameById.get(c.candidateUserId) ?? '').name,
+          pathway: c.pathway,
+          state: c.state,
+          /** Null on a pooled case — the table shows it as unassigned (U13). */
+          assessorUserId: c.assessorUserId,
+          createdAt: c.createdAt,
+          /** The part the case is at now — null once every required part passed. */
+          currentPartLabel: current?.part.label ?? null,
+          /** 1-based position of that part among the pathway's required parts. */
+          currentPartIndex: current ? progress.indexOf(current) + 1 : null,
+          /** How many parts this pathway requires — the "of 6" in "Part 3 of 6". */
+          requiredPartCount: progress.length,
+          /** Waiting on a person: final sign-off, or a part handed in unmarked. */
+          awaitingAssessor: caseAwaitsAssessor(c.state, attempts),
+        };
+      }),
     );
   }),
 );
