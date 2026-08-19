@@ -1525,6 +1525,24 @@ describe('competency holders', () => {
     }
   });
 
+  it('carries the grant row id as holderId, so a renewal can attach evidence (task #43)', async () => {
+    // Renewing a lapsed licence files the new evidence against the HOLDING via
+    // POST /competency-documents/:holderId, and nothing else on the record
+    // carries that id — so the held read has to surface it.
+    mockDbValue = fakeDb({
+      competencyHoldersFindMany: [{ id: 'holder-42', competencyId: 'c1', grantedAt: daysAgo(10) }],
+      competenciesFindMany: [{ id: 'c1', name: 'Driver Licence' }],
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/competencies/held/${HOLDER_ID}`, { headers: authHeader() });
+      const [row] = (await res.json()) as { holderId: string }[];
+      expect(row!.holderId).toBe('holder-42');
+    } finally {
+      server.close();
+    }
+  });
+
   it('counts a ticket inside its grace period as still current', async () => {
     // Grace is set per competency by an admin, and within it the person is
     // requalifying rather than unqualified.

@@ -241,7 +241,9 @@ function signOffErrorMessage(body: Record<string, unknown>): string {
   const code = typeof body.error === 'string' ? body.error : '';
   const base = SIGN_OFF_ERRORS[code] ?? `Sign-off refused (${code || 'unknown'}).`;
   if (code === 'prerequisites_unsatisfied' && typeof body.detail === 'string') {
-    return `${base} ${body.detail}`;
+    // Point the assessor at the fix: a lapsed licence is renewed — re-dated and
+    // its new evidence filed — from the person's profile, under Competencies.
+    return `${base} ${body.detail} Renew it from the candidate's profile, under Competencies, then sign off again.`;
   }
   if (code === 'parts_incomplete' && Array.isArray(body.outstanding)) {
     return `${base} Outstanding: ${(body.outstanding as string[]).join(', ')}.`;

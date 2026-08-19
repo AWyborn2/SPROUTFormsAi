@@ -33,7 +33,7 @@ import type {
   SubmissionValue,
 } from '@formai/shared';
 import { geometrySegments, ROLE_LABELS } from '@formai/shared';
-import { ApiError, apiClient } from './api-client.js';
+import { ApiError, apiClient, uploadAttachment } from './api-client.js';
 import { ROLE_NAMES } from './types.js';
 import type {
   AuditFormInput,
@@ -1391,6 +1391,26 @@ export const store = {
         ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
       })
       .then(() => undefined);
+  },
+
+  /**
+   * Attach an evidence file — the renewed licence or certificate — to one held
+   * competency (the grant row identified by `holderId`, from
+   * `getHeldCompetencies`). It lands as `held` evidence immediately: this is the
+   * editor's path (R28), distinct from the candidate's own replacement upload,
+   * which waits for approval. `uploadAttachment` streams the base64 with real
+   * upload progress, because a licence photo off a phone is routinely several MB.
+   */
+  uploadCompetencyEvidence(
+    holderId: string,
+    file: File,
+    onProgress?: (percent: number) => void,
+  ): Promise<{ id: string; fileName: string }> {
+    return uploadAttachment<{ id: string; fileName: string }>(
+      `/competency-documents/${holderId}`,
+      file,
+      onProgress,
+    );
   },
 
   /* ── Saved imports ─────────────────────────────────────────────────────── */
