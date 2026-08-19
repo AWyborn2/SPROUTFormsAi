@@ -44,6 +44,7 @@ import {
   keyMove,
   moveSegment,
   removeSegment,
+  replaceSegmentOnPage,
   moveBand,
   moveBoundary,
   retargetPageChanges,
@@ -129,6 +130,14 @@ export function GeometryEditorScreen({
    */
   const [edited, setEdited] = useState<FormField[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /**
+   * Which page's whole-field box is the EDITABLE one, for a table that spans a
+   * page break and so carries one box per page. Null falls back to the first.
+   * The other pages' bands still render, read-only, so nothing looks undivided.
+   * Set to the page an author just drew or divided; clicking a page row switches
+   * it. Reset whenever the selected field changes.
+   */
+  const [activeOverlayPage, setActiveOverlayPage] = useState<number | null>(null);
   const [textPages, setTextPages] = useState<readonly TextPage[]>([]);
   /**
    * Why the last drawn table box could not be subdivided, and for which field.
@@ -244,10 +253,29 @@ export function GeometryEditorScreen({
    * conditional and every hook in this component must run on every render.
    */
   const overlay = useMemo(
-    () => bandOverlayFor(drawTarget, selectedId, proposalPreviews, fields),
-    [drawTarget, selectedId, proposalPreviews, fields],
+    () => bandOverlayFor(drawTarget, selectedId, proposalPreviews, fields, activeOverlayPage),
+    [drawTarget, selectedId, proposalPreviews, fields, activeOverlayPage],
   );
   const bandOverlay = overlay?.box ?? null;
+  /*
+    A table spanning a page break carries one whole-field box per page. Only ONE
+    is the editable overlay above; the rest render their bands READ-ONLY on their
+    own pages, so an author sees every page's divisions and never mistakes a
+    divided continuation for an unplaced one. Excludes the active overlay (it is
+    already drawn, editable) and only lists boxes that HAVE bands to show.
+  */
+  const readonlyBands = useMemo(() => {
+    if (!bandOverlay) return [];
+    const field = fields.find((f) => f.id === selectedId);
+    if (!field || isPerOptionField(field)) return [];
+    return (field.geometry?.segments ?? []).filter(
+      (s) =>
+        rowCellIndex(s) === null &&
+        s.optionKey === undefined &&
+        s.page !== bandOverlay.page &&
+        (s.rowBands?.length ?? 0) > 0,
+    );
+  }, [bandOverlay, fields, selectedId]);
 
   /**
    * Where a dragged band edge may land, from the overlay page's own text —
@@ -294,13 +322,16 @@ export function GeometryEditorScreen({
     }
 
     const { fieldId, optionKey } = overlay.source;
+    // Matched by page AS WELL AS optionKey: a table spanning a page break has
+    // several whole-field boxes, all with optionKey null, and matching on the
+    // key alone would rewrite EVERY page's box to this one — collapsing the
+    // continuation onto the page being edited.
+    const page = overlay.box.page;
     mutate(fieldId, (f) => {
       const segments = f.geometry?.segments ?? [];
-      if (!segments.some((s) => (s.optionKey ?? null) === optionKey)) return f;
-      return {
-        ...f,
-        geometry: { segments: segments.map((s) => ((s.optionKey ?? null) === optionKey ? next : s)) },
-      };
+      const nextSegments = replaceSegmentOnPage(segments, optionKey, page, next);
+      if (nextSegments === segments) return f;
+      return { ...f, geometry: { segments: nextSegments } };
     });
   }
 
@@ -336,13 +367,13 @@ export function GeometryEditorScreen({
     }
 
     const { fieldId, optionKey } = overlay.source;
+    // Page-scoped, like `onBandEdge`: don't drag every page's box onto this one.
+    const page = overlay.box.page;
     mutate(fieldId, (f) => {
       const segments = f.geometry?.segments ?? [];
-      if (!segments.some((sg) => (sg.optionKey ?? null) === optionKey)) return f;
-      return {
-        ...f,
-        geometry: { segments: segments.map((sg) => ((sg.optionKey ?? null) === optionKey ? next : sg)) },
-      };
+      const nextSegments = replaceSegmentOnPage(segments, optionKey, page, next);
+      if (nextSegments === segments) return f;
+      return { ...f, geometry: { segments: nextSegments } };
     });
   }
 
@@ -432,6 +463,7 @@ export function GeometryEditorScreen({
    */
   function selectField(field: FormField) {
     setSelectedId(field.id);
+    setActiveOverlayPage(null);
     setDrawTarget(null);
     // Scoped to this field only — every OTHER field's parked needs-review
     // proposal must survive selecting something else in the sidebar. A flat
@@ -590,6 +622,7 @@ export function GeometryEditorScreen({
    */
   function openReviewField(fieldId: string) {
     setSelectedId(fieldId);
+    setActiveOverlayPage(null);
     setDrawTarget(null);
   }
 
@@ -769,6 +802,8 @@ export function GeometryEditorScreen({
     // Merge by page, not replace: a box drawn on the continuation page must not
     // wipe the one already placed on the page the table starts on.
     setTablePageBox(field.id, result.ok ? result.proposal.segment : box);
+    // The page just drawn becomes the editable overlay.
+    setActiveOverlayPage(box.page);
   }
 
   /**
@@ -823,6 +858,8 @@ export function GeometryEditorScreen({
       result.ok ? null : { fieldId: field.id, title: 'Not divided', detail: result.detail },
     );
     if (result.ok) setTablePageBox(field.id, result.segment);
+    // Editing follows the page just divided, so its new bands are draggable.
+    setActiveOverlayPage(page);
   }
 
   function clearRowBox(fieldId: string, rowIndex: number) {
@@ -1230,6 +1267,7 @@ export function GeometryEditorScreen({
             onTextLayer={onTextLayer}
             placements={placements}
             bandOverlay={bandOverlay}
+            readonlyBands={readonlyBands}
             onMoveBox={moveOverlayBox}
             bandSnapTargets={bandSnapTargets}
             bandSnapTargetsY={bandSnapTargetsY}
@@ -1315,6 +1353,8 @@ export function GeometryEditorScreen({
               onSetTablePageBox={(seg) => setTablePageBox(selected.id, seg)}
               onClearTablePage={(page) => clearTablePage(selected.id, page)}
               onSetAllGlyphs={(glyph) => setAllGlyphs(selected.id, glyph)}
+              activePage={activeOverlayPage}
+              onActivatePage={setActiveOverlayPage}
               onClearRowBox={(rowIndex) => clearRowBox(selected.id, rowIndex)}
               onRestyleRowBox={(rowIndex, box) => restyleRowBox(selected.id, rowIndex, box)}
               onDivideGrid={(rows, page) => setManualGrid(selected, rows, page)}
@@ -1480,6 +1520,7 @@ function bandOverlayFor(
   selectedId: string | null,
   proposalPreviews: readonly { fieldId: string; proposal: FieldProposal | TableProposal }[],
   fields: readonly FormField[],
+  activeOverlayPage: number | null,
 ): BandOverlayInfo | null {
   if (drawTarget) {
     const field = fields.find((f) => f.id === drawTarget.fieldId);
@@ -1505,7 +1546,14 @@ function bandOverlayFor(
   */
   const field = fields.find((f) => f.id === selectedId);
   if (field && !isPerOptionField(field)) {
-    const segment = field.geometry?.segments?.[0];
+    const wholeField = (field.geometry?.segments ?? []).filter(
+      (s) => rowCellIndex(s) === null && s.optionKey === undefined,
+    );
+    // A page-spanning table has one whole-field box per page. The ACTIVE page —
+    // the one just drawn, divided, or clicked — is the editable overlay; the
+    // rest render read-only (see `readonlyBands`). A single-page field has one
+    // box and `wholeField[0]` is it.
+    const segment = wholeField.find((s) => s.page === activeOverlayPage) ?? wholeField[0];
     if (segment) {
       return { box: segment, source: { kind: 'segment', fieldId: selectedId, optionKey: segment.optionKey ?? null } };
     }
@@ -1742,6 +1790,8 @@ function PlacementPanel({
   onSetTablePageBox,
   onClearTablePage,
   onSetAllGlyphs,
+  activePage,
+  onActivatePage,
   onClearRowBox,
   onRestyleRowBox,
   onDivideGrid,
@@ -1758,6 +1808,10 @@ function PlacementPanel({
   onClearTablePage: (page: number) => void;
   /** Set (or clear, with undefined) the printed glyph on every placed box at once. */
   onSetAllGlyphs: (glyph: GlyphKind | undefined) => void;
+  /** Which page's table box is the editable overlay (multi-page tables). */
+  activePage: number | null;
+  /** Make a page's box the editable one — its bands become draggable. */
+  onActivatePage: (page: number) => void;
   onClearRowBox: (rowIndex: number) => void;
   onRestyleRowBox: (rowIndex: number, box: PageBox) => void;
   onDivideGrid: (rows: number, page: number) => void;
@@ -1948,6 +2002,8 @@ function PlacementPanel({
             boxes={wholeFieldBoxes}
             fixedRowCount={field.fixedRows?.length ?? 0}
             armed={sameTarget(drawTarget, { fieldId: field.id, optionKey: null })}
+            activePage={activePage}
+            onActivate={onActivatePage}
             onToggleDraw={() => onToggleDraw({ fieldId: field.id, optionKey: null })}
             onSetPageBox={onSetTablePageBox}
             onClearPage={onClearTablePage}
@@ -2435,6 +2491,8 @@ function TablePageBoxes({
   boxes,
   fixedRowCount,
   armed,
+  activePage,
+  onActivate,
   onToggleDraw,
   onSetPageBox,
   onClearPage,
@@ -2443,6 +2501,8 @@ function TablePageBoxes({
   boxes: readonly PageBox[];
   fixedRowCount: number;
   armed: boolean;
+  activePage: number | null;
+  onActivate: (page: number) => void;
   onToggleDraw: () => void;
   onSetPageBox: (seg: PageBox) => void;
   onClearPage: (page: number) => void;
@@ -2479,6 +2539,10 @@ function TablePageBoxes({
           // Seed the divide count from the table's declared rows only when there
           // is ONE box to fill; a split table's per-page count is the author's.
           defaultRows={boxes.length === 1 ? fixedRowCount : 0}
+          // Only offer the switch when there is more than one page to switch
+          // between — a single-page table's box is always the editable overlay.
+          active={boxes.length > 1 && seg.page === activePage}
+          onActivate={boxes.length > 1 ? () => onActivate(seg.page) : undefined}
           onClear={() => onClearPage(seg.page)}
           onRestyle={onSetPageBox}
           onDivide={(rows) => onDivide(rows, seg.page)}
@@ -2488,16 +2552,27 @@ function TablePageBoxes({
   );
 }
 
-/** One page's whole-field table box: its row count, a divide control, Clear, style. */
+/**
+ * One page's whole-field table box: its row count, a divide control, Clear, style.
+ * For a page-spanning table only ONE page's grid is editable on the canvas at a
+ * time; `onActivate` makes THIS page the editable one (its bands become draggable,
+ * the others render read-only) and `active` reflects which page that is. Dividing
+ * a page activates it automatically, so this switch is for going back to fine-tune
+ * a page divided earlier.
+ */
 function TablePageRow({
   seg,
   defaultRows,
+  active,
+  onActivate,
   onClear,
   onRestyle,
   onDivide,
 }: {
   seg: PageBox;
   defaultRows: number;
+  active: boolean;
+  onActivate?: () => void;
   onClear: () => void;
   onRestyle: (next: PageBox) => void;
   onDivide: (rows: number) => void;
@@ -2507,12 +2582,29 @@ function TablePageRow({
     measured > 0 ? String(measured) : defaultRows > 0 ? String(defaultRows) : '',
   );
   const count = Number(rows);
+  const pageLabel = `Page ${seg.page + 1}`;
   return (
-    <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+    <div
+      className={`rounded-sm border p-[8px_9px] ${
+        active ? 'border-border-accent bg-surface-accent-soft' : 'border-border-subtle bg-surface-sunken'
+      }`}
+    >
       <div className="mb-1.5 flex items-center gap-1.5">
-        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold">
-          Page {seg.page + 1}
-        </span>
+        {onActivate ? (
+          <button
+            type="button"
+            onClick={onActivate}
+            aria-pressed={active}
+            title={active ? 'Editing this page on the canvas' : 'Edit this page’s rows on the canvas'}
+            className={`min-w-0 flex-1 truncate rounded-sm px-1 py-0.5 text-left text-[12px] font-semibold ${
+              active ? 'text-accent' : 'text-text-secondary hover:bg-surface-hover'
+            }`}
+          >
+            {active ? `${pageLabel} — editing` : pageLabel}
+          </button>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-[12px] font-semibold">{pageLabel}</span>
+        )}
         <span className="text-[10.5px] font-semibold text-text-tertiary">
           {measured > 0 ? `${measured} row${measured === 1 ? '' : 's'}` : 'not divided'}
         </span>

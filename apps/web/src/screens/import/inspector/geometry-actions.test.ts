@@ -50,6 +50,7 @@ import {
   keyMove,
   isDeleteKey,
   removeSegment,
+  replaceSegmentOnPage,
   NUDGE_POINTS_COARSE,
   clampDelta,
   nudgeStep,
@@ -1618,6 +1619,52 @@ describe('removeSegment', () => {
   it('returns the SAME array when nothing matched', () => {
     const segments = [a, b];
     expect(removeSegment(segments, 7)).toBe(segments);
+  });
+});
+
+describe('replaceSegmentOnPage — the page-scoped write behind a band-edge drag / box move', () => {
+  // A repeating table spanning a page break: one whole-field box per page, BOTH
+  // with a null option key. This is the exact shape that made "the second box
+  // won't divide" — editing page 1 must not rewrite page 0's box.
+  const p0: PageBox = {
+    page: 0,
+    x: 10,
+    y: 20,
+    width: 100,
+    height: 200,
+    pageWidth: 595,
+    pageHeight: 842,
+    rowBands: [{ key: 'a', start: 20, end: 120 }],
+  };
+  const p1: PageBox = { ...p0, page: 1, rowBands: [{ key: 'b', start: 20, end: 120 }] };
+
+  it('replaces ONLY the box on the named page, leaving the other page’s box untouched', () => {
+    const next: PageBox = { ...p1, height: 300, rowBands: [{ key: 'b', start: 20, end: 320 }] };
+    const out = replaceSegmentOnPage([p0, p1], null, 1, next);
+    expect(out).toEqual([p0, next]);
+    // The page-0 box is the very same object — it was never rewritten.
+    expect(out[0]).toBe(p0);
+  });
+
+  it('does NOT collapse every page’s box onto the edited one (the clobber this guards against)', () => {
+    // The bug: matching on optionKey alone (both null) rewrote every whole-field
+    // box to `next`, so the continuation vanished onto the edited page.
+    const next: PageBox = { ...p0, x: 50 };
+    const out = replaceSegmentOnPage([p0, p1], null, 0, next);
+    expect(out).toEqual([next, p1]);
+    expect(out.filter((s) => s.page === 1)).toHaveLength(1);
+  });
+
+  it('scopes to a single option on a per-option field', () => {
+    const oa: PageBox = { ...p0, optionKey: 'a', rowBands: undefined };
+    const ob: PageBox = { ...p0, optionKey: 'b', rowBands: undefined };
+    const next: PageBox = { ...ob, x: 77 };
+    expect(replaceSegmentOnPage([oa, ob], 'b', 0, next)).toEqual([oa, next]);
+  });
+
+  it('returns the SAME array when nothing matched, so the caller can skip a no-op write', () => {
+    const segments = [p0, p1];
+    expect(replaceSegmentOnPage(segments, null, 9, { ...p0, page: 9 })).toBe(segments);
   });
 });
 

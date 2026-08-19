@@ -1772,3 +1772,25 @@ export function removeSegment(
   if (next.length === segments.length) return segments as PageBox[];
   return next.length > 0 ? next : undefined;
 }
+
+/**
+ * Replace the box on ONE page carrying a given option key with `next` — the
+ * page-scoped write a band-edge drag and a whole-box move both route through.
+ *
+ * A repeating table that spans a page break has several whole-field boxes, ALL
+ * with a null option key; matching on the key alone rewrites every page's box to
+ * the one being edited, collapsing the continuation onto the edited page.
+ * Scoping the match to `page` as well keeps each page's box independent. Returns
+ * the input array reference unchanged when nothing matches, so a caller can skip
+ * a no-op write.
+ */
+export function replaceSegmentOnPage(
+  segments: readonly PageBox[],
+  optionKey: string | null,
+  page: number,
+  next: PageBox,
+): PageBox[] {
+  const matches = (s: PageBox) => (s.optionKey ?? null) === optionKey && s.page === page;
+  if (!segments.some(matches)) return segments as PageBox[];
+  return segments.map((s) => (matches(s) ? next : s));
+}
