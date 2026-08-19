@@ -95,6 +95,30 @@ export function TheoryQuiz({
   const currentSubmitted = questionId ? submitted.has(questionId) : false;
   const isLastPage = pageIndex >= pages.length - 1;
 
+  /*
+    A PAGE WITH NO MULTIPLE-CHOICE QUESTION still has to be completable.
+
+    The quiz keys everything off a choice field — Submit checks its answer
+    against the key, and the progress count only ticks when one is submitted. A
+    page whose field is a signature, or any short-answer input, has no such
+    field and no key to check, so it was a dead end: `questionId` was undefined,
+    `currentAnswered` stayed false and the Submit button was disabled forever
+    (the signature-only part that could never be handed in). Such a page is done
+    the moment its own required inputs are filled — there is nothing to mark.
+  */
+  const requiredInputsDone = useMemo(() => {
+    if (!page) return true;
+    return page.fields
+      .filter(
+        (f) =>
+          writable.has(f.id) &&
+          f.required &&
+          (f.options?.length ?? 0) === 0 &&
+          f.type !== 'section_header',
+      )
+      .every((f) => isAnswered(f.id));
+  }, [page, writable, isAnswered]);
+
   const canRetry =
     allowRetry && currentFeedback && !currentFeedback.correct;
 
@@ -166,9 +190,19 @@ export function TheoryQuiz({
 
   if (!page) return null;
 
-  const answered = pages.filter(
-    (p) => p.fields.some((f) => (f.options?.length ?? 0) > 0 && submitted.has(f.id)),
-  ).length;
+  // A page is done when its multiple-choice question has been submitted, or —
+  // for a page with no choice question (a signature, a short answer) — when its
+  // required inputs are filled. Keeps the progress count and the segment colours
+  // honest for a part that mixes quiz questions with a sign-off page.
+  const isChoice = (f: FormField) => (f.options?.length ?? 0) > 0;
+  const pageDone = (p: TheoryPage) => {
+    const q = p.fields.find(isChoice);
+    if (q) return submitted.has(q.id);
+    return p.fields
+      .filter((f) => writable.has(f.id) && f.required && f.type !== 'section_header')
+      .every((f) => isAnswered(f.id));
+  };
+  const answered = pages.filter(pageDone).length;
 
   return (
     <div className="fai-rise mx-auto max-w-[680px] p-[30px_28px_60px]">
@@ -195,18 +229,23 @@ export function TheoryQuiz({
       <div className="mb-6">
         <div className="flex gap-1">
           {pages.map((_, i) => {
-            const pField = pages[i]?.fields.find((f) => (f.options?.length ?? 0) > 0);
+            const p = pages[i]!;
+            const pField = p.fields.find(isChoice);
             const pFeedback = pField ? feedback[pField.id] : undefined;
-            const isDone = pField ? submitted.has(pField.id) : false;
+            const isDone = pageDone(p);
             return (
               <div
                 key={i}
                 className="h-1.5 flex-1 overflow-hidden rounded-full transition-colors duration-300"
                 style={{
                   backgroundColor: isDone
-                    ? pFeedback?.correct
-                      ? 'var(--success)'
-                      : 'var(--danger)'
+                    ? // A checked choice question shows right/wrong; a filled
+                      // non-choice page (a signature) just shows done.
+                      pField
+                      ? pFeedback?.correct
+                        ? 'var(--success)'
+                        : 'var(--danger)'
+                      : 'var(--success)'
                     : i === pageIndex
                       ? 'var(--accent)'
                       : 'var(--surface-sunken)',
@@ -292,37 +331,55 @@ export function TheoryQuiz({
 
       {/* Action buttons */}
       <div className="mt-6 flex items-center justify-center gap-3">
-        {!currentSubmitted && (
-          <Button
-            onClick={handleCheckAnswer}
-            disabled={!currentAnswered || checking}
-            className="min-w-[140px]"
-          >
-            {checking ? 'Checking…' : 'Submit'}
-          </Button>
-        )}
+        {questionId ? (
+          <>
+            {!currentSubmitted && (
+              <Button
+                onClick={handleCheckAnswer}
+                disabled={!currentAnswered || checking}
+                className="min-w-[140px]"
+              >
+                {checking ? 'Checking…' : 'Submit'}
+              </Button>
+            )}
 
-        {canRetry && (
-          <Button
-            variant="outline"
-            leadingIcon="rotate-ccw"
-            onClick={handleRetry}
-          >
-            Try again
-          </Button>
-        )}
+            {canRetry && (
+              <Button
+                variant="outline"
+                leadingIcon="rotate-ccw"
+                onClick={handleRetry}
+              >
+                Try again
+              </Button>
+            )}
 
-        {currentSubmitted && !canRetry && (
+            {currentSubmitted && !canRetry && (
+              <Button
+                onClick={handleNext}
+                disabled={submitting || saving}
+                className="min-w-[140px]"
+              >
+                {isLastPage
+                  ? submitting
+                    ? 'Finishing…'
+                    : 'Finish'
+                  : 'Next'}
+              </Button>
+            )}
+          </>
+        ) : (
+          /*
+            No choice question on this page — nothing to check, so straight to
+            Next/Finish, unlocked once the page's required inputs (the signature)
+            are filled. This is what lets a signature-only or short-answer page
+            be handed in at all.
+          */
           <Button
             onClick={handleNext}
-            disabled={submitting || saving}
+            disabled={!requiredInputsDone || submitting || saving}
             className="min-w-[140px]"
           >
-            {isLastPage
-              ? submitting
-                ? 'Finishing…'
-                : 'Finish'
-              : 'Next'}
+            {isLastPage ? (submitting ? 'Finishing…' : 'Finish') : 'Next'}
           </Button>
         )}
       </div>

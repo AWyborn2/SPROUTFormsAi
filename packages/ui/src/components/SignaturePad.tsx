@@ -32,6 +32,14 @@ export function SignaturePad({
   const [typed, setTyped] = useState(false);
   const [typedName, setTypedName] = useState('');
   const [hasInk, setHasInk] = useState(!!value);
+  /*
+    Whether the canvas holds ink, tracked in a REF so `endStroke` reads it
+    synchronously. `hasInk` is React state set inside the pointer-move handler,
+    and a guard reading it back can see the pre-update value — a stroke ended in
+    the same tick it began would emit nothing and the signature would look drawn
+    but never reach the form. The ref is written the instant a line is drawn.
+  */
+  const ink = useRef(!!value);
 
   const ctx = useCallback(() => canvasRef.current?.getContext('2d') ?? null, []);
 
@@ -48,6 +56,7 @@ export function SignaturePad({
       const img = new Image();
       img.onload = () => context.drawImage(img, 0, 0);
       img.src = value;
+      ink.current = true;
       setHasInk(true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -79,6 +88,7 @@ export function SignaturePad({
     context.lineTo(p.x, p.y);
     context.stroke();
     last.current = p;
+    ink.current = true;
     if (!hasInk) setHasInk(true);
   }
 
@@ -87,13 +97,14 @@ export function SignaturePad({
     drawing.current = false;
     last.current = null;
     const c = canvasRef.current;
-    if (c && hasInk) onChange(c.toDataURL('image/png'));
+    if (c && ink.current) onChange(c.toDataURL('image/png'));
   }
 
   function clear() {
     const context = ctx();
     const c = canvasRef.current;
     if (context && c) context.clearRect(0, 0, c.width, c.height);
+    ink.current = false;
     setHasInk(false);
     setTypedName('');
     onChange('');
@@ -109,9 +120,11 @@ export function SignaturePad({
       context.font = "34px 'Spectral', Georgia, serif";
       context.textBaseline = 'middle';
       context.fillText(name, 16, height / 2);
+      ink.current = true;
       setHasInk(true);
       onChange(c.toDataURL('image/png'));
     } else {
+      ink.current = false;
       setHasInk(false);
       onChange('');
     }
