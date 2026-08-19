@@ -28,6 +28,7 @@ import {
   pathwayFromHistory,
   requiredParts,
   resolveLocationParts,
+  theoryRetryOf,
   totalLoggedHours,
   validateAnswerKeys,
   validateManifest,
@@ -1312,5 +1313,29 @@ describe('pathwayFromHistory', () => {
 
   it('suggests new for a tool that awards nothing — no competency to have held', () => {
     expect(pathwayFromHistory([], ['c-dozer'])).toBe('new');
+  });
+});
+
+describe('theoryRetryOf', () => {
+  it('uses an explicit mode when the tool names one', () => {
+    expect(theoryRetryOf({ theoryRetry: 'off' })).toBe('off');
+    expect(theoryRetryOf({ theoryRetry: 'immediate' })).toBe('immediate');
+    expect(theoryRetryOf({ theoryRetry: 'end' })).toBe('end');
+  });
+
+  it('reads a legacy allowRetry=true as immediate (its old on-the-spot retry)', () => {
+    expect(theoryRetryOf({ theoryAllowRetry: true })).toBe('immediate');
+  });
+
+  it('reads a legacy allowRetry=false as end — the re-take on failure it still had', () => {
+    expect(theoryRetryOf({ theoryAllowRetry: false })).toBe('end');
+  });
+
+  it('defaults a tool that names nothing to end, so behaviour is unchanged', () => {
+    expect(theoryRetryOf({})).toBe('end');
+  });
+
+  it('prefers the explicit mode over the legacy boolean', () => {
+    expect(theoryRetryOf({ theoryRetry: 'off', theoryAllowRetry: true })).toBe('off');
   });
 });

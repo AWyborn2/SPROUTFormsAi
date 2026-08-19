@@ -121,6 +121,35 @@ export function theoryRenderingOf(
   return manifest.theoryRendering ?? DEFAULT_THEORY_RENDERING;
 }
 
+/**
+ * When a candidate may retry a theory part they got wrong.
+ *
+ *  - `off` — one attempt; a wrong answer is final and a failed quiz does not
+ *    offer another go (the assessor reopens it if they choose to).
+ *  - `immediate` — one question per screen only: a wrong answer shows "Try
+ *    again" on the spot, and the candidate cannot move on until it is right.
+ *  - `end` — no per-question retry; a failed quiz offers a fresh attempt at the
+ *    whole thing from the results screen.
+ */
+export const THEORY_RETRY_MODES = ['off', 'immediate', 'end'] as const;
+export type TheoryRetryMode = (typeof THEORY_RETRY_MODES)[number];
+
+/**
+ * A tool's theory-retry mode, resolved — one rule the API and the builder both
+ * read, so a candidate's screen never disagrees with the author's preview.
+ *
+ * Honours the legacy boolean `theoryAllowRetry` for tools authored before the
+ * mode existed: `true` was the on-the-spot retry (`immediate`), and `false` was
+ * the state that still offered a whole-quiz re-attempt on failure (`end`) — so
+ * neither existing tool changes behaviour. A tool naming a `theoryRetry`
+ * outright uses it.
+ */
+export function theoryRetryOf(
+  manifest: Pick<AssessmentToolManifest, 'theoryRetry' | 'theoryAllowRetry'>,
+): TheoryRetryMode {
+  return manifest.theoryRetry ?? (manifest.theoryAllowRetry ? 'immediate' : 'end');
+}
+
 /** The two outcomes the printed paper offers. There is no third. */
 export const PART_OUTCOMES = ['satisfactory', 'not_satisfactory'] as const;
 export type PartOutcome = (typeof PART_OUTCOMES)[number];
@@ -711,12 +740,20 @@ export interface AssessmentToolManifest {
    */
   theoryPassPercent?: number;
   /**
+   * @deprecated Superseded by `theoryRetry`; still read by `theoryRetryOf` for
+   * tools authored before the mode existed. `true` meant on-the-spot retry.
+   *
    * Whether a candidate may retry individual questions after seeing feedback
-   * in interactive theory mode. When false (the default), they see
-   * correct/incorrect feedback and move on; the score reflects first answers.
-   * When true, they can change their answer and resubmit before proceeding.
+   * in interactive theory mode.
    */
   theoryAllowRetry?: boolean;
+  /**
+   * When a candidate may retry a theory part they got wrong — off, on the spot
+   * (`immediate`), or a whole-quiz re-attempt at the end (`end`). Resolved by
+   * `theoryRetryOf`, which falls back to the legacy `theoryAllowRetry`. Absent
+   * on tools authored before the mode existed.
+   */
+  theoryRetry?: TheoryRetryMode;
   /**
    * The front page's certification block.
    *

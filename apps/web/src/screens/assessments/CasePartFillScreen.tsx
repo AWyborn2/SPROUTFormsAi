@@ -257,7 +257,7 @@ export function CasePartFillScreen() {
         pages={pages}
         values={values}
         writable={writable}
-        allowRetry={!!attempt.theoryAllowRetry}
+        retryMode={attempt.theoryRetry ?? 'end'}
         passPercent={attempt.theoryPassPercent ?? 100}
         partLabel={attempt.partLabel}
         partKey={attempt.partKey}

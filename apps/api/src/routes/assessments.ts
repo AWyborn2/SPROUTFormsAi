@@ -47,6 +47,7 @@ import {
   totalLoggedHours,
   stripMarkingSecrets,
   theoryRenderingOf,
+  theoryRetryOf,
   unplacedMarkDestinations,
   validateAnswerKeys,
   validateManifest,
@@ -59,6 +60,7 @@ import {
   type RepeatingRowValue,
   type SubmissionValue,
   THEORY_RENDERINGS,
+  THEORY_RETRY_MODES,
 } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
@@ -734,6 +736,12 @@ const toolBody = z.object({
       to save a one-question-per-screen tool would publish a stacked one.
     */
     theoryRendering: z.enum(THEORY_RENDERINGS).optional(),
+    // Named for the same reason as every optional above: an unlisted property is
+    // silently STRIPPED, so a builder that saved a pass threshold or a retry mode
+    // would publish a tool that quietly fell back to the default.
+    theoryPassPercent: z.number().int().min(1).max(100).optional(),
+    theoryAllowRetry: z.boolean().optional(),
+    theoryRetry: z.enum(THEORY_RETRY_MODES).optional(),
     signOff: z
       .object({
         assessorNameFieldId: z.string().optional(),
@@ -3145,7 +3153,7 @@ assessmentCasesRouter.get(
       // Resolved, never raw: a manifest naming nothing means the default,
       // and `?? null` here spelled that as "stacked" on the fill surface.
       theoryRendering: theoryRenderingOf(manifest),
-      theoryAllowRetry: manifest.theoryAllowRetry ?? false,
+      theoryRetry: theoryRetryOf(manifest),
       theoryPassPercent: manifest.theoryPassPercent ?? null,
       attemptNumber: attempt.attemptNumber,
       outcome: attempt.outcome,

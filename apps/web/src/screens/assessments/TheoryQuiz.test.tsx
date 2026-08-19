@@ -10,7 +10,7 @@
  * filled, while the choice-question path is untouched.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import type { FormField } from '@formai/shared';
 import type { TheoryPage } from '../../lib/theory-pages.js';
@@ -45,7 +45,7 @@ function renderQuiz(over: Partial<ComponentProps<typeof TheoryQuiz>> = {}) {
     pages: [page([field({ id: 't1', required: true })])],
     values: {},
     writable: new Set(['t1']),
-    allowRetry: false,
+    retryMode: 'off',
     passPercent: 100,
     partLabel: 'Candidate declaration',
     partKey: 'part-1',
@@ -107,5 +107,37 @@ describe('TheoryQuiz — a choice-question page is unchanged', () => {
     // Finish button shows in its place.
     expect(button(/submit/i)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /finish/i })).toBeNull();
+  });
+});
+
+describe('TheoryQuiz — retry mode gates the on-the-spot retry (task #45)', () => {
+  function answerWrong(retryMode: ComponentProps<typeof TheoryQuiz>['retryMode']) {
+    renderQuiz({
+      pages: [page([field({ id: 'q1', type: 'radio', options: ['a', 'b'], required: true })])],
+      writable: new Set(['q1']),
+      values: { q1: 'a' },
+      retryMode,
+      onCheckQuestion: vi.fn().mockResolvedValue({ correct: false }),
+    });
+    fireEvent.click(button(/submit/i));
+  }
+
+  it('offers "Try again" on a wrong answer in immediate mode, and no way past it', async () => {
+    answerWrong('immediate');
+    await waitFor(() => expect(button(/try again/i)).toBeTruthy());
+    // The candidate cannot move on while the retry is on the table.
+    expect(screen.queryByRole('button', { name: /finish|^next$/i })).toBeNull();
+  });
+
+  it('moves straight on in end mode — the re-take is offered later, at the results', async () => {
+    answerWrong('end');
+    await waitFor(() => expect(button(/finish/i)).toBeTruthy());
+    expect(screen.queryByRole('button', { name: /try again/i })).toBeNull();
+  });
+
+  it('moves straight on in off mode too — one shot', async () => {
+    answerWrong('off');
+    await waitFor(() => expect(button(/finish/i)).toBeTruthy());
+    expect(screen.queryByRole('button', { name: /try again/i })).toBeNull();
   });
 });
