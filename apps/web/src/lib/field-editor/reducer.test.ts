@@ -184,26 +184,33 @@ describe('review finding — reordering cannot orphan a condition', () => {
 describe('typeOptionsFor', () => {
   const values = (type: FormField['type']) => typeOptionsFor(type).map((o) => o.value);
 
-  it('offers no structural type for a scalar field', () => {
+  it('offers checkbox group and Yes/No for a scalar field — but never a table', () => {
     const v = values('text');
+    // The one genuinely un-seedable type is withheld: a table needs columns
+    // extraction supplies, which a retype cannot conjure.
     expect(v).not.toContain('repeating_group');
-    expect(v).not.toContain('checkbox_group');
-    expect(v).not.toContain('boolean_yes_no');
+    // checkbox_group and boolean_yes_no ARE authorable now — the exact
+    // correction the picker exists for: "this multiple-choice question takes
+    // several answers" is a retype to checkbox_group.
+    expect(v).toContain('checkbox_group');
+    expect(v).toContain('boolean_yes_no');
     expect(v).toContain('date');
     expect(v).toContain('dropdown');
   });
 
-  it('offers a structural field its OWN type, exactly once, and no other', () => {
+  it('offers a table its OWN type exactly once, plus every authorable type', () => {
     const v = values('repeating_group');
     expect(v.filter((x) => x === 'repeating_group')).toHaveLength(1);
-    expect(v).not.toContain('checkbox_group');
-    expect(v).not.toContain('boolean_yes_no');
-    // ...and it stays retypeable to any authorable type.
+    // ...and it stays retypeable to any authorable type, table payload dropped
+    // on the way out.
     expect(v).toContain('text');
+    expect(v).toContain('checkbox_group');
   });
 
-  it('does the same for an imported checkbox_group (the fixture Shift field)', () => {
+  it('lists checkbox_group once for a checkbox_group, and never a table', () => {
     const v = values('checkbox_group');
+    // Authorable now, so it appears through the normal list — not a
+    // special-cased own-type prepend.
     expect(v.filter((x) => x === 'checkbox_group')).toHaveLength(1);
     expect(v).not.toContain('repeating_group');
   });
@@ -301,6 +308,46 @@ describe('changeType payload reconciliation', () => {
       selectionType: 'multiple',
     };
     expect(retype(shift, 'dropdown').selectionType).toBeUndefined();
+  });
+
+  it('turns a multiple-choice question into a multi-answer checkbox group, options kept', () => {
+    // The report this closes: a "Multiple choice" question that really takes
+    // several answers could not be retyped, because checkbox_group was the one
+    // type the picker withheld. Its options carry over, and selectionType
+    // defaults to multiple so the answer-key step lets several answers be keyed.
+    const radio: FormField = {
+      id: 'q21',
+      type: 'radio',
+      label: 'Retarder lever function',
+      required: false,
+      source: 'imported',
+      colSpan: 12,
+      options: ['Slows the machine', 'Locks the diff', 'Raises the bowl'],
+    };
+    const cg = retype(radio, 'checkbox_group');
+    expect(cg.type).toBe('checkbox_group');
+    expect(cg.options).toEqual(['Slows the machine', 'Locks the diff', 'Raises the bowl']);
+    expect(cg.selectionType).toBe('multiple');
+  });
+
+  it('does not overwrite a checkbox group’s own selectionType', () => {
+    // The multiple default seeds only when there is none — re-confirming an
+    // imported single-select group must keep it single.
+    const single: FormField = {
+      id: 's',
+      type: 'checkbox_group',
+      label: 'Shift',
+      required: false,
+      source: 'imported',
+      colSpan: 12,
+      options: ['D', 'N'],
+      selectionType: 'single',
+    };
+    expect(retype(single, 'checkbox_group').selectionType).toBe('single');
+  });
+
+  it('turns any scalar into a Yes/No, which needs no payload', () => {
+    expect(retype(field('note'), 'boolean_yes_no').type).toBe('boolean_yes_no');
   });
 
   it('leaves a retype undoable', () => {
