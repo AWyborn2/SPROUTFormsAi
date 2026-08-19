@@ -1271,6 +1271,9 @@ assessmentToolsRouter.get(
         name: t.name,
         templateId: t.templateId,
         departmentId: t.departmentId,
+        // The competency this tool grants, so the new-case form can suggest a
+        // pathway from whether the candidate already holds it.
+        awardedCompetencyIds: t.awardedCompetencyIds ?? [],
         parts: orderedParts(t.manifest).map((p) => ({ key: p.key, label: p.label, kind: p.kind })),
         /*
           The organisation's Locations, offered on the new-case form so a case is

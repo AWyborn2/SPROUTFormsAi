@@ -44,6 +44,29 @@ export const ASSESSMENT_PATHWAYS = ['experienced', 'new', 'rpl'] as const;
 export type AssessmentPathway = (typeof ASSESSMENT_PATHWAYS)[number];
 
 /**
+ * The pathway a candidate's competency history suggests, to prefill the new-case
+ * form: `experienced` when they already hold — or have held — any competency this
+ * tool awards, `new` otherwise. An experienced candidate has operated the plant
+ * before, so the shorter path fits; a first-timer takes the full assessment.
+ *
+ * Never `rpl`: recognition of prior learning waives the logged-hours parts and
+ * carries a justification, so it is a deliberate assessor decision that history
+ * alone cannot make. And only a SUGGESTION — the assessor sees it and overrides
+ * when they know better, which is the whole point of leaving the box editable.
+ *
+ * Pass the candidate's held competency ids as they come from `/held/:userId`,
+ * which already excludes revoked grants; an expired-but-not-revoked ticket still
+ * counts as experience, because they did operate the machine.
+ */
+export function pathwayFromHistory(
+  awardedCompetencyIds: readonly string[],
+  heldCompetencyIds: Iterable<string>,
+): AssessmentPathway {
+  const held = heldCompetencyIds instanceof Set ? heldCompetencyIds : new Set(heldCompetencyIds);
+  return awardedCompetencyIds.some((id) => held.has(id)) ? 'experienced' : 'new';
+}
+
+/**
  * What kind of evidence a part gathers. Drives which surface fills it and how
  * it completes — a logbook accumulates over weeks against an hours minimum, a
  * practical is marked in one sitting, theory is auto-marked.
