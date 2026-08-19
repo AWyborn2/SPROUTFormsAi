@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { SubmissionValue } from '@formai/shared';
+import type { CaseNextStep, SubmissionValue } from '@formai/shared';
 import { durationUnitLong, logbookRows } from '@formai/shared';
 import { Button, Icon, todayISODate, useToast } from '@formai/ui';
 import { ApiError } from '../../lib/data/api-client.js';
@@ -323,6 +323,30 @@ export function CasePartFillScreen() {
         </div>
       )}
 
+      {/*
+        WHERE TO GO AFTER PASSING. A signed declaration used to dead-end on the
+        "locked record" banner with no way onward; now it names the next part —
+        a button when the candidate may start it, a note when it is the
+        assessor's. Shown only once THIS part has passed, so a part still waiting
+        on a mark is not told to move on.
+      */}
+      {marked && attempt.outcome === 'satisfactory' && (
+        <NextStepPanel
+          nextStep={attempt.nextStep}
+          opening={openAttempt.isPending}
+          onContinue={(partKey) =>
+            openAttempt.mutate(partKey, {
+              onSuccess: (r) => navigate(`/app/assessments/${caseId}/attempts/${r.id}`),
+              onError: () =>
+                toast({
+                  variant: 'warning',
+                  message: "Couldn't open the next part — your assessor may need to.",
+                }),
+            })
+          }
+        />
+      )}
+
       {handedIn && !marked && (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5">
           <p className="text-[13px] text-text-secondary">
@@ -521,6 +545,58 @@ export function CasePartFillScreen() {
           </Button>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Where the candidate goes after a part passes.
+ *
+ * A signed declaration used to leave them on a "locked record" banner with no
+ * way onward. Now: a button to start the next part they may fill, or a plain
+ * note that it is the assessor's to complete. Which one comes off the server's
+ * `nextStep`, decided from the same workflow access the open-attempt route
+ * enforces — so a "Continue" is never offered for a part the server would refuse.
+ */
+function NextStepPanel({
+  nextStep,
+  opening,
+  onContinue,
+}: {
+  nextStep: CaseNextStep;
+  opening: boolean;
+  onContinue: (partKey: string) => void;
+}) {
+  if (nextStep.kind === 'continue') {
+    return (
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-border-accent bg-surface-accent-soft px-3 py-3">
+        <p className="text-[13px] text-text-secondary">
+          Next: <strong className="text-text-primary">{nextStep.label}</strong>
+        </p>
+        <Button leadingIcon="arrow-right" disabled={opening} onClick={() => onContinue(nextStep.partKey)}>
+          {opening ? 'Opening…' : `Continue to ${nextStep.label}`}
+        </Button>
+      </div>
+    );
+  }
+
+  if (nextStep.kind === 'awaiting_other') {
+    return (
+      <div className="mb-4 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-3">
+        <p className="text-[13px] text-text-secondary">
+          The next part — <strong className="text-text-primary">{nextStep.label}</strong> — is
+          completed by {nextStep.filledBy}. Please arrange to complete the next part.
+        </p>
+      </div>
+    );
+  }
+
+  // 'done' — nothing further for this party; the case moves to sign-off.
+  return (
+    <div className="mb-4 rounded-[10px] border border-success bg-success-soft px-3 py-3">
+      <p className="text-[13px] text-success-text">
+        That’s every part you needed to complete — your assessor will finish the sign-off from here.
+      </p>
     </div>
   );
 }

@@ -22,6 +22,8 @@ import {
   isCaseCompetent,
   isTerminalCaseState,
   moreCoachingRequired,
+  nextStepAfter,
+  type NextStepPart,
   orderedParts,
   requiredParts,
   resolveLocationParts,
@@ -1198,5 +1200,83 @@ describe('validatePartCompletionMarks', () => {
         [table, scalar],
       ),
     ).toHaveLength(5);
+  });
+});
+
+describe('nextStepAfter', () => {
+  const part = (over: Partial<NextStepPart> & { key: string }): NextStepPart => ({
+    label: over.key,
+    state: 'open',
+    candidateFills: false,
+    staffFills: false,
+    ...over,
+  });
+
+  // A typical flow: declaration (candidate) → theory (candidate) → practical
+  // (assessor) → sign-off note (candidate).
+  const flow: NextStepPart[] = [
+    part({ key: 'decl', label: 'Candidate declaration', state: 'satisfactory', candidateFills: true }),
+    part({ key: 'theory', label: 'Theory', state: 'open', candidateFills: true }),
+    part({ key: 'prac', label: 'Practical demonstration', state: 'locked', staffFills: true }),
+  ];
+
+  it('offers a Continue to the next part the candidate may fill', () => {
+    // After the declaration, theory is the candidate's and open.
+    expect(nextStepAfter(flow, 'decl', true)).toEqual({
+      kind: 'continue',
+      partKey: 'theory',
+      label: 'Theory',
+    });
+  });
+
+  it('tells the candidate when the next part is the assessor’s', () => {
+    // After theory, the practical is the assessor's (and still locked).
+    expect(nextStepAfter(flow, 'theory', true)).toEqual({
+      kind: 'awaiting_other',
+      label: 'Practical demonstration',
+      filledBy: 'your assessor',
+    });
+  });
+
+  it('never offers a Continue for a locked part, even one the viewer fills', () => {
+    const locked: NextStepPart[] = [
+      part({ key: 'a', state: 'satisfactory', candidateFills: true }),
+      part({ key: 'b', state: 'locked', candidateFills: true }),
+    ];
+    // The candidate fills 'b', but its dependencies are unmet — waiting, not go.
+    expect(nextStepAfter(locked, 'a', true)).toMatchObject({ kind: 'awaiting_other' });
+  });
+
+  it('skips parts already satisfactory to the next unfinished one', () => {
+    const parts: NextStepPart[] = [
+      part({ key: 'a', state: 'satisfactory', candidateFills: true }),
+      part({ key: 'b', state: 'satisfactory', candidateFills: true }),
+      part({ key: 'c', label: 'Logbook', state: 'open', candidateFills: true }),
+    ];
+    expect(nextStepAfter(parts, 'a', true)).toEqual({ kind: 'continue', partKey: 'c', label: 'Logbook' });
+  });
+
+  it('is done when every later part is satisfactory', () => {
+    const parts: NextStepPart[] = [
+      part({ key: 'a', state: 'satisfactory', candidateFills: true }),
+      part({ key: 'b', state: 'satisfactory', staffFills: true }),
+    ];
+    expect(nextStepAfter(parts, 'a', true)).toEqual({ kind: 'done' });
+    // The very last part has nothing after it either.
+    expect(nextStepAfter(parts, 'b', true)).toEqual({ kind: 'done' });
+  });
+
+  it('reads from the staff viewpoint too', () => {
+    // Same flow, but the assessor just finished the practical: theory ahead is
+    // the candidate's, so it reads as awaiting the candidate.
+    const parts: NextStepPart[] = [
+      part({ key: 'prac', state: 'satisfactory', staffFills: true }),
+      part({ key: 'log', label: 'Logbook', state: 'open', candidateFills: true }),
+    ];
+    expect(nextStepAfter(parts, 'prac', false)).toEqual({
+      kind: 'awaiting_other',
+      label: 'Logbook',
+      filledBy: 'the candidate',
+    });
   });
 });

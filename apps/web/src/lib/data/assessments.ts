@@ -18,6 +18,7 @@ import type {
   AssessmentPathway,
   AssessmentToolManifest,
   AssessmentWorkflow,
+  CaseNextStep,
   DurationUnit,
   FormField,
   NotSatisfactoryDisposition,
@@ -198,6 +199,8 @@ export interface AttemptFillView {
   /** Null until the candidate hands it in. */
   submittedAt: string | null;
   templateVersionId: string;
+  /** The step after this part — a "continue", or a wait on the other party. */
+  nextStep: CaseNextStep;
   /**
    * The case's stream and the manifest question it answers. Either being null
    * fails OPEN: every location set renders rather than none.
