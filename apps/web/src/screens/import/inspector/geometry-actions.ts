@@ -564,6 +564,22 @@ export const RECT_TRACE_MIN_OVERLAP = 0.35;
 export const RECT_TRACE_MIN_DRAG_COVERED = 0.65;
 
 /**
+ * The share of the printed RECTANGLE's extent, on each axis, the drag must
+ * cover — the mirror of `RECT_TRACE_MIN_DRAG_COVERED`, and the gate that refuses
+ * an ENCLOSING border.
+ *
+ * Drag-coverage alone asks only "does the rect contain most of my drag", which a
+ * page frame or a whole-table outline answers yes to for ANY large box drawn
+ * inside it — so a box drawn around a few answer cells snapped straight out to
+ * the full page. Requiring the drag to cover most of the rect too means the two
+ * must be nearly the SAME rectangle: a checkbox trace (drag ≈ box) clears it, a
+ * border several times the drag's size on an axis does not. IoU was meant to
+ * catch this, but 0.35 admits a rect up to ~2.9x the drag's area and a page
+ * border is only ~2x — inside the gap.
+ */
+export const RECT_TRACE_MIN_RECT_COVERED = 0.65;
+
+/**
  * The printed rectangle an author was tracing, if they were tracing one.
  *
  * Snapping four edges INDEPENDENTLY is what deforms a traced checkbox: each
@@ -573,13 +589,15 @@ export const RECT_TRACE_MIN_DRAG_COVERED = 0.65;
  * asks the question the author was answering — *which box did you mean* — and
  * returns that box exactly, at its printed size, with no accumulated error.
  *
- * TWO gates, because they refuse different mistakes. IoU refuses a rect far
- * larger than the drag (the cell around a traced checkbox). Drag-coverage
- * refuses a rect far smaller than the drag (one line of a deliberate two-line
- * box) — a real trace covers its box snugly and clears both with room.
+ * THREE gates, because they refuse different mistakes. Drag-coverage refuses a
+ * rect far SMALLER than the drag (one line of a deliberate two-line box).
+ * Rect-coverage refuses a rect far LARGER than the drag (the enclosing cell, the
+ * page border a big box was drawn inside). IoU is the tie-break between rects
+ * that clear both. A real trace covers its box snugly BOTH ways and clears all
+ * three with room.
  *
- * Returns null when nothing clears both, which is the common case on an
- * unruled page and leaves per-edge snapping to handle it.
+ * Returns null when nothing clears them, which is the common case on an unruled
+ * page and leaves per-edge snapping to handle it.
  */
 export function rectTraced(
   drawn: { x: number; y: number; width: number; height: number },
@@ -597,7 +615,9 @@ export function rectTraced(
     if (ix <= 0 || iy <= 0) continue;
     if (
       ix < RECT_TRACE_MIN_DRAG_COVERED * drawn.width ||
-      iy < RECT_TRACE_MIN_DRAG_COVERED * drawn.height
+      iy < RECT_TRACE_MIN_DRAG_COVERED * drawn.height ||
+      ix < RECT_TRACE_MIN_RECT_COVERED * r.width ||
+      iy < RECT_TRACE_MIN_RECT_COVERED * r.height
     ) {
       continue;
     }
