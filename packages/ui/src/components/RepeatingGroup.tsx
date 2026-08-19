@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { cn } from '../utils/cn.js';
+import { Dialog } from './Dialog.js';
 import { Icon } from './Icon.js';
+import { SignaturePad } from './SignaturePad.js';
 
 /**
  * A column in a repeating group. Kept local to @formai/ui (structurally
@@ -599,6 +601,20 @@ function RepeatingCell({
   */
   const explicitPair = column.type === 'check_cross' || (column.type === 'boolean_yes_no' && explicitYesNo);
 
+  // A signature column is a real drawn signature, not a typed name — a compact
+  // cell that opens a full pad on tap, so a row on a phone stays legible.
+  if (column.type === 'signature') {
+    return (
+      <SignatureCell
+        value={typeof value === 'string' ? value : ''}
+        label={column.label}
+        readOnly={readOnly}
+        invalid={invalid}
+        onChange={onChange}
+      />
+    );
+  }
+
   if (readOnly) {
     const blank = value === null || value === undefined || value === '';
     const display =
@@ -759,5 +775,100 @@ function RepeatingCell({
       aria-invalid={invalid || undefined}
       className={cellClass}
     />
+  );
+}
+
+/**
+ * A signature cell: a compact preview that opens a full drawing pad on tap.
+ *
+ * The stored value is a PNG data URL — the same shape a standalone signature
+ * field uses, so the export prints it like any other signature. A table cell is
+ * far too small to draw in, so the drawing happens in a modal and the cell shows
+ * a thumbnail of what was captured (or a "Tap to sign" prompt when empty). The
+ * pad only commits on Save, so cancelling a stray stroke leaves the row's
+ * signature as it was.
+ */
+function SignatureCell({
+  value,
+  label,
+  readOnly,
+  invalid,
+  onChange,
+}: {
+  value: string;
+  label: string;
+  readOnly?: boolean;
+  invalid?: boolean;
+  onChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const signed = value.startsWith('data:image');
+
+  if (readOnly) {
+    return signed ? (
+      <img src={value} alt={label} className="h-9 max-w-[150px] object-contain" />
+    ) : (
+      <span className="block px-1 text-[13px] text-text-tertiary">—</span>
+    );
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-label={signed ? `${label} — signed, tap to change` : `${label} — tap to sign`}
+        aria-invalid={invalid || undefined}
+        onClick={() => {
+          setDraft(value);
+          setOpen(true);
+        }}
+        className={cn(
+          'flex h-9 w-full min-w-[120px] items-center justify-center gap-1.5 rounded-md border px-2 text-[12.5px] font-semibold focus:outline-none focus-visible:border-border-accent focus-visible:shadow-focus',
+          signed
+            ? 'border-border-strong bg-surface-card text-text-primary'
+            : 'border-dashed border-border-strong bg-surface-card text-text-tertiary hover:bg-surface-hover',
+        )}
+      >
+        {signed ? (
+          <img src={value} alt="" className="h-7 max-w-[130px] object-contain" />
+        ) : (
+          <>
+            <Icon name="pen-line" size={13} />
+            Tap to sign
+          </>
+        )}
+      </button>
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title={label}
+        description="Draw the signature, then save it into the row."
+        size="md"
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="rounded-md border border-border-strong bg-surface-card px-3.5 py-2 text-[13px] font-semibold text-text-secondary hover:bg-surface-hover"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onChange(draft);
+                setOpen(false);
+              }}
+              className="rounded-md bg-accent px-3.5 py-2 text-[13px] font-semibold text-[#12321f] hover:brightness-95"
+            >
+              Save signature
+            </button>
+          </>
+        }
+      >
+        <SignaturePad value={draft} onChange={setDraft} aria-label={label} />
+      </Dialog>
+    </>
   );
 }

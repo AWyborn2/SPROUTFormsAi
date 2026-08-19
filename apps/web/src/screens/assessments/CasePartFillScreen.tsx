@@ -307,8 +307,15 @@ export function CasePartFillScreen() {
     );
   }
 
+  // A part with a repeating table (a logbook) needs the room for all its
+  // columns, so it lays out wider than an ordinary question part where a
+  // narrow measure keeps text readable.
+  const wideTable = attempt.fields.some((f) => f.type === 'repeating_group');
+
   return (
-    <div className="fai-rise mx-auto max-w-[820px] p-[30px_28px_60px]">
+    <div
+      className={`fai-rise mx-auto ${wideTable ? 'max-w-[1180px]' : 'max-w-[820px]'} p-[30px_28px_60px]`}
+    >
       <button
         type="button"
         onClick={() => navigate(`/app/assessments/${caseId}`)}
