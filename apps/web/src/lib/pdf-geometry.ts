@@ -1147,6 +1147,39 @@ export function setGlyphOnAll(
 }
 
 /**
+ * Divide a drawn box into one cell per option, top-to-bottom in printed order —
+ * the "sweep an area" auto-placer for a choice field whose option boxes the
+ * extraction missed.
+ *
+ * The author drags one box around the printed option list; each option gets an
+ * even horizontal band tagged with its own `optionKey` — exactly the per-option
+ * boxes the exporter marks, so it draws the chosen option's mark in its band.
+ * Even division rather than text detection, deliberately: it is predictable and
+ * the bands are then nudged into place, where a confident-looking guess in the
+ * wrong spot is the failure this whole screen exists to prevent. A field mark
+ * style on the drawn box carries onto every cell, so a swept-then-styled box
+ * lands as, say, a ring around each chosen option.
+ */
+export function distributeOptionCells(box: PageBox, options: readonly string[]): PageBox[] {
+  const n = options.length;
+  if (n === 0) return [];
+  const rowHeight = box.height / n;
+  return options.map((option, index) => ({
+    page: box.page,
+    x: box.x,
+    // Top-down: option 0 is the top band. PDF y grows upward, matching
+    // `proposeManualGrid`'s row bands.
+    y: box.y + box.height - rowHeight * (index + 1),
+    width: box.width,
+    height: rowHeight,
+    pageWidth: box.pageWidth,
+    pageHeight: box.pageHeight,
+    optionKey: option,
+    ...(box.markStyle ? { markStyle: box.markStyle } : {}),
+  }));
+}
+
+/**
  * Divide an author's drawn box into a grid BY THEIR SAY-SO — the recourse when
  * the page's printed shapes cannot be measured at all.
  *

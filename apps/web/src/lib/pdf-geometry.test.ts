@@ -1586,6 +1586,7 @@ describe('matchAnchorBoxAt', () => {
 
 import {
   clearWholeFieldBoxOnPage,
+  distributeOptionCells,
   isWholeFieldBox,
   mergeWholeFieldBox,
   setGlyphOnAll,
@@ -1694,5 +1695,38 @@ describe('setGlyphOnAll — bulk-set the printed mark on every box', () => {
     // markStyle would be a style that means nothing.
     const out = setGlyphOnAll([box(0, 'ring'), box(1, 'ring')], undefined);
     expect(out.every((b) => !('markStyle' in b))).toBe(true);
+  });
+});
+
+describe('distributeOptionCells — sweep an area into a cell per option', () => {
+  const area: PageBox = {
+    page: 2,
+    x: 40,
+    y: 500,
+    width: 300,
+    height: 120,
+    pageWidth: 595,
+    pageHeight: 842,
+  };
+
+  it('gives one box per option, tagged and full width, top-to-bottom', () => {
+    const cells = distributeOptionCells(area, ['a', 'b', 'c']);
+    expect(cells.map((c) => c.optionKey)).toEqual(['a', 'b', 'c']);
+    expect(cells.every((c) => c.page === 2 && c.x === 40 && c.width === 300)).toBe(true);
+    // Even bands, top option highest in PDF space (y grows upward).
+    expect(cells.map((c) => c.height)).toEqual([40, 40, 40]);
+    expect(cells[0]!.y).toBeGreaterThan(cells[2]!.y);
+    // The bands tile the box with no gap or overlap.
+    expect(cells[0]!.y).toBe(area.y + area.height - 40);
+    expect(cells[2]!.y).toBe(area.y);
+  });
+
+  it('carries the drawn box’s mark style onto every cell', () => {
+    const cells = distributeOptionCells({ ...area, markStyle: { glyph: 'ring' } }, ['a', 'b']);
+    expect(cells.every((c) => c.markStyle?.glyph === 'ring')).toBe(true);
+  });
+
+  it('returns nothing for a field with no options', () => {
+    expect(distributeOptionCells(area, [])).toEqual([]);
   });
 });

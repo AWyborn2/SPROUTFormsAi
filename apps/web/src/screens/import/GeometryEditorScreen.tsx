@@ -17,6 +17,7 @@ import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../
 import type { FieldProposal, TableProposal, TextPage } from '../../lib/pdf-geometry.js';
 import {
   clearWholeFieldBoxOnPage,
+  distributeOptionCells,
   mergeWholeFieldBox,
   proposeManualGrid,
   proposeRectGrid,
@@ -651,6 +652,24 @@ export function GeometryEditorScreen({
     });
   }
 
+  /**
+   * Sweep an area: divide one drawn box into a cell per option and place them
+   * all at once.
+   *
+   * The gap this closes: a choice field whose option boxes the extraction missed
+   * offered only per-option "Draw", one box at a time — six drags for the Q3
+   * checklist. This is the option analog of a table's "Divide into rows": drag
+   * one box around the printed options and each gets its band. REPLACES the
+   * field's placement outright (the whole-field box and any earlier option boxes
+   * go), because the swept set is the answer to "where does each option's mark
+   * land" and a stale box underneath is a second answer.
+   */
+  function distributeOptions(field: FormField, box: PageBox) {
+    const cells = distributeOptionCells(box, field.options ?? []);
+    if (cells.length === 0) return;
+    mutate(field.id, (f) => ({ ...f, geometry: { segments: cells } }));
+  }
+
   function setScalarBox(fieldId: string, box: PageBox | null) {
     mutate(fieldId, (f) => (box ? { ...f, geometry: { segments: [box] } } : stripGeometry(f)));
   }
@@ -1219,9 +1238,11 @@ export function GeometryEditorScreen({
             drawLine={drawTarget?.toOptionKey !== undefined}
             onDrawBox={(box) => {
               if (!drawTarget) return;
-              const { fieldId, optionKey, rowIndex } = drawTarget;
+              const { fieldId, optionKey, rowIndex, distribute } = drawTarget;
               const target = fields.find((f) => f.id === fieldId);
-              if (target?.type === 'repeating_group' && rowIndex !== undefined) {
+              if (distribute && target) {
+                distributeOptions(target, box);
+              } else if (target?.type === 'repeating_group' && rowIndex !== undefined) {
                 setRowBox(target, rowIndex, box);
               } else if (optionKey !== null) setOptionBox(fieldId, optionKey, box);
               else if (target?.type === 'repeating_group') setTableBox(target, box);
@@ -1343,6 +1364,12 @@ interface DrawTarget {
    * Absent everywhere else — a table placed as a measured grid is one box.
    */
   rowIndex?: number;
+  /**
+   * Sweep mode: the next drag is ONE box around a choice field's whole option
+   * list, divided into a cell per option. `optionKey` is null here — the drag
+   * places every option at once, not one.
+   */
+  distribute?: boolean;
 }
 
 function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
@@ -1353,7 +1380,8 @@ function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
     // The far end is part of the identity: arming "statement 1 → sign 2" and
     // then "statement 1 → sign 3" must swap the target, not toggle it off.
     a.toOptionKey === b.toOptionKey &&
-    a.rowIndex === b.rowIndex
+    a.rowIndex === b.rowIndex &&
+    a.distribute === b.distribute
   );
 }
 
@@ -1754,6 +1782,8 @@ function PlacementPanel({
    * box by box.
    */
   const glyphBoxes = matchAnchorField ? [] : (field.geometry?.segments ?? []);
+  /** Sweep mode for a choice field: one drag places a cell for every option. */
+  const sweepTarget: DrawTarget = { fieldId: field.id, optionKey: null, distribute: true };
   /*
    * The per-row fallback is offered where it can mean something: a fixed-row
    * table with exactly ONE answer column. One drawn rectangle per row IS that
@@ -1867,6 +1897,28 @@ function PlacementPanel({
         />
       ) : perOption ? (
         <div className="flex flex-col gap-1.5">
+          {/*
+            SWEEP AN AREA. When the extraction placed none of the options — or a
+            set came out wrong — drag ONE box around the printed option list and
+            each option gets its own cell, instead of drawing them one by one. It
+            replaces whatever was placed; nudge the bands afterwards.
+          */}
+          <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+            <Button
+              variant={sameTarget(drawTarget, sweepTarget) ? 'primary' : 'outline'}
+              leadingIcon="scan-line"
+              className="w-full justify-center"
+              onClick={() => onToggleDraw(sweepTarget)}
+            >
+              {sameTarget(drawTarget, sweepTarget)
+                ? 'Drawing… drag around the options'
+                : 'Sweep an area — place every option'}
+            </Button>
+            <p className="mt-1.5 text-[11px] leading-snug text-text-tertiary">
+              Drag one box around all {field.options!.length} printed options; each gets its own cell,
+              top to bottom. Fine-tune any of them below.
+            </p>
+          </div>
           {field.options!.map((option) => {
             const target: DrawTarget = { fieldId: field.id, optionKey: option };
             const box = (field.geometry?.segments ?? []).find((s) => s.optionKey === option);
