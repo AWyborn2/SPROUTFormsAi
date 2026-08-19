@@ -260,8 +260,16 @@ function SignOffDialog({
 }) {
   const signOff = useSignOffCase(caseId);
   const { toast } = useToast();
-  const [name, setName] = useState('');
-  const [signature, setSignature] = useState('');
+  const { data: session } = useSession();
+  /*
+    PREFILLED FROM THE ACCOUNT, so an assessor certifies without re-typing their
+    name or re-drawing a signature they have drawn before. The saved signature
+    (remembered from the last sign-off) paints onto the pad on mount. Both stay
+    editable — clicking Sign off is still the deliberate act — and a signature
+    drawn here is remembered for next time by the sign-off route.
+  */
+  const [name, setName] = useState(session?.userName ?? '');
+  const [signature, setSignature] = useState(session?.signature ?? '');
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
@@ -513,10 +521,12 @@ function PartCard({
  */
 function OutcomeForm({ caseId, attemptId, kind, selfMarking }: { caseId: string; attemptId: string; kind: string; selfMarking: boolean }) {
   const record = useRecordOutcome(caseId);
+  const { data: session } = useSession();
   const [outcome, setOutcome] = useState<'satisfactory' | 'not_satisfactory' | ''>('');
   const [disposition, setDisposition] = useState<NotSatisfactoryDisposition>('coaching_then_retry');
   const [reason, setReason] = useState('');
-  const [assessorName, setAssessorName] = useState('');
+  // Prefilled from the account so the assessor is not re-typing their own name.
+  const [assessorName, setAssessorName] = useState(session?.userName ?? '');
   const [error, setError] = useState<string | null>(null);
 
   const needsReason = outcome === 'not_satisfactory';

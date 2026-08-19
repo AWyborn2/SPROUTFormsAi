@@ -4565,6 +4565,22 @@ assessmentCasesRouter.post(
       .where(eq(schema.assessmentCases.id, row.id));
 
     /*
+      REMEMBER THE SIGNATURE, so the next sign-off prefills it and the assessor
+      draws it once rather than on every certification. A convenience write, not
+      part of the certification: it is wrapped so a failure to remember can never
+      sink a sign-off that has already been recorded — the same doctrine the
+      competency grant below follows.
+    */
+    try {
+      await db
+        .update(schema.users)
+        .set({ signature: parsed.data.signature })
+        .where(eq(schema.users.id, tenant.userId));
+    } catch {
+      // The case is signed off regardless; the signature simply is not remembered.
+    }
+
+    /*
       THIS TARGET IS THE ONLY DURABLE RECORD OF THE SIGN-OFF-TIME CHECK.
 
       The case's `prerequisiteWarnings` column is written once, at creation,

@@ -154,6 +154,17 @@ export const users = pgTable('users', {
    */
   username: text().unique(),
   passwordHash: text('password_hash'),
+  /**
+   * The person's saved signature — a PNG data URL, as `SignaturePad` emits.
+   *
+   * HERE rather than on the profile for the same reason as `username`: a
+   * person's signature is their own mark and does not change between the
+   * customers they might assess for, so it belongs on the product-wide row. It
+   * is remembered from the last sign-off and prefilled at the next, so an
+   * assessor draws it once rather than on every certification. Null until they
+   * have signed anything.
+   */
+  signature: text('signature'),
   createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
 });
 

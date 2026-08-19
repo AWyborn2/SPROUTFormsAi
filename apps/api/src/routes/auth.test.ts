@@ -236,6 +236,8 @@ describe('POST /auth/login', () => {
         orgName: 'Acme Inc',
         userName: 'Ash Wyborn',
         userEmail: 'ash@x.io',
+        // Null until the assessor draws one at a sign-off, which persists it.
+        signature: null,
         accountKind: 'team',
         branding: null,
         teamSize: null,
@@ -305,6 +307,8 @@ describe('GET /auth/me', () => {
         orgName: 'Acme Inc',
         userName: 'Ash Wyborn',
         userEmail: 'ash@x.io',
+        // Null until the assessor draws one at a sign-off, which persists it.
+        signature: null,
         accountKind: 'team',
         branding: null,
         teamSize: null,
