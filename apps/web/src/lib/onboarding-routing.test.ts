@@ -22,6 +22,7 @@ function session(patch: Partial<SessionInfo> = {}): SessionInfo {
     orgName: 'Acme Corp',
     userName: 'Jane',
     userEmail: 'jane@acme.test',
+    signature: null,
     accountKind: 'team',
     branding: null,
     // The resolved plan features the session now carries; this fixture is a

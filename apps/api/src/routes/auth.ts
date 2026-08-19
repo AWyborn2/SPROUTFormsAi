@@ -83,6 +83,8 @@ async function buildSessionInfo(tenant: TenantContext): Promise<SessionInfo> {
     orgName: org?.name ?? '',
     userName: user?.name ?? '',
     userEmail: user?.email ?? '',
+    // The saved signature, so a sign-off prefills it and the assessor draws once.
+    signature: user?.signature ?? null,
     accountKind: (org?.accountKind ?? 'team') as SessionInfo['accountKind'],
     branding: org?.branding ?? null,
     teamSize: org?.teamSize ?? null,
