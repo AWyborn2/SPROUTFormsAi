@@ -189,6 +189,21 @@ describe('rectTraced', () => {
     expect(rectTraced(drag, [cell, checkbox])).toEqual(cell);
   });
 
+  it('refuses a table or page border a large box was drawn INSIDE', () => {
+    /*
+      THE FULL-PAGE BUG. Drawing an answer-region box inside a fully-bordered
+      table snapped it out to the whole page. The border contains the drag, so
+      drag-coverage passes; and a drag covering most of the border's area clears
+      IoU 0.35 — this one is 0.6 — so the border came back and the box exploded.
+      Rect-coverage refuses it: the drag reaches only 60% of the border's HEIGHT,
+      so the two are not the same rectangle and the border is not a trace.
+    */
+    const border: PrintedRect = { x: 30, y: 200, width: 540, height: 400 };
+    const drag = { x: 30, y: 280, width: 540, height: 240 };
+
+    expect(rectTraced(drag, [border])).toBeNull();
+  });
+
   it('refuses a drag that merely overlaps something', () => {
     // A drag across open page that happens to clip a printed box is not a
     // trace of it. Refusing here is what leaves edge-snapping in charge of
