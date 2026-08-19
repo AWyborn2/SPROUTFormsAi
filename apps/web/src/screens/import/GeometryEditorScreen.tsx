@@ -22,6 +22,7 @@ import {
   proposeRectGrid,
   proposeRowCell,
   rowCellIndex,
+  setGlyphOnAll,
 } from '../../lib/pdf-geometry.js';
 import {
   groupFields,
@@ -686,6 +687,24 @@ export function GeometryEditorScreen({
   }
 
   /**
+   * Set (or clear) the printed glyph on EVERY placed box of a field at once.
+   *
+   * A "select correct answers" question places one box per option, a table one
+   * per page or row — and an author who wanted them all to print the SAME mark
+   * (a ring around each chosen option, say) had to pick it box by box. This
+   * applies the one choice across every segment, leaving positions and bands
+   * untouched. Clearing (undefined) restores each to the field's default mark —
+   * the same "no markStyle" the per-box picker writes.
+   */
+  function setAllGlyphs(fieldId: string, glyph: GlyphKind | undefined) {
+    mutate(fieldId, (f) => {
+      const segs = f.geometry?.segments ?? [];
+      if (segs.length === 0) return f;
+      return { ...f, geometry: { segments: setGlyphOnAll(segs, glyph) } };
+    });
+  }
+
+  /**
    * A box drawn on a repeating table, subdivided from the checkboxes printed
    * inside it (bounded subdivision, U4).
    *
@@ -1274,6 +1293,7 @@ export function GeometryEditorScreen({
               onSetScalarBox={(box) => setScalarBox(selected.id, box)}
               onSetTablePageBox={(seg) => setTablePageBox(selected.id, seg)}
               onClearTablePage={(page) => clearTablePage(selected.id, page)}
+              onSetAllGlyphs={(glyph) => setAllGlyphs(selected.id, glyph)}
               onClearRowBox={(rowIndex) => clearRowBox(selected.id, rowIndex)}
               onRestyleRowBox={(rowIndex, box) => restyleRowBox(selected.id, rowIndex, box)}
               onDivideGrid={(rows, page) => setManualGrid(selected, rows, page)}
@@ -1693,6 +1713,7 @@ function PlacementPanel({
   onSetScalarBox,
   onSetTablePageBox,
   onClearTablePage,
+  onSetAllGlyphs,
   onClearRowBox,
   onRestyleRowBox,
   onDivideGrid,
@@ -1707,6 +1728,8 @@ function PlacementPanel({
   onSetTablePageBox: (seg: PageBox) => void;
   /** Clear the whole-field table box on one page. */
   onClearTablePage: (page: number) => void;
+  /** Set (or clear, with undefined) the printed glyph on every placed box at once. */
+  onSetAllGlyphs: (glyph: GlyphKind | undefined) => void;
   onClearRowBox: (rowIndex: number) => void;
   onRestyleRowBox: (rowIndex: number, box: PageBox) => void;
   onDivideGrid: (rows: number, page: number) => void;
@@ -1724,6 +1747,13 @@ function PlacementPanel({
   const wholeFieldBoxes = (field.geometry?.segments ?? [])
     .filter((s) => rowCellIndex(s) === null && s.optionKey === undefined)
     .sort((a, b) => a.page - b.page);
+  /**
+   * Boxes that print a mark of their own — every placed box EXCEPT a matching
+   * question's anchors, which draw a connector, not a glyph. When there are two
+   * or more, the author can set them all to the same mark at once instead of
+   * box by box.
+   */
+  const glyphBoxes = matchAnchorField ? [] : (field.geometry?.segments ?? []);
   /*
    * The per-row fallback is offered where it can mean something: a fixed-row
    * table with exactly ONE answer column. One drawn rectangle per row IS that
@@ -1818,6 +1848,14 @@ function PlacementPanel({
           </Button>
         </div>
       )}
+
+      {/*
+        SET EVERY BOX AT ONCE. A "select correct answers" question, or a table
+        spread over pages/rows, places many boxes; picking the same mark for all
+        of them one at a time is the tedium this removes. Shown only once there
+        are two or more boxes to act on.
+      */}
+      {glyphBoxes.length > 1 && <BulkGlyphRow boxes={glyphBoxes} onSetAll={onSetAllGlyphs} />}
 
       {matchAnchorField ? (
         <MatchAnchorRows
@@ -2221,6 +2259,62 @@ function GlyphRow({ box, onChange }: { box: PageBox; onChange: (next: PageBox) =
           printed columns.
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * Set the printed glyph on EVERY placed box of a field at once — the bulk
+ * companion to `GlyphRow`. A button is highlighted only when ALL the boxes
+ * already share that mark; a mixed set highlights nothing, so the row reports
+ * the true state rather than a guess. Applying one leaves each box's position
+ * and bands untouched.
+ */
+function BulkGlyphRow({
+  boxes,
+  onSetAll,
+}: {
+  boxes: readonly PageBox[];
+  onSetAll: (glyph: GlyphKind | undefined) => void;
+}) {
+  const glyphs = new Set(boxes.map((b) => b.markStyle?.glyph));
+  // The mark they all share, or `null` when the set is mixed (nothing pressed).
+  const common = glyphs.size === 1 ? [...glyphs][0] : null;
+  return (
+    <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[8px_9px]">
+      <span className="mb-1 block text-[10.5px] font-semibold text-text-tertiary">
+        Set all {boxes.length} boxes to print
+      </span>
+      <div className="flex flex-wrap gap-1">
+        <button
+          type="button"
+          onClick={() => onSetAll(undefined)}
+          aria-pressed={common === undefined}
+          className={`rounded-sm border px-1.5 py-0.5 text-[10px] ${
+            common === undefined
+              ? 'border-border-accent bg-surface-card font-semibold text-accent'
+              : 'border-border text-text-secondary hover:bg-surface-hover'
+          }`}
+        >
+          Default
+        </button>
+        {GLYPH_KINDS.map((glyph) => (
+          <button
+            key={glyph}
+            type="button"
+            onClick={() => onSetAll(glyph)}
+            aria-pressed={common === glyph}
+            aria-label={`Print ${GLYPH_LABELS[glyph]} on all boxes`}
+            className={`rounded-sm border px-1.5 py-0.5 text-[10px] ${
+              common === glyph
+                ? 'border-border-accent bg-surface-card font-semibold text-accent'
+                : 'border-border text-text-secondary hover:bg-surface-hover'
+            }`}
+          >
+            {GLYPH_LABELS[glyph]}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

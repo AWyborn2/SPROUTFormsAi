@@ -1588,8 +1588,9 @@ import {
   clearWholeFieldBoxOnPage,
   isWholeFieldBox,
   mergeWholeFieldBox,
+  setGlyphOnAll,
 } from './pdf-geometry.js';
-import type { PageBox } from '@formai/shared';
+import type { GlyphKind, PageBox } from '@formai/shared';
 
 describe('whole-field table boxes, one per page (a table that spans a page break)', () => {
   /** A whole-field box on `page` — plain when `rows` is 0, divided otherwise. */
@@ -1664,5 +1665,34 @@ describe('whole-field table boxes, one per page (a table that spans a page break
     const withRow = clearWholeFieldBoxOnPage([whole(7, 6), rowCell(7, 0)], 7);
     expect(withRow).toHaveLength(1);
     expect(isWholeFieldBox(withRow[0]!)).toBe(false);
+  });
+});
+
+describe('setGlyphOnAll — bulk-set the printed mark on every box', () => {
+  function box(page: number, glyph?: GlyphKind): PageBox {
+    return {
+      page,
+      x: 10,
+      y: 10,
+      width: 20,
+      height: 20,
+      pageWidth: 595,
+      pageHeight: 842,
+      ...(glyph ? { markStyle: { glyph } } : {}),
+    };
+  }
+
+  it('sets the glyph on every box, leaving positions and pages untouched', () => {
+    const out = setGlyphOnAll([box(0), box(1, 'tick_hand')], 'ring');
+    expect(out.map((b) => b.markStyle?.glyph)).toEqual(['ring', 'ring']);
+    expect(out.map((b) => b.page)).toEqual([0, 1]);
+    expect(out[0]!.width).toBe(20);
+  });
+
+  it('clears the whole markStyle for Default, never an empty one', () => {
+    // Absent is what the exporter reads as "the field's own mark"; an empty
+    // markStyle would be a style that means nothing.
+    const out = setGlyphOnAll([box(0, 'ring'), box(1, 'ring')], undefined);
+    expect(out.every((b) => !('markStyle' in b))).toBe(true);
   });
 });

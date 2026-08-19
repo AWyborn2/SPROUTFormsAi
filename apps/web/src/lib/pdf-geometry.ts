@@ -20,7 +20,7 @@
  * fixtures with no PDF in the loop.
  */
 import { resolveGeometry } from '@formai/shared';
-import type { FormFieldType, GeometryBand, PageBox, RepeatingColumn } from '@formai/shared';
+import type { FormFieldType, GeometryBand, GlyphKind, PageBox, RepeatingColumn } from '@formai/shared';
 import type { PrintedRect, RuleSpan } from '../screens/import/inspector/geometry-actions.js';
 
 /**
@@ -1125,6 +1125,25 @@ export function mergeWholeFieldBox(segments: readonly PageBox[], seg: PageBox): 
 /** Remove the whole-field table box on one page, keeping the table's other pages. */
 export function clearWholeFieldBoxOnPage(segments: readonly PageBox[], page: number): PageBox[] {
   return segments.filter((s) => !(isWholeFieldBox(s) && s.page === page));
+}
+
+/**
+ * Set (or clear, with `undefined`) the printed glyph on EVERY segment — the pure
+ * core of the placement inspector's "set all boxes to print X" bulk action.
+ *
+ * Each box's position and bands are untouched; only its `markStyle.glyph`
+ * changes. Clearing drops the whole `markStyle` rather than writing an empty
+ * one, exactly as the per-box picker does — absent is what the exporter reads as
+ * "the field's own default mark", so a cleared box carries no style at all.
+ */
+export function setGlyphOnAll(
+  segments: readonly PageBox[],
+  glyph: GlyphKind | undefined,
+): PageBox[] {
+  return segments.map((s) => {
+    const { markStyle: _drop, ...rest } = s;
+    return glyph ? { ...rest, markStyle: { ...s.markStyle, glyph } } : rest;
+  });
 }
 
 /**
