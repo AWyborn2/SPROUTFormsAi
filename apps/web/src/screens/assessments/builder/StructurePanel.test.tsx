@@ -246,17 +246,17 @@ describe('StructurePanel', () => {
 
   describe('the type palette', () => {
     it('offers what the shared guard allows, not a list of its own', () => {
-      // `typeOptionsFor` on a scalar returns the authorable types only — no
-      // repeating_group, checkbox_group or boolean_yes_no, each of which needs
-      // payload only extraction can supply.
+      // `typeOptionsFor` on a scalar returns every authorable type — including
+      // Checkbox group, which a retype seeds with options — and withholds only
+      // the table, whose columns extraction alone supplies.
       setup();
       expand('Candidate declaration');
       fireEvent.click(screen.getByRole('button', { name: 'Change type of Candidate name' }));
 
       expect(screen.getByRole('button', { name: /Date/ })).toBeTruthy();
       expect(screen.getByRole('button', { name: /Paragraph/ })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /Checkbox group/ })).toBeTruthy();
       expect(screen.queryByRole('button', { name: /Repeating table/ })).toBeNull();
-      expect(screen.queryByRole('button', { name: /Checkbox group/ })).toBeNull();
     });
 
     it('OFFERS CHECK / CROSS, WHICH IS WHAT AN OUTCOME BOX IS', () => {
