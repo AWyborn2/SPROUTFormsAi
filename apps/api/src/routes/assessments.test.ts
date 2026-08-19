@@ -2133,11 +2133,21 @@ describe('candidate scoping', () => {
 
       const mine = (await (await fetch(`${base}/assessment-cases`, { headers: auth(candidate) })).json()) as {
         candidateUserId: string;
+        currentPartLabel: string | null;
+        currentPartIndex: number | null;
+        requiredPartCount: number;
+        awaitingAssessor: boolean;
       }[];
       const all = (await (await fetch(`${base}/assessment-cases`, { headers: auth() })).json()) as unknown[];
 
       expect(mine).toHaveLength(1);
       expect(mine[0]?.candidateUserId).toBe(CANDIDATE);
+      // A fresh case carries its stage: it sits at the first required part and
+      // is waiting on nobody yet (no part handed in, not signing off).
+      expect(mine[0]?.currentPartIndex).toBe(1);
+      expect(mine[0]?.requiredPartCount).toBeGreaterThan(0);
+      expect(mine[0]?.currentPartLabel).toBeTruthy();
+      expect(mine[0]?.awaitingAssessor).toBe(false);
       expect(all).toHaveLength(2);
     } finally {
       server.close();
