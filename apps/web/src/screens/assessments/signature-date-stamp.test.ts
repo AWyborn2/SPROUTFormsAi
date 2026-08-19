@@ -8,7 +8,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { FormField } from '@formai/shared';
-import { companionDateField, dateFieldToStamp } from './signature-date-stamp.js';
+import {
+  applyAssessorSignoff,
+  assessorSignoffTargets,
+  companionDateField,
+  dateFieldToStamp,
+} from './signature-date-stamp.js';
 
 function f(over: Partial<FormField> & { id: string; type: FormField['type'] }): FormField {
   return { label: over.id, required: false, source: 'imported', ...over };
@@ -81,5 +86,124 @@ describe('dateFieldToStamp', () => {
 
   it('ignores changes to fields that are not signatures', () => {
     expect(dateFieldToStamp(fields, { sig: '', date: '' }, 'date', '2026-08-02')).toBeNull();
+  });
+});
+
+describe('assessorSignoffTargets', () => {
+  it('finds the assessor name box and the date in its block', () => {
+    const fields = [
+      f({ id: 'h', type: 'section_header', label: 'Assessor sign-off' }),
+      f({ id: 'nm', type: 'text', label: 'Assessor Name' }),
+      f({ id: 'sig', type: 'text', label: 'Assessor Signature' }),
+      f({ id: 'dt', type: 'date', label: 'Date' }),
+    ];
+    expect(assessorSignoffTargets(fields)).toEqual({ nameFieldId: 'nm', dateFieldId: 'dt' });
+  });
+
+  it('finds the date whether it sits before or after the name in the block', () => {
+    const fields = [
+      f({ id: 'dt', type: 'date', label: 'Date' }),
+      f({ id: 'nm', type: 'text', label: 'Name of Assessor' }),
+    ];
+    expect(assessorSignoffTargets(fields)).toEqual({ nameFieldId: 'nm', dateFieldId: 'dt' });
+  });
+
+  it('accepts a date box typed as text but captioned "Date"', () => {
+    const fields = [
+      f({ id: 'nm', type: 'text', label: "Assessor's Name" }),
+      f({ id: 'dt', type: 'text', label: 'Date' }),
+    ];
+    expect(assessorSignoffTargets(fields)).toEqual({ nameFieldId: 'nm', dateFieldId: 'dt' });
+  });
+
+  it('does NOT mistake a plain candidate "Name" box for the assessor', () => {
+    const fields = [
+      f({ id: 'nm', type: 'text', label: 'Name' }),
+      f({ id: 'dt', type: 'date', label: 'Date' }),
+    ];
+    expect(assessorSignoffTargets(fields)).toEqual({ nameFieldId: null, dateFieldId: null });
+  });
+
+  it('fills neither when a part carries two assessor-name boxes (ambiguous)', () => {
+    const fields = [
+      f({ id: 'nm1', type: 'text', label: 'Assessor Name' }),
+      f({ id: 'nm2', type: 'text', label: 'Assessor Name' }),
+      f({ id: 'dt', type: 'date', label: 'Date' }),
+    ];
+    expect(assessorSignoffTargets(fields)).toEqual({ nameFieldId: null, dateFieldId: null });
+  });
+
+  it('leaves the date null when its block holds two dates (ambiguous)', () => {
+    const fields = [
+      f({ id: 'nm', type: 'text', label: 'Assessor Name' }),
+      f({ id: 'd1', type: 'date', label: 'Date' }),
+      f({ id: 'd2', type: 'date', label: 'Date' }),
+    ];
+    expect(assessorSignoffTargets(fields)).toEqual({ nameFieldId: 'nm', dateFieldId: null });
+  });
+
+  it('does not reach across a section header into a neighbouring block for the date', () => {
+    const fields = [
+      f({ id: 'nm', type: 'text', label: 'Assessor Name' }),
+      f({ id: 'h', type: 'section_header', label: 'Candidate declaration' }),
+      f({ id: 'dt', type: 'date', label: 'Date' }),
+    ];
+    expect(assessorSignoffTargets(fields)).toEqual({ nameFieldId: 'nm', dateFieldId: null });
+  });
+
+  it('keeps "date of birth" out of the assessor date box', () => {
+    const fields = [
+      f({ id: 'nm', type: 'text', label: 'Assessor Name' }),
+      f({ id: 'dob', type: 'text', label: 'Date of birth' }),
+    ];
+    // dob is a text field whose label is not a bare/"signed" date — not picked.
+    expect(assessorSignoffTargets(fields)).toEqual({ nameFieldId: 'nm', dateFieldId: null });
+  });
+});
+
+describe('applyAssessorSignoff', () => {
+  const fields = [
+    f({ id: 'nm', type: 'text', label: 'Assessor Name' }),
+    f({ id: 'dt', type: 'date', label: 'Date' }),
+  ];
+  const writable = new Set(['nm', 'dt']);
+  const TODAY = '2026-08-19';
+
+  it('fills the assessor name and today’s date when both are blank and writable', () => {
+    const out = applyAssessorSignoff(fields, writable, {}, 'Ash Wyborn', TODAY);
+    expect(out).toEqual({ nm: 'Ash Wyborn', dt: TODAY });
+  });
+
+  it('never clobbers a value already there', () => {
+    const out = applyAssessorSignoff(
+      fields,
+      writable,
+      { nm: 'Someone Else', dt: '2026-01-01' },
+      'Ash Wyborn',
+      TODAY,
+    );
+    expect(out).toEqual({ nm: 'Someone Else', dt: '2026-01-01' });
+  });
+
+  it('leaves a box the caller may NOT fill alone — the candidate’s record is untouched', () => {
+    // Only the date is writable here; the name box belongs to someone else.
+    const out = applyAssessorSignoff(fields, new Set(['dt']), {}, 'Ash Wyborn', TODAY);
+    expect(out).toEqual({ dt: TODAY });
+  });
+
+  it('stamps the date even when the session has no name yet', () => {
+    const out = applyAssessorSignoff(fields, writable, {}, '', TODAY);
+    expect(out).toEqual({ dt: TODAY });
+  });
+
+  it('returns the SAME object when there is nothing to fill, so React can skip the update', () => {
+    const values = { nm: 'Ash Wyborn', dt: TODAY };
+    expect(applyAssessorSignoff(fields, writable, values, 'Ash Wyborn', TODAY)).toBe(values);
+  });
+
+  it('does nothing when the part has no assessor sign-off block', () => {
+    const plain = [f({ id: 'q1', type: 'text', label: 'Comment' })];
+    const values = {};
+    expect(applyAssessorSignoff(plain, new Set(['q1']), values, 'Ash Wyborn', TODAY)).toBe(values);
   });
 });

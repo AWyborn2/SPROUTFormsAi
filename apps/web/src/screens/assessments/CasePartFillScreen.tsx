@@ -4,13 +4,14 @@ import type { CaseNextStep, SubmissionValue } from '@formai/shared';
 import { durationUnitLong, logbookRows } from '@formai/shared';
 import { Button, Icon, todayISODate, useToast } from '@formai/ui';
 import { ApiError } from '../../lib/data/api-client.js';
-import { dateFieldToStamp } from './signature-date-stamp.js';
+import { applyAssessorSignoff, dateFieldToStamp } from './signature-date-stamp.js';
 import { LogbookProgress } from './LogbookProgress.js';
 import {
   useAssessmentAttempt,
   useCheckQuestion,
   useOpenAttempt,
   useSaveAttempt,
+  useSession,
   useSetAttemptSubmitted,
 } from '../../lib/data/hooks.js';
 import { partVisibility } from '../../lib/assessment-fill.js';
@@ -46,6 +47,8 @@ export function CasePartFillScreen() {
   const setSubmitted = useSetAttemptSubmitted(caseId ?? '');
   const openAttempt = useOpenAttempt(caseId ?? '');
   const checkQuestion = useCheckQuestion(caseId ?? '', attemptId);
+  // The acting user, to prefill their own name into an assessor sign-off block.
+  const { data: session } = useSession();
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   const [dirty, setDirty] = useState(false);
@@ -56,9 +59,13 @@ export function CasePartFillScreen() {
    * the new attempt would render the old one's answers.
    */
   const seeded = useRef(false);
+  // The assessor sign-off prefill below runs once per attempt too, but AFTER the
+  // seed, on its own latch — it depends on the session, which can resolve later.
+  const signoffFilled = useRef(false);
 
   useEffect(() => {
     seeded.current = false;
+    signoffFilled.current = false;
   }, [attemptId]);
 
   useEffect(() => {
@@ -66,6 +73,35 @@ export function CasePartFillScreen() {
     setValues(attempt.values ?? {});
     seeded.current = true;
   }, [attempt]);
+
+  /*
+    ASSESSOR SIGN-OFF PREFILL. When the assessor opens a part they are marking,
+    fill their own name (from the account) and today's date into that part's
+    assessor sign-off block — the same sign-once convenience the certification
+    dialog gives, brought to the marking form so neither is transcribed by hand.
+    This covers the case a signature draw cannot: a practical whose outcome the
+    checklist auto-marks (B) is completed by ticking and handing in, with no
+    signature stroke for the companion-date stamp to fire on.
+
+    Only where the box is the caller's to fill (`writable`) and still blank, so
+    the candidate's own record is untouched and an edited value is never
+    re-clobbered. Once per attempt, after the seed, waiting for the session so
+    the name lands in the same pass as the date.
+  */
+  useEffect(() => {
+    if (!attempt || !seeded.current || signoffFilled.current) return;
+    // Only an OPEN attempt: a marked or handed-in one is a record, and stamping
+    // today's date onto it would claim a sign-off day that never happened.
+    if (attempt.outcome !== null || attempt.submittedAt !== null) {
+      signoffFilled.current = true;
+      return;
+    }
+    const name = session?.userName;
+    if (name === undefined) return; // session still resolving; the name needs it
+    signoffFilled.current = true;
+    const writable = new Set(attempt.writableFieldIds ?? []);
+    setValues((prev) => applyAssessorSignoff(attempt.fields, writable, prev, name, todayISODate()));
+  }, [attempt, session]);
 
   /*
     A MARKED ATTEMPT SHOWS THE SERVER'S COPY. Hand-in can mark on the spot now,
