@@ -1508,6 +1508,65 @@ export function moreCoachingRequired(progress: readonly PartProgress[]): boolean
 }
 
 /**
+ * What comes after the part just finished, from the point of view of whoever
+ * finished it — the "continue, or wait for someone else" step.
+ *
+ * Whether a part is the viewer's to fill is decided by workflow access
+ * (`partFieldAccess`), the same authority the open-attempt route enforces, so
+ * this only ever OFFERS a step the server would then allow. A part carries two
+ * booleans: whether the candidate may fill it, and whether any staff role
+ * (assessor / supervisor / SME) may — computed by the caller so this stays a
+ * pure decision.
+ */
+export interface NextStepPart {
+  key: string;
+  label: string;
+  state: PartState;
+  /** The candidate has `fill` access to a field in this part. */
+  candidateFills: boolean;
+  /** A staff role (assessor / supervisor / SME) has `fill` access to one. */
+  staffFills: boolean;
+}
+
+export type CaseNextStep =
+  /** The viewer can start the next part themselves. */
+  | { kind: 'continue'; partKey: string; label: string }
+  /** The next part belongs to someone else (or is not yet unlocked). */
+  | { kind: 'awaiting_other'; label: string; filledBy: string }
+  /** Nothing left for the viewer — every later part is already satisfactory. */
+  | { kind: 'done' };
+
+/**
+ * The next step after `currentKey` for the party that just completed it.
+ *
+ * The next part is the first one AFTER the current in document order that is not
+ * yet satisfactory — the next thing anyone has to do. A `locked` next part (its
+ * dependencies unmet) is never offered as "continue"; it reads as waiting on the
+ * other party, because from here that is what unblocks it. `viewerIsCandidate`
+ * rather than a role, so this needs no `WorkflowRole` import and cannot go stale
+ * against the role list.
+ */
+export function nextStepAfter(
+  parts: readonly NextStepPart[],
+  currentKey: string,
+  viewerIsCandidate: boolean,
+): CaseNextStep {
+  const index = parts.findIndex((p) => p.key === currentKey);
+  const next = (index === -1 ? [] : parts.slice(index + 1)).find((p) => p.state !== 'satisfactory');
+  if (!next) return { kind: 'done' };
+
+  const viewerFills = viewerIsCandidate ? next.candidateFills : next.staffFills;
+  if (viewerFills && next.state !== 'locked') {
+    return { kind: 'continue', partKey: next.key, label: next.label };
+  }
+  return {
+    kind: 'awaiting_other',
+    label: next.label,
+    filledBy: viewerIsCandidate ? 'your assessor' : 'the candidate',
+  };
+}
+
+/**
  * WHICH rows a logbook part's hours are counted from — the one rule, shared.
  *
  * There were three, and they disagreed. The threshold notification counted the

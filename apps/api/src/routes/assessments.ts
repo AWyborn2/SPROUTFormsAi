@@ -15,6 +15,7 @@ import {
   fieldsInSection,
   isCaseCompetent,
   isTerminalCaseState,
+  nextStepAfter,
   isSelfMarking,
   moreCoachingRequired,
   type AssessmentCaseState,
@@ -3073,14 +3074,16 @@ assessmentCasesRouter.get(
       state itself comes from — and served over the stored value, so this
       surface can never show a tick the progress does not back.
     */
+    /*
+      Case progress, once — the completion ticks and the "what's next" step below
+      both read it, and it is the same derivation the part's own state comes from.
+    */
+    const caseAttempts = await attemptsFor(db, row.id);
+    const progress = caseProgress(manifest, row.pathway as AssessmentPathway, toAttemptFacts(caseAttempts));
+
     const completionIds = new Set((manifest.partCompletionMarks ?? []).map((m) => m.fieldId));
     const completionValues: Record<string, SubmissionValue> = {};
     if (visibleFields.some((f) => completionIds.has(f.id))) {
-      const progress = caseProgress(
-        manifest,
-        row.pathway as AssessmentPathway,
-        toAttemptFacts(await attemptsFor(db, row.id)),
-      );
       for (const f of visibleFields) {
         if (!completionIds.has(f.id)) continue;
         completionValues[f.id] = completionTickRows(
@@ -3090,6 +3093,29 @@ assessmentCasesRouter.get(
         );
       }
     }
+
+    /*
+      WHAT COMES NEXT for whoever just finished this part — a "continue" they may
+      start, or a note that the next part is someone else's. Decided from the same
+      workflow access the open-attempt route enforces, so it never offers a step
+      the server would then refuse.
+    */
+    const nextStep = nextStepAfter(
+      progress.map((p) => {
+        const pf = fieldsInPart(allFields, manifest, p.part.key);
+        return {
+          key: p.part.key,
+          label: p.part.label,
+          state: p.state,
+          candidateFills: partFieldAccess(workflow, p.part.key, pf, 'candidate').writable.length > 0,
+          staffFills: STAFF_WORKFLOW_ROLES.some(
+            (r) => partFieldAccess(workflow, p.part.key, pf, r).writable.length > 0,
+          ),
+        };
+      }),
+      attempt.partKey,
+      party === 'candidate',
+    );
     const prereqValues: Record<string, boolean> = {};
     if (prereqHere) {
       for (const result of await evaluatePrerequisites(db, tenant.orgId, row.candidateUserId, manifest)) {
@@ -3121,6 +3147,8 @@ assessmentCasesRouter.get(
       outcome: attempt.outcome,
       submittedAt: attempt.submittedAt,
       templateVersionId: attempt.templateVersionId,
+      /** The step after this part — a "continue", or a wait on the other party. */
+      nextStep,
       /**
        * The case's stream and the field its answer belongs in, so the renderer
        * can seed visibility exactly the way the exporter does — by answering the
