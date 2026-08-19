@@ -25,6 +25,7 @@ import {
   nextStepAfter,
   type NextStepPart,
   orderedParts,
+  pathwayFromHistory,
   requiredParts,
   resolveLocationParts,
   totalLoggedHours,
@@ -1278,5 +1279,38 @@ describe('nextStepAfter', () => {
       label: 'Logbook',
       filledBy: 'the candidate',
     });
+  });
+});
+
+describe('pathwayFromHistory', () => {
+  it('suggests experienced when the candidate already holds a competency this tool awards', () => {
+    expect(pathwayFromHistory(['c-dozer'], ['c-dozer', 'c-first-aid'])).toBe('experienced');
+  });
+
+  it('suggests new when they hold none of the awarded competencies', () => {
+    expect(pathwayFromHistory(['c-dozer'], ['c-first-aid'])).toBe('new');
+  });
+
+  it('suggests new when the candidate holds nothing at all', () => {
+    expect(pathwayFromHistory(['c-dozer'], [])).toBe('new');
+  });
+
+  it('counts a held competency even when the tool awards several', () => {
+    expect(pathwayFromHistory(['c-a', 'c-b'], ['c-b'])).toBe('experienced');
+  });
+
+  it('never suggests rpl — that is a deliberate assessor choice, not inferable', () => {
+    // Whatever the history, the suggestion is only ever new or experienced.
+    for (const held of [[], ['c-dozer'], ['c-a', 'c-b']]) {
+      expect(pathwayFromHistory(['c-dozer'], held)).not.toBe('rpl');
+    }
+  });
+
+  it('accepts a Set as well as an array of held ids', () => {
+    expect(pathwayFromHistory(['c-dozer'], new Set(['c-dozer']))).toBe('experienced');
+  });
+
+  it('suggests new for a tool that awards nothing — no competency to have held', () => {
+    expect(pathwayFromHistory([], ['c-dozer'])).toBe('new');
   });
 });

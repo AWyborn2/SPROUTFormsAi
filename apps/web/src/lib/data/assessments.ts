@@ -34,6 +34,12 @@ export interface AssessmentToolSummary {
   id: string;
   name: string;
   templateId: string;
+  /**
+   * The competency this tool grants (constrained to one at authoring time). Used
+   * on the new-case form to suggest a pathway: a candidate who already holds it
+   * is `experienced`, one who never has is `new`.
+   */
+  awardedCompetencyIds: string[];
   parts: { key: string; label: string; kind: PartKind }[];
   /**
    * Location streams whose assessor requirements differ, if any.

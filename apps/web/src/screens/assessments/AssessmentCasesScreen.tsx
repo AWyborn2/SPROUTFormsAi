@@ -1,13 +1,14 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button, Icon } from '@formai/ui';
-import { ASSESSMENT_PATHWAYS, type AssessmentPathway } from '@formai/shared';
+import { ASSESSMENT_PATHWAYS, type AssessmentPathway, pathwayFromHistory } from '@formai/shared';
 import { CaseStatusCell } from '../statusBadges.js';
 import type { AssessmentToolSummary } from '../../lib/data/assessments.js';
 import {
   useAssessmentCases,
   useAssessmentTools,
   useCreateAssessmentCase,
+  useHeldCompetencies,
   useMembers,
   useSession,
 } from '../../lib/data/hooks.js';
@@ -310,9 +311,37 @@ function NewCaseForm({
   const [locationId, setLocationId] = useState('');
   const [rplJustification, setRplJustification] = useState('');
   const [error, setError] = useState<string | null>(null);
+  /*
+    Whether the assessor has chosen the pathway by hand. A manual choice wins
+    until they pick a different candidate or tool, when a fresh suggestion from
+    the new candidate's history is due.
+  */
+  const [pathwayOverridden, setPathwayOverridden] = useState(false);
 
+  const tool = tools.find((t) => t.id === toolId);
   /** The organisation's Locations, offered as a closed list (R77). */
-  const locations = tools.find((t) => t.id === toolId)?.locations ?? [];
+  const locations = tool?.locations ?? [];
+
+  /*
+    SUGGEST THE PATHWAY FROM THE CANDIDATE'S RECORD. A candidate who already
+    holds — or has held — the competency this tool grants has operated the plant
+    before, so `experienced` (the shorter path) fits; a first-timer takes the
+    full assessment. Only a suggestion: the box stays editable, and a manual
+    choice is never overwritten. `/held/:userId` already excludes revoked grants.
+  */
+  const held = useHeldCompetencies(candidateUserId || undefined);
+  const holdsAwarded =
+    !!tool && !!held.data && tool.awardedCompetencyIds.some((id) => held.data!.some((c) => c.competencyId === id));
+
+  // A new candidate or tool is a fresh decision — drop any prior manual override.
+  useEffect(() => {
+    setPathwayOverridden(false);
+  }, [candidateUserId, toolId]);
+
+  useEffect(() => {
+    if (pathwayOverridden || !candidateUserId || !tool || !held.data) return;
+    setPathway(pathwayFromHistory(tool.awardedCompetencyIds, held.data.map((c) => c.competencyId)));
+  }, [pathwayOverridden, candidateUserId, tool, held.data]);
 
   async function submit() {
     setError(null);
@@ -383,7 +412,11 @@ function NewCaseForm({
           <select
             id="nc-pathway"
             value={pathway}
-            onChange={(e) => setPathway(e.target.value as AssessmentPathway)}
+            onChange={(e) => {
+              // A hand-picked pathway is the assessor's call — stop suggesting.
+              setPathwayOverridden(true);
+              setPathway(e.target.value as AssessmentPathway);
+            }}
             className={`${field} mt-1`}
           >
             {ASSESSMENT_PATHWAYS.map((p) => (
@@ -391,9 +424,11 @@ function NewCaseForm({
             ))}
           </select>
           <p className="mt-1 text-xs text-text-tertiary">
-            {pathway === 'new'
-              ? 'All six parts, including both logbooks.'
-              : 'Theory and the first practical demonstration only.'}
+            {candidateUserId && !pathwayOverridden && held.data
+              ? holdsAwarded
+                ? 'Suggested from their record — they already hold this competency. Change it if you know better.'
+                : 'Suggested from their record — no prior record of this competency. Change it if you know better.'
+              : 'Sets which parts the candidate completes. RPL waives the logged-hours parts and records why.'}
           </p>
         </div>
 

@@ -501,6 +501,23 @@ afterEach(() => {
 
 // â”€â”€ tool authoring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+describe('GET /assessment-tools (list)', () => {
+  it('exposes each tool’s awarded competency, so the new-case form can suggest a pathway', async () => {
+    const { db, store } = makeDb();
+    seedUnlinkedTool(store, { awardedCompetencyIds: [COMPETENCY] });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-tools`, { headers: auth() });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Array<{ awardedCompetencyIds: string[] }>;
+      expect(body[0]?.awardedCompetencyIds).toEqual([COMPETENCY]);
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('POST /assessment-tools', () => {
   /*
     A z.object STRIPS unknown keys. So a manifest property this schema omits is
