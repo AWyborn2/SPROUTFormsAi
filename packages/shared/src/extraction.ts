@@ -230,6 +230,14 @@ export interface ExtractionResult {
   pageCount: number;
   fields: ExtractedField[];
   /**
+   * The id of the stored raw-extraction capture (`extraction_captures.id`), when
+   * one was written. Best-effort, like the capture itself: absent when capture is
+   * off, has no database, or its write was swallowed. The review client echoes it
+   * back at publish so the correction diff links to the exact raw it corrects; a
+   * missing id simply means that link cannot be made.
+   */
+  captureId?: string;
+  /**
    * Free-text observations that don't map to any single field but help whoever
    * reviews the extraction (mergeable duplicate sections, validation needs).
    */

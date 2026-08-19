@@ -2,7 +2,12 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, Icon, Input, useToast } from '@formai/ui';
 import { useCreateVersionFromImport, useForm, usePublishImport } from '../../lib/data/hooks.js';
-import { clearSavedImport, reviewedToFields, useImportSession } from '../../lib/data/import-session.js';
+import {
+  clearSavedImport,
+  reviewedToFields,
+  sendImportCorrections,
+  useImportSession,
+} from '../../lib/data/import-session.js';
 import { canExportSubmission } from '../../lib/data/store.js';
 import { stripFileExtension } from './upload-validation.js';
 import { ImportStepper } from './ImportStepper.js';
@@ -54,7 +59,16 @@ export function ImportPublishScreen() {
         sourcePdfAssetId: session.assetId,
       },
       {
-        onSuccess: () => {
+        onSuccess: (summary) => {
+          // Record how the reviewer corrected this extraction, while the editor
+          // is still intact (navigation below unmounts the screen, and only a
+          // fresh import resets the session). Fire-and-forget — see
+          // `sendImportCorrections`.
+          sendImportCorrections({
+            assetId: session.assetId,
+            formId: summary.id,
+            ...(summary.currentVersionId ? { versionId: summary.currentVersionId } : {}),
+          });
           // The work has a permanent home now, so the autosave has nothing left
           // to protect — and leaving it would offer this finished form back as
           // "unfinished" the next time the wizard is opened.
@@ -88,6 +102,12 @@ export function ImportPublishScreen() {
       },
       {
         onSuccess: (summary) => {
+          // Record the correction diff for this re-extraction too (see doPublish).
+          sendImportCorrections({
+            assetId: session.assetId,
+            ...(session.targetFormId ? { formId: session.targetFormId } : {}),
+            ...(summary.currentVersionId ? { versionId: summary.currentVersionId } : {}),
+          });
           // Same as publishing: a saved version IS the permanent home, whether
           // or not it went live.
           if (session.assetId) void clearSavedImport(session.assetId);

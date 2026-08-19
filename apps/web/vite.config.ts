@@ -6,9 +6,17 @@ import { defineConfig } from 'vite';
 // no build-time API URL to configure) — vite strips the /api prefix before
 // forwarding to the API process, which mounts its routes without one
 // (/forms, /team, /auth, ...). See apps/web/src/lib/data/api-client.ts.
+//
+// The target follows the API's own port. `API_PORT` defaults to 8787 in the API
+// (apps/api/src/env.ts) and in .env.example, so the default here matches it; an
+// override via env keeps the two in step. `API_PROXY_TARGET` allows a full URL
+// override (e.g. an API on another host). The previous hardcoded :8000 did not
+// match the API's :8787, so every dev /api call 502'd.
+const apiTarget =
+  process.env.API_PROXY_TARGET ?? `http://localhost:${process.env.API_PORT ?? '8787'}`;
 const apiProxy = {
   '/api': {
-    target: 'http://localhost:8000',
+    target: apiTarget,
     changeOrigin: true,
     rewrite: (path: string) => path.replace(/^\/api/, ''),
   },

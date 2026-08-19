@@ -165,6 +165,7 @@ export const keys = {
   fillLinks: (formId: string) => ['fillLinks', formId] as const,
   invite: (token: string) => ['invite', token] as const,
   apiKeys: ['apiKeys'] as const,
+  correctionCandidates: (minCount: number) => ['correctionCandidates', minCount] as const,
   taxonomy: ['taxonomy'] as const,
   formBrands: ['formBrands'] as const,
   memberPlacement: (id: string) => ['members', id, 'placement'] as const,
@@ -827,6 +828,14 @@ export function useAuditLog() {
 
 export function useApiKeys() {
   return useQuery({ queryKey: keys.apiKeys, queryFn: () => store.listApiKeys() });
+}
+
+/** Recurring extraction-correction shapes surfaced as candidate rules (admin). */
+export function useCorrectionCandidates(minCount = 3) {
+  return useQuery({
+    queryKey: keys.correctionCandidates(minCount),
+    queryFn: () => store.listCorrectionCandidates(minCount),
+  });
 }
 
 export function useCreateApiKey() {

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { DOCUMENT_TYPES } from '@formai/shared';
+import { CORRECTION_KINDS, DOCUMENT_TYPES } from '@formai/shared';
 import type { FormField, SubmissionValue } from '@formai/shared';
 import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
@@ -10,6 +10,7 @@ import { withErrorHandling } from '../lib/with-error-handling.js';
 import { getAnthropic } from '../anthropic.js';
 import { auditForm, extractForm, roundTripExport } from '../pdf/index.js';
 import { captureExtraction } from '../pdf/capture.js';
+import { aggregateCorrectionRows, candidateRules } from '../pdf/correction-insights.js';
 import { getStorageClient } from '../storage/index.js';
 import { env } from '../env.js';
 
@@ -129,8 +130,10 @@ pdfRouter.post(
       });
       // Capture the raw extraction as training signal for the (human-gated)
       // correction loop. Best-effort — awaited so the row lands before we
-      // respond, but it cannot throw and cannot fail the import.
-      await captureExtraction(db, {
+      // respond, but it cannot throw and cannot fail the import. The returned
+      // id (null when capture no-ops) rides back on the result so the review
+      // client can echo it at publish and link the correction diff to this raw.
+      const captureId = await captureExtraction(db, {
         orgId: tenant.orgId,
         assetId: parsed.data.assetId,
         fileName: parsed.data.fileName,
@@ -140,7 +143,7 @@ pdfRouter.post(
         model: result.path === 'ai' ? env.ANTHROPIC_EXTRACTION_MODEL : undefined,
         result,
       });
-      res.json(result);
+      res.json(captureId ? { ...result, captureId } : result);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'extraction_failed';
       // Flat PDFs with no configured key surface as a 422, not a 500.
@@ -309,5 +312,165 @@ pdfRouter.post(
       const message = err instanceof Error ? err.message : 'round_trip_failed';
       res.status(500).json({ error: message });
     }
+  }),
+);
+
+/*
+  The corrections diff, validated at the boundary. The per-correction payload is
+  passthrough — the store keeps the whole `ExtractionCorrections` verbatim and
+  the shape's fine detail belongs to `diffExtraction`, not to a second copy of
+  the union here — but `kind` and `fieldId` are checked so a malformed body is a
+  400 at the edge rather than a bad row.
+*/
+const correctionSchema = z
+  .object({ kind: z.enum(CORRECTION_KINDS), fieldId: z.string().min(1) })
+  .passthrough();
+
+const correctionsBody = z.object({
+  /** Storage id of the source PDF, when one exists. */
+  assetId: z.string().min(1).optional(),
+  /** Provenance of the published AFTER. */
+  formId: z.string().min(1).optional(),
+  versionId: z.string().min(1).optional(),
+  /** Fields the raw extraction produced — the metric denominator. */
+  fieldCount: z.number().int().nonnegative(),
+  /** The `ExtractionCorrections` record from `diffExtraction`. */
+  corrections: z.object({
+    captureId: z.string().min(1).optional(),
+    documentType: z.enum(DOCUMENT_TYPES).optional(),
+    path: z.enum(['acroform', 'ai']),
+    pageCount: z.number().int().nonnegative(),
+    corrections: z.array(correctionSchema),
+  }),
+});
+
+/**
+ * Store the reviewer-correction diff for one published import — the learning
+ * loop's training signal (2b). Called by the review client at publish, its own
+ * request off the publish critical path; a failure here never blocks a publish.
+ *
+ * Org-scoped throughout: the row is written under the caller's org, and a
+ * `captureId`, if given, must name a capture in that same org — a caller cannot
+ * attach a correction to another tenant's raw extraction.
+ */
+pdfRouter.post(
+  '/corrections',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const parsed = correctionsBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tenant = req.tenant!;
+    const { corrections: diff } = parsed.data;
+
+    // A supplied capture link must belong to this org, or it is not the caller's
+    // to attach to — reject rather than silently dropping the link.
+    if (diff.captureId) {
+      const capture = await db.query.extractionCaptures.findFirst({
+        where: and(
+          eq(schema.extractionCaptures.id, diff.captureId),
+          eq(schema.extractionCaptures.orgId, tenant.orgId),
+        ),
+        columns: { id: true },
+      });
+      if (!capture) {
+        res.status(404).json({ error: 'capture_not_found' });
+        return;
+      }
+    }
+
+    const [row] = await db
+      .insert(schema.extractionCorrections)
+      .values({
+        orgId: tenant.orgId,
+        captureId: diff.captureId ?? null,
+        assetId: parsed.data.assetId ?? null,
+        documentType: diff.documentType ?? null,
+        formId: parsed.data.formId ?? null,
+        versionId: parsed.data.versionId ?? null,
+        corrections: diff,
+        correctionCount: diff.corrections.length,
+        fieldCount: parsed.data.fieldCount,
+        createdByUserId: tenant.userId,
+      })
+      .returning({ id: schema.extractionCorrections.id });
+
+    res.status(201).json({ id: row?.id });
+  }),
+);
+
+/**
+ * The correction-rate metric and shape clusters for this org's imports (2b/E).
+ *
+ * Two things, from the same rows: (1) the correction RATE per document type —
+ * corrections per extracted field, read off the denormalised counts, so a
+ * promoted extraction rule's effect is measurable; and (2) the recurring
+ * correction SHAPES, each a content-free `shapeOf` key with its count and a few
+ * example captures. The shape is the privacy boundary: it names types, counts
+ * and structural predicates, never field text — so even a cross-org view (a
+ * later platform surface) can show which mistakes recur without exposing what
+ * any one paper said. This endpoint stays ORG-SCOPED; the sample captures are
+ * the caller's own.
+ */
+pdfRouter.get(
+  '/corrections/insights',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const rows = await db.query.extractionCorrections.findMany({
+      where: eq(schema.extractionCorrections.orgId, tenant.orgId),
+      columns: { documentType: true, correctionCount: true, fieldCount: true, corrections: true, captureId: true },
+      // A cap, not a page: insights are an aggregate, and an org with more than
+      // this many imports has plenty of signal already. Paginate if it ever bites.
+      limit: 5000,
+    });
+
+    res.json(aggregateCorrectionRows(rows));
+  }),
+);
+
+/**
+ * The human-gated candidate-rules surface (2c / U10).
+ *
+ * ADMIN-ONLY, because acting on a candidate means writing a general profile rule
+ * (or promoting a LEARNED_EXAMPLE) — a maintainer's decision, not a candidate's.
+ * Returns the recurring correction shapes above a small threshold, each with the
+ * rule it suggests and a few of THIS org's example captures. It proposes; it
+ * changes nothing — promotion is always a reviewed code change (`LEARNED_EXAMPLES`).
+ */
+pdfRouter.get(
+  '/corrections/candidates',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    const tenant = req.tenant!;
+    if (tenant.role !== 'admin' && tenant.role !== 'owner') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    // A shape must recur to be a candidate; one or two corrections are noise.
+    const rawMin = Number(req.query.minCount);
+    const minCount = Number.isInteger(rawMin) && rawMin >= 1 ? Math.min(rawMin, 100) : 3;
+
+    const rows = await db.query.extractionCorrections.findMany({
+      where: eq(schema.extractionCorrections.orgId, tenant.orgId),
+      columns: { documentType: true, correctionCount: true, fieldCount: true, corrections: true, captureId: true },
+      limit: 5000,
+    });
+    const { shapes } = aggregateCorrectionRows(rows);
+    res.json({ minCount, candidates: candidateRules(shapes, minCount) });
   }),
 );
