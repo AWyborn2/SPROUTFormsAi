@@ -501,3 +501,137 @@ describe('WorkflowBuilderScreen — summary auto-fill', () => {
     expect('partCompletionMarks' in payload).toBe(false);
   });
 });
+
+/**
+ * The pickers offer OPTIONS of choice fields, not just whole ✓/✗ boxes. A
+ * printed pair — the two pathway lines, "not yet Competent / Competent" —
+ * usually extracts as ONE field with two options, each option carrying its
+ * own printed box; offering only whole fields hid exactly those boxes.
+ */
+describe('WorkflowBuilderScreen — summary auto-fill choice-field options', () => {
+  const pathwayGroup: AssessmentToolDetail['fields'][number] = {
+    id: 'pw-group',
+    type: 'checkbox_group',
+    label: 'Methods used to assess competence',
+    required: false,
+    source: 'imported',
+    options: [
+      'PART 1 and 2: Experienced candidates or Re-assessments',
+      'PART 1, 2, 3, 4, 5 and Final: New and inexperienced candidates',
+    ],
+  };
+  const resultPair: AssessmentToolDetail['fields'][number] = {
+    id: 'result-pair',
+    type: 'radio',
+    label: 'Assessment Result',
+    required: false,
+    source: 'imported',
+    options: ['Candidate not yet Competent', 'Candidate Competent'],
+  };
+
+  it('maps a pathway to one OPTION of a checkbox group', () => {
+    toolResult.data = tool({ fields: [...tool().fields, pathwayGroup] });
+    render(<WorkflowBuilderScreen />);
+
+    const select = screen.getByLabelText(
+      'Printed box for the New / inexperienced pathway',
+    ) as HTMLSelectElement;
+    const wanted = [...select.options].find((o) =>
+      o.text.includes('New and inexperienced candidates'),
+    );
+    expect(wanted).toBeDefined();
+
+    fireEvent.change(select, { target: { value: wanted!.value } });
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      pathwayMarks?: Record<string, { fieldId: string; value: unknown }>;
+    };
+    // A checkbox group ticks by SELECTION: the mark writes the option array.
+    expect(payload.pathwayMarks).toEqual({
+      new: {
+        fieldId: 'pw-group',
+        value: ['PART 1, 2, 3, 4, 5 and Final: New and inexperienced candidates'],
+      },
+    });
+  });
+
+  it('maps the result pair to the OPTIONS of a radio, and round-trips the stored mark', () => {
+    toolResult.data = tool({
+      fields: [...tool().fields, resultPair],
+      manifest: {
+        ...tool().manifest,
+        signOff: {
+          overallSatisfactory: { fieldId: 'result-pair', value: 'Candidate Competent' },
+        },
+      },
+    });
+    render(<WorkflowBuilderScreen />);
+
+    const competent = screen.getByLabelText(
+      'Printed box for Candidate Competent',
+    ) as HTMLSelectElement;
+    // The stored option-mark seeds the select back to its own entry.
+    expect(competent.selectedOptions[0]?.text).toBe(
+      'Assessment Result — Candidate Competent',
+    );
+
+    const notYet = screen.getByLabelText(
+      'Printed box for Candidate not yet Competent',
+    ) as HTMLSelectElement;
+    const wanted = [...notYet.options].find((o) => o.text.includes('not yet Competent'));
+    fireEvent.change(notYet, { target: { value: wanted!.value } });
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      signOff?: { overallNotSatisfactory?: { fieldId: string; value: unknown } };
+    };
+    // A radio ticks by ANSWER: the mark writes the option string.
+    expect(payload.signOff?.overallNotSatisfactory).toEqual({
+      fieldId: 'result-pair',
+      value: 'Candidate not yet Competent',
+    });
+  });
+
+  it('pre-ticks one option of a group as an always-ticked default', () => {
+    toolResult.data = tool({ fields: [...tool().fields, pathwayGroup] });
+    render(<WorkflowBuilderScreen />);
+
+    const add = screen.getByLabelText('Add an always-ticked box') as HTMLSelectElement;
+    const wanted = [...add.options].find((o) => o.text.includes('Experienced candidates'));
+    fireEvent.change(add, { target: { value: wanted!.value } });
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as { fieldDefaults?: Record<string, unknown> };
+    expect(payload.fieldDefaults).toEqual({
+      'pw-group': ['PART 1 and 2: Experienced candidates or Re-assessments'],
+    });
+  });
+
+  it('does not list a checklist that sits inside a part — only the cover methods table', () => {
+    // Every practical observation checklist is a fixed-row two-column table
+    // too; listing them buried the one table that matters. Unmapped tables
+    // inside a part stay out of the card.
+    const practicalChecklist: AssessmentToolDetail['fields'][number] = {
+      id: 'plan-prepare',
+      type: 'repeating_group',
+      label: '1. Plan and Prepare',
+      required: false,
+      source: 'imported',
+      fixedRows: ['Receive – interpret and clarify work instructions'],
+      columns: [
+        { key: 'item', label: 'Item', type: 'text' },
+        { key: 'done', label: 'Done', type: 'checkbox' },
+      ],
+    };
+    // Inside p2's slice (after h2), with no completion mark.
+    toolResult.data = tool({ fields: [...tool().fields, practicalChecklist] });
+    render(<WorkflowBuilderScreen />);
+
+    expect(
+      screen.queryByLabelText(
+        'Part that ticks "Receive – interpret and clarify work instructions"',
+      ),
+    ).toBeNull();
+  });
+});

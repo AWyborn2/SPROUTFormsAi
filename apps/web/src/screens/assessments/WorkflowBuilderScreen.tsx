@@ -10,6 +10,7 @@ import {
   WORKFLOW_ROLES,
   effectiveAccess,
   fieldsInPart,
+  isChoiceField,
   orderedParts,
   orderedSections,
   valueSource,
@@ -1052,6 +1053,28 @@ const PATHWAY_TICK_LABELS: Record<AssessmentPathway, string> = {
 };
 
 /**
+ * Joins a field id to one of its options in a select's value — the unit
+ * separator, which cannot appear in printed text, so the pair round-trips
+ * unambiguously whatever the option says.
+ */
+const OPTION_SEP = '\u001F';
+
+/**
+ * One place a tick can land: a whole ✓/✗-style box (`bool`), one option of a
+ * radio/dropdown (`single`), or one option of a checkbox group (`multi`).
+ * `mark` is the exact DeclaredMark the export writes; `option` is set for the
+ * two option kinds.
+ */
+interface TickTarget {
+  /** The <select> option value — field id, or id + OPTION_SEP + option. */
+  value: string;
+  label: string;
+  kind: 'bool' | 'single' | 'multi';
+  option?: string;
+  mark: DeclaredMark;
+}
+
+/**
  * The summary page's auto-fill wiring, made visible and correctable.
  *
  * Publish GUESSES most of this from printed labels — the result pair from a
@@ -1083,11 +1106,54 @@ function SummaryAutoFill({
   defaults: Record<string, SubmissionValue>;
   onDefaults: (next: Record<string, SubmissionValue>) => void;
 }) {
-  // The same set the prerequisite picker offers: fields a tick can land in.
-  const tickable = useMemo(
-    () => tool.fields.filter((f) => f.type === 'check_cross' || f.type === 'boolean_yes_no'),
-    [tool.fields],
-  );
+  /*
+    EVERYWHERE A TICK CAN LAND. One entry per ✓/✗-style box — and one per
+    OPTION of a choice field, because a printed pair ("Candidate not yet
+    Competent / Candidate Competent", the two pathway lines) usually extracts
+    as ONE field with two options, each option carrying its own printed box.
+    Offering only whole fields hid exactly the boxes this card exists to map.
+    The entry's mark carries the value the export must write: `true` on a
+    ✓/✗ box, the option string on a radio/dropdown, a one-option array on a
+    checkbox group — the shapes their renderers tick on.
+  */
+  const tickTargets = useMemo(() => {
+    const out: TickTarget[] = [];
+    for (const f of tool.fields) {
+      if (f.type === 'check_cross' || f.type === 'boolean_yes_no' || f.type === 'checkbox') {
+        out.push({
+          value: f.id,
+          label: f.label || f.id,
+          kind: 'bool',
+          mark: { fieldId: f.id, value: true },
+        });
+      } else if (isChoiceField(f.type)) {
+        for (const option of f.options ?? []) {
+          out.push({
+            // OPTION_SEP cannot appear in printed text, so the pair is unambiguous.
+            value: `${f.id}${OPTION_SEP}${option}`,
+            label: f.label && f.label !== option ? `${f.label} — ${option}` : option,
+            kind: f.type === 'checkbox_group' ? 'multi' : 'single',
+            option,
+            mark: { fieldId: f.id, value: f.type === 'checkbox_group' ? [option] : option },
+          });
+        }
+      }
+    }
+    return out;
+  }, [tool.fields]);
+
+  /** The select value a stored mark round-trips to, '' when unmapped. */
+  const targetValue = (mark: DeclaredMark | undefined): string => {
+    if (!mark) return '';
+    if (Array.isArray(mark.value)) {
+      return mark.value[0] !== undefined ? `${mark.fieldId}${OPTION_SEP}${mark.value[0]}` : '';
+    }
+    if (typeof mark.value === 'string') return `${mark.fieldId}${OPTION_SEP}${mark.value}`;
+    return mark.fieldId;
+  };
+  const markFor = (value: string): DeclaredMark | undefined =>
+    tickTargets.find((t) => t.value === value)?.mark;
+
   const parts = orderedParts(tool.manifest);
   // Only the pathways this tool's parts actually distinguish, plus any a mark
   // already names — offering all three on a two-pathway paper invites a
@@ -1095,30 +1161,47 @@ function SummaryAutoFill({
   const pathways = ASSESSMENT_PATHWAYS.filter(
     (p) => parts.some((part) => part.pathways.includes(p)) || pathwayMarks[p] !== undefined,
   );
-  // The printed method checklists: fixed-row two-column tables, the same shape
-  // the per-row Preset control recognises — label column plus tick column.
+  /*
+    The printed method checklists: fixed-row two-column tables OUTSIDE every
+    part — the summary page belongs to no part, which is what makes its
+    checklist a completion record rather than a question. Without the
+    outside-a-part test this listed every practical observation checklist on
+    the paper as a thing to map, which buried the one table that matters. A
+    table already carrying a mapping stays visible wherever it sits, so
+    nothing configured can hide.
+  */
+  const coveredByParts = useMemo(() => {
+    const ids = new Set<string>();
+    for (const p of tool.manifest.parts) {
+      for (const f of fieldsInPart(tool.fields, tool.manifest, p.key)) ids.add(f.id);
+    }
+    return ids;
+  }, [tool]);
   const methodTables = tool.fields.filter(
     (f) =>
       f.type === 'repeating_group' &&
       (f.fixedRows?.length ?? 0) > 0 &&
-      (f.columns?.length ?? 0) === 2,
+      (f.columns?.length ?? 0) === 2 &&
+      (!coveredByParts.has(f.id) || completion.some((m) => m.fieldId === f.id)),
   );
 
   const setResult = (
     key: 'overallSatisfactory' | 'overallNotSatisfactory',
-    fieldId: string,
+    value: string,
   ) => {
     // Spread keeps the name/signature/date pointers and the coaching pair —
     // this card repoints the result boxes and must not shed the rest.
     const next = { ...(signOff ?? {}) };
-    if (fieldId) next[key] = { fieldId, value: true };
+    const mark = markFor(value);
+    if (mark) next[key] = mark;
     else delete next[key];
     onSignOff(next);
   };
 
-  const setPathway = (pathway: AssessmentPathway, fieldId: string) => {
+  const setPathway = (pathway: AssessmentPathway, value: string) => {
     const next = { ...pathwayMarks };
-    if (fieldId) next[pathway] = { fieldId, value: true };
+    const mark = markFor(value);
+    if (mark) next[pathway] = mark;
     else delete next[pathway];
     onPathwayMarks(next);
   };
@@ -1130,11 +1213,44 @@ function SummaryAutoFill({
     onCompletion(partKey ? [...rest, { partKey, fieldId: table.id, rowIndex, columnKey }] : rest);
   };
 
-  const preTicked = tickable.filter((f) => defaults[f.id] === true);
-  const setPreTick = (fieldId: string, on: boolean) => {
+  /*
+    A default is "active" when the stored default already carries this
+    target's tick — `true` on a box, the option on a radio, membership in a
+    group's array. Group options accumulate into ONE array default; the other
+    shapes replace, because a radio has one answer.
+  */
+  const storedOptions = (fieldId: string): string[] => {
+    const stored = defaults[fieldId];
+    return Array.isArray(stored)
+      ? (stored as unknown[]).filter((o): o is string => typeof o === 'string')
+      : [];
+  };
+  const defaultActive = (t: TickTarget): boolean => {
+    if (t.kind === 'bool') return defaults[t.mark.fieldId] === true;
+    if (t.kind === 'single') return defaults[t.mark.fieldId] === t.option;
+    return storedOptions(t.mark.fieldId).includes(t.option!);
+  };
+  const preTicked = tickTargets.filter(defaultActive);
+  const addPreTick = (value: string) => {
+    const t = tickTargets.find((x) => x.value === value);
+    if (!t) return;
     const next = { ...defaults };
-    if (on) next[fieldId] = true;
-    else delete next[fieldId];
+    if (t.kind === 'multi') {
+      next[t.mark.fieldId] = [...new Set([...storedOptions(t.mark.fieldId), t.option!])];
+    } else {
+      next[t.mark.fieldId] = t.kind === 'bool' ? true : t.option!;
+    }
+    onDefaults(next);
+  };
+  const removePreTick = (t: TickTarget) => {
+    const next = { ...defaults };
+    if (t.kind === 'multi') {
+      const remaining = storedOptions(t.mark.fieldId).filter((o) => o !== t.option);
+      if (remaining.length > 0) next[t.mark.fieldId] = remaining;
+      else delete next[t.mark.fieldId];
+    } else {
+      delete next[t.mark.fieldId];
+    }
     onDefaults(next);
   };
 
@@ -1175,16 +1291,16 @@ function SummaryAutoFill({
             finding: a recorded answer always wins over it.
           </p>
           <div className="flex flex-wrap items-center gap-1.5">
-            {preTicked.map((f) => (
+            {preTicked.map((t) => (
               <span
-                key={f.id}
+                key={t.value}
                 className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-page px-2 py-0.5 text-[11px]"
               >
-                {f.label || f.id}
+                {t.label}
                 <button
                   type="button"
-                  aria-label={`Stop pre-ticking ${f.label || f.id}`}
-                  onClick={() => setPreTick(f.id, false)}
+                  aria-label={`Stop pre-ticking ${t.label}`}
+                  onClick={() => removePreTick(t)}
                   className="text-text-tertiary hover:text-text-primary"
                 >
                   ×
@@ -1194,15 +1310,15 @@ function SummaryAutoFill({
             <select
               aria-label="Add an always-ticked box"
               value=""
-              onChange={(e) => e.target.value && setPreTick(e.target.value, true)}
+              onChange={(e) => e.target.value && addPreTick(e.target.value)}
               className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
             >
               <option value="">— add a box —</option>
-              {tickable
-                .filter((f) => defaults[f.id] !== true)
-                .map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.label || f.id}
+              {tickTargets
+                .filter((t) => !defaultActive(t))
+                .map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
                   </option>
                 ))}
             </select>
@@ -1224,14 +1340,14 @@ function SummaryAutoFill({
               <span className="text-[11px] text-text-tertiary">ticks</span>
               <select
                 aria-label={`Printed box for the ${PATHWAY_TICK_LABELS[pathway]} pathway`}
-                value={pathwayMarks[pathway]?.fieldId ?? ''}
+                value={targetValue(pathwayMarks[pathway])}
                 onChange={(e) => setPathway(pathway, e.target.value)}
                 className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
               >
                 <option value="">— not printed —</option>
-                {tickable.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.label || f.id}
+                {tickTargets.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
                   </option>
                 ))}
               </select>
@@ -1251,14 +1367,14 @@ function SummaryAutoFill({
               <span className="min-w-[190px] text-[11.5px] text-text-secondary">{row.label}</span>
               <select
                 aria-label={`Printed box for ${row.label}`}
-                value={row.mark?.fieldId ?? ''}
+                value={targetValue(row.mark)}
                 onChange={(e) => setResult(row.key, e.target.value)}
                 className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
               >
                 <option value="">— not mapped —</option>
-                {tickable.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.label || f.id}
+                {tickTargets.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
                   </option>
                 ))}
               </select>
