@@ -444,7 +444,9 @@ describe('WorkflowBuilderScreen — summary auto-fill', () => {
     expect(payload.pathwayMarks).toEqual({ new: { fieldId: 'crit1', value: true } });
   });
 
-  it('shows the methods mapping publish guessed, and saves a corrected row', () => {
+  it('shows the mapping publish guessed ON the table row, and saves a corrected one', () => {
+    // The control lives on the field itself — open its section and heading
+    // group to reach it, like any other field override.
     toolResult.data = tool({
       fields: [...tool().fields, methodsTable],
       manifest: {
@@ -453,12 +455,14 @@ describe('WorkflowBuilderScreen — summary auto-fill', () => {
       },
     });
     render(<WorkflowBuilderScreen />);
+    fireEvent.click(screen.getByText('Part 2 — Practical'));
+    fireEvent.click(screen.getByText('Plan & Prepare'));
 
-    const row0 = screen.getByLabelText('Part that ticks "1. Theory"') as HTMLSelectElement;
+    const row0 = screen.getByLabelText('When "1. Theory" ticks') as HTMLSelectElement;
     // The invisible guess, finally visible.
     expect(row0.value).toBe('p1');
 
-    fireEvent.change(screen.getByLabelText('Part that ticks "2. Practical Demonstration"'), {
+    fireEvent.change(screen.getByLabelText('When "2. Practical Demonstration" ticks'), {
       target: { value: 'p2' },
     });
     fireEvent.click(screen.getByText('Save workflow'));
@@ -469,6 +473,37 @@ describe('WorkflowBuilderScreen — summary auto-fill', () => {
     expect(payload.partCompletionMarks).toEqual([
       { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'done' },
       { partKey: 'p2', fieldId: 'methods', rowIndex: 1, columnKey: 'done' },
+    ]);
+  });
+
+  it('switching a row from Always ticked to a part clears the preset — one row, one mechanism', () => {
+    // A row pre-ticked AND completion-mapped would print ticked on untouched
+    // cases while claiming to track completion; the one dropdown makes the
+    // states exclusive.
+    toolResult.data = tool({
+      fields: [...tool().fields, methodsTable],
+      manifest: {
+        ...tool().manifest,
+        fieldDefaults: { methods: [{ done: true }] },
+      },
+    });
+    render(<WorkflowBuilderScreen />);
+    fireEvent.click(screen.getByText('Part 2 — Practical'));
+    fireEvent.click(screen.getByText('Plan & Prepare'));
+
+    const row0 = screen.getByLabelText('When "1. Theory" ticks') as HTMLSelectElement;
+    expect(row0.value).toBe('__always__');
+
+    fireEvent.change(row0, { target: { value: 'p1' } });
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      fieldDefaults?: Record<string, unknown> | null;
+      partCompletionMarks?: Array<{ partKey: string; rowIndex: number }>;
+    };
+    expect(payload.fieldDefaults).toBeNull();
+    expect(payload.partCompletionMarks).toEqual([
+      { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'done' },
     ]);
   });
 
@@ -608,30 +643,35 @@ describe('WorkflowBuilderScreen — summary auto-fill choice-field options', () 
     });
   });
 
-  it('does not list a checklist that sits inside a part — only the cover methods table', () => {
-    // Every practical observation checklist is a fixed-row two-column table
-    // too; listing them buried the one table that matters. Unmapped tables
-    // inside a part stay out of the card.
-    const practicalChecklist: AssessmentToolDetail['fields'][number] = {
-      id: 'plan-prepare',
-      type: 'repeating_group',
-      label: '1. Plan and Prepare',
+  it('keeps quiz machinery out of the pickers — keyed questions and their ✓/✗ cells', () => {
+    // Offering every option of a thirty-question paper buried the handful of
+    // real summary boxes. A keyed question and the cell its mark lands in are
+    // auto-marking's territory, not a summary target.
+    const question: AssessmentToolDetail['fields'][number] = {
+      id: 'quiz-q1',
+      type: 'radio',
+      label: '1. What are the minimum requirements?',
       required: false,
       source: 'imported',
-      fixedRows: ['Receive – interpret and clarify work instructions'],
-      columns: [
-        { key: 'item', label: 'Item', type: 'text' },
-        { key: 'done', label: 'Done', type: 'checkbox' },
-      ],
+      options: ['PPE', 'Crib bag'],
+      answerKey: ['PPE'],
+      outcomeTarget: { fieldId: 'quiz-q1-out' },
     };
-    // Inside p2's slice (after h2), with no completion mark.
-    toolResult.data = tool({ fields: [...tool().fields, practicalChecklist] });
+    const cell: AssessmentToolDetail['fields'][number] = {
+      id: 'quiz-q1-out',
+      type: 'check_cross',
+      label: 'Outcome for Q1',
+      required: false,
+      source: 'imported',
+    };
+    toolResult.data = tool({ fields: [...tool().fields, question, cell] });
     render(<WorkflowBuilderScreen />);
 
-    expect(
-      screen.queryByLabelText(
-        'Part that ticks "Receive – interpret and clarify work instructions"',
-      ),
-    ).toBeNull();
+    const add = screen.getByLabelText('Add an always-ticked box') as HTMLSelectElement;
+    const texts = [...add.options].map((o) => o.text);
+    expect(texts.some((t) => t.includes('minimum requirements'))).toBe(false);
+    expect(texts).not.toContain('Outcome for Q1');
+    // The real boxes are still there.
+    expect(texts).toContain('Wears correct PPE');
   });
 });

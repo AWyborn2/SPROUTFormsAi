@@ -748,6 +748,54 @@ describe('withDerivedMarks', () => {
     expect(healed.values['q2-out']).toBe(true);
   });
 
+  it("fills the part's auto-locked verdict radio, by the same rule hand-in writes it", () => {
+    // An attempt marked before the hand-in write existed stores no verdict;
+    // the radio the author locked to `auto` backfills from the outcome here.
+    const fieldsWithRadio: FormField[] = [
+      ...versionFields.slice(0, 5),
+      {
+        id: 'p1-verdict',
+        type: 'radio',
+        label: 'The Candidate’s responses were',
+        required: false,
+        source: 'imported',
+        options: ['Satisfactory', 'Not Satisfactory'],
+      },
+      ...versionFields.slice(5),
+    ];
+    const manifest: AssessmentToolManifest = {
+      ...BASE,
+      workflow: {
+        roles: ['candidate', 'assessor'],
+        sections: [
+          {
+            key: 's1',
+            ordinal: 1,
+            label: 'Theory',
+            partKey: 'p1',
+            access: { candidate: 'fill', assessor: 'fill' },
+            fieldSource: { 'p1-verdict': 'auto' },
+          },
+        ],
+      },
+    };
+
+    const healed = withDerivedMarks(
+      passed('p1', { values: { q1: ['a'], q2: ['a'] } }),
+      fieldsWithRadio,
+      manifest,
+    );
+    expect(healed.values['p1-verdict']).toBe('Satisfactory');
+
+    // A verdict somebody already recorded stands, as everywhere in this seam.
+    const kept = withDerivedMarks(
+      passed('p1', { values: { q1: ['a'], q2: ['a'], 'p1-verdict': 'Not Satisfactory' } }),
+      fieldsWithRadio,
+      manifest,
+    );
+    expect(kept.values['p1-verdict']).toBe('Not Satisfactory');
+  });
+
   it('leaves a judged part alone — its marks belong to the person', () => {
     const attempt = passed('p2', { values: { prac: true } });
 

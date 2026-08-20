@@ -10,6 +10,7 @@ import type { AssessmentPart, AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
 import {
+  autoVerdictWrite,
   deriveChecklistOutcome,
   incorrectQuestionsNote,
   isSelfMarking,
@@ -177,6 +178,41 @@ describe('isSelfMarking (U15)', () => {
       signOff: {
         overallSatisfactory: { fieldId: 'result', value: 'Candidate Competent' },
         overallNotSatisfactory: { fieldId: 'result', value: 'Candidate not yet Competent' },
+      },
+    };
+
+    expect(isSelfMarking(fields, manifest, 'p1')).toBe(true);
+  });
+
+  it('still self-marks when the verdict radio is locked to auto instead of declared', () => {
+    /*
+      The other spelling of the same intent: the workflow editor's `auto` lock
+      on the printed pair, which `autoVerdictWrite` fills at hand-in. Without
+      this, the switch that turns the auto-verdict ON was the same switch
+      turning the quiz's marking OFF.
+    */
+    const fields = [
+      header('h'),
+      q('g1', ['a']),
+      outcome('g1-out'),
+      unkeyed('verdict', { options: ['Satisfactory', 'Not Satisfactory'] }),
+    ];
+    const manifest: AssessmentToolManifest = {
+      parts: [
+        { key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'], startFieldId: 'h' },
+      ],
+      workflow: {
+        roles: ['candidate', 'assessor'],
+        sections: [
+          {
+            key: 's1',
+            ordinal: 1,
+            label: 'P1',
+            partKey: 'p1',
+            access: { candidate: 'fill', assessor: 'fill' },
+            fieldSource: { verdict: 'auto' },
+          },
+        ],
       },
     };
 
@@ -770,5 +806,77 @@ describe('deriveChecklistOutcome (B — a practical part auto-marks from its Yes
     // is still satisfactory on the one real criterion.
     const out = deriveChecklistOutcome(withOutcomeCell, manifest, part, { c1: 'Yes' }, AUTO);
     expect(out?.outcome).toBe('satisfactory');
+  });
+});
+
+/**
+ * The theory-side twin of the checklist derivation: a part that already knows
+ * its outcome writes the verdict radio the author locked to `auto`.
+ */
+describe('autoVerdictWrite', () => {
+  const fields: FormField[] = [
+    header('h'),
+    q('g1', ['a']),
+    outcome('g1-out'),
+    unkeyed('verdict', { type: 'radio', options: ['Satisfactory', 'Not Satisfactory'] }),
+  ];
+  const manifestWith = (fieldSource?: Record<string, 'entry' | 'prefill' | 'auto'>): AssessmentToolManifest => ({
+    parts: [
+      { key: 'p1', ordinal: 1, label: 'P1', kind: 'theory', pathways: ['new'], startFieldId: 'h' },
+    ],
+    workflow: {
+      roles: ['candidate', 'assessor'],
+      sections: [
+        {
+          key: 's1',
+          ordinal: 1,
+          label: 'P1',
+          partKey: 'p1',
+          access: { candidate: 'fill', assessor: 'fill' },
+          ...(fieldSource ? { fieldSource } : {}),
+        },
+      ],
+    },
+  });
+  const part = (m: AssessmentToolManifest) => m.parts[0]!;
+
+  it('writes the matching half of the pair for each outcome', () => {
+    const m = manifestWith({ verdict: 'auto' });
+    const source = m.workflow!.sections[0]!.fieldSource;
+
+    expect(autoVerdictWrite(fields, m, part(m), 'satisfactory', source)).toEqual({
+      fieldId: 'verdict',
+      value: 'Satisfactory',
+    });
+    expect(autoVerdictWrite(fields, m, part(m), 'not_satisfactory', source)).toEqual({
+      fieldId: 'verdict',
+      value: 'Not Satisfactory',
+    });
+  });
+
+  it('writes nothing unless the author locked the field to auto — an ordinary verdict stays the assessor’s', () => {
+    const m = manifestWith();
+    expect(autoVerdictWrite(fields, m, part(m), 'satisfactory', undefined)).toBeNull();
+
+    const entry = manifestWith({ verdict: 'entry' });
+    expect(
+      autoVerdictWrite(fields, entry, part(entry), 'satisfactory', entry.workflow!.sections[0]!.fieldSource),
+    ).toBeNull();
+  });
+
+  it('writes nothing when the auto-locked field has no verdict pair to resolve', () => {
+    // Options that spell neither satisfactory nor not — a coin toss on the
+    // single most consequential cell is refused, same as the checklist path.
+    const odd: FormField[] = [
+      header('h'),
+      q('g1', ['a']),
+      outcome('g1-out'),
+      unkeyed('verdict', { type: 'radio', options: ['Alpha', 'Beta'] }),
+    ];
+    const m = manifestWith({ verdict: 'auto' });
+
+    expect(
+      autoVerdictWrite(odd, m, part(m), 'satisfactory', m.workflow!.sections[0]!.fieldSource),
+    ).toBeNull();
   });
 });
