@@ -15,6 +15,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   hoursByTask,
+  logbookDurationRows,
   logbookRows,
   logbookTaskProgress,
   rowsByTask,
@@ -123,6 +124,89 @@ describe('logbookRows', () => {
     const rows = logbookRows([header('h-log')], PART, { entries: ROWS });
 
     expect(totalLoggedHours(rows, 'duration')).toBe(47);
+  });
+});
+
+describe('logbookDurationRows', () => {
+  // The HOURS total, which is a different question from `logbookRows`. A logbook
+  // part may hold more than one table — Part 5's supervised and minimal-
+  // supervision logs both accrue against the same minimum — and the total is
+  // the sum over every one of them, not just the first the manifest names.
+  const PART = { durationColumnKey: 'duration' };
+
+  const SUPERVISED = [
+    { __key: 's1', date: '2026-07-01', duration: 20 },
+    { __key: 's2', date: '2026-07-08', duration: 27 },
+  ];
+  const MINIMAL = [
+    { __key: 'm1', date: '2026-08-01', duration: 6 },
+    { __key: 'm2', date: '2026-08-02', duration: 4 },
+  ];
+
+  it('sums rows from EVERY table that carries the duration column', () => {
+    // The bug: only the first repeater table accumulated. Two tables on the same
+    // part, both carrying the duration column, must total together.
+    const rows = logbookDurationRows(PART, {
+      'supervised-log': SUPERVISED,
+      'minimal-supervision-log': MINIMAL,
+    });
+
+    expect(rows).toHaveLength(4);
+    expect(totalLoggedHours(rows, 'duration')).toBe(57);
+  });
+
+  it('ignores an array of strings sitting beside the logs', () => {
+    const rows = logbookDurationRows(PART, {
+      'some-checkbox': ['Stop all work', 'Park up safely'],
+      'supervised-log': SUPERVISED,
+      'minimal-supervision-log': MINIMAL,
+    });
+
+    expect(totalLoggedHours(rows, 'duration')).toBe(57);
+  });
+
+  it('leaves out a table that does not carry the duration column', () => {
+    // Another part's table would report someone else's hours. Only tables
+    // carrying THIS part's duration column count.
+    const rows = logbookDurationRows(PART, {
+      'supervised-log': SUPERVISED,
+      'other-part-table': [{ __key: 'x', minutes: 90 }],
+    });
+
+    expect(rows).toEqual(SUPERVISED);
+  });
+
+  it('collects a table whose leading row is blank but a later row is filled', () => {
+    // A logbook filled a shift at a time leads with an empty row ready for the
+    // next entry. Keying off the first row alone would drop the table's hours.
+    const rows = logbookDurationRows(PART, {
+      'minimal-supervision-log': [{ __key: 'blank' }, { __key: 'm1', duration: 6 }],
+    });
+
+    expect(totalLoggedHours(rows, 'duration')).toBe(6);
+  });
+
+  it('carries half-filled rows through without counting them — progressive saving', () => {
+    // The save route stores in-progress rows; their calc duration is still ''.
+    // They ride along on the record but contribute nothing to the total, so a
+    // candidate can save mid-shift without a blank row rejecting the save.
+    const rows = logbookDurationRows(PART, {
+      'minimal-supervision-log': [
+        { __key: 'm1', duration: 6 },
+        { __key: 'm2', duration: '' },
+        { __key: 'm3', start: '100' },
+      ],
+    });
+
+    expect(rows).toHaveLength(3);
+    expect(totalLoggedHours(rows, 'duration')).toBe(6);
+  });
+
+  it('reads nothing from an empty attempt or a part with no duration column', () => {
+    expect(logbookDurationRows(PART, {})).toEqual([]);
+    expect(logbookDurationRows(PART, null)).toEqual([]);
+    expect(logbookDurationRows(PART, undefined)).toEqual([]);
+    expect(logbookDurationRows({ durationColumnKey: undefined }, { 'log': SUPERVISED })).toEqual([]);
   });
 });
 

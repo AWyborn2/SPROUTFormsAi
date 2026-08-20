@@ -1672,6 +1672,49 @@ export function logbookRows(
     | undefined ?? [];
 }
 
+/**
+ * EVERY logged row a logbook part totals its hours from — across ALL of the
+ * part's tables, not just the first.
+ *
+ * `logbookRows` answers "the part's DECLARED table": one table, because the
+ * retry carry-forward re-keys each table on its own and must not merge them.
+ * The HOURS total is a different question. A part can hold more than one
+ * repeating table — Part 5's supervised and minimal-supervision logs both
+ * accrue against the same minimum — and the total is the sum over every one of
+ * them. Reading only the first table under-reports a candidate's experience,
+ * which for a figure measured against a safety threshold is the wrong error
+ * direction.
+ *
+ * Value-based on purpose. An attempt's values hold only its own part's fields —
+ * the save route writes nothing else — so "every row list carrying this
+ * column" is exactly this part's logs, and it needs neither the field list nor
+ * the manifest. That is what lets the client progress meter and the server
+ * threshold compute the identical figure, and what lets it span tables the
+ * section-scoped `logbookRows` never reaches when each table sits in its own
+ * sub-section.
+ */
+export function logbookDurationRows(
+  part: Pick<AssessmentPart, 'durationColumnKey'>,
+  values: Record<string, SubmissionValue> | null | undefined,
+): RepeatingRowValue[] {
+  const key = part.durationColumnKey;
+  if (!key) return [];
+  const all = values ?? {};
+  const isRowList = (v: unknown): v is RepeatingRowValue[] =>
+    Array.isArray(v) && v.length > 0 && v.every((r) => typeof r === 'object' && r !== null);
+  const out: RepeatingRowValue[] = [];
+  for (const v of Object.values(all)) {
+    // A row list is one of this part's logs if ANY of its rows carries the
+    // duration column — not merely the first. A logbook filled a shift at a
+    // time often leads with a blank row left ready for the next entry, and a
+    // table whose duration is typed rather than calculated has no cell there
+    // until someone fills one; keying off the first row alone would drop the
+    // whole table's hours in both cases.
+    if (isRowList(v) && v.some((r) => key in r)) out.push(...v);
+  }
+  return out;
+}
+
 /** A logbook part's duration unit, defaulting the omitted case to hours. */
 export type DurationUnit = 'hours' | 'minutes';
 
