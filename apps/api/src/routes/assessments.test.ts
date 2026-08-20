@@ -5391,3 +5391,110 @@ describe('POST /assessment-tools/:id/republish', () => {
   });
 });
 
+
+/**
+ * "Where each part applies" (U9), finally ENFORCED at case runtime. The rule
+ * was stored and edited but never consulted by progress, so a case demanded
+ * every pathway part regardless of its Location — a Boddington dozer case
+ * still owed the Worsley theory paper.
+ */
+describe('location parts rule at case runtime', () => {
+  async function caseWithRule(base: string, locationId?: string) {
+    const tool = await seedTool(base);
+    // MINING narrows to p1, p2, p4 — the logbook p3 is not done there.
+    const ruleRes = await fetch(`${base}/assessment-tools/${tool.id}/location-parts`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ locationPartKeys: { [MINING]: ['p1', 'p2', 'p4'] } }),
+    });
+    expect(ruleRes.status).toBe(200);
+
+    const c = (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          toolId: tool.id,
+          candidateUserId: CANDIDATE,
+          pathway: 'new',
+          ...(locationId ? { locationId } : {}),
+        }),
+      })
+    ).json()) as { id: string };
+    return c.id;
+  }
+
+  const open = (base: string, caseId: string, part: string) =>
+    fetch(`${base}/assessment-cases/${caseId}/parts/${part}/attempts`, {
+      method: 'POST',
+      headers: auth(),
+    });
+
+  async function passPart(
+    base: string,
+    caseId: string,
+    part: string,
+    values: Record<string, unknown>,
+    outcome: Record<string, unknown>,
+  ) {
+    const a = (await (await open(base, caseId, part)).json()) as { id: string };
+    await fetch(`${base}/assessment-cases/${caseId}/attempts/${a.id}`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ values }),
+    });
+    const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${a.id}/outcome`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify(outcome),
+    });
+    expect(res.status).toBe(200);
+  }
+
+  it('completes a case without the part its Location excludes, and refuses to open it', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const caseId = await caseWithRule(base, MINING);
+
+      // The excluded logbook is not this case's to open — same refusal as a
+      // part outside the pathway.
+      const p3 = await open(base, caseId, 'p3');
+      expect(p3.status).toBe(400);
+      expect(((await p3.json()) as { error: string }).error).toBe('part_not_in_pathway');
+
+      await passPart(base, caseId, 'p1', { q1: ['a'] }, {});
+      await passPart(base, caseId, 'p2', {}, { outcome: 'satisfactory' });
+      // p4 unlocks with p3 skipped — the excluded part never blocks the
+      // sequence…
+      await passPart(base, caseId, 'p4', {}, { outcome: 'satisfactory' });
+
+      // …and the case is finished without it.
+      expect(rows(store, 'assessmentCases').find((r) => r.id === caseId)?.state).toBe(
+        'awaiting_sign_off',
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still requires everything at a Location the rule does not list — the safe direction', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const caseId = await caseWithRule(base, RAW_MATERIALS);
+
+      await passPart(base, caseId, 'p1', { q1: ['a'] }, {});
+      await passPart(base, caseId, 'p2', {}, { outcome: 'satisfactory' });
+
+      // p3 (the logbook) still gates p4 here: an unlisted Location narrows
+      // nothing (R75).
+      const p4 = await open(base, caseId, 'p4');
+      expect(p4.status).toBe(409);
+      expect(((await p4.json()) as { error: string }).error).toBe('part_locked');
+    } finally {
+      server.close();
+    }
+  });
+});

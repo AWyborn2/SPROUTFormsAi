@@ -502,6 +502,26 @@ describe('assembleCaseValues — part completion ticks', () => {
     expect(values['methods']).toBeUndefined();
   });
 
+  it('never reports a Location-excluded part as a blank required one', () => {
+    // The refusal "required by this pathway but no passing attempt, yet
+    // signed off" reads `blank` — a part the case's Location excludes must
+    // not appear there, or no location-scoped case could ever export signed.
+    const withRule = assembleCaseValues({
+      manifest: BASE,
+      pathway: 'new',
+      attempts: [passed('p1'), passed('p2')],
+      applicablePartKeys: new Set(['p1', 'p2']),
+    });
+    expect(withRule.blank).toEqual([]);
+
+    const without = assembleCaseValues({
+      manifest: BASE,
+      pathway: 'new',
+      attempts: [passed('p1'), passed('p2')],
+    });
+    expect(without.blank).toEqual(['p3']);
+  });
+
   it('judges a multi-part row against the parts THIS case requires', () => {
     // One "Theory" row covering p1 and p3 — the route resolves which of them
     // this case actually sits (pathway ∩ Location rule) and passes the set.
