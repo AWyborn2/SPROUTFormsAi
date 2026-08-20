@@ -345,6 +345,10 @@ export interface PrerequisiteCheck {
  * fixed-row identity is positional everywhere: the fill surface seeds row i
  * from `fixedRows[i]`, and the exporter maps value rows to printed bands the
  * same way.
+ *
+ * Several marks may name the SAME row — one entry per part — and the row then
+ * ticks when every named part that applies to the case has passed; see
+ * `completionTickRows`.
  */
 export interface PartCompletionMark {
   /** The part whose SATISFACTORY final state ticks the row. */
@@ -363,14 +367,27 @@ export interface PartCompletionMark {
  * `marks` are the entries for ONE field. The result is POSITIONAL — row i is
  * printed row i — with gaps filled by empty rows so a tick at row 5 cannot
  * slide up through a hole at row 2 when the exporter consumes rows in order.
- * Only a SATISFACTORY part writes, and it writes `true` into its own cell:
+ * Only SATISFACTORY parts write, and they write `true` into their own cell:
  * a failed or unstarted part leaves its row exactly as stored, because
  * un-ticked means "not completed", never "failed".
+ *
+ * SEVERAL MARKS MAY SHARE ONE ROW, and then the row ticks when EVERY mapped
+ * part THAT APPLIES TO THIS CASE has passed. The case that forced the rule:
+ * the Track Dozer's "Theory" method row covers three theory parts — General
+ * plus one of two location-specific papers — so "any passed" ticks after
+ * General alone, and "all passed" never ticks because no candidate sits both
+ * locations' papers. `applicablePartKeys` is the case's own required set
+ * (pathway ∩ location rule, see `casePartKeys`); a mapped part outside it
+ * simply does not count. Omitted means every mapped part applies, which is
+ * exact for single-mark rows and for tools with no location rule. A row none
+ * of whose mapped parts apply stays untouched — it is not this case's row to
+ * tick.
  */
 export function completionTickRows(
   marks: readonly PartCompletionMark[],
   progress: readonly PartProgress[],
   existing?: SubmissionValue,
+  applicablePartKeys?: ReadonlySet<string>,
 ): RepeatingRowValue[] {
   const rows: RepeatingRowValue[] = Array.isArray(existing)
     ? (existing as RepeatingRowValue[]).map((r) =>
@@ -382,13 +399,45 @@ export function completionTickRows(
     progress.filter((p) => p.state === 'satisfactory').map((p) => p.part.key),
   );
 
+  const byRow = new Map<number, PartCompletionMark[]>();
   for (const mark of marks) {
-    if (!satisfied.has(mark.partKey)) continue;
-    while (rows.length <= mark.rowIndex) rows.push({});
-    rows[mark.rowIndex]![mark.columnKey] = true;
+    const group = byRow.get(mark.rowIndex);
+    if (group) group.push(mark);
+    else byRow.set(mark.rowIndex, [mark]);
+  }
+
+  for (const [rowIndex, group] of byRow) {
+    const applicable = applicablePartKeys
+      ? group.filter((m) => applicablePartKeys.has(m.partKey))
+      : group;
+    if (applicable.length === 0) continue;
+    if (!applicable.every((m) => satisfied.has(m.partKey))) continue;
+    while (rows.length <= rowIndex) rows.push({});
+    for (const mark of applicable) rows[rowIndex]![mark.columnKey] = true;
   }
 
   return rows;
+}
+
+/**
+ * The part keys THIS CASE actually requires: the pathway's parts, narrowed by
+ * the tool's per-Location rule when the case names a Location.
+ *
+ * The one derivation `completionTickRows` needs to judge a multi-part row,
+ * kept here so its answer can never drift from the planning engine's — both
+ * sides read `resolveLocationParts`, whose absence rule (an unlisted Location
+ * requires everything) errs toward the longer assessment.
+ */
+export function casePartKeys(
+  manifest: AssessmentToolManifest,
+  pathway: AssessmentPathway,
+  locationPartKeys: LocationPartKeys | undefined,
+  locationId: string | null | undefined,
+): Set<string> {
+  const pathwayKeys = requiredParts(manifest, pathway).map((p) => p.key);
+  return new Set(
+    resolveLocationParts(pathwayKeys, locationPartKeys ?? {}, locationId ? [locationId] : []),
+  );
 }
 
 /** Problems with completion-mark mappings — shared by publish and validation. */

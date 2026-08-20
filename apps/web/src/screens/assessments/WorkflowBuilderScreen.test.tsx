@@ -476,6 +476,49 @@ describe('WorkflowBuilderScreen — summary auto-fill', () => {
     ]);
   });
 
+  it('maps one row to SEVERAL parts with the "+ and…" adder, and removes one by its chip', () => {
+    /*
+      The Track Dozer's Theory method spans three theory parts. The row ticks
+      once every mapped part the case requires has passed, so the author lists
+      them all here and the case's Location decides which ones count.
+    */
+    toolResult.data = tool({
+      fields: [...tool().fields, methodsTable],
+      manifest: {
+        ...tool().manifest,
+        partCompletionMarks: [{ partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'done' }],
+      },
+    });
+    render(<WorkflowBuilderScreen />);
+    fireEvent.click(screen.getByText('Part 2 — Practical'));
+    fireEvent.click(screen.getByText('Plan & Prepare'));
+
+    fireEvent.change(screen.getByLabelText('Also require another part before "1. Theory" ticks'), {
+      target: { value: 'p2' },
+    });
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      partCompletionMarks?: Array<{ partKey: string; rowIndex: number }>;
+    };
+    expect(payload.partCompletionMarks).toEqual([
+      { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'done' },
+      { partKey: 'p2', fieldId: 'methods', rowIndex: 0, columnKey: 'done' },
+    ]);
+
+    // The extra renders as a removable chip; removing it leaves the primary.
+    fireEvent.click(
+      screen.getByLabelText('"1. Theory" no longer waits for Part 2 — Practical'),
+    );
+    fireEvent.click(screen.getByText('Save workflow'));
+    const second = saveMutate.mock.calls[1]![0] as {
+      partCompletionMarks?: Array<{ partKey: string }>;
+    };
+    expect(second.partCompletionMarks).toEqual([
+      { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'done' },
+    ]);
+  });
+
   it('switching a row from Always ticked to a part clears the preset — one row, one mechanism', () => {
     // A row pre-ticked AND completion-mapped would print ticked on untouched
     // cases while claiming to track completion; the one dropdown makes the

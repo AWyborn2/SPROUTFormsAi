@@ -107,6 +107,13 @@ export interface AssembleCaseInput {
    * nobody reached.
    */
   resolved?: boolean;
+  /**
+   * The part keys THIS CASE requires (`casePartKeys`: pathway ∩ the tool's
+   * per-Location rule), for judging a multi-part completion row. The route
+   * resolves it — the case's Location lives on the case row, which this seam
+   * deliberately never sees. Omitted means every mapped part applies.
+   */
+  applicablePartKeys?: ReadonlySet<string>;
 }
 
 export interface AssembledCase {
@@ -246,6 +253,7 @@ export function assembleCaseValues({
   attempts,
   signOff,
   resolved,
+  applicablePartKeys,
 }: AssembleCaseInput): AssembledCase {
   const known = new Set(manifest.parts.map((p) => p.key));
   const unknown = [...new Set(attempts.map((a) => a.partKey))].filter((k) => !known.has(k));
@@ -346,6 +354,7 @@ export function assembleCaseValues({
         completionMarks.filter((m) => m.fieldId === fieldId),
         progress,
         values[fieldId],
+        applicablePartKeys,
       );
       if (rows.length > 0) values[fieldId] = rows;
     }

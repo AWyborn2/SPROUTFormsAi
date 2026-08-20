@@ -21,6 +21,7 @@ import {
   moreCoachingRequired,
   type AssessmentCaseState,
   autoVerdictWrite,
+  casePartKeys,
   logbookRows,
   logbookDurationRows,
   markTheory,
@@ -3124,12 +3125,22 @@ assessmentCasesRouter.get(
     const completionIds = new Set((manifest.partCompletionMarks ?? []).map((m) => m.fieldId));
     const completionValues: Record<string, SubmissionValue> = {};
     if (visibleFields.some((f) => completionIds.has(f.id))) {
+      // A multi-part row is judged against THIS case's required set — the
+      // pathway narrowed by the tool's per-Location rule — so a location's
+      // alternative paper never blocks the tick on the other location's case.
+      const applicable = casePartKeys(
+        manifest,
+        row.pathway as AssessmentPathway,
+        tool.locationPartKeys ?? {},
+        row.locationId,
+      );
       for (const f of visibleFields) {
         if (!completionIds.has(f.id)) continue;
         completionValues[f.id] = completionTickRows(
           (manifest.partCompletionMarks ?? []).filter((m) => m.fieldId === f.id),
           progress,
           attempt.values?.[f.id],
+          applicable,
         );
       }
     }
@@ -3949,6 +3960,15 @@ assessmentCasesRouter.post(
         // Resolved = finished either way. The coaching pair is written on a
         // resolved case only; while it is open, neither box is ticked.
         resolved: isTerminalCaseState(row.state as AssessmentCaseState),
+        // What THIS case requires, so a multi-part completion row is judged
+        // against the parts this candidate actually sits — the other
+        // location's paper never blocks the tick.
+        applicablePartKeys: casePartKeys(
+          tool.manifest,
+          row.pathway as AssessmentPathway,
+          tool.locationPartKeys ?? {},
+          row.locationId,
+        ),
       });
       res.setHeader('Content-Type', 'application/pdf');
       res.send(Buffer.from(out));
