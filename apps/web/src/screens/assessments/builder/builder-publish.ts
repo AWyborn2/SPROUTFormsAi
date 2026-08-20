@@ -179,7 +179,16 @@ export function resolvePublishFields(
 
   const next = fields.map((field, index) => {
     const key = keyById.get(field.id);
-    if (!key || key.answerKey.length === 0) return field;
+    /*
+      A MODEL KEY IS A KEY ROW TOO. A written question's draft key carries
+      `answerKey: []` and the assessor's `modelAnswer` prose — it publishes
+      onto the field like a key does, and its outcome target resolves through
+      the SAME tiers, because the target means the same thing on both kinds:
+      the box the mark lands in. The only difference is who writes the mark.
+    */
+    const hasKey = !!key && key.answerKey.length > 0;
+    const hasModel = !!key?.modelAnswer;
+    if (!key || (!hasKey && !hasModel)) return field;
 
     // An existing outcomeTarget on the field wins: it may have been authored
     // explicitly, and a resolved link should not overwrite a decision.
@@ -192,13 +201,25 @@ export function resolvePublishFields(
       }
     }
     if (!target) {
-      unlinked.push(field.id);
-      return field;
+      /*
+        Targetless splits by kind, because the validators split by kind. A KEY
+        with nowhere to land is refused (`validateAnswerKeys` rejects it — a
+        computed mark that never reaches the page reads as a question nobody
+        answered). A MODEL ANSWER with nowhere to land still publishes: it is
+        a marking aid the assessor reads, the validator accepts it targetless,
+        and the assessor's tick simply has no declared cell on this paper.
+      */
+      if (hasKey) {
+        unlinked.push(field.id);
+        return field;
+      }
+      return { ...field, modelAnswer: key.modelAnswer! };
     }
 
     return {
       ...field,
-      answerKey: [...key.answerKey],
+      ...(hasKey ? { answerKey: [...key.answerKey] } : {}),
+      ...(hasModel ? { modelAnswer: key.modelAnswer! } : {}),
       outcomeTarget: typeof target === 'string' ? { fieldId: target } : target,
     };
   });
@@ -329,6 +350,12 @@ export interface PublishSummary {
   questionsKeyed: number;
   questionsVerified: number;
   boxesPlaced: number;
+  /**
+   * Written questions publishing with a model answer. Present only when there
+   * ARE any, so a choice-only draft's summary is byte-identical to before the
+   * kind existed — the same absent-means-today rule every draft shape follows.
+   */
+  writtenGuided?: number;
 }
 
 export function publishSummary(
@@ -336,12 +363,17 @@ export function publishSummary(
   keys: readonly DraftAnswerKey[],
   manifest: AssessmentToolManifest | null,
 ): PublishSummary {
+  const writtenGuided = keys.filter((k) => k.answerKey.length === 0 && k.modelAnswer).length;
   return {
     parts: manifest?.parts.length ?? 0,
+    // Keys only — a model key (`answerKey: []`) is a guide a person marks
+    // against, and counting it "keyed" would claim auto-marking it never does.
     questionsKeyed: keys.filter((k) => k.answerKey.length > 0).length,
     // Verified is reported SEPARATELY from keyed, because an unverified key
     // still marks — the distinction is the attestation, not the behaviour.
+    // It spans both kinds: a model key's attestation is the same claim.
     questionsVerified: keys.filter((k) => k.verifiedAt).length,
     boxesPlaced: fields.reduce((n, f) => n + (f.geometry?.segments.length ?? 0), 0),
+    ...(writtenGuided > 0 ? { writtenGuided } : {}),
   };
 }

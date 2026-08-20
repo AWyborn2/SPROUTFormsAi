@@ -13,7 +13,10 @@
  *
  * The rule here is the script's, scoped tighter:
  *
- *   A SECTION SEEDS ONLY IF ITS QUESTION COUNT MATCHES EXACTLY.
+ *   A SECTION SEEDS ONLY IF ITS QUESTION COUNT MATCHES EXACTLY —
+ *   against the full choice-plus-written list first (how a mixed paper
+ *   numbers itself), then against the choice questions alone (how every
+ *   older, all-choice guide was written). Failing both refuses the section.
  *
  * Per section rather than per document, because a mismatch in one optional
  * stream should not block the two that are correct — and every section that
@@ -83,10 +86,26 @@ export function parseAnswerGuide(raw: unknown): GuideParse {
       const questions = (value as { questions?: unknown })?.questions;
       if (!Array.isArray(questions)) continue;
       for (const q of questions) {
-        const item = q as { n?: unknown; answers?: unknown };
+        const item = q as { n?: unknown; answers?: unknown; answer?: unknown; model_answer?: unknown };
         const n = Number(item.n);
         if (!Number.isInteger(n) || n < 1) continue;
-        const answers = Array.isArray(item.answers) ? item.answers.map(String) : [];
+        /*
+          A WRITTEN entry's answer is prose, and real keys write it three ways:
+          `answers` as a one-string list, a bare `answer`, or `model_answer`.
+          All land in the same `answers` list — the string is kept verbatim and
+          WHAT it is (option letters or a model answer) is decided at match
+          time by the question it lands on, because only the question knows
+          whether it offers options. A second field here would force the parser
+          to guess a kind it cannot know yet.
+        */
+        const prose = [item.answers, item.answer, item.model_answer].find(
+          (raw): raw is string => typeof raw === 'string' && raw.trim().length > 0,
+        );
+        const answers = Array.isArray(item.answers)
+          ? item.answers.map(String)
+          : prose
+            ? [prose]
+            : [];
         if (answers.length === 0) continue;
         entries.push({ section, n, answers });
       }
@@ -273,6 +292,31 @@ export function resolveAnswer(answer: string, options: readonly string[]): strin
   return loose ?? null;
 }
 
+/**
+ * A WRITTEN question, as the guide matcher counts one: prose typed into a
+ * `text`/`textarea` field. An entry landing on one seeds a MODEL ANSWER
+ * (`answerKey: []`, prose the assessor marks against) rather than a key —
+ * the target question decides the seed's kind, never the guide.
+ *
+ * Verdict-flagged fields are out for the same reason the Answer Key step
+ * leaves them out: a written verdict is the assessor's own prose, and a
+ * marking guide for the marker's words is not a thing.
+ */
+function isWrittenQuestion(f: FormField): boolean {
+  return (f.type === 'text' || f.type === 'textarea') && !f.assessorVerdict;
+}
+
+/**
+ * Every answer is a bare option letter — "b", "A". On a written question that
+ * is a POSITIONAL answer with no options to be positional against: the guide
+ * and the document disagree about what kind of question this is, and the only
+ * safe response is to say so. Turning "b" into a model answer would hand the
+ * assessor a one-letter marking guide that means nothing.
+ */
+function allOptionLetters(answers: readonly string[]): boolean {
+  return answers.length > 0 && answers.every((a) => /^[a-z]$/i.test(a.trim()));
+}
+
 /** Why a section could not be seeded. Reported, never swallowed. */
 export interface GuideProblem {
   section: string;
@@ -317,16 +361,41 @@ export function matchGuideToQuestions(
   */
   const sectionless = entries.filter((e) => !e.section);
   if (sectionless.length > 0) {
+    // Written questions belong in the text-match pool too: their labels are
+    // exactly as findable as a choice question's, and a guide that quotes one
+    // is carrying its model answer.
     const all = sections
       .flatMap((s) => s.fields)
       .map((f) => byId.get(f.id))
-      .filter((f): f is FormField => !!f && (f.options?.length ?? 0) > 0 && !excluded.has(f.id));
+      .filter(
+        (f): f is FormField =>
+          !!f && !excluded.has(f.id) && ((f.options?.length ?? 0) > 0 || isWrittenQuestion(f)),
+      );
 
     let count = 0;
     for (const entry of sectionless) {
       const found = questionForText(entry, all);
       if (typeof found === 'string') {
         problems.push({ section: 'This guide', reason: found });
+        continue;
+      }
+      if ((found.options?.length ?? 0) === 0) {
+        // A written match. Letters here mean the guide thinks this question
+        // has options — a kind disagreement, reported rather than guessed at.
+        if (allOptionLetters(entry.answers)) {
+          problems.push({
+            section: 'This guide',
+            reason: `Question ${entry.n} ("${short(found.label)}") is a written question, but the guide answers it with option letter${entry.answers.length === 1 ? '' : 's'} ${entry.answers.map((a) => `"${a}"`).join(', ')}. That answer was not applied.`,
+          });
+          continue;
+        }
+        keys.push({
+          fieldId: found.id,
+          answerKey: [],
+          modelAnswer: entry.answers.join('\n'),
+          source: 'guide_json',
+        });
+        count += 1;
         continue;
       }
       const resolved = entry.answers.map((a) => resolveAnswer(a, found.options ?? []));
@@ -364,22 +433,40 @@ export function matchGuideToQuestions(
       continue;
     }
 
-    // Only questions — a section's headings and text boxes are not numbered by
-    // a guide and must not consume one of its positions.
-    const questions = section.fields
+    // Only questions — a section's headings are not numbered by a guide and
+    // must not consume one of its positions.
+    const inSection = section.fields
       .map((f) => byId.get(f.id))
-      .filter((f): f is FormField => !!f && (f.options?.length ?? 0) > 0 && !excluded.has(f.id));
+      .filter((f): f is FormField => !!f && !excluded.has(f.id));
+    const full = inSection.filter((f) => (f.options?.length ?? 0) > 0 || isWrittenQuestion(f));
+    const choiceOnly = inSection.filter((f) => (f.options?.length ?? 0) > 0);
 
     /*
-      THE COUNT GATE. The guide's numbers are aligned against these questions by
-      ORDER, so a count that does not match means every entry after the first
-      discrepancy lands on the wrong question — silently, and on a safety
-      record. Seed nothing for this section and say exactly what was seen.
+      THE COUNT GATE, IN TWO PASSES. The guide's numbers are aligned against a
+      question list by ORDER, so a count that does not match means every entry
+      after the first discrepancy lands on the wrong question — silently, and
+      on a safety record.
+
+      Pass 1 aligns against the FULL numbered list — choice AND written — which
+      is how a mixed paper numbers itself: a guide for 15 questions of which 11
+      are written carries 15 entries, and the old choice-only gate read that as
+      "15 answers, 4 questions" and refused the lot. Pass 2 is the old gate
+      verbatim: a shorter, all-choice guide (the repo's own track-dozer key)
+      still aligns against the choice questions alone, exactly as it always
+      has. Failing BOTH is the only refusal, and it reports both counts so the
+      author can see which list the guide was written against.
     */
-    if (questions.length !== group.length) {
+    const questions =
+      full.length === group.length
+        ? full
+        : choiceOnly.length === group.length
+          ? choiceOnly
+          : null;
+
+    if (!questions) {
       problems.push({
         section: name,
-        reason: `The guide has ${group.length} answer${group.length === 1 ? '' : 's'} for "${section.label}", which has ${questions.length} question${questions.length === 1 ? '' : 's'}. Answers are aligned by order, so none were applied — key this section by hand, or correct the question types first.`,
+        reason: `The guide has ${group.length} answer${group.length === 1 ? '' : 's'} for "${section.label}", which has ${full.length} question${full.length === 1 ? '' : 's'} (${choiceOnly.length} with options). Answers are aligned by order, so none were applied — key this section by hand, or correct the question types first.`,
       });
       continue;
     }
@@ -395,6 +482,33 @@ export function matchGuideToQuestions(
         continue;
       }
       const options = question.options ?? [];
+      /*
+        THE TARGET DECIDES THE KIND. An entry landing on a written question is
+        a model answer; on a choice question it resolves against the options
+        exactly as before. A kind DISAGREEMENT — letters on a written question,
+        prose no option matches — is a reported problem, never a guess, because
+        both mean the guide and the document number their questions differently
+        and every seed after the disagreement is suspect.
+      */
+      if (options.length === 0) {
+        if (allOptionLetters(entry.answers)) {
+          problems.push({
+            section: name,
+            reason: `Question ${entry.n} of "${section.label}" is a written question, but the guide answers it with option letter${entry.answers.length === 1 ? '' : 's'} ${entry.answers.map((a) => `"${a}"`).join(', ')}. That answer was not applied.`,
+          });
+          continue;
+        }
+        keys.push({
+          fieldId: question.id,
+          answerKey: [],
+          modelAnswer: entry.answers.join('\n'),
+          // Seeded, never attested — same rule as a key: a person still has
+          // to say they checked it.
+          source: 'guide_json',
+        });
+        count += 1;
+        continue;
+      }
       const resolved = entry.answers.map((a) => resolveAnswer(a, options));
       if (resolved.some((r) => r === null)) {
         const unresolved = entry.answers.filter((a, i) => resolved[i] === null);

@@ -309,6 +309,21 @@ export interface KeyOps {
    * as keyed that contributes no mark.
    */
   setKey: (fieldId: string, answerKey: string[], source?: KeySource) => void;
+  /**
+   * Set a WRITTEN question's model answer — the assessor's marking guide.
+   *
+   * The row it writes carries `answerKey: []`: a text/textarea question has no
+   * options, so the key row exists purely to hold the prose and the attestation
+   * (`DraftAnswerKey` documents the shape). Empty or whitespace text REMOVES
+   * the row — a model answer is opt-in, and an empty guide row would let the
+   * step report a written question as guided that guides nothing, exactly the
+   * empty-key case `setKey` refuses.
+   *
+   * Editing the text drops the attestation for the same reason changing a key
+   * does: "the training authority confirmed THIS answer" does not survive the
+   * answer changing.
+   */
+  setModelAnswer: (fieldId: string, text: string) => void;
   /** Toggle one option in a key, for a question that takes a set. */
   toggleOption: (fieldId: string, option: string, multiple: boolean) => void;
   /** Record or withdraw the attestation, with who made it. */
@@ -921,8 +936,11 @@ export function useBuilderDraftState({
           return rest;
         }
         // The key goes with the flag. A verdict field that kept one would be
-        // graded by `markTheory`, which reads the key and nothing else.
-        const { answerKey: _key, ...rest } = f;
+        // graded by `markTheory`, which reads the key and nothing else. The
+        // model answer goes with it too: a revision-seeded field carries the
+        // published `modelAnswer` verbatim, and a verdict with a marking guide
+        // beside it would republish a guide for a judgement nobody marks.
+        const { answerKey: _key, modelAnswer: _model, ...rest } = f;
         return { ...rest, assessorVerdict: true };
       }),
     );
@@ -956,6 +974,39 @@ export function useBuilderDraftState({
               source,
               ...(same && existing.verifiedBy ? { verifiedBy: existing.verifiedBy } : {}),
               ...(same && existing.verifiedAt ? { verifiedAt: existing.verifiedAt } : {}),
+            },
+          ];
+        }),
+
+      setModelAnswer: (fieldId, text) =>
+        setKeys((prev) => {
+          const rest = prev.filter((k) => k.fieldId !== fieldId);
+          /*
+            Whitespace is removal, not a guide. An all-space model answer would
+            count as "guided" everywhere the row's presence is read — the step's
+            counter, the publish summary — while guiding nobody.
+          */
+          if (!text.trim()) return rest;
+          const existing = prev.find((k) => k.fieldId === fieldId);
+          /*
+            A CHANGED GUIDE LOSES ITS VERIFICATION — the same rule as `setKey`.
+            The attestation is "the training authority confirmed THIS answer";
+            carrying it across edited prose would let a guide nobody has checked
+            report itself as verified on a safety-critical assessment.
+          */
+          const same = existing?.modelAnswer === text;
+          return [
+            ...rest,
+            {
+              fieldId,
+              // Empty BY SHAPE: a written question has no options to key, and
+              // marking skips an empty key, so this row is invisible to
+              // `markTheory` — it exists for the assessor, never the machine.
+              answerKey: [],
+              modelAnswer: text,
+              source: same && existing ? existing.source : ('manual' as const),
+              ...(same && existing?.verifiedBy ? { verifiedBy: existing.verifiedBy } : {}),
+              ...(same && existing?.verifiedAt ? { verifiedAt: existing.verifiedAt } : {}),
             },
           ];
         }),

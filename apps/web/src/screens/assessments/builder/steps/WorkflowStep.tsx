@@ -436,8 +436,11 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         <span className="block text-[14.5px] font-semibold text-success-text">Published</span>
         <p className="mt-1 text-[12.5px] text-success-text">
           {summary.parts} part{summary.parts === 1 ? '' : 's'} · {summary.questionsKeyed} question
-          {summary.questionsKeyed === 1 ? '' : 's'} keyed ({summary.questionsVerified} verified) ·{' '}
-          {summary.boxesPlaced} box{summary.boxesPlaced === 1 ? '' : 'es'} placed. The tool is
+          {summary.questionsKeyed === 1 ? '' : 's'} keyed ({summary.questionsVerified} verified)
+          {summary.writtenGuided
+            ? ` · ${summary.writtenGuided} written with model answers`
+            : ''}{' '}
+          · {summary.boxesPlaced} box{summary.boxesPlaced === 1 ? '' : 'es'} placed. The tool is
           enrollable from Assessments.
         </p>
         {/*
@@ -472,7 +475,9 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         <span className="block text-[14.5px] font-semibold">Publish</span>
         <p className="mt-0.5 text-[11.5px] text-text-tertiary">
           {summary.parts} part{summary.parts === 1 ? '' : 's'} · {summary.questionsKeyed} keyed ·{' '}
-          {summary.questionsVerified} verified · {summary.boxesPlaced} placed
+          {summary.questionsVerified} verified
+          {summary.writtenGuided ? ` · ${summary.writtenGuided} written guided` : ''} ·{' '}
+          {summary.boxesPlaced} placed
         </p>
         {summary.questionsKeyed > summary.questionsVerified && (
           <p className="mt-2 text-[11.5px] text-text-secondary">

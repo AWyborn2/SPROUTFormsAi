@@ -157,3 +157,89 @@ describe('seedRevisionSnapshot', () => {
     expect(revisionDraftName(TOOL, VERSION)).toBe('Mine Site SME Theory — revision of v1');
   });
 });
+
+/**
+ * WRITTEN questions across a revision — model answers are keys too.
+ *
+ * The builder's Answer Key step reads model answers from the DRAFT KEYS, so a
+ * seed that left them only on the fields would open the revision showing every
+ * written question unguided while republishing the old guides underneath. And
+ * the R15 rule extends naturally: a written key's answer IS its prose, so the
+ * attestation carries exactly when the prose is unchanged.
+ */
+describe('seedRevisionSnapshot — written questions with model answers', () => {
+  const writtenField = (id: string, modelAnswer?: string): FormField => ({
+    id,
+    type: 'textarea',
+    label: `Explain ${id}`,
+    required: false,
+    source: 'imported',
+    ...(modelAnswer ? { modelAnswer } : {}),
+  });
+
+  const MIXED_FIELDS: FormField[] = [
+    header('h1', 'Part 1 Theory'),
+    question('q1', ['a']),
+    writtenField('w1', 'The expected prose'),
+    writtenField('w2'),
+  ];
+  const VERSION_W = { id: 'v2-id', label: 'v2', fields: MIXED_FIELDS, sourcePdfAssetId: null };
+
+  it('re-seeds a published model answer as a written draft key row', () => {
+    const snap = seedRevisionSnapshot({ tool: TOOL, version: VERSION_W });
+
+    expect(snap.keys).toContainEqual({
+      fieldId: 'w1',
+      answerKey: [],
+      modelAnswer: 'The expected prose',
+      source: 'manual',
+    });
+    // An unguided written question seeds NO row — the guide is opt-in, and an
+    // empty row would report it guided.
+    expect(snap.keys.some((k) => k.fieldId === 'w2')).toBe(false);
+  });
+
+  it('carries the attestation for unchanged model text, and clears it for edited text', () => {
+    const priorDraftState = toDraftState({
+      fileName: 'Mine Site SME Theory',
+      extraction: null,
+      fields: MIXED_FIELDS,
+      structure: [],
+      groupCount: 1,
+      setup: { pathways: ['new'] } as never,
+      excluded: new Set<string>(),
+      keys: [
+        // Same prose as published — the attestation carries.
+        {
+          fieldId: 'w1',
+          answerKey: [],
+          modelAnswer: 'The expected prose',
+          source: 'manual',
+          verifiedBy: 'T. Authority',
+          verifiedAt: '2026-08-01',
+        },
+        // The published key's answer set is unchanged but this pins the
+        // choice path still carries beside the written one.
+        { fieldId: 'q1', answerKey: ['a'], source: 'manual', verifiedBy: 'T. Authority', verifiedAt: '2026-08-01' },
+      ],
+      partOverrides: {},
+      partOrder: [],
+      formId: 'form-1',
+    });
+
+    const snap = seedRevisionSnapshot({ tool: TOOL, version: VERSION_W, priorDraftState });
+    expect(snap.keys.find((k) => k.fieldId === 'w1')?.verifiedBy).toBe('T. Authority');
+    expect(snap.keys.find((k) => k.fieldId === 'q1')?.verifiedBy).toBe('T. Authority');
+
+    // Now the published prose differs from what was attested — nobody's
+    // attestation.
+    const editedVersion = {
+      ...VERSION_W,
+      fields: MIXED_FIELDS.map((f) =>
+        f.id === 'w1' ? { ...f, modelAnswer: 'Different prose entirely' } : f,
+      ),
+    };
+    const edited = seedRevisionSnapshot({ tool: TOOL, version: editedVersion, priorDraftState });
+    expect(edited.keys.find((k) => k.fieldId === 'w1')?.verifiedBy).toBeUndefined();
+  });
+});
