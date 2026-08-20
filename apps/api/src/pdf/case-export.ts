@@ -275,7 +275,12 @@ export function assembleCaseValues({
   const rendered: string[] = [];
   const blank: string[] = [];
 
-  const passing = requiredParts(manifest, pathway);
+  // Narrowed to what THIS case requires — a Location-excluded part prints
+  // blank like a part outside the pathway, and is never reported as a blank
+  // REQUIRED part on a signed case.
+  const passing = requiredParts(manifest, pathway).filter(
+    (p) => !applicablePartKeys || applicablePartKeys.has(p.key),
+  );
   for (const part of passing) {
     const attempt = authoritativeAttempt(attempts, part.key);
     if (!attempt) {
@@ -348,6 +353,7 @@ export function assembleCaseValues({
       manifest,
       pathway,
       attempts.map((a) => ({ partKey: a.partKey, attemptNumber: a.attemptNumber, outcome: a.outcome })),
+      applicablePartKeys,
     );
     for (const fieldId of new Set(completionMarks.map((m) => m.fieldId))) {
       const rows = completionTickRows(
@@ -415,7 +421,7 @@ export function assembleCaseValues({
         partKey: a.partKey,
         attemptNumber: a.attemptNumber,
         outcome: a.outcome,
-      })));
+      })), applicablePartKeys);
       const coaching = moreCoachingRequired(progress);
       if (coaching === true) writeMark(values, marks.moreCoachingRequiredYes);
       if (coaching === false) writeMark(values, marks.moreCoachingRequiredNo);

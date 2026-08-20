@@ -1695,13 +1695,25 @@ function attemptsForPart(attempts: readonly AttemptFact[], partKey: string): Att
  * A dependency that cannot bite is waived rather than deadlocked: a required
  * section with no part, or whose part this pathway does not include (RPL
  * waives the logbooks), never blocks anything.
+ *
+ * `applicablePartKeys` narrows further to what THIS CASE requires — the
+ * pathway's parts intersected with the tool's per-Location rule for the
+ * case's Location (`casePartKeys`). A part the rule excludes behaves exactly
+ * like one the pathway excludes: it is not listed, it never blocks the
+ * sequential unlock, and the case completes without it. Before this the rule
+ * was stored and edited but never enforced, so a Boddington dozer case still
+ * demanded the Worsley theory paper. Omitted means pathway-only, which is
+ * what every caller without a case in hand (the builder, validation) wants.
  */
 export function caseProgress(
   manifest: AssessmentToolManifest,
   pathway: AssessmentPathway,
   attempts: readonly AttemptFact[],
+  applicablePartKeys?: ReadonlySet<string>,
 ): PartProgress[] {
-  const required = requiredParts(manifest, pathway);
+  const required = requiredParts(manifest, pathway).filter(
+    (p) => !applicablePartKeys || applicablePartKeys.has(p.key),
+  );
 
   // Pass/fail per part first: dependencies may point FORWARD in document
   // order (the cover-page declaration depending on the theory printed after
