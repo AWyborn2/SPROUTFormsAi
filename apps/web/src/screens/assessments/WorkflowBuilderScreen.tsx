@@ -843,20 +843,24 @@ export function WorkflowBuilderScreen() {
                                     completionMarks={
                                       completionDraft ?? tool.manifest.partCompletionMarks ?? []
                                     }
-                                    onCompletionMark={(rowIndex, partKey) =>
+                                    onCompletionMarks={(rowIndex, partKeys) =>
                                       setCompletionDraft((prev) => {
                                         const base =
                                           prev ?? tool.manifest.partCompletionMarks ?? [];
                                         const rest = base.filter(
                                           (m) => !(m.fieldId === field.id && m.rowIndex === rowIndex),
                                         );
-                                        if (!partKey) return rest;
                                         // The tick lands in the second column — the same
                                         // alignment the exporter's row cursor uses.
                                         const columnKey = field.columns?.[1]?.key ?? '';
                                         return [
                                           ...rest,
-                                          { partKey, fieldId: field.id, rowIndex, columnKey },
+                                          ...partKeys.map((partKey) => ({
+                                            partKey,
+                                            fieldId: field.id,
+                                            rowIndex,
+                                            columnKey,
+                                          })),
                                         ];
                                       })
                                     }
@@ -1412,7 +1416,7 @@ function FieldRow({
   onDefaultValue,
   parts,
   completionMarks,
-  onCompletionMark,
+  onCompletionMarks,
 }: {
   field: FormField;
   section: WorkflowSection;
@@ -1429,8 +1433,8 @@ function FieldRow({
   parts?: ReadonlyArray<{ key: string; label: string }>;
   /** Every stored completion mark; the row control reads its own field's. */
   completionMarks?: readonly PartCompletionMark[];
-  /** Map (or clear, with null) which part ticks this field's given row. */
-  onCompletionMark?: (rowIndex: number, partKey: string | null) => void;
+  /** Replace which parts tick this field's given row ([] clears it). */
+  onCompletionMarks?: (rowIndex: number, partKeys: string[]) => void;
 }) {
   const source = valueSource(section, field.id);
   return (
@@ -1517,10 +1521,21 @@ function FieldRow({
                 ? (defaultValue as Record<string, boolean>[])
                 : [];
               const presetTicked = rows[index]?.[columnKey] === true;
-              const mappedPart = completionMarks?.find(
+              /*
+                A ROW MAY MAP TO SEVERAL PARTS — the Track Dozer's "Theory"
+                method covers General plus one of two location papers. The
+                first mark drives the select; the rest render as removable
+                "and" chips beside it, and the row ticks once every mapped
+                part that applies to the case has passed.
+              */
+              const rowMarks = (completionMarks ?? []).filter(
                 (m) => m.fieldId === field.id && m.rowIndex === index,
-              )?.partKey;
-              const mode = mappedPart ?? (presetTicked ? PRESET_MODE : '');
+              );
+              const primary = rowMarks[0]?.partKey;
+              const extras = rowMarks.slice(1);
+              const mode = primary ?? (presetTicked ? PRESET_MODE : '');
+              const partLabel = (key: string) =>
+                parts?.find((p) => p.key === key)?.label ?? key;
 
               const setPreset = (on: boolean) => {
                 const next = field.fixedRows!.map((_, i) => ({
@@ -1530,12 +1545,33 @@ function FieldRow({
               };
               const onMode = (value: string) => {
                 if (value === PRESET_MODE) {
-                  if (mappedPart) onCompletionMark?.(index, null);
+                  if (rowMarks.length > 0) onCompletionMarks?.(index, []);
                   setPreset(true);
                   return;
                 }
                 if (presetTicked) setPreset(false);
-                onCompletionMark?.(index, value === '' ? null : value);
+                if (value === '') {
+                  onCompletionMarks?.(index, []);
+                  return;
+                }
+                // Replaces the PRIMARY part; the "and" chips ride along.
+                onCompletionMarks?.(index, [
+                  value,
+                  ...extras.map((m) => m.partKey).filter((k) => k !== value),
+                ]);
+              };
+              const addPart = (value: string) => {
+                if (!value) return;
+                onCompletionMarks?.(index, [
+                  ...rowMarks.map((m) => m.partKey),
+                  value,
+                ]);
+              };
+              const removePart = (key: string) => {
+                onCompletionMarks?.(
+                  index,
+                  rowMarks.map((m) => m.partKey).filter((k) => k !== key),
+                );
               };
 
               return (
@@ -1557,6 +1593,40 @@ function FieldRow({
                       </option>
                     ))}
                   </select>
+                  {extras.map((m) => (
+                    <span
+                      key={m.partKey}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-page px-2 py-0.5 text-[11px] text-text-secondary"
+                    >
+                      and {partLabel(m.partKey)}
+                      <button
+                        type="button"
+                        aria-label={`"${row}" no longer waits for ${partLabel(m.partKey)}`}
+                        onClick={() => removePart(m.partKey)}
+                        className="text-text-tertiary hover:text-text-primary"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  {primary && (parts ?? []).some((p) => !rowMarks.some((m) => m.partKey === p.key)) && (
+                    <select
+                      aria-label={`Also require another part before "${row}" ticks`}
+                      title="The row ticks once every mapped part that applies to the case has passed — a part the case doesn't require (other location, other pathway) never blocks it."
+                      value=""
+                      onChange={(e) => addPart(e.target.value)}
+                      className="h-[24px] rounded-sm border border-border-subtle bg-surface-page px-1.5 text-[11px] text-text-tertiary"
+                    >
+                      <option value="">+ and…</option>
+                      {(parts ?? [])
+                        .filter((p) => !rowMarks.some((m) => m.partKey === p.key))
+                        .map((p) => (
+                          <option key={p.key} value={p.key}>
+                            {p.label}
+                          </option>
+                        ))}
+                    </select>
+                  )}
                 </div>
               );
             })}

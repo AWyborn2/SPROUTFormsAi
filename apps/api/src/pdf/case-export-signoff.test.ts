@@ -501,6 +501,36 @@ describe('assembleCaseValues — part completion ticks', () => {
 
     expect(values['methods']).toBeUndefined();
   });
+
+  it('judges a multi-part row against the parts THIS case requires', () => {
+    // One "Theory" row covering p1 and p3 — the route resolves which of them
+    // this case actually sits (pathway ∩ Location rule) and passes the set.
+    const multi: AssessmentToolManifest = {
+      ...BASE,
+      partCompletionMarks: [
+        { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'used' },
+        { partKey: 'p3', fieldId: 'methods', rowIndex: 0, columnKey: 'used' },
+      ],
+    };
+
+    // p3 does not apply to this case: p1 alone ticks the row.
+    const narrowed = assembleCaseValues({
+      manifest: multi,
+      pathway: 'new',
+      attempts: [passed('p1')],
+      applicablePartKeys: new Set(['p1', 'p2']),
+    });
+    expect(narrowed.values['methods']).toEqual([{ used: true }]);
+
+    // Both apply: the row waits for both.
+    const waiting = assembleCaseValues({
+      manifest: multi,
+      pathway: 'new',
+      attempts: [passed('p1')],
+      applicablePartKeys: new Set(['p1', 'p2', 'p3']),
+    });
+    expect(waiting.values['methods']).toBeUndefined();
+  });
 });
 
 /**

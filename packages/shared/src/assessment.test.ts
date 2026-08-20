@@ -1157,6 +1157,130 @@ describe('completionTickRows', () => {
 
     expect(rows).toEqual([{ label: 'Theory', note: 'kept', done: true }]);
   });
+
+  /*
+    A ROW MAPPED TO SEVERAL PARTS — the Track Dozer's "Theory" method covers
+    General plus one of two location-specific papers. "Any passed" would tick
+    after General alone; "all passed" would never tick, because no candidate
+    sits both locations' papers. The rule: every mapped part THE CASE REQUIRES
+    must pass, and parts outside the case's set do not count.
+  */
+  describe('a row mapped to several parts', () => {
+    const theoryRow = [
+      { partKey: 'general', fieldId: 'methods', rowIndex: 0, columnKey: 'done' },
+      { partKey: 'bbm', fieldId: 'methods', rowIndex: 0, columnKey: 'done' },
+      { partKey: 'raw', fieldId: 'methods', rowIndex: 0, columnKey: 'done' },
+    ];
+    const bbmCase = new Set(['general', 'bbm']);
+
+    it('waits for every applicable part, not just the first', async () => {
+      const { completionTickRows } = await import('./assessment.js');
+      const rows = completionTickRows(
+        theoryRow,
+        progressOf({ general: 'satisfactory', bbm: 'open' }),
+        undefined,
+        bbmCase,
+      );
+
+      expect(rows).toEqual([]);
+    });
+
+    it('ticks once every applicable part has passed — the other location never blocks', async () => {
+      const { completionTickRows } = await import('./assessment.js');
+      const rows = completionTickRows(
+        theoryRow,
+        // `raw` is absent from progress entirely — a BBM case never sits it.
+        progressOf({ general: 'satisfactory', bbm: 'satisfactory' }),
+        undefined,
+        bbmCase,
+      );
+
+      expect(rows).toEqual([{ done: true }]);
+    });
+
+    it('demands every mapped part when no applicable set is given', async () => {
+      const { completionTickRows } = await import('./assessment.js');
+      const rows = completionTickRows(
+        theoryRow,
+        progressOf({ general: 'satisfactory', bbm: 'satisfactory' }),
+      );
+
+      // `raw` never passed and nothing said it does not apply, so no tick —
+      // silence is the safe failure on a completion record.
+      expect(rows).toEqual([]);
+    });
+
+    it('leaves a row alone when none of its mapped parts apply to this case', async () => {
+      const { completionTickRows } = await import('./assessment.js');
+      const rows = completionTickRows(
+        theoryRow,
+        progressOf({ general: 'satisfactory' }),
+        [{ label: 'Theory' }],
+        new Set(['other']),
+      );
+
+      expect(rows).toEqual([{ label: 'Theory' }]);
+    });
+
+    it('judges single-mark rows exactly as before under an applicable set', async () => {
+      const { completionTickRows } = await import('./assessment.js');
+      const rows = completionTickRows(
+        marks,
+        progressOf({ p1: 'satisfactory', p2: 'satisfactory' }),
+        undefined,
+        new Set(['p1']),
+      );
+
+      // p1's row ticks; p2's row is not this case's to tick, even satisfied.
+      expect(rows).toEqual([{ done: true }]);
+    });
+  });
+});
+
+/**
+ * The one derivation a multi-part row is judged against: what THIS case
+ * requires — the pathway's parts, narrowed by the tool's per-Location rule.
+ */
+describe('casePartKeys', () => {
+  const manifest = {
+    parts: [
+      part({ key: 'general', ordinal: 1, pathways: ['new', 'experienced'] }),
+      part({ key: 'bbm', ordinal: 2, pathways: ['new', 'experienced'] }),
+      part({ key: 'raw', ordinal: 3, pathways: ['new', 'experienced'] }),
+      part({ key: 'logbook', ordinal: 4, pathways: ['new'] }),
+    ],
+  };
+  const rule = {
+    'loc-bbm': ['general', 'bbm', 'logbook'],
+    'loc-raw': ['general', 'raw', 'logbook'],
+  };
+
+  it('narrows by pathway AND the location rule together', async () => {
+    const { casePartKeys } = await import('./assessment.js');
+
+    expect(casePartKeys(manifest, 'new', rule, 'loc-bbm')).toEqual(
+      new Set(['general', 'bbm', 'logbook']),
+    );
+    // Experienced drops the logbook by pathway; the rule drops the other paper.
+    expect(casePartKeys(manifest, 'experienced', rule, 'loc-raw')).toEqual(
+      new Set(['general', 'raw']),
+    );
+  });
+
+  it('requires everything when the case names no Location, or the rule does not list it', async () => {
+    const { casePartKeys } = await import('./assessment.js');
+
+    expect(casePartKeys(manifest, 'new', rule, null)).toEqual(
+      new Set(['general', 'bbm', 'raw', 'logbook']),
+    );
+    // An unlisted Location requires every part — the safe direction (R75).
+    expect(casePartKeys(manifest, 'new', rule, 'loc-elsewhere')).toEqual(
+      new Set(['general', 'bbm', 'raw', 'logbook']),
+    );
+    expect(casePartKeys(manifest, 'new', undefined, 'loc-bbm')).toEqual(
+      new Set(['general', 'bbm', 'raw', 'logbook']),
+    );
+  });
 });
 
 describe('validatePartCompletionMarks', () => {
