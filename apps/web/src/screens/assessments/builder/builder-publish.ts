@@ -36,10 +36,32 @@ import {
   type AssessmentToolManifest,
   type BuilderStructure,
   type DraftAnswerKey,
+  type ExtractionResult,
   type FieldGeometry,
   type OutcomeTarget,
   type FormField,
 } from '@formai/shared';
+
+/**
+ * The printed references, keyed by field id, read back off the extraction the
+ * draft keeps whole.
+ *
+ * `questionRef` lives on the EXTRACTED field, never on `FormField` — the same
+ * split as `coverSection` — so the builder resolves links by carrying the refs
+ * BESIDE the fields, exactly as the keys travel until publish merges them on.
+ * Field ids survive `seedFields`, which is what makes the join safe. A revision
+ * draft has no extraction and gets an empty map: its links fall through to the
+ * author's own choices and the adjacency tier, as before.
+ */
+export function extractionQuestionRefs(
+  extraction: Pick<ExtractionResult, 'fields'> | null | undefined,
+): Map<string, string> {
+  const refs = new Map<string, string>();
+  for (const field of extraction?.fields ?? []) {
+    if (field.questionRef) refs.set(field.id, field.questionRef);
+  }
+  return refs;
+}
 
 /**
  * The manifest a REVISION republishes: the seeded tool's manifest with the
@@ -138,25 +160,40 @@ export function composeRevisionManifest(
 export function resolvePublishFields(
   fields: readonly FormField[],
   keys: readonly DraftAnswerKey[],
+  /**
+   * Printed references by field id, from `extractionQuestionRefs`. The refs are
+   * merged onto the fields' linkable view only — never written to the fields —
+   * because `questionRef` is extraction metadata, not part of the published
+   * shape. Absent (a revision draft, a caller predating the wiring), every
+   * question falls through to the author's own choice and the adjacency tier.
+   */
+  refs?: ReadonlyMap<string, string>,
 ): { fields: FormField[]; unlinked: string[]; inferred: string[] } {
-  const linked = linkOutcomeTargets(fields);
+  const linkable = refs?.size
+    ? fields.map((f) => {
+        const ref = refs.get(f.id);
+        return ref ? { ...f, questionRef: ref } : f;
+      })
+    : fields;
+  const linked = linkOutcomeTargets(linkable);
   const targetByQuestion = new Map(linked.links.map((l) => [l.questionId, l.outcomeId]));
   const keyById = new Map(keys.map((k) => [k.fieldId, k]));
   const unlinked: string[] = [];
   const inferred: string[] = [];
 
   /*
-    THE PRINTED-REFERENCE ROUTE CANNOT FIRE IN THIS BUILDER, and that is why a
-    third tier exists.
+    THE PRINTED-REFERENCE ROUTE FIRES ONLY WHEN THE CALLER PASSES THE REFS, and
+    that is why a third tier exists.
 
     `linkOutcomeTargets` pairs a question with its ✓/✗ box by the `questionRef`
     both carry. That reference lives on the EXTRACTED field — `FormField` has no
-    such property, and `seedFields` does not copy it — so every question is
-    skipped and the map above is always empty here. The import-review screen
-    keeps the reference in its own side-table and resolves links there; the
-    assessment builder never had an equivalent.
+    such property — so the builder resolves it by handing this function the refs
+    read back off the extraction the draft keeps whole (`extractionQuestionRefs`),
+    mirroring how the import-review screen keeps the reference in its own
+    side-table. A box the extraction missed, an author-added field, or a revision
+    draft (which has no extraction) carries no ref and falls through.
 
-    The visible consequence was that "Automatic — from the printed reference"
+    Before the refs were wired through, "Automatic — from the printed reference"
     resolved nothing, on every question, and a thirty-question paper failed
     publish thirty times over with "no outcome box to write its mark into". The
     only way through was to pick all thirty by hand from a list of thirty
@@ -273,10 +310,12 @@ export function checkPublish(
   structure?: BuilderStructure,
   /** The revision's carried-but-unconfirmed stash, when there is one. */
   carriedGeometry?: Record<string, FieldGeometry>,
+  /** Printed references by field id (`extractionQuestionRefs`), for the link tier. */
+  refs?: ReadonlyMap<string, string>,
 ): PublishCheck {
   const arranged = structure && structure.length > 0 ? resolveStructure(structure, fields) : null;
   const ordered = arranged ? arranged.fields : fields;
-  const resolved = resolvePublishFields(ordered, keys);
+  const resolved = resolvePublishFields(ordered, keys, refs);
 
   const problems: string[] = [];
 
