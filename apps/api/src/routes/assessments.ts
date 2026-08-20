@@ -22,6 +22,7 @@ import {
   type AssessmentCaseState,
   autoVerdictWrite,
   casePartKeys,
+  type LocationPartKeys,
   logbookRows,
   prerequisiteCompetencyIds,
   reducePrerequisiteClasses,
@@ -232,6 +233,26 @@ function unionPartFieldAccess(
   const hidden = (per[0]?.hidden ?? []).filter((id) => per.every((a) => a.hidden.includes(id)));
   const writable = [...new Set(per.flatMap((a) => a.writable))];
   return { hidden, writable };
+}
+
+/**
+ * What THIS case requires — the pathway's parts narrowed by the tool's
+ * per-Location rule for the case's Location. The ONE derivation every
+ * progress read shares (dashboard, case screen, fill view, marking,
+ * sign-off, export), so no two surfaces can disagree about whether a
+ * Location-excluded part is owed. A case with no Location, or one the rule
+ * does not list, requires everything — the safe direction (R75).
+ */
+function applicablePartsFor(
+  tool: { manifest: AssessmentToolManifest; locationPartKeys: LocationPartKeys | null },
+  row: { pathway: string; locationId: string | null },
+): Set<string> {
+  return casePartKeys(
+    tool.manifest,
+    row.pathway as AssessmentPathway,
+    tool.locationPartKeys ?? {},
+    row.locationId,
+  );
 }
 
 /** The repeating table a logbook part totals its hours from, on one version. */
@@ -2377,9 +2398,15 @@ assessmentCasesRouter.get(
         const tool = toolById.get(c.toolId);
         const attempts = attemptsByCase.get(c.id) ?? [];
         // The pathway's required parts with their derived states — the same
-        // computation the progress screen uses, so the two agree.
+        // computation the progress screen uses, so the two agree. Narrowed to
+        // the case's Location: an excluded part is not owed and not listed.
         const progress = tool
-          ? caseProgress(tool.manifest, c.pathway as AssessmentPathway, toAttemptFacts(attempts))
+          ? caseProgress(
+              tool.manifest,
+              c.pathway as AssessmentPathway,
+              toAttemptFacts(attempts),
+              applicablePartsFor(tool, c),
+            )
           : [];
         // The stage: first part not yet satisfactory, and where it sits.
         const current = progress.find((p) => p.state !== 'satisfactory');
@@ -2545,7 +2572,12 @@ assessmentCasesRouter.get(
         // if one ever did, the candidate stays on the dashboard with no parts
         // rather than disappearing from it or failing the whole request.
         const progress = tool
-          ? caseProgress(tool.manifest, c.pathway as AssessmentPathway, toAttemptFacts(attempts))
+          ? caseProgress(
+              tool.manifest,
+              c.pathway as AssessmentPathway,
+              toAttemptFacts(attempts),
+              applicablePartsFor(tool, c),
+            )
           : [];
 
         // The first required part that has not passed, in document order. Null
@@ -2708,7 +2740,12 @@ assessmentCasesRouter.get(
     }
 
     const attempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+    const progress = caseProgress(
+      tool.manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(attempts),
+      applicablePartsFor(tool, row),
+    );
 
     // Appeals AGAINST this case — the superseding record must be visible from
     // the superseded one, or a reviewer reading the original would take a
@@ -2899,7 +2936,14 @@ assessmentCasesRouter.post(
 
     const partKey = req.params.partKey!;
     const attempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+    // Narrowed to the case's Location — an excluded part is not in the list,
+    // so opening it refuses exactly as opening a part outside the pathway does.
+    const progress = caseProgress(
+      tool.manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(attempts),
+      applicablePartsFor(tool, row),
+    );
     const target = progress.find((p) => p.part.key === partKey);
 
     if (!target) {
@@ -3141,20 +3185,20 @@ assessmentCasesRouter.get(
       both read it, and it is the same derivation the part's own state comes from.
     */
     const caseAttempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(manifest, row.pathway as AssessmentPathway, toAttemptFacts(caseAttempts));
+    // THIS case's required set — pathway narrowed by the tool's per-Location
+    // rule — read once for the progress, the "what's next" step and the
+    // completion ticks below, so all three agree about an excluded part.
+    const applicable = applicablePartsFor(tool, row);
+    const progress = caseProgress(
+      manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(caseAttempts),
+      applicable,
+    );
 
     const completionIds = new Set((manifest.partCompletionMarks ?? []).map((m) => m.fieldId));
     const completionValues: Record<string, SubmissionValue> = {};
     if (visibleFields.some((f) => completionIds.has(f.id))) {
-      // A multi-part row is judged against THIS case's required set — the
-      // pathway narrowed by the tool's per-Location rule — so a location's
-      // alternative paper never blocks the tick on the other location's case.
-      const applicable = casePartKeys(
-        manifest,
-        row.pathway as AssessmentPathway,
-        tool.locationPartKeys ?? {},
-        row.locationId,
-      );
       for (const f of visibleFields) {
         if (!completionIds.has(f.id)) continue;
         completionValues[f.id] = completionTickRows(
@@ -3431,6 +3475,7 @@ async function setSubmitted(
         row,
         attempt,
         manifest: tool.manifest,
+        locationPartKeys: tool.locationPartKeys ?? null,
         outcome: 'satisfactory',
         derivedValues: attempt.values ?? {},
         disposition: null,
@@ -3468,6 +3513,7 @@ async function setSubmitted(
           row,
           attempt,
           manifest: tool.manifest,
+          locationPartKeys: tool.locationPartKeys ?? null,
           outcome: computed.outcome,
           derivedValues: verdict
             ? { ...computed.derivedValues, [verdict.fieldId]: verdict.value }
@@ -3498,6 +3544,7 @@ async function setSubmitted(
             row,
             attempt,
             manifest: tool.manifest,
+            locationPartKeys: tool.locationPartKeys ?? null,
             outcome: checklist.outcome,
             derivedValues: checklist.derivedValues,
             disposition: checklist.outcome === 'not_satisfactory' ? 'coaching_then_retry' : null,
@@ -4190,6 +4237,8 @@ async function resolveAttemptOutcome(
     row: NonNullable<Awaited<ReturnType<typeof loadCase>>>;
     attempt: { id: string; partKey: string; attemptNumber: number };
     manifest: AssessmentToolManifest;
+    /** The tool's per-Location parts rule, so case state reads what THIS case requires. */
+    locationPartKeys: LocationPartKeys | null;
     outcome: 'satisfactory' | 'not_satisfactory';
     derivedValues: Record<string, SubmissionValue>;
     disposition: (typeof NS_DISPOSITIONS)[number] | null;
@@ -4219,9 +4268,16 @@ async function resolveAttemptOutcome(
     })
     .where(eq(schema.assessmentPartAttempts.id, attempt.id));
 
-  // Recompute case state from the rows rather than incrementing a counter.
+  // Recompute case state from the rows rather than incrementing a counter —
+  // over what THIS case requires, so a Location-excluded part never holds a
+  // finished case open.
   const attempts = await attemptsFor(database, row.id);
-  const progress = caseProgress(input.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+  const progress = caseProgress(
+    input.manifest,
+    row.pathway as AssessmentPathway,
+    toAttemptFacts(attempts),
+    applicablePartsFor({ manifest: input.manifest, locationPartKeys: input.locationPartKeys }, row),
+  );
   const allPartsPassed = isCaseCompetent(progress);
   // The RESOLVED disposition, not the requested one — a computed fail that
   // defaulted to coaching keeps the case open, which is the whole point.
@@ -4456,6 +4512,7 @@ assessmentCasesRouter.post(
       row,
       attempt,
       manifest: tool.manifest,
+      locationPartKeys: tool.locationPartKeys ?? null,
       outcome,
       derivedValues,
       disposition,
@@ -4604,7 +4661,12 @@ assessmentCasesRouter.post(
       attempt.
     */
     const attempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+    const progress = caseProgress(
+      tool.manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(attempts),
+      applicablePartsFor(tool, row),
+    );
     if (!isCaseCompetent(progress)) {
       res.status(409).json({
         error: 'parts_incomplete',
