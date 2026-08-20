@@ -189,7 +189,17 @@ export function CasePartFillScreen() {
   // take it back until it is marked.
   const marked = attempt.outcome !== null;
   const handedIn = attempt.submittedAt !== null;
-  const readOnly = marked || handedIn;
+  /*
+    THE MARKING PASS: the assessor on a handed-in, not-yet-marked attempt. The
+    server already narrowed `writableFieldIds` to the marking surface — the
+    per-question ✓/✗ boxes and the sign-off block — so the screen opens for
+    editing and the field gate below does the rest: the candidate's prose stays
+    disabled because it is no longer in the writable set. `party` is identity,
+    decided server-side, so a self-assessing candidate is `candidate` here and
+    keeps today's frozen view of their own handed-in paper.
+  */
+  const markingPass = attempt.party === 'assessor' && handedIn && !marked;
+  const readOnly = marked || (handedIn && attempt.party === 'candidate');
 
   /*
     Clamped on READ rather than reset on change: a question answered on the last
@@ -205,6 +215,12 @@ export function CasePartFillScreen() {
     read-only until somebody configures it.
   */
   const writable = new Set(attempt.writableFieldIds ?? []);
+  /*
+    The assessor's marking guide, keyed for the per-field callout below. Present
+    only on an assessor payload — the server sends the property ABSENT for a
+    candidate, so an empty map here is also the proof nothing leaked.
+  */
+  const modelAnswers = new Map((attempt.markingGuide ?? []).map((g) => [g.fieldId, g.modelAnswer]));
   // Captured so the closure below keeps the non-null narrowing from the early
   // return above — TS widens `attempt` back to possibly-undefined inside a
   // nested function.
@@ -236,8 +252,21 @@ export function CasePartFillScreen() {
 
   function onSave() {
     if (!attemptId || readOnly) return;
+    /*
+      ON THE MARKING PASS, SAVE ONLY WHAT IS OURS TO WRITE. The served values
+      include the keyed questions' PRE-MARKS, merged in for display at cells the
+      workflow keeps `auto` — not writable by anybody. The candidate flow PATCHes
+      its whole map back and the server tolerates unchanged echoes, but a
+      pre-mark is NOT in the stored map yet, so echoing it reads as writing a
+      foreign field and the whole save is refused. Filtering to the server's own
+      writable set sends exactly the marking surface; candidates keep today's
+      whole-map echo untouched.
+    */
+    const payload = markingPass
+      ? Object.fromEntries(Object.entries(values).filter(([id]) => writable.has(id)))
+      : values;
     save.mutate(
-      { attemptId, values },
+      { attemptId, values: payload },
       {
         onSuccess: () => {
           setDirty(false);
@@ -248,7 +277,10 @@ export function CasePartFillScreen() {
     );
   }
 
-  if (paged && !readOnly && pages.length > 0) {
+  // Never the quiz on a marking pass: the quiz is the CANDIDATE'S sitting
+  // presentation (check-answer, retry, hand-in) — the assessor gets the stacked
+  // marking surface with the model answers beside each written question.
+  if (paged && !readOnly && !markingPass && pages.length > 0) {
     return (
       <TheoryQuiz
         pages={pages}
@@ -458,6 +490,24 @@ export function CasePartFillScreen() {
               disabled={readOnly || !writable.has(f.id)}
               onChange={(v) => setValue(f.id, v)}
             />
+            {/*
+              MODEL ANSWER — assessor guide. Rendered BESIDE the field rather
+              than inside it: `FieldInput` stays unforked, and the candidate
+              never has this block because the guide itself is absent from
+              their payload — there is nothing here to hide, only to render.
+              Whitespace-preserving because the answer key's prose arrives with
+              its own line breaks and losing them mangles multi-part answers.
+            */}
+            {modelAnswers.has(f.id) && (
+              <div className="mt-1.5 rounded-[10px] border border-warning bg-warning-soft p-[8px_10px]">
+                <p className="mb-1 text-[10.5px] font-semibold uppercase tracking-wide text-warning-text">
+                  Model answer — assessor guide
+                </p>
+                <p className="whitespace-pre-wrap text-[12.5px] leading-snug text-warning-text">
+                  {modelAnswers.get(f.id)}
+                </p>
+              </div>
+            )}
           </div>
         ))}
         {shown.length === 0 && (
@@ -513,6 +563,10 @@ export function CasePartFillScreen() {
           {/* A DECLARATION is not marked — signing it IS the act, so the button
               says what actually happens and nobody is told to wait for a
               marking that will never occur. */}
+          {/* NOT ON THE MARKING PASS: the attempt is already handed in — the
+              assessor saves ticks and records the outcome from the case screen;
+              a second "hand in" here would be an act with no meaning. */}
+          {!markingPass && (
           <Button
             leadingIcon="send"
             disabled={save.isPending || setSubmitted.isPending}
@@ -583,6 +637,7 @@ export function CasePartFillScreen() {
                 ? 'Sign and continue'
                 : 'Hand in for marking'}
           </Button>
+          )}
         </div>
       )}
     </div>
