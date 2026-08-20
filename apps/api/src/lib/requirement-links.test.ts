@@ -10,9 +10,12 @@ import { describe, expect, it, vi } from 'vitest';
 // parameter, so a null module db is all this needs.
 vi.mock('../db.js', () => ({ db: null, getDbStatus: () => 'unconfigured' }));
 
-const { awardingToolByCompetency, awardingToolFor, requiredToolIdsForMembership } = await import(
-  './requirement-links.js'
-);
+const {
+  awardingToolByCompetency,
+  awardingToolByCompetencyForOrg,
+  awardingToolFor,
+  requiredToolIdsForMembership,
+} = await import('./requirement-links.js');
 
 const ORG = 'org-1';
 
@@ -205,6 +208,51 @@ describe('awardingToolByCompetency', () => {
     });
 
     expect(await awardingToolFor(db, ORG, 'c-licence')).toBeNull();
+  });
+});
+
+// ── the org-wide shape of the same rule (training matrix, U2): the wanted ────
+// ── set is the award universe itself, and the shared tail keeps the two ──────
+// ── shapes from ever ranking a tool differently. ─────────────────────────────
+
+describe('awardingToolByCompetencyForOrg', () => {
+  it('resolves every awarded competency in the org with ONE tools read (KTD2, batched)', async () => {
+    const { db, reads } = makeDb({
+      assessmentTools: [
+        tool('t-a', ['c1', 'c2'], AT('2026-01-01T00:00:00Z')),
+        tool('t-b', ['c2', 'c3'], AT('2026-02-01T00:00:00Z')),
+      ],
+      formTemplates: [template('tpl-t-a', 'v1'), template('tpl-t-b', 'v2')],
+    });
+
+    const byCompetency = await awardingToolByCompetencyForOrg(db, ORG);
+
+    // The whole universe, no wanted list supplied — and the shared duplicate
+    // rule holds: c2 goes to the earlier-created tool, same as the wanted-set
+    // shape would resolve it.
+    expect(byCompetency.get('c1')).toBe('t-a');
+    expect(byCompetency.get('c2')).toBe('t-a');
+    expect(byCompetency.get('c3')).toBe('t-b');
+    // One org-wide read per REQUEST is the point of this shape: a per-user
+    // loop re-reading the tools table is exactly what the matrix must avoid.
+    expect(reads.filter((r) => r.table === 'assessmentTools')).toHaveLength(1);
+  });
+
+  it('leaves an unpublished-template tool out, so its competencies read evidence-only (KTD2, R7)', async () => {
+    const { db } = makeDb({
+      assessmentTools: [tool('t-unpublished', ['c1'], AT('2026-01-01T00:00:00Z'))],
+      formTemplates: [template('tpl-t-unpublished', null)],
+    });
+
+    const byCompetency = await awardingToolByCompetencyForOrg(db, ORG);
+
+    expect(byCompetency.has('c1')).toBe(false);
+  });
+
+  it('returns an empty map for an org with no tools — every competency is evidence-only', async () => {
+    const { db } = makeDb({});
+
+    expect((await awardingToolByCompetencyForOrg(db, ORG)).size).toBe(0);
   });
 });
 
