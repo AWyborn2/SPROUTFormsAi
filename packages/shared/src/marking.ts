@@ -100,6 +100,20 @@ export function isSelfMarking(
   // The cover's boxes too, for the tools that print the certification block
   // inside a part's slice rather than only on the front page.
   for (const id of signOffMarkFieldIds(manifest)) furniture.add(id);
+  /*
+    AND EVERY FIELD THE AUTHOR LOCKED TO `auto`. An auto-sourced field is
+    written by marking, never answered by a person — the workflow editor's
+    whole meaning for the setting. The one that bit: a theory part's printed
+    verdict radio locked to `auto` (so `autoVerdictWrite` fills it at hand-in)
+    read here as an unkeyed question, and the part stopped self-marking — the
+    switch that turns the auto-verdict ON was the same switch turning the
+    quiz's marking OFF.
+  */
+  for (const s of manifest.workflow?.sections ?? []) {
+    for (const [id, source] of Object.entries(s.fieldSource ?? {})) {
+      if (source === 'auto') furniture.add(id);
+    }
+  }
 
   const questions = partFields.filter(
     (f) => !STRUCTURAL_FIELD_TYPES.has(f.type) && !furniture.has(f.id),
@@ -545,6 +559,40 @@ export function isYesValue(value: SubmissionValue | undefined): boolean {
  * verdict the assessor still picks stays `entry`), and it has at least one Yes/No
  * criterion to read. `verdictSource` is the part section's `fieldSource` map.
  */
+/**
+ * The write a part's auto-locked verdict field takes for a KNOWN outcome —
+ * the theory-side twin of `deriveChecklistOutcome`'s final step, sharing its
+ * discovery rule exactly.
+ *
+ * A practical derives its outcome FROM the checklist, so the derivation above
+ * owns the whole journey. A theory part already knows its outcome — the quiz
+ * marking computed it — but its printed verdict radio ("The Candidate's
+ * responses were: Satisfactory / Not Satisfactory") was left blank: locking it
+ * to `auto` made it un-typable without anything ever filling it, the same gap
+ * the checklist derivation closed for practicals. Same signal, same field
+ * rule: a choice field in the part whose options resolve to a verdict pair,
+ * locked to `auto` by the author. Returns null when the part prints no such
+ * field, which is most theory papers.
+ */
+export function autoVerdictWrite(
+  fields: readonly FormField[],
+  manifest: AssessmentToolManifest,
+  part: AssessmentPart,
+  outcome: PartOutcome,
+  verdictSource: Record<string, ValueSource> | undefined,
+): { fieldId: string; value: SubmissionValue } | null {
+  const partFields = fieldsInPart(fields, manifest, part.key);
+  const verdictField = partFields.find(
+    (f) => isChoiceField(f.type) && verdictPairOf(f) !== null && verdictSource?.[f.id] === 'auto',
+  );
+  if (!verdictField) return null;
+  const pair = verdictPairOf(verdictField)!;
+  return {
+    fieldId: verdictField.id,
+    value: outcome === 'satisfactory' ? pair.yes : pair.no,
+  };
+}
+
 export function deriveChecklistOutcome(
   fields: readonly FormField[],
   manifest: AssessmentToolManifest,

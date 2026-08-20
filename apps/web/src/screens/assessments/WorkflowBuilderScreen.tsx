@@ -358,6 +358,8 @@ export function WorkflowBuilderScreen() {
 
   const sections = orderedSections(workflow);
   const labelByKey = new Map(workflow.sections.map((s) => [s.key, s.label]));
+  /** For the per-row "ticks when X passes" choices on fixed checklists. */
+  const partOptions = orderedParts(tool.manifest).map((p) => ({ key: p.key, label: p.label }));
 
   return (
     <div className="fai-rise mx-auto flex max-w-[1000px] flex-col gap-4 p-[30px_28px_60px]">
@@ -560,8 +562,6 @@ export function WorkflowBuilderScreen() {
 
       <SummaryAutoFill
         tool={tool}
-        completion={completionDraft ?? tool.manifest.partCompletionMarks ?? []}
-        onCompletion={setCompletionDraft}
         signOff={signOffDraft ?? tool.manifest.signOff}
         onSignOff={(next) => setSignOffDraft(next)}
         pathwayMarks={pathwayDraft ?? tool.manifest.pathwayMarks ?? {}}
@@ -839,6 +839,27 @@ export function WorkflowBuilderScreen() {
                                         return base;
                                       })
                                     }
+                                    parts={partOptions}
+                                    completionMarks={
+                                      completionDraft ?? tool.manifest.partCompletionMarks ?? []
+                                    }
+                                    onCompletionMark={(rowIndex, partKey) =>
+                                      setCompletionDraft((prev) => {
+                                        const base =
+                                          prev ?? tool.manifest.partCompletionMarks ?? [];
+                                        const rest = base.filter(
+                                          (m) => !(m.fieldId === field.id && m.rowIndex === rowIndex),
+                                        );
+                                        if (!partKey) return rest;
+                                        // The tick lands in the second column — the same
+                                        // alignment the exporter's row cursor uses.
+                                        const columnKey = field.columns?.[1]?.key ?? '';
+                                        return [
+                                          ...rest,
+                                          { partKey, fieldId: field.id, rowIndex, columnKey },
+                                        ];
+                                      })
+                                    }
                                     onPrefillKey={(key) =>
                                       setPrefillDraft((prev) => {
                                         const base = { ...(prev ?? tool.manifest.profilePrefill ?? {}) };
@@ -1087,8 +1108,6 @@ interface TickTarget {
  */
 function SummaryAutoFill({
   tool,
-  completion,
-  onCompletion,
   signOff,
   onSignOff,
   pathwayMarks,
@@ -1097,8 +1116,6 @@ function SummaryAutoFill({
   onDefaults,
 }: {
   tool: AssessmentToolDetail;
-  completion: PartCompletionMark[];
-  onCompletion: (marks: PartCompletionMark[]) => void;
   signOff: AssessmentToolManifest['signOff'];
   onSignOff: (next: NonNullable<AssessmentToolManifest['signOff']>) => void;
   pathwayMarks: NonNullable<AssessmentToolManifest['pathwayMarks']>;
@@ -1117,8 +1134,20 @@ function SummaryAutoFill({
     checkbox group — the shapes their renderers tick on.
   */
   const tickTargets = useMemo(() => {
+    /*
+      Quiz machinery is not a summary box. A keyed question's options and the
+      ✓/✗ cell its mark lands in are auto-marking's own territory — offering
+      them here buried the handful of real summary boxes under every option
+      of a thirty-question paper.
+    */
+    const quiz = new Set<string>();
+    for (const f of tool.fields) {
+      if ((f.answerKey?.length ?? 0) > 0) quiz.add(f.id);
+      if (f.outcomeTarget) quiz.add(f.outcomeTarget.fieldId);
+    }
     const out: TickTarget[] = [];
     for (const f of tool.fields) {
+      if (quiz.has(f.id)) continue;
       if (f.type === 'check_cross' || f.type === 'boolean_yes_no' || f.type === 'checkbox') {
         out.push({
           value: f.id,
@@ -1161,29 +1190,6 @@ function SummaryAutoFill({
   const pathways = ASSESSMENT_PATHWAYS.filter(
     (p) => parts.some((part) => part.pathways.includes(p)) || pathwayMarks[p] !== undefined,
   );
-  /*
-    The printed method checklists: fixed-row two-column tables OUTSIDE every
-    part — the summary page belongs to no part, which is what makes its
-    checklist a completion record rather than a question. Without the
-    outside-a-part test this listed every practical observation checklist on
-    the paper as a thing to map, which buried the one table that matters. A
-    table already carrying a mapping stays visible wherever it sits, so
-    nothing configured can hide.
-  */
-  const coveredByParts = useMemo(() => {
-    const ids = new Set<string>();
-    for (const p of tool.manifest.parts) {
-      for (const f of fieldsInPart(tool.fields, tool.manifest, p.key)) ids.add(f.id);
-    }
-    return ids;
-  }, [tool]);
-  const methodTables = tool.fields.filter(
-    (f) =>
-      f.type === 'repeating_group' &&
-      (f.fixedRows?.length ?? 0) > 0 &&
-      (f.columns?.length ?? 0) === 2 &&
-      (!coveredByParts.has(f.id) || completion.some((m) => m.fieldId === f.id)),
-  );
 
   const setResult = (
     key: 'overallSatisfactory' | 'overallNotSatisfactory',
@@ -1204,13 +1210,6 @@ function SummaryAutoFill({
     if (mark) next[pathway] = mark;
     else delete next[pathway];
     onPathwayMarks(next);
-  };
-
-  const setMethodRow = (table: FormField, rowIndex: number, partKey: string) => {
-    // The tick lands in the second column — same alignment as the Preset.
-    const columnKey = table.columns![1]!.key;
-    const rest = completion.filter((m) => !(m.fieldId === table.id && m.rowIndex === rowIndex));
-    onCompletion(partKey ? [...rest, { partKey, fieldId: table.id, rowIndex, columnKey }] : rest);
   };
 
   /*
@@ -1383,47 +1382,22 @@ function SummaryAutoFill({
           ))}
         </div>
 
-        {/* The methods checklist: which printed row ticks when which part passes. */}
-        {methodTables.map((table) => (
-          <div key={table.id}>
-            <span className="block text-[12px] font-semibold">
-              {table.label || 'Methods checklist'} — ticks as parts pass
-            </span>
-            <p className="mt-0.5 mb-1.5 text-[11px] text-text-tertiary">
-              Each row ticks the moment its part&rsquo;s final outcome is satisfactory. A row with
-              no part is left for the assessor.
-            </p>
-            {table.fixedRows!.map((rowLabel, index) => (
-              <div key={index} className="mb-1.5 flex flex-wrap items-center gap-2">
-                <span className="min-w-[240px] truncate text-[11.5px] text-text-secondary">
-                  {rowLabel}
-                </span>
-                <span className="text-[11px] text-text-tertiary">ticks when</span>
-                <select
-                  aria-label={`Part that ticks "${rowLabel}"`}
-                  value={
-                    completion.find((m) => m.fieldId === table.id && m.rowIndex === index)
-                      ?.partKey ?? ''
-                  }
-                  onChange={(e) => setMethodRow(table, index, e.target.value)}
-                  className="h-[26px] min-w-[200px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
-                >
-                  <option value="">— nothing (manual) —</option>
-                  {parts.map((p) => (
-                    <option key={p.key} value={p.key}>
-                      {p.label}
-                    </option>
-                  ))}
-                </select>
-                <span className="text-[11px] text-text-tertiary">passes</span>
-              </div>
-            ))}
-          </div>
-        ))}
+        {/*
+          The methods checklist's per-row mapping lives ON the table's own row
+          in its section below — manual / always ticked / when a part passes —
+          because that is where an author looks for it, wherever the table
+          sits on the paper.
+        */}
       </div>
     </div>
   );
 }
+
+/**
+ * The row-mode select's "always ticked" sentinel — impossible as a part key,
+ * which keeps one dropdown carrying both mechanisms without ambiguity.
+ */
+const PRESET_MODE = '__always__';
 
 /** One field's overrides. `Inherit` is a real choice, not the absence of one. */
 function FieldRow({
@@ -1436,6 +1410,9 @@ function FieldRow({
   onPrefillKey,
   defaultValue,
   onDefaultValue,
+  parts,
+  completionMarks,
+  onCompletionMark,
 }: {
   field: FormField;
   section: WorkflowSection;
@@ -1448,6 +1425,12 @@ function FieldRow({
   /** The tool's preset answer for this field, when one is declared. */
   defaultValue?: SubmissionValue;
   onDefaultValue?: (value: SubmissionValue | null) => void;
+  /** The tool's parts, for the per-row "ticks when X passes" choices. */
+  parts?: ReadonlyArray<{ key: string; label: string }>;
+  /** Every stored completion mark; the row control reads its own field's. */
+  completionMarks?: readonly PartCompletionMark[];
+  /** Map (or clear, with null) which part ticks this field's given row. */
+  onCompletionMark?: (rowIndex: number, partKey: string | null) => void;
 }) {
   const source = valueSource(section, field.id);
   return (
@@ -1508,40 +1491,73 @@ function FieldRow({
         `validateProfilePrefill` refuses anything else at save.
       */}
       {/*
-        THE METHODS PRESET. A repeating table whose rows are fixed and whose one
-        answer column is a tick — "Methods used to assess competence" — can
-        carry a tool-level DEFAULT: the rows that come pre-ticked on every
-        case. A default, not a derived fact: the section stays writable and an
-        assessor's recorded answer always wins. Rows are written by INDEX,
-        which is the same alignment the exporter's row cursor uses.
+        HOW EACH PRINTED ROW OF A FIXED CHECKLIST FILLS — one dropdown per row,
+        ON the row, because that is where an author looks for it:
+
+          · manual — nobody fills it but a person;
+          · always ticked — a tool-level DEFAULT, printed ticked on every case
+            from day one (a recorded answer still wins over it);
+          · when <part> passes — ticks the moment that part's final outcome is
+            satisfactory, on the fill view, the dashboard and the export.
+
+        One control for what used to be two (the Preset checkboxes and a
+        separate mapping card), because the two mechanisms were being mistaken
+        for each other: pre-ticking every row LOOKED like completion tracking
+        and printed a fully-ticked checklist on untouched cases. Rows are
+        addressed by INDEX, the same alignment the exporter's row cursor uses.
       */}
       {field.type === 'repeating_group' &&
         (field.fixedRows?.length ?? 0) > 0 &&
         (field.columns?.length ?? 0) === 2 &&
         onDefaultValue && (
-          <div className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 pl-1">
-            <span className="font-mono text-[9px] uppercase text-text-tertiary">Preset</span>
+          <div className="flex w-full flex-col gap-1 pl-1">
             {field.fixedRows!.map((row, index) => {
               const columnKey = field.columns![1]!.key;
               const rows = Array.isArray(defaultValue)
                 ? (defaultValue as Record<string, boolean>[])
                 : [];
-              const ticked = rows[index]?.[columnKey] === true;
+              const presetTicked = rows[index]?.[columnKey] === true;
+              const mappedPart = completionMarks?.find(
+                (m) => m.fieldId === field.id && m.rowIndex === index,
+              )?.partKey;
+              const mode = mappedPart ?? (presetTicked ? PRESET_MODE : '');
+
+              const setPreset = (on: boolean) => {
+                const next = field.fixedRows!.map((_, i) => ({
+                  [columnKey]: i === index ? on : rows[i]?.[columnKey] === true,
+                }));
+                onDefaultValue(next.some((r) => r[columnKey]) ? next : null);
+              };
+              const onMode = (value: string) => {
+                if (value === PRESET_MODE) {
+                  if (mappedPart) onCompletionMark?.(index, null);
+                  setPreset(true);
+                  return;
+                }
+                if (presetTicked) setPreset(false);
+                onCompletionMark?.(index, value === '' ? null : value);
+              };
+
               return (
-                <label key={row} className="flex items-center gap-1 text-[11px] text-text-secondary">
-                  <input
-                    type="checkbox"
-                    checked={ticked}
-                    onChange={(e) => {
-                      const next = field.fixedRows!.map((_, i) => ({
-                        [columnKey]: i === index ? e.target.checked : rows[i]?.[columnKey] === true,
-                      }));
-                      const any = next.some((r) => r[columnKey]);
-                      onDefaultValue(any ? next : null);
-                    }}
-                  />
-                  {row}
-                </label>
+                <div key={row} className="flex flex-wrap items-center gap-2">
+                  <span className="min-w-[240px] truncate text-[11px] text-text-secondary">
+                    {row}
+                  </span>
+                  <select
+                    aria-label={`When "${row}" ticks`}
+                    value={mode}
+                    onChange={(e) => onMode(e.target.value)}
+                    className="h-[24px] min-w-[210px] rounded-sm border border-border bg-surface-page px-1.5 text-[11px]"
+                  >
+                    <option value="">— manual —</option>
+                    <option value={PRESET_MODE}>Always ticked</option>
+                    {(parts ?? []).map((p) => (
+                      <option key={p.key} value={p.key}>
+                        when {p.label} passes
+                      </option>
+                    ))}
+                  </select>
+                </div>
               );
             })}
           </div>

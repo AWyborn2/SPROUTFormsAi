@@ -20,6 +20,7 @@ import {
   isSelfMarking,
   moreCoachingRequired,
   type AssessmentCaseState,
+  autoVerdictWrite,
   logbookRows,
   logbookDurationRows,
   markTheory,
@@ -3417,12 +3418,28 @@ async function setSubmitted(
           passPercent: tool.manifest.theoryPassPercent,
         });
         theoryScore = { correctCount: computed.correctCount, totalCount: computed.totalCount };
+        /*
+          The part's printed verdict radio, when the author LOCKED it to
+          `auto` — same signal, same field rule as the practical's checklist
+          derivation. The quiz marking already knows the outcome; without this
+          the radio was un-typable AND unfilled, the exact gap (B) closed for
+          practicals.
+        */
+        const verdict = autoVerdictWrite(
+          fields,
+          tool.manifest,
+          part,
+          computed.outcome,
+          sectionForPart(workflowOf(tool.manifest, fields), part.key)?.fieldSource,
+        );
         marked = await resolveAttemptOutcome(db, tenant, {
           row,
           attempt,
           manifest: tool.manifest,
           outcome: computed.outcome,
-          derivedValues: computed.derivedValues,
+          derivedValues: verdict
+            ? { ...computed.derivedValues, [verdict.fieldId]: verdict.value }
+            : computed.derivedValues,
           disposition: computed.outcome === 'not_satisfactory' ? 'coaching_then_retry' : null,
           reason: null,
           belowThresholdReason: null,
