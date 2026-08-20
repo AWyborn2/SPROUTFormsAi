@@ -39,6 +39,27 @@ function startsPage(field: FormField): boolean {
 }
 
 /**
+ * The fields a QUIZ actually shows: headings, plus what the caller may write.
+ *
+ * A question's ✓/✗ outcome cell — and any other field marking writes, like a
+ * part's verdict radio locked to `auto` — is a results box for the printed
+ * PDF, not a question. The server already refuses writes to those (they are
+ * dropped from `writableFieldIds`), so rendering them in the quiz puts an
+ * unanswerable control under every question, and an auto verdict radio would
+ * even claim a page of its own that no candidate could complete. Headings
+ * stay: they introduce the question below them and were never writable.
+ *
+ * QUIZ MODE ONLY. The stacked view keeps showing read-only cells — an
+ * assessor reviewing a marked paper reads the ✓/✗ beside each question there.
+ */
+export function quizFields(
+  fields: readonly FormField[],
+  writableIds: ReadonlySet<string>,
+): FormField[] {
+  return fields.filter((f) => f.type === 'section_header' || writableIds.has(f.id));
+}
+
+/**
  * Split a part's visible fields into one page per question.
  *
  * Anything printed BEFORE the first question — a part heading, an instruction —
