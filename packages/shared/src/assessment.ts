@@ -1993,6 +1993,23 @@ export function validateAnswerKeys(fields: readonly FormField[]): string[] {
   const byId = new Map(fields.map((f) => [f.id, f]));
 
   for (const field of fields) {
+    /*
+      A MODEL ANSWER ON A CHOICE QUESTION IS AUTHOR CONFUSION, not a richer
+      configuration. A question that offers options is marked by exact-set
+      `answerKey`; a written question is judged by an assessor reading prose
+      against `modelAnswer`. An options-bearing field carrying a model answer
+      means the author reached for the wrong instrument — the guide would sit
+      beside a question the machine already marks, and nobody would ever read
+      it. Written questions (no options) pass with or without an
+      `outcomeTarget`: the target is where the ASSESSOR'S tick lands, and a
+      guide with no declared cell is still a legitimate marking aid.
+    */
+    if (field.modelAnswer && (field.options?.length ?? 0) > 0) {
+      problems.push(
+        `Field "${field.id}" has a model answer but offers options — a choice question takes an answer key, not a written marking guide.`,
+      );
+    }
+
     if (!field.answerKey) continue;
 
     if (field.answerKey.length === 0) {

@@ -14,6 +14,7 @@ import {
   deriveChecklistOutcome,
   incorrectQuestionsNote,
   isSelfMarking,
+  markKeyedQuestions,
   markTheory,
   stripMarkingSecrets,
 } from './marking.js';
@@ -554,6 +555,165 @@ describe('stripMarkingSecrets', () => {
     stripMarkingSecrets(fields);
 
     expect(fields[0]?.answerKey).toEqual(['a', 'b']);
+  });
+
+  it('REMOVES A MODEL ANSWER STANDING ALONE — a written question carries no key, only prose', () => {
+    /*
+      The written-question shape: no answerKey, no options, just the assessor's
+      marking guide. The fast path's some-check must see it, or a paper of
+      eleven written questions and nothing else would be served verbatim.
+    */
+    const written: FormField = {
+      id: 'w1',
+      type: 'textarea',
+      label: 'w1',
+      required: true,
+      source: 'imported',
+      modelAnswer: 'Contact the tip head controller on channel 2 before entering.',
+    };
+
+    const stripped = stripMarkingSecrets([written]);
+
+    expect(stripped[0]).not.toBe(written);
+    expect(stripped[0]?.modelAnswer).toBeUndefined();
+    expect(stripped[0]?.label).toBe('w1');
+    expect(stripped[0]?.type).toBe('textarea');
+  });
+
+  it('removes modelAnswer alongside the other secrets on one field', () => {
+    const loaded = q('g1', ['a'], 'g1-out', { modelAnswer: 'never mind the options', answerHint: 'hint' });
+
+    const g1 = stripMarkingSecrets([loaded, outcome('g1-out')]).find((f) => f.id === 'g1');
+
+    expect(g1?.answerKey).toBeUndefined();
+    expect(g1?.outcomeTarget).toBeUndefined();
+    expect(g1?.answerHint).toBeUndefined();
+    expect(g1?.modelAnswer).toBeUndefined();
+    expect(g1?.options).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('a targeted-but-unkeyed written question still keeps the identity fast-path honest', () => {
+    // The identity return may only fire when NOTHING carries a secret — a
+    // written question's outcomeTarget alone is already enough to copy.
+    const clean: FormField[] = [header('h'), outcome('o1')];
+
+    expect(stripMarkingSecrets(clean)).toBe(clean);
+  });
+});
+
+/**
+ * The arithmetic core of marking, extracted for MIXED parts: keyed choice
+ * questions pre-mark automatically while written questions wait for the
+ * assessor. What is pinned here is the boundary — exactly the keyed questions
+ * are marked, exactly their cells are written, and no part-level conclusion
+ * (verdict, note, outcome) is smuggled out with them.
+ */
+describe('markKeyedQuestions — the mixed-part pre-mark', () => {
+  /** A written question: prose answer, model-answer guide, assessor-ticked box. */
+  const written = (id: string): FormField => ({
+    id,
+    type: 'text',
+    label: id,
+    required: true,
+    source: 'imported',
+    modelAnswer: `Model answer for ${id}`,
+    outcomeTarget: { fieldId: `${id}-out` },
+  });
+
+  const radio = (id: string, options: string[], answerKey: string[]): FormField => ({
+    id,
+    type: 'radio',
+    label: id,
+    required: true,
+    source: 'imported',
+    options,
+    answerKey,
+    outcomeTarget: { fieldId: `${id}-out` },
+  });
+
+  /*
+    The reference paper in miniature — the Authorised Tip Head Controller
+    shape: 15 questions (11 written, 4 choice), each with a printed ✓/✗ box.
+  */
+  const writtenIds = ['q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q9', 'q10', 'q13', 'q14', 'q15'];
+  const mixedFields: FormField[] = [
+    header('part2'),
+    ...writtenIds.slice(0, 6).map(written),
+    radio('q7', ['a', 'b', 'c'], ['b']),
+    radio('q8', ['a', 'b', 'c', 'd'], ['c']),
+    ...['q9', 'q10'].map(written),
+    q('q11', ['a', 'b', 'c', 'd']), // checkbox_group, exact set of 4
+    radio('q12', ['True', 'False'], ['True']),
+    ...['q13', 'q14', 'q15'].map(written),
+    ...['q1', 'q2', 'q3', 'q4', 'q5', 'q6', 'q7', 'q8', 'q9', 'q10', 'q11', 'q12', 'q13', 'q14', 'q15'].map(
+      (id) => outcome(`${id}-out`),
+    ),
+  ];
+
+  const answers: Record<string, SubmissionValue> = {
+    q1: 'Check the tip head is clear before reversing.',
+    q7: 'b', // right
+    q8: 'a', // wrong
+    q11: ['a', 'b', 'c', 'd'], // right — the full exact set
+    // q12 unanswered
+  };
+
+  it('MARKS EXACTLY THE FOUR KEYED QUESTIONS — written ones are not the machine’s to judge', () => {
+    const { marks } = markKeyedQuestions(mixedFields, answers);
+
+    expect(marks.map((m) => m.fieldId)).toEqual(['q7', 'q8', 'q11', 'q12']);
+    expect(marks.map((m) => m.correct)).toEqual([true, false, true, false]);
+    expect(marks.find((m) => m.fieldId === 'q12')?.unanswered).toBe(true);
+  });
+
+  it('writes only the keyed questions’ cells; every written question’s box stays blank for the assessor', () => {
+    const { derivedValues } = markKeyedQuestions(mixedFields, answers);
+
+    expect(derivedValues['q7-out']).toBe(true);
+    expect(derivedValues['q8-out']).toBe(false);
+    expect(derivedValues['q11-out']).toBe(true);
+    expect(derivedValues['q12-out']).toBe(false);
+    for (const id of writtenIds) {
+      // A pre-written ✓ on a question nobody judged would be a finding nobody
+      // made — the box must arrive empty.
+      expect(derivedValues[`${id}-out`], `${id}-out`).toBeUndefined();
+    }
+    // The candidate's prose rides through untouched.
+    expect(derivedValues.q1).toBe('Check the tip head is clear before reversing.');
+  });
+
+  it('draws no part-level conclusion — marks and values only', () => {
+    // No outcome, no verdict box, no further-action note: those belong to
+    // markTheory, which holds the whole part's evidence. In a mixed part the
+    // machine holds only the keyed subset.
+    expect(Object.keys(markKeyedQuestions(mixedFields, answers)).sort()).toEqual([
+      'derivedValues',
+      'marks',
+    ]);
+  });
+
+  it('flags mandatory only when told which questions gate', () => {
+    const bare = markKeyedQuestions(mixedFields, answers);
+    expect(bare.marks.every((m) => !m.mandatory)).toBe(true);
+
+    const gated = markKeyedQuestions(mixedFields, answers, ['q7', 'q11']);
+    expect(gated.marks.filter((m) => m.mandatory).map((m) => m.fieldId)).toEqual(['q7', 'q11']);
+  });
+
+  it('is the exact arithmetic markTheory reports — the delegation cannot drift', () => {
+    const core = markKeyedQuestions(mixedFields, answers, ['q7']);
+    const whole = markTheory({ fields: mixedFields, values: answers, part: { mandatoryFieldIds: ['q7'] } });
+
+    expect(whole.marks).toEqual(core.marks);
+    expect(whole.derivedValues).toEqual(core.derivedValues);
+  });
+
+  it('does not mutate the values it was given', () => {
+    const values: Record<string, SubmissionValue> = { q7: 'b' };
+
+    markKeyedQuestions(mixedFields, values);
+
+    expect(values).toEqual({ q7: 'b' });
   });
 });
 

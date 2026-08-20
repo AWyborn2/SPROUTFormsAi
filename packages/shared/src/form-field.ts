@@ -457,10 +457,39 @@ export interface FormField {
   answerHint?: string;
 
   /**
+   * The ASSESSOR'S marking guide for a WRITTEN (`text`/`textarea`) question —
+   * the expected answer as prose, judged by a person, never by the machine.
+   *
+   * Three contracts, each load-bearing:
+   *
+   * NEVER SERVED TO A FILL SURFACE. This is the answer to the question, in the
+   * same sense `answerKey` is — `stripMarkingSecrets` removes it, and the
+   * assessor reads it through a separate role-gated channel. A candidate who
+   * can open devtools must find nothing.
+   *
+   * NEVER AUTO-COMPARED against the candidate's text. The source answer keys
+   * themselves say written answers are "not a literal exact-string match";
+   * the assessor judges the candidate's wording against this guide and ticks
+   * the ✓/✗ box the question's `outcomeTarget` names. String equality here
+   * would fail every honest paraphrase on a safety-critical record.
+   *
+   * OPT-IN. Absent (or empty) means the written question is ordinary
+   * furniture: still answered, still assessor-judged, just without a guide
+   * beside it. A choice question never carries one — it takes an `answerKey`,
+   * and `validateAnswerKeys` reports the confusion.
+   */
+  modelAnswer?: string;
+
+  /**
    * Where this question's derived ✓/✗ is written. Required whenever
    * `answerKey` is set — a key with nowhere to land would compute a mark that
    * never reaches the page, which on an evidence document reads as an
    * unanswered question rather than a marked one.
+   *
+   * An UNKEYED question may also declare one: a written question's target is
+   * the box the ASSESSOR ticks after judging the answer (see `modelAnswer`).
+   * Marking never writes an unkeyed question's cell, so the workflow leaves it
+   * fillable by the assessor rather than locking it `auto`.
    */
   outcomeTarget?: OutcomeTarget;
 

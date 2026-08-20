@@ -280,8 +280,21 @@ export type KeySource = (typeof KEY_SOURCES)[number];
 export interface DraftAnswerKey {
   /** The question field's id. */
   fieldId: string;
-  /** Option values that TOGETHER make a correct answer — exact-set, as marking. */
+  /**
+   * Option values that TOGETHER make a correct answer — exact-set, as marking.
+   *
+   * `[]` for a WRITTEN key: a text/textarea question has no options to key, so
+   * its draft carries `modelAnswer` instead and the option list stays empty.
+   * The two are mutually exclusive by shape, not by rule — the target question
+   * decides which one it can hold.
+   */
   answerKey: string[];
+  /**
+   * The assessor's marking guide for a written question — prose, judged by a
+   * person. Published onto `FormField.modelAnswer`; never auto-compared. See
+   * the contract on the field.
+   */
+  modelAnswer?: string;
   source: KeySource;
   /**
    * Who attested to this answer, and when.

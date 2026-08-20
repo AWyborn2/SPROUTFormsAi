@@ -231,18 +231,21 @@ function applyMarks(
  *
  * `answerKey` is the complete answer key to the assessment; serving it to the
  * browser that renders the questions hands every candidate the answers in
- * devtools. Marking never runs client-side (the outcome route computes it from
- * the stored attempt), so no fill surface has any use for these properties —
- * only the builder, where keys are authored, may see them.
+ * devtools. `modelAnswer` is the same secret in prose — a written question's
+ * expected answer — so it strips on exactly the same rule, and the assessor's
+ * copy travels through a separate role-gated channel instead of un-stripping.
+ * Marking never runs client-side (the outcome route computes it from the
+ * stored attempt), so no fill surface has any use for these properties — only
+ * the builder, where keys are authored, may see them.
  *
  * Returns the same array when nothing carried a key, so callers can cheaply
  * skip no-op copies.
  */
 export function stripMarkingSecrets(fields: readonly FormField[]): FormField[] {
-  if (!fields.some((f) => f.answerKey || f.outcomeTarget || f.answerHint)) return fields as FormField[];
+  if (!fields.some((f) => f.answerKey || f.outcomeTarget || f.answerHint || f.modelAnswer)) return fields as FormField[];
   return fields.map((f) => {
-    if (!f.answerKey && !f.outcomeTarget && !f.answerHint) return f;
-    const { answerKey: _key, outcomeTarget: _target, answerHint: _hint, ...rest } = f;
+    if (!f.answerKey && !f.outcomeTarget && !f.answerHint && !f.modelAnswer) return f;
+    const { answerKey: _key, outcomeTarget: _target, answerHint: _hint, modelAnswer: _model, ...rest } = f;
     return rest;
   });
 }
@@ -327,21 +330,37 @@ export interface MarkTheoryInput {
 }
 
 /**
- * Mark every visible keyed question and decide the part's outcome.
+ * Mark the visible KEYED questions and nothing else — the arithmetic core of
+ * `markTheory`, without any of its part-level consequences.
  *
- * The outcome turns on the mandatory section alone: questions outside it are
- * marked and reported, but a wrong answer there does not by itself make the
- * part unsatisfactory. That mirrors the paper, where the must-pass section is
- * the gate and the location-specific sets are evidence.
+ * Returns each keyed question's verdict plus the value map with every ✓/✗
+ * written at its target. Deliberately NO part verdict, NO further-action note,
+ * NO outcome: those are claims about a whole part, and in a MIXED part — keyed
+ * choice questions alongside assessor-judged written ones — the machine holds
+ * only some of the evidence. The keyed marks are honest pre-marks the assessor
+ * builds on; letting this function tick "Satisfactory" would certify a part on
+ * the four questions it can read while ignoring the eleven it cannot.
+ *
+ * An unkeyed question — written or otherwise — is skipped entirely, even when
+ * it declares an `outcomeTarget`: that cell is the assessor's to tick.
+ *
+ * `mandatoryFieldIds` is optional so callers pre-marking a judged part need no
+ * part at hand; each mark's `mandatory` flag is then false, which is correct —
+ * the must-pass gate is `markTheory`'s concern, and this function draws none
+ * of the conclusions that read the flag.
  */
-export function markTheory({ fields, values, part, passPercent }: MarkTheoryInput): TheoryMarkingResult {
+export function markKeyedQuestions(
+  fields: readonly FormField[],
+  values: Record<string, SubmissionValue> | null | undefined,
+  mandatoryFieldIds?: readonly string[],
+): { marks: QuestionMark[]; derivedValues: Record<string, SubmissionValue> } {
   // An untouched attempt has no map. Marking it is meaningful — every question
   // is unanswered — so normalize rather than refusing, which would have made an
   // assessor unable to fail a candidate who wrote nothing.
   const answers = values ?? {};
   const visible = visibleFields(fields, answers as VisibilityAnswers);
 
-  const mandatoryIds = new Set(part.mandatoryFieldIds ?? []);
+  const mandatoryIds = new Set(mandatoryFieldIds ?? []);
 
   const marks: QuestionMark[] = [];
 
@@ -360,6 +379,24 @@ export function markTheory({ fields, values, part, passPercent }: MarkTheoryInpu
       mandatory: mandatoryIds.has(field.id),
     });
   }
+
+  return { marks, derivedValues: applyMarks(marks, answers) };
+}
+
+/**
+ * Mark every visible keyed question and decide the part's outcome.
+ *
+ * The outcome turns on the mandatory section alone: questions outside it are
+ * marked and reported, but a wrong answer there does not by itself make the
+ * part unsatisfactory. That mirrors the paper, where the must-pass section is
+ * the gate and the location-specific sets are evidence.
+ */
+export function markTheory({ fields, values, part, passPercent }: MarkTheoryInput): TheoryMarkingResult {
+  const answers = values ?? {};
+  // The per-question arithmetic is shared with the mixed-marking pre-mark path
+  // (`markKeyedQuestions`); everything below it — verdict box, further-action
+  // note, outcome — is the part-level judgment only a fully-keyed part may make.
+  const { marks, derivedValues } = markKeyedQuestions(fields, answers, part.mandatoryFieldIds);
 
   const correctCount = marks.filter((m) => m.correct).length;
   const mandatoryMarks = marks.filter((m) => m.mandatory);
@@ -418,8 +455,6 @@ export function markTheory({ fields, values, part, passPercent }: MarkTheoryInpu
       : mandatoryAllCorrect
         ? 'satisfactory'
         : 'not_satisfactory';
-
-  const derivedValues = applyMarks(marks, answers);
 
   /*
     THE PART'S OWN VERDICT BOX, written from the same arithmetic that produced
