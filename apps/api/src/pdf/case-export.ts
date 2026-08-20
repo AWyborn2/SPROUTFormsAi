@@ -359,6 +359,14 @@ export function assembleCaseValues({
     exports blank. On a competency record, silence is the safe failure; a
     confident mark in the wrong box asserts a finding nobody made.
   */
+  /*
+    THE PATHWAY TICK, seeded from the case like the location stream: the
+    pathway chose which parts this document shows filled, so the box saying so
+    must come from the same fact — an open OR resolved case prints it, because
+    which programme the candidate is on is true from day one.
+  */
+  writeMark(values, manifest.pathwayMarks?.[pathway]);
+
   for (const part of passing) {
     if (rendered.includes(part.key)) writeMark(values, part.checklistMark);
   }

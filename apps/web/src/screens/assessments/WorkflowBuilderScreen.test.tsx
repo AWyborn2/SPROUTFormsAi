@@ -377,3 +377,127 @@ describe('WorkflowBuilderScreen — where each part applies (U9)', () => {
     expect(screen.queryByText('Save parts rule')).toBeNull();
   });
 });
+
+/**
+ * The summary auto-fill card. Publish GUESSES the result pair and the methods
+ * mapping from printed labels with no way to see or fix the guess; this card
+ * is the fix, so what it shows and what a save carries are pinned here.
+ */
+describe('WorkflowBuilderScreen — summary auto-fill', () => {
+  const methodsTable: AssessmentToolDetail['fields'][number] = {
+    id: 'methods',
+    type: 'repeating_group',
+    label: 'Assessment Methods',
+    required: false,
+    source: 'imported',
+    fixedRows: ['1. Theory', '2. Practical Demonstration'],
+    columns: [
+      { key: 'method', label: 'Method', type: 'text' },
+      { key: 'done', label: 'Done', type: 'checkbox' },
+    ],
+  };
+
+  it('seeds the result pair from the manifest and saves a repointed box', () => {
+    toolResult.data = tool({
+      manifest: {
+        ...tool().manifest,
+        signOff: { overallSatisfactory: { fieldId: 'crit1', value: true } },
+      },
+    });
+    render(<WorkflowBuilderScreen />);
+
+    const competent = screen.getByLabelText(
+      'Printed box for Candidate Competent',
+    ) as HTMLSelectElement;
+    expect(competent.value).toBe('crit1');
+
+    fireEvent.change(screen.getByLabelText('Printed box for Candidate not yet Competent'), {
+      target: { value: 'crit1' },
+    });
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      signOff?: { overallSatisfactory?: { fieldId: string }; overallNotSatisfactory?: { fieldId: string } };
+    };
+    // The repoint rides WITH the stored half — repointing one box must not
+    // shed the other.
+    expect(payload.signOff?.overallSatisfactory?.fieldId).toBe('crit1');
+    expect(payload.signOff?.overallNotSatisfactory).toEqual({ fieldId: 'crit1', value: true });
+  });
+
+  it('maps a pathway to its printed box — only the pathways this tool declares', () => {
+    toolResult.data = tool();
+    render(<WorkflowBuilderScreen />);
+
+    // Parts declare only 'new', so 'experienced' is not offered.
+    expect(screen.queryByLabelText(/Experienced \/ re-assessment pathway/)).toBeNull();
+
+    fireEvent.change(
+      screen.getByLabelText('Printed box for the New / inexperienced pathway'),
+      { target: { value: 'crit1' } },
+    );
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      pathwayMarks?: Record<string, { fieldId: string; value: unknown }>;
+    };
+    expect(payload.pathwayMarks).toEqual({ new: { fieldId: 'crit1', value: true } });
+  });
+
+  it('shows the methods mapping publish guessed, and saves a corrected row', () => {
+    toolResult.data = tool({
+      fields: [...tool().fields, methodsTable],
+      manifest: {
+        ...tool().manifest,
+        partCompletionMarks: [{ partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'done' }],
+      },
+    });
+    render(<WorkflowBuilderScreen />);
+
+    const row0 = screen.getByLabelText('Part that ticks "1. Theory"') as HTMLSelectElement;
+    // The invisible guess, finally visible.
+    expect(row0.value).toBe('p1');
+
+    fireEvent.change(screen.getByLabelText('Part that ticks "2. Practical Demonstration"'), {
+      target: { value: 'p2' },
+    });
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      partCompletionMarks?: Array<{ partKey: string; fieldId: string; rowIndex: number; columnKey: string }>;
+    };
+    expect(payload.partCompletionMarks).toEqual([
+      { partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'done' },
+      { partKey: 'p2', fieldId: 'methods', rowIndex: 1, columnKey: 'done' },
+    ]);
+  });
+
+  it('adds an always-ticked box as a field default', () => {
+    toolResult.data = tool();
+    render(<WorkflowBuilderScreen />);
+
+    fireEvent.change(screen.getByLabelText('Add an always-ticked box'), {
+      target: { value: 'crit1' },
+    });
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      fieldDefaults?: Record<string, unknown>;
+    };
+    expect(payload.fieldDefaults).toEqual({ crit1: true });
+  });
+
+  it('sends none of it untouched — a plain workflow save cannot erase the wiring', () => {
+    toolResult.data = tool();
+    render(<WorkflowBuilderScreen />);
+
+    const group = screen.getByRole('group', { name: 'Candidate access to Part 2 — Practical' });
+    fireEvent.click(within(group).getByText('fill'));
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as Record<string, unknown>;
+    expect('signOff' in payload).toBe(false);
+    expect('pathwayMarks' in payload).toBe(false);
+    expect('partCompletionMarks' in payload).toBe(false);
+  });
+});

@@ -38,6 +38,9 @@ import {
   profilePrefillValues,
   validateProfilePrefill,
   validatePrerequisiteChecks,
+  validatePartCompletionMarks,
+  validatePathwayMarks,
+  validateSignOffMarks,
   type ProfilePrefillSource,
   sectionForPart,
   workflowOf,
@@ -480,6 +483,33 @@ const declaredMarkSchema = z.object({
   value: z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(z.string())]),
 });
 
+/*
+  Named once and used by BOTH the create body and the workflow PATCH, because
+  the two accepting different shapes is how `overallNotSatisfactory` went
+  missing: the manifest type had it, the exporter wrote it, and this schema
+  silently STRIPPED it — so every tool published over HTTP lost the "not yet
+  Competent" box while the same tool authored by script kept it.
+*/
+const signOffSchema = z.object({
+  assessorNameFieldId: z.string().optional(),
+  assessorSignatureFieldId: z.string().optional(),
+  signedDateFieldId: z.string().optional(),
+  overallSatisfactory: declaredMarkSchema.optional(),
+  overallNotSatisfactory: declaredMarkSchema.optional(),
+  moreCoachingRequiredYes: declaredMarkSchema.optional(),
+  moreCoachingRequiredNo: declaredMarkSchema.optional(),
+});
+
+const partCompletionMarkSchema = z.object({
+  partKey: z.string().min(1),
+  fieldId: z.string().min(1),
+  rowIndex: z.number().int().min(0),
+  columnKey: z.string().min(1),
+});
+
+/** The case's pathway → the printed box that says so. Partial by design. */
+const pathwayMarksSchema = z.record(z.enum(ASSESSMENT_PATHWAYS), declaredMarkSchema);
+
 const partSchema = z.object({
   key: z.string().min(1),
   ordinal: z.number().int().positive(),
@@ -692,6 +722,21 @@ const updateToolBody = z.object({
     .optional(),
   /** Tool-declared default answers. Same tri-state; values stored opaque. */
   fieldDefaults: z.record(z.string(), z.unknown()).nullable().optional(),
+  /**
+   * The methods-checklist mapping: which printed row ticks when which part
+   * passes. Same tri-state — the array replaces, null clears, absent keeps —
+   * so the editor can finally SEE and CORRECT what publish only guessed at.
+   */
+  partCompletionMarks: z.array(partCompletionMarkSchema).nullable().optional(),
+  /**
+   * The front page's certification block, replaced whole. The editor seeds its
+   * draft from the stored block and sends it back with the result pair
+   * repointed, so the name/signature/date pointers and the coaching pair ride
+   * through a save untouched.
+   */
+  signOff: signOffSchema.nullable().optional(),
+  /** The pathway → printed-box map. Same tri-state as everything above. */
+  pathwayMarks: pathwayMarksSchema.nullable().optional(),
 });
 
 const toolBody = z.object({
@@ -714,16 +759,7 @@ const toolBody = z.object({
     // Named for the same reason as every optional above: an unlisted manifest
     // property is silently STRIPPED, and a builder that appeared to save the
     // completion mapping would publish a checklist that never ticks.
-    partCompletionMarks: z
-      .array(
-        z.object({
-          partKey: z.string().min(1),
-          fieldId: z.string().min(1),
-          rowIndex: z.number().int().min(0),
-          columnKey: z.string().min(1),
-        }),
-      )
-      .optional(),
+    partCompletionMarks: z.array(partCompletionMarkSchema).optional(),
     /*
       Who does what, and when. The same trap this file warns about above: a
       manifest property this schema does not name is silently STRIPPED, so a
@@ -743,16 +779,10 @@ const toolBody = z.object({
     theoryPassPercent: z.number().int().min(1).max(100).optional(),
     theoryAllowRetry: z.boolean().optional(),
     theoryRetry: z.enum(THEORY_RETRY_MODES).optional(),
-    signOff: z
-      .object({
-        assessorNameFieldId: z.string().optional(),
-        assessorSignatureFieldId: z.string().optional(),
-        signedDateFieldId: z.string().optional(),
-        overallSatisfactory: declaredMarkSchema.optional(),
-        moreCoachingRequiredYes: declaredMarkSchema.optional(),
-        moreCoachingRequiredNo: declaredMarkSchema.optional(),
-      })
-      .optional(),
+    signOff: signOffSchema.optional(),
+    // The printed pathway tick, written from the case at export. Named for the
+    // same reason as every optional above: unlisted means silently STRIPPED.
+    pathwayMarks: pathwayMarksSchema.optional(),
   }),
   candidatePrerequisiteIds: z.array(z.string().uuid()).optional(),
   assessorCompetencyIds: z.array(z.string().uuid()).optional(),
@@ -1831,7 +1861,10 @@ assessmentToolsRouter.patch(
       parsed.data.workflow !== undefined ||
       parsed.data.profilePrefill !== undefined ||
       parsed.data.prerequisiteChecks !== undefined ||
-      parsed.data.fieldDefaults !== undefined;
+      parsed.data.fieldDefaults !== undefined ||
+      parsed.data.partCompletionMarks !== undefined ||
+      parsed.data.signOff !== undefined ||
+      parsed.data.pathwayMarks !== undefined;
     let manifest: AssessmentToolManifest = tool.manifest;
     if (parsed.data.workflow) manifest = { ...manifest, workflow: parsed.data.workflow };
     if (parsed.data.profilePrefill !== undefined) {
@@ -1852,6 +1885,22 @@ assessmentToolsRouter.patch(
       const { fieldDefaults: _dropped, ...rest } = manifest;
       manifest = parsed.data.fieldDefaults
         ? { ...rest, fieldDefaults: parsed.data.fieldDefaults as Record<string, SubmissionValue> }
+        : rest;
+    }
+    if (parsed.data.partCompletionMarks !== undefined) {
+      const { partCompletionMarks: _dropped, ...rest } = manifest;
+      manifest = parsed.data.partCompletionMarks
+        ? { ...rest, partCompletionMarks: parsed.data.partCompletionMarks }
+        : rest;
+    }
+    if (parsed.data.signOff !== undefined) {
+      const { signOff: _dropped, ...rest } = manifest;
+      manifest = parsed.data.signOff ? { ...rest, signOff: parsed.data.signOff } : rest;
+    }
+    if (parsed.data.pathwayMarks !== undefined) {
+      const { pathwayMarks: _dropped, ...rest } = manifest;
+      manifest = parsed.data.pathwayMarks
+        ? { ...rest, pathwayMarks: parsed.data.pathwayMarks }
         : rest;
     }
 
@@ -1876,6 +1925,9 @@ assessmentToolsRouter.patch(
       ...workflowProblems,
       ...validateProfilePrefill(manifest.profilePrefill, fields),
       ...validatePrerequisiteChecks(manifest.prerequisiteChecks, fields),
+      ...validatePartCompletionMarks(manifest.partCompletionMarks, manifest, fields),
+      ...validatePathwayMarks(manifest.pathwayMarks, fields),
+      ...validateSignOffMarks(manifest.signOff, fields),
     ];
     if (problems.length > 0) {
       // Nothing written. A half-applied workflow is worse than a rejected one:

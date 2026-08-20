@@ -52,15 +52,71 @@ import {
  * moment). Derived keys win where both exist: parts, pathways and pointers
  * are what the author is here to edit. Undefined derived keys are stripped
  * first, so an absence in the derivation can never erase a seeded value.
+ *
+ * TWO EXCEPTIONS, when `fields` is given: `partCompletionMarks` and the
+ * sign-off block. Publish DERIVES both from printed labels, so the plain
+ * overlay re-guessed them on every revision — which was fine while the guess
+ * was the only writer, and wrong the moment the workflow editor let an author
+ * repoint them: a republish would silently clobber a configured mapping with
+ * a fresh guess. So a seeded entry that still RESOLVES against the revision's
+ * fields wins over the derivation, and one whose target vanished falls back
+ * (or is dropped, for the pathway map nothing derives) rather than blocking
+ * the republish on a ghost id.
  */
 export function composeRevisionManifest(
   seeded: AssessmentToolManifest,
   derived: AssessmentToolManifest,
+  fields?: readonly FormField[],
 ): AssessmentToolManifest {
   const overlay = Object.fromEntries(
     Object.entries(derived).filter(([, value]) => value !== undefined),
   );
-  return { ...seeded, ...overlay } as AssessmentToolManifest;
+  const merged = { ...seeded, ...overlay } as AssessmentToolManifest;
+  if (!fields) return merged;
+  const byId = new Map(fields.map((f) => [f.id, f]));
+
+  const resolvedSeededMarks = (seeded.partCompletionMarks ?? []).filter((mark) => {
+    const field = byId.get(mark.fieldId);
+    return (
+      field?.type === 'repeating_group' &&
+      mark.rowIndex < (field.fixedRows?.length ?? 0) &&
+      (field.columns ?? []).some((c) => c.key === mark.columnKey) &&
+      merged.parts.some((p) => p.key === mark.partKey)
+    );
+  });
+  if (resolvedSeededMarks.length > 0) merged.partCompletionMarks = resolvedSeededMarks;
+
+  if (seeded.signOff) {
+    // Per-key graft: each seeded pointer wins where its field still exists,
+    // so one renamed box costs one pointer, never the whole block.
+    const next = { ...(merged.signOff ?? {}) };
+    const pointerKeys = ['assessorNameFieldId', 'assessorSignatureFieldId', 'signedDateFieldId'] as const;
+    for (const key of pointerKeys) {
+      const id = seeded.signOff[key];
+      if (id && byId.has(id)) next[key] = id;
+    }
+    const markKeys = [
+      'overallSatisfactory',
+      'overallNotSatisfactory',
+      'moreCoachingRequiredYes',
+      'moreCoachingRequiredNo',
+    ] as const;
+    for (const key of markKeys) {
+      const mark = seeded.signOff[key];
+      if (mark && byId.has(mark.fieldId)) next[key] = mark;
+    }
+    merged.signOff = next;
+  }
+
+  if (seeded.pathwayMarks) {
+    const kept = Object.fromEntries(
+      Object.entries(seeded.pathwayMarks).filter(([, mark]) => mark && byId.has(mark.fieldId)),
+    ) as AssessmentToolManifest['pathwayMarks'];
+    if (kept && Object.keys(kept).length > 0) merged.pathwayMarks = kept;
+    else delete merged.pathwayMarks;
+  }
+
+  return merged;
 }
 
 /**

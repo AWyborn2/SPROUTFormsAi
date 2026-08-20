@@ -265,11 +265,17 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         fields: check.fields,
         ...(opts?.dropDanglingLocationRules ? { dropDanglingLocationRules: true } : {}),
         // The seeded manifest carries the workflow-editor extras the builder
-        // does not model; the builder's derivation overlays it.
-        manifest: composeRevisionManifest(draft.revisionToolManifest ?? manifest, {
-          ...manifest,
-          workflow: workflowFromStructure(structure, parts, manifest, check.fields),
-        }),
+        // does not model; the builder's derivation overlays it — except the
+        // summary wiring, where a seeded entry that still resolves against
+        // the revision's fields beats the fresh label-guess.
+        manifest: composeRevisionManifest(
+          draft.revisionToolManifest ?? manifest,
+          {
+            ...manifest,
+            workflow: workflowFromStructure(structure, parts, manifest, check.fields),
+          },
+          check.fields,
+        ),
         ...(draft.revisionIdentity ? { revisionIdentity: draft.revisionIdentity } : {}),
       });
       setDone({ toolId: result.id });
