@@ -26,6 +26,7 @@
  * decision.
  */
 
+import type { CompetencyStatus } from './competency-expiry.js';
 import type { FormField, FormFieldType } from './form-field.js';
 import { geometrySegments } from './geometry.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
@@ -333,8 +334,85 @@ export function validateProfilePrefill(
 export interface PrerequisiteCheck {
   /** The printed ✓/✗ box the verdict lands in. */
   fieldId: string;
-  /** The competency whose currency answers it. */
+  /**
+   * @deprecated Superseded by `competencyIds`; still read for checks authored
+   * before a box could accept more than one class. Resolve via
+   * `prerequisiteCompetencyIds`, never directly.
+   */
+  competencyId?: string;
+  /**
+   * The competencies ANY ONE of which answers the box — "Driver's Licence C
+   * or higher" is a claim about a FAMILY of classes, and the register keeps
+   * each class as its own competency. One id per qualifying class; the box
+   * ticks (and the sign-off gate passes) when any listed class is current.
+   * Listing the classes per tool rather than ranking them in the register is
+   * deliberate: which classes qualify is this paper's claim, and "or higher"
+   * orders differently for cars, trucks and bikes.
+   */
+  competencyIds?: string[];
+}
+
+/** The classes a prerequisite accepts, whichever spelling the check carries. */
+export function prerequisiteCompetencyIds(
+  check: Pick<PrerequisiteCheck, 'competencyId' | 'competencyIds'>,
+): string[] {
+  const ids = check.competencyIds ?? (check.competencyId ? [check.competencyId] : []);
+  return [...new Set(ids.filter((id) => id.length > 0))];
+}
+
+/** One accepted class, evaluated against the register. */
+export interface PrerequisiteClassState {
   competencyId: string;
+  competencyName: string;
+  /** Current — held, expiring, in grace, or undated. Expired, revoked and missing are not. */
+  satisfied: boolean;
+  status: CompetencyStatus | 'revoked' | 'missing';
+  expiresAt: string | null;
+}
+
+/**
+ * The one answer a multi-class prerequisite gives, from its classes' states.
+ *
+ * ANY current class satisfies the box, and the record leans on the one that
+ * LASTS LONGEST — an undated grant outlasts every dated one, so a licence
+ * expiring next week is not the class the certificate cites when a permanent
+ * one exists. When nothing is current, the most ACTIONABLE failure surfaces:
+ * an expired class renews, a revoked one at least explains itself, missing
+ * says the least — and the name lists every accepted class, so the sign-off
+ * refusal reads "C / LR / HR: missing" rather than blaming one class the
+ * candidate never needed to hold.
+ */
+export function reducePrerequisiteClasses(
+  classes: readonly PrerequisiteClassState[],
+): PrerequisiteClassState {
+  if (classes.length === 0) {
+    // Only bad stored data reaches here — the validators refuse an empty
+    // check at save. Unsatisfied is the honest reading of a claim about
+    // nothing.
+    return {
+      competencyId: '',
+      competencyName: 'Unknown competency',
+      satisfied: false,
+      status: 'missing',
+      expiresAt: null,
+    };
+  }
+
+  const current = [...classes]
+    .filter((c) => c.satisfied)
+    .sort((a, b) => {
+      if (a.expiresAt === null) return -1;
+      if (b.expiresAt === null) return 1;
+      return b.expiresAt.localeCompare(a.expiresAt);
+    })[0];
+  if (current) return current;
+
+  const rank = (s: PrerequisiteClassState['status']) =>
+    s === 'expired' ? 0 : s === 'revoked' ? 1 : 2;
+  const best = [...classes].sort((a, b) => rank(a.status) - rank(b.status))[0]!;
+  return classes.length > 1
+    ? { ...best, competencyName: classes.map((c) => c.competencyName).join(' / ') }
+    : best;
 }
 
 /**
@@ -576,7 +654,7 @@ export function validatePrerequisiteChecks(
       problems.push(`Field "${field.label}" carries two prerequisite checks; one box answers one claim.`);
     }
     seen.add(check.fieldId);
-    if (!check.competencyId) {
+    if (prerequisiteCompetencyIds(check).length === 0) {
       problems.push(`Prerequisite on "${field.label}" names no competency.`);
     }
   }

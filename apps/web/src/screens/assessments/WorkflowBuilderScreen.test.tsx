@@ -38,7 +38,12 @@ vi.mock('react-router-dom', () => ({
 
 vi.mock('../../lib/data/hooks.js', () => ({
   useAssessmentTool: () => toolResult,
-  useCompetencies: () => ({ data: [{ id: 'comp-1', name: 'Drivers Licence C or higher' }] }),
+  useCompetencies: () => ({
+    data: [
+      { id: 'comp-1', name: 'Drivers Licence C or higher' },
+      { id: 'comp-hr', name: 'Licence - Rigid (HR)' },
+    ],
+  }),
   useSaveWorkflow: () => ({ mutate: saveMutate, isPending: false }),
   useSetLocationParts: () => ({ mutate: setLocationPartsMutate, isPending: false }),
   useSession: () => sessionResult,
@@ -716,5 +721,59 @@ describe('WorkflowBuilderScreen — summary auto-fill choice-field options', () 
     expect(texts).not.toContain('Outcome for Q1');
     // The real boxes are still there.
     expect(texts).toContain('Wears correct PPE');
+  });
+});
+
+/**
+ * A prerequisite box answered by ANY of several classes — "Driver's Licence C
+ * or higher" is a family, and a check that could name only one class failed a
+ * candidate holding a higher one.
+ */
+describe('WorkflowBuilderScreen — any-of prerequisite classes', () => {
+  it('adds a second class with "+ or…" and saves the plural spelling', () => {
+    toolResult.data = tool({
+      manifest: {
+        ...tool().manifest,
+        prerequisiteChecks: [{ fieldId: 'crit1', competencyId: 'comp-1' }],
+      },
+    });
+    render(<WorkflowBuilderScreen />);
+
+    // The legacy single-class check seeds the primary select.
+    const primary = screen.getByLabelText('Competency that answers it') as HTMLSelectElement;
+    expect(primary.value).toBe('comp-1');
+
+    fireEvent.change(screen.getByLabelText('Accept another class for this prerequisite'), {
+      target: { value: 'comp-hr' },
+    });
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      prerequisiteChecks?: Array<{ fieldId: string; competencyIds?: string[] }>;
+    };
+    expect(payload.prerequisiteChecks).toEqual([
+      { fieldId: 'crit1', competencyIds: ['comp-1', 'comp-hr'], competencyId: undefined },
+    ]);
+  });
+
+  it('removes a class by its chip, keeping the rest', () => {
+    toolResult.data = tool({
+      manifest: {
+        ...tool().manifest,
+        prerequisiteChecks: [{ fieldId: 'crit1', competencyIds: ['comp-1', 'comp-hr'] }],
+      },
+    });
+    render(<WorkflowBuilderScreen />);
+
+    expect(screen.getByText(/or Licence - Rigid \(HR\)/)).toBeDefined();
+    fireEvent.click(
+      screen.getByLabelText('Remove Licence - Rigid (HR) from this prerequisite'),
+    );
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      prerequisiteChecks?: Array<{ competencyIds?: string[] }>;
+    };
+    expect(payload.prerequisiteChecks?.[0]?.competencyIds).toEqual(['comp-1']);
   });
 });

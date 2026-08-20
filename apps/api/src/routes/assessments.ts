@@ -23,6 +23,8 @@ import {
   autoVerdictWrite,
   casePartKeys,
   logbookRows,
+  prerequisiteCompetencyIds,
+  reducePrerequisiteClasses,
   logbookDurationRows,
   markTheory,
   ACCESS_LEVELS,
@@ -512,6 +514,18 @@ const partCompletionMarkSchema = z.object({
 /** The case's pathway → the printed box that says so. Partial by design. */
 const pathwayMarksSchema = z.record(z.enum(ASSESSMENT_PATHWAYS), declaredMarkSchema);
 
+/*
+  One printed box, answered by ANY of the listed classes. `competencyId` is the
+  legacy single-class spelling and still accepted — a manifest saved before
+  boxes took families must round-trip untouched. At-least-one is
+  `validatePrerequisiteChecks`' job, which both save paths already run.
+*/
+const prerequisiteCheckSchema = z.object({
+  fieldId: z.string().min(1),
+  competencyId: z.string().min(1).optional(),
+  competencyIds: z.array(z.string().min(1)).optional(),
+});
+
 const partSchema = z.object({
   key: z.string().min(1),
   ordinal: z.number().int().positive(),
@@ -645,6 +659,13 @@ interface PrerequisiteResult {
  * mid-programme shows expired the next time anyone looks — a stored verdict is
  * a verdict about the day it was written. Revocation is decisive over the date
  * (R106): a revoked grant is not a current one whatever its expiry says.
+ *
+ * A check may accept SEVERAL classes ("Driver's Licence C or higher" is a
+ * family, and the register keeps each class as its own competency): the box
+ * is satisfied by ANY current one, and the result names the class that
+ * answered it. An unsatisfied multi-class check names every accepted class,
+ * so the sign-off refusal reads "C / LR / HR: missing" rather than blaming
+ * one class the candidate never needed to hold.
  */
 async function evaluatePrerequisites(
   database: NonNullable<typeof db>,
@@ -655,7 +676,7 @@ async function evaluatePrerequisites(
   const checks = manifest.prerequisiteChecks ?? [];
   if (checks.length === 0) return [];
 
-  const ids = [...new Set(checks.map((c) => c.competencyId))];
+  const ids = [...new Set(checks.flatMap((c) => prerequisiteCompetencyIds(c)))];
   const [competencies, holders] = await Promise.all([
     database.query.competencies.findMany({
       where: and(eq(schema.competencies.orgId, orgId), inArray(schema.competencies.id, ids)),
@@ -671,16 +692,14 @@ async function evaluatePrerequisites(
   const byId = new Map(competencies.map((c) => [c.id, c]));
   const now = new Date();
 
-  return checks.map((check) => {
-    const competency = byId.get(check.competencyId);
-    const held = holders.find((h) => h.competencyId === check.competencyId);
-    const base = {
-      fieldId: check.fieldId,
-      competencyId: check.competencyId,
-      competencyName: competency?.name ?? 'Unknown competency',
-    };
+  const evaluateOne = (competencyId: string) => {
+    const competency = byId.get(competencyId);
+    const held = holders.find((h) => h.competencyId === competencyId);
+    const base = { competencyId, competencyName: competency?.name ?? 'Unknown competency' };
     if (!held) return { ...base, satisfied: false, status: 'missing' as const, expiresAt: null };
-    if (held.revokedAt) return { ...base, satisfied: false, status: 'revoked' as const, expiresAt: null };
+    if (held.revokedAt) {
+      return { ...base, satisfied: false, status: 'revoked' as const, expiresAt: null };
+    }
     const status = competencyStatus(
       { grantedAt: held.grantedAt, ...(held.expiresAt ? { expiresAt: held.expiresAt } : {}) },
       { validForMonths: competency?.validForMonths, gracePeriodDays: competency?.gracePeriodDays },
@@ -692,7 +711,14 @@ async function evaluatePrerequisites(
       status,
       expiresAt: held.expiresAt ? held.expiresAt.toISOString() : null,
     };
-  });
+  };
+
+  return checks.map((check) => ({
+    fieldId: check.fieldId,
+    // The any-of decision is shared — see `reducePrerequisiteClasses` for
+    // which class answers the box and which failure surfaces when none does.
+    ...reducePrerequisiteClasses(prerequisiteCompetencyIds(check).map(evaluateOne)),
+  }));
 }
 
 /** The tool's declared defaults for these fields — served under stored values. */
@@ -718,10 +744,7 @@ const updateToolBody = z.object({
    */
   profilePrefill: z.record(z.string(), z.enum(PROFILE_PREFILL_KEYS)).nullable().optional(),
   /** Same tri-state as profilePrefill: absent keeps, null clears, array replaces. */
-  prerequisiteChecks: z
-    .array(z.object({ fieldId: z.string().min(1), competencyId: z.string().min(1) }))
-    .nullable()
-    .optional(),
+  prerequisiteChecks: z.array(prerequisiteCheckSchema).nullable().optional(),
   /** Tool-declared default answers. Same tri-state; values stored opaque. */
   fieldDefaults: z.record(z.string(), z.unknown()).nullable().optional(),
   /**
@@ -913,9 +936,7 @@ assessmentToolsRouter.post(
 */
 const republishManifestSchema = toolBody.shape.manifest.extend({
   profilePrefill: z.record(z.string(), z.enum(PROFILE_PREFILL_KEYS)).optional(),
-  prerequisiteChecks: z
-    .array(z.object({ fieldId: z.string().min(1), competencyId: z.string().min(1) }))
-    .optional(),
+  prerequisiteChecks: z.array(prerequisiteCheckSchema).optional(),
   fieldDefaults: z.record(z.string(), z.unknown()).optional(),
 });
 
