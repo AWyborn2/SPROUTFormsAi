@@ -300,6 +300,21 @@ export interface MemberRequiredCounts {
 }
 
 /**
+ * Does one assembled cell currently SATISFY a requirement? The single reading
+ * of "this cell counts", used by the per-row fraction below and the U4
+ * member-set aggregates — stated once so the row header, the summary KPIs and
+ * the sweep's snapshot cannot each re-decide what a satisfied cell is.
+ *
+ * A cell's status always comes from a NON-revoked grant (`bestCurrency` skips
+ * revoked), so `revoked: false` here restates the construction rather than
+ * assuming anything new; a status-less cell (never held, or revoked-only) is
+ * simply not satisfied.
+ */
+export function cellCountsAsHeld(cell: TrainingMatrixCell): boolean {
+  return cell.status !== undefined && countsAsHeld({ status: cell.status, revoked: false });
+}
+
+/**
  * The summary-oriented slice a row header shows ("7 / 9 required held").
  * Deliberately NOT the U4 aggregates — those sum across the org and live with
  * the summary unit; this is one row's fraction, derived from cells so it can
@@ -313,10 +328,130 @@ export function requiredCounts(
   for (const cell of cells) {
     if (!cell || cell.standing !== 'required') continue;
     requiredTotal += 1;
-    // A cell's status always comes from a NON-revoked grant (bestCurrency
-    // skips revoked), so `revoked: false` here restates the construction
-    // rather than assuming anything new.
-    if (cell.status && countsAsHeld({ status: cell.status, revoked: false })) requiredHeld += 1;
+    if (cellCountsAsHeld(cell)) requiredHeld += 1;
   }
   return { requiredTotal, requiredHeld };
+}
+
+// ── the U4 member-set slice: ONE implementation for the route AND the sweep ──
+
+/**
+ * The batched reads a member-set compliance derivation consumes — the same
+ * plain-data posture as `TrainingMatrixInput`, minus the display metadata a
+ * grid needs and an aggregate does not. `awardingToolByCompetency` matters
+ * only to a consumer that reads `noAward` off the cells (the summary's
+ * evidence-only gap count); a counts-only caller (the sweep) passes an empty
+ * map, because no COUNT below reads the flag.
+ */
+export interface MemberSetStandingInput {
+  /** The member set, BY USER (one entry per person; duplicates collapse). */
+  userIds: readonly string[];
+  /** userId → the competency ids REQUIRED of them (`requiredCompetencyIdsByUser`). */
+  requiredByUser: ReadonlyMap<string, ReadonlySet<string>>;
+  competencyById: ReadonlyMap<string, MatrixCompetency>;
+  grantsByUser: ReadonlyMap<string, readonly MatrixGrant[]>;
+  awardingToolByCompetency: ReadonlyMap<string, string>;
+  now: Date;
+}
+
+/** One member's REQUIRED standing, cell by cell — what every U4 aggregate folds over. */
+export interface MemberRequiredStanding {
+  userId: string;
+  /** competencyId → this member's required-standing cell for it. Never null:
+   * a required cell always has something to say (`matrixCell`'s contract). */
+  cells: Map<string, TrainingMatrixCell>;
+  /** Every required competency counts as held — the "fully compliant" bit. */
+  compliant: boolean;
+  /** The required competencies NOT currently satisfied — open required gaps. */
+  gapCompetencyIds: string[];
+}
+
+/**
+ * Resolve each member of a set to their required cells and gap list — the
+ * shared derivation under `GET /training-summary` AND the sweep's daily
+ * snapshot (U4). Both surfaces fold over THIS result, so a snapshot row and
+ * the live KPI computed from the same data cannot disagree: there is exactly
+ * one opinion of "compliant member" and "open required gap", and it is
+ * `matrixCell` + `cellCountsAsHeld`, the same rules the matrix grid renders.
+ *
+ * A required competency the org no longer DEFINES still gaps: nobody can hold
+ * a deleted competency current, the assignment engine treats it as unmet, and
+ * `GET /compliance` reports it as never held — so a synthetic unnamed column
+ * stands in rather than the requirement silently vanishing from the numbers.
+ */
+export function requiredStandingByMember(
+  input: MemberSetStandingInput,
+): Map<string, MemberRequiredStanding> {
+  const byUser = new Map<string, MemberRequiredStanding>();
+  for (const userId of input.userIds) {
+    if (byUser.has(userId)) continue;
+    const required = input.requiredByUser.get(userId) ?? new Set<string>();
+
+    const grantsByCompetency = new Map<string, MatrixGrant[]>();
+    for (const grant of input.grantsByUser.get(userId) ?? []) {
+      const list = grantsByCompetency.get(grant.competencyId) ?? [];
+      list.push(grant);
+      grantsByCompetency.set(grant.competencyId, list);
+    }
+
+    const cells = new Map<string, TrainingMatrixCell>();
+    const gapCompetencyIds: string[] = [];
+    for (const competencyId of required) {
+      const competency = input.competencyById.get(competencyId) ?? {
+        id: competencyId,
+        name: 'Unknown competency',
+        code: null,
+      };
+      const cell = matrixCell(
+        competency,
+        'required',
+        grantsByCompetency.get(competencyId) ?? [],
+        input.awardingToolByCompetency,
+        input.now,
+      );
+      if (!cell) continue; // unreachable: a required cell is never null
+      cells.set(competencyId, cell);
+      if (!cellCountsAsHeld(cell)) gapCompetencyIds.push(competencyId);
+    }
+    byUser.set(userId, {
+      userId,
+      cells,
+      compliant: gapCompetencyIds.length === 0,
+      gapCompetencyIds,
+    });
+  }
+  return byUser;
+}
+
+/** The three numbers a `compliance_snapshots` row stores, and the summary's
+ * headline KPI — named identically to the columns on purpose. */
+export interface MemberSetComplianceCounts {
+  /** Members whose every required competency counts as held. */
+  compliantCount: number;
+  /** Members in the set (by user). Zero members yields 0/0 — the client
+   * renders 0%, never NaN, and no percentage is computed server-side. */
+  memberCount: number;
+  /** Open required gaps summed across the set. */
+  requiredGapCount: number;
+}
+
+/**
+ * Fold a set of member standings into the snapshot numbers. Takes standings
+ * rather than raw reads so a caller slicing ONE org-wide derivation into many
+ * scoped subsets (the sweep's per-location and per-department rows, the
+ * summary's per-group bars) folds the same cells every time instead of
+ * re-deriving them per scope.
+ */
+export function complianceCountsOf(
+  standings: Iterable<MemberRequiredStanding>,
+): MemberSetComplianceCounts {
+  let compliantCount = 0;
+  let memberCount = 0;
+  let requiredGapCount = 0;
+  for (const standing of standings) {
+    memberCount += 1;
+    if (standing.compliant) compliantCount += 1;
+    requiredGapCount += standing.gapCompetencyIds.length;
+  }
+  return { compliantCount, memberCount, requiredGapCount };
 }

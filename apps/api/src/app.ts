@@ -34,6 +34,7 @@ import { workforceImportRouter } from './routes/workforce-import.js';
 import { workingListRouter } from './routes/working-list.js';
 import { complianceRouter } from './routes/compliance.js';
 import { trainingMatrixRouter } from './routes/training-matrix.js';
+import { trainingSummaryRouter } from './routes/training-summary.js';
 import { profilesRouter } from './routes/profiles.js';
 import { competencyDocumentsRouter } from './routes/competency-documents.js';
 import { uploadsRouter } from './routes/uploads.js';
@@ -186,6 +187,7 @@ export function createApp(): Express {
   app.use('/working-list', workingListRouter);
   app.use('/compliance', complianceRouter);
   app.use('/training-matrix', trainingMatrixRouter);
+  app.use('/training-summary', trainingSummaryRouter);
   app.use('/profiles', profilesRouter);
   app.use('/competency-documents', attachmentJson, competencyDocumentsRouter);
   // The only routes not behind a session or API key — guarded by a shared secret.

@@ -12,7 +12,9 @@ vi.mock('../email/resend.js', () => ({
   sendExpiryNoticeEmail: (...args: unknown[]) => sendExpiry(...args),
 }));
 
-const { sweepOrganization, sweepAllOrganizations } = await import('./sweep.js');
+const { captureComplianceSnapshots, sweepOrganization, sweepAllOrganizations } = await import(
+  './sweep.js'
+);
 
 const NOW = new Date('2026-08-06T00:00:00Z');
 const daysFromNow = (n: number) => new Date(NOW.getTime() + n * 86_400_000);
@@ -66,10 +68,13 @@ function stringValues(node: unknown, out: string[] = [], depth = 0): string[] {
 function makeDb(opts: DbOpts) {
   const notices: Record<string, unknown>[] = [];
   const cases: Record<string, unknown>[] = [];
+  const snapshots: Record<string, unknown>[] = [];
   const insert = vi.fn((table: unknown) => ({
-    values: (v: Record<string, unknown>) => {
-      if (table === schema.sentNotices) notices.push(v);
-      else if (table === schema.assessmentCases) cases.push(v);
+    values: (v: Record<string, unknown> | Record<string, unknown>[]) => {
+      // The snapshot capture inserts the whole day's rows in ONE call.
+      if (table === schema.complianceSnapshots) snapshots.push(...(Array.isArray(v) ? v : [v]));
+      else if (table === schema.sentNotices) notices.push(v as Record<string, unknown>);
+      else if (table === schema.assessmentCases) cases.push(v as Record<string, unknown>);
       const row = { id: `row-${notices.length + cases.length}` };
       return {
         returning: async () => [row],
@@ -117,9 +122,27 @@ function makeDb(opts: DbOpts) {
       sentNotices: { findFirst: async () => notices[0] },
     },
     insert,
+    // The snapshot capture's delete-then-insert: the WHERE's bound values are
+    // the orgId and the capturedOn date string, so matching a row on BOTH is
+    // exactly the per-(org, day) delete the real query issues.
+    delete: (table: unknown) => ({
+      where: async (w: unknown) => {
+        if (table !== schema.complianceSnapshots) return;
+        const bound = new Set(stringValues(w));
+        for (let i = snapshots.length - 1; i >= 0; i--) {
+          const row = snapshots[i]!;
+          if (bound.has(row.orgId as string) && bound.has(row.capturedOn as string)) {
+            snapshots.splice(i, 1);
+          }
+        }
+      },
+    }),
+    // The capture wraps its expansion in one repeatable-read transaction and
+    // the standing loader nests inside it; this fake has no snapshot to isolate.
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
-  return { db, notices, cases };
+  return { db, notices, cases, snapshots };
 }
 
 afterEach(() => {
@@ -394,6 +417,120 @@ describe('sweepOrganization — assignment pass through the shared resolver (KTD
 
     expect(result.casesCreated).toBe(2);
     expect(cases.map((c) => c.candidateUserId).sort()).toEqual(['u1', 'u2']);
+  });
+});
+
+describe('sweepOrganization — snapshot capture (U4, KTD5)', () => {
+  /*
+    Two members under one org-wide requirement (c1, evidence-only — no tools,
+    so the assignment pass creates nothing and the capture is what is under
+    test). u1 holds c1 current and is placed at the active location AND
+    department; u2 holds nothing and is placed nowhere. Expected numbers:
+      org   → compliant 1 / members 2 / gaps 1
+      loc1  → compliant 1 / members 1 / gaps 0
+      d1    → compliant 1 / members 1 / gaps 0
+    The ORG row's numbers come from the same derivation GET /training-summary
+    computes its KPIs with (requiredStandingByMember + complianceCountsOf) —
+    the route suite pins an equivalent two-member fixture to the same
+    {compliant 1, members 2, gaps 1}, so the snapshot and the dashboard cannot
+    tell different stories about one workforce.
+  */
+  const snapshotFixture = () =>
+    makeDb({
+      memberships: [
+        { id: 'm1', orgId: 'org-1', userId: 'u1', status: 'active' },
+        { id: 'm2', orgId: 'org-1', userId: 'u2', status: 'active' },
+      ],
+      heldLocations: [{ membershipId: 'm1', locationId: 'loc1', position: 0 }],
+      heldDepartments: [{ membershipId: 'm1', departmentId: 'd1' }],
+      locations: [{ id: 'loc1', orgId: 'org-1', name: 'Site A', status: 'active' }],
+      departments: [{ id: 'd1', orgId: 'org-1', name: 'Crew A', status: 'active' }],
+      roleLinks: [
+        { id: 'l1', orgId: 'org-1', roleId: null, locationId: null, departmentId: null, competencyId: 'c1', tier: 'required' },
+      ],
+      tools: [],
+      holders: [{ userId: 'u1', competencyId: 'c1', ...grantExpiringIn(400), revokedAt: null }],
+      comps: [COMP],
+      users: [USER, { id: 'u2', email: 'u2@example.com' }],
+    });
+
+  it('writes one row per scope per UTC day — and a second same-day run leaves exactly the same rows', async () => {
+    const { db, snapshots } = snapshotFixture();
+
+    const first = await sweepOrganization(db, org() as never, NOW);
+    const second = await sweepOrganization(db, org() as never, NOW);
+
+    // Delete-then-insert per (org, day): the second run REPLACES the day's
+    // rows rather than stacking a duplicate set beside them.
+    expect(first.snapshotsWritten).toBe(3);
+    expect(second.snapshotsWritten).toBe(3);
+    expect(first.snapshotFailed).toBeUndefined();
+    expect(snapshots).toHaveLength(3);
+
+    const orgRow = snapshots.find((r) => r.scopeType === null);
+    expect(orgRow).toMatchObject({
+      orgId: 'org-1',
+      capturedOn: '2026-08-06',
+      scopeId: null,
+      compliantCount: 1,
+      memberCount: 2,
+      requiredGapCount: 1,
+    });
+    expect(snapshots.find((r) => r.scopeType === 'location')).toMatchObject({
+      scopeId: 'loc1',
+      capturedOn: '2026-08-06',
+      compliantCount: 1,
+      memberCount: 1,
+      requiredGapCount: 0,
+    });
+    expect(snapshots.find((r) => r.scopeType === 'department')).toMatchObject({
+      scopeId: 'd1',
+      capturedOn: '2026-08-06',
+      compliantCount: 1,
+      memberCount: 1,
+      requiredGapCount: 0,
+    });
+  });
+
+  it('captures a zeroed org row for an org with no active members — 0/0, never a skipped day', async () => {
+    // An empty org still gets its trend point: 0 members is a true statement,
+    // and a missing row would render as an outage rather than an empty org.
+    const { db, snapshots } = makeDb({});
+    const written = await captureComplianceSnapshots(db, 'org-1', NOW);
+    expect(written).toBe(1);
+    expect(snapshots).toEqual([
+      {
+        orgId: 'org-1',
+        capturedOn: '2026-08-06',
+        scopeType: null,
+        scopeId: null,
+        compliantCount: 0,
+        memberCount: 0,
+        requiredGapCount: 0,
+      },
+    ]);
+  });
+
+  it('keeps the assignment/notification results when the snapshot write fails (isolation)', async () => {
+    // The first two passes committed real work; a snapshot failure after them
+    // is a missing trend point, and must surface as a FLAG beside the numbers
+    // rather than un-counting them.
+    const { db, notices, snapshots } = makeDb({
+      holders: [{ userId: 'u1', competencyId: 'c1', ...grantExpiringIn(20), revokedAt: null }],
+      comps: [COMP],
+      users: [USER],
+    });
+    (db as { delete: unknown }).delete = () => {
+      throw new Error('snapshot table unavailable');
+    };
+
+    const result = await sweepOrganization(db, org() as never, NOW);
+
+    expect(result.noticesSent).toBe(1);
+    expect(notices).toHaveLength(1);
+    expect(result.snapshotFailed).toBe(true);
+    expect(result.snapshotsWritten).toBe(0);
+    expect(snapshots).toHaveLength(0);
   });
 });
 
