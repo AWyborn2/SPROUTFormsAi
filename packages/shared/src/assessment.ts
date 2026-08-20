@@ -433,6 +433,77 @@ export function validatePartCompletionMarks(
   return problems;
 }
 
+/**
+ * One declared mark's destination, checked the same way everywhere: the field
+ * must exist, and a cell address must name a real column of a real table.
+ * `what` prefixes each problem so the caller's context survives into the
+ * message ("The 'new' pathway box names field …").
+ */
+function declaredMarkProblems(
+  mark: DeclaredMark,
+  what: string,
+  byId: ReadonlyMap<string, FormField>,
+): string[] {
+  const field = byId.get(mark.fieldId);
+  if (!field) return [`${what} names field "${mark.fieldId}", which is not in this version.`];
+  if (mark.columnKey !== undefined) {
+    if (field.type !== 'repeating_group') {
+      return [`${what} addresses a cell of "${mark.fieldId}", a ${field.type} — only a table has cells.`];
+    }
+    if (!(field.columns ?? []).some((c) => c.key === mark.columnKey)) {
+      return [`${what} names column "${mark.columnKey}", which "${mark.fieldId}" does not have.`];
+    }
+  }
+  return [];
+}
+
+/** Problems with the pathway → printed-box mapping — shared by publish and the tool PATCH. */
+export function validatePathwayMarks(
+  marks: AssessmentToolManifest['pathwayMarks'],
+  fields: readonly FormField[],
+): string[] {
+  const problems: string[] = [];
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  for (const [pathway, mark] of Object.entries(marks ?? {})) {
+    if (!mark) continue;
+    problems.push(...declaredMarkProblems(mark, `The "${pathway}" pathway box`, byId));
+  }
+  return problems;
+}
+
+/**
+ * Problems with the sign-off block's destinations — used by the tool PATCH,
+ * where an editor actively points these at fields and a ghost id is a bug in
+ * the picker rather than history. (Publish-time manifests may carry pointers
+ * from older versions; there the exporter's silent skip remains the contract.)
+ */
+export function validateSignOffMarks(
+  signOff: AssessmentToolManifest['signOff'],
+  fields: readonly FormField[],
+): string[] {
+  if (!signOff) return [];
+  const problems: string[] = [];
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  const pointers: Array<[string | undefined, string]> = [
+    [signOff.assessorNameFieldId, 'The sign-off assessor-name box'],
+    [signOff.assessorSignatureFieldId, 'The sign-off signature box'],
+    [signOff.signedDateFieldId, 'The sign-off date box'],
+  ];
+  for (const [id, what] of pointers) {
+    if (id && !byId.has(id)) problems.push(`${what} names field "${id}", which is not in this version.`);
+  }
+  const marks: Array<[DeclaredMark | undefined, string]> = [
+    [signOff.overallSatisfactory, 'The "Candidate Competent" box'],
+    [signOff.overallNotSatisfactory, 'The "not yet Competent" box'],
+    [signOff.moreCoachingRequiredYes, 'The "more coaching — Yes" box'],
+    [signOff.moreCoachingRequiredNo, 'The "more coaching — No" box'],
+  ];
+  for (const [mark, what] of marks) {
+    if (mark) problems.push(...declaredMarkProblems(mark, what, byId));
+  }
+  return problems;
+}
+
 /** Problems with prerequisite mappings — shared by publish and the tool PATCH. */
 export function validatePrerequisiteChecks(
   checks: readonly PrerequisiteCheck[] | undefined,
@@ -805,6 +876,22 @@ export interface AssessmentToolManifest {
     moreCoachingRequiredYes?: DeclaredMark;
     moreCoachingRequiredNo?: DeclaredMark;
   };
+  /**
+   * The printed pathway tick — "New and inexperienced candidates" /
+   * "Experienced candidates or Re-assessments" — written from the CASE.
+   *
+   * The pathway is decided when the case is created (suggested from the
+   * candidate's competency history, adjustable by the assessor) and it is what
+   * chose which parts the candidate sat. The printed box saying so is
+   * therefore a case fact, not an answer: seeded at export exactly like the
+   * location stream, so the ticked pathway can never disagree with the parts
+   * the document actually shows filled.
+   *
+   * Keyed by pathway so two pathways may share one printed box (RPL papers
+   * often tick the experienced line). A pathway with no entry prints nothing,
+   * which is the exporter's safe failure everywhere.
+   */
+  pathwayMarks?: Partial<Record<AssessmentPathway, DeclaredMark>>;
 }
 
 /**
@@ -1400,6 +1487,7 @@ export function validateManifest(
   problems.push(...validateProfilePrefill(manifest.profilePrefill, fields));
   problems.push(...validatePrerequisiteChecks(manifest.prerequisiteChecks, fields));
   problems.push(...validatePartCompletionMarks(manifest.partCompletionMarks, manifest, fields));
+  problems.push(...validatePathwayMarks(manifest.pathwayMarks, fields));
   for (const id of Object.keys(manifest.fieldDefaults ?? {})) {
     if (!fieldIds.has(id)) {
       problems.push(`Default answer names field "${id}", which is not in this version.`);
@@ -1960,6 +2048,10 @@ export function unplacedMarkDestinations(
     check(signOff.overallNotSatisfactory?.fieldId, 'The "not yet Competent" box');
     check(signOff.moreCoachingRequiredYes?.fieldId, 'The "more coaching — Yes" box');
     check(signOff.moreCoachingRequiredNo?.fieldId, 'The "more coaching — No" box');
+  }
+
+  for (const [pathway, mark] of Object.entries(manifest.pathwayMarks ?? {})) {
+    check(mark?.fieldId, `The "${pathway}" pathway box`);
   }
 
   for (const prereq of manifest.prerequisiteChecks ?? []) {

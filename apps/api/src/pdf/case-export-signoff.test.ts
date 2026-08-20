@@ -504,6 +504,67 @@ describe('assembleCaseValues — part completion ticks', () => {
 });
 
 /**
+ * The pathway tick — written from the CASE, like the location stream: the
+ * pathway chose which parts this document shows filled, so the box saying so
+ * must come from the same fact.
+ */
+describe('assembleCaseValues — the pathway tick', () => {
+  const PATHED: AssessmentToolManifest = {
+    ...BASE,
+    pathwayMarks: {
+      new: { fieldId: 'pathway-new', value: true },
+      experienced: { fieldId: 'pathway-exp', value: true },
+    },
+  };
+
+  it("ticks the case's pathway box and no other", () => {
+    const { values } = assembleCaseValues({
+      manifest: PATHED,
+      pathway: 'new',
+      attempts: [],
+    });
+
+    expect(values['pathway-new']).toBe(true);
+    expect(values['pathway-exp']).toBeUndefined();
+  });
+
+  it('ticks on an OPEN case — which programme the candidate is on is true from day one', () => {
+    const { values } = assembleCaseValues({
+      manifest: PATHED,
+      pathway: 'experienced',
+      attempts: [passed('p1')],
+    });
+
+    expect(values['pathway-exp']).toBe(true);
+    expect(values['pathway-new']).toBeUndefined();
+  });
+
+  it('writes nothing for a pathway the map does not name', () => {
+    const { values } = assembleCaseValues({
+      manifest: { ...BASE, pathwayMarks: { new: { fieldId: 'pathway-new', value: true } } },
+      pathway: 'experienced',
+      attempts: [],
+    });
+
+    expect(values['pathway-new']).toBeUndefined();
+    expect(values['pathway-exp']).toBeUndefined();
+  });
+
+  it('two pathways may share one printed box — RPL ticks the experienced line', () => {
+    const shared: AssessmentToolManifest = {
+      ...BASE,
+      pathwayMarks: {
+        experienced: { fieldId: 'pathway-exp', value: true },
+        rpl: { fieldId: 'pathway-exp', value: true },
+      },
+    };
+    const { values } = assembleCaseValues({ manifest: shared, pathway: 'rpl', attempts: [] });
+
+    expect(values['pathway-exp']).toBe(true);
+  });
+});
+
+/**
  * The maps the ROUTE resolves — identity prefill and prerequisite verdicts —
  * and the seam that used to drop them. `exportCasePdf` re-listed every
  * assemble field by hand and the list drifted: both maps were computed on

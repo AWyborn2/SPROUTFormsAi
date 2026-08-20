@@ -14,6 +14,7 @@ import {
 } from '@tanstack/react-query';
 import type {
   AssessmentPathway,
+  PartCompletionMark,
   PrerequisiteCheck,
   ProfilePrefillKey,
   AssessmentToolManifest,
@@ -1288,6 +1289,9 @@ export function useSaveWorkflow(toolId: string) {
       profilePrefill?: Record<string, ProfilePrefillKey> | null;
       prerequisiteChecks?: PrerequisiteCheck[] | null;
       fieldDefaults?: Record<string, SubmissionValue> | null;
+      partCompletionMarks?: PartCompletionMark[] | null;
+      signOff?: AssessmentToolManifest['signOff'] | null;
+      pathwayMarks?: AssessmentToolManifest['pathwayMarks'] | null;
     }) =>
       assessmentsApi.saveWorkflow(
         toolId,
@@ -1295,6 +1299,9 @@ export function useSaveWorkflow(toolId: string) {
         input.profilePrefill,
         input.prerequisiteChecks,
         input.fieldDefaults,
+        input.partCompletionMarks,
+        input.signOff,
+        input.pathwayMarks,
       ),
     onSuccess: () => {
       // Prefix invalidation, so the detail AND the list refresh: the list

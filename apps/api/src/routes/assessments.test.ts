@@ -584,6 +584,47 @@ describe('POST /assessment-tools', () => {
     }
   });
 
+  it('keeps overallNotSatisfactory and the pathway marks — the schema no longer strips them', async () => {
+    /*
+      The same silent-strip trap, hit again: the manifest type, the builder's
+      derivation and the exporter all carried `signOff.overallNotSatisfactory`,
+      but this schema omitted it — so every tool published over HTTP lost the
+      "Candidate not yet Competent" box, and the pair printed half-written on
+      exactly the records that needed the negative half.
+    */
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/assessment-tools`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          templateId: TEMPLATE,
+          name: 'Track Dozer',
+          manifest: {
+            ...MANIFEST,
+            signOff: {
+              overallSatisfactory: { fieldId: 'q-mining-out', value: true },
+              overallNotSatisfactory: { fieldId: 'q-raw-out', value: true },
+            },
+            pathwayMarks: { new: { fieldId: 'q-mining-out', value: true } },
+          },
+          awardedCompetencyIds: [COMPETENCY],
+        }),
+      });
+      expect(res.status).toBe(201);
+      const m = rows(store, 'assessmentTools')[0]?.manifest as {
+        signOff?: { overallNotSatisfactory?: { fieldId: string } };
+        pathwayMarks?: { new?: { fieldId: string } };
+      };
+      expect(m?.signOff?.overallNotSatisfactory?.fieldId).toBe('q-raw-out');
+      expect(m?.pathwayMarks?.new?.fieldId).toBe('q-mining-out');
+    } finally {
+      server.close();
+    }
+  });
+
   it('creates a tool when the manifest matches the template', async () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
@@ -700,6 +741,129 @@ describe('POST /assessment-tools', () => {
       });
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toBe('invalid_award');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * The workflow editor's summary auto-fill keys. Publish GUESSES the result
+ * pair and the methods mapping from printed labels with no way to see or fix
+ * the guess; these PATCH keys are the fix, so what they persist — and what
+ * they refuse — is pinned here.
+ */
+describe('PATCH /assessment-tools/:id — summary auto-fill keys', () => {
+  it('persists the result pair and the pathway map, and a later save keeps them', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const res = await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({
+          signOff: {
+            overallSatisfactory: { fieldId: 'q-mining-out', value: true },
+            overallNotSatisfactory: { fieldId: 'q-raw-out', value: true },
+          },
+          pathwayMarks: { new: { fieldId: 'q-mining-out', value: true } },
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      // A name-only PATCH must leave them exactly as stored — the tri-state's
+      // whole point is that saving one thing cannot erase another.
+      await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ name: 'Renamed' }),
+      });
+
+      const m = rows(store, 'assessmentTools').find((r) => r.id === tool.id)?.manifest as {
+        signOff?: { overallSatisfactory?: { fieldId: string }; overallNotSatisfactory?: { fieldId: string } };
+        pathwayMarks?: { new?: { fieldId: string } };
+      };
+      expect(m?.signOff?.overallSatisfactory?.fieldId).toBe('q-mining-out');
+      expect(m?.signOff?.overallNotSatisfactory?.fieldId).toBe('q-raw-out');
+      expect(m?.pathwayMarks?.new?.fieldId).toBe('q-mining-out');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('clears the sign-off block with null', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({
+          signOff: { overallSatisfactory: { fieldId: 'q-mining-out', value: true } },
+        }),
+      });
+      await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ signOff: null }),
+      });
+
+      const m = rows(store, 'assessmentTools').find((r) => r.id === tool.id)?.manifest as {
+        signOff?: unknown;
+      };
+      expect(m?.signOff).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a pathway box that is not in this version, and writes nothing', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const res = await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({
+          pathwayMarks: { new: { fieldId: 'ghost-box', value: true } },
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; problems: string[] };
+      expect(body.error).toBe('invalid_workflow');
+      expect(body.problems.join(' ')).toContain('ghost-box');
+      const m = rows(store, 'assessmentTools').find((r) => r.id === tool.id)?.manifest as {
+        pathwayMarks?: unknown;
+      };
+      expect(m?.pathwayMarks).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a completion mark pointing at anything but a fixed-row table', async () => {
+    const { db } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const res = await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({
+          partCompletionMarks: [{ partKey: 'p1', fieldId: 'q1', rowIndex: 0, columnKey: 'used' }],
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_workflow');
     } finally {
       server.close();
     }

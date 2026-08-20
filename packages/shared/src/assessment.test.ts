@@ -1205,6 +1205,96 @@ describe('validatePartCompletionMarks', () => {
   });
 });
 
+describe('validatePathwayMarks', () => {
+  const box: FormField = {
+    id: 'pathway-new',
+    type: 'check_cross',
+    label: 'New / inexperienced',
+    required: false,
+    source: 'imported',
+  };
+
+  it('accepts a mark on a real field, and an empty or absent map', async () => {
+    const { validatePathwayMarks } = await import('./assessment.js');
+    expect(validatePathwayMarks({ new: { fieldId: 'pathway-new', value: true } }, [box])).toEqual([]);
+    expect(validatePathwayMarks({}, [box])).toEqual([]);
+    expect(validatePathwayMarks(undefined, [box])).toEqual([]);
+  });
+
+  it('refuses a ghost field, naming the pathway that carries it', async () => {
+    const { validatePathwayMarks } = await import('./assessment.js');
+    const problems = validatePathwayMarks({ experienced: { fieldId: 'nope', value: true } }, [box]);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('experienced');
+    expect(problems[0]).toContain('nope');
+  });
+
+  it('refuses a cell address on anything but a table, and a column the table lacks', async () => {
+    const { validatePathwayMarks } = await import('./assessment.js');
+    const table: FormField = {
+      id: 'grid',
+      type: 'repeating_group',
+      label: 'Grid',
+      required: false,
+      source: 'imported',
+      fixedRows: ['a'],
+      columns: [{ key: 'tick', label: 'Tick', type: 'checkbox' }],
+    };
+
+    expect(
+      validatePathwayMarks(
+        { new: { fieldId: 'pathway-new', rowKey: 'r', columnKey: 'tick', value: true } },
+        [box, table],
+      ),
+    ).toHaveLength(1);
+    expect(
+      validatePathwayMarks(
+        { new: { fieldId: 'grid', rowKey: 'r', columnKey: 'ghost', value: true } },
+        [box, table],
+      ),
+    ).toHaveLength(1);
+    expect(
+      validatePathwayMarks(
+        { new: { fieldId: 'grid', rowKey: 'r', columnKey: 'tick', value: true } },
+        [box, table],
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('validateSignOffMarks', () => {
+  const name: FormField = { id: 'sign-name', type: 'text', label: 'Assessor', required: false, source: 'imported' };
+  const yes: FormField = { id: 'overall-yes', type: 'check_cross', label: 'Competent', required: false, source: 'imported' };
+
+  it('accepts pointers and marks that resolve, and an absent block', async () => {
+    const { validateSignOffMarks } = await import('./assessment.js');
+    expect(
+      validateSignOffMarks(
+        {
+          assessorNameFieldId: 'sign-name',
+          overallSatisfactory: { fieldId: 'overall-yes', value: true },
+        },
+        [name, yes],
+      ),
+    ).toEqual([]);
+    expect(validateSignOffMarks(undefined, [name, yes])).toEqual([]);
+  });
+
+  it('names every ghost — a pointer and a mark alike', async () => {
+    const { validateSignOffMarks } = await import('./assessment.js');
+    const problems = validateSignOffMarks(
+      {
+        signedDateFieldId: 'gone-date',
+        overallNotSatisfactory: { fieldId: 'gone-no', value: true },
+      },
+      [name, yes],
+    );
+    expect(problems).toHaveLength(2);
+    expect(problems.join(' ')).toContain('gone-date');
+    expect(problems.join(' ')).toContain('gone-no');
+  });
+});
+
 describe('nextStepAfter', () => {
   const part = (over: Partial<NextStepPart> & { key: string }): NextStepPart => ({
     label: over.key,

@@ -389,3 +389,95 @@ describe('carried geometry at publish (AE2)', () => {
     expect(withoutStash.carried).toEqual([]);
   });
 });
+
+/**
+ * A revision must not clobber the summary wiring an author configured in the
+ * workflow editor with a fresh label-guess — and must not carry a pointer
+ * whose box no longer exists into a republish that validation would refuse.
+ */
+describe('composeRevisionManifest — the summary wiring survives a revision', () => {
+  const methods: FormField = field({
+    id: 'methods',
+    type: 'repeating_group',
+    fixedRows: ['1. Theory'],
+    columns: [
+      { key: 'method', label: 'Method', type: 'text' },
+      { key: 'done', label: 'Done', type: 'checkbox' },
+    ],
+  });
+  const box = (id: string): FormField => field({ id, type: 'check_cross' });
+
+  const seeded: AssessmentToolManifest = {
+    ...manifestWith(),
+    partCompletionMarks: [{ partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'done' }],
+    signOff: {
+      assessorNameFieldId: 'sign-name',
+      overallSatisfactory: { fieldId: 'author-yes', value: true },
+      overallNotSatisfactory: { fieldId: 'author-no', value: true },
+    },
+    pathwayMarks: { new: { fieldId: 'pathway-new', value: true } },
+  };
+  const derived: AssessmentToolManifest = {
+    ...manifestWith(),
+    partCompletionMarks: [{ partKey: 'p1', fieldId: 'methods', rowIndex: 0, columnKey: 'method' }],
+    signOff: {
+      overallSatisfactory: { fieldId: 'guess-yes', value: true },
+      overallNotSatisfactory: { fieldId: 'guess-no', value: true },
+    },
+  };
+
+  it('keeps the seeded wiring wherever it still resolves', async () => {
+    const { composeRevisionManifest } = await import('./builder-publish.js');
+    const fields = [
+      question('q1'),
+      methods,
+      box('author-yes'),
+      box('author-no'),
+      box('pathway-new'),
+      field({ id: 'sign-name' }),
+    ];
+
+    const merged = composeRevisionManifest(seeded, derived, fields);
+
+    expect(merged.partCompletionMarks).toEqual(seeded.partCompletionMarks);
+    expect(merged.signOff?.overallSatisfactory?.fieldId).toBe('author-yes');
+    expect(merged.signOff?.overallNotSatisfactory?.fieldId).toBe('author-no');
+    expect(merged.signOff?.assessorNameFieldId).toBe('sign-name');
+    expect(merged.pathwayMarks).toEqual(seeded.pathwayMarks);
+  });
+
+  it('falls back per key where a seeded box vanished, and drops a dead pathway mark', async () => {
+    const { composeRevisionManifest } = await import('./builder-publish.js');
+    // author-no and pathway-new no longer exist; author-yes survives.
+    const fields = [question('q1'), methods, box('author-yes'), box('guess-no')];
+
+    const merged = composeRevisionManifest(seeded, derived, fields);
+
+    // One renamed box costs one pointer, never the whole block.
+    expect(merged.signOff?.overallSatisfactory?.fieldId).toBe('author-yes');
+    expect(merged.signOff?.overallNotSatisfactory?.fieldId).toBe('guess-no');
+    // A dead pathway mark is dropped rather than blocking the republish.
+    expect(merged.pathwayMarks).toBeUndefined();
+  });
+
+  it('uses the derivation when no seeded completion mark resolves', async () => {
+    const { composeRevisionManifest } = await import('./builder-publish.js');
+    // The methods table is gone entirely — nothing seeded can resolve.
+    const fields = [question('q1'), box('author-yes')];
+
+    const merged = composeRevisionManifest(seeded, derived, fields);
+
+    expect(merged.partCompletionMarks).toEqual(derived.partCompletionMarks);
+  });
+
+  it('keeps the plain overlay when no fields are given — every existing caller unchanged', async () => {
+    const { composeRevisionManifest } = await import('./builder-publish.js');
+    const merged = composeRevisionManifest(seeded, derived);
+
+    // Derived wins where both exist, exactly as before.
+    expect(merged.signOff?.overallSatisfactory?.fieldId).toBe('guess-yes');
+    expect(merged.partCompletionMarks).toEqual(derived.partCompletionMarks);
+    // And a key the derivation never writes rides through from the seed.
+    expect(merged.pathwayMarks).toEqual(seeded.pathwayMarks);
+  });
+});

@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { Button, Icon, Switch, useToast } from '@formai/ui';
 import {
   ACCESS_LEVELS,
+  ASSESSMENT_PATHWAYS,
   PROFILE_PREFILL_KEYS,
   PROFILE_PREFILL_LABELS,
   VALUE_SOURCES,
@@ -14,9 +15,13 @@ import {
   valueSource,
   workflowFromFields,
   type AccessLevel,
+  type AssessmentPathway,
+  type AssessmentToolManifest,
   type AssessmentWorkflow,
+  type DeclaredMark,
   type FieldAccess,
   type FormField,
+  type PartCompletionMark,
   type PrerequisiteCheck,
   type ProfilePrefillKey,
   type SubmissionValue,
@@ -198,6 +203,20 @@ export function WorkflowBuilderScreen() {
   const [defaultsDraft, setDefaultsDraft] = useState<
     Record<string, SubmissionValue> | undefined
   >(undefined);
+  /**
+   * The summary page's auto-fill wiring, each the same tri-state as the maps
+   * above: `undefined` means untouched and unsent, so a plain workflow save
+   * cannot erase what publish derived or somebody else configured.
+   */
+  const [completionDraft, setCompletionDraft] = useState<PartCompletionMark[] | undefined>(
+    undefined,
+  );
+  const [signOffDraft, setSignOffDraft] = useState<
+    AssessmentToolManifest['signOff'] | undefined
+  >(undefined);
+  const [pathwayDraft, setPathwayDraft] = useState<
+    AssessmentToolManifest['pathwayMarks'] | undefined
+  >(undefined);
   const competencies = useCompetencies();
 
   // The parts rule is an Admin act (R73). Reads for everyone, edits for admins.
@@ -224,7 +243,10 @@ export function WorkflowBuilderScreen() {
     draft !== null ||
     prefillDraft !== undefined ||
     prereqDraft !== undefined ||
-    defaultsDraft !== undefined;
+    defaultsDraft !== undefined ||
+    completionDraft !== undefined ||
+    signOffDraft !== undefined ||
+    pathwayDraft !== undefined;
 
   /** A part's fields, grouped by printed heading. Computed once per tool load. */
   const groupsForPart = useMemo(() => {
@@ -277,12 +299,26 @@ export function WorkflowBuilderScreen() {
       prereqTouched && prereqDraft!.filter((c) => c.fieldId && c.competencyId).length > 0
         ? prereqDraft!.filter((c) => c.fieldId && c.competencyId)
         : null;
+    const completionTouched = completionDraft !== undefined;
+    const completion =
+      completionTouched && completionDraft!.length > 0 ? completionDraft! : null;
+    const signOffTouched = signOffDraft !== undefined;
+    const signOff =
+      signOffTouched && Object.values(signOffDraft ?? {}).some((v) => v !== undefined)
+        ? signOffDraft!
+        : null;
+    const pathwaysTouched = pathwayDraft !== undefined;
+    const pathways =
+      pathwaysTouched && Object.keys(pathwayDraft ?? {}).length > 0 ? pathwayDraft! : null;
     save.mutate(
       {
         workflow,
         ...(touched ? { profilePrefill: map } : {}),
         ...(prereqTouched ? { prerequisiteChecks: checks } : {}),
         ...(defaultsTouched ? { fieldDefaults: defaults } : {}),
+        ...(completionTouched ? { partCompletionMarks: completion } : {}),
+        ...(signOffTouched ? { signOff } : {}),
+        ...(pathwaysTouched ? { pathwayMarks: pathways } : {}),
       },
       {
       onSuccess: (result) => {
@@ -290,6 +326,9 @@ export function WorkflowBuilderScreen() {
         setPrefillDraft(undefined);
         setPrereqDraft(undefined);
         setDefaultsDraft(undefined);
+        setCompletionDraft(undefined);
+        setSignOffDraft(undefined);
+        setPathwayDraft(undefined);
         toast({
           variant: result.warnings.length > 0 ? 'warning' : 'success',
           message:
@@ -517,6 +556,18 @@ export function WorkflowBuilderScreen() {
           Add a prerequisite check
         </Button>
       </div>
+
+      <SummaryAutoFill
+        tool={tool}
+        completion={completionDraft ?? tool.manifest.partCompletionMarks ?? []}
+        onCompletion={setCompletionDraft}
+        signOff={signOffDraft ?? tool.manifest.signOff}
+        onSignOff={(next) => setSignOffDraft(next)}
+        pathwayMarks={pathwayDraft ?? tool.manifest.pathwayMarks ?? {}}
+        onPathwayMarks={setPathwayDraft}
+        defaults={defaultsDraft ?? tool.manifest.fieldDefaults ?? {}}
+        onDefaults={setDefaultsDraft}
+      />
 
       {tool.workflowIsDefault && !dirty && (
         <div className="rounded-md border border-border-accent bg-surface-accent-soft p-[11px_13px] text-[12.5px] text-text-secondary">
@@ -990,6 +1041,270 @@ function LocationPartsEditor({ tool, canEdit }: { tool: AssessmentToolDetail; ca
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+const PATHWAY_TICK_LABELS: Record<AssessmentPathway, string> = {
+  new: 'New / inexperienced',
+  experienced: 'Experienced / re-assessment',
+  rpl: 'Recognition of prior learning',
+};
+
+/**
+ * The summary page's auto-fill wiring, made visible and correctable.
+ *
+ * Publish GUESSES most of this from printed labels — the result pair from a
+ * "RESULT" heading, the methods mapping from part numbers — and until now the
+ * guess was invisible: where it landed right the page filled itself, and where
+ * it missed there was no knob anywhere, only a box that stayed blank on every
+ * export. This card shows what is actually wired and lets an author repoint
+ * it, using the same manifest keys publish writes, so a correction here and a
+ * lucky guess there are indistinguishable downstream.
+ */
+function SummaryAutoFill({
+  tool,
+  completion,
+  onCompletion,
+  signOff,
+  onSignOff,
+  pathwayMarks,
+  onPathwayMarks,
+  defaults,
+  onDefaults,
+}: {
+  tool: AssessmentToolDetail;
+  completion: PartCompletionMark[];
+  onCompletion: (marks: PartCompletionMark[]) => void;
+  signOff: AssessmentToolManifest['signOff'];
+  onSignOff: (next: NonNullable<AssessmentToolManifest['signOff']>) => void;
+  pathwayMarks: NonNullable<AssessmentToolManifest['pathwayMarks']>;
+  onPathwayMarks: (next: NonNullable<AssessmentToolManifest['pathwayMarks']>) => void;
+  defaults: Record<string, SubmissionValue>;
+  onDefaults: (next: Record<string, SubmissionValue>) => void;
+}) {
+  // The same set the prerequisite picker offers: fields a tick can land in.
+  const tickable = useMemo(
+    () => tool.fields.filter((f) => f.type === 'check_cross' || f.type === 'boolean_yes_no'),
+    [tool.fields],
+  );
+  const parts = orderedParts(tool.manifest);
+  // Only the pathways this tool's parts actually distinguish, plus any a mark
+  // already names — offering all three on a two-pathway paper invites a
+  // mapping nothing will ever stamp.
+  const pathways = ASSESSMENT_PATHWAYS.filter(
+    (p) => parts.some((part) => part.pathways.includes(p)) || pathwayMarks[p] !== undefined,
+  );
+  // The printed method checklists: fixed-row two-column tables, the same shape
+  // the per-row Preset control recognises — label column plus tick column.
+  const methodTables = tool.fields.filter(
+    (f) =>
+      f.type === 'repeating_group' &&
+      (f.fixedRows?.length ?? 0) > 0 &&
+      (f.columns?.length ?? 0) === 2,
+  );
+
+  const setResult = (
+    key: 'overallSatisfactory' | 'overallNotSatisfactory',
+    fieldId: string,
+  ) => {
+    // Spread keeps the name/signature/date pointers and the coaching pair —
+    // this card repoints the result boxes and must not shed the rest.
+    const next = { ...(signOff ?? {}) };
+    if (fieldId) next[key] = { fieldId, value: true };
+    else delete next[key];
+    onSignOff(next);
+  };
+
+  const setPathway = (pathway: AssessmentPathway, fieldId: string) => {
+    const next = { ...pathwayMarks };
+    if (fieldId) next[pathway] = { fieldId, value: true };
+    else delete next[pathway];
+    onPathwayMarks(next);
+  };
+
+  const setMethodRow = (table: FormField, rowIndex: number, partKey: string) => {
+    // The tick lands in the second column — same alignment as the Preset.
+    const columnKey = table.columns![1]!.key;
+    const rest = completion.filter((m) => !(m.fieldId === table.id && m.rowIndex === rowIndex));
+    onCompletion(partKey ? [...rest, { partKey, fieldId: table.id, rowIndex, columnKey }] : rest);
+  };
+
+  const preTicked = tickable.filter((f) => defaults[f.id] === true);
+  const setPreTick = (fieldId: string, on: boolean) => {
+    const next = { ...defaults };
+    if (on) next[fieldId] = true;
+    else delete next[fieldId];
+    onDefaults(next);
+  };
+
+  const resultRows: Array<{
+    key: 'overallSatisfactory' | 'overallNotSatisfactory';
+    label: string;
+    hint: string;
+    mark: DeclaredMark | undefined;
+  }> = [
+    {
+      key: 'overallSatisfactory',
+      label: 'Candidate Competent',
+      hint: 'ticks once an assessor signs the case off',
+      mark: signOff?.overallSatisfactory,
+    },
+    {
+      key: 'overallNotSatisfactory',
+      label: 'Candidate not yet Competent',
+      hint: 'ticks when the case resolves without competency',
+      mark: signOff?.overallNotSatisfactory,
+    },
+  ];
+
+  return (
+    <div className="rounded-md border border-border bg-surface-card p-[13px_15px]">
+      <span className="block text-[13px] font-semibold">Summary auto-fill</span>
+      <p className="mt-0.5 mb-2.5 max-w-[72ch] text-[11.5px] text-text-tertiary">
+        The front page fills itself from the case — point each printed box at the field it lives
+        in. A box left unmapped prints blank, never a guess.
+      </p>
+
+      <div className="flex flex-col gap-3">
+        {/* Boxes that print ticked on every case — the Category-of-Assessment line. */}
+        <div>
+          <span className="block text-[12px] font-semibold">Always ticked</span>
+          <p className="mt-0.5 mb-1.5 text-[11px] text-text-tertiary">
+            Printed ticked on every case — the Category of Assessment line. A default, not a
+            finding: a recorded answer always wins over it.
+          </p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {preTicked.map((f) => (
+              <span
+                key={f.id}
+                className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-page px-2 py-0.5 text-[11px]"
+              >
+                {f.label || f.id}
+                <button
+                  type="button"
+                  aria-label={`Stop pre-ticking ${f.label || f.id}`}
+                  onClick={() => setPreTick(f.id, false)}
+                  className="text-text-tertiary hover:text-text-primary"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            <select
+              aria-label="Add an always-ticked box"
+              value=""
+              onChange={(e) => e.target.value && setPreTick(e.target.value, true)}
+              className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+            >
+              <option value="">— add a box —</option>
+              {tickable
+                .filter((f) => defaults[f.id] !== true)
+                .map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.label || f.id}
+                  </option>
+                ))}
+            </select>
+          </div>
+        </div>
+
+        {/* The pathway tick — written from the case at export. */}
+        <div>
+          <span className="block text-[12px] font-semibold">Pathway</span>
+          <p className="mt-0.5 mb-1.5 text-[11px] text-text-tertiary">
+            Ticks the box for the pathway the case was created on — the same choice that decided
+            which parts the candidate sits.
+          </p>
+          {pathways.map((pathway) => (
+            <div key={pathway} className="mb-1.5 flex flex-wrap items-center gap-2">
+              <span className="min-w-[190px] text-[11.5px] text-text-secondary">
+                {PATHWAY_TICK_LABELS[pathway]}
+              </span>
+              <span className="text-[11px] text-text-tertiary">ticks</span>
+              <select
+                aria-label={`Printed box for the ${PATHWAY_TICK_LABELS[pathway]} pathway`}
+                value={pathwayMarks[pathway]?.fieldId ?? ''}
+                onChange={(e) => setPathway(pathway, e.target.value)}
+                className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+              >
+                <option value="">— not printed —</option>
+                {tickable.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.label || f.id}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+
+        {/* The Assessment Result pair. Two boxes, two different gates. */}
+        <div>
+          <span className="block text-[12px] font-semibold">Assessment result</span>
+          <p className="mt-0.5 mb-1.5 text-[11px] text-text-tertiary">
+            Competent prints only once an assessor has signed; not-yet-competent prints as soon as
+            a case resolves without it — a failed case often ends with no sign-off at all.
+          </p>
+          {resultRows.map((row) => (
+            <div key={row.key} className="mb-1.5 flex flex-wrap items-center gap-2">
+              <span className="min-w-[190px] text-[11.5px] text-text-secondary">{row.label}</span>
+              <select
+                aria-label={`Printed box for ${row.label}`}
+                value={row.mark?.fieldId ?? ''}
+                onChange={(e) => setResult(row.key, e.target.value)}
+                className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+              >
+                <option value="">— not mapped —</option>
+                {tickable.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.label || f.id}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[11px] text-text-tertiary">{row.hint}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* The methods checklist: which printed row ticks when which part passes. */}
+        {methodTables.map((table) => (
+          <div key={table.id}>
+            <span className="block text-[12px] font-semibold">
+              {table.label || 'Methods checklist'} — ticks as parts pass
+            </span>
+            <p className="mt-0.5 mb-1.5 text-[11px] text-text-tertiary">
+              Each row ticks the moment its part&rsquo;s final outcome is satisfactory. A row with
+              no part is left for the assessor.
+            </p>
+            {table.fixedRows!.map((rowLabel, index) => (
+              <div key={index} className="mb-1.5 flex flex-wrap items-center gap-2">
+                <span className="min-w-[240px] truncate text-[11.5px] text-text-secondary">
+                  {rowLabel}
+                </span>
+                <span className="text-[11px] text-text-tertiary">ticks when</span>
+                <select
+                  aria-label={`Part that ticks "${rowLabel}"`}
+                  value={
+                    completion.find((m) => m.fieldId === table.id && m.rowIndex === index)
+                      ?.partKey ?? ''
+                  }
+                  onChange={(e) => setMethodRow(table, index, e.target.value)}
+                  className="h-[26px] min-w-[200px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+                >
+                  <option value="">— nothing (manual) —</option>
+                  {parts.map((p) => (
+                    <option key={p.key} value={p.key}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-[11px] text-text-tertiary">passes</span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

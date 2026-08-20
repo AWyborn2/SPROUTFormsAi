@@ -12,6 +12,7 @@
  * had ever been sent the rest.
  */
 import type {
+  PartCompletionMark,
   PrerequisiteCheck,
   ProfilePrefillKey,
   TheoryRendering,
@@ -344,6 +345,9 @@ export const assessmentsApi = {
     profilePrefill?: Record<string, ProfilePrefillKey> | null,
     prerequisiteChecks?: PrerequisiteCheck[] | null,
     fieldDefaults?: Record<string, SubmissionValue> | null,
+    partCompletionMarks?: PartCompletionMark[] | null,
+    signOff?: AssessmentToolManifest['signOff'] | null,
+    pathwayMarks?: AssessmentToolManifest['pathwayMarks'] | null,
   ) =>
     apiClient.patch<{ id: string; workflow: AssessmentWorkflow; warnings: string[] }>(
       `/assessment-tools/${id}`,
@@ -354,6 +358,9 @@ export const assessmentsApi = {
         ...(profilePrefill !== undefined ? { profilePrefill } : {}),
         ...(prerequisiteChecks !== undefined ? { prerequisiteChecks } : {}),
         ...(fieldDefaults !== undefined ? { fieldDefaults } : {}),
+        ...(partCompletionMarks !== undefined ? { partCompletionMarks } : {}),
+        ...(signOff !== undefined ? { signOff } : {}),
+        ...(pathwayMarks !== undefined ? { pathwayMarks } : {}),
       },
     ),
 
