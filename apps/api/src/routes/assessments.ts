@@ -24,7 +24,9 @@ import {
   casePartKeys,
   logbookRows,
   logbookDurationRows,
+  markKeyedQuestions,
   markTheory,
+  SELF_ANSWERING_TYPES,
   ACCESS_LEVELS,
   VALUE_SOURCES,
   WORKFLOW_ROLES,
@@ -230,6 +232,47 @@ function unionPartFieldAccess(
   const hidden = (per[0]?.hidden ?? []).filter((id) => per.every((a) => a.hidden.includes(id)));
   const writable = [...new Set(per.flatMap((a) => a.writable))];
   return { hidden, writable };
+}
+
+/**
+ * The MARKING SURFACE of one part — what staff may still write on an attempt
+ * that is handed in but not yet marked.
+ *
+ * A submitted attempt's ANSWERS are frozen ("submitted" means the answers stop
+ * moving while the assessor reads them), but marking a mixed part IS writing:
+ * the assessor ticks each written question's ✓/✗ against its model answer,
+ * then signs the part. So the writable set narrows to exactly the marks:
+ *
+ * - the assessor-writable `entry` fields that are SELF-ANSWERING
+ *   (`check_cross` / `boolean_yes_no`) — the unkeyed ✓/✗ cells
+ *   `assessorMarkBoxIds` left `entry`, and any practical-style tick boxes.
+ *   Self-answering by TYPE is the fence: a textarea the workflow happens to
+ *   let the assessor fill is still the candidate's evidence once handed in.
+ * - the part's own declared furniture — assessor name, signed date, further
+ *   action — which is how the assessor signs what they just marked. Declared
+ *   ids only, same doctrine as `autoSourcesFor`; each still has to be
+ *   workflow-writable, because callers INTERSECT this with the party's
+ *   writable set rather than replacing it.
+ *
+ * Served by the fill route as `writableFieldIds` in that state and enforced by
+ * the PATCH gate, so the surface and the write rule cannot disagree.
+ */
+function markingSurfaceIds(
+  workflow: ReturnType<typeof workflowOf>,
+  part: AssessmentPart,
+  partFields: readonly FormField[],
+): Set<string> {
+  const assessorWritable = new Set(
+    partFieldAccess(workflow, part.key, partFields, 'assessor').writable,
+  );
+  const out = new Set<string>();
+  for (const f of partFields) {
+    if (assessorWritable.has(f.id) && SELF_ANSWERING_TYPES.includes(f.type)) out.add(f.id);
+  }
+  for (const id of [part.assessorNameFieldId, part.signedDateFieldId, part.furtherActionFieldId]) {
+    if (id) out.add(id);
+  }
+  return out;
 }
 
 /** The repeating table a logbook part totals its hours from, on one version. */
@@ -3176,6 +3219,28 @@ assessmentCasesRouter.get(
       }
     }
 
+    /*
+      THE MARKING PASS: the assessor opening an attempt that is handed in but
+      not yet marked. Decided by PARTY, never by permission — a self-assessing
+      candidate is `party === 'candidate'` by identity and gets none of this,
+      because whatever else they may fill, the marks on their own paper are not
+      theirs to see early or to tick.
+
+      Two things change in that state, and only in that state:
+      - `writableFieldIds` narrows to the marking surface (the same set the
+        PATCH gate enforces, so the screen and the write rule agree), and
+      - the keyed questions' ✓/✗ are PRE-MARKED into the served values —
+        display only, merged UNDER the stored map so nothing a person recorded
+        is shadowed; they persist when the outcome is recorded, not here.
+    */
+    // Truthiness, not `!== null` — an unsubmitted attempt reads as absence,
+    // whichever of null/undefined the row happens to carry.
+    const markingPass = party === 'assessor' && !!attempt.submittedAt && attempt.outcome === null;
+    const markingSurface = markingPass ? markingSurfaceIds(workflow, part, partFields) : null;
+    // Over the UNSTRIPPED visible fields — marking must see answerKey — and the
+    // STORED values, so a pre-mark reflects what the candidate actually handed in.
+    const preMarks = markingPass ? markKeyedQuestions(visibleFields, attempt.values).derivedValues : null;
+
     res.json({
       id: attempt.id,
       partKey: attempt.partKey,
@@ -3198,6 +3263,27 @@ assessmentCasesRouter.get(
       outcome: attempt.outcome,
       submittedAt: attempt.submittedAt,
       templateVersionId: attempt.templateVersionId,
+      /*
+        Which side of the assessment this caller is on, so the screen can say
+        "marking" instead of "sitting" without re-deriving the identity rule.
+      */
+      party,
+      /*
+        THE ASSESSOR'S MARKING GUIDE — each written question's model answer,
+        served as a SEPARATE role-gated block rather than by un-stripping the
+        fields. `stripMarkingSecrets` stays unconditional above: one strip rule
+        with no branches is the property the leak tests pin, and the guide
+        travelling beside the fields means no candidate-shaped payload ever has
+        a shape that could carry a secret. Absent — not empty — for the
+        candidate, including a self-assessing one (`party` is identity).
+      */
+      ...(party === 'assessor'
+        ? {
+            markingGuide: visibleFields
+              .filter((f) => typeof f.modelAnswer === 'string' && f.modelAnswer.trim() !== '')
+              .map((f) => ({ fieldId: f.id, modelAnswer: f.modelAnswer as string })),
+          }
+        : {}),
       /** The step after this part — a "continue", or a wait on the other party. */
       nextStep,
       /**
@@ -3257,7 +3343,14 @@ assessmentCasesRouter.get(
         to lock the box twice.
       */
       writableFieldIds: access.writable.filter(
-        (id) => !hidden.has(id) && !prefillMap[id] && !prereqIds.has(id) && !completionIds.has(id),
+        (id) =>
+          !hidden.has(id) &&
+          !prefillMap[id] &&
+          !prereqIds.has(id) &&
+          !completionIds.has(id) &&
+          // On a marking pass only the marking surface stays writable — the
+          // candidate's answers are frozen the moment they handed in.
+          (!markingSurface || markingSurface.has(id)),
       ),
       /*
         Layering, least to most authoritative: tool DEFAULTS under everything —
@@ -3267,6 +3360,9 @@ assessmentCasesRouter.get(
       */
       values: {
         ...defaultsFor(manifest, visibleFields),
+        // Display pre-marks, assessor-only, submitted-unmarked only — UNDER the
+        // stored values, so a cell anybody actually recorded always wins.
+        ...(preMarks ?? {}),
         ...(attempt.values ?? {}),
         ...prefill,
         ...prereqValues,
@@ -3660,10 +3756,20 @@ assessmentCasesRouter.patch(
       res.status(409).json({ error: 'attempt_resolved' });
       return;
     }
-    // Handed in, not yet marked. Refusing here is what makes "submitted" mean
-    // anything — otherwise the answers could keep moving while the assessor was
-    // reading them. The candidate can reopen it themselves; nothing is lost.
-    if (attempt.submittedAt) {
+    /*
+      Handed in, not yet marked. Refusing the CANDIDATE here is what makes
+      "submitted" mean anything — otherwise the answers could keep moving while
+      the assessor was reading them; they can reopen it themselves, nothing is
+      lost. STAFF are the exception, because on a mixed part marking IS writing:
+      the assessor ticks each written question's ✓/✗ and signs the part. Their
+      writable set narrows below to exactly that MARKING SURFACE, so the
+      candidate's frozen answers stay frozen either way. Party by identity, the
+      same rule as everywhere on this router — a self-assessing candidate is
+      the candidate, and still 409s.
+    */
+    const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
+    const markingPass = !!attempt.submittedAt;
+    if (markingPass && party === 'candidate') {
       res.status(409).json({ error: 'attempt_submitted' });
       return;
     }
@@ -3710,7 +3816,6 @@ assessmentCasesRouter.patch(
       fields, whose values come from the case record or from marking and must
       not be typed over.
     */
-    const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
     /*
       Read ONCE and passed to both, because `workflowOf` needs the fields too:
       a question's ✓/✗ cell is declared on the question rather than in the
@@ -3732,6 +3837,28 @@ assessmentCasesRouter.patch(
           ).writable,
         )
       : null;
+
+    /*
+      ON A MARKING PASS THE ALLOWED SET NARROWS TO THE MARKING SURFACE — the
+      same set the fill route served as `writableFieldIds`, so the screen and
+      this gate cannot disagree. Intersection, not replacement: a furniture id
+      the workflow does not let this party write stays refused. A submitted
+      attempt whose tool or part cannot be loaded has no computable surface, so
+      it keeps the flat refusal it always had rather than falling open to the
+      whole part.
+    */
+    if (markingPass) {
+      if (!tool || !part || !allowed) {
+        res.status(409).json({ error: 'attempt_submitted' });
+        return;
+      }
+      const surface = markingSurfaceIds(
+        workflowOf(tool.manifest, versionFields),
+        part,
+        fieldsInPart(versionFields, tool.manifest, attempt.partKey),
+      );
+      for (const id of [...allowed]) if (!surface.has(id)) allowed.delete(id);
+    }
 
     let values: Record<string, SubmissionValue> = { ...stored };
     if (allowed) {
@@ -4353,9 +4480,29 @@ assessmentCasesRouter.post(
     } else if (checklist) {
       outcome = checklist.outcome;
       derivedValues = checklist.derivedValues;
-    } else if (!outcome) {
-      res.status(400).json({ error: 'outcome_required' });
-      return;
+    } else {
+      if (!outcome) {
+        res.status(400).json({ error: 'outcome_required' });
+        return;
+      }
+      /*
+        MIXED MARKING (D4): a JUDGED part still pre-marks its KEYED SUBSET.
+
+        The verdict is the assessor's — nothing above changed — but the keyed
+        choice questions' ✓/✗ are arithmetic the machine already did on the
+        fill surface, and leaving them out of the stored values printed four
+        permanently blank boxes on every mixed paper. Same discipline as the
+        computed branch: `markKeyedQuestions` over the version's UNSTRIPPED
+        fields, visibility deciding which questions count. Merged UNDER the
+        stored values (the `withDerivedMarks` precedent): a cell any person
+        recorded — every written question's assessor-ticked box, or a keyed
+        cell someone overrode before these locked — is never rewritten.
+        Deliberately NO part verdict and NO auto-locked radio write
+        (`autoVerdictWrite` stays a self-marking-branch act, the #269 line):
+        the machine holds only some of this part's evidence.
+      */
+      const preMarked = markKeyedQuestions(fields, attempt.values);
+      derivedValues = { ...preMarked.derivedValues, ...(attempt.values ?? {}) };
     }
 
     let disposition = parsed.data.disposition ?? null;

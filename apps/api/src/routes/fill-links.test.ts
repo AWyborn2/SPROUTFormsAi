@@ -484,6 +484,51 @@ describe('GET /fill/:token (public, no auth)', () => {
     }
   });
 
+  it('strips every marking secret — modelAnswer included — from the anonymous payload', async () => {
+    // A written question's model answer is the answer key in prose, and this
+    // route's only credential is a link token. Same rule as answerKey: the
+    // secret must not reach any fill surface, role-gated delivery is the
+    // assessments router's business.
+    mockDbValue = fakeDb({
+      fillLinksFindFirst: ACTIVE_LINK,
+      formTemplatesFindFirst: PUBLISHED_TEMPLATE,
+      formTemplateVersionsFindFirst: {
+        ...PUBLISHED_V1,
+        fields: [
+          {
+            id: 'q-choice',
+            type: 'radio',
+            label: 'Keyed',
+            required: false,
+            options: ['a', 'b'],
+            answerKey: ['a'],
+            outcomeTarget: { fieldId: 'q-out' },
+          },
+          {
+            id: 'q-written',
+            type: 'textarea',
+            label: 'Written',
+            required: false,
+            modelAnswer: 'THE MODEL ANSWER',
+          },
+        ],
+      },
+      organizationsFindFirst: { id: 'org-1', name: 'Charles Hull', branding: BRANDING },
+    }).db;
+    const { server, base } = startApp();
+    try {
+      const res = await fetch(`${base}/fill/${ACTIVE_LINK.token}`);
+      expect(res.status).toBe(200);
+      const raw = JSON.stringify(await res.json());
+      expect(raw).not.toContain('modelAnswer');
+      expect(raw).not.toContain('THE MODEL ANSWER');
+      expect(raw).not.toContain('answerKey');
+      expect(raw).not.toContain('outcomeTarget');
+    } finally {
+      server.close();
+    }
+  });
+
   /**
    * The anonymous page has no session and no billing read, so this flag is the
    * only way it can know not to draw the Smart Fill mic. It has to stay a bare

@@ -826,7 +826,7 @@ describe('withDerivedMarks', () => {
     expect(kept.values['p1-verdict']).toBe('Not Satisfactory');
   });
 
-  it('leaves a judged part alone — its marks belong to the person', () => {
+  it('leaves a judged part with NO keyed questions alone — its marks belong to the person', () => {
     const attempt = passed('p2', { values: { prac: true } });
 
     expect(withDerivedMarks(attempt, versionFields, BASE)).toBe(attempt);
@@ -841,5 +841,76 @@ describe('withDerivedMarks', () => {
     };
 
     expect(withDerivedMarks(attempt, versionFields, BASE)).toBe(attempt);
+  });
+
+  /*
+    MIXED MARKING (U3): a JUDGED part still heals its KEYED SUBSET. p2 here
+    prints a keyed choice question beside a written one the assessor ticked by
+    hand — the written question keeps the part person-judged, and before this
+    path the whole attempt came back untouched, so the keyed ✓/✗ printed blank
+    on every mixed paper resolved before the outcome route persisted pre-marks.
+  */
+  describe('the judged mixed part', () => {
+    const mixedFields: FormField[] = [
+      header('h1'),
+      question('q1'),
+      cell('q1-out'),
+      question('q2'),
+      cell('q2-out'),
+      header('h2'),
+      question('k1'),
+      cell('k1-out'),
+      {
+        id: 'w1',
+        type: 'text',
+        label: 'w1 written',
+        required: false,
+        source: 'imported',
+        modelAnswer: 'The expected prose.',
+        outcomeTarget: { fieldId: 'w1-out' },
+      },
+      cell('w1-out'),
+      header('h3'),
+    ];
+
+    it('backfills the keyed subset and nothing of the person’s, scoped to its own part', () => {
+      const healed = withDerivedMarks(
+        passed('p2', { values: { k1: ['a'], w1: 'candidate prose', 'w1-out': true } }),
+        mixedFields,
+        BASE,
+      );
+
+      // The keyed question's silent cell fills from its own answer…
+      expect(healed.values['k1-out']).toBe(true);
+      // …the person's tick and the candidate's prose stand untouched…
+      expect(healed.values['w1-out']).toBe(true);
+      expect(healed.values['w1']).toBe('candidate prose');
+      // …and ANOTHER part's keyed questions are never marked against this
+      // attempt's values — the subset is the part's own slice.
+      expect(healed.values['q1-out']).toBeUndefined();
+      expect(healed.values['q2-out']).toBeUndefined();
+    });
+
+    it('never overwrites a keyed cell somebody already recorded', () => {
+      const healed = withDerivedMarks(
+        // k1 is wrong, but a person recorded ✓ before the cells locked.
+        passed('p2', { values: { k1: ['b'], 'k1-out': true } }),
+        mixedFields,
+        BASE,
+      );
+
+      expect(healed.values['k1-out']).toBe(true);
+    });
+
+    it('backfills nothing for a failed mixed attempt — it never prints', () => {
+      const attempt: CaseAttemptRecord = {
+        partKey: 'p2',
+        attemptNumber: 1,
+        outcome: 'not_satisfactory',
+        values: { k1: ['a'], w1: 'prose' },
+      };
+
+      expect(withDerivedMarks(attempt, mixedFields, BASE)).toBe(attempt);
+    });
   });
 });

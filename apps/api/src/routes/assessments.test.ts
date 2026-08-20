@@ -5391,3 +5391,544 @@ describe('POST /assessment-tools/:id/republish', () => {
   });
 });
 
+/*
+  ── Mixed marking and the assessor's marking pass (U3/U4) ────────────────────
+
+  The Tip Head Controller shape: one theory part carrying KEYED choice
+  questions (the machine's) beside UNKEYED written questions with model
+  answers (the assessor's), every question with a printed ✓/✗ box. The tool
+  ships the workflow the builder emits for it: keyed cells locked `auto`,
+  written questions' cells assessor-fillable with the candidate on view, the
+  part's verdict radio locked `auto` — which is exactly the #269 configuration
+  that must NOT auto-fire when written questions are present.
+*/
+const MIX_TEMPLATE = '00000000-0000-4000-8000-0000000000e1';
+const MIX_VERSION = '00000000-0000-4000-8000-0000000000e2';
+const MODEL_W1 = 'Stop tipping, chock the wheels and report to the supervisor.';
+
+const MIX_FIELDS: FormField[] = [
+  header('h-mix'),
+  {
+    id: 'q-k1',
+    type: 'radio',
+    label: 'Q1 keyed',
+    required: true,
+    source: 'imported',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: 'q-k1-out' },
+  },
+  { id: 'q-k1-out', type: 'check_cross', label: 'Q1 outcome', required: false, source: 'imported' },
+  {
+    id: 'q-k2',
+    type: 'checkbox_group',
+    label: 'Q2 keyed',
+    required: true,
+    source: 'imported',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: 'q-k2-out' },
+  },
+  { id: 'q-k2-out', type: 'check_cross', label: 'Q2 outcome', required: false, source: 'imported' },
+  {
+    id: 'q-w1',
+    type: 'textarea',
+    label: 'Q3 written',
+    required: true,
+    source: 'imported',
+    modelAnswer: MODEL_W1,
+    outcomeTarget: { fieldId: 'q-w1-out' },
+  },
+  { id: 'q-w1-out', type: 'check_cross', label: 'Q3 outcome', required: false, source: 'imported' },
+  // A written question with a target but NO model answer — legal furniture,
+  // and the guide must not carry an empty entry for it.
+  {
+    id: 'q-w2',
+    type: 'text',
+    label: 'Q4 written',
+    required: false,
+    source: 'imported',
+    outcomeTarget: { fieldId: 'q-w2-out' },
+  },
+  { id: 'q-w2-out', type: 'check_cross', label: 'Q4 outcome', required: false, source: 'imported' },
+  {
+    id: 'mix-verdict',
+    type: 'radio',
+    label: 'The Candidate’s responses were',
+    required: false,
+    source: 'imported',
+    options: ['Satisfactory', 'Not Satisfactory'],
+  },
+  { id: 'mix-assessor-name', type: 'text', label: 'Name of Assessor', required: false, source: 'imported' },
+  { id: 'mix-signed-date', type: 'date', label: 'Date', required: false, source: 'imported' },
+];
+
+const MIX_MANIFEST: AssessmentToolManifest = {
+  parts: [
+    {
+      key: 'm1',
+      ordinal: 1,
+      label: 'Mixed Theory',
+      kind: 'theory',
+      pathways: ['experienced', 'new', 'rpl'],
+      startFieldId: 'h-mix',
+      assessorNameFieldId: 'mix-assessor-name',
+      signedDateFieldId: 'mix-signed-date',
+    },
+  ],
+  workflow: {
+    roles: ['candidate', 'assessor'],
+    sections: [
+      {
+        key: 'm1',
+        ordinal: 1,
+        label: 'Mixed Theory',
+        partKey: 'm1',
+        access: { candidate: 'fill', assessor: 'fill' },
+        // What the builder emits: keyed cells and the verdict radio are the
+        // system's; the written questions' cells stay `entry` for the assessor.
+        fieldSource: { 'q-k1-out': 'auto', 'q-k2-out': 'auto', 'mix-verdict': 'auto' },
+        fieldAccess: { 'q-w1-out': { candidate: 'view' }, 'q-w2-out': { candidate: 'view' } },
+      },
+    ],
+  },
+};
+
+/** Seed the mixed template + tool, open a case and an m1 attempt. */
+async function mixedCase(
+  base: string,
+  store: Record<string, Record<string, unknown>[]>,
+  candidateUserId: string = CANDIDATE,
+) {
+  rows(store, 'formTemplates').push({
+    id: MIX_TEMPLATE,
+    orgId: ORG,
+    name: 'Tip Head Controller',
+    currentVersionId: MIX_VERSION,
+  });
+  rows(store, 'formTemplateVersions').push({ id: MIX_VERSION, templateId: MIX_TEMPLATE, fields: MIX_FIELDS });
+  const created = await fetch(`${base}/assessment-tools`, {
+    method: 'POST',
+    headers: auth(),
+    body: JSON.stringify({
+      templateId: MIX_TEMPLATE,
+      name: 'Tip Head Controller',
+      manifest: MIX_MANIFEST,
+      awardedCompetencyIds: [COMPETENCY],
+    }),
+  });
+  expect(created.status).toBe(201);
+  const tool = (await created.json()) as { id: string };
+  const caseRes = await fetch(`${base}/assessment-cases`, {
+    method: 'POST',
+    headers: auth(),
+    body: JSON.stringify({ toolId: tool.id, candidateUserId, pathway: 'new' }),
+  });
+  expect(caseRes.status).toBe(201);
+  const kase = (await caseRes.json()) as { id: string };
+  const attemptRes = await fetch(`${base}/assessment-cases/${kase.id}/parts/m1/attempts`, {
+    method: 'POST',
+    headers: auth(),
+  });
+  expect(attemptRes.status).toBe(201);
+  return { caseId: kase.id, attemptId: ((await attemptRes.json()) as { id: string }).id };
+}
+
+describe('mixed marking: a judged part pre-marks its keyed subset (U3)', () => {
+  it('stores the keyed ✓/✗ at outcome time, with anything a person recorded winning', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      // Candidate answers: q-k1 right, q-k2 wrong, prose for the written ones.
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'q-k1': 'a', 'q-k2': ['b'], 'q-w1': 'Chock and report.' } }),
+      });
+      // The assessor ticks the written question's box by hand.
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { 'q-w1-out': true } }),
+      });
+      // A legacy stored tick at a keyed cell (recorded before these locked):
+      // the machine disagrees — q-k2 is wrong — but the person's mark stands.
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === attemptId)!;
+      row.values = { ...(row.values as Record<string, unknown>), 'q-k2-out': true };
+
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat Assessor' }),
+      });
+      expect(res.status).toBe(200);
+
+      const values = row.values as Record<string, unknown>;
+      // The machine's pre-mark fills the silent keyed cell…
+      expect(values['q-k1-out']).toBe(true);
+      // …and never rewrites the one a person recorded.
+      expect(values['q-k2-out']).toBe(true);
+      // The written questions' cells stay exactly the person's.
+      expect(values['q-w1-out']).toBe(true);
+      expect(values['q-w2-out']).toBeUndefined();
+      // Marker attribution stays PERSON — the machine marked four cells, not
+      // the part.
+      expect(row.outcome).toBe('satisfactory');
+      expect(row.markerKind).toBe('person');
+      expect(row.assessorName).toBe('Pat Assessor');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('the #269 pin: written questions keep the auto-locked verdict radio empty — the outcome demands the assessor', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'q-k1': 'a', 'q-k2': ['a'], 'q-w1': 'All correct prose.' } }),
+      });
+      const submit = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/submit`, {
+        method: 'POST',
+        headers: auth(candidate),
+      });
+      expect(submit.status).toBe(200);
+      // Hand-in parks the attempt for marking: no outcome, no verdict write —
+      // even though every KEYED answer is correct, the written ones aren't
+      // the machine's to judge.
+      expect('outcome' in ((await submit.json()) as Record<string, unknown>)).toBe(false);
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === attemptId)!;
+      expect(row.outcome).toBeNull();
+      expect((row.values as Record<string, unknown>)['mix-verdict']).toBeUndefined();
+
+      // And the outcome route refuses to invent one.
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: '{}',
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('outcome_required');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('regression: a fully keyed part still marks itself at hand-in', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const caseRes = await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+      });
+      const kase = (await caseRes.json()) as { id: string };
+      const attemptRes = await fetch(`${base}/assessment-cases/${kase.id}/parts/p1/attempts`, {
+        method: 'POST',
+        headers: auth(),
+      });
+      const attempt = (await attemptRes.json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${kase.id}/attempts/${attempt.id}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { q1: ['a'] } }),
+      });
+      const submit = await fetch(`${base}/assessment-cases/${kase.id}/attempts/${attempt.id}/submit`, {
+        method: 'POST',
+        headers: auth(candidate),
+      });
+      expect(submit.status).toBe(200);
+      expect(((await submit.json()) as { outcome?: string }).outcome).toBe('satisfactory');
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === attempt.id)!;
+      expect((row.values as Record<string, unknown>)['q1-out']).toBe(true);
+      expect(row.markerKind).toBe('automatic');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('assessor delivery: the marking guide and pre-marks (U4/D6)', () => {
+  it('serves the candidate NO modelAnswer anywhere and NO markingGuide property', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(candidate),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.party).toBe('candidate');
+      // Absence asserted explicitly — an empty guide would still be a shape
+      // that could someday carry a secret.
+      expect('markingGuide' in body).toBe(false);
+      expect(JSON.stringify(body)).not.toContain('modelAnswer');
+      expect(JSON.stringify(body)).not.toContain(MODEL_W1.slice(0, 12));
+    } finally {
+      server.close();
+    }
+  });
+
+  it('serves the assessor stripped fields PLUS the guide, only for questions that have one', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(),
+      });
+      const body = (await res.json()) as {
+        party: string;
+        fields: FormField[];
+        markingGuide: { fieldId: string; modelAnswer: string }[];
+      };
+      expect(body.party).toBe('assessor');
+      // The fields themselves are never un-stripped, whoever is asking.
+      expect(body.fields.some((f) => f.modelAnswer !== undefined)).toBe(false);
+      expect(body.fields.some((f) => f.answerKey !== undefined)).toBe(false);
+      // The guide travels beside them: q-w1 only — q-w2 has no model answer.
+      expect(body.markingGuide).toEqual([{ fieldId: 'q-w1', modelAnswer: MODEL_W1 }]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a self-assessing candidate is a candidate: no guide on their own paper', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      // The admin IS the candidate on this case — staff role, own paper.
+      const { caseId, attemptId } = await mixedCase(base, store, ADMIN);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(),
+      });
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(body.party).toBe('candidate');
+      expect('markingGuide' in body).toBe(false);
+      expect(JSON.stringify(body)).not.toContain('modelAnswer');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('pre-marks the keyed boxes only after hand-in, and only for the assessor', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'q-k1': 'a' } }),
+      });
+
+      // Before hand-in: nothing derived, for anyone — the answers are moving.
+      const early = (await (
+        await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, { headers: auth() })
+      ).json()) as { values: Record<string, unknown> };
+      expect(early.values['q-k1-out']).toBeUndefined();
+
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/submit`, {
+        method: 'POST',
+        headers: auth(candidate),
+      });
+
+      // After: the assessor sees the machine's honest read — right, and the
+      // unanswered q-k2 marked incorrect…
+      const assessor = (await (
+        await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, { headers: auth() })
+      ).json()) as { values: Record<string, unknown> };
+      expect(assessor.values['q-k1-out']).toBe(true);
+      expect(assessor.values['q-k2-out']).toBe(false);
+
+      // …and the candidate still sees exactly what they stored.
+      const cand = (await (
+        await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+          headers: auth(candidate),
+        })
+      ).json()) as { values: Record<string, unknown> };
+      expect(cand.values['q-k1-out']).toBeUndefined();
+      expect(cand.values['q-k2-out']).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('narrows writableFieldIds to the marking surface once the attempt is handed in', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+
+      // Open attempt: staff may fill anything the workflow grants, prose included.
+      const before = (await (
+        await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, { headers: auth() })
+      ).json()) as { writableFieldIds: string[] };
+      expect(before.writableFieldIds).toContain('q-w1');
+
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/submit`, {
+        method: 'POST',
+        headers: auth(candidate),
+      });
+
+      const after = (await (
+        await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, { headers: auth() })
+      ).json()) as { writableFieldIds: string[] };
+      // The marks and the signature furniture…
+      expect(after.writableFieldIds).toEqual(
+        expect.arrayContaining(['q-w1-out', 'q-w2-out', 'mix-assessor-name', 'mix-signed-date']),
+      );
+      // …and nothing of the candidate's evidence, nor the machine's cells.
+      expect(after.writableFieldIds).not.toContain('q-w1');
+      expect(after.writableFieldIds).not.toContain('q-k1');
+      expect(after.writableFieldIds).not.toContain('q-k1-out');
+      expect(after.writableFieldIds).not.toContain('mix-verdict');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('the marking pass: staff writes on a submitted attempt (U4/D5)', () => {
+  async function submittedMixed(base: string, store: Record<string, Record<string, unknown>[]>) {
+    const { caseId, attemptId } = await mixedCase(base, store);
+    await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+      method: 'PATCH',
+      headers: auth(candidate),
+      body: JSON.stringify({ values: { 'q-k1': 'a', 'q-k2': ['a'], 'q-w1': 'Chock and report.' } }),
+    });
+    await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/submit`, {
+      method: 'POST',
+      headers: auth(candidate),
+    });
+    return { caseId, attemptId };
+  }
+
+  it('lets staff tick a ✓/✗ box and sign, on the submitted-unmarked attempt', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await submittedMixed(base, store);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { 'q-w1-out': true, 'mix-assessor-name': 'Pat Assessor' } }),
+      });
+      expect(res.status).toBe(200);
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === attemptId)!;
+      const values = row.values as Record<string, unknown>;
+      expect(values['q-w1-out']).toBe(true);
+      expect(values['mix-assessor-name']).toBe('Pat Assessor');
+      // The candidate's prose survived the pass untouched.
+      expect(values['q-w1']).toBe('Chock and report.');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses staff a candidate textarea — the evidence is frozen, only the marks are open', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await submittedMixed(base, store);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { 'q-w1': 'reworded by the marker' } }),
+      });
+      // The same refusal shape as every other out-of-scope write.
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { error: string; fields: string[] };
+      expect(body.error).toBe('field_not_in_part');
+      expect(body.fields).toEqual(['q-w1']);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still 409s the candidate on their own submitted attempt', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await submittedMixed(base, store);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'q-k1': 'b' } }),
+      });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('attempt_submitted');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a MARKED attempt is evidence: 409 for everyone, staff included', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await submittedMixed(base, store);
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat Assessor' }),
+      });
+
+      const staff = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { 'q-w1-out': false } }),
+      });
+      expect(staff.status).toBe(409);
+      expect(((await staff.json()) as { error: string }).error).toBe('attempt_resolved');
+
+      const cand = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'q-k1': 'b' } }),
+      });
+      expect(cand.status).toBe(409);
+      expect(((await cand.json()) as { error: string }).error).toBe('attempt_resolved');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('check-question still refuses a written field — no key, no check (regression pin)', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/check-question`, {
+        method: 'POST',
+        headers: auth(candidate),
+        body: JSON.stringify({ fieldId: 'q-w1', value: 'any prose at all' }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('not_a_keyed_question');
+    } finally {
+      server.close();
+    }
+  });
+});
+

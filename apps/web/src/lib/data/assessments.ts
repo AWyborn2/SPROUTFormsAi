@@ -207,6 +207,22 @@ export interface AttemptFillView {
   /** Null until the candidate hands it in. */
   submittedAt: string | null;
   templateVersionId: string;
+  /**
+   * Which side of this assessment the caller is on, decided by the server from
+   * the case (the candidate on the case is the candidate; anyone else with
+   * access is acting as the assessor). A self-assessing candidate is
+   * `candidate` — identity, not permission — which is what keeps the marking
+   * guide off their own paper.
+   */
+  party: 'candidate' | 'assessor';
+  /**
+   * The assessor's marking guide: each written question's model answer, served
+   * as a separate role-gated block ONLY when `party === 'assessor'`. `fields`
+   * above stay stripped for everyone — this never rides on a field — and the
+   * property is ABSENT (not empty) on a candidate payload, so no
+   * candidate-shaped response has anywhere a secret could sit.
+   */
+  markingGuide?: { fieldId: string; modelAnswer: string }[];
   /** The step after this part — a "continue", or a wait on the other party. */
   nextStep: CaseNextStep;
   /**
