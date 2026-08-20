@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { CaseNextStep, SubmissionValue } from '@formai/shared';
-import { durationUnitLong, logbookRows } from '@formai/shared';
+import { durationUnitLong, logbookDurationRows } from '@formai/shared';
 import { Button, Icon, todayISODate, useToast } from '@formai/ui';
 import { ApiError } from '../../lib/data/api-client.js';
 import { applyAssessorSignoff, dateFieldToStamp } from './signature-date-stamp.js';
@@ -225,16 +225,13 @@ export function CasePartFillScreen() {
 
   /*
     The logbook's rows as they stand right now, so the progress panel moves as
-    the candidate types. `logbookRows` carries the same table-finding (and
-    unexpected-key fallback) the server totals with, so what the candidate sees
-    accruing is what the threshold reads.
+    the candidate types. `logbookDurationRows` totals EVERY table that carries
+    the duration column — a part may hold more than one — by the same rule the
+    server threshold uses, so what the candidate sees accruing is what the
+    threshold reads.
   */
   const logbookHourRows = attempt.durationColumnKey
-    ? logbookRows(
-        partFields,
-        { startFieldId: partFields[0]?.id ?? '', durationColumnKey: attempt.durationColumnKey },
-        values,
-      )
+    ? logbookDurationRows({ durationColumnKey: attempt.durationColumnKey }, values)
     : [];
 
   function onSave() {

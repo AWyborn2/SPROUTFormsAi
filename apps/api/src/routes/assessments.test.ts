@@ -2520,13 +2520,16 @@ describe('POST /assessment-cases/:id/export', () => {
 });
 
 /**
- * Hours count toward a safety threshold, so two properties are pinned at the
- * route: a non-positive duration is REFUSED rather than quietly ignored, and a
- * duration column carrying a machine_hours calc is recomputed server-side â€”
- * the client's figure for a derived cell is discarded, so meter arithmetic
- * cannot be forged by editing a request body.
+ * A logbook is filled a shift at a time, so the save route must take partial
+ * progress: a not-yet-valid row (zero, negative, blank, or still awaiting its
+ * duration) is STORED and simply left out of the running total, never a reason
+ * to reject the whole save. Refusing them here — as the route once did — is
+ * what made "save progress" impossible on a half-filled log. Completeness is
+ * the minimum-hours threshold's job at submit, not this route's. Hours still
+ * count toward a safety threshold, so a duration column carrying a calc is
+ * recomputed server-side and the client's figure for a derived cell discarded.
  */
-describe('logbook duration integrity', () => {
+describe('logbook progressive saving', () => {
   async function logbookAttempt(base: string) {
     const tool = await seedTool(base);
     const c = (await (
@@ -2565,7 +2568,11 @@ describe('logbook duration integrity', () => {
     return { caseId: c.id, attemptId: log.id };
   }
 
-  it('refuses a row with a zero duration rather than ignoring it', async () => {
+  it('accepts a zero-duration row and simply leaves it out of the total', async () => {
+    // Progressive saving is the whole point of a logbook filled a shift at a
+    // time, so a not-yet-valid row must never reject the save. A zero rides
+    // along on the record and counts for nothing, where it once 400'd the
+    // entire save and made saving progress impossible.
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
@@ -2577,16 +2584,14 @@ describe('logbook duration integrity', () => {
         body: JSON.stringify({ values: { 'log-table': [{ duration: 8 }, { duration: 0 }] } }),
       });
 
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { error: string; row: number };
-      expect(body.error).toBe('invalid_logbook_row');
-      expect(body.row).toBe(1);
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { hours: number }).hours).toBe(8);
     } finally {
       server.close();
     }
   });
 
-  it('refuses a negative duration', async () => {
+  it('accepts a negative duration without counting it', async () => {
     mockDbValue = makeDb().db;
     const { server, base } = startApp();
     try {
@@ -2595,10 +2600,30 @@ describe('logbook duration integrity', () => {
       const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
         method: 'PATCH',
         headers: auth(),
-        body: JSON.stringify({ values: { 'log-table': [{ duration: -4 }] } }),
+        body: JSON.stringify({ values: { 'log-table': [{ duration: -4 }, { duration: 5 }] } }),
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { hours: number }).hours).toBe(5);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('saves a blank row left ready for the next entry — the "cannot save progress" report', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await logbookAttempt(base);
+
+      const res = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { 'log-table': [{ duration: 8 }, {}] } }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { hours: number }).hours).toBe(8);
     } finally {
       server.close();
     }

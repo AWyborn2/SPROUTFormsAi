@@ -21,6 +21,7 @@ import {
   moreCoachingRequired,
   type AssessmentCaseState,
   logbookRows,
+  logbookDurationRows,
   markTheory,
   ACCESS_LEVELS,
   VALUE_SOURCES,
@@ -2341,20 +2342,22 @@ assessmentCasesRouter.get(
  * safety threshold. It is also the attempt the threshold notification fired on
  * and the one the evidence document renders, so the dashboard agrees with both.
  *
- * Every array in the attempt's values is totalled rather than the one table the
- * manifest names, because naming it needs the pinned version's field list — a
- * read per attempt version that this endpoint otherwise never makes. A part's
- * values hold only that part's fields and only its logbook table carries the
- * duration column, so the wider sum reaches the same number.
+ * Summed across EVERY table in the attempt's values that carries the duration
+ * column, not the one table the manifest names first. A part's values hold only
+ * that part's fields, so every such table is one of this part's logs — and a
+ * part may keep several (Part 5's supervised and minimal-supervision logs both
+ * accrue against the same minimum). Totalling only the first under-reports a
+ * candidate's experience, the wrong direction against a safety threshold. Being
+ * value-based, it needs no field list, so the dashboard agrees with the meter
+ * the candidate watches and the threshold the save route fires — all three read
+ * `logbookDurationRows`.
  */
 function loggedHoursFor(
   part: AssessmentPart,
   attempts: readonly {
     attemptNumber: number;
     values: Record<string, SubmissionValue>;
-    templateVersionId: string;
   }[],
-  fieldsByVersion: ReadonlyMap<string, FormField[]>,
 ): number | null {
   if (part.kind !== 'logbook' || !part.durationColumnKey) return null;
   // Picked by attempt number rather than by position, so the answer does not
@@ -2367,10 +2370,9 @@ function loggedHoursFor(
   );
   if (!latest) return 0;
 
-  // The same rule the threshold notification and the retry carry-forward use.
-  // Three copies of "which rows are the logbook" disagreed; this is the one.
-  const rows = logbookRows(fieldsByVersion.get(latest.templateVersionId) ?? [], part, latest.values);
-  return totalLoggedHours(rows, part.durationColumnKey);
+  // The same rule the threshold notification and the candidate's progress meter
+  // use. Three copies of "which rows are the logbook" disagreed; this is the one.
+  return totalLoggedHours(logbookDurationRows(part, latest.values), part.durationColumnKey);
 }
 
 /**
@@ -2460,32 +2462,6 @@ assessmentCasesRouter.get(
       else byCase.set(row.caseId, [row]);
     }
 
-    /*
-      The fields of every version the visible attempts are pinned to, loaded ONCE
-      for the whole page.
-
-      Needed because hours come from the part's DECLARED table, and finding that
-      table means reading the version an attempt was taken against. Counting
-      every array on the attempt instead — which this endpoint used to do — made
-      it disagree with the threshold notification about the same candidate, with
-      no retry involved. See `logbookRows`.
-
-      Deduplicated by version rather than fetched per attempt: a cohort shares a
-      handful of versions, and a read per attempt is the N+1 this endpoint exists
-      to replace.
-    */
-    const versionIds = [
-      ...new Set([...byCase.values()].flat().map((a) => a.templateVersionId)),
-    ];
-    const versions = versionIds.length
-      ? await db.query.formTemplateVersions.findMany({
-          where: inArray(schema.formTemplateVersions.id, versionIds),
-        })
-      : [];
-    const fieldsByVersion = new Map<string, FormField[]>(
-      versions.map((v) => [v.id, (v.fields ?? []) as FormField[]]),
-    );
-
     res.json(
       cases.map((c) => {
         const tool = toolById.get(c.toolId);
@@ -2526,7 +2502,6 @@ assessmentCasesRouter.get(
             loggedHours: loggedHoursFor(
               p.part,
               attempts.filter((a) => a.partKey === p.part.key),
-              fieldsByVersion,
             ),
           })),
           createdAt: c.createdAt,
@@ -3703,46 +3678,38 @@ assessmentCasesRouter.patch(
       // Whatever the client sent for a derived cell is discarded: hours count
       // toward a safety threshold, so the meter arithmetic must not be
       // forgeable by editing a request body.
+      //
+      // Recomputed for EVERY repeating table in the values, each against its
+      // OWN columns — a logbook part may hold several (Part 5's supervised and
+      // minimal-supervision logs). The old code recomputed only the first table
+      // and passed the rest through untouched, which left the second table's
+      // hours exactly as forgeable as the recompute was there to prevent. The
+      // values are already this part's own fields, so matching a value key to a
+      // repeating-group field id recomputes this part's tables and nothing else.
       const fields = await fieldsForVersion(db, attempt.templateVersionId);
-      const table = fieldsInSection(fields, part.startFieldId).find(
-        (f) => f.type === 'repeating_group',
+      const columnsByTableId = new Map(
+        fields
+          .filter((f) => f.type === 'repeating_group')
+          .map((f) => [f.id, f.columns] as const),
       );
-
       const durationKey = part.durationColumnKey;
       values = Object.fromEntries(
         Object.entries(values).map(([k, v]) => {
-          if (!Array.isArray(v) || (table && k !== table.id)) return [k, v];
-          const rows = applyCalcs(table?.columns, v as RepeatingRowValue[]);
-          return [k, rows];
+          const columns = columnsByTableId.get(k);
+          if (!columns || !Array.isArray(v)) return [k, v];
+          return [k, applyCalcs(columns, v as RepeatingRowValue[])];
         }),
       );
 
-      // Shared with the progress dashboard and the retry carry-forward. The old
-      // fallback here took the first array of ANY kind, which would have counted
-      // a checkbox group's answers as logbook rows.
-      const rows: RepeatingRowValue[] = logbookRows(fields, part, values);
-
-      // A row whose duration is present but not a positive number is a
-      // mis-entry (zero, negative, or meter readings that go backwards — a
-      // calc writes '' for those). Refusing it keeps "hours that count" and
-      // "rows on the record" the same set, so the exported logbook cannot
-      // show entries the threshold quietly ignored.
-      const bad = (rows ?? []).findIndex((r) => {
-        const raw = r?.[durationKey];
-        if (raw === undefined || raw === null) return false;
-        const n = typeof raw === 'number' ? raw : Number.parseFloat(String(raw));
-        return !(Number.isFinite(n) && n > 0);
-      });
-      if (bad >= 0) {
-        res.status(400).json({
-          error: 'invalid_logbook_row',
-          row: bad,
-          message: `Row ${bad + 1} has no positive ${durationKey} — check the start and finish readings.`,
-        });
-        return;
-      }
-
-      hours = totalLoggedHours(rows ?? [], durationKey);
+      // Summed across ALL the part's tables — see `logbookDurationRows`. A
+      // half-filled or blank row (its calc duration still '') simply does not
+      // count: progressive saving is the whole point of a logbook filled a
+      // shift at a time, so a row the candidate has not finished must never
+      // reject the save. The old code refused any non-positive duration here,
+      // which meant a single in-progress row — or an empty one left ready for
+      // the next entry — made "save progress" impossible. Completeness is the
+      // minimum-hours threshold's job, judged at submit, not this route's.
+      hours = totalLoggedHours(logbookDurationRows(part, values), durationKey);
       thresholdReached =
         part.minimumHours != null && hours >= part.minimumHours && attempt.thresholdNotifiedAt === null;
     }
