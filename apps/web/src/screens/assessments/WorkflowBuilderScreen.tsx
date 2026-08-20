@@ -13,6 +13,7 @@ import {
   isChoiceField,
   orderedParts,
   orderedSections,
+  prerequisiteCompetencyIds,
   valueSource,
   workflowFromFields,
   type AccessLevel,
@@ -296,10 +297,10 @@ export function WorkflowBuilderScreen() {
     const defaultsTouched = defaultsDraft !== undefined;
     const defaults =
       defaultsTouched && Object.keys(defaultsDraft!).length > 0 ? defaultsDraft! : null;
-    const checks =
-      prereqTouched && prereqDraft!.filter((c) => c.fieldId && c.competencyId).length > 0
-        ? prereqDraft!.filter((c) => c.fieldId && c.competencyId)
-        : null;
+    const completeChecks = (prereqDraft ?? []).filter(
+      (c) => c.fieldId && prerequisiteCompetencyIds(c).length > 0,
+    );
+    const checks = prereqTouched && completeChecks.length > 0 ? completeChecks : null;
     const completionTouched = completionDraft !== undefined;
     const completion =
       completionTouched && completionDraft!.length > 0 ? completionDraft! : null;
@@ -499,6 +500,19 @@ export function WorkflowBuilderScreen() {
               base[index] = { ...base[index]!, ...patch };
               return base;
             });
+          /*
+            ANY listed class answers the box — "Driver's Licence C or higher"
+            is a family, and the register keeps each class on its own row. The
+            first class drives the select; the rest are removable "or" chips.
+            Edits write the plural spelling; the legacy single id still reads.
+          */
+          const classIds = prerequisiteCompetencyIds(check);
+          const primary = classIds[0] ?? '';
+          const extras = classIds.slice(1);
+          const className = (id: string) =>
+            (competencies.data ?? []).find((c) => c.id === id)?.name ?? id;
+          const setClasses = (ids: string[]) =>
+            update({ competencyIds: ids, competencyId: undefined });
           return (
             <div key={index} className="mb-1.5 flex flex-wrap items-center gap-2">
               <select
@@ -519,8 +533,14 @@ export function WorkflowBuilderScreen() {
               <span className="text-[11px] text-text-tertiary">answers from</span>
               <select
                 aria-label="Competency that answers it"
-                value={check.competencyId}
-                onChange={(e) => update({ competencyId: e.target.value })}
+                value={primary}
+                onChange={(e) =>
+                  setClasses(
+                    e.target.value
+                      ? [e.target.value, ...extras.filter((id) => id !== e.target.value)]
+                      : extras,
+                  )
+                }
                 className="h-[26px] min-w-[220px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
               >
                 <option value="">— competency —</option>
@@ -530,6 +550,43 @@ export function WorkflowBuilderScreen() {
                   </option>
                 ))}
               </select>
+              {extras.map((id) => (
+                <span
+                  key={id}
+                  className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-page px-2 py-0.5 text-[11px] text-text-secondary"
+                >
+                  or {className(id)}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${className(id)} from this prerequisite`}
+                    onClick={() => setClasses(classIds.filter((x) => x !== id))}
+                    className="text-text-tertiary hover:text-text-primary"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              {primary &&
+                (competencies.data ?? []).some((c) => !classIds.includes(c.id)) && (
+                  <select
+                    aria-label="Accept another class for this prerequisite"
+                    title="The box ticks — and the sign-off passes — when ANY listed class is current."
+                    value=""
+                    onChange={(e) =>
+                      e.target.value && setClasses([...classIds, e.target.value])
+                    }
+                    className="h-[26px] rounded-sm border border-border-subtle bg-surface-page px-1.5 text-[11.5px] text-text-tertiary"
+                  >
+                    <option value="">+ or…</option>
+                    {(competencies.data ?? [])
+                      .filter((c) => !classIds.includes(c.id))
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                  </select>
+                )}
               <Button
                 variant="ghost"
                 size="sm"
@@ -552,7 +609,7 @@ export function WorkflowBuilderScreen() {
           onClick={() =>
             setPrereqDraft((prev) => [
               ...(prev ?? tool.manifest.prerequisiteChecks ?? []),
-              { fieldId: '', competencyId: '' },
+              { fieldId: '', competencyIds: [] },
             ])
           }
         >
