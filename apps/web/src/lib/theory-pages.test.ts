@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { FormField } from '@formai/shared';
-import { answeredPages, theoryPages } from './theory-pages.js';
+import { answeredPages, quizFields, theoryPages } from './theory-pages.js';
 
 function field(over: Partial<FormField> & { id: string }): FormField {
   return { label: over.id, type: 'text', required: false, source: 'imported', ...over };
@@ -87,5 +87,46 @@ describe('answeredPages', () => {
   it('never counts a page that carries no question', () => {
     const prose = theoryPages([heading('h1')]);
     expect(answeredPages(prose, {})).toBe(0);
+  });
+});
+
+/**
+ * What the quiz actually shows: headings plus what the candidate may write.
+ * Marking's print boxes — the ✓/✗ outcome cells, an auto-locked verdict
+ * radio — never render as quiz controls.
+ */
+describe('quizFields', () => {
+  it('drops the outcome cell under a question — a results box, not a question', () => {
+    const fields = [heading('h1'), q('q1'), outcome('o1'), q('q2'), outcome('o2')];
+    const writable = new Set(['q1', 'q2']);
+
+    expect(quizFields(fields, writable).map((f) => f.id)).toEqual(['h1', 'q1', 'q2']);
+  });
+
+  it('drops an auto-locked verdict radio, so it never claims an unanswerable page', () => {
+    // The verdict radio has options, so left in it would page as a question
+    // no candidate can answer — and the progress bar could never finish.
+    const verdict = field({
+      id: 'p1-verdict',
+      type: 'radio',
+      options: ['Satisfactory', 'Not Satisfactory'],
+    });
+    const fields = [q('q1'), verdict];
+    const pages = theoryPages(quizFields(fields, new Set(['q1'])));
+
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.fields.map((f) => f.id)).toEqual(['q1']);
+    expect(answeredPages(pages, { q1: 'a' })).toBe(1);
+  });
+
+  it('keeps headings and every writable field, whatever its type', () => {
+    const sig = field({ id: 'sig', type: 'signature' });
+    const fields = [heading('h1'), q('q1'), sig];
+
+    expect(quizFields(fields, new Set(['q1', 'sig'])).map((f) => f.id)).toEqual([
+      'h1',
+      'q1',
+      'sig',
+    ]);
   });
 });
