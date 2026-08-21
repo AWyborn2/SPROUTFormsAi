@@ -1584,3 +1584,48 @@ describe('theoryRetryOf', () => {
     expect(theoryRetryOf({ theoryRetry: 'off', theoryAllowRetry: true })).toBe('off');
   });
 });
+
+/**
+ * `caseProgress` narrowed to what THIS case requires — the Location rule,
+ * finally enforced: an excluded part is not listed, never blocks the
+ * sequence, and the case completes without it.
+ */
+describe('caseProgress — applicable part keys', () => {
+  const manifest = {
+    parts: [
+      part({ key: 'general', ordinal: 1, pathways: ['new'] }),
+      part({ key: 'raw-theory', ordinal: 2, pathways: ['new'] }),
+      part({ key: 'practical', ordinal: 3, pathways: ['new'] }),
+    ],
+  };
+  const passed = (key: string) => ({ partKey: key, attemptNumber: 1, outcome: 'satisfactory' as const });
+
+  it('drops an excluded part from the list and from the sequential gate', async () => {
+    const { caseProgress } = await import('./assessment.js');
+    const progress = caseProgress(manifest, 'new', [passed('general')], new Set(['general', 'practical']));
+
+    expect(progress.map((p) => p.part.key)).toEqual(['general', 'practical']);
+    // raw-theory untouched does not lock the practical — general passing opens it.
+    expect(progress.find((p) => p.part.key === 'practical')?.state).toBe('open');
+  });
+
+  it('completes the case without the excluded part', async () => {
+    const { caseProgress, isCaseCompetent } = await import('./assessment.js');
+    const progress = caseProgress(
+      manifest,
+      'new',
+      [passed('general'), passed('practical')],
+      new Set(['general', 'practical']),
+    );
+
+    expect(isCaseCompetent(progress)).toBe(true);
+  });
+
+  it('changes nothing when no set is given — every pathway part still counts', async () => {
+    const { caseProgress, isCaseCompetent } = await import('./assessment.js');
+    const progress = caseProgress(manifest, 'new', [passed('general'), passed('practical')]);
+
+    expect(progress.map((p) => p.part.key)).toEqual(['general', 'raw-theory', 'practical']);
+    expect(isCaseCompetent(progress)).toBe(false);
+  });
+});

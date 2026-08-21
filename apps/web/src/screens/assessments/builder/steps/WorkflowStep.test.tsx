@@ -73,6 +73,7 @@ const summaryState: { value: Record<string, unknown> } = {
 };
 vi.mock('../builder-publish.js', () => ({
   checkPublish: () => ({ problems: [], fields: [], carried: [], inferred: [], unplaced: [], warnings: [] }),
+  extractionQuestionRefs: () => new Map<string, string>(),
   publishSummary: () => summaryState.value,
   composeRevisionManifest: (_seed: unknown, next: unknown) => next,
 }));

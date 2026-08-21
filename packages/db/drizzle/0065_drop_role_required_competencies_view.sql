@@ -12,6 +12,6 @@
 --
 -- Hand-authored: drizzle-kit never knew the view existed (it was created by
 -- raw SQL in 0060 and lives in no schema file), so `generate` can neither emit
--- nor object to this — the 0064 snapshot is byte-for-byte 0063's tables with a
+-- nor object to this — the 0065 snapshot is byte-for-byte 0064's tables with a
 -- fresh id, and `drizzle-kit generate` still reports no schema changes.
 DROP VIEW IF EXISTS "role_required_competencies";

@@ -211,16 +211,19 @@ describe('0059 migration — the SQL that carries the shape (U1)', () => {
     expect(sql).not.toMatch(/neither ordering/i);
   });
 
-  it('…and 0064 keeps that promise: the bridge is dropped, and only dropped', async () => {
+  it('…and 0065 keeps that promise: the bridge is dropped, and only dropped', async () => {
     /*
       The round after the rename shipped, so the deploy window the view bridged
-      is closed. 0064 must remove it — leaving it would let a rogue old client
+      is closed. 0065 must remove it — leaving it would let a rogue old client
       keep writing through a name the codebase no longer knows — and must do
       NOTHING ELSE: a drop that rode along with schema work could not be
       reasoned about (or reverted) as the bookkeeping step it is.
+      (Main's 0064_aromatic_gorilla_man also drops the view, without IF EXISTS,
+      alongside its own schema work — 0065's IF EXISTS makes running after it
+      a safe no-op.)
     */
     const sql = await readFile(
-      path.join(DRIZZLE_DIR, '0064_drop_role_required_competencies_view.sql'),
+      path.join(DRIZZLE_DIR, '0065_drop_role_required_competencies_view.sql'),
       'utf8',
     );
     expect(sql).toContain('DROP VIEW IF EXISTS "role_required_competencies";');

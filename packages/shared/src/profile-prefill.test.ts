@@ -14,11 +14,14 @@ import type { AssessmentToolManifest } from './assessment.js';
 import type { FormField } from './form-field.js';
 import {
   missingDeclarationFields,
+  prerequisiteCompetencyIds,
   profilePrefillValues,
+  reducePrerequisiteClasses,
   unplacedMarkDestinations,
   validateManifest,
   validatePrerequisiteChecks,
   validateProfilePrefill,
+  type PrerequisiteClassState,
 } from './assessment.js';
 import { canWrite, sectionForPart, workflowFromFields, workflowOf } from './workflow.js';
 
@@ -291,6 +294,90 @@ describe('validatePrerequisiteChecks', () => {
         fields,
       ),
     ).toHaveLength(1);
+  });
+
+  it('accepts the plural spelling, and refuses it empty', () => {
+    // "C or higher" is a family of classes; any listed one answers the box.
+    expect(
+      validatePrerequisiteChecks([{ fieldId: 'prereq', competencyIds: ['c1', 'c2'] }], fields),
+    ).toEqual([]);
+    expect(
+      validatePrerequisiteChecks([{ fieldId: 'prereq', competencyIds: [] }], fields),
+    ).toHaveLength(1);
+  });
+});
+
+describe('prerequisiteCompetencyIds', () => {
+  it('reads either spelling, deduplicated, empty ids dropped', () => {
+    expect(prerequisiteCompetencyIds({ competencyId: 'c1' })).toEqual(['c1']);
+    expect(prerequisiteCompetencyIds({ competencyIds: ['c1', 'c2', 'c1', ''] })).toEqual(['c1', 'c2']);
+    // The plural wins when both are present — it is what the editor writes.
+    expect(prerequisiteCompetencyIds({ competencyId: 'c1', competencyIds: ['c2'] })).toEqual(['c2']);
+    expect(prerequisiteCompetencyIds({})).toEqual([]);
+  });
+});
+
+/**
+ * Which class answers a multi-class box, and which failure surfaces when none
+ * does — the "Driver's Licence C or higher" rule.
+ */
+describe('reducePrerequisiteClasses', () => {
+  const cls = (
+    id: string,
+    over: Partial<PrerequisiteClassState> = {},
+  ): PrerequisiteClassState => ({
+    competencyId: id,
+    competencyName: id,
+    satisfied: false,
+    status: 'missing',
+    expiresAt: null,
+    ...over,
+  });
+
+  it('a higher class the candidate holds satisfies the box the C-class alone would fail', () => {
+    const out = reducePrerequisiteClasses([
+      cls('c-class', { status: 'expired', expiresAt: '2026-01-01T00:00:00.000Z' }),
+      cls('hr-class', { satisfied: true, status: 'held', expiresAt: '2027-06-30T00:00:00.000Z' }),
+    ]);
+
+    expect(out.satisfied).toBe(true);
+    expect(out.competencyId).toBe('hr-class');
+  });
+
+  it('leans on the class that lasts longest — undated beats every dated one', () => {
+    const out = reducePrerequisiteClasses([
+      cls('short', { satisfied: true, status: 'expiring', expiresAt: '2026-09-01T00:00:00.000Z' }),
+      cls('long', { satisfied: true, status: 'held', expiresAt: '2028-01-01T00:00:00.000Z' }),
+      cls('permanent', { satisfied: true, status: 'undated' }),
+    ]);
+
+    expect(out.competencyId).toBe('permanent');
+  });
+
+  it('surfaces the most actionable failure and names every accepted class', () => {
+    const out = reducePrerequisiteClasses([
+      cls('c-class', { competencyName: 'Licence C' }),
+      cls('hr-class', { competencyName: 'Licence HR', status: 'expired', expiresAt: '2026-01-01T00:00:00.000Z' }),
+    ]);
+
+    expect(out.satisfied).toBe(false);
+    // Expired over missing — a renewal is a next step; "missing" says the least.
+    expect(out.status).toBe('expired');
+    expect(out.competencyName).toBe('Licence C / Licence HR');
+  });
+
+  it('keeps the single-class shape exactly as before', () => {
+    const out = reducePrerequisiteClasses([
+      cls('only', { competencyName: 'Licence C', status: 'expired' }),
+    ]);
+    expect(out.competencyName).toBe('Licence C');
+    expect(out.status).toBe('expired');
+  });
+
+  it('reads an empty check as unsatisfied, never as vacuously met', () => {
+    const out = reducePrerequisiteClasses([]);
+    expect(out.satisfied).toBe(false);
+    expect(out.status).toBe('missing');
   });
 });
 

@@ -394,6 +394,21 @@ export interface FormField {
   sourcePosition?: SourcePosition;
 
   /**
+   * For AI-extracted fields — the 1-based inclusive page range of the
+   * extraction BATCH that produced this field, stamped in code server-side
+   * (the splitter knows which pages went into each call; the model is never
+   * asked). NOT a page the field is known to sit on: a batch is up to four
+   * pages and the field's printed start can even fall one page outside it
+   * where a batch-boundary merge stitched an orphan back on. Consumers treat
+   * it as a soft prior only — never a hard page trust.
+   *
+   * Absent means: extracted before the stamp existed, extracted via AcroForm
+   * (which carries real geometry instead), or built by hand. Absence must
+   * change nothing — every consumer takes its unscoped path.
+   */
+  sourcePages?: { from: number; to: number };
+
+  /**
    * For PDF-imported fields — multi-page footprint with explicit column and
    * row bands, for tables that span page breaks or whose columns are not
    * evenly spaced. Supersedes `sourcePosition` where present, but never

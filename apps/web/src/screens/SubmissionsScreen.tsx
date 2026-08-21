@@ -5,24 +5,14 @@ import type { SubmissionStatus } from '@formai/shared';
 import { useForms, useSubmissions } from '../lib/data/hooks.js';
 import type { SubmissionRow } from '../lib/data/types.js';
 import { SUBMISSION_TABS, SubmissionStatusBadge } from './statusBadges.js';
+import { exportCsv } from '../lib/csv.js';
 
 /** Serialise the current rows to a CSV string and trigger a download. */
-function exportCsv(rows: SubmissionRow[]) {
-  const header = ['ID', 'Submitted by', 'Email', 'Form', 'Received', 'Status', 'Flag'];
-  const escape = (v: string) => `"${v.replace(/"/g, '""')}"`;
-  const lines = [
-    header.join(','),
-    ...rows.map((r) =>
-      [r.id, r.who, r.email, r.form, r.date, r.status, r.flag].map((v) => escape(String(v))).join(','),
-    ),
-  ];
-  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'submissions.csv';
-  a.click();
-  URL.revokeObjectURL(url);
+function exportSubmissionsCsv(rows: SubmissionRow[]) {
+  exportCsv('submissions.csv', [
+    ['ID', 'Submitted by', 'Email', 'Form', 'Received', 'Status', 'Flag'],
+    ...rows.map((r) => [r.id, r.who, r.email, r.form, r.date, r.status, r.flag].map(String)),
+  ]);
 }
 
 /** Submissions table — filter by form + status, search, row-select, export. */
@@ -136,7 +126,7 @@ export function SubmissionsScreen() {
             aria-label="Search submissions"
           />
         </div>
-        <Button variant="outline" size="sm" leadingIcon="download" onClick={() => exportCsv(filtered)}>
+        <Button variant="outline" size="sm" leadingIcon="download" onClick={() => exportSubmissionsCsv(filtered)}>
           Export CSV
         </Button>
       </div>
@@ -173,7 +163,7 @@ export function SubmissionsScreen() {
           <span className="flex-1" />
           <button
             onClick={() => {
-              exportCsv(filtered.filter((r) => selected.has(r.id)));
+              exportSubmissionsCsv(filtered.filter((r) => selected.has(r.id)));
             }}
             className="rounded-sm border border-white/20 bg-white/5 px-3 py-1.5 text-[12.5px] font-semibold"
           >

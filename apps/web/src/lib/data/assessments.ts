@@ -12,6 +12,7 @@
  * had ever been sent the rest.
  */
 import type {
+  DeclaredMark,
   PartCompletionMark,
   PrerequisiteCheck,
   ProfilePrefillKey,
@@ -31,6 +32,13 @@ import type {
   SubmissionValue,
 } from '@formai/shared';
 import { apiClient } from './api-client.js';
+
+/** One part's printed verdict pair, as the workflow PATCH carries it. */
+export interface PartOutcomeMarkEntry {
+  partKey: string;
+  outcomeSatisfactory?: DeclaredMark;
+  outcomeNotSatisfactory?: DeclaredMark;
+}
 
 export interface AssessmentToolSummary {
   id: string;
@@ -364,6 +372,7 @@ export const assessmentsApi = {
     partCompletionMarks?: PartCompletionMark[] | null,
     signOff?: AssessmentToolManifest['signOff'] | null,
     pathwayMarks?: AssessmentToolManifest['pathwayMarks'] | null,
+    partOutcomeMarks?: PartOutcomeMarkEntry[] | null,
   ) =>
     apiClient.patch<{ id: string; workflow: AssessmentWorkflow; warnings: string[] }>(
       `/assessment-tools/${id}`,
@@ -377,6 +386,7 @@ export const assessmentsApi = {
         ...(partCompletionMarks !== undefined ? { partCompletionMarks } : {}),
         ...(signOff !== undefined ? { signOff } : {}),
         ...(pathwayMarks !== undefined ? { pathwayMarks } : {}),
+        ...(partOutcomeMarks !== undefined ? { partOutcomeMarks } : {}),
       },
     ),
 
@@ -389,6 +399,17 @@ export const assessmentsApi = {
    * document is worded. The map holds only the exceptions: a Location left out
    * requires every part (R75).
    */
+  /**
+   * Set or change WHERE an open case is assessed (R77). Staff only, open
+   * cases only — the Location decides what the case requires, so a case
+   * opened without one is corrected here rather than reopened.
+   */
+  setCaseLocation: (caseId: string, locationId: string | null) =>
+    apiClient.patch<{ id: string; locationId: string | null }>(
+      `/assessment-cases/${caseId}/location`,
+      { locationId },
+    ),
+
   setLocationParts: (id: string, locationPartKeys: Record<string, string[]>) =>
     apiClient.patch<{ id: string; locationPartKeys: Record<string, string[]> }>(
       `/assessment-tools/${id}/location-parts`,

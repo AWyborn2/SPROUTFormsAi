@@ -18,3 +18,4 @@ export * from './taxonomy.ts';
 export * from './profiles.ts';
 export * from './documents.ts';
 export * from './form-brands.ts';
+export * from './reporting.ts';

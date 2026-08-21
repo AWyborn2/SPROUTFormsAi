@@ -44,7 +44,7 @@ import {
   type DerivedPart,
 } from './builder-manifest.js';
 import { structureFromExtraction } from './builder-structure.js';
-import { resolvePublishFields } from './builder-publish.js';
+import { extractionQuestionRefs, resolvePublishFields } from './builder-publish.js';
 import type { BuilderSnapshot } from './builder-draft-state.js';
 
 /**
@@ -416,7 +416,7 @@ function messageForError(err: unknown): string {
  * "what did the document actually say", which an edited copy can no longer
  * answer.
  */
-function seedFields(extraction: ExtractionResult): FormField[] {
+export function seedFields(extraction: ExtractionResult): FormField[] {
   return extraction.fields.map((f) => ({
     id: f.id,
     type: f.type,
@@ -430,6 +430,10 @@ function seedFields(extraction: ExtractionResult): FormField[] {
     ...(f.answerSets ? { answerSets: f.answerSets } : {}),
     ...(f.fixedRows ? { fixedRows: f.fixedRows } : {}),
     ...(f.sourcePosition ? { sourcePosition: f.sourcePosition } : {}),
+    // The extraction-batch window, for the placement engine's soft prior.
+    // Dropping it here is exactly how `questionRef` silently died before this
+    // mapping learned to carry review-relevant extraction metadata forward.
+    ...(f.sourcePages ? { sourcePages: f.sourcePages } : {}),
     confidence: f.confidence,
   }));
 }
@@ -1138,12 +1142,14 @@ export function useBuilderDraftState({
     keyed the paper: keying is what proposes a question as mandatory, and the
     validator could not see the very keys that did it.
   */
+  const questionRefs = useMemo(() => extractionQuestionRefs(extraction), [extraction]);
+
   const manifestProblems = useMemo(
     () =>
       parts.length > 0
-        ? validateManifest(manifest, resolvePublishFields(fields, keys).fields)
+        ? validateManifest(manifest, resolvePublishFields(fields, keys, questionRefs).fields)
         : [],
-    [manifest, fields, keys, parts.length],
+    [manifest, fields, keys, parts.length, questionRefs],
   );
 
   const partOps = useMemo<PartOps>(

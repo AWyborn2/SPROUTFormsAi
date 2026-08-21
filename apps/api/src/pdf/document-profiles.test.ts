@@ -305,6 +305,18 @@ describe('the assessment profile', () => {
     expect(p).toContain('single out ONE');
   });
 
+  it('keeps the printed question as the label, never the bare reference', () => {
+    /*
+      The real failure: theory questions inside parts came back with `label`
+      "Part 1 Q1" and the question's words nowhere. The label is the only text
+      the builder's question bank shows, and it is what placement matches
+      against the page's own text — a label printed nowhere can never be found
+      on the page, so the field is unreadable AND unplaceable at once.
+    */
+    expect(p).toContain('A QUESTION’S `label` IS THE PRINTED QUESTION, NEVER ITS NUMBER');
+    expect(p).toContain('never substitute the reference for the words');
+  });
+
   it('names no employer, site or ticket code as a requirement', () => {
     /*
       Every example in this profile is illustrative of a printed SHAPE. A rule

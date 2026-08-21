@@ -90,33 +90,36 @@ export interface ResolveOptions {
   awardsOverride?: ReadonlyMap<string, readonly string[]>;
 }
 
+/** The tool-row fields the resolution reads — structural, so both the stored
+ * rows and a test's plain objects fit. */
+interface AwardingToolRow {
+  id: string;
+  templateId: string;
+  awardedCompetencyIds: string[] | null;
+  createdAt: Date;
+}
+
+/** A pending award injected by the caller WINS over the stored list, so the
+ * ordering below ranks the post-link world rather than the stored one. */
+const awardsOf = (t: AwardingToolRow, options: ResolveOptions): readonly string[] =>
+  options.awardsOverride?.get(t.id) ?? t.awardedCompetencyIds ?? [];
+
 /**
- * Resolve each given competency to its ONE awarding tool, per the KTD2 rule.
- * A competency with no qualifying tool is simply absent from the map — the
- * caller reads absence as "evidence-only".
- *
- * `awardedCompetencyIds` is jsonb with no FK, so containment is filtered in
- * JS over the org's tools rather than pushed into SQL — the same posture the
- * competency in-use check takes, and per-org tool lists are small.
+ * THE KTD2 RULE'S ONE IMPLEMENTATION — the shared tail of the wanted-set and
+ * org-wide resolutions below. Private so the rule cannot grow a third public
+ * spelling: both entry points differ only in how `wanted` is built, and the
+ * candidate filter, the published-template gate and the (createdAt, id)
+ * ordering live here exactly once.
  */
-export async function awardingToolByCompetency(
+async function resolveAmongTools(
   reader: Reader,
   orgId: string,
-  competencyIds: readonly string[],
-  options: ResolveOptions = {},
+  tools: readonly AwardingToolRow[],
+  wanted: ReadonlySet<string>,
+  options: ResolveOptions,
 ): Promise<Map<string, string>> {
   const byCompetency = new Map<string, string>();
-  const wanted = new Set(competencyIds);
-  if (wanted.size === 0) return byCompetency;
-
-  const tools = await reader.query.assessmentTools.findMany({
-    where: eq(schema.assessmentTools.orgId, orgId),
-  });
-  // A pending award injected by the caller WINS over the stored list, so the
-  // ordering below ranks the post-link world rather than the stored one.
-  const awardsOf = (t: { id: string; awardedCompetencyIds: string[] | null }): readonly string[] =>
-    options.awardsOverride?.get(t.id) ?? t.awardedCompetencyIds ?? [];
-  const candidates = tools.filter((t) => awardsOf(t).some((c) => wanted.has(c)));
+  const candidates = tools.filter((t) => awardsOf(t, options).some((c) => wanted.has(c)));
   if (candidates.length === 0) return byCompetency;
 
   // Only a tool whose template has a PUBLISHED version can carry a case —
@@ -141,13 +144,69 @@ export async function awardingToolByCompetency(
         (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
     );
   for (const tool of ordered) {
-    for (const competencyId of awardsOf(tool)) {
+    for (const competencyId of awardsOf(tool, options)) {
       if (wanted.has(competencyId) && !byCompetency.has(competencyId)) {
         byCompetency.set(competencyId, tool.id);
       }
     }
   }
   return byCompetency;
+}
+
+/**
+ * Resolve each given competency to its ONE awarding tool, per the KTD2 rule.
+ * A competency with no qualifying tool is simply absent from the map — the
+ * caller reads absence as "evidence-only".
+ *
+ * `awardedCompetencyIds` is jsonb with no FK, so containment is filtered in
+ * JS over the org's tools rather than pushed into SQL — the same posture the
+ * competency in-use check takes, and per-org tool lists are small.
+ */
+export async function awardingToolByCompetency(
+  reader: Reader,
+  orgId: string,
+  competencyIds: readonly string[],
+  options: ResolveOptions = {},
+): Promise<Map<string, string>> {
+  const wanted = new Set(competencyIds);
+  if (wanted.size === 0) return new Map();
+
+  const tools = await reader.query.assessmentTools.findMany({
+    where: eq(schema.assessmentTools.orgId, orgId),
+  });
+  return resolveAmongTools(reader, orgId, tools, wanted, options);
+}
+
+/**
+ * The WHOLE org's awarding resolution in one read — every competency any org
+ * tool awards, resolved to its one tool by the same KTD2 rule (shared tail
+ * above, so this and the wanted-set shape cannot rank differently).
+ *
+ * Exists for the training matrix (U2): the grid resolves competency → tool for
+ * every column of every row, and the wanted-set shape would either be called
+ * per user (an org-wide tools read multiplied by headcount) or force the route
+ * to pre-collect the union of ids the tools read was about to reveal anyway.
+ * One call per REQUEST, whatever the workforce size — the same batching
+ * discipline `requiredToolIdsByMembership` applies at the assignment seam.
+ *
+ * The map answers only for competencies some tool AWARDS; a caller holding the
+ * org's full competency list reads absence as evidence-only (R7), exactly as
+ * with the wanted-set shape.
+ */
+export async function awardingToolByCompetencyForOrg(
+  reader: Reader,
+  orgId: string,
+  options: ResolveOptions = {},
+): Promise<Map<string, string>> {
+  const tools = await reader.query.assessmentTools.findMany({
+    where: eq(schema.assessmentTools.orgId, orgId),
+  });
+  // The award universe IS the wanted set: nothing outside it could resolve.
+  const wanted = new Set<string>();
+  for (const tool of tools) {
+    for (const competencyId of awardsOf(tool, options)) wanted.add(competencyId);
+  }
+  return resolveAmongTools(reader, orgId, tools, wanted, options);
 }
 
 /** Single-competency shape of the resolution — for callers holding one id. */

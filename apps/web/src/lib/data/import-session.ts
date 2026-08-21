@@ -192,6 +192,12 @@ function seedEditor(fields: ExtractedField[]): ReviewField[] {
       ...(f.answerSets ? { answerSets: f.answerSets } : {}),
       ...(f.fixedRows && f.fixedRows.length > 0 ? { fixedRows: f.fixedRows } : {}),
       ...(f.sourcePosition ? { sourcePosition: f.sourcePosition } : {}),
+      // The extraction-batch window rides on the field itself, not in
+      // `reviewMeta`: unlike `questionRef` it has no resolved form to publish
+      // in its place — the window itself is what the placement engine reads,
+      // including on the standalone Placement screen, which review-side
+      // metadata never reaches.
+      ...(f.sourcePages ? { sourcePages: f.sourcePages } : {}),
     };
   });
   editor = initialBuilderState({ formId: null, name: '', fields: formFields });
@@ -1613,6 +1619,11 @@ export function reviewedToFields(fields: ReviewField[]): FormField[] {
     ...(f.visibleWhen ? { visibleWhen: f.visibleWhen } : {}),
     ...(f.fixedRows && f.fixedRows.length > 0 ? { fixedRows: f.fixedRows } : {}),
     ...(f.sourcePosition ? { sourcePosition: f.sourcePosition } : {}),
+    // The extraction-batch window publishes, like `sourcePosition` and unlike
+    // `groupOrdinal`: the standalone Placement screen reads the PUBLISHED
+    // fields, so a window dropped here would scope detection in review and
+    // then silently stop scoping it after publish.
+    ...(f.sourcePages ? { sourcePages: f.sourcePages } : {}),
     // Only CONFIRMED geometry crosses, for the same reason only accepted
     // answer sets do (R8). An unconfirmed proposal that published would draw
     // marks onto a competency record against a grid no human ever looked at —

@@ -38,7 +38,12 @@ vi.mock('react-router-dom', () => ({
 
 vi.mock('../../lib/data/hooks.js', () => ({
   useAssessmentTool: () => toolResult,
-  useCompetencies: () => ({ data: [{ id: 'comp-1', name: 'Drivers Licence C or higher' }] }),
+  useCompetencies: () => ({
+    data: [
+      { id: 'comp-1', name: 'Drivers Licence C or higher' },
+      { id: 'comp-hr', name: 'Licence - Rigid (HR)' },
+    ],
+  }),
   useSaveWorkflow: () => ({ mutate: saveMutate, isPending: false }),
   useSetLocationParts: () => ({ mutate: setLocationPartsMutate, isPending: false }),
   useSession: () => sessionResult,
@@ -115,8 +120,8 @@ describe('WorkflowBuilderScreen', () => {
     toolResult.data = tool();
     render(<WorkflowBuilderScreen />);
 
-    expect(screen.getByText('Part 1 — Theory')).toBeDefined();
-    expect(screen.getByText('Part 2 — Practical')).toBeDefined();
+    expect(screen.getByRole('button', { name: /^Part 1 — Theory/ })).toBeDefined();
+    expect(screen.getByRole('button', { name: /^Part 2 — Practical/ })).toBeDefined();
   });
 
   it('opens with every section collapsed', () => {
@@ -135,7 +140,7 @@ describe('WorkflowBuilderScreen', () => {
     toolResult.data = tool();
     render(<WorkflowBuilderScreen />);
 
-    fireEvent.click(screen.getByText('Part 1 — Theory'));
+    fireEvent.click(screen.getByRole('button', { name: /^Part 1 — Theory/ }));
 
     // The heading group appears…
     expect(screen.getByText('General questions')).toBeDefined();
@@ -455,7 +460,7 @@ describe('WorkflowBuilderScreen — summary auto-fill', () => {
       },
     });
     render(<WorkflowBuilderScreen />);
-    fireEvent.click(screen.getByText('Part 2 — Practical'));
+    fireEvent.click(screen.getByRole('button', { name: /^Part 2 — Practical/ }));
     fireEvent.click(screen.getByText('Plan & Prepare'));
 
     const row0 = screen.getByLabelText('When "1. Theory" ticks') as HTMLSelectElement;
@@ -490,7 +495,7 @@ describe('WorkflowBuilderScreen — summary auto-fill', () => {
       },
     });
     render(<WorkflowBuilderScreen />);
-    fireEvent.click(screen.getByText('Part 2 — Practical'));
+    fireEvent.click(screen.getByRole('button', { name: /^Part 2 — Practical/ }));
     fireEvent.click(screen.getByText('Plan & Prepare'));
 
     fireEvent.change(screen.getByLabelText('Also require another part before "1. Theory" ticks'), {
@@ -531,7 +536,7 @@ describe('WorkflowBuilderScreen — summary auto-fill', () => {
       },
     });
     render(<WorkflowBuilderScreen />);
-    fireEvent.click(screen.getByText('Part 2 — Practical'));
+    fireEvent.click(screen.getByRole('button', { name: /^Part 2 — Practical/ }));
     fireEvent.click(screen.getByText('Plan & Prepare'));
 
     const row0 = screen.getByLabelText('When "1. Theory" ticks') as HTMLSelectElement;
@@ -716,5 +721,105 @@ describe('WorkflowBuilderScreen — summary auto-fill choice-field options', () 
     expect(texts).not.toContain('Outcome for Q1');
     // The real boxes are still there.
     expect(texts).toContain('Wears correct PPE');
+  });
+});
+
+/**
+ * A prerequisite box answered by ANY of several classes — "Driver's Licence C
+ * or higher" is a family, and a check that could name only one class failed a
+ * candidate holding a higher one.
+ */
+describe('WorkflowBuilderScreen — any-of prerequisite classes', () => {
+  it('adds a second class with "+ or…" and saves the plural spelling', () => {
+    toolResult.data = tool({
+      manifest: {
+        ...tool().manifest,
+        prerequisiteChecks: [{ fieldId: 'crit1', competencyId: 'comp-1' }],
+      },
+    });
+    render(<WorkflowBuilderScreen />);
+
+    // The legacy single-class check seeds the primary select.
+    const primary = screen.getByLabelText('Competency that answers it') as HTMLSelectElement;
+    expect(primary.value).toBe('comp-1');
+
+    fireEvent.change(screen.getByLabelText('Accept another class for this prerequisite'), {
+      target: { value: 'comp-hr' },
+    });
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      prerequisiteChecks?: Array<{ fieldId: string; competencyIds?: string[] }>;
+    };
+    expect(payload.prerequisiteChecks).toEqual([
+      { fieldId: 'crit1', competencyIds: ['comp-1', 'comp-hr'], competencyId: undefined },
+    ]);
+  });
+
+  it('removes a class by its chip, keeping the rest', () => {
+    toolResult.data = tool({
+      manifest: {
+        ...tool().manifest,
+        prerequisiteChecks: [{ fieldId: 'crit1', competencyIds: ['comp-1', 'comp-hr'] }],
+      },
+    });
+    render(<WorkflowBuilderScreen />);
+
+    expect(screen.getByText(/or Licence - Rigid \(HR\)/)).toBeDefined();
+    fireEvent.click(
+      screen.getByLabelText('Remove Licence - Rigid (HR) from this prerequisite'),
+    );
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      prerequisiteChecks?: Array<{ competencyIds?: string[] }>;
+    };
+    expect(payload.prerequisiteChecks?.[0]?.competencyIds).toEqual(['comp-1']);
+  });
+});
+
+/**
+ * The parts' printed verdict pairs, finally author-mappable — the fix for a
+ * "responses were" pair that publish's guess missed or hung on a part the
+ * case excludes.
+ */
+describe('WorkflowBuilderScreen — part results', () => {
+  it('maps a part pair to choice-field options and saves full state per part', () => {
+    const pair: AssessmentToolDetail['fields'][number] = {
+      id: 'p1-verdict',
+      type: 'radio',
+      label: 'PART 1 - The Candidate’s responses were',
+      required: false,
+      source: 'imported',
+      options: ['Satisfactory', 'Not Satisfactory'],
+    };
+    toolResult.data = tool({ fields: [...tool().fields, pair] });
+    render(<WorkflowBuilderScreen />);
+
+    const yes = screen.getByLabelText('Satisfactory box for Part 1 — Theory') as HTMLSelectElement;
+    const wantedYes = [...yes.options].find((o) => o.text.endsWith('— Satisfactory'));
+    fireEvent.change(yes, { target: { value: wantedYes!.value } });
+    const no = screen.getByLabelText(
+      'Not Satisfactory box for Part 1 — Theory',
+    ) as HTMLSelectElement;
+    const wantedNo = [...no.options].find((o) => o.text.endsWith('— Not Satisfactory'));
+    fireEvent.change(no, { target: { value: wantedNo!.value } });
+    fireEvent.click(screen.getByText('Save workflow'));
+
+    const payload = saveMutate.mock.calls[0]![0] as {
+      partOutcomeMarks?: Array<{
+        partKey: string;
+        outcomeSatisfactory?: { fieldId: string; value: unknown };
+        outcomeNotSatisfactory?: { fieldId: string; value: unknown };
+      }>;
+    };
+    expect(payload.partOutcomeMarks).toEqual([
+      {
+        partKey: 'p1',
+        outcomeSatisfactory: { fieldId: 'p1-verdict', value: 'Satisfactory' },
+        outcomeNotSatisfactory: { fieldId: 'p1-verdict', value: 'Not Satisfactory' },
+      },
+      { partKey: 'p2' },
+    ]);
   });
 });

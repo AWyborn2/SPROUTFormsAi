@@ -193,7 +193,7 @@ export function withDerivedMarks(
     return { ...attempt, values: { ...keyed.derivedValues, ...(attempt.values ?? {}) } };
   }
 
-  const marked = markTheory({ fields: versionFields, values: attempt.values, part });
+  const marked = markTheory({ fields: versionFields, values: attempt.values, part, manifest });
   // The part's auto-locked verdict radio, by the same rule hand-in writes it —
   // an attempt marked before that write existed backfills here, under the
   // stored values like every other derived mark.
@@ -300,7 +300,12 @@ export function assembleCaseValues({
   const rendered: string[] = [];
   const blank: string[] = [];
 
-  const passing = requiredParts(manifest, pathway);
+  // Narrowed to what THIS case requires — a Location-excluded part prints
+  // blank like a part outside the pathway, and is never reported as a blank
+  // REQUIRED part on a signed case.
+  const passing = requiredParts(manifest, pathway).filter(
+    (p) => !applicablePartKeys || applicablePartKeys.has(p.key),
+  );
   for (const part of passing) {
     const attempt = authoritativeAttempt(attempts, part.key);
     if (!attempt) {
@@ -373,6 +378,7 @@ export function assembleCaseValues({
       manifest,
       pathway,
       attempts.map((a) => ({ partKey: a.partKey, attemptNumber: a.attemptNumber, outcome: a.outcome })),
+      applicablePartKeys,
     );
     for (const fieldId of new Set(completionMarks.map((m) => m.fieldId))) {
       const rows = completionTickRows(
@@ -440,7 +446,7 @@ export function assembleCaseValues({
         partKey: a.partKey,
         attemptNumber: a.attemptNumber,
         outcome: a.outcome,
-      })));
+      })), applicablePartKeys);
       const coaching = moreCoachingRequired(progress);
       if (coaching === true) writeMark(values, marks.moreCoachingRequiredYes);
       if (coaching === false) writeMark(values, marks.moreCoachingRequiredNo);

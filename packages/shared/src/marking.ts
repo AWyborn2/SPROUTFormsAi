@@ -333,7 +333,18 @@ export interface MarkTheoryInput {
   part: Pick<
     AssessmentPart,
     'mandatoryFieldIds' | 'outcomeSatisfactory' | 'outcomeNotSatisfactory' | 'furtherActionFieldId'
-  >;
+  > &
+    Partial<Pick<AssessmentPart, 'key'>>;
+  /**
+   * The manifest, so marking can scope to THE PART'S OWN questions. Without
+   * it every visible keyed question in the version is marked — which on a
+   * paper with several theory parts wrote ✓/✗ into the OTHER parts' printed
+   * cells from this part's attempt, and let their unanswered questions poison
+   * this part's empty-mandatory gate. Optional for compatibility: a caller
+   * without the manifest (older tests, single-part tools) marks exactly as
+   * before.
+   */
+  manifest?: AssessmentToolManifest;
   /**
    * Pass threshold as a percentage (1–100). When set, the part is satisfactory
    * if `correctCount / totalCount >= passPercent / 100`. Absent or undefined
@@ -361,11 +372,20 @@ export interface MarkTheoryInput {
  * part at hand; each mark's `mandatory` flag is then false, which is correct —
  * the must-pass gate is `markTheory`'s concern, and this function draws none
  * of the conclusions that read the flag.
+ *
+ * `scopeIds` restricts the marks to ONE PART'S OWN QUESTIONS. Visibility is
+ * still evaluated over the FULL field list — a rule may hang off a cover
+ * question — but the marks themselves stay inside the scope. Without it, a
+ * paper with three theory parts marked all of them from any one attempt: the
+ * other parts' cells got a ✗ for questions the candidate never saw, and their
+ * unanswered questions dragged the calling part's whole-part gate to fail.
+ * Null/undefined means unscoped — every visible keyed question is marked.
  */
 export function markKeyedQuestions(
   fields: readonly FormField[],
   values: Record<string, SubmissionValue> | null | undefined,
   mandatoryFieldIds?: readonly string[],
+  scopeIds?: ReadonlySet<string> | null,
 ): { marks: QuestionMark[]; derivedValues: Record<string, SubmissionValue> } {
   // An untouched attempt has no map. Marking it is meaningful — every question
   // is unanswered — so normalize rather than refusing, which would have made an
@@ -373,11 +393,14 @@ export function markKeyedQuestions(
   const answers = values ?? {};
   const visible = visibleFields(fields, answers as VisibilityAnswers);
 
+  const scope = scopeIds ?? null;
+
   const mandatoryIds = new Set(mandatoryFieldIds ?? []);
 
   const marks: QuestionMark[] = [];
 
   for (const field of visible) {
+    if (scope && !scope.has(field.id)) continue;
     if (!field.answerKey || field.answerKey.length === 0) continue;
     if (!field.outcomeTarget) continue;
 
@@ -404,12 +427,28 @@ export function markKeyedQuestions(
  * part unsatisfactory. That mirrors the paper, where the must-pass section is
  * the gate and the location-specific sets are evidence.
  */
-export function markTheory({ fields, values, part, passPercent }: MarkTheoryInput): TheoryMarkingResult {
+export function markTheory({
+  fields,
+  values,
+  part,
+  passPercent,
+  manifest,
+}: MarkTheoryInput): TheoryMarkingResult {
   const answers = values ?? {};
+  /*
+    ONLY THIS PART'S QUESTIONS ARE THIS ATTEMPT'S TO MARK. With a manifest and
+    a part key, the marks are scoped to the part's own slice (visibility still
+    runs over the full list inside `markKeyedQuestions`). Without them —
+    older tests, single-part tools — marking is unscoped, exactly as before.
+  */
+  const scope =
+    manifest && part.key
+      ? new Set(fieldsInPart(fields, manifest, part.key).map((f) => f.id))
+      : null;
   // The per-question arithmetic is shared with the mixed-marking pre-mark path
   // (`markKeyedQuestions`); everything below it — verdict box, further-action
   // note, outcome — is the part-level judgment only a fully-keyed part may make.
-  const { marks, derivedValues } = markKeyedQuestions(fields, answers, part.mandatoryFieldIds);
+  const { marks, derivedValues } = markKeyedQuestions(fields, answers, part.mandatoryFieldIds, scope);
 
   const correctCount = marks.filter((m) => m.correct).length;
   const mandatoryMarks = marks.filter((m) => m.mandatory);

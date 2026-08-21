@@ -23,7 +23,10 @@ import {
   assessorMarkBoxIds,
   autoVerdictWrite,
   casePartKeys,
+  type LocationPartKeys,
   logbookRows,
+  prerequisiteCompetencyIds,
+  reducePrerequisiteClasses,
   logbookDurationRows,
   markKeyedQuestions,
   markTheory,
@@ -45,6 +48,7 @@ import {
   validateProfilePrefill,
   validatePrerequisiteChecks,
   validatePartCompletionMarks,
+  validatePartOutcomeMarks,
   validatePathwayMarks,
   validateSignOffMarks,
   type ProfilePrefillSource,
@@ -291,6 +295,26 @@ function markingSurfaceIds(
   return out;
 }
 
+/**
+ * What THIS case requires — the pathway's parts narrowed by the tool's
+ * per-Location rule for the case's Location. The ONE derivation every
+ * progress read shares (dashboard, case screen, fill view, marking,
+ * sign-off, export), so no two surfaces can disagree about whether a
+ * Location-excluded part is owed. A case with no Location, or one the rule
+ * does not list, requires everything — the safe direction (R75).
+ */
+function applicablePartsFor(
+  tool: { manifest: AssessmentToolManifest; locationPartKeys: LocationPartKeys | null },
+  row: { pathway: string; locationId: string | null },
+): Set<string> {
+  return casePartKeys(
+    tool.manifest,
+    row.pathway as AssessmentPathway,
+    tool.locationPartKeys ?? {},
+    row.locationId,
+  );
+}
+
 /** The repeating table a logbook part totals its hours from, on one version. */
 async function logbookTableId(
   database: Database,
@@ -389,7 +413,7 @@ async function carryForwardTheory(
   const fields = await fieldsForVersion(database, last.templateVersionId);
   if (!isSelfMarking(fields, input.manifest, input.part.key)) return undefined;
 
-  const { marks } = markTheory({ fields, values: last.values, part: input.part });
+  const { marks } = markTheory({ fields, values: last.values, part: input.part, manifest: input.manifest });
   const values: Record<string, SubmissionValue> = {};
   for (const mark of marks) {
     if (!mark.correct) continue;
@@ -571,6 +595,18 @@ const partCompletionMarkSchema = z.object({
 /** The case's pathway → the printed box that says so. Partial by design. */
 const pathwayMarksSchema = z.record(z.enum(ASSESSMENT_PATHWAYS), declaredMarkSchema);
 
+/*
+  One printed box, answered by ANY of the listed classes. `competencyId` is the
+  legacy single-class spelling and still accepted — a manifest saved before
+  boxes took families must round-trip untouched. At-least-one is
+  `validatePrerequisiteChecks`' job, which both save paths already run.
+*/
+const prerequisiteCheckSchema = z.object({
+  fieldId: z.string().min(1),
+  competencyId: z.string().min(1).optional(),
+  competencyIds: z.array(z.string().min(1)).optional(),
+});
+
 const partSchema = z.object({
   key: z.string().min(1),
   ordinal: z.number().int().positive(),
@@ -704,6 +740,13 @@ interface PrerequisiteResult {
  * mid-programme shows expired the next time anyone looks — a stored verdict is
  * a verdict about the day it was written. Revocation is decisive over the date
  * (R106): a revoked grant is not a current one whatever its expiry says.
+ *
+ * A check may accept SEVERAL classes ("Driver's Licence C or higher" is a
+ * family, and the register keeps each class as its own competency): the box
+ * is satisfied by ANY current one, and the result names the class that
+ * answered it. An unsatisfied multi-class check names every accepted class,
+ * so the sign-off refusal reads "C / LR / HR: missing" rather than blaming
+ * one class the candidate never needed to hold.
  */
 async function evaluatePrerequisites(
   database: NonNullable<typeof db>,
@@ -714,7 +757,7 @@ async function evaluatePrerequisites(
   const checks = manifest.prerequisiteChecks ?? [];
   if (checks.length === 0) return [];
 
-  const ids = [...new Set(checks.map((c) => c.competencyId))];
+  const ids = [...new Set(checks.flatMap((c) => prerequisiteCompetencyIds(c)))];
   const [competencies, holders] = await Promise.all([
     database.query.competencies.findMany({
       where: and(eq(schema.competencies.orgId, orgId), inArray(schema.competencies.id, ids)),
@@ -730,16 +773,14 @@ async function evaluatePrerequisites(
   const byId = new Map(competencies.map((c) => [c.id, c]));
   const now = new Date();
 
-  return checks.map((check) => {
-    const competency = byId.get(check.competencyId);
-    const held = holders.find((h) => h.competencyId === check.competencyId);
-    const base = {
-      fieldId: check.fieldId,
-      competencyId: check.competencyId,
-      competencyName: competency?.name ?? 'Unknown competency',
-    };
+  const evaluateOne = (competencyId: string) => {
+    const competency = byId.get(competencyId);
+    const held = holders.find((h) => h.competencyId === competencyId);
+    const base = { competencyId, competencyName: competency?.name ?? 'Unknown competency' };
     if (!held) return { ...base, satisfied: false, status: 'missing' as const, expiresAt: null };
-    if (held.revokedAt) return { ...base, satisfied: false, status: 'revoked' as const, expiresAt: null };
+    if (held.revokedAt) {
+      return { ...base, satisfied: false, status: 'revoked' as const, expiresAt: null };
+    }
     const status = competencyStatus(
       { grantedAt: held.grantedAt, ...(held.expiresAt ? { expiresAt: held.expiresAt } : {}) },
       { validForMonths: competency?.validForMonths, gracePeriodDays: competency?.gracePeriodDays },
@@ -751,7 +792,14 @@ async function evaluatePrerequisites(
       status,
       expiresAt: held.expiresAt ? held.expiresAt.toISOString() : null,
     };
-  });
+  };
+
+  return checks.map((check) => ({
+    fieldId: check.fieldId,
+    // The any-of decision is shared — see `reducePrerequisiteClasses` for
+    // which class answers the box and which failure surfaces when none does.
+    ...reducePrerequisiteClasses(prerequisiteCompetencyIds(check).map(evaluateOne)),
+  }));
 }
 
 /** The tool's declared defaults for these fields — served under stored values. */
@@ -777,10 +825,7 @@ const updateToolBody = z.object({
    */
   profilePrefill: z.record(z.string(), z.enum(PROFILE_PREFILL_KEYS)).nullable().optional(),
   /** Same tri-state as profilePrefill: absent keeps, null clears, array replaces. */
-  prerequisiteChecks: z
-    .array(z.object({ fieldId: z.string().min(1), competencyId: z.string().min(1) }))
-    .nullable()
-    .optional(),
+  prerequisiteChecks: z.array(prerequisiteCheckSchema).nullable().optional(),
   /** Tool-declared default answers. Same tri-state; values stored opaque. */
   fieldDefaults: z.record(z.string(), z.unknown()).nullable().optional(),
   /**
@@ -798,6 +843,25 @@ const updateToolBody = z.object({
   signOff: signOffSchema.nullable().optional(),
   /** The pathway → printed-box map. Same tri-state as everything above. */
   pathwayMarks: pathwayMarksSchema.nullable().optional(),
+  /**
+   * The parts' printed verdict pairs — "The Candidate's responses were:
+   * Satisfactory / Not Satisfactory" — repointed per part. An entry replaces
+   * BOTH of the named part's marks (an absent half clears it); parts not
+   * named keep theirs; null clears every part's pair. The same pair mapped on
+   * several parts is the multi-theory paper's spelling: each applicable part
+   * writes it at its own marking, so whichever papers the case sits stamp
+   * the one printed box.
+   */
+  partOutcomeMarks: z
+    .array(
+      z.object({
+        partKey: z.string().min(1),
+        outcomeSatisfactory: declaredMarkSchema.optional(),
+        outcomeNotSatisfactory: declaredMarkSchema.optional(),
+      }),
+    )
+    .nullable()
+    .optional(),
 });
 
 const toolBody = z.object({
@@ -972,9 +1036,7 @@ assessmentToolsRouter.post(
 */
 const republishManifestSchema = toolBody.shape.manifest.extend({
   profilePrefill: z.record(z.string(), z.enum(PROFILE_PREFILL_KEYS)).optional(),
-  prerequisiteChecks: z
-    .array(z.object({ fieldId: z.string().min(1), competencyId: z.string().min(1) }))
-    .optional(),
+  prerequisiteChecks: z.array(prerequisiteCheckSchema).optional(),
   fieldDefaults: z.record(z.string(), z.unknown()).optional(),
 });
 
@@ -1941,7 +2003,8 @@ assessmentToolsRouter.patch(
       parsed.data.fieldDefaults !== undefined ||
       parsed.data.partCompletionMarks !== undefined ||
       parsed.data.signOff !== undefined ||
-      parsed.data.pathwayMarks !== undefined;
+      parsed.data.pathwayMarks !== undefined ||
+      parsed.data.partOutcomeMarks !== undefined;
     let manifest: AssessmentToolManifest = tool.manifest;
     if (parsed.data.workflow) manifest = { ...manifest, workflow: parsed.data.workflow };
     if (parsed.data.profilePrefill !== undefined) {
@@ -1980,6 +2043,39 @@ assessmentToolsRouter.patch(
         ? { ...rest, pathwayMarks: parsed.data.pathwayMarks }
         : rest;
     }
+    const partOutcomeEntries = parsed.data.partOutcomeMarks;
+    if (partOutcomeEntries !== undefined) {
+      // An entry naming a part the tool does not have is a picker bug, not a
+      // mapping to silently drop.
+      const known = new Set(manifest.parts.map((p) => p.key));
+      const ghosts = (partOutcomeEntries ?? []).filter((e) => !known.has(e.partKey));
+      if (ghosts.length > 0) {
+        res.status(400).json({
+          error: 'invalid_workflow',
+          problems: ghosts.map((g) => `Verdict pair names part "${g.partKey}", which this tool has no part for.`),
+        });
+        return;
+      }
+      manifest = {
+        ...manifest,
+        parts: manifest.parts.map((p) => {
+          if (partOutcomeEntries === null) {
+            const { outcomeSatisfactory: _s, outcomeNotSatisfactory: _n, ...rest } = p;
+            return rest;
+          }
+          const entry = partOutcomeEntries.find((e) => e.partKey === p.key);
+          if (!entry) return p;
+          const { outcomeSatisfactory: _s, outcomeNotSatisfactory: _n, ...rest } = p;
+          return {
+            ...rest,
+            ...(entry.outcomeSatisfactory ? { outcomeSatisfactory: entry.outcomeSatisfactory } : {}),
+            ...(entry.outcomeNotSatisfactory
+              ? { outcomeNotSatisfactory: entry.outcomeNotSatisfactory }
+              : {}),
+          };
+        }),
+      };
+    }
 
     const template = await db.query.formTemplates.findFirst({
       where: and(
@@ -2005,6 +2101,7 @@ assessmentToolsRouter.patch(
       ...validatePartCompletionMarks(manifest.partCompletionMarks, manifest, fields),
       ...validatePathwayMarks(manifest.pathwayMarks, fields),
       ...validateSignOffMarks(manifest.signOff, fields),
+      ...validatePartOutcomeMarks(manifest, fields),
     ];
     if (problems.length > 0) {
       // Nothing written. A half-applied workflow is worse than a rejected one:
@@ -2359,6 +2456,80 @@ assessmentCasesRouter.post(
 );
 
 /**
+ * Set or change WHERE an open case is assessed (R77).
+ *
+ * Exists because the Location decides what the case requires — the per-part
+ * rule, the assessor requirement, the printed stream — and cases opened
+ * before the rule was enforced (or with the picker skipped) carry none: they
+ * demand every part and keep printing attempts the Location would exclude.
+ * The fix for such a case is its Location, not a new case.
+ *
+ * STAFF ONLY, and only while the case is OPEN. A candidate must not move
+ * their own assessment to an easier rule, and a resolved or signed case is a
+ * record — where it was assessed is part of what was signed.
+ */
+assessmentCasesRouter.patch(
+  '/:id/location',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'edit');
+    if (scope !== 'all') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = z
+      .object({ locationId: z.string().uuid().nullable() })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (row.state !== 'open') {
+      res.status(409).json({ error: 'case_not_open' });
+      return;
+    }
+    // Chosen from the org's list, never typed (R77) — same rule as create.
+    if (parsed.data.locationId) {
+      const location = await db.query.locations.findFirst({
+        where: and(
+          eq(schema.locations.id, parsed.data.locationId),
+          eq(schema.locations.orgId, tenant.orgId),
+          eq(schema.locations.status, 'active'),
+        ),
+      });
+      if (!location) {
+        res.status(400).json({ error: 'location_not_found', locationId: parsed.data.locationId });
+        return;
+      }
+    }
+
+    await db
+      .update(schema.assessmentCases)
+      .set({ locationId: parsed.data.locationId })
+      .where(eq(schema.assessmentCases.id, row.id));
+
+    await recordAudit(db, tenant, {
+      action: 'Moved assessment case',
+      target: `${row.id} → location ${parsed.data.locationId ?? 'none'}`,
+      category: 'submissions',
+      icon: 'map-pin',
+    });
+
+    res.json({ id: row.id, locationId: parsed.data.locationId });
+  }),
+);
+
+/**
  * Cases the caller may see.
  *
  * An `own` scope filters SERVER-SIDE by candidate. Filtering in the client
@@ -2431,9 +2602,15 @@ assessmentCasesRouter.get(
         const tool = toolById.get(c.toolId);
         const attempts = attemptsByCase.get(c.id) ?? [];
         // The pathway's required parts with their derived states — the same
-        // computation the progress screen uses, so the two agree.
+        // computation the progress screen uses, so the two agree. Narrowed to
+        // the case's Location: an excluded part is not owed and not listed.
         const progress = tool
-          ? caseProgress(tool.manifest, c.pathway as AssessmentPathway, toAttemptFacts(attempts))
+          ? caseProgress(
+              tool.manifest,
+              c.pathway as AssessmentPathway,
+              toAttemptFacts(attempts),
+              applicablePartsFor(tool, c),
+            )
           : [];
         // The stage: first part not yet satisfactory, and where it sits.
         const current = progress.find((p) => p.state !== 'satisfactory');
@@ -2599,7 +2776,12 @@ assessmentCasesRouter.get(
         // if one ever did, the candidate stays on the dashboard with no parts
         // rather than disappearing from it or failing the whole request.
         const progress = tool
-          ? caseProgress(tool.manifest, c.pathway as AssessmentPathway, toAttemptFacts(attempts))
+          ? caseProgress(
+              tool.manifest,
+              c.pathway as AssessmentPathway,
+              toAttemptFacts(attempts),
+              applicablePartsFor(tool, c),
+            )
           : [];
 
         // The first required part that has not passed, in document order. Null
@@ -2762,7 +2944,12 @@ assessmentCasesRouter.get(
     }
 
     const attempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+    const progress = caseProgress(
+      tool.manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(attempts),
+      applicablePartsFor(tool, row),
+    );
 
     // Appeals AGAINST this case — the superseding record must be visible from
     // the superseded one, or a reviewer reading the original would take a
@@ -2953,7 +3140,14 @@ assessmentCasesRouter.post(
 
     const partKey = req.params.partKey!;
     const attempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+    // Narrowed to the case's Location — an excluded part is not in the list,
+    // so opening it refuses exactly as opening a part outside the pathway does.
+    const progress = caseProgress(
+      tool.manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(attempts),
+      applicablePartsFor(tool, row),
+    );
     const target = progress.find((p) => p.part.key === partKey);
 
     if (!target) {
@@ -3195,20 +3389,20 @@ assessmentCasesRouter.get(
       both read it, and it is the same derivation the part's own state comes from.
     */
     const caseAttempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(manifest, row.pathway as AssessmentPathway, toAttemptFacts(caseAttempts));
+    // THIS case's required set — pathway narrowed by the tool's per-Location
+    // rule — read once for the progress, the "what's next" step and the
+    // completion ticks below, so all three agree about an excluded part.
+    const applicable = applicablePartsFor(tool, row);
+    const progress = caseProgress(
+      manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(caseAttempts),
+      applicable,
+    );
 
     const completionIds = new Set((manifest.partCompletionMarks ?? []).map((m) => m.fieldId));
     const completionValues: Record<string, SubmissionValue> = {};
     if (visibleFields.some((f) => completionIds.has(f.id))) {
-      // A multi-part row is judged against THIS case's required set — the
-      // pathway narrowed by the tool's per-Location rule — so a location's
-      // alternative paper never blocks the tick on the other location's case.
-      const applicable = casePartKeys(
-        manifest,
-        row.pathway as AssessmentPathway,
-        tool.locationPartKeys ?? {},
-        row.locationId,
-      );
       for (const f of visibleFields) {
         if (!completionIds.has(f.id)) continue;
         completionValues[f.id] = completionTickRows(
@@ -3596,6 +3790,7 @@ async function setSubmitted(
         row,
         attempt,
         manifest: tool.manifest,
+        locationPartKeys: tool.locationPartKeys ?? null,
         outcome: 'satisfactory',
         derivedValues: attempt.values ?? {},
         disposition: null,
@@ -3613,6 +3808,7 @@ async function setSubmitted(
           values: attempt.values,
           part,
           passPercent: tool.manifest.theoryPassPercent,
+          manifest: tool.manifest,
         });
         theoryScore = { correctCount: computed.correctCount, totalCount: computed.totalCount };
         /*
@@ -3633,6 +3829,7 @@ async function setSubmitted(
           row,
           attempt,
           manifest: tool.manifest,
+          locationPartKeys: tool.locationPartKeys ?? null,
           outcome: computed.outcome,
           derivedValues: verdict
             ? { ...computed.derivedValues, [verdict.fieldId]: verdict.value }
@@ -3663,6 +3860,7 @@ async function setSubmitted(
             row,
             attempt,
             manifest: tool.manifest,
+            locationPartKeys: tool.locationPartKeys ?? null,
             outcome: checklist.outcome,
             derivedValues: checklist.derivedValues,
             disposition: checklist.outcome === 'not_satisfactory' ? 'coaching_then_retry' : null,
@@ -4387,6 +4585,8 @@ async function resolveAttemptOutcome(
     row: NonNullable<Awaited<ReturnType<typeof loadCase>>>;
     attempt: { id: string; partKey: string; attemptNumber: number };
     manifest: AssessmentToolManifest;
+    /** The tool's per-Location parts rule, so case state reads what THIS case requires. */
+    locationPartKeys: LocationPartKeys | null;
     outcome: 'satisfactory' | 'not_satisfactory';
     derivedValues: Record<string, SubmissionValue>;
     disposition: (typeof NS_DISPOSITIONS)[number] | null;
@@ -4416,9 +4616,16 @@ async function resolveAttemptOutcome(
     })
     .where(eq(schema.assessmentPartAttempts.id, attempt.id));
 
-  // Recompute case state from the rows rather than incrementing a counter.
+  // Recompute case state from the rows rather than incrementing a counter —
+  // over what THIS case requires, so a Location-excluded part never holds a
+  // finished case open.
   const attempts = await attemptsFor(database, row.id);
-  const progress = caseProgress(input.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+  const progress = caseProgress(
+    input.manifest,
+    row.pathway as AssessmentPathway,
+    toAttemptFacts(attempts),
+    applicablePartsFor({ manifest: input.manifest, locationPartKeys: input.locationPartKeys }, row),
+  );
   const allPartsPassed = isCaseCompetent(progress);
   // The RESOLVED disposition, not the requested one — a computed fail that
   // defaulted to coaching keeps the case open, which is the whole point.
@@ -4565,7 +4772,7 @@ assessmentCasesRouter.post(
         );
 
     if (computed) {
-      const marked = markTheory({ fields, values: attempt.values, part });
+      const marked = markTheory({ fields, values: attempt.values, part, manifest: tool.manifest });
       outcome = marked.outcome;
       derivedValues = marked.derivedValues;
     } else if (checklist) {
@@ -4683,6 +4890,7 @@ assessmentCasesRouter.post(
       row,
       attempt,
       manifest: tool.manifest,
+      locationPartKeys: tool.locationPartKeys ?? null,
       outcome,
       derivedValues,
       disposition,
@@ -4831,7 +5039,12 @@ assessmentCasesRouter.post(
       attempt.
     */
     const attempts = await attemptsFor(db, row.id);
-    const progress = caseProgress(tool.manifest, row.pathway as AssessmentPathway, toAttemptFacts(attempts));
+    const progress = caseProgress(
+      tool.manifest,
+      row.pathway as AssessmentPathway,
+      toAttemptFacts(attempts),
+      applicablePartsFor(tool, row),
+    );
     if (!isCaseCompetent(progress)) {
       res.status(409).json({
         error: 'parts_incomplete',

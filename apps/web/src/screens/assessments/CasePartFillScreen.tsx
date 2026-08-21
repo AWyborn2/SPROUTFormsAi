@@ -17,7 +17,7 @@ import {
 import { partVisibility } from '../../lib/assessment-fill.js';
 import { fillSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
-import { answeredPages, theoryPages } from '../../lib/theory-pages.js';
+import { answeredPages, quizFields, theoryPages } from '../../lib/theory-pages.js';
 import { TheoryQuiz } from './TheoryQuiz.js';
 
 /**
@@ -157,7 +157,18 @@ export function CasePartFillScreen() {
     before this existed.
   */
   const paged = attempt?.theoryRendering === 'one_per_screen' && attempt?.partKind === 'theory';
-  const pages = useMemo(() => (paged ? theoryPages(rendered) : []), [paged, rendered]);
+  /*
+    QUIZ PAGES CARRY ONLY WHAT THE CANDIDATE ANSWERS. A question's ✓/✗ outcome
+    cell is marking's print box — the server refuses writes to it — so it must
+    not render under the question it belongs to; see `quizFields`.
+  */
+  const pages = useMemo(
+    () =>
+      paged
+        ? theoryPages(quizFields(rendered, new Set(attempt?.writableFieldIds ?? [])))
+        : [],
+    [paged, rendered, attempt?.writableFieldIds],
+  );
   const [pageIndex, setPageIndex] = useState(0);
 
   /*
@@ -218,8 +229,17 @@ export function CasePartFillScreen() {
     page can make an earlier one visible or hidden, and snapping the candidate
     back to page one every time the list resized would lose their place.
   */
-  const page = pages[Math.min(pageIndex, Math.max(0, pages.length - 1))];
-  const answered = paged ? answeredPages(pages, answers) : 0;
+  /*
+    THE QUIZ WINDOW IS THE CANDIDATE'S. `pages` is built from `quizFields`,
+    which keeps only the writable set — right for a sitting, where marking's
+    print boxes must not render under the questions. But on the marking pass
+    `writableFieldIds` IS the narrow marking surface, so paging there would
+    hand the assessor screens of bare ✓/✗ boxes with no questions and no
+    guide. The marker always gets the full stacked surface instead.
+  */
+  const windowed = paged && !markingPass;
+  const page = windowed ? pages[Math.min(pageIndex, Math.max(0, pages.length - 1))] : undefined;
+  const answered = windowed ? answeredPages(pages, answers) : 0;
   const shown = page ? page.fields : rendered;
   /*
     Which fields this caller may change, as the server decided. A tool with no
@@ -467,7 +487,7 @@ export function CasePartFillScreen() {
         </div>
       )}
 
-      {paged && pages.length > 1 && (
+      {windowed && pages.length > 1 && (
         <div className="flex items-center gap-3">
           <span
             className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-sunken"
@@ -539,7 +559,7 @@ export function CasePartFillScreen() {
         )}
       </div>
 
-      {paged && pages.length > 1 && (
+      {windowed && pages.length > 1 && (
         <div className="flex items-center gap-2">
           <button
             type="button"

@@ -12,7 +12,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { AssessmentToolManifest, DraftAnswerKey, FormField } from '@formai/shared';
-import { checkPublish, publishSummary, resolvePublishFields } from './builder-publish.js';
+import {
+  checkPublish,
+  extractionQuestionRefs,
+  publishSummary,
+  resolvePublishFields,
+} from './builder-publish.js';
 
 function field(over: Partial<FormField> & { id: string }): FormField {
   return { label: over.id, type: 'text', required: false, source: 'imported', ...over };
@@ -101,6 +106,108 @@ describe('resolvePublishFields', () => {
       [KEY('q1', [])],
     );
     expect(fields[0]!.answerKey).toBeUndefined();
+  });
+});
+
+describe('resolvePublishFields — refs carried beside the fields', () => {
+  /*
+    `questionRef` lives on the EXTRACTED field, never on `FormField` — the
+    fixtures above smuggle it on through a spread, which is precisely what the
+    builder's real fields cannot do. These tests use bare fields plus the refs
+    map `extractionQuestionRefs` builds, i.e. the shape production actually has.
+  */
+  it('links by the printed reference from the refs map, not adjacency', () => {
+    // The outcome box is NOT adjacent — a notes field sits between — so an
+    // adjacency guess cannot explain a resolved link.
+    const { fields, inferred, unlinked } = resolvePublishFields(
+      [question('q1'), field({ id: 'notes' }), outcome('o1')],
+      [KEY('q1')],
+      new Map([
+        ['q1', 'BBM Q3'],
+        ['o1', 'BBM Q3'],
+      ]),
+    );
+
+    expect(fields[0]!.outcomeTarget).toEqual({ fieldId: 'o1' });
+    expect(inferred).toEqual([]);
+    expect(unlinked).toEqual([]);
+  });
+
+  it('never writes the ref onto the published field', () => {
+    const { fields } = resolvePublishFields(
+      [question('q1'), outcome('o1')],
+      [KEY('q1')],
+      new Map([
+        ['q1', 'Q1'],
+        ['o1', 'Q1'],
+      ]),
+    );
+    expect('questionRef' in fields[0]!).toBe(false);
+  });
+
+  it('an explicitly authored target still wins over a ref link', () => {
+    const { fields } = resolvePublishFields(
+      [{ ...question('q1'), outcomeTarget: { fieldId: 'chosen' } }, outcome('o1')],
+      [KEY('q1')],
+      new Map([
+        ['q1', 'Q1'],
+        ['o1', 'Q1'],
+      ]),
+    );
+    expect(fields[0]!.outcomeTarget).toEqual({ fieldId: 'chosen' });
+  });
+
+  it('a field the extraction missed carries no ref and falls to adjacency, reported', () => {
+    // The author-added box is immediately next, so adjacency finds it — and
+    // says so, because the map has no entry to link by.
+    const { fields, inferred } = resolvePublishFields(
+      [question('q1'), outcome('added-by-author')],
+      [KEY('q1')],
+      new Map(),
+    );
+    expect(fields[0]!.outcomeTarget).toEqual({ fieldId: 'added-by-author' });
+    expect(inferred).toEqual(['q1']);
+  });
+});
+
+describe('checkPublish — refs reach the link tier', () => {
+  it('a keyed question with a non-adjacent referenced box passes without a guess', () => {
+    const bare = [question('q1'), field({ id: 'gap' }), outcome('o1')];
+    const check = checkPublish(
+      bare,
+      [KEY('q1')],
+      manifestWith({ mandatoryFieldIds: ['q1'] }),
+      undefined,
+      undefined,
+      new Map([
+        ['q1', 'Q1'],
+        ['o1', 'Q1'],
+      ]),
+    );
+    expect(check.unlinked).toEqual([]);
+    expect(check.inferred).toEqual([]);
+  });
+});
+
+describe('extractionQuestionRefs', () => {
+  it('keys every ref-carrying extracted field by id, skipping the rest', () => {
+    const refs = extractionQuestionRefs({
+      fields: [
+        { id: 'q1', label: 'Q', type: 'radio', confidence: 1, questionRef: 'Q1' },
+        { id: 'notes', label: 'Notes', type: 'text', confidence: 1 },
+        { id: 'o1', label: 'Outcome', type: 'check_cross', confidence: 1, questionRef: 'Q1' },
+      ],
+    });
+    expect(refs).toEqual(
+      new Map([
+        ['q1', 'Q1'],
+        ['o1', 'Q1'],
+      ]),
+    );
+  });
+
+  it('a revision draft has no extraction and gets an empty map', () => {
+    expect(extractionQuestionRefs(null).size).toBe(0);
   });
 });
 
