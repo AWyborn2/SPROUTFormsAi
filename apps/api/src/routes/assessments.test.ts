@@ -6042,13 +6042,12 @@ const TWO_FIELDS: FormField[] = [
 const TWO_MANIFEST: AssessmentToolManifest = {
   parts: [
     /*
-      t1 names its mandatory set explicitly because the SELF-MARKING branch
-      still runs `markTheory` over the whole version: without the narrowing,
-      t2's unanswered keyed question fails t1's gate at hand-in. That
-      whole-version gate is a pre-existing adjacent issue this round leaves
-      alone — the fix under test here is the JUDGED pre-mark's part scoping.
+      t1 deliberately names NO mandatory set: #278's part-scoped markTheory
+      means t2's unanswered keyed question must neither fail t1's gate at
+      hand-in nor write its cells into t1's values — the workaround this
+      comment used to justify is gone, and its absence IS the pin.
     */
-    { key: 't1', ordinal: 1, label: 'Keyed Theory', kind: 'theory', pathways: ['experienced', 'new', 'rpl'], startFieldId: 'h-t1', mandatoryFieldIds: ['k1'] },
+    { key: 't1', ordinal: 1, label: 'Keyed Theory', kind: 'theory', pathways: ['experienced', 'new', 'rpl'], startFieldId: 'h-t1' },
     { key: 't2', ordinal: 2, label: 'Mixed Theory', kind: 'theory', pathways: ['experienced', 'new', 'rpl'], startFieldId: 'h-t2' },
   ],
 };
