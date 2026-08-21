@@ -12,7 +12,12 @@ import {
 } from '../../../../lib/data/hooks.js';
 import { useInlineCompetencyCreate } from '../../../../lib/data/use-inline-competency-create.js';
 import { store } from '../../../../lib/data/store.js';
-import { checkPublish, composeRevisionManifest, publishSummary } from '../builder-publish.js';
+import {
+  checkPublish,
+  composeRevisionManifest,
+  extractionQuestionRefs,
+  publishSummary,
+} from '../builder-publish.js';
 import { workflowFromStructure } from '../builder-workflow.js';
 import { useStartRevision } from '../use-start-revision.js';
 import type { BuilderDraftState } from '../use-builder-draft.js';
@@ -213,10 +218,13 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
   const createDraft = useCreateDraftForm();
 
   // The STRUCTURE carries the order. Without it publish writes extraction
-  // order and the whole of step 2 is cosmetic.
+  // order and the whole of step 2 is cosmetic. The REFS carry the printed
+  // question references — without them the link tier resolves nothing and
+  // every outcome box is an adjacency guess.
+  const questionRefs = useMemo(() => extractionQuestionRefs(draft.extraction), [draft.extraction]);
   const check = useMemo(
-    () => checkPublish(fields, keys, manifest, structure, draft.carriedGeometry),
-    [fields, keys, manifest, structure, draft.carriedGeometry],
+    () => checkPublish(fields, keys, manifest, structure, draft.carriedGeometry, questionRefs),
+    [fields, keys, manifest, structure, draft.carriedGeometry, questionRefs],
   );
   const summary = useMemo(() => publishSummary(fields, keys, manifest), [fields, keys, manifest]);
 

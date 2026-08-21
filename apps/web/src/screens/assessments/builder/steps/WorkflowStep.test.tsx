@@ -68,6 +68,7 @@ vi.mock('../use-start-revision.js', () => ({
 */
 vi.mock('../builder-publish.js', () => ({
   checkPublish: () => ({ problems: [], fields: [], carried: [], inferred: [], unplaced: [] }),
+  extractionQuestionRefs: () => new Map<string, string>(),
   publishSummary: () => ({ parts: 1, questionsKeyed: 2, questionsVerified: 1, boxesPlaced: 2 }),
   composeRevisionManifest: (_seed: unknown, next: unknown) => next,
 }));

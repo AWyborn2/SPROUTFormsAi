@@ -17,7 +17,7 @@ import {
 import { partVisibility } from '../../lib/assessment-fill.js';
 import { fillSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
-import { answeredPages, theoryPages } from '../../lib/theory-pages.js';
+import { answeredPages, quizFields, theoryPages } from '../../lib/theory-pages.js';
 import { TheoryQuiz } from './TheoryQuiz.js';
 
 /**
@@ -157,7 +157,18 @@ export function CasePartFillScreen() {
     before this existed.
   */
   const paged = attempt?.theoryRendering === 'one_per_screen' && attempt?.partKind === 'theory';
-  const pages = useMemo(() => (paged ? theoryPages(rendered) : []), [paged, rendered]);
+  /*
+    QUIZ PAGES CARRY ONLY WHAT THE CANDIDATE ANSWERS. A question's ✓/✗ outcome
+    cell is marking's print box — the server refuses writes to it — so it must
+    not render under the question it belongs to; see `quizFields`.
+  */
+  const pages = useMemo(
+    () =>
+      paged
+        ? theoryPages(quizFields(rendered, new Set(attempt?.writableFieldIds ?? [])))
+        : [],
+    [paged, rendered, attempt?.writableFieldIds],
+  );
   const [pageIndex, setPageIndex] = useState(0);
 
   if (isLoading) {

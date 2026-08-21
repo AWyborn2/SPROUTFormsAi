@@ -48,6 +48,14 @@ export type DerivableField = Pick<FormField, 'type' | 'columns' | 'fixedRows'> &
  * empty gap between the 0.0 ties it must refuse and the ≥0.2 genuine winners it
  * must keep — so no real single-region derivation is lost (R5) while a true
  * coin-flip between indistinguishable tables refuses.
+ *
+ * One newer separation sits INSIDE the band, deliberately: a rect-anchored
+ * headerless proposal ships at 0.95, so against a confidence-1 text rival on
+ * the same row count the 0.05 gap refuses. That is the intended failure
+ * direction — the rect-anchored tier is a brand-new heuristic and must not
+ * win a coin-flip against corroborated header evidence — and the ordinal and
+ * drawn-box recourses remain. Anyone re-tuning this constant must keep 0.05
+ * inside the band or that tie starts resolving by guess.
  */
 export const NEAR_EQUAL_CONFIDENCE = 0.15;
 
@@ -132,7 +140,40 @@ export type GeometryPanelState =
   | { kind: 'draw-only'; reason: string }
   | { kind: 'no-proposal'; reason: string }
   | { kind: 'needs-subdivision'; box: PageBox; reason: string }
-  | { kind: 'proposed'; segment: PageBox; confidence: number; notes: string[]; confirmed: boolean };
+  | {
+      kind: 'proposed';
+      segment: PageBox;
+      confidence: number;
+      notes: string[];
+      confirmed: boolean;
+      /**
+       * How the derivation placed the COLUMN bands, when a table derivation is
+       * behind this proposal — provenance for the panel's caption, carried
+       * separately from `notes` because notes are warnings and several tests
+       * assert `notes: []` on a clean derivation. Absent for anything that is
+       * not a derived table grid (scalars, hand-drawn boxes).
+       */
+      columnEvidence?: TableProposal['columnEvidence'];
+    };
+
+/**
+ * The one-line provenance caption the geometry panel shows for a derived table
+ * grid — the reviewer-facing half of `columnEvidence` (R7).
+ *
+ * Composed here rather than in the components because two panels render it
+ * (the import review inspector and the placement screen), and two copies of
+ * the wording would drift. It is also the visible tell for the historic
+ * silent-zero rect-extractor regression: if that returns, the measured wording
+ * simply stops appearing.
+ */
+export function columnEvidenceCaption(
+  evidence: TableProposal['columnEvidence'] | undefined,
+): string | null {
+  if (evidence === undefined) return null;
+  return evidence === 'printed-boxes'
+    ? 'Columns measured from printed boxes.'
+    : 'Columns inferred from header text.';
+}
 
 /**
  * Derive a proposal for one field from a page's text.
@@ -159,6 +200,13 @@ export function deriveForField(
   pageText: PositionedText[],
   pageWidth: number,
   pageHeight: number,
+  /**
+   * The page's printed rectangles (`TextPage.rects`), for snapping the answer
+   * columns onto the printed squares and for anchoring headerless checklists.
+   * Optional and trailing so every existing caller compiles unchanged —
+   * `undefined` is NOT MEASURED, and derivation degrades to text-only exactly.
+   */
+  rects?: readonly PrintedRect[],
 ): TableProposal | null {
   if (field.type !== 'repeating_group' || !field.columns || field.columns.length < 2) return null;
 
@@ -168,6 +216,7 @@ export function deriveForField(
     pageHeight,
     items: pageText,
     columns: field.columns,
+    rects,
   });
   if (proposals.length === 0) return null;
 
@@ -199,7 +248,7 @@ export function deriveAcrossPages(
 ): TableProposal | null {
   if (field.groupOrdinal) {
     for (const [i, page] of pages.entries()) {
-      const p = deriveForField(field, i, page.items, page.width, page.height);
+      const p = deriveForField(field, i, page.items, page.width, page.height, page.rects);
       if (p) return p;
     }
     return null;
@@ -209,7 +258,7 @@ export function deriveAcrossPages(
   let best: TableProposal | null = null;
 
   for (const [i, page] of pages.entries()) {
-    const p = deriveForField(field, i, page.items, page.width, page.height);
+    const p = deriveForField(field, i, page.items, page.width, page.height, page.rects);
     if (!p) continue;
     if (!best) {
       best = p;
@@ -1196,6 +1245,13 @@ export interface SubdivideInput {
   columns: readonly RepeatingColumn[];
   /** The field's printed row count, when known, to break a multi-header tie. */
   wantRows?: number;
+  /**
+   * The PAGE's printed rectangles — filtered to the drawn box here, by the
+   * same centre test `proposeRectGrid` scopes with, so a square belonging to
+   * the table below the drag can never snap this table's bands. `undefined`
+   * keeps the NOT MEASURED convention and derives text-only.
+   */
+  rects?: readonly PrintedRect[];
 }
 
 /**
@@ -1214,9 +1270,21 @@ export interface SubdivideInput {
  * box happens to catch a repeated header, the row-count match breaks the tie,
  * then confidence.
  */
-export function subdivideBox({ box, items, columns, wantRows }: SubdivideInput): TableProposal | null {
+export function subdivideBox({ box, items, columns, wantRows, rects }: SubdivideInput): TableProposal | null {
   const inside = itemsInBox(items, box);
   if (inside.length === 0) return null;
+
+  // A rectangle belongs to the drag when its CENTRE does — the same test
+  // `proposeRectGrid` uses, for the same reason: a checkbox is 9pt, and full
+  // enclosure punishes a trace for being a few tenths of a point tight, while
+  // the centre test still keeps the next table's squares out.
+  const right = box.x + box.width;
+  const top = box.y + box.height;
+  const rectsInside = rects?.filter((r) => {
+    const cx = r.x + r.width / 2;
+    const cy = r.y + r.height / 2;
+    return cx >= box.x && cx <= right && cy >= box.y && cy <= top;
+  });
 
   const proposals = proposeTableSegments({
     page: box.page,
@@ -1224,6 +1292,7 @@ export function subdivideBox({ box, items, columns, wantRows }: SubdivideInput):
     pageHeight: box.pageHeight,
     items: inside,
     columns: [...columns],
+    rects: rectsInside,
   });
   if (proposals.length === 0) return null;
 
@@ -1433,6 +1502,10 @@ export function panelState(
       confidence: derived?.confidence ?? 1,
       notes: derived?.notes ?? [],
       confirmed,
+      // Provenance travels only where a table derivation stands behind the
+      // proposal — a scalar's box or a hand-drawn grid carries no claim about
+      // how columns were found, so it gets no caption (R7).
+      ...(derived ? { columnEvidence: derived.columnEvidence } : {}),
     };
   }
 
