@@ -151,6 +151,13 @@ export const keys = {
    * roster or register write.
    */
   trainingMatrix: ['training-matrix'] as const,
+  /**
+   * The KPI roll-up (U6). TOP-LEVEL for the same reason as `trainingMatrix`,
+   * and a SIBLING of it — `['training-matrix', …]` would make every summary a
+   * prefix match of the grid's invalidation. Keyed by (scope, axis) because
+   * each combination is a distinct server computation.
+   */
+  trainingSummary: (scope: string, axis: string) => ['training-summary', scope, axis] as const,
   assessmentCases: ['assessmentCases'] as const,
   /**
    * The shared assessor queue (U13). A SIBLING of assessmentCases — it shares no
@@ -1654,6 +1661,27 @@ export function useTrainingMatrix() {
   return useQuery({
     queryKey: keys.trainingMatrix,
     queryFn: () => store.getTrainingMatrix(),
+  });
+}
+
+/**
+ * The one-page KPI roll-up — admin/owner + assessments feature (U6). At most
+ * one of `location`/`department` narrows the scope; neither means org-wide.
+ * The key serialises the scope so each (scope, axis) pairing caches apart.
+ */
+export function useTrainingSummary(params: {
+  location?: string;
+  department?: string;
+  axis: 'location' | 'department' | 'role';
+}) {
+  const scope = params.location
+    ? `location:${params.location}`
+    : params.department
+      ? `department:${params.department}`
+      : 'org';
+  return useQuery({
+    queryKey: keys.trainingSummary(scope, params.axis),
+    queryFn: () => store.getTrainingSummary(params),
   });
 }
 
