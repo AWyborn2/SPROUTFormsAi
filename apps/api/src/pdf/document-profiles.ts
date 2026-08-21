@@ -321,7 +321,16 @@ const ASSESSMENT_PROFILE =
   'answerable question the paper never asked, mis-numbers every field after it, and is the ' +
   'commonest way a batch boundary corrupts this class. The same holds for a lone stem whose choices ' +
   'all fall past your last page: emit the question with the choices you can see and note in ' +
-  '`designNotes` that its options may continue beyond the range.';
+  '`designNotes` that its options may continue beyond the range.\n' +
+  '20. A QUESTION’S `label` IS THE PRINTED QUESTION, NEVER ITS NUMBER. Carry the question’s own ' +
+  'words verbatim as the `label` ("When must a pre-start inspection be completed?"), dropping only ' +
+  'the printed number/letter into `questionRef` per rule 3. NEVER emit a label that is just the ' +
+  'reference — "Q1", "Part 1 Q1", "7" — with the question’s words left out, however long the ' +
+  'question runs. The label is the only text a reviewer sees in the question bank, so a bare ' +
+  'reference makes the bank unreadable; and placement finds a field on the page by matching its ' +
+  'label against the page’s own printed text, so a label printed nowhere can never be placed. ' +
+  'Where a question is genuinely unreadable in your pages (a scan artefact, a truncated stem), emit ' +
+  'what is printed and say so in `note` — never substitute the reference for the words.';
 
 const PROFILES: Partial<Record<DocumentType, string>> = {
   assessment: ASSESSMENT_PROFILE,
