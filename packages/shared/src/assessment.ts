@@ -631,6 +631,40 @@ export function validateSignOffMarks(
   return problems;
 }
 
+/**
+ * Problems with the parts' printed verdict pairs — used by the tool PATCH,
+ * where an editor actively points them at fields and a ghost id is a bug in
+ * the picker rather than history.
+ */
+export function validatePartOutcomeMarks(
+  manifest: Pick<AssessmentToolManifest, 'parts'>,
+  fields: readonly FormField[],
+): string[] {
+  const problems: string[] = [];
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  for (const part of manifest.parts) {
+    if (part.outcomeSatisfactory) {
+      problems.push(
+        ...declaredMarkProblems(
+          part.outcomeSatisfactory,
+          `Part "${part.label}" — the Satisfactory verdict box`,
+          byId,
+        ),
+      );
+    }
+    if (part.outcomeNotSatisfactory) {
+      problems.push(
+        ...declaredMarkProblems(
+          part.outcomeNotSatisfactory,
+          `Part "${part.label}" — the Not Satisfactory verdict box`,
+          byId,
+        ),
+      );
+    }
+  }
+  return problems;
+}
+
 /** Problems with prerequisite mappings — shared by publish and the tool PATCH. */
 export function validatePrerequisiteChecks(
   checks: readonly PrerequisiteCheck[] | undefined,

@@ -44,6 +44,7 @@ import {
   validateProfilePrefill,
   validatePrerequisiteChecks,
   validatePartCompletionMarks,
+  validatePartOutcomeMarks,
   validatePathwayMarks,
   validateSignOffMarks,
   type ProfilePrefillSource,
@@ -353,7 +354,7 @@ async function carryForwardTheory(
   const fields = await fieldsForVersion(database, last.templateVersionId);
   if (!isSelfMarking(fields, input.manifest, input.part.key)) return undefined;
 
-  const { marks } = markTheory({ fields, values: last.values, part: input.part });
+  const { marks } = markTheory({ fields, values: last.values, part: input.part, manifest: input.manifest });
   const values: Record<string, SubmissionValue> = {};
   for (const mark of marks) {
     if (!mark.correct) continue;
@@ -783,6 +784,25 @@ const updateToolBody = z.object({
   signOff: signOffSchema.nullable().optional(),
   /** The pathway → printed-box map. Same tri-state as everything above. */
   pathwayMarks: pathwayMarksSchema.nullable().optional(),
+  /**
+   * The parts' printed verdict pairs — "The Candidate's responses were:
+   * Satisfactory / Not Satisfactory" — repointed per part. An entry replaces
+   * BOTH of the named part's marks (an absent half clears it); parts not
+   * named keep theirs; null clears every part's pair. The same pair mapped on
+   * several parts is the multi-theory paper's spelling: each applicable part
+   * writes it at its own marking, so whichever papers the case sits stamp
+   * the one printed box.
+   */
+  partOutcomeMarks: z
+    .array(
+      z.object({
+        partKey: z.string().min(1),
+        outcomeSatisfactory: declaredMarkSchema.optional(),
+        outcomeNotSatisfactory: declaredMarkSchema.optional(),
+      }),
+    )
+    .nullable()
+    .optional(),
 });
 
 const toolBody = z.object({
@@ -1908,7 +1928,8 @@ assessmentToolsRouter.patch(
       parsed.data.fieldDefaults !== undefined ||
       parsed.data.partCompletionMarks !== undefined ||
       parsed.data.signOff !== undefined ||
-      parsed.data.pathwayMarks !== undefined;
+      parsed.data.pathwayMarks !== undefined ||
+      parsed.data.partOutcomeMarks !== undefined;
     let manifest: AssessmentToolManifest = tool.manifest;
     if (parsed.data.workflow) manifest = { ...manifest, workflow: parsed.data.workflow };
     if (parsed.data.profilePrefill !== undefined) {
@@ -1947,6 +1968,39 @@ assessmentToolsRouter.patch(
         ? { ...rest, pathwayMarks: parsed.data.pathwayMarks }
         : rest;
     }
+    const partOutcomeEntries = parsed.data.partOutcomeMarks;
+    if (partOutcomeEntries !== undefined) {
+      // An entry naming a part the tool does not have is a picker bug, not a
+      // mapping to silently drop.
+      const known = new Set(manifest.parts.map((p) => p.key));
+      const ghosts = (partOutcomeEntries ?? []).filter((e) => !known.has(e.partKey));
+      if (ghosts.length > 0) {
+        res.status(400).json({
+          error: 'invalid_workflow',
+          problems: ghosts.map((g) => `Verdict pair names part "${g.partKey}", which this tool has no part for.`),
+        });
+        return;
+      }
+      manifest = {
+        ...manifest,
+        parts: manifest.parts.map((p) => {
+          if (partOutcomeEntries === null) {
+            const { outcomeSatisfactory: _s, outcomeNotSatisfactory: _n, ...rest } = p;
+            return rest;
+          }
+          const entry = partOutcomeEntries.find((e) => e.partKey === p.key);
+          if (!entry) return p;
+          const { outcomeSatisfactory: _s, outcomeNotSatisfactory: _n, ...rest } = p;
+          return {
+            ...rest,
+            ...(entry.outcomeSatisfactory ? { outcomeSatisfactory: entry.outcomeSatisfactory } : {}),
+            ...(entry.outcomeNotSatisfactory
+              ? { outcomeNotSatisfactory: entry.outcomeNotSatisfactory }
+              : {}),
+          };
+        }),
+      };
+    }
 
     const template = await db.query.formTemplates.findFirst({
       where: and(
@@ -1972,6 +2026,7 @@ assessmentToolsRouter.patch(
       ...validatePartCompletionMarks(manifest.partCompletionMarks, manifest, fields),
       ...validatePathwayMarks(manifest.pathwayMarks, fields),
       ...validateSignOffMarks(manifest.signOff, fields),
+      ...validatePartOutcomeMarks(manifest, fields),
     ];
     if (problems.length > 0) {
       // Nothing written. A half-applied workflow is worse than a rejected one:
@@ -2322,6 +2377,80 @@ assessmentCasesRouter.post(
       prerequisiteWarnings: warnings,
       parts: requiredParts(tool.manifest, pathway).map((p) => p.key),
     });
+  }),
+);
+
+/**
+ * Set or change WHERE an open case is assessed (R77).
+ *
+ * Exists because the Location decides what the case requires — the per-part
+ * rule, the assessor requirement, the printed stream — and cases opened
+ * before the rule was enforced (or with the picker skipped) carry none: they
+ * demand every part and keep printing attempts the Location would exclude.
+ * The fix for such a case is its Location, not a new case.
+ *
+ * STAFF ONLY, and only while the case is OPEN. A candidate must not move
+ * their own assessment to an easier rule, and a resolved or signed case is a
+ * record — where it was assessed is part of what was signed.
+ */
+assessmentCasesRouter.patch(
+  '/:id/location',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'edit');
+    if (scope !== 'all') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = z
+      .object({ locationId: z.string().uuid().nullable() })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (row.state !== 'open') {
+      res.status(409).json({ error: 'case_not_open' });
+      return;
+    }
+    // Chosen from the org's list, never typed (R77) — same rule as create.
+    if (parsed.data.locationId) {
+      const location = await db.query.locations.findFirst({
+        where: and(
+          eq(schema.locations.id, parsed.data.locationId),
+          eq(schema.locations.orgId, tenant.orgId),
+          eq(schema.locations.status, 'active'),
+        ),
+      });
+      if (!location) {
+        res.status(400).json({ error: 'location_not_found', locationId: parsed.data.locationId });
+        return;
+      }
+    }
+
+    await db
+      .update(schema.assessmentCases)
+      .set({ locationId: parsed.data.locationId })
+      .where(eq(schema.assessmentCases.id, row.id));
+
+    await recordAudit(db, tenant, {
+      action: 'Moved assessment case',
+      target: `${row.id} → location ${parsed.data.locationId ?? 'none'}`,
+      category: 'submissions',
+      icon: 'map-pin',
+    });
+
+    res.json({ id: row.id, locationId: parsed.data.locationId });
   }),
 );
 
@@ -3493,6 +3622,7 @@ async function setSubmitted(
           values: attempt.values,
           part,
           passPercent: tool.manifest.theoryPassPercent,
+          manifest: tool.manifest,
         });
         theoryScore = { correctCount: computed.correctCount, totalCount: computed.totalCount };
         /*
@@ -4424,7 +4554,7 @@ assessmentCasesRouter.post(
         );
 
     if (computed) {
-      const marked = markTheory({ fields, values: attempt.values, part });
+      const marked = markTheory({ fields, values: attempt.values, part, manifest: tool.manifest });
       outcome = marked.outcome;
       derivedValues = marked.derivedValues;
     } else if (checklist) {

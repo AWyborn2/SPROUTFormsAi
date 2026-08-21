@@ -317,7 +317,18 @@ export interface MarkTheoryInput {
   part: Pick<
     AssessmentPart,
     'mandatoryFieldIds' | 'outcomeSatisfactory' | 'outcomeNotSatisfactory' | 'furtherActionFieldId'
-  >;
+  > &
+    Partial<Pick<AssessmentPart, 'key'>>;
+  /**
+   * The manifest, so marking can scope to THE PART'S OWN questions. Without
+   * it every visible keyed question in the version is marked — which on a
+   * paper with several theory parts wrote ✓/✗ into the OTHER parts' printed
+   * cells from this part's attempt, and let their unanswered questions poison
+   * this part's empty-mandatory gate. Optional for compatibility: a caller
+   * without the manifest (older tests, single-part tools) marks exactly as
+   * before.
+   */
+  manifest?: AssessmentToolManifest;
   /**
    * Pass threshold as a percentage (1–100). When set, the part is satisfactory
    * if `correctCount / totalCount >= passPercent / 100`. Absent or undefined
@@ -334,18 +345,38 @@ export interface MarkTheoryInput {
  * part unsatisfactory. That mirrors the paper, where the must-pass section is
  * the gate and the location-specific sets are evidence.
  */
-export function markTheory({ fields, values, part, passPercent }: MarkTheoryInput): TheoryMarkingResult {
+export function markTheory({
+  fields,
+  values,
+  part,
+  passPercent,
+  manifest,
+}: MarkTheoryInput): TheoryMarkingResult {
   // An untouched attempt has no map. Marking it is meaningful — every question
   // is unanswered — so normalize rather than refusing, which would have made an
   // assessor unable to fail a candidate who wrote nothing.
   const answers = values ?? {};
   const visible = visibleFields(fields, answers as VisibilityAnswers);
 
+  /*
+    ONLY THIS PART'S QUESTIONS ARE THIS ATTEMPT'S TO MARK. Visibility is still
+    evaluated over the FULL list — a rule may hang off a cover question — but
+    the marks themselves stay inside the part's slice. Without the scope, a
+    paper with three theory parts marked all of them from any one attempt:
+    the other parts' cells got a ✗ for questions the candidate never saw, and
+    their unanswered questions dragged this part's whole-part gate to fail.
+  */
+  const scope =
+    manifest && part.key
+      ? new Set(fieldsInPart(fields, manifest, part.key).map((f) => f.id))
+      : null;
+
   const mandatoryIds = new Set(part.mandatoryFieldIds ?? []);
 
   const marks: QuestionMark[] = [];
 
   for (const field of visible) {
+    if (scope && !scope.has(field.id)) continue;
     if (!field.answerKey || field.answerKey.length === 0) continue;
     if (!field.outcomeTarget) continue;
 

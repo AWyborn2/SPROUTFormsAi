@@ -168,7 +168,7 @@ export function withDerivedMarks(
   if (!part) return attempt;
   if (!isSelfMarking(versionFields, manifest, part.key)) return attempt;
 
-  const marked = markTheory({ fields: versionFields, values: attempt.values, part });
+  const marked = markTheory({ fields: versionFields, values: attempt.values, part, manifest });
   // The part's auto-locked verdict radio, by the same rule hand-in writes it —
   // an attempt marked before that write existed backfills here, under the
   // stored values like every other derived mark.

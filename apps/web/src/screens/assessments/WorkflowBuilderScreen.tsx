@@ -40,7 +40,7 @@ import {
   useTaxonomy,
   useUpdateTaxonomySettings,
 } from '../../lib/data/hooks.js';
-import type { AssessmentToolDetail } from '../../lib/data/assessments.js';
+import type { AssessmentToolDetail, PartOutcomeMarkEntry } from '../../lib/data/assessments.js';
 import { groupFieldsByHeading, totalFields } from './workflow-groups.js';
 
 /**
@@ -219,6 +219,10 @@ export function WorkflowBuilderScreen() {
   const [pathwayDraft, setPathwayDraft] = useState<
     AssessmentToolManifest['pathwayMarks'] | undefined
   >(undefined);
+  /** The parts' printed verdict pairs, full-state per part. Tri-state. */
+  const [partMarksDraft, setPartMarksDraft] = useState<PartOutcomeMarkEntry[] | undefined>(
+    undefined,
+  );
   const competencies = useCompetencies();
 
   // The parts rule is an Admin act (R73). Reads for everyone, edits for admins.
@@ -248,7 +252,8 @@ export function WorkflowBuilderScreen() {
     defaultsDraft !== undefined ||
     completionDraft !== undefined ||
     signOffDraft !== undefined ||
-    pathwayDraft !== undefined;
+    pathwayDraft !== undefined ||
+    partMarksDraft !== undefined;
 
   /** A part's fields, grouped by printed heading. Computed once per tool load. */
   const groupsForPart = useMemo(() => {
@@ -312,6 +317,7 @@ export function WorkflowBuilderScreen() {
     const pathwaysTouched = pathwayDraft !== undefined;
     const pathways =
       pathwaysTouched && Object.keys(pathwayDraft ?? {}).length > 0 ? pathwayDraft! : null;
+    const partMarksTouched = partMarksDraft !== undefined;
     save.mutate(
       {
         workflow,
@@ -321,6 +327,7 @@ export function WorkflowBuilderScreen() {
         ...(completionTouched ? { partCompletionMarks: completion } : {}),
         ...(signOffTouched ? { signOff } : {}),
         ...(pathwaysTouched ? { pathwayMarks: pathways } : {}),
+        ...(partMarksTouched ? { partOutcomeMarks: partMarksDraft! } : {}),
       },
       {
       onSuccess: (result) => {
@@ -331,6 +338,7 @@ export function WorkflowBuilderScreen() {
         setCompletionDraft(undefined);
         setSignOffDraft(undefined);
         setPathwayDraft(undefined);
+        setPartMarksDraft(undefined);
         toast({
           variant: result.warnings.length > 0 ? 'warning' : 'success',
           message:
@@ -625,6 +633,8 @@ export function WorkflowBuilderScreen() {
         onPathwayMarks={setPathwayDraft}
         defaults={defaultsDraft ?? tool.manifest.fieldDefaults ?? {}}
         onDefaults={setDefaultsDraft}
+        partMarks={partMarksDraft ?? partEntriesFrom(tool.manifest)}
+        onPartMarks={setPartMarksDraft}
       />
 
       {tool.workflowIsDefault && !dirty && (
@@ -1156,6 +1166,15 @@ interface TickTarget {
   mark: DeclaredMark;
 }
 
+/** Every part's current verdict-pair state, as the PATCH's full replacement. */
+function partEntriesFrom(manifest: AssessmentToolManifest): PartOutcomeMarkEntry[] {
+  return orderedParts(manifest).map((p) => ({
+    partKey: p.key,
+    ...(p.outcomeSatisfactory ? { outcomeSatisfactory: p.outcomeSatisfactory } : {}),
+    ...(p.outcomeNotSatisfactory ? { outcomeNotSatisfactory: p.outcomeNotSatisfactory } : {}),
+  }));
+}
+
 /**
  * The summary page's auto-fill wiring, made visible and correctable.
  *
@@ -1175,6 +1194,8 @@ function SummaryAutoFill({
   onPathwayMarks,
   defaults,
   onDefaults,
+  partMarks,
+  onPartMarks,
 }: {
   tool: AssessmentToolDetail;
   signOff: AssessmentToolManifest['signOff'];
@@ -1183,6 +1204,8 @@ function SummaryAutoFill({
   onPathwayMarks: (next: NonNullable<AssessmentToolManifest['pathwayMarks']>) => void;
   defaults: Record<string, SubmissionValue>;
   onDefaults: (next: Record<string, SubmissionValue>) => void;
+  partMarks: PartOutcomeMarkEntry[];
+  onPartMarks: (next: PartOutcomeMarkEntry[]) => void;
 }) {
   /*
     EVERYWHERE A TICK CAN LAND. One entry per ✓/✗-style box — and one per
@@ -1441,6 +1464,69 @@ function SummaryAutoFill({
               <span className="text-[11px] text-text-tertiary">{row.hint}</span>
             </div>
           ))}
+        </div>
+
+        {/* Each part's printed verdict pair, written from its own marking. */}
+        <div>
+          <span className="block text-[12px] font-semibold">Part results</span>
+          <p className="mt-0.5 mb-1.5 max-w-[72ch] text-[11px] text-text-tertiary">
+            Each part&rsquo;s printed &ldquo;responses were: Satisfactory / Not
+            Satisfactory&rdquo; pair, stamped from that part&rsquo;s own marking. One printed
+            pair shared by several theory parts is mapped on EACH of them — whichever papers
+            the case sits write the same box.
+          </p>
+          {parts.map((p) => {
+            const entry = partMarks.find((e) => e.partKey === p.key);
+            const set = (
+              key: 'outcomeSatisfactory' | 'outcomeNotSatisfactory',
+              value: string,
+            ) => {
+              const mark = markFor(value);
+              onPartMarks(
+                parts.map((part) => {
+                  const current = partMarks.find((e) => e.partKey === part.key) ?? {
+                    partKey: part.key,
+                  };
+                  if (part.key !== p.key) return current;
+                  const { [key]: _dropped, ...rest } = current;
+                  return mark ? { ...rest, [key]: mark } : rest;
+                }),
+              );
+            };
+            return (
+              <div key={p.key} className="mb-1.5 flex flex-wrap items-center gap-2">
+                <span className="min-w-[190px] truncate text-[11.5px] text-text-secondary">
+                  {p.label}
+                </span>
+                <select
+                  aria-label={`Satisfactory box for ${p.label}`}
+                  value={targetValue(entry?.outcomeSatisfactory)}
+                  onChange={(e) => set('outcomeSatisfactory', e.target.value)}
+                  className="h-[26px] min-w-[200px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+                >
+                  <option value="">— Satisfactory box —</option>
+                  {tickTargets.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label={`Not Satisfactory box for ${p.label}`}
+                  value={targetValue(entry?.outcomeNotSatisfactory)}
+                  onChange={(e) => set('outcomeNotSatisfactory', e.target.value)}
+                  className="h-[26px] min-w-[200px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+                >
+                  <option value="">— Not Satisfactory box —</option>
+                  {tickTargets.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            );
+          })}
         </div>
 
         {/*
