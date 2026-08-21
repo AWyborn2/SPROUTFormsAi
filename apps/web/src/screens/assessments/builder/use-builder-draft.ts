@@ -44,7 +44,7 @@ import {
   type DerivedPart,
 } from './builder-manifest.js';
 import { structureFromExtraction } from './builder-structure.js';
-import { resolvePublishFields } from './builder-publish.js';
+import { extractionQuestionRefs, resolvePublishFields } from './builder-publish.js';
 import type { BuilderSnapshot } from './builder-draft-state.js';
 
 /**
@@ -1087,12 +1087,14 @@ export function useBuilderDraftState({
     keyed the paper: keying is what proposes a question as mandatory, and the
     validator could not see the very keys that did it.
   */
+  const questionRefs = useMemo(() => extractionQuestionRefs(extraction), [extraction]);
+
   const manifestProblems = useMemo(
     () =>
       parts.length > 0
-        ? validateManifest(manifest, resolvePublishFields(fields, keys).fields)
+        ? validateManifest(manifest, resolvePublishFields(fields, keys, questionRefs).fields)
         : [],
-    [manifest, fields, keys, parts.length],
+    [manifest, fields, keys, parts.length, questionRefs],
   );
 
   const partOps = useMemo<PartOps>(

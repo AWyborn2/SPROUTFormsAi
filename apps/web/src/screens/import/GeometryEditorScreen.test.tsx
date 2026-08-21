@@ -79,14 +79,20 @@ vi.mock('@formai/ui', async () => {
  * (defaulting to none), so a snap-target test can assert the value fed to
  * `PdfViewer` was actually derived from this page's own text.
  */
-const { pdfViewerPropsSpy, stubTextLayerItems, stubTextLayerPageCount } = vi.hoisted(() => ({
-  pdfViewerPropsSpy: vi.fn<(props: MockPdfViewerProps) => void>(),
-  stubTextLayerItems: { current: [] as { text: string; x: number; y: number; width: number }[] },
-  // How many pages the stub feeds (page 0 carries `stubTextLayerItems`, the
-  // rest are blank). One suffices almost everywhere; the page-scoped-scan
-  // tests need a second page because a TextPage's index IS its page number.
-  stubTextLayerPageCount: { current: 1 },
-}));
+const { pdfViewerPropsSpy, stubTextLayerItems, stubTextLayerPageCount, stubTextLayerRects } =
+  vi.hoisted(() => ({
+    pdfViewerPropsSpy: vi.fn<(props: MockPdfViewerProps) => void>(),
+    stubTextLayerItems: { current: [] as { text: string; x: number; y: number; width: number }[] },
+    // How many pages the stub feeds (page 0 carries `stubTextLayerItems`, the
+    // rest are blank). One suffices almost everywhere; the page-scoped-scan
+    // tests need a second page because a TextPage's index IS its page number.
+    stubTextLayerPageCount: { current: 1 },
+    // Page 0's printed rectangles (U6). Default null — the property is simply
+    // absent, matching the NOT MEASURED convention every existing test ran under.
+    stubTextLayerRects: {
+      current: null as { x: number; y: number; width: number; height: number }[] | null,
+    },
+  }));
 
 vi.mock('./PdfViewer.js', () => ({
   PdfViewer: (props: MockPdfViewerProps) => {
@@ -97,6 +103,7 @@ vi.mock('./PdfViewer.js', () => ({
           width: 595,
           height: 842,
           items: i === 0 ? stubTextLayerItems.current : [],
+          ...(i === 0 && stubTextLayerRects.current ? { rects: stubTextLayerRects.current } : {}),
         })),
       );
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -272,6 +279,7 @@ afterEach(() => {
   version.isLoading = false;
   stubTextLayerItems.current = [];
   stubTextLayerPageCount.current = 1;
+  stubTextLayerRects.current = null;
 });
 
 describe('GeometryEditorScreen — batched "Place all N" (U2/KTD3)', () => {
@@ -712,6 +720,88 @@ describe('GeometryEditorScreen — review-fix regressions (P1 findings from code
     expect(screen.getByText(/3\/3 placed/)).toBeDefined();
     const mark = pdfViewerPropsSpy.mock.calls.at(-1)![0].placements?.find((p) => p.slot === 'f1#Yes');
     expect(mark?.box.x).toBe(999);
+  });
+});
+
+describe('GeometryEditorScreen — column-evidence caption (rect-columns U6, R7)', () => {
+  /** The Mine Site shape: label column, ONE answer column, five printed rows. */
+  function headerlessChecklist(id: string, label: string): FormField {
+    return {
+      id,
+      type: 'repeating_group',
+      label,
+      required: false,
+      source: 'imported',
+      columns: [
+        { key: 'method', label: 'Method', type: 'text' },
+        { key: 'used', label: 'Used', type: 'check_cross' },
+      ],
+      fixedRows: ['Observation', 'Practical', 'Verbal', 'Written', 'Portfolio'],
+    };
+  }
+
+  /** A dozer-shaped header table: header glyphs, four label rows, no rects. */
+  function headerTable(id: string, label: string): FormField {
+    return {
+      id,
+      type: 'repeating_group',
+      label,
+      required: false,
+      source: 'imported',
+      columns: [
+        { key: 'item', label: 'Item', type: 'text' },
+        { key: 'tick', label: '✓', type: 'boolean_yes_no' },
+        { key: 'cross', label: '×', type: 'boolean_yes_no' },
+        { key: 'na', label: 'N/A', type: 'boolean_yes_no' },
+      ],
+      fixedRows: ['r0', 'r1', 'r2', 'r3'],
+    };
+  }
+
+  it('captions a rect-anchored grid as measured from printed boxes', () => {
+    // Five labels at one margin, five 9pt squares on the measured 28.4pt
+    // pitch, no header glyphs — the rect-anchored derivation, whose whole
+    // point is that the columns were measured, and the caption says so.
+    stubTextLayerItems.current = [0, 1, 2, 3, 4].map((i) => ({
+      text: `Method ${i}`,
+      x: 40,
+      y: 762 - i * 28.4,
+      width: 200,
+    }));
+    stubTextLayerRects.current = [0, 1, 2, 3, 4].map((i) => ({
+      x: 500,
+      y: 760 - i * 28.4,
+      width: 9,
+      height: 9,
+    }));
+    renderWithField(headerlessChecklist('t1', 'Methods table'));
+
+    fireEvent.click(screen.getByText('Methods table'));
+
+    expect(screen.getByText('Columns measured from printed boxes.')).toBeDefined();
+  });
+
+  it('captions a text-derived grid as inferred from header text', () => {
+    // The measured dozer header with no rects on the page: the columns come
+    // from header glyphs, and the caption must not claim otherwise — its
+    // wording is the visible tell for the historic silent-zero rect
+    // extractor regression.
+    stubTextLayerItems.current = [
+      { text: 'N/A', x: 539.9, y: 648.6, width: 13.3 },
+      { text: 'During the demonstration, did the candidate:', x: 37.5, y: 647.7, width: 192 },
+      { text: '', x: 502.6, y: 647.7, width: 7.1 },
+      { text: '/ ×', x: 512.1, y: 647.7, width: 10.3 },
+      { text: 'Receive and interpret work instructions', x: 37.5, y: 630.8, width: 258.1 },
+      { text: 'Identify and report potential hazards', x: 37.5, y: 614, width: 143.6 },
+      { text: 'Communicate with other personnel', x: 37.5, y: 597.1, width: 198.6 },
+      { text: 'Wearing correct PPE', x: 37.5, y: 580.3, width: 84 },
+    ];
+    renderWithField(headerTable('t2', 'Practical table'));
+
+    fireEvent.click(screen.getByText('Practical table'));
+
+    expect(screen.getByText('Columns inferred from header text.')).toBeDefined();
+    expect(screen.queryByText('Columns measured from printed boxes.')).toBeNull();
   });
 });
 

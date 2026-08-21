@@ -21,6 +21,8 @@ import {
   SNAP_RANGE,
   DRAW_SNAP_RANGE,
   appendRowBelow,
+  columnEvidenceCaption,
+  type PrintedRect,
   applyFieldChanges,
   applyMatrix,
   retargetPageChanges,
@@ -328,6 +330,45 @@ describe('panelState', () => {
 
     if (state.kind === 'proposed') expect(state.confirmed).toBe(true);
   });
+
+  it('carries the column-evidence provenance through from the derivation (R7)', () => {
+    const proposal = derived()!;
+
+    const state = panelState(tableField(), proposal.segment, false, proposal);
+
+    expect(state.kind).toBe('proposed');
+    if (state.kind === 'proposed') expect(state.columnEvidence).toBe('header-text');
+  });
+
+  it('gives a scalar box no column-evidence caption — provenance is a table-derivation claim', () => {
+    const box: PageBox = {
+      page: 0,
+      x: 100,
+      y: 200,
+      width: 120,
+      height: 16,
+      pageWidth: 595,
+      pageHeight: 842,
+    };
+    const state = panelState(tableField({ type: 'text' }), box, false, null);
+
+    expect(state.kind).toBe('proposed');
+    if (state.kind === 'proposed') {
+      expect(state.columnEvidence).toBeUndefined();
+      expect(columnEvidenceCaption(state.columnEvidence)).toBeNull();
+    }
+  });
+});
+
+describe('columnEvidenceCaption — the reviewer-facing half of provenance (U6, R7)', () => {
+  it('says measured for printed-boxes and inferred for header-text', () => {
+    expect(columnEvidenceCaption('printed-boxes')).toBe('Columns measured from printed boxes.');
+    expect(columnEvidenceCaption('header-text')).toBe('Columns inferred from header text.');
+  });
+
+  it('renders nothing where no table derivation stands behind the proposal', () => {
+    expect(columnEvidenceCaption(undefined)).toBeNull();
+  });
 });
 
 describe('classifyProposalTier', () => {
@@ -340,6 +381,7 @@ describe('classifyProposalTier', () => {
     anchorsLocated: 2,
     anchorsInferred: 0,
     notes: [],
+    columnEvidence: 'header-text',
   });
   const fieldProposal = (confidence: number): FieldProposal => ({
     segments: [box],
@@ -361,6 +403,14 @@ describe('classifyProposalTier', () => {
     expect(classifyProposalTier(tableProposal(0.99))).toBe('needs-review');
     expect(classifyProposalTier(fieldProposal(0.6))).toBe('needs-review');
     expect(classifyProposalTier(fieldProposal(0.99))).toBe('needs-review');
+  });
+
+  it('classifies the rect-anchored 0.95 tier as needs-review, never auto-confirm (R9/KTD5)', () => {
+    // Rect-anchored proposals ship at exactly 0.95 — measured coordinates, but
+    // a brand-new row-pairing heuristic with no printed header behind it. The
+    // first release is human-gated; raising it is a later, corpus-informed
+    // decision, and this pin is what makes that gate real.
+    expect(classifyProposalTier(tableProposal(0.95))).toBe('needs-review');
   });
 });
 
@@ -405,6 +455,126 @@ describe('deriveAcrossPages', () => {
 
   it('is empty-safe before the viewer has read the PDF', () => {
     expect(deriveAcrossPages(tableField(), [])).toBeNull();
+  });
+});
+
+/**
+ * Rect evidence reaching the decision layer (U5, R10).
+ *
+ * The headerless-checklist fixture mirrors the measured Mine Site SME shape —
+ * a shared label margin, one declared answer column, printed squares on a
+ * uniform pitch (28.4pt, the measured value) — scaled onto an A4 page so the
+ * squares sit inside it.
+ */
+describe('rect-derived proposals through deriveForField / deriveAcrossPages (U5)', () => {
+  /** The Mine Site shape: label column plus ONE answer column, five rows. */
+  function checklistField(): DerivableField {
+    return {
+      type: 'repeating_group',
+      columns: [
+        { key: 'method', label: 'Method', type: 'text' },
+        { key: 'used', label: 'Used', type: 'check_cross' },
+      ],
+      fixedRows: ['Observation', 'Practical', 'Verbal', 'Written', 'Portfolio'],
+    };
+  }
+
+  /** Five method labels at one margin — no header glyphs anywhere. */
+  function checklistLabels(dy = 0): PositionedText[] {
+    return [0, 1, 2, 3, 4].map((i) => ({
+      text: `Method ${i}`,
+      x: 40,
+      y: 762 - dy - i * 28.4,
+      width: 200,
+    }));
+  }
+
+  /** Five 9pt squares sharing an x, on the measured 28.4pt pitch. */
+  function checklistSquares(dy = 0): PrintedRect[] {
+    return [0, 1, 2, 3, 4].map((i) => ({ x: 500, y: 760 - dy - i * 28.4, width: 9, height: 9 }));
+  }
+
+  it('places a headerless checklist from the page that carries its squares, not page 0', () => {
+    const blank: TextPage = { items: [], width: A4.width, height: A4.height };
+    const withChecklist: TextPage = {
+      items: checklistLabels(),
+      width: A4.width,
+      height: A4.height,
+      rects: checklistSquares(),
+    };
+
+    const got = deriveAcrossPages(checklistField(), [blank, withChecklist]);
+
+    expect(got).not.toBeNull();
+    expect(got!.segment.page).toBe(1);
+    expect(got!.confidence).toBe(0.95);
+    expect(got!.columnEvidence).toBe('printed-boxes');
+    expect(got!.segment.rowBands).toHaveLength(5);
+  });
+
+  it('a 0.95 rect-anchored proposal lands in the needs-review tier, never auto-confirm', () => {
+    const proposal = deriveForField(
+      checklistField(),
+      0,
+      checklistLabels(),
+      A4.width,
+      A4.height,
+      checklistSquares(),
+    );
+
+    expect(proposal?.confidence).toBe(0.95);
+    expect(classifyProposalTier(proposal)).toBe('needs-review');
+  });
+
+  it('Covers AE6: stacked twin checklists refuse at selection rather than guessing table identity', () => {
+    // Two structurally identical five-row checklists in one x-run of ten
+    // squares. The gap split yields two candidates and two 0.95 proposals;
+    // `selectByRowCount` sees two equally-close rivals inside the near-equal
+    // band and refuses — the existing recourse (ordinal, drawn box) applies.
+    const items = [...checklistLabels(), ...checklistLabels(300)];
+    const rects = [...checklistSquares(), ...checklistSquares(300)];
+
+    expect(deriveForField(checklistField(), 0, items, A4.width, A4.height, rects)).toBeNull();
+  });
+
+  it('deriveForField without the rects argument still refuses the headerless page (text-only behaviour)', () => {
+    // The trailing parameter is optional precisely so every existing caller
+    // compiles and behaves unchanged: no header glyphs, no rects, no proposal.
+    expect(deriveForField(checklistField(), 0, checklistLabels(), A4.width, A4.height)).toBeNull();
+  });
+
+  it('subdivideBox ignores squares outside the drawn box — the drag still scopes the evidence', () => {
+    const box: PageBox = {
+      page: 6,
+      x: 30,
+      y: 570,
+      width: 540,
+      height: 90,
+      pageWidth: A4.width,
+      pageHeight: A4.height,
+    };
+    // A square column far below the drag, row-count-compatible with nothing
+    // inside it. If the centre filter leaked, these would reach the marriage.
+    const outside: PrintedRect[] = [0, 1, 2, 3].map((i) => ({
+      x: 505,
+      y: 300 - i * 16.8,
+      width: 9,
+      height: 9,
+    }));
+
+    const field = tableField();
+    const textOnly = subdivideBox({ box, items: pageText(), columns: field.columns!, wantRows: 4 });
+    const withOutside = subdivideBox({
+      box,
+      items: pageText(),
+      columns: field.columns!,
+      wantRows: 4,
+      rects: outside,
+    });
+
+    expect(textOnly).not.toBeNull();
+    expect(withOutside).toEqual(textOnly);
+    expect(withOutside!.columnEvidence).toBe('header-text');
   });
 });
 
