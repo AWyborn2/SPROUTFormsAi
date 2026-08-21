@@ -105,6 +105,21 @@ describe('keyOps.setModelAnswer', () => {
     expect(result.current.keys[0]?.verifiedBy).toBe('Training authority');
   });
 
+  it('WITHDRAWING VERIFICATION KEEPS THE GUIDE — only the attestation goes', async () => {
+    // The withdraw once rebuilt the row as a literal predating `modelAnswer`,
+    // so unticking "Verified" silently deleted the authored guide. Withdrawing
+    // is a claim about the ATTESTATION, never about the prose.
+    const result = await draftOf([ex({ id: 'w1' })]);
+
+    act(() => result.current.keyOps.setModelAnswer('w1', 'The authored guide.'));
+    act(() => result.current.keyOps.setVerified('w1', true, 'Training authority'));
+    act(() => result.current.keyOps.setVerified('w1', false, 'Training authority'));
+
+    expect(result.current.keys[0]?.modelAnswer).toBe('The authored guide.');
+    expect(result.current.keys[0]?.verifiedBy).toBeUndefined();
+    expect(result.current.keys[0]?.verifiedAt).toBeUndefined();
+  });
+
   it('setAssessorVerdict CLEARS a written question’s model key', async () => {
     // The same sweep that clears a choice key: a verdict field holds no
     // marking configuration of either kind.

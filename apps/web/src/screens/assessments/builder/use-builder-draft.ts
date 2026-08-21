@@ -1033,15 +1033,19 @@ export function useBuilderDraftState({
 
       setVerified: (fieldId, verified, actor) =>
         setKeys((prev) =>
-          prev.map((k) =>
-            k.fieldId !== fieldId
-              ? k
-              : verified
-                ? { ...k, verifiedBy: actor, verifiedAt: new Date().toISOString() }
-                : // Withdrawing drops both halves: a `verifiedAt` with nobody
-                  // attached is a timestamp nobody stands behind.
-                  { fieldId: k.fieldId, answerKey: k.answerKey, source: k.source },
-          ),
+          prev.map((k) => {
+            if (k.fieldId !== fieldId) return k;
+            if (verified) return { ...k, verifiedBy: actor, verifiedAt: new Date().toISOString() };
+            /*
+              Withdrawing drops both attestation halves — a `verifiedAt` with
+              nobody attached is a timestamp nobody stands behind — and ONLY
+              those. Rebuilding the row as a literal predating `modelAnswer`
+              silently deleted a written question's authored guide the moment
+              its verification was unticked.
+            */
+            const { verifiedBy: _by, verifiedAt: _at, ...rest } = k;
+            return rest;
+          }),
         ),
 
       seedKeys: (seeded) =>

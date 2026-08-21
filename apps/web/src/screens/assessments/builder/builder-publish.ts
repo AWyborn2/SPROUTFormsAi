@@ -30,6 +30,7 @@ import { resolveStructure } from './builder-structure.js';
 import {
   isSelfAnswering,
   linkOutcomeTargets,
+  markingCompositionWarnings,
   unplacedMarkDestinations,
   validateAnswerKeys,
   validateManifest,
@@ -177,7 +178,29 @@ export function resolvePublishFields(
     return next && isSelfAnswering(next.type) ? next.id : undefined;
   };
 
-  const next = fields.map((field, index) => {
+  /*
+    THE DRAFT KEY ROWS ARE THE SINGLE SOURCE OF TRUTH for what they own —
+    `answerKey` and `modelAnswer` — so those are STRIPPED off every field
+    first and re-applied only from rows. Without the strip, a revision-seeded
+    field (which carries the published copy verbatim) republished it after the
+    author CLEARED the key or guide in the draft: clearing deleted only the
+    row, the untouched field returned here as-is, and the builder showed a
+    question unguided while quietly republishing the old answer underneath.
+
+    Exactly the two row-owned properties, nothing wider: `outcomeTarget` is a
+    placement the author may have set by hand (the tier below deliberately
+    lets it win), and `answerHint` never travels on a key row — stripping
+    either would change what an untouched draft publishes. A from-scratch
+    draft's fields never carry these two, and a revision seed creates a row
+    for every field that does (`keysFromFields`), so present-row output is
+    byte-identical to before.
+  */
+  const next = fields.map((raw, index) => {
+    let field = raw;
+    if (raw.answerKey !== undefined || raw.modelAnswer !== undefined) {
+      const { answerKey: _seededKey, modelAnswer: _seededModel, ...rest } = raw;
+      field = rest;
+    }
     const key = keyById.get(field.id);
     /*
       A MODEL KEY IS A KEY ROW TOO. A written question's draft key carries
@@ -258,6 +281,13 @@ export interface PublishCheck {
    * exporter's safe failure is exactly that silence.
    */
   carried: string[];
+  /**
+   * Marking compositions that will misbehave at runtime — an auto-locked
+   * verdict pair beside untargeted Yes/No boxes (auto-fails hand-ins), a
+   * written question's mark addressed at a table cell (untickable on the
+   * marking pass). Warnings, never gates: the shared validator's own contract.
+   */
+  warnings: string[];
   fields: FormField[];
 }
 
@@ -340,6 +370,7 @@ export function checkPublish(
     inferred: resolved.inferred,
     unplaced: manifest ? unplacedMarkDestinations(manifest, resolved.fields) : [],
     carried,
+    warnings: manifest ? markingCompositionWarnings(manifest, resolved.fields) : [],
     fields: resolved.fields,
   };
 }

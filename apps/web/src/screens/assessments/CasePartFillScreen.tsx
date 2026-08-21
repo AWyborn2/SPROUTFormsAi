@@ -160,6 +160,18 @@ export function CasePartFillScreen() {
   const pages = useMemo(() => (paged ? theoryPages(rendered) : []), [paged, rendered]);
   const [pageIndex, setPageIndex] = useState(0);
 
+  /*
+    The assessor's marking guide, keyed for the per-field callout below. Present
+    only on an assessor payload — the server sends the property ABSENT for a
+    candidate, so an empty map here is also the proof nothing leaked. Memoized
+    (and above the early returns, like every hook here) because `values` is
+    keystroke-hot state — rebuilding the map every render is waste.
+  */
+  const modelAnswers = useMemo(
+    () => new Map((attempt?.markingGuide ?? []).map((g) => [g.fieldId, g.modelAnswer])),
+    [attempt?.markingGuide],
+  );
+
   if (isLoading) {
     return <div className="p-[30px_28px] text-sm text-text-tertiary">Loading…</div>;
   }
@@ -215,12 +227,6 @@ export function CasePartFillScreen() {
     read-only until somebody configures it.
   */
   const writable = new Set(attempt.writableFieldIds ?? []);
-  /*
-    The assessor's marking guide, keyed for the per-field callout below. Present
-    only on an assessor payload — the server sends the property ABSENT for a
-    candidate, so an empty map here is also the proof nothing leaked.
-  */
-  const modelAnswers = new Map((attempt.markingGuide ?? []).map((g) => [g.fieldId, g.modelAnswer]));
   // Captured so the closure below keeps the non-null narrowing from the early
   // return above — TS widens `attempt` back to possibly-undefined inside a
   // nested function.
@@ -419,7 +425,15 @@ export function CasePartFillScreen() {
         />
       )}
 
-      {handedIn && !marked && (
+      {/*
+        THE REOPEN BANNER IS THE CANDIDATE'S, BY PARTY. "You can still take it
+        back" is candidate-voiced, and the button beside it reopened the
+        attempt LIVE — on the assessor's marking pass that gesture un-hands-in
+        the paper they are mid-way through marking, which is the candidate's
+        act, never the marker's. The marking pass gets its own one-liner
+        instead, so the state is still named without offering the wrong verb.
+      */}
+      {handedIn && !marked && attempt.party === 'candidate' && (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5">
           <p className="text-[13px] text-text-secondary">
             Handed in — your assessor will mark this. You can still take it back until they do.
@@ -442,6 +456,14 @@ export function CasePartFillScreen() {
           >
             Take it back
           </Button>
+        </div>
+      )}
+
+      {markingPass && (
+        <div className="mb-4 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5">
+          <p className="text-[13px] text-text-secondary">
+            Marking — tick against the guide and save; the candidate's answers are frozen.
+          </p>
         </div>
       )}
 

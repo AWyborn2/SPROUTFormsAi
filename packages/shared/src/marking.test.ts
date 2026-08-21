@@ -16,6 +16,7 @@ import {
   isSelfMarking,
   markKeyedQuestions,
   markTheory,
+  markingCompositionWarnings,
   stripMarkingSecrets,
 } from './marking.js';
 
@@ -599,6 +600,29 @@ describe('stripMarkingSecrets', () => {
 
     expect(stripMarkingSecrets(clean)).toBe(clean);
   });
+
+  it('STRIPS AN EMPTY-STRING SECRET — detection is presence, not truthiness', () => {
+    /*
+      `modelAnswer: ''` is falsy, so a truthy check let the property NAME ride
+      into a candidate payload — exactly what a "no `modelAnswer` anywhere in
+      the JSON" leak pin trips over. Same rule for an empty hint.
+    */
+    const emptied: FormField = {
+      id: 'w1',
+      type: 'textarea',
+      label: 'w1',
+      required: true,
+      source: 'imported',
+      modelAnswer: '',
+      answerHint: '',
+    };
+
+    const stripped = stripMarkingSecrets([emptied]);
+
+    expect(stripped[0]).not.toBe(emptied);
+    expect('modelAnswer' in stripped[0]!).toBe(false);
+    expect('answerHint' in stripped[0]!).toBe(false);
+  });
 });
 
 /**
@@ -1038,5 +1062,127 @@ describe('autoVerdictWrite', () => {
     expect(
       autoVerdictWrite(odd, m, part(m), 'satisfactory', m.workflow!.sections[0]!.fieldSource),
     ).toBeNull();
+  });
+});
+
+/*
+  Publish-time warnings for marking compositions that misbehave at runtime.
+  Both directions of each rule are pinned — presence for the trap, absence for
+  the closest legitimate configuration — because a warning that fires on every
+  healthy practical would train authors to ignore the one that matters.
+*/
+describe('markingCompositionWarnings', () => {
+  const boolBox = (id: string, label = id): FormField => ({
+    id,
+    type: 'boolean_yes_no',
+    label,
+    required: false,
+    source: 'imported',
+  });
+  const written = (id: string, target?: string): FormField => ({
+    id,
+    type: 'textarea',
+    label: id,
+    required: true,
+    source: 'imported',
+    modelAnswer: 'the guide',
+    ...(target ? { outcomeTarget: { fieldId: target } } : {}),
+  });
+  const verdict: FormField = {
+    id: 'verdict',
+    type: 'radio',
+    label: 'The Candidate’s responses were',
+    required: false,
+    source: 'imported',
+    options: ['Satisfactory', 'Not Satisfactory'],
+  };
+  const table: FormField = {
+    id: 'table',
+    type: 'repeating_group',
+    label: 'Outcome table',
+    required: false,
+    source: 'imported',
+  };
+
+  const manifestFor = (fields: FormField[], verdictAuto: boolean): AssessmentToolManifest => ({
+    parts: [
+      {
+        key: 'p1',
+        ordinal: 1,
+        label: 'Mixed Theory',
+        kind: 'theory',
+        pathways: ['new'],
+        startFieldId: fields[0]!.id,
+      },
+    ],
+    workflow: {
+      roles: ['candidate', 'assessor'],
+      sections: [
+        {
+          key: 'p1',
+          ordinal: 1,
+          label: 'Mixed Theory',
+          partKey: 'p1',
+          access: { candidate: 'fill', assessor: 'fill' },
+          ...(verdictAuto ? { fieldSource: { verdict: 'auto' as const } } : {}),
+        },
+      ],
+    },
+  });
+
+  it('(a) WARNS on an auto-locked verdict beside an untargeted Yes/No box, naming the box', () => {
+    // The #269 opt-in plus a stray self-answering box: hand-in reads the box
+    // as a checklist criterion, finds it untouched, and records Not
+    // Satisfactory before anyone marks.
+    const fields = [
+      header('h'),
+      written('w1', 'w1-out'),
+      outcome('w1-out'),
+      boolBox('stray', 'Radio check completed'),
+      verdict,
+    ];
+
+    const warnings = markingCompositionWarnings(manifestFor(fields, true), fields);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('Mixed Theory');
+    expect(warnings[0]).toContain('"Radio check completed"');
+    expect(warnings[0]).toContain('Not Satisfactory');
+  });
+
+  it('(a) stays SILENT when the verdict is the assessor’s to pick', () => {
+    const fields = [header('h'), written('w1', 'w1-out'), outcome('w1-out'), boolBox('stray'), verdict];
+
+    expect(markingCompositionWarnings(manifestFor(fields, false), fields)).toEqual([]);
+  });
+
+  it('(a) stays SILENT when every Yes/No box is some question’s target — the healthy mixed shape', () => {
+    const fields = [header('h'), written('w1', 'w1-out'), outcome('w1-out'), verdict];
+
+    expect(markingCompositionWarnings(manifestFor(fields, true), fields)).toEqual([]);
+  });
+
+  it('(b) WARNS when a written question’s mark is addressed at a table, naming the question', () => {
+    // The marking surface excludes tables (a table id is shared with the
+    // candidate’s own rows), so the assessor has no way to tick this cell.
+    const fields = [header('h'), written('w1', 'table'), table];
+
+    const warnings = markingCompositionWarnings(manifestFor(fields, false), fields);
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('"w1"');
+    expect(warnings[0]).toContain('table cell');
+  });
+
+  it('(b) stays SILENT for a KEYED question in a table — the machine writes that cell, not a person', () => {
+    const fields = [header('h'), q('k1', ['a'], 'table'), table];
+
+    expect(markingCompositionWarnings(manifestFor(fields, false), fields)).toEqual([]);
+  });
+
+  it('(b) stays SILENT for a written question aimed at a standalone ✓/✗ box', () => {
+    const fields = [header('h'), written('w1', 'w1-out'), outcome('w1-out')];
+
+    expect(markingCompositionWarnings(manifestFor(fields, false), fields)).toEqual([]);
   });
 });

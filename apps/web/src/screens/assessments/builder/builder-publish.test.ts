@@ -480,6 +480,95 @@ describe('resolvePublishFields — written questions with model answers', () => 
   });
 });
 
+describe('resolvePublishFields — the draft key rows are the single source of truth', () => {
+  /*
+    A revision seeds its fields VERBATIM from the published version, so each
+    keyed/guided field carries its own copy of `answerKey`/`modelAnswer` — and
+    `keysFromFields` mints a draft row for every one of them. Clearing the key
+    or the guide in the builder deletes only the ROW; the fix strips the
+    fields' own copies first and re-applies from rows, so a cleared row means
+    a cleared field instead of the builder showing "unguided" while the old
+    answer republishes underneath.
+  */
+  const seededChoice = field({
+    id: 'q1',
+    type: 'radio',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: 'o1' },
+  });
+  const seededWritten = field({
+    id: 'w1',
+    type: 'textarea',
+    modelAnswer: 'the old guide',
+    outcomeTarget: { fieldId: 'w1-out' },
+  });
+  const seededFields = [seededChoice, outcome('o1'), seededWritten, outcome('w1-out')];
+
+  it('CLEARED ROWS CLEAR THE FIELDS — key and guide both gone from the publish', () => {
+    const { fields } = resolvePublishFields(seededFields, []);
+
+    const q1 = fields.find((f) => f.id === 'q1')!;
+    const w1 = fields.find((f) => f.id === 'w1')!;
+    expect('answerKey' in q1).toBe(false);
+    expect('modelAnswer' in w1).toBe(false);
+    // The placements are NOT the rows' to clear: an outcomeTarget is an
+    // authored fact about where a mark lands, kept even while unkeyed.
+    expect(q1.outcomeTarget).toEqual({ fieldId: 'o1' });
+    expect(w1.outcomeTarget).toEqual({ fieldId: 'w1-out' });
+  });
+
+  it('an UNTOUCHED revision draft publishes byte-identically to its seed', () => {
+    // Exactly the rows `keysFromFields` seeds for these fields.
+    const rows: DraftAnswerKey[] = [
+      { fieldId: 'q1', answerKey: ['a'], source: 'manual' },
+      { fieldId: 'w1', answerKey: [], modelAnswer: 'the old guide', source: 'manual' },
+    ];
+
+    const { fields } = resolvePublishFields(seededFields, rows);
+
+    expect(fields.find((f) => f.id === 'q1')).toEqual(seededChoice);
+    expect(fields.find((f) => f.id === 'w1')).toEqual(seededWritten);
+  });
+
+  it('clearing ONLY the guide half of a seeded row does not resurrect the field’s copy', () => {
+    // The author kept the choice key but removed the written guide from a
+    // field that (from hand-edited data) carried both: the surviving row
+    // speaks for the key alone.
+    const both = field({
+      id: 'q1',
+      type: 'radio',
+      options: ['a', 'b'],
+      answerKey: ['a'],
+      modelAnswer: 'stale prose',
+      outcomeTarget: { fieldId: 'o1' },
+    });
+
+    const { fields } = resolvePublishFields(
+      [both, outcome('o1')],
+      [{ fieldId: 'q1', answerKey: ['a'], source: 'manual' }],
+    );
+
+    const q1 = fields.find((f) => f.id === 'q1')!;
+    expect(q1.answerKey).toEqual(['a']);
+    expect('modelAnswer' in q1).toBe(false);
+  });
+
+  it('REGRESSION: a from-scratch draft publishes deep-equal to before — its fields never carried the copies', () => {
+    const { fields } = resolvePublishFields(
+      [question('q1'), outcome('o1'), field({ id: 'w1', type: 'textarea' }), outcome('w1-out')],
+      [KEY('q1'), { fieldId: 'w1', answerKey: [], modelAnswer: 'guide', source: 'manual' }],
+    );
+
+    expect(fields).toEqual([
+      { ...question('q1'), answerKey: ['a'], outcomeTarget: { fieldId: 'o1' } },
+      outcome('o1'),
+      { ...field({ id: 'w1', type: 'textarea' }), modelAnswer: 'guide', outcomeTarget: { fieldId: 'w1-out' } },
+      outcome('w1-out'),
+    ]);
+  });
+});
+
 describe('carried geometry at publish (AE2)', () => {
   it('names every carried-but-unconfirmed field, and none when the stash is empty', async () => {
     const { checkPublish } = await import('./builder-publish.js');

@@ -277,11 +277,16 @@ export function sectionsMatch(guideName: string, heading: string): boolean {
  * Returns null rather than guessing when neither route resolves. A wrong option
  * here is a question every candidate fails.
  */
+/** A bare option letter — "b", "A" — the positional form a printed key prints. */
+function isOptionLetter(s: string): boolean {
+  return /^[a-z]$/i.test(s);
+}
+
 export function resolveAnswer(answer: string, options: readonly string[]): string | null {
   const trimmed = answer.trim();
   if (!trimmed) return null;
 
-  if (/^[a-z]$/i.test(trimmed)) {
+  if (isOptionLetter(trimmed)) {
     const index = trimmed.toLowerCase().charCodeAt(0) - 97;
     return options[index] ?? null;
   }
@@ -314,7 +319,7 @@ function isWrittenQuestion(f: FormField): boolean {
  * assessor a one-letter marking guide that means nothing.
  */
 function allOptionLetters(answers: readonly string[]): boolean {
-  return answers.length > 0 && answers.every((a) => /^[a-z]$/i.test(a.trim()));
+  return answers.length > 0 && answers.every((a) => isOptionLetter(a.trim()));
 }
 
 /** Why a section could not be seeded. Reported, never swallowed. */
@@ -328,6 +333,40 @@ export interface GuideMatch {
   problems: GuideProblem[];
   /** Sections that seeded, with how many answers each contributed. */
   seeded: { section: string; count: number }[];
+}
+
+/*
+  One entry landing on one written question, shared by both loops below. The
+  TARGET already decided this entry seeds a model answer; letters here mean the
+  guide thinks the question has options — a kind disagreement, reported rather
+  than guessed at. `describe` is the caller's own name for the question
+  (`Question 3 ("label…")` when matched by text, `Question 3 of "Section"` when
+  by position), so each loop keeps the exact message its author reads.
+*/
+function matchWritten(
+  entry: GuideEntry,
+  field: FormField,
+  problemSection: string,
+  describe: string,
+): { key: DraftAnswerKey } | { problem: GuideProblem } {
+  if (allOptionLetters(entry.answers)) {
+    return {
+      problem: {
+        section: problemSection,
+        reason: `${describe} is a written question, but the guide answers it with option letter${entry.answers.length === 1 ? '' : 's'} ${entry.answers.map((a) => `"${a}"`).join(', ')}. That answer was not applied.`,
+      },
+    };
+  }
+  return {
+    key: {
+      fieldId: field.id,
+      answerKey: [],
+      modelAnswer: entry.answers.join('\n'),
+      // Seeded, never attested — same rule as a key: a person still has
+      // to say they checked it.
+      source: 'guide_json',
+    },
+  };
 }
 
 /**
@@ -380,21 +419,19 @@ export function matchGuideToQuestions(
         continue;
       }
       if ((found.options?.length ?? 0) === 0) {
-        // A written match. Letters here mean the guide thinks this question
-        // has options — a kind disagreement, reported rather than guessed at.
-        if (allOptionLetters(entry.answers)) {
-          problems.push({
-            section: 'This guide',
-            reason: `Question ${entry.n} ("${short(found.label)}") is a written question, but the guide answers it with option letter${entry.answers.length === 1 ? '' : 's'} ${entry.answers.map((a) => `"${a}"`).join(', ')}. That answer was not applied.`,
-          });
+        // A written match — `matchWritten` reports a kind disagreement or
+        // seeds the model answer.
+        const result = matchWritten(
+          entry,
+          found,
+          'This guide',
+          `Question ${entry.n} ("${short(found.label)}")`,
+        );
+        if ('problem' in result) {
+          problems.push(result.problem);
           continue;
         }
-        keys.push({
-          fieldId: found.id,
-          answerKey: [],
-          modelAnswer: entry.answers.join('\n'),
-          source: 'guide_json',
-        });
+        keys.push(result.key);
         count += 1;
         continue;
       }
@@ -471,6 +508,24 @@ export function matchGuideToQuestions(
       continue;
     }
 
+    /*
+      A DUPLICATED NUMBER DEFEATS THE COUNT GATE. Two entries both claiming
+      question 4 still count-match a four-question section carrying entries
+      1,2,4,4 — and positional seeding then keys question 4 twice (the later
+      entry silently winning) while question 3 is never seeded at all. That is
+      the same misalignment the gate exists to refuse, just folded so the
+      counts agree, so it gets the same response: name the numbers, seed
+      nothing for the section.
+    */
+    const dupes = [...new Set(group.map((e) => e.n).filter((n, i, ns) => ns.indexOf(n) !== i))];
+    if (dupes.length > 0) {
+      problems.push({
+        section: name,
+        reason: `The guide numbers ${dupes.length === 1 ? 'question' : 'questions'} ${dupes.join(', ')} more than once for "${section.label}". Answers are aligned by number, so none were applied — fix the duplicate${dupes.length === 1 ? '' : 's'} in the guide, or key this section by hand.`,
+      });
+      continue;
+    }
+
     let count = 0;
     for (const entry of group) {
       const question = questions[entry.n - 1];
@@ -491,21 +546,17 @@ export function matchGuideToQuestions(
         and every seed after the disagreement is suspect.
       */
       if (options.length === 0) {
-        if (allOptionLetters(entry.answers)) {
-          problems.push({
-            section: name,
-            reason: `Question ${entry.n} of "${section.label}" is a written question, but the guide answers it with option letter${entry.answers.length === 1 ? '' : 's'} ${entry.answers.map((a) => `"${a}"`).join(', ')}. That answer was not applied.`,
-          });
+        const result = matchWritten(
+          entry,
+          question,
+          name,
+          `Question ${entry.n} of "${section.label}"`,
+        );
+        if ('problem' in result) {
+          problems.push(result.problem);
           continue;
         }
-        keys.push({
-          fieldId: question.id,
-          answerKey: [],
-          modelAnswer: entry.answers.join('\n'),
-          // Seeded, never attested — same rule as a key: a person still has
-          // to say they checked it.
-          source: 'guide_json',
-        });
+        keys.push(result.key);
         count += 1;
         continue;
       }

@@ -5531,7 +5531,7 @@ async function mixedCase(
     headers: auth(),
   });
   expect(attemptRes.status).toBe(201);
-  return { caseId: kase.id, attemptId: ((await attemptRes.json()) as { id: string }).id };
+  return { caseId: kase.id, attemptId: ((await attemptRes.json()) as { id: string }).id, toolId: tool.id };
 }
 
 describe('mixed marking: a judged part pre-marks its keyed subset (U3)', () => {
@@ -5932,3 +5932,435 @@ describe('the marking pass: staff writes on a submitted attempt (U4/D5)', () => 
   });
 });
 
+
+/*
+  ── Review-round pins ────────────────────────────────────────────────────────
+
+  The tool detail is the ONE read that serves unstripped fields (answerKey +
+  modelAnswer), so it takes the same edit gate as the PATCH beside it. The
+  leak pin mirrors fill-links.test.ts's posture: absence is asserted on the
+  serialized body, not on a property the shape might rename.
+*/
+describe('GET /assessment-tools/:id is an authoring read — edit-gated', () => {
+  it('403s a candidate-role caller, with no key material in the refusal', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { toolId } = await mixedCase(base, store);
+      const res = await fetch(`${base}/assessment-tools/${toolId}`, { headers: auth(candidate) });
+      expect(res.status).toBe(403);
+      const body = JSON.stringify(await res.json());
+      expect(body).not.toContain('answerKey');
+      expect(body).not.toContain('modelAnswer');
+      expect(body).not.toContain(MODEL_W1.slice(0, 12));
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still serves an editor the UNSTRIPPED fields — the authoring surface keeps its keys', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { toolId } = await mixedCase(base, store);
+      const res = await fetch(`${base}/assessment-tools/${toolId}`, { headers: auth() });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { fields: FormField[] };
+      expect(body.fields.find((f) => f.id === 'q-k1')?.answerKey).toEqual(['a']);
+      expect(body.fields.find((f) => f.id === 'q-w1')?.modelAnswer).toBe(MODEL_W1);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('403s a viewer-role caller too — org-wide view is not authoring', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { toolId } = await mixedCase(base, store);
+      const res = await fetch(`${base}/assessment-tools/${toolId}`, {
+        headers: auth({ userId: BUILDER, orgId: ORG, role: 'viewer' }),
+      });
+      expect(res.status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/*
+  ── The judged pre-mark is PART-SCOPED ───────────────────────────────────────
+
+  Marking the whole version at the outcome route read every OTHER part's keyed
+  questions as unanswered and wrote their ✗ into THIS attempt's stored values;
+  the export's per-part merge then let a later judged attempt's foreign ✗
+  overwrite the keyed part's real ✓ on the certified PDF.
+*/
+const TWO_TEMPLATE = '00000000-0000-4000-8000-0000000000e3';
+const TWO_VERSION = '00000000-0000-4000-8000-0000000000e4';
+
+const TWO_FIELDS: FormField[] = [
+  header('h-t1'),
+  {
+    id: 'k1',
+    type: 'radio',
+    label: 'P1 keyed',
+    required: true,
+    source: 'imported',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: 'k1-out' },
+  },
+  { id: 'k1-out', type: 'check_cross', label: 'P1 outcome', required: false, source: 'imported' },
+  header('h-t2'),
+  {
+    id: 'k2',
+    type: 'radio',
+    label: 'P2 keyed',
+    required: true,
+    source: 'imported',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: 'k2-out' },
+  },
+  { id: 'k2-out', type: 'check_cross', label: 'P2 outcome', required: false, source: 'imported' },
+  {
+    id: 'w2',
+    type: 'textarea',
+    label: 'P2 written',
+    required: true,
+    source: 'imported',
+    modelAnswer: 'Chock, isolate, report.',
+    outcomeTarget: { fieldId: 'w2-out' },
+  },
+  { id: 'w2-out', type: 'check_cross', label: 'P2 written outcome', required: false, source: 'imported' },
+];
+
+const TWO_MANIFEST: AssessmentToolManifest = {
+  parts: [
+    /*
+      t1 names its mandatory set explicitly because the SELF-MARKING branch
+      still runs `markTheory` over the whole version: without the narrowing,
+      t2's unanswered keyed question fails t1's gate at hand-in. That
+      whole-version gate is a pre-existing adjacent issue this round leaves
+      alone — the fix under test here is the JUDGED pre-mark's part scoping.
+    */
+    { key: 't1', ordinal: 1, label: 'Keyed Theory', kind: 'theory', pathways: ['experienced', 'new', 'rpl'], startFieldId: 'h-t1', mandatoryFieldIds: ['k1'] },
+    { key: 't2', ordinal: 2, label: 'Mixed Theory', kind: 'theory', pathways: ['experienced', 'new', 'rpl'], startFieldId: 'h-t2' },
+  ],
+};
+
+describe('mixed marking pre-marks only the ATTEMPT PART’s keyed questions', () => {
+  it('a judged part’s outcome never writes another part’s ✗ into its stored values', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      rows(store, 'formTemplates').push({
+        id: TWO_TEMPLATE,
+        orgId: ORG,
+        name: 'Two Part Paper',
+        currentVersionId: TWO_VERSION,
+      });
+      rows(store, 'formTemplateVersions').push({ id: TWO_VERSION, templateId: TWO_TEMPLATE, fields: TWO_FIELDS });
+      const created = await fetch(`${base}/assessment-tools`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          templateId: TWO_TEMPLATE,
+          name: 'Two Part Paper',
+          manifest: TWO_MANIFEST,
+          awardedCompetencyIds: [COMPETENCY],
+        }),
+      });
+      expect(created.status).toBe(201);
+      const tool = (await created.json()) as { id: string };
+      const kase = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+        })
+      ).json()) as { id: string };
+
+      // Part 1: fully keyed, answered right, marks itself at hand-in — ✓ stored.
+      const a1 = (await (
+        await fetch(`${base}/assessment-cases/${kase.id}/parts/t1/attempts`, { method: 'POST', headers: auth() })
+      ).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${kase.id}/attempts/${a1.id}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { k1: 'a' } }),
+      });
+      const s1 = await fetch(`${base}/assessment-cases/${kase.id}/attempts/${a1.id}/submit`, {
+        method: 'POST',
+        headers: auth(candidate),
+      });
+      expect(((await s1.json()) as { outcome?: string }).outcome).toBe('satisfactory');
+
+      // Part 2: judged (w2 is unkeyed), keyed subset answered right.
+      const a2 = (await (
+        await fetch(`${base}/assessment-cases/${kase.id}/parts/t2/attempts`, { method: 'POST', headers: auth() })
+      ).json()) as { id: string };
+      await fetch(`${base}/assessment-cases/${kase.id}/attempts/${a2.id}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { k2: 'a', w2: 'Chock and report.' } }),
+      });
+      const res = await fetch(`${base}/assessment-cases/${kase.id}/attempts/${a2.id}/outcome`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'Pat Assessor' }),
+      });
+      expect(res.status).toBe(200);
+
+      const row2 = rows(store, 'assessmentPartAttempts').find((r) => r.id === a2.id)!;
+      const values2 = row2.values as Record<string, unknown>;
+      // Its own keyed subset pre-marked…
+      expect(values2['k2-out']).toBe(true);
+      // …and NOTHING of part 1's: no foreign ✗ to shadow the real ✓ at export.
+      expect('k1-out' in values2).toBe(false);
+      expect('k1' in values2).toBe(false);
+
+      // Part 1's own record is untouched — the mark the export draws.
+      const row1 = rows(store, 'assessmentPartAttempts').find((r) => r.id === a1.id)!;
+      expect((row1.values as Record<string, unknown>)['k1-out']).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/*
+  ── Reopen clears the marking pass's writes ──────────────────────────────────
+
+  A candidate taking a submitted attempt back is about to change the answers a
+  partial marking pass judged — the assessor's ✓/✗ and sign-off must not
+  pre-label the revised paper.
+*/
+describe('reopen strips the marking pass’s ✓/✗ and sign-off from the stored attempt', () => {
+  it('submit → staff ticks and signs → candidate reopens → the marks are gone, the answers stay', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'q-k1': 'a', 'q-w1': 'Chock and report.' } }),
+      });
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/submit`, {
+        method: 'POST',
+        headers: auth(candidate),
+      });
+      // A partial marking pass: one written question ticked, the part signed.
+      const markRes = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({
+          values: { 'q-w1-out': true, 'mix-assessor-name': 'Pat Assessor', 'mix-signed-date': '2026-08-21' },
+        }),
+      });
+      expect(markRes.status).toBe(200);
+
+      const reopen = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/reopen`, {
+        method: 'POST',
+        headers: auth(candidate),
+      });
+      expect(reopen.status).toBe(200);
+
+      const row = rows(store, 'assessmentPartAttempts').find((r) => r.id === attemptId)!;
+      const values = row.values as Record<string, unknown>;
+      // The marking pass's writes are gone — judgments on answers about to change.
+      expect('q-w1-out' in values).toBe(false);
+      expect('mix-assessor-name' in values).toBe(false);
+      expect('mix-signed-date' in values).toBe(false);
+      // The candidate's own evidence is exactly as they left it.
+      expect(values['q-k1']).toBe('a');
+      expect(values['q-w1']).toBe('Chock and report.');
+      expect(row.submittedAt).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/*
+  ── The marking surface excludes candidate-writable boxes ────────────────────
+
+  A self-answering yes/no the CANDIDATE fills is one of their answers; leaving
+  it on the marking surface let staff flip a candidate's own recorded answer on
+  a frozen attempt. No explicit workflow here on purpose: the derived default
+  gives everyone fill on the answer box, while the written question's cell is
+  candidate-view by `assessorMarkAccess` — the builder's own emission.
+*/
+const SELFQ_TEMPLATE = '00000000-0000-4000-8000-0000000000e5';
+const SELFQ_VERSION = '00000000-0000-4000-8000-0000000000e6';
+
+const SELFQ_FIELDS: FormField[] = [
+  header('h-s1'),
+  { id: 'q-self', type: 'boolean_yes_no', label: 'Was the area barricaded?', required: true, source: 'imported' },
+  {
+    id: 'q-w1',
+    type: 'textarea',
+    label: 'Describe the isolation steps',
+    required: true,
+    source: 'imported',
+    modelAnswer: 'Isolate, lock, tag, test for dead.',
+    outcomeTarget: { fieldId: 'q-w1-out' },
+  },
+  { id: 'q-w1-out', type: 'check_cross', label: 'Isolation outcome', required: false, source: 'imported' },
+  { id: 's-name', type: 'text', label: 'Name of Assessor', required: false, source: 'imported' },
+];
+
+const SELFQ_MANIFEST: AssessmentToolManifest = {
+  parts: [
+    {
+      key: 's1',
+      ordinal: 1,
+      label: 'Self-answer Theory',
+      kind: 'theory',
+      pathways: ['experienced', 'new', 'rpl'],
+      startFieldId: 'h-s1',
+      assessorNameFieldId: 's-name',
+    },
+  ],
+};
+
+describe('the marking surface never contains a candidate-writable answer box', () => {
+  async function submittedSelfQ(base: string, store: Record<string, Record<string, unknown>[]>) {
+    rows(store, 'formTemplates').push({
+      id: SELFQ_TEMPLATE,
+      orgId: ORG,
+      name: 'Self Answer',
+      currentVersionId: SELFQ_VERSION,
+    });
+    rows(store, 'formTemplateVersions').push({ id: SELFQ_VERSION, templateId: SELFQ_TEMPLATE, fields: SELFQ_FIELDS });
+    const created = await fetch(`${base}/assessment-tools`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({
+        templateId: SELFQ_TEMPLATE,
+        name: 'Self Answer',
+        manifest: SELFQ_MANIFEST,
+        awardedCompetencyIds: [COMPETENCY],
+      }),
+    });
+    expect(created.status).toBe(201);
+    const tool = (await created.json()) as { id: string };
+    const kase = (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+      })
+    ).json()) as { id: string };
+    const attempt = (await (
+      await fetch(`${base}/assessment-cases/${kase.id}/parts/s1/attempts`, { method: 'POST', headers: auth() })
+    ).json()) as { id: string };
+    await fetch(`${base}/assessment-cases/${kase.id}/attempts/${attempt.id}`, {
+      method: 'PATCH',
+      headers: auth(candidate),
+      body: JSON.stringify({ values: { 'q-self': true, 'q-w1': 'Locked and tagged.' } }),
+    });
+    await fetch(`${base}/assessment-cases/${kase.id}/attempts/${attempt.id}/submit`, {
+      method: 'POST',
+      headers: auth(candidate),
+    });
+    return { caseId: kase.id, attemptId: attempt.id };
+  }
+
+  it('serves the assessor a surface WITHOUT the candidate’s yes/no answer', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await submittedSelfQ(base, store);
+      const body = (await (
+        await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, { headers: auth() })
+      ).json()) as { writableFieldIds: string[] };
+      // The assessor-only cell and the signature furniture stay open…
+      expect(body.writableFieldIds).toEqual(expect.arrayContaining(['q-w1-out', 's-name']));
+      // …and the candidate's own recorded answer is frozen evidence.
+      expect(body.writableFieldIds).not.toContain('q-self');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a staff write to the candidate’s yes/no, and accepts the assessor-only ✓/✗', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await submittedSelfQ(base, store);
+      const flip = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { 'q-self': false } }),
+      });
+      expect(flip.status).toBe(403);
+      expect(((await flip.json()) as { fields: string[] }).fields).toEqual(['q-self']);
+
+      const tick = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ values: { 'q-w1-out': true } }),
+      });
+      expect(tick.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/*
+  ── The marking guide's audience is MARKERS, not all staff viewers ───────────
+
+  `party === 'assessor'` is identity, and a view-only role satisfies it. The
+  guide and the pre-marks attach only for a caller who clears the same
+  org-wide `assessments.edit` the marking-pass PATCH enforces.
+*/
+describe('view-only staff get no marking guide and no pre-marks', () => {
+  it('a viewer’s payload carries neither; an editor’s carries both', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const { caseId, attemptId } = await mixedCase(base, store);
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        method: 'PATCH',
+        headers: auth(candidate),
+        body: JSON.stringify({ values: { 'q-k1': 'a' } }),
+      });
+      await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}/submit`, {
+        method: 'POST',
+        headers: auth(candidate),
+      });
+
+      const viewer = { userId: BUILDER, orgId: ORG, role: 'viewer' };
+      const viewed = await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, {
+        headers: auth(viewer),
+      });
+      expect(viewed.status).toBe(200);
+      const viewerBody = (await viewed.json()) as Record<string, unknown>;
+      expect(viewerBody.party).toBe('assessor');
+      expect('markingGuide' in viewerBody).toBe(false);
+      expect(JSON.stringify(viewerBody)).not.toContain('modelAnswer');
+      expect(JSON.stringify(viewerBody)).not.toContain(MODEL_W1.slice(0, 12));
+      expect((viewerBody.values as Record<string, unknown>)['q-k1-out']).toBeUndefined();
+
+      const editorBody = (await (
+        await fetch(`${base}/assessment-cases/${caseId}/attempts/${attemptId}`, { headers: auth() })
+      ).json()) as { markingGuide?: unknown[]; values: Record<string, unknown> };
+      expect(editorBody.markingGuide).toEqual([{ fieldId: 'q-w1', modelAnswer: MODEL_W1 }]);
+      expect(editorBody.values['q-k1-out']).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+});

@@ -192,6 +192,42 @@ describe('workflowFromFields', () => {
     expect(w.sections[0]!.fieldIds).toEqual(['loose']);
   });
 
+  it('a MIXED part: the written question’s cell is assessor-fill / candidate-view; the keyed cell is auto', () => {
+    /*
+      The written-model-answers shape: a keyed choice question (its cell the
+      machine's, locked `auto` for everyone) beside an unkeyed written question
+      whose declared cell the ASSESSOR ticks and the candidate may only see.
+    */
+    const mixed: FormField[] = [
+      header('h-mix', 'Mixed Theory'),
+      { ...field('qk', 'checkbox_group'), answerKey: ['a'], outcomeTarget: { fieldId: 'qk-out' } },
+      field('qk-out', 'check_cross'),
+      { ...field('qw', 'textarea'), modelAnswer: 'the guide', outcomeTarget: { fieldId: 'qw-out' } },
+      field('qw-out', 'check_cross'),
+    ];
+    const m: AssessmentToolManifest = {
+      parts: [
+        { key: 'mix', ordinal: 1, label: 'Mixed', kind: 'theory', pathways: ['new'], startFieldId: 'qk' },
+      ],
+    };
+
+    const section = workflowFromFields(mixed, m).sections.find((s) => s.partKey === 'mix')!;
+
+    // The written cell: the assessor's pen, the candidate's eyes only.
+    expect(canWrite(section, 'qw-out', 'assessor')).toBe(true);
+    expect(canWrite(section, 'qw-out', 'candidate')).toBe(false);
+    expect(section.fieldAccess).toEqual({ 'qw-out': { candidate: 'view' } });
+    // The keyed cell is marking's to write — nobody types it.
+    expect(canWrite(section, 'qk-out', 'assessor')).toBe(false);
+    expect(canWrite(section, 'qk-out', 'candidate')).toBe(false);
+  });
+
+  it('an ALL-KEYED part emits no fieldAccess key at all — the pre-model-answer shape, byte-identical', () => {
+    const section = rebuilt.sections.find((s) => s.partKey === 'p_theory')!;
+
+    expect('fieldAccess' in section).toBe(false);
+  });
+
   it('skips headers with no fields beneath them', () => {
     const withEmpties: FormField[] = [
       header('h-details', 'Candidate Details'),

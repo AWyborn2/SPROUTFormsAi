@@ -733,6 +733,27 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         </div>
       )}
 
+      {/*
+        MARKING COMPOSITIONS THAT MISBEHAVE AT RUNTIME — an auto-locked verdict
+        beside untargeted Yes/No boxes auto-fails hand-ins; a written question's
+        mark aimed at a table cell is untickable on the marking pass. Warnings,
+        never gates, in the shared validator's own words — the same doctrine as
+        the unplaced-marks block above.
+      */}
+      {check.warnings.length > 0 && (
+        <div className="flex flex-col gap-1.5 rounded-[14px] border border-warning bg-warning-soft p-3">
+          <span className="text-[11.5px] font-semibold text-warning-text">
+            {check.warnings.length} marking setup issue{check.warnings.length === 1 ? '' : 's'} worth
+            a look before publishing
+          </span>
+          {check.warnings.map((message, i) => (
+            <p key={i} className="text-[11.5px] text-warning-text">
+              {message}
+            </p>
+          ))}
+        </div>
+      )}
+
       {failure && (
         <p role="alert" className="rounded-[10px] border border-danger bg-danger-soft p-[8px_10px] text-[11.5px] text-danger-text">
           {failure}

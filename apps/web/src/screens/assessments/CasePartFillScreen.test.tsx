@@ -187,6 +187,20 @@ describe('CasePartFillScreen — the assessor marking pass (U7)', () => {
     );
   });
 
+  it('shows the marking one-liner and NEVER the candidate’s reopen banner or its live button', () => {
+    /*
+      The reopen banner used to render by state alone, so the marking pass got
+      candidate-voiced copy ("you can still take it back") beside a LIVE
+      button that un-hands-in the paper mid-marking. The banner is the
+      candidate's by party; the marker gets a one-line statement of the state.
+    */
+    renderScreen(attempt());
+
+    expect(screen.queryByRole('button', { name: /take it back/i })).toBeNull();
+    expect(screen.queryByText(/you can still take it back/i)).toBeNull();
+    expect(screen.getByText(/candidate's answers are frozen/i)).toBeDefined();
+  });
+
   it('keeps a MARKED attempt read-only for the assessor too', () => {
     renderScreen(attempt({ outcome: 'satisfactory', markingGuide: [] }));
     expect(input('q1_mark').disabled).toBe(true);

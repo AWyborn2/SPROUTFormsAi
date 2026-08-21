@@ -169,6 +169,30 @@ describe('matchGuideToQuestions', () => {
     expect(match.problems[0]!.reason).toContain('3 questions');
   });
 
+  it('A DUPLICATED QUESTION NUMBER refuses the section, naming the number', () => {
+    /*
+      Entries 1, 2, 2 count-match a three-question section while double-seeding
+      question 2 (the later entry silently winning) and never seeding question
+      3 — the same misalignment the count gate refuses, folded so the counts
+      agree. Same response: name it, seed nothing.
+    */
+    const match = matchGuideToQuestions(
+      [
+        { section: 'general', n: 1, answers: ['a'] },
+        { section: 'general', n: 2, answers: ['b'] },
+        { section: 'general', n: 2, answers: ['c'] },
+      ],
+      SECTIONS,
+      FIELDS,
+      NONE,
+    );
+
+    expect(match.keys).toEqual([]);
+    expect(match.seeded).toEqual([]);
+    expect(match.problems).toHaveLength(1);
+    expect(match.problems[0]!.reason).toContain('question 2 more than once');
+  });
+
   it('a mismatch in one section does not block a section that is correct', () => {
     // Per section rather than per document: an optional stream the author has
     // not finished typing should not hold up the two that are right.

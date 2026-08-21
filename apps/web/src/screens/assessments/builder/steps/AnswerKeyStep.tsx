@@ -232,9 +232,7 @@ export function AnswerKeyStep({ draft, actor = 'You' }: AnswerKeyStepProps) {
           wins outright, because the whole point of it is to reach the type and
           keying controls this flag otherwise hides.
         */
-        const matching =
-          !question.notMatching &&
-          (isMatchingQuestion(question.options) || (!!extracted && hasAnyMatchSide(extracted)));
+        const matching = isMatchingHere(question);
         /*
           A written card is the model-answer surface and NOTHING else that a
           choice card offers: no type dropdown (retyping prose to a choice is

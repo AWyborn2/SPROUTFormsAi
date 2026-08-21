@@ -34,7 +34,7 @@ import type {
 import { SELF_ANSWERING_TYPES, isChoiceField } from './form-field.js';
 import type { FormField, FormFieldType, OutcomeTarget } from './form-field.js';
 import type { RepeatingRowValue, SubmissionValue } from './submission.js';
-import type { ValueSource } from './workflow.js';
+import { sectionForPart, workflowOf, type ValueSource } from './workflow.js';
 import { visibleFields, type VisibilityAnswers } from './visibility.js';
 
 /**
@@ -240,11 +240,24 @@ function applyMarks(
  *
  * Returns the same array when nothing carried a key, so callers can cheaply
  * skip no-op copies.
+ *
+ * Presence is `!== undefined`, NOT truthiness: `modelAnswer: ''` (or a null
+ * from hand-edited data) is falsy, so a truthy check let the property NAME
+ * itself survive into a candidate payload — and a leak test asserting "no
+ * `modelAnswer` anywhere in the JSON" is exactly what it would trip. Same
+ * rule for all four secrets, so one empty-string hint cannot behave
+ * differently from an empty-string guide.
  */
+const hasMarkingSecret = (f: FormField): boolean =>
+  f.answerKey !== undefined ||
+  f.outcomeTarget !== undefined ||
+  f.answerHint !== undefined ||
+  f.modelAnswer !== undefined;
+
 export function stripMarkingSecrets(fields: readonly FormField[]): FormField[] {
-  if (!fields.some((f) => f.answerKey || f.outcomeTarget || f.answerHint || f.modelAnswer)) return fields as FormField[];
+  if (!fields.some(hasMarkingSecret)) return fields as FormField[];
   return fields.map((f) => {
-    if (!f.answerKey && !f.outcomeTarget && !f.answerHint && !f.modelAnswer) return f;
+    if (!hasMarkingSecret(f)) return f;
     const { answerKey: _key, outcomeTarget: _target, answerHint: _hint, modelAnswer: _model, ...rest } = f;
     return rest;
   });
@@ -657,4 +670,88 @@ export function deriveChecklistOutcome(
   const derivedValues: Record<string, SubmissionValue> = { ...answers };
   writeDeclared(derivedValues, { fieldId: verdictField.id, value: allPass ? pair.yes : pair.no });
   return { outcome: allPass ? 'satisfactory' : 'not_satisfactory', derivedValues };
+}
+
+/**
+ * Marking compositions that will behave badly at runtime, said at PUBLISH.
+ * Warnings, never gates — the tool still publishes; these name the trap.
+ *
+ * (a) A part with an AUTO-LOCKED VERDICT PAIR (the #269 opt-in) that also
+ *     carries an unkeyed self-answering box no question targets. That box is
+ *     exactly what `deriveChecklistOutcome` reads as a checklist criterion, so
+ *     the moment the part is handed in the derivation runs, finds the box
+ *     untouched (or reads a candidate's own yes/no answer as a verdict on
+ *     them), and records NOT SATISFACTORY before any marking happened. The
+ *     runtime fix — deciding whose box it really is — is deferred by design;
+ *     the author is the one who can say, so the warning names the boxes.
+ *
+ * (b) A WRITTEN question (unkeyed, so its ✓/✗ is the assessor's to tick)
+ *     whose `outcomeTarget` addresses a repeating-group cell. Mixed marking is
+ *     whole-key granular and the marking surface deliberately excludes tables
+ *     (a table id is shared with the candidate's own rows), so the assessor
+ *     has no way to tick that cell on the marking pass and the mark can only
+ *     ever print blank. Cell-granular marking is deferred; the warning is not.
+ *
+ * Same discovery rules as the runtime code it predicts (`deriveChecklistOutcome`
+ * for the verdict field and its criteria; `markingSurfaceIds`' type fence for
+ * the table exclusion), so the warning can never fire where the runtime would
+ * not.
+ */
+export function markingCompositionWarnings(
+  manifest: AssessmentToolManifest,
+  fields: readonly FormField[],
+): string[] {
+  const warnings: string[] = [];
+  const workflow = workflowOf(manifest, fields);
+  const byId = new Map(fields.map((f) => [f.id, f]));
+
+  for (const part of manifest.parts) {
+    const partFields = fieldsInPart(fields, manifest, part.key);
+    const verdictSource = sectionForPart(workflow, part.key)?.fieldSource;
+    const verdictField = partFields.find(
+      (f) => isChoiceField(f.type) && verdictPairOf(f) !== null && verdictSource?.[f.id] === 'auto',
+    );
+
+    if (verdictField) {
+      // Exactly `deriveChecklistOutcome`'s criteria set: self-answering boxes
+      // minus everything marking itself writes (verdict pair, questions'
+      // declared cells) and minus keyed questions, which the arithmetic owns.
+      const written = new Set<string>(partMarkFieldIds(part));
+      for (const f of partFields) if (f.outcomeTarget) written.add(f.outcomeTarget.fieldId);
+      const untargeted = partFields.filter(
+        (f) =>
+          SELF_ANSWERING_TYPES.includes(f.type) &&
+          !written.has(f.id) &&
+          (f.answerKey?.length ?? 0) === 0 &&
+          f.id !== verdictField.id,
+      );
+      if (untargeted.length > 0) {
+        warnings.push(
+          `Part "${part.label}" locks its verdict to automatic, but ${untargeted
+            .map((f) => `"${f.label}"`)
+            .join(', ')} ${untargeted.length === 1 ? 'is a Yes/No box' : 'are Yes/No boxes'} no ` +
+            'question targets — hand-in reads them as checklist criteria and will record Not ' +
+            'Satisfactory before anyone marks. Target each from a question, or let the assessor ' +
+            'pick the verdict.',
+        );
+      }
+    }
+
+    for (const f of partFields) {
+      if ((f.answerKey?.length ?? 0) > 0 || !f.outcomeTarget) continue;
+      const target = byId.get(f.outcomeTarget.fieldId);
+      const addressesCell =
+        target?.type === 'repeating_group' ||
+        (f.outcomeTarget.rowKey !== undefined && f.outcomeTarget.columnKey !== undefined);
+      if (addressesCell) {
+        warnings.push(
+          `"${f.label}" is a written question whose ✓/✗ lands in a table cell — the marking ` +
+            'pass cannot write tables, so the assessor will have no way to tick it. Point its ' +
+            'outcome at a standalone ✓/✗ box.',
+        );
+      }
+    }
+  }
+
+  return warnings;
 }
