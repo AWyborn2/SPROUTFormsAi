@@ -79,28 +79,33 @@ vi.mock('@formai/ui', async () => {
  * (defaulting to none), so a snap-target test can assert the value fed to
  * `PdfViewer` was actually derived from this page's own text.
  */
-const { pdfViewerPropsSpy, stubTextLayerItems, stubTextLayerRects } = vi.hoisted(() => ({
-  pdfViewerPropsSpy: vi.fn<(props: MockPdfViewerProps) => void>(),
-  stubTextLayerItems: { current: [] as { text: string; x: number; y: number; width: number }[] },
-  // The page's printed rectangles (U6). Default null — the property is simply
-  // absent, matching the NOT MEASURED convention every existing test ran under.
-  stubTextLayerRects: {
-    current: null as { x: number; y: number; width: number; height: number }[] | null,
-  },
-}));
+const { pdfViewerPropsSpy, stubTextLayerItems, stubTextLayerPageCount, stubTextLayerRects } =
+  vi.hoisted(() => ({
+    pdfViewerPropsSpy: vi.fn<(props: MockPdfViewerProps) => void>(),
+    stubTextLayerItems: { current: [] as { text: string; x: number; y: number; width: number }[] },
+    // How many pages the stub feeds (page 0 carries `stubTextLayerItems`, the
+    // rest are blank). One suffices almost everywhere; the page-scoped-scan
+    // tests need a second page because a TextPage's index IS its page number.
+    stubTextLayerPageCount: { current: 1 },
+    // Page 0's printed rectangles (U6). Default null — the property is simply
+    // absent, matching the NOT MEASURED convention every existing test ran under.
+    stubTextLayerRects: {
+      current: null as { x: number; y: number; width: number; height: number }[] | null,
+    },
+  }));
 
 vi.mock('./PdfViewer.js', () => ({
   PdfViewer: (props: MockPdfViewerProps) => {
     pdfViewerPropsSpy(props);
     useEffect(() => {
-      props.onTextLayer([
-        {
+      props.onTextLayer(
+        Array.from({ length: stubTextLayerPageCount.current }, (_, i) => ({
           width: 595,
           height: 842,
-          items: stubTextLayerItems.current,
-          ...(stubTextLayerRects.current ? { rects: stubTextLayerRects.current } : {}),
-        },
-      ]);
+          items: i === 0 ? stubTextLayerItems.current : [],
+          ...(i === 0 && stubTextLayerRects.current ? { rects: stubTextLayerRects.current } : {}),
+        })),
+      );
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [props.onTextLayer]);
     return null;
@@ -273,6 +278,7 @@ afterEach(() => {
   version.data = undefined;
   version.isLoading = false;
   stubTextLayerItems.current = [];
+  stubTextLayerPageCount.current = 1;
   stubTextLayerRects.current = null;
 });
 
@@ -561,6 +567,108 @@ describe('GeometryEditorScreen — needs-review queue: bulk confirm and step-thr
     expect(screen.getByLabelText('Review Field A')).toBeDefined();
     expect(screen.getByLabelText('Review Field C')).toBeDefined();
     expect(screen.queryByLabelText('Review Field B')).toBeNull();
+  });
+});
+
+describe('GeometryEditorScreen — the extraction window reaches the engine (sourcePages)', () => {
+  /**
+   * The window logic itself (capping, notes, refusals) is proven at the pure
+   * level in `geometry-actions.test.ts`; derivation is stubbed here. What
+   * these tests pin is the WIRING — which calls hand the engine a window and
+   * which deliberately do not (R8) — by asserting the third argument the
+   * stubbed deriver received.
+   */
+  const windowedField = (): FormField => ({
+    ...choiceField('f1', 'Windowed field', ['Yes', 'No', 'Maybe']),
+    sourcePages: { from: 1, to: 1 },
+  });
+
+  it('selectField resolves the field window and hands it to the deriver', () => {
+    renderWithField(windowedField());
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(null);
+    deriveOptionCellsAcrossPagesMock.mockClear();
+
+    fireEvent.click(screen.getByText('Windowed field'));
+
+    // One page in the stub, stamped {1,1}: 0-based bounds 0..0 after clamped
+    // dilation. Both `selectField` and the panel's own preview memo derive,
+    // and each must pass the same resolved window.
+    const windows = deriveOptionCellsAcrossPagesMock.mock.calls.map((c) => c[2]);
+    expect(windows.length).toBeGreaterThan(0);
+    for (const w of windows) expect(w).toEqual({ first: 0, last: 0, from: 1, to: 1 });
+  });
+
+  it('a field with no sourcePages takes the unscoped path — the deriver gets null (R6)', () => {
+    renderWithField(choiceField('f1', 'Legacy field', ['Yes', 'No', 'Maybe']));
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(null);
+    deriveOptionCellsAcrossPagesMock.mockClear();
+
+    fireEvent.click(screen.getByText('Legacy field'));
+
+    expect(deriveOptionCellsAcrossPagesMock.mock.calls.length).toBeGreaterThan(0);
+    for (const c of deriveOptionCellsAcrossPagesMock.mock.calls) expect(c[2]).toBeNull();
+  });
+
+  it('the whole-document bulk pass passes each field its own window', async () => {
+    renderWithField(windowedField());
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(null);
+    deriveOptionCellsAcrossPagesMock.mockClear();
+
+    await clickAutoPlace();
+
+    const call = deriveOptionCellsAcrossPagesMock.mock.calls.find(
+      (c) => (c[0] as { label: string }).label === 'Windowed field',
+    );
+    expect(call).toBeDefined();
+    expect(call![2]).toEqual({ first: 0, last: 0, from: 1, to: 1 });
+  });
+
+  it('AE6: the page-scoped scan passes NO window, and its unique hit still auto-confirms', async () => {
+    // Two stub pages so a scoped page index is expressible. The field carries
+    // a perfectly valid window; the author pointing at a page must outrank it
+    // (R8) — the engine is handed null, so a stale or boundary-shifted window
+    // cannot downgrade the scoped scan's auto-confirm.
+    stubTextLayerPageCount.current = 2;
+    renderWithField(windowedField());
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(1));
+
+    fireEvent.change(screen.getByLabelText('Page'), { target: { value: '2' } });
+    deriveOptionCellsAcrossPagesMock.mockClear();
+    fireEvent.click(screen.getByText('Scan'));
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+
+    const call = deriveOptionCellsAcrossPagesMock.mock.calls.find(
+      (c) => (c[0] as { label: string }).label === 'Windowed field',
+    );
+    expect(call).toBeDefined();
+    expect(call![2]).toBeNull();
+    // The scoped scan's unique hit auto-confirms exactly as today.
+    expect(screen.getByText(/3\/3 placed/)).toBeDefined();
+  });
+
+  it('a window-capped proposal parks as needs-review — never auto-confirmed — and shows its note', async () => {
+    renderWithField(windowedField());
+    // What the real windowed deriver returns for a window-disambiguated hit:
+    // capped strictly below 1, note naming the excluded pages (KTD2/R5).
+    deriveOptionCellsAcrossPagesMock.mockReturnValue({
+      ...proposal(0.95),
+      notes: ['Matched on page 7; pages 12 and 17 excluded by the extraction window (pages 5–8).'],
+    });
+
+    await clickAutoPlace();
+
+    // Parked, not placed: the cap kept it out of the auto-confirm tier.
+    expect(screen.getByText(/0\/3 placed/)).toBeDefined();
+    expect(screen.getByText('1 field need review')).toBeDefined();
+
+    // Opening the field surfaces the reviewer-facing story through the
+    // existing notes channel — no new UI.
+    fireEvent.click(screen.getByLabelText('Review Windowed field'));
+    expect(
+      screen.getByText('Matched on page 7; pages 12 and 17 excluded by the extraction window (pages 5–8).'),
+    ).toBeDefined();
   });
 });
 

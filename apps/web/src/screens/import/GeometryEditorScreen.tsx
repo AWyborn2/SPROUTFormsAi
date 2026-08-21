@@ -56,11 +56,13 @@ import {
   replaceSegmentOnPage,
   moveBand,
   moveBoundary,
+  pageWindowOf,
   retargetPageChanges,
   snapTargets,
   snapTargetsY,
   type BandHandle,
   type FieldChange,
+  type PageWindow,
 } from './inspector/geometry-actions.js';
 
 /**
@@ -481,7 +483,7 @@ export function GeometryEditorScreen({
 
     if (geometrySegments(field).length > 0) return;
 
-    const proposal = deriveProposal(field, textPages);
+    const proposal = deriveProposal(field, textPages, pageWindowOf(field.sourcePages, textPages.length));
     const tier = classifyProposalTier(proposal);
     if (tier === 'no-match') return;
 
@@ -548,7 +550,15 @@ export function GeometryEditorScreen({
       for (const field of fields) {
         if (geometrySegments(field).length >= expectedBoxes(field)) continue;
 
-        const proposal = deriveProposal(field, scope);
+        /*
+          The page-scoped pass passes NO window (R8/AE6): the author pointing
+          at a page is a stronger disambiguation than the batch prior, and a
+          stale or boundary-shifted window must not downgrade — or exclude —
+          an explicit human choice. Only the whole-document pass consults it.
+        */
+        const window =
+          onlyPage === undefined ? pageWindowOf(field.sourcePages, textPages.length) : null;
+        const proposal = deriveProposal(field, scope, window);
         const tier = classifyProposalTier(proposal);
         if (tier === 'no-match') continue;
         if (tier === 'needs-review') {
@@ -1580,10 +1590,16 @@ function bandOverlayFor(
  * and the bulk "Auto-place remaining fields" pass (U4) both route through this
  * so they classify identically. Empty `textPages` (the text layer hasn't loaded
  * yet) refuses rather than deriving off nothing.
+ *
+ * `window` is the field's resolved extraction window — the CALLER's decision,
+ * not this function's, because the same field is scanned with its window on
+ * the whole-document pass and without it on the author's page-scoped pass
+ * (R8): which prior applies depends on who asked, not on what the field is.
  */
 function deriveProposal(
   field: FormField,
   textPages: readonly TextPage[],
+  window: PageWindow | null,
 ): FieldProposal | TableProposal | null {
   if (textPages.length === 0) return null;
   /*
@@ -1593,13 +1609,13 @@ function deriveProposal(
     something the candidate might do rather than something the page prints.
   */
   if (isMatchAnchorField(field)) {
-    return deriveMatchAnchorsAcrossPages(matchAnchors(field.options ?? []), textPages);
+    return deriveMatchAnchorsAcrossPages(matchAnchors(field.options ?? []), textPages, window);
   }
   if (isPerOptionField(field)) {
-    return deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages);
+    return deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages, window);
   }
   if (field.type === 'repeating_group') {
-    return deriveAcrossPages(field, textPages);
+    return deriveAcrossPages(field, textPages, window);
   }
   return null;
 }
@@ -1878,17 +1894,21 @@ function PlacementPanel({
    */
   const proposal = useMemo(() => {
     if (textPages.length === 0) return null;
+    // The panel's own derivation consults the field's extraction window
+    // exactly as `deriveProposal` does — the offer shown here and the one the
+    // bulk pass parks must be the same proposal, notes and cap included.
+    const window = pageWindowOf(field.sourcePages, textPages.length);
     // Matching is checked first for the same reason `deriveProposal` checks it
     // first: its field IS a choice field, and the option-cell derivation would
     // otherwise match its PAIRINGS against text that never prints them.
-    if (matchAnchorField) return deriveMatchAnchorsAcrossPages(anchors, textPages);
-    if (perOption) return deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages);
+    if (matchAnchorField) return deriveMatchAnchorsAcrossPages(anchors, textPages, window);
+    if (perOption) return deriveOptionCellsAcrossPages(field as { label: string; options?: string[] }, textPages, window);
     return null;
   }, [field, textPages, perOption, matchAnchorField, anchors]);
 
   const tableProposal = useMemo(() => {
     if (textPages.length === 0 || field.type !== 'repeating_group') return null;
-    return deriveAcrossPages(field, textPages);
+    return deriveAcrossPages(field, textPages, pageWindowOf(field.sourcePages, textPages.length));
   }, [field, textPages]);
 
   return (
