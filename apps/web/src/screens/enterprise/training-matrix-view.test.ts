@@ -16,8 +16,10 @@ import {
   groupMembers,
   matrixCsvRows,
   memberCompliancePct,
+  memberHasGaps,
   memberIssueChips,
   memberMatchesFilters,
+  memberStatusBadge,
   type MatrixFilters,
 } from './training-matrix-view.js';
 
@@ -240,9 +242,47 @@ describe('groupMembers', () => {
     expect(g?.name).toBe('Boddington');
     expect(g?.held).toBe(2); // held + the expiring one (it still counts)
     expect(g?.expiring).toBe(1);
-    expect(g?.attention).toBe(2); // Ben's gap + Ben's lapse
+    // REQUIRED-only, like memberHasGaps: b's required gap counts, b's OPTIONAL
+    // lapse does not — an optional lapse is its own category, never attention.
+    expect(g?.attention).toBe(1);
     // Required cells: a's two (both counting) + b's gap → 2/3.
     expect(g?.compliancePct).toBe(67);
+  });
+});
+
+describe('memberStatusBadge', () => {
+  it('required gaps beat expiring beat compliant', () => {
+    const gapsAndExpiring = member({
+      cells: [{ standing: 'required' }, expiring45, { standing: 'required', status: 'expired' }],
+    });
+    expect(memberStatusBadge(gapsAndExpiring, 60, NOW)).toEqual({
+      label: '2 gaps',
+      variant: 'danger',
+    });
+
+    const expiringOnly = member({ cells: [{ standing: 'required', status: 'held' }, expiring45] });
+    expect(memberStatusBadge(expiringOnly, 60, NOW)).toEqual({
+      label: '1 expiring',
+      variant: 'warning',
+    });
+
+    const compliant = member({ cells: [{ standing: 'required', status: 'held' }] });
+    expect(memberStatusBadge(compliant, 60, NOW)).toEqual({
+      label: 'Compliant',
+      variant: 'success',
+    });
+  });
+
+  it('an optional lapsed grant is never a "gap" — badge agrees with the Has gaps filter', () => {
+    const optionalLapse = member({
+      cells: [{ standing: 'required', status: 'held' }, { standing: 'optional', status: 'expired' }],
+    });
+    expect(memberStatusBadge(optionalLapse, 60, NOW)).toEqual({
+      label: 'Compliant',
+      variant: 'success',
+    });
+    expect(memberHasGaps(optionalLapse)).toBe(false);
+    expect(memberCompliancePct(optionalLapse)).toBe(100);
   });
 });
 

@@ -455,3 +455,31 @@ export function complianceCountsOf(
   }
   return { compliantCount, memberCount, requiredGapCount };
 }
+
+/**
+ * One pass over placement rows → users per scope id. Both the summary route
+ * and the sweep chart per-scope compliance; a scan of the whole placement set
+ * per scope is O(scopes × placements), so the grouping happens here, once,
+ * and each scope's lookup is O(1). Sharing the pass also keeps the two
+ * surfaces from drifting on who counts as "placed here".
+ */
+export function usersByScopeId<T extends { membershipId: string }>(
+  placements: readonly T[],
+  scopeIdOf: (row: T) => string,
+  userOfMembership: ReadonlyMap<string, string>,
+  includeUser?: (userId: string) => boolean,
+): Map<string, Set<string>> {
+  const users = new Map<string, Set<string>>();
+  for (const row of placements) {
+    const userId = userOfMembership.get(row.membershipId);
+    if (!userId || (includeUser && !includeUser(userId))) continue;
+    const scopeId = scopeIdOf(row);
+    let set = users.get(scopeId);
+    if (!set) {
+      set = new Set();
+      users.set(scopeId, set);
+    }
+    set.add(userId);
+  }
+  return users;
+}

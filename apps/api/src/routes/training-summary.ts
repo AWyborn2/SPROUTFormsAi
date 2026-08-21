@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { schema } from '@formai/db';
 import { requireTenant } from '../middleware/tenant.js';
@@ -11,6 +11,7 @@ import {
   cellCountsAsHeld,
   complianceCountsOf,
   requiredStandingByMember,
+  usersByScopeId,
   type MatrixCompetency,
   type MatrixGrant,
   type MemberRequiredStanding,
@@ -189,41 +190,39 @@ trainingSummaryRouter.get(
         questions about WHERE people are placed, and retirement governs what a
         scope requires, not who stands in it.
       */
-      const locationPlacements = membershipIds.length
-        ? await tx.query.membershipLocations.findMany({
-            where: inArray(schema.membershipLocations.membershipId, membershipIds),
-          })
-        : [];
-      const departmentPlacements = membershipIds.length
-        ? await tx.query.membershipDepartments.findMany({
-            where: inArray(schema.membershipDepartments.membershipId, membershipIds),
-          })
-        : [];
-      // Role placements only feed the role AXIS — held (non-withdrawn) roles,
-      // the same filter the scope expansion applies (R52).
-      const rolePlacements =
-        axis === 'role' && membershipIds.length
-          ? await tx.query.membershipRoles.findMany({
-              where: and(
-                inArray(schema.membershipRoles.membershipId, membershipIds),
-                isNull(schema.membershipRoles.withdrawnAt),
-              ),
-            })
-          : [];
-
-      // Taxonomy values, ANY status: scope validation must recognise a retired
-      // value (its members' numbers are real — module docblock); the group
-      // axis below filters to active itself.
-      const locations = await tx.query.locations.findMany({
-        where: eq(schema.locations.orgId, orgId),
-      });
-      const departments = await tx.query.departments.findMany({
-        where: eq(schema.departments.orgId, orgId),
-      });
-      const jobRoles =
-        axis === 'role'
-          ? await tx.query.jobRoles.findMany({ where: eq(schema.jobRoles.orgId, orgId) })
-          : [];
+      // Independent reads issued together — the driver pipelines them on the
+      // transaction's connection; this is a whole-workforce read where serial
+      // round trips add up. Role placements only feed the role AXIS — held
+      // (non-withdrawn) roles, the same filter the scope expansion applies
+      // (R52). Taxonomy values load with ANY status: scope validation must
+      // recognise a retired value (its members' numbers are real — module
+      // docblock); the group axis below filters to active itself.
+      const [locationPlacements, departmentPlacements, rolePlacements, locations, departments, jobRoles] =
+        await Promise.all([
+          membershipIds.length
+            ? tx.query.membershipLocations.findMany({
+                where: inArray(schema.membershipLocations.membershipId, membershipIds),
+              })
+            : [],
+          membershipIds.length
+            ? tx.query.membershipDepartments.findMany({
+                where: inArray(schema.membershipDepartments.membershipId, membershipIds),
+              })
+            : [],
+          axis === 'role' && membershipIds.length
+            ? tx.query.membershipRoles.findMany({
+                where: and(
+                  inArray(schema.membershipRoles.membershipId, membershipIds),
+                  isNull(schema.membershipRoles.withdrawnAt),
+                ),
+              })
+            : [],
+          tx.query.locations.findMany({ where: eq(schema.locations.orgId, orgId) }),
+          tx.query.departments.findMany({ where: eq(schema.departments.orgId, orgId) }),
+          axis === 'role'
+            ? tx.query.jobRoles.findMany({ where: eq(schema.jobRoles.orgId, orgId) })
+            : [],
+        ]);
 
       // Resolve the scope BEFORE the heavy reads: an unknown id answers 400
       // without walking the workforce.
@@ -354,45 +353,37 @@ trainingSummaryRouter.get(
         const counts = complianceCountsOf(standingsOf(users));
         return { memberCount: counts.memberCount, compliantCount: counts.compliantCount };
       };
-      const usersPlacedAt = <T extends { membershipId: string }>(
-        placements: readonly T[],
-        keyOf: (row: T) => string,
-        wanted: string,
-      ): Set<string> => {
-        const users = new Set<string>();
-        for (const row of placements) {
-          if (keyOf(row) !== wanted) continue;
-          const userId = userOfMembership.get(row.membershipId);
-          if (userId && scopedUserIds.has(userId)) users.add(userId);
-        }
-        return users;
-      };
+      const inScope = (userId: string): boolean => scopedUserIds.has(userId);
+      const noUsers: ReadonlySet<string> = new Set<string>();
       let groups: SummaryGroup[];
       if (axis === 'location') {
         // Active values only: a retired site confers nothing and charting it
         // would resurrect it; its members still count in the org KPIs above.
+        const byLocation = usersByScopeId(locationPlacements, (p) => p.locationId, userOfMembership, inScope);
         groups = locations
           .filter((l) => l.status === 'active')
           .map((l) => ({
             id: l.id,
             name: l.name,
-            ...groupCounts(usersPlacedAt(locationPlacements, (p) => p.locationId, l.id)),
+            ...groupCounts(byLocation.get(l.id) ?? noUsers),
           }));
       } else if (axis === 'role') {
         // ALL roles, any status: a retired-but-held role still contributes
         // requirements (the U4 split), so its holders' bar stays honest.
+        const byRole = usersByScopeId(rolePlacements, (p) => p.roleId, userOfMembership, inScope);
         groups = jobRoles.map((r) => ({
           id: r.id,
           name: r.name,
-          ...groupCounts(usersPlacedAt(rolePlacements, (p) => p.roleId, r.id)),
+          ...groupCounts(byRole.get(r.id) ?? noUsers),
         }));
       } else {
+        const byDepartment = usersByScopeId(departmentPlacements, (p) => p.departmentId, userOfMembership, inScope);
         groups = departments
           .filter((d) => d.status === 'active')
           .map((d) => ({
             id: d.id,
             name: d.name,
-            ...groupCounts(usersPlacedAt(departmentPlacements, (p) => p.departmentId, d.id)),
+            ...groupCounts(byDepartment.get(d.id) ?? noUsers),
           }));
       }
 
@@ -431,15 +422,19 @@ trainingSummaryRouter.get(
       });
 
       // ── trend + gap delta, ORG grain regardless of scope (R12) ─────────
+      // Bounded at the query: the sweep writes one org row per day forever,
+      // so an unbounded read grows with org age while the trend only ever
+      // needs the last TREND_DAYS. The (orgId, capturedOn) partial unique
+      // index serves the range directly.
+      const trendCutoff = new Date(now.getTime() - TREND_DAYS * DAY_MS).toISOString().slice(0, 10);
       const snapshotRows = await tx.query.complianceSnapshots.findMany({
         where: and(
           eq(schema.complianceSnapshots.orgId, orgId),
           isNull(schema.complianceSnapshots.scopeType),
+          gte(schema.complianceSnapshots.capturedOn, trendCutoff),
         ),
       });
-      const trendCutoff = new Date(now.getTime() - TREND_DAYS * DAY_MS).toISOString().slice(0, 10);
       const points = snapshotRows
-        .filter((r) => r.capturedOn >= trendCutoff)
         .sort((a, b) => (a.capturedOn < b.capturedOn ? -1 : a.capturedOn > b.capturedOn ? 1 : 0))
         .map((r) => ({
           capturedOn: r.capturedOn,

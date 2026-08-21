@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Badge, Button, Card, Icon, Select } from '@formai/ui';
 import { useTaxonomy, useTrainingSummary } from '../../lib/data/hooks.js';
+import { TONE_BAR, TONE_TEXT } from './tone-styles.js';
 import {
   DONUT_RADIUS,
   compliancePct,
@@ -29,17 +30,8 @@ import {
 const TREND_W = 560;
 const TREND_H = 160;
 
-const BAND_BAR: Record<GroupBand, string> = {
-  success: 'bg-success',
-  warning: 'bg-warning',
-  danger: 'bg-danger',
-};
-
-const BAND_TEXT: Record<GroupBand, string> = {
-  success: 'text-success-text',
-  warning: 'text-warning-text',
-  danger: 'text-danger-text',
-};
+const BAND_BAR: Record<GroupBand, string> = TONE_BAR;
+const BAND_TEXT: Record<GroupBand, string> = TONE_TEXT;
 
 const CHIP_TEXT: Record<DeltaChip['tone'], string> = {
   success: 'text-success-text',

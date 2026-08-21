@@ -1,4 +1,4 @@
-import { EXPIRY_WARNING_DAYS } from '@formai/shared';
+import { countsAsHeld, EXPIRY_WARNING_DAYS } from '@formai/shared';
 import type {
   TrainingMatrixCell,
   TrainingMatrixCompetency,
@@ -54,13 +54,14 @@ export type CellDisplay =
   | { kind: 'expiring'; days: number }
   | { kind: 'lapsed' };
 
-/** Whether the cell's dated status still counts as held (revocation checked by callers). */
-function statusCounts(cell: TrainingMatrixCell): boolean {
+/**
+ * Whether the cell currently satisfies its requirement — the shared
+ * `countsAsHeld` fold (revocation beats every date), guarded for cells that
+ * carry no dated status at all.
+ */
+function cellCounts(cell: TrainingMatrixCell): boolean {
   return (
-    cell.status === 'held' ||
-    cell.status === 'undated' ||
-    cell.status === 'expiring' ||
-    cell.status === 'grace'
+    cell.status !== undefined && countsAsHeld({ status: cell.status, revoked: cell.revoked === true })
   );
 }
 
@@ -106,7 +107,7 @@ export function memberCompliancePct(member: TrainingMatrixMember): number {
   for (const cell of member.cells) {
     if (!cell || cell.standing !== 'required') continue;
     required += 1;
-    if (cell.status !== undefined && !cell.revoked && statusCounts(cell)) held += 1;
+    if (cellCounts(cell)) held += 1;
   }
   return required === 0 ? 100 : Math.round((held / required) * 100);
 }
@@ -137,7 +138,7 @@ export function memberHasGaps(member: TrainingMatrixMember): boolean {
     (cell) =>
       cell !== null &&
       cell.standing === 'required' &&
-      (cell.status === undefined || cell.revoked === true || !statusCounts(cell)),
+      !cellCounts(cell),
   );
 }
 
@@ -239,10 +240,19 @@ export function groupMembers(
         else if (display.kind === 'expiring') {
           held += 1; // still counts — the flag is urgency, not absence
           expiring += 1;
-        } else if (display.kind === 'gap' || display.kind === 'lapsed') attention += 1;
+        } else if (
+          display.kind === 'gap' ||
+          (display.kind === 'lapsed' && cell?.standing === 'required')
+        ) {
+          // REQUIRED-only, like memberHasGaps and the "Has gaps" chip: an
+          // optional lapsed grant is its own category (the compliance
+          // report's optionalLapses bucket), shown on its cell and chips but
+          // never counted as attention the way an unmet obligation is.
+          attention += 1;
+        }
         if (cell?.standing === 'required') {
           required += 1;
-          if (cell.status !== undefined && !cell.revoked && statusCounts(cell)) requiredHeld += 1;
+          if (cellCounts(cell)) requiredHeld += 1;
         }
       }
     }
@@ -297,6 +307,31 @@ export function memberIssueChips(
   });
   const all = [...danger, ...warning];
   return { chips: all.slice(0, MAX_ISSUE_CHIPS), more: Math.max(0, all.length - MAX_ISSUE_CHIPS) };
+}
+
+/**
+ * A member's headline standing: required gaps beat expiring beats compliant.
+ * Gap counting is REQUIRED-only, matching `memberHasGaps` and the "Has gaps"
+ * chip — an optional lapsed grant still shows on its cell and in the issue
+ * chips, but it is its own category (the compliance report's optionalLapses
+ * bucket), never a "gap". A badge that disagreed with the filter about the
+ * same member is the failure this gate exists to prevent.
+ */
+export function memberStatusBadge(
+  member: TrainingMatrixMember,
+  windowDays: number,
+  now: Date,
+): { label: string; variant: 'success' | 'warning' | 'danger' } {
+  let gaps = 0;
+  let expiring = 0;
+  for (const cell of member.cells) {
+    const kind = cellDisplay(cell, windowDays, now).kind;
+    if (kind === 'gap' || (kind === 'lapsed' && cell?.standing === 'required')) gaps += 1;
+    else if (kind === 'expiring') expiring += 1;
+  }
+  if (gaps > 0) return { label: `${gaps} gap${gaps === 1 ? '' : 's'}`, variant: 'danger' };
+  if (expiring > 0) return { label: `${expiring} expiring`, variant: 'warning' };
+  return { label: 'Compliant', variant: 'success' };
 }
 
 /** A cell's state as the CSV says it. Empty for a not-required, nothing-held cell. */

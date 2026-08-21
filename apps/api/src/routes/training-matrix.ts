@@ -140,18 +140,23 @@ trainingMatrixRouter.get(
         the first location) and the grid should list them the way every other
         surface does.
       */
-      const locationRows = await reader.query.membershipLocations.findMany({
-        where: inArray(schema.membershipLocations.membershipId, membershipIds),
-      });
-      const departmentRows = await reader.query.membershipDepartments.findMany({
-        where: inArray(schema.membershipDepartments.membershipId, membershipIds),
-      });
-      const roleRows = await reader.query.membershipRoles.findMany({
-        where: and(
-          inArray(schema.membershipRoles.membershipId, membershipIds),
-          isNull(schema.membershipRoles.withdrawnAt),
-        ),
-      });
+      // Independent reads issued together — the driver pipelines them on the
+      // transaction's connection, and this route is a whole-workforce read
+      // where serial round trips add up (the R18 tripwire below).
+      const [locationRows, departmentRows, roleRows] = await Promise.all([
+        reader.query.membershipLocations.findMany({
+          where: inArray(schema.membershipLocations.membershipId, membershipIds),
+        }),
+        reader.query.membershipDepartments.findMany({
+          where: inArray(schema.membershipDepartments.membershipId, membershipIds),
+        }),
+        reader.query.membershipRoles.findMany({
+          where: and(
+            inArray(schema.membershipRoles.membershipId, membershipIds),
+            isNull(schema.membershipRoles.withdrawnAt),
+          ),
+        }),
+      ]);
       const placedMembershipIds = new Set(locationRows.map((r) => r.membershipId));
 
       const nameById = async (
@@ -176,9 +181,11 @@ trainingMatrixRouter.get(
                 });
         return new Map(rows.map((r) => [r.id, r.name]));
       };
-      const locationNames = await nameById('locations', [...new Set(locationRows.map((r) => r.locationId))]);
-      const departmentNames = await nameById('departments', [...new Set(departmentRows.map((r) => r.departmentId))]);
-      const roleNames = await nameById('jobRoles', [...new Set(roleRows.map((r) => r.roleId))]);
+      const [locationNames, departmentNames, roleNames] = await Promise.all([
+        nameById('locations', [...new Set(locationRows.map((r) => r.locationId))]),
+        nameById('departments', [...new Set(departmentRows.map((r) => r.departmentId))]),
+        nameById('jobRoles', [...new Set(roleRows.map((r) => r.roleId))]),
+      ]);
 
       const collectRefs = <T extends { membershipId: string; position: number }>(
         rows: readonly T[],

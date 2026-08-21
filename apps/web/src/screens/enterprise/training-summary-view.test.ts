@@ -162,6 +162,9 @@ describe('weeklyBars', () => {
     expect(signOffDeltaChip(current, prior)).toEqual({ text: '▼ 3 vs last wk', tone: 'danger' });
     expect(signOffDeltaChip(prior, current)).toEqual({ text: '▲ 3 vs last wk', tone: 'success' });
     expect(signOffDeltaChip(4, 4)).toBeNull();
+    // Monday morning: a week-to-date zero against a real prior week is not a
+    // collapse — no full-red arrow minutes into the week.
+    expect(signOffDeltaChip(0, 7)).toBeNull();
   });
 });
 

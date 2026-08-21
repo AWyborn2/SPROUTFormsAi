@@ -3,10 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { Avatar, Badge, Button, Card, Icon, Input, Select, Switch } from '@formai/ui';
 import { useTaxonomy, useTrainingMatrix } from '../../lib/data/hooks.js';
 import { exportCsv } from '../../lib/csv.js';
-import type {
-  TrainingMatrixCompetency,
-  TrainingMatrixMember,
-} from '../../lib/data/types.js';
+import { TONE_BAR, TONE_TEXT } from './tone-styles.js';
+import type { TrainingMatrixCompetency } from '../../lib/data/types.js';
 import {
   DEFAULT_WINDOW,
   ROW_CHUNK,
@@ -17,6 +15,7 @@ import {
   matrixCsvRows,
   memberCompliancePct,
   memberIssueChips,
+  memberStatusBadge,
   memberMatchesFilters,
   type CellDisplay,
   type ComplianceBand,
@@ -33,17 +32,8 @@ import {
  * `training-matrix-view.ts`; this file only renders it.
  */
 
-const BAND_BAR: Record<ComplianceBand, string> = {
-  success: 'bg-success',
-  warning: 'bg-warning',
-  danger: 'bg-danger',
-};
-
-const BAND_TEXT: Record<ComplianceBand, string> = {
-  success: 'text-success-text',
-  warning: 'text-warning-text',
-  danger: 'text-danger-text',
-};
+const BAND_BAR: Record<ComplianceBand, string> = TONE_BAR;
+const BAND_TEXT: Record<ComplianceBand, string> = TONE_TEXT;
 
 /** The square itself — colours from the same tokens the Badge variants use. */
 const CELL_STYLE: Record<CellDisplay['kind'], string> = {
@@ -118,24 +108,6 @@ function ComplianceMeter({ pct }: { pct: number }) {
   );
 }
 
-/** A member's headline standing: gaps beat expiring beats compliant. */
-function memberStatusBadge(
-  member: TrainingMatrixMember,
-  windowDays: number,
-  now: Date,
-): { label: string; variant: 'success' | 'warning' | 'danger' } {
-  let gaps = 0;
-  let expiring = 0;
-  for (const cell of member.cells) {
-    const kind = cellDisplay(cell, windowDays, now).kind;
-    if (kind === 'gap' || kind === 'lapsed') gaps += 1;
-    else if (kind === 'expiring') expiring += 1;
-  }
-  if (gaps > 0) return { label: `${gaps} gap${gaps === 1 ? '' : 's'}`, variant: 'danger' };
-  if (expiring > 0) return { label: `${expiring} expiring`, variant: 'warning' };
-  return { label: 'Compliant', variant: 'success' };
-}
-
 const LEGEND: Array<{ label: string; className: string }> = [
   { label: 'Held', className: CELL_STYLE.held },
   { label: 'Expiring', className: CELL_STYLE.expiring },
@@ -146,7 +118,7 @@ const LEGEND: Array<{ label: string; className: string }> = [
 
 export function TrainingMatrixScreen() {
   const navigate = useNavigate();
-  const { data: matrix, isLoading, isError } = useTrainingMatrix();
+  const { data: matrix, isLoading, isError, dataUpdatedAt } = useTrainingMatrix();
   const { data: taxonomy } = useTaxonomy();
 
   const [view, setView] = useState<'grid' | 'group'>('grid');
@@ -159,9 +131,16 @@ export function TrainingMatrixScreen() {
   const [showRecommended, setShowRecommended] = useState(true);
   const [shown, setShown] = useState(ROW_CHUNK);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Groups the user asked to see past the first ROW_CHUNK members of — the
+  // grouped view's analog of the grid's "Show more", so expanding every group
+  // on a large org never renders the whole workforce at once.
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
 
-  // One instant for the whole render, so no two cells disagree about "today".
-  const now = useMemo(() => new Date(), []);
+  // One instant for the whole render, so no two cells disagree about "today" —
+  // re-anchored whenever a fresh payload lands (dataUpdatedAt), so a
+  // long-lived tab that refetches never computes day counts against the
+  // mount-time clock.
+  const now = useMemo(() => new Date(), [dataUpdatedAt]);
 
   const competencies = matrix?.competencies ?? [];
   const members = matrix?.members ?? [];
@@ -469,7 +448,7 @@ export function TrainingMatrixScreen() {
                 </button>
                 {open && (
                   <div className="border-t border-border-subtle">
-                    {g.members.map((m) => {
+                    {(expandedGroups.has(g.name) ? g.members : g.members.slice(0, ROW_CHUNK)).map((m) => {
                       const badge = memberStatusBadge(m, windowDays, now);
                       const { chips, more } = memberIssueChips(m, competencies, windowDays, now);
                       return (
@@ -477,6 +456,7 @@ export function TrainingMatrixScreen() {
                           key={m.membershipId}
                           onClick={() => navigate(`/app/profile/${m.membershipId}`)}
                           className="flex w-full items-center gap-3 border-b border-border-subtle px-4 py-2.5 text-left last:border-b-0 hover:bg-surface-sunken"
+                          style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 49px' }}
                         >
                           <Avatar name={m.name} size="sm" />
                           <span className="min-w-0 flex-none">
@@ -501,6 +481,16 @@ export function TrainingMatrixScreen() {
                         </button>
                       );
                     })}
+                    {!expandedGroups.has(g.name) && g.members.length > ROW_CHUNK && (
+                      <button
+                        onClick={() =>
+                          setExpandedGroups((prev) => new Set(prev).add(g.name))
+                        }
+                        className="w-full px-4 py-2.5 text-left text-[12.5px] font-semibold text-text-accent hover:bg-surface-sunken"
+                      >
+                        Show all {g.members.length} people
+                      </button>
+                    )}
                   </div>
                 )}
               </Card>

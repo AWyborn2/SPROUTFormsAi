@@ -1214,6 +1214,10 @@ export function useApplyAwardLink() {
       qc.invalidateQueries({ queryKey: keys.assessorQueue });
       qc.invalidateQueries({ queryKey: keys.workingList });
       qc.invalidateQueries({ queryKey: keys.compliance });
+      // The training matrix and summary read the same standing the compliance
+      // report does; the bare summary prefix sweeps every (scope, axis) cache.
+      qc.invalidateQueries({ queryKey: keys.trainingMatrix });
+      qc.invalidateQueries({ queryKey: ['training-summary'] });
       qc.invalidateQueries({ queryKey: keys.auditLog });
     },
   });
@@ -1799,6 +1803,10 @@ function useRequirementWriteInvalidation(ref: RequirementScopeRef) {
     void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     void qc.invalidateQueries({ queryKey: keys.myRecommended });
     void qc.invalidateQueries({ queryKey: keys.compliance });
+    // The training matrix and summary read the same standing the compliance
+    // report does; the bare summary prefix sweeps every (scope, axis) cache.
+    void qc.invalidateQueries({ queryKey: keys.trainingMatrix });
+    void qc.invalidateQueries({ queryKey: ['training-summary'] });
     void qc.invalidateQueries({ queryKey: keys.auditLog });
   };
 }

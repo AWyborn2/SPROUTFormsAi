@@ -37,6 +37,7 @@ import { runSnapshotted } from './requirement-links.js';
 import {
   complianceCountsOf,
   requiredStandingByMember,
+  usersByScopeId,
   type MatrixCompetency,
   type MatrixGrant,
 } from './training-matrix.js';
@@ -350,27 +351,19 @@ export async function captureComplianceSnapshots(
       }
       return { orgId, capturedOn, scopeType, scopeId, ...complianceCountsOf(subset) };
     };
-    const usersPlacedAt = <T extends { membershipId: string }>(
-      placements: readonly T[],
-      keyOf: (row: T) => string,
-      wanted: string,
-    ): string[] =>
-      placements
-        .filter((p) => keyOf(p) === wanted)
-        .map((p) => userOfMembership.get(p.membershipId))
-        .filter((id): id is string => Boolean(id));
+    const byLocation = usersByScopeId(locationPlacements, (p) => p.locationId, userOfMembership);
+    const byDepartment = usersByScopeId(
+      departmentPlacements,
+      (p) => p.departmentId,
+      userOfMembership,
+    );
+    const noUsers: ReadonlySet<string> = new Set<string>();
 
     const rows = [
       rowFor(null, null, userIds),
-      ...activeLocations.map((l) =>
-        rowFor('location', l.id, usersPlacedAt(locationPlacements, (p) => p.locationId, l.id)),
-      ),
+      ...activeLocations.map((l) => rowFor('location', l.id, byLocation.get(l.id) ?? noUsers)),
       ...activeDepartments.map((d) =>
-        rowFor(
-          'department',
-          d.id,
-          usersPlacedAt(departmentPlacements, (p) => p.departmentId, d.id),
-        ),
+        rowFor('department', d.id, byDepartment.get(d.id) ?? noUsers),
       ),
     ];
 

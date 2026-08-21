@@ -133,6 +133,10 @@ export interface DeltaChip {
 export function signOffDeltaChip(currentWeek: number, priorFullWeek: number): DeltaChip | null {
   const delta = currentWeek - priorFullWeek;
   if (delta === 0) return null;
+  // Week-to-date zero against a real prior week is Monday morning, not a
+  // collapse — a full-red "▼ N vs last wk" minutes into the week is exactly
+  // the misleading arrow the zero rule above exists to prevent.
+  if (currentWeek === 0 && priorFullWeek > 0) return null;
   return delta > 0
     ? { text: `▲ ${delta} vs last wk`, tone: 'success' }
     : { text: `▼ ${-delta} vs last wk`, tone: 'danger' };

@@ -90,6 +90,30 @@ const grant = (userId: string, competencyId: string, over: Record<string, unknow
   ...over,
 });
 
+/**
+ * Bound `YYYY-MM-DD` params inside a drizzle condition AST — enough for the
+ * fake to apply the route's capturedOn range the way Postgres would, without
+ * modelling the whole where clause.
+ */
+function boundDateParams(cond: unknown): string[] {
+  const out: string[] = [];
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    const rec = node as { queryChunks?: unknown[]; value?: unknown };
+    if (Array.isArray(rec.queryChunks)) {
+      rec.queryChunks.forEach(walk);
+      return;
+    }
+    if (typeof rec.value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(rec.value)) out.push(rec.value);
+  };
+  walk(cond);
+  return out;
+}
+
 function fakeDb(opts: {
   planTier?: string;
   memberships?: unknown[];
@@ -184,9 +208,18 @@ function fakeDb(opts: {
       assessmentCases: {
         findMany: vi.fn(async () => (opts.cases ?? []).filter((c) => c.signedOffAt != null)),
       },
-      // Same posture for `isNull(scopeType)` — org rows only.
+      // Same posture for `isNull(scopeType)` — org rows only. The route now
+      // bounds the read at the query (gte on capturedOn), so the fake honours
+      // the bound date param the same way Postgres would.
       complianceSnapshots: {
-        findMany: vi.fn(async () => (opts.snapshots ?? []).filter((r) => r.scopeType == null)),
+        findMany: vi.fn(async (args?: { where?: unknown }) => {
+          const cutoff = boundDateParams(args?.where)[0];
+          return (opts.snapshots ?? []).filter(
+            (r) =>
+              r.scopeType == null &&
+              (cutoff === undefined || (typeof r.capturedOn === 'string' && r.capturedOn >= cutoff)),
+          );
+        }),
       },
     },
   } as unknown as Db;
@@ -374,6 +407,64 @@ describe('GET /training-summary — scope (R12)', () => {
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toBe('unknown_scope');
+    server.close();
+  });
+});
+
+describe('GET /training-summary — group axis (R11)', () => {
+  const ROLE = '33333333-3333-3333-3333-333333333333';
+  const ROLE_RETIRED = '44444444-4444-4444-4444-444444444444';
+
+  it('?axis=role groups by held roles and keeps a RETIRED-but-held role on the chart', async () => {
+    // u1 holds an active role and gaps; u2 holds a RETIRED role and is
+    // compliant. Roles chart with ANY status (a retired-but-held role still
+    // contributes requirements — the U4 split), unlike location/department.
+    mockDbValue = fakeDb({
+      memberships: [member(1), member(2)],
+      membershipRoles: [
+        { membershipId: 'm1', roleId: ROLE, withdrawnAt: null },
+        { membershipId: 'm2', roleId: ROLE_RETIRED, withdrawnAt: null },
+      ],
+      jobRoles: [
+        { id: ROLE, orgId: 'org-1', name: 'Dozer Operator', status: 'active' },
+        { id: ROLE_RETIRED, orgId: 'org-1', name: 'Tip Head Spotter', status: 'retired' },
+      ],
+      roleLinks: [orgLink(COMP)],
+      holders: [grant('u2', COMP, { expiresAt: daysAhead(400) })],
+    });
+    const { server, base } = startApp();
+    const body = await getSummary(base, '?axis=role');
+    expect(body.complianceByGroup.axis).toBe('role');
+    expect(body.complianceByGroup.groups).toEqual([
+      { id: ROLE, name: 'Dozer Operator', memberCount: 1, compliantCount: 0 },
+      { id: ROLE_RETIRED, name: 'Tip Head Spotter', memberCount: 1, compliantCount: 1 },
+    ]);
+    server.close();
+  });
+
+  it('?axis=location groups by placement and drops a retired location from the chart', async () => {
+    const LOC_RETIRED = '55555555-5555-5555-5555-555555555555';
+    mockDbValue = fakeDb({
+      memberships: [member(1), member(2)],
+      membershipLocations: [
+        { membershipId: 'm1', locationId: LOC, position: 0 },
+        { membershipId: 'm2', locationId: LOC_RETIRED, position: 0 },
+      ],
+      locations: [
+        { id: LOC, orgId: 'org-1', name: 'Boddington', status: 'active' },
+        { id: LOC_RETIRED, orgId: 'org-1', name: 'Old Pit', status: 'retired' },
+      ],
+      roleLinks: [orgLink(COMP)],
+      holders: [grant('u1', COMP, { expiresAt: daysAhead(400) })],
+    });
+    const { server, base } = startApp();
+    const body = await getSummary(base, '?axis=location');
+    expect(body.complianceByGroup.axis).toBe('location');
+    // Only the ACTIVE location charts; its one placed member is compliant.
+    // m2's retired site confers nothing and charting it would resurrect it.
+    expect(body.complianceByGroup.groups).toEqual([
+      { id: LOC, name: 'Boddington', memberCount: 1, compliantCount: 1 },
+    ]);
     server.close();
   });
 });
