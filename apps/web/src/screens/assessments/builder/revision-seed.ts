@@ -61,11 +61,25 @@ export function revisionDraftName(tool: RevisionSeedTool, version: RevisionSeedV
   return `${tool.name} — revision of ${version.label}`;
 }
 
-/** Keys as the published fields carry them, unverified. */
+/**
+ * Keys as the published fields carry them, unverified.
+ *
+ * A WRITTEN question's model answer seeds the same way an answer key does —
+ * as a draft key row (`answerKey: []`, `modelAnswer` prose) — because the
+ * builder's Answer Key step reads model answers from the keys, never off the
+ * fields. A seed that left them on the fields alone would open the revision
+ * showing every written question unguided while quietly republishing the old
+ * guides underneath.
+ */
 function keysFromFields(fields: readonly FormField[]): DraftAnswerKey[] {
   return fields
-    .filter((f) => Array.isArray(f.answerKey) && f.answerKey.length > 0)
-    .map((f) => ({ fieldId: f.id, answerKey: [...f.answerKey!], source: 'manual' as const }));
+    .filter((f) => (Array.isArray(f.answerKey) && f.answerKey.length > 0) || f.modelAnswer)
+    .map((f) => ({
+      fieldId: f.id,
+      answerKey: Array.isArray(f.answerKey) ? [...f.answerKey] : [],
+      ...(f.modelAnswer ? { modelAnswer: f.modelAnswer } : {}),
+      source: 'manual' as const,
+    }));
 }
 
 /** Whether two keys name the same option set (order-free, exact-set). */
@@ -167,8 +181,15 @@ export function seedRevisionSnapshot({
   );
   const keys = seededKeys.map((k) => {
     const recorded = priorKeyByField.get(k.fieldId);
-    // R15: verification carries only for an unchanged answer.
-    if (recorded && sameKey(recorded.answerKey, k.answerKey) && recorded.verifiedBy) {
+    // R15: verification carries only for an unchanged answer — the option set
+    // AND the model text, because a written key's answer IS its prose. Both
+    // absent compares equal, so choice keys are untouched by the second check.
+    if (
+      recorded &&
+      sameKey(recorded.answerKey, k.answerKey) &&
+      recorded.modelAnswer === k.modelAnswer &&
+      recorded.verifiedBy
+    ) {
       return {
         ...k,
         source: recorded.source,

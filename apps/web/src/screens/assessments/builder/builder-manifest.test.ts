@@ -284,6 +284,25 @@ describe('derivePartsFromStructure', () => {
     expect(parts[0]!.mandatoryFieldIds).toEqual(['q1']);
   });
 
+  it('NEVER PROPOSES A MODEL KEY as mandatory', () => {
+    /*
+      A written question's model key (`answerKey: []` + `modelAnswer`) is a
+      row marking never reads. Proposing its question as mandatory would hand
+      `validateManifest` a mandatory question with no answer key the moment an
+      author types a model answer — a legitimate guide becoming a publish
+      blocker.
+    */
+    const parts = derive(
+      [section('p1', 'Part 1', ['q1', 'w1'])],
+      [question('q1'), field({ id: 'w1', type: 'textarea' })],
+      [
+        { fieldId: 'q1', answerKey: ['a'], source: 'manual' },
+        { fieldId: 'w1', answerKey: [], modelAnswer: 'The expected prose', source: 'manual' },
+      ],
+    );
+    expect(parts[0]!.mandatoryFieldIds).toEqual(['q1']);
+  });
+
   it('never proposes an excluded question as mandatory', () => {
     const parts = derive(
       [section('p1', 'Part 1', ['q1', 'q2'])],

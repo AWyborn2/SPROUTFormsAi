@@ -444,8 +444,11 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         <span className="block text-[14.5px] font-semibold text-success-text">Published</span>
         <p className="mt-1 text-[12.5px] text-success-text">
           {summary.parts} part{summary.parts === 1 ? '' : 's'} · {summary.questionsKeyed} question
-          {summary.questionsKeyed === 1 ? '' : 's'} keyed ({summary.questionsVerified} verified) ·{' '}
-          {summary.boxesPlaced} box{summary.boxesPlaced === 1 ? '' : 'es'} placed. The tool is
+          {summary.questionsKeyed === 1 ? '' : 's'} keyed ({summary.questionsVerified} verified)
+          {summary.writtenGuided
+            ? ` · ${summary.writtenGuided} written with model answers`
+            : ''}{' '}
+          · {summary.boxesPlaced} box{summary.boxesPlaced === 1 ? '' : 'es'} placed. The tool is
           enrollable from Assessments.
         </p>
         {/*
@@ -480,7 +483,9 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
         <span className="block text-[14.5px] font-semibold">Publish</span>
         <p className="mt-0.5 text-[11.5px] text-text-tertiary">
           {summary.parts} part{summary.parts === 1 ? '' : 's'} · {summary.questionsKeyed} keyed ·{' '}
-          {summary.questionsVerified} verified · {summary.boxesPlaced} placed
+          {summary.questionsVerified} verified
+          {summary.writtenGuided ? ` · ${summary.writtenGuided} written guided` : ''} ·{' '}
+          {summary.boxesPlaced} placed
         </p>
         {summary.questionsKeyed > summary.questionsVerified && (
           <p className="mt-2 text-[11.5px] text-text-secondary">
@@ -733,6 +738,27 @@ export function WorkflowStep({ draft }: WorkflowStepProps) {
             Place these in <strong>PDF mapping</strong> before publishing, or the marks will
             compute and the printed record will not show them.
           </p>
+        </div>
+      )}
+
+      {/*
+        MARKING COMPOSITIONS THAT MISBEHAVE AT RUNTIME — an auto-locked verdict
+        beside untargeted Yes/No boxes auto-fails hand-ins; a written question's
+        mark aimed at a table cell is untickable on the marking pass. Warnings,
+        never gates, in the shared validator's own words — the same doctrine as
+        the unplaced-marks block above.
+      */}
+      {check.warnings.length > 0 && (
+        <div className="flex flex-col gap-1.5 rounded-[14px] border border-warning bg-warning-soft p-3">
+          <span className="text-[11.5px] font-semibold text-warning-text">
+            {check.warnings.length} marking setup issue{check.warnings.length === 1 ? '' : 's'} worth
+            a look before publishing
+          </span>
+          {check.warnings.map((message, i) => (
+            <p key={i} className="text-[11.5px] text-warning-text">
+              {message}
+            </p>
+          ))}
         </div>
       )}
 

@@ -66,10 +66,15 @@ vi.mock('../use-start-revision.js', () => ({
   open so the only thing standing between the author and publish is what THIS
   round added — the award.
 */
+// Mutable so the summary tests below can add `writtenGuided` without a second
+// mock — reset in afterEach so every other test keeps the plain shape.
+const summaryState: { value: Record<string, unknown> } = {
+  value: { parts: 1, questionsKeyed: 2, questionsVerified: 1, boxesPlaced: 2 },
+};
 vi.mock('../builder-publish.js', () => ({
-  checkPublish: () => ({ problems: [], fields: [], carried: [], inferred: [], unplaced: [] }),
+  checkPublish: () => ({ problems: [], fields: [], carried: [], inferred: [], unplaced: [], warnings: [] }),
   extractionQuestionRefs: () => new Map<string, string>(),
-  publishSummary: () => ({ parts: 1, questionsKeyed: 2, questionsVerified: 1, boxesPlaced: 2 }),
+  publishSummary: () => summaryState.value,
   composeRevisionManifest: (_seed: unknown, next: unknown) => next,
 }));
 
@@ -132,6 +137,7 @@ const publishButton = () =>
 afterEach(() => {
   vi.clearAllMocks();
   competencies.data = [];
+  summaryState.value = { parts: 1, questionsKeyed: 2, questionsVerified: 1, boxesPlaced: 2 };
   saveFieldsAsync.mockReset().mockResolvedValue(undefined);
   createToolAsync.mockReset().mockResolvedValue({ id: 'tool-new' });
   createDraftAsync.mockReset().mockResolvedValue({ formId: 'nf-1', versionId: 'nv-1' });
@@ -248,5 +254,50 @@ describe('WorkflowStep award control (U5)', () => {
     expect(createToolAsync).toHaveBeenCalledWith(
       expect.objectContaining({ templateId: 'nf-1', awardedCompetencyIds: ['c-grader'] }),
     );
+  });
+});
+
+describe('WorkflowStep publish summary — the written-guided clause', () => {
+  /*
+    `publishSummary.writtenGuided` is present-only-when-nonzero, and the step
+    renders it in TWO places: the pre-publish blurb ("N written guided") and
+    the post-publish success card ("N written with model answers"). Both
+    states are walked in one test so neither clause can quietly drop out of
+    one surface while the other keeps it.
+  */
+  async function publishThrough() {
+    fireEvent.change(screen.getByLabelText('This assessment awards'), {
+      target: { value: 'c-grader' },
+    });
+    await act(async () => {
+      fireEvent.click(publishButton());
+    });
+  }
+
+  it('renders the clause in BOTH summary states when written guides exist', async () => {
+    summaryState.value = {
+      parts: 1,
+      questionsKeyed: 2,
+      questionsVerified: 1,
+      boxesPlaced: 2,
+      writtenGuided: 3,
+    };
+    competencies.data = [GRADER];
+    render(<WorkflowStep draft={draftOf()} />);
+
+    expect(document.body.textContent).toContain('3 written guided');
+
+    await publishThrough();
+    expect(document.body.textContent).toContain('3 written with model answers');
+  });
+
+  it('omits the clause entirely in both states when the draft has none', async () => {
+    competencies.data = [GRADER];
+    render(<WorkflowStep draft={draftOf()} />);
+
+    expect(document.body.textContent).not.toContain('written guided');
+
+    await publishThrough();
+    expect(document.body.textContent).not.toContain('written with model answers');
   });
 });

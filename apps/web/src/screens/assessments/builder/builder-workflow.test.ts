@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { AssessmentToolManifest, BuilderStructure, FormField } from '@formai/shared';
-import { canWrite, partFieldAccess, sectionCoveringField } from '@formai/shared';
+import { canWrite, effectiveAccess, partFieldAccess, sectionCoveringField } from '@formai/shared';
 import { workflowFromStructure } from './builder-workflow.js';
 import type { DerivedPart } from './builder-manifest.js';
 
@@ -100,6 +100,58 @@ describe('workflowFromStructure', () => {
 
     expect(w.sections.find((s) => s.key === 'details')?.fieldIds).toEqual(['name', 'swipe']);
     expect(w.sections.find((s) => s.key === 'prereqs')?.fieldIds).toEqual([]);
+  });
+});
+
+describe('written questions — the assessor-marked cells', () => {
+  /*
+    The lock split, at the builder's emission site: `autoSourcesFor` locks only
+    KEYED questions' ✓/✗ cells (marking writes those), so an unkeyed written
+    question's declared cell must come out assessor-fillable and candidate-view
+    here — or publishing hands the candidate the box that records whether their
+    own answer was satisfactory.
+  */
+  // Inserted INSIDE the theory part's contiguous slice (between q1-out and the
+  // declaration anchor) — `assessorMarkBoxIds` reads `fieldsInPart`, and a
+  // written question printed in another part is that part's business.
+  const writtenFields: FormField[] = fields.flatMap((f) =>
+    f.id === 'q1-out'
+      ? [
+          f,
+          { ...field('w1', 'textarea'), modelAnswer: 'the expected prose', outcomeTarget: { fieldId: 'w1-out' } },
+          field('w1-out', 'check_cross'),
+        ]
+      : [f],
+  );
+  const writtenStructure: BuilderStructure = structure.map((s) =>
+    s.key === 'theory'
+      ? { ...s, fields: [...s.fields, { id: 'w1' }, { id: 'w1-out' }] }
+      : s,
+  ) as BuilderStructure;
+
+  const w = workflowFromStructure(writtenStructure, parts, manifest, writtenFields);
+  const theory = w.sections.find((s) => s.key === 'theory')!;
+
+  it('grants the assessor the pen and the candidate only eyes on the written question’s box', () => {
+    expect(canWrite(theory, 'w1-out', 'assessor')).toBe(true);
+    expect(canWrite(theory, 'w1-out', 'candidate')).toBe(false);
+    // Visible, not hidden — the candidate is entitled to see the standard
+    // being applied to them.
+    expect(effectiveAccess(theory, 'w1-out', 'candidate')).toBe('view');
+    // The written question itself stays the candidate's to answer.
+    expect(canWrite(theory, 'w1', 'candidate')).toBe(true);
+  });
+
+  it('keeps the keyed neighbour’s cell locked for everyone', () => {
+    expect(canWrite(theory, 'q1-out', 'candidate')).toBe(false);
+    expect(canWrite(theory, 'q1-out', 'assessor')).toBe(false);
+  });
+
+  it('emits no fieldAccess at all for a tool whose targets are all keyed', () => {
+    // The regression pin: the module-level fixture keys its only target, so
+    // the published workflow must keep the exact shape it had before the
+    // split — no `fieldAccess` key appearing on any section.
+    expect(workflow.sections.every((s) => !('fieldAccess' in s))).toBe(true);
   });
 });
 

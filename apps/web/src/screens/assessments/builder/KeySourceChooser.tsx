@@ -36,7 +36,16 @@ export interface KeySourceChooserProps {
 }
 
 interface Outcome {
+  /** Choice keys seeded — rows with options in them. */
   seeded: number;
+  /**
+   * Model answers seeded for WRITTEN questions. Reported as its own number
+   * because it is a different promise: a key auto-marks, a model answer is a
+   * guide an assessor marks against. "15 answers seeded" over 4 keys and 11
+   * guides would claim auto-marking for eleven questions the machine never
+   * touches.
+   */
+  models: number;
   problems: GuideProblem[];
   note?: string;
 }
@@ -59,7 +68,11 @@ export function KeySourceChooser({ sections, fields, excluded, onSeed }: KeySour
       }
       const match = matchGuideToQuestions(parsed.entries, sections, fields, excluded);
       onSeed(match.keys);
-      setOutcome({ seeded: match.keys.length, problems: match.problems });
+      setOutcome({
+        seeded: match.keys.filter((k) => k.answerKey.length > 0).length,
+        models: match.keys.filter((k) => k.modelAnswer).length,
+        problems: match.problems,
+      });
     } catch {
       // A JSON parse failure is the common case here — somebody picked the
       // wrong file — and saying which file operation failed is what makes it
@@ -112,6 +125,8 @@ export function KeySourceChooser({ sections, fields, excluded, onSeed }: KeySour
       onSeed(keys);
       setOutcome({
         seeded: keys.length,
+        // The PDF route seeds choice keys only this round.
+        models: 0,
         // The model's own notes are reported as problems, because that is what
         // they are: questions it declined to answer and why.
         problems: (result.notes ?? []).map((reason) => ({ section: 'From the guide', reason })),
@@ -168,7 +183,10 @@ export function KeySourceChooser({ sections, fields, excluded, onSeed }: KeySour
         <div className="flex flex-col gap-1.5">
           <p className="rounded-[10px] border border-border-subtle bg-surface-sunken p-[8px_10px] text-[11.5px] text-text-secondary">
             <strong>
-              {outcome.seeded} answer{outcome.seeded === 1 ? '' : 's'} seeded
+              {outcome.seeded} answer{outcome.seeded === 1 ? '' : 's'}
+              {outcome.models > 0 &&
+                ` · ${outcome.models} model answer${outcome.models === 1 ? '' : 's'}`}{' '}
+              seeded
             </strong>
             , none verified. {outcome.note}
           </p>

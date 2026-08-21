@@ -280,8 +280,10 @@ export function partFieldAccess(
  * its own structure without touching the version.
  *
  * Same guarantees as the builder's emission: everyone-fills access (changing
- * who may write is the author's act, not a rebuild's), outcome cells locked
- * `auto` through `autoSourcesFor`, profile-mapped fields locked `prefill`.
+ * who may write is the author's act, not a rebuild's), keyed questions' outcome
+ * cells locked `auto` through `autoSourcesFor`, unkeyed-but-targeted cells left
+ * to the assessor via `assessorMarkAccess`, profile-mapped fields locked
+ * `prefill`.
  */
 export function workflowFromFields(
   fields: readonly FormField[],
@@ -324,7 +326,14 @@ export function workflowFromFields(
       access: { candidate: 'fill', assessor: 'fill' },
     };
     if (part) {
-      return { ...base, partKey: part.key, fieldSource: autoSourcesFor(manifest, part, fields) };
+      // Same pair of guarantees as the derived default: keyed cells locked
+      // `auto`, unkeyed-but-targeted cells assessor-fillable and candidate-view.
+      return {
+        ...base,
+        partKey: part.key,
+        fieldSource: autoSourcesFor(manifest, part, fields),
+        ...assessorMarkAccess(manifest, part, fields),
+      };
     }
     const fieldSource: Record<string, ValueSource> = {};
     for (const id of draft.ids) {
@@ -397,6 +406,13 @@ export function derivedWorkflow(
         by refusing the keystroke: a typed outcome was never going to survive.
       */
       fieldSource: autoSourcesFor(manifest, part, fields),
+      /*
+        AND THE CELLS MARKING WILL NEVER WRITE — an unkeyed written question's
+        declared ✓/✗ box — are the assessor's to tick, not the candidate's.
+        Spreads to nothing for the all-keyed tools, so their sections keep the
+        exact shape they had (no `fieldAccess` key appears at all).
+      */
+      ...assessorMarkAccess(manifest, part, fields),
     }));
   return { roles: ['candidate', 'assessor'], sections };
 }
@@ -434,14 +450,23 @@ export function autoSourcesFor(
   for (const id of partMarkFieldIds(part)) auto(id);
 
   /*
-    EVERY QUESTION'S OWN ✓/✗ CELL — the ones the candidate could press.
+    EVERY KEYED QUESTION'S OWN ✓/✗ CELL — the ones the candidate could press.
 
     Scoped to this part's fields, so a section covers only the cells printed
     inside it. Read off `outcomeTarget`, which is the same declaration
     `markTheory` writes through: if marking will write it, nobody types it.
+
+    KEYED ONLY, so that sentence stays literally true. Marking's loop skips a
+    question without a key, so an UNKEYED question's declared cell — a written
+    question whose ✓/✗ the ASSESSOR ticks after judging the answer — is one
+    marking will never write. Locking it `auto` produced a box nobody could
+    fill: not the machine (no key to mark), not a person (`canWrite` refuses
+    every non-`entry` field) — a permanently blank cell on an evidence
+    document. Those cells stay `entry`; `assessorMarkBoxIds` names them so the
+    emission sites can grant the assessor the pen and the candidate only eyes.
   */
   for (const field of fieldsInPart(fields, manifest, part.key)) {
-    auto(field.outcomeTarget?.fieldId);
+    if ((field.answerKey?.length ?? 0) > 0) auto(field.outcomeTarget?.fieldId);
     /*
       A PROFILE-MAPPED FIELD IS PREFILLED, NOT TYPED — same doctrine, different
       source. The id comes from `manifest.profilePrefill`, a declaration the
@@ -470,6 +495,59 @@ export function autoSourcesFor(
   }
 
   return out;
+}
+
+/**
+ * The ✓/✗ cells of one part that are the ASSESSOR'S TO TICK — the declared
+ * targets of UNKEYED questions.
+ *
+ * The complement of what `autoSourcesFor` locks: a keyed question's cell is
+ * written by marking and locked `auto`; an unkeyed question's cell — a written
+ * question the assessor judges against its `modelAnswer` — is written by a
+ * person. That person must be the assessor and never the candidate, or the
+ * fill surface hands a candidate the box that records whether their own answer
+ * was satisfactory. The emission sites merge `candidate: 'view'` for these ids
+ * (see `assessorMarkAccess`): visible because the candidate is entitled to see
+ * the standard applied to them, unwritable because it is not theirs to apply.
+ *
+ * Same declarations-only doctrine as `autoSourcesFor`: every id here comes off
+ * a question's own `outcomeTarget`, never a guess from a field's type. A tool
+ * whose targets are all keyed — every tool published before written model
+ * answers existed — returns empty, and the emitted workflow is byte-identical.
+ */
+export function assessorMarkBoxIds(
+  manifest: AssessmentToolManifest,
+  part: AssessmentToolManifest['parts'][number],
+  fields: readonly FormField[],
+): string[] {
+  const out: string[] = [];
+  for (const field of fieldsInPart(fields, manifest, part.key)) {
+    if ((field.answerKey?.length ?? 0) > 0) continue;
+    const id = field.outcomeTarget?.fieldId;
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
+/**
+ * The `fieldAccess` fragment for one part's assessor-ticked cells, spreadable
+ * into a section literal — `{}` (no key at all) when the part has none, so a
+ * tool with no unkeyed targets emits exactly the workflow it always did.
+ *
+ * Candidate is overridden to `view`; the assessor is deliberately NOT named,
+ * inheriting the section's own level — an author who narrows a section later
+ * must not find a stale per-field `fill` overriding their decision.
+ */
+export function assessorMarkAccess(
+  manifest: AssessmentToolManifest,
+  part: AssessmentToolManifest['parts'][number],
+  fields: readonly FormField[],
+): { fieldAccess?: Record<string, Partial<Record<WorkflowRole, FieldAccess>>> } {
+  const ids = assessorMarkBoxIds(manifest, part, fields);
+  if (ids.length === 0) return {};
+  return {
+    fieldAccess: Object.fromEntries(ids.map((id) => [id, { candidate: 'view' as FieldAccess }])),
+  };
 }
 
 /** The tool's workflow, configured or synthesised. */

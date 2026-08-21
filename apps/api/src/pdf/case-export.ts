@@ -2,8 +2,10 @@ import {
   autoVerdictWrite,
   caseProgress,
   completionTickRows,
+  fieldsInPart,
   isCaseCompetent,
   isSelfMarking,
+  markKeyedQuestions,
   markTheory,
   moreCoachingRequired,
   requiredParts,
@@ -154,9 +156,11 @@ function authoritativeAttempt(
  * Re-run the same arithmetic over the same stored answers with the same
  * version's keys, and MERGE UNDER the stored values: anything marking (or a
  * person) already recorded wins, so a certified record is never rewritten —
- * only its silences are filled. Skipped entirely unless the attempt PASSED and
- * the part marks itself: a failed attempt never prints, and a judged part's
- * marks belong to the person who judged it.
+ * only its silences are filled. Skipped entirely unless the attempt PASSED —
+ * a failed attempt never prints. A self-marking part heals the full result
+ * (marks, verdict pair, further-action note); a JUDGED part heals only its
+ * keyed subset's ✓/✗ (mixed marking), because everything else on it belongs
+ * to the person who judged it.
  */
 export function withDerivedMarks(
   attempt: CaseAttemptRecord,
@@ -166,7 +170,28 @@ export function withDerivedMarks(
   if (attempt.outcome !== 'satisfactory') return attempt;
   const part = manifest.parts.find((p) => p.key === attempt.partKey);
   if (!part) return attempt;
-  if (!isSelfMarking(versionFields, manifest, part.key)) return attempt;
+  if (!isSelfMarking(versionFields, manifest, part.key)) {
+    /*
+      A JUDGED part is a person's verdict — but its KEYED SUBSET is still
+      arithmetic (mixed marking). The outcome route persists those pre-marks
+      now; an attempt resolved before it did stores the answers alone, and the
+      printed ✓/✗ beside each keyed choice question exports blank on exactly
+      the paper the marks were computed for. Same healing rule as below: same
+      arithmetic, same keys, merged UNDER the stored values so a box the
+      assessor ticked — every written question's, and any keyed cell a person
+      overrode — is never rewritten.
+
+      Scoped to the PART'S OWN SLICE, unlike the whole-version `markTheory`
+      call below: this runs for every judged part of the case, and marking one
+      part's attempt against another part's keys would write marks for
+      questions this attempt never contained. A part with no keyed question
+      derives nothing and the attempt is returned untouched — which keeps a
+      purely person-judged practical exactly as the person left it.
+    */
+    const keyed = markKeyedQuestions(fieldsInPart(versionFields, manifest, part.key), attempt.values);
+    if (keyed.marks.length === 0) return attempt;
+    return { ...attempt, values: { ...keyed.derivedValues, ...(attempt.values ?? {}) } };
+  }
 
   const marked = markTheory({ fields: versionFields, values: attempt.values, part, manifest });
   // The part's auto-locked verdict radio, by the same rule hand-in writes it —

@@ -171,6 +171,18 @@ export function CasePartFillScreen() {
   );
   const [pageIndex, setPageIndex] = useState(0);
 
+  /*
+    The assessor's marking guide, keyed for the per-field callout below. Present
+    only on an assessor payload — the server sends the property ABSENT for a
+    candidate, so an empty map here is also the proof nothing leaked. Memoized
+    (and above the early returns, like every hook here) because `values` is
+    keystroke-hot state — rebuilding the map every render is waste.
+  */
+  const modelAnswers = useMemo(
+    () => new Map((attempt?.markingGuide ?? []).map((g) => [g.fieldId, g.modelAnswer])),
+    [attempt?.markingGuide],
+  );
+
   if (isLoading) {
     return <div className="p-[30px_28px] text-sm text-text-tertiary">Loading…</div>;
   }
@@ -200,15 +212,34 @@ export function CasePartFillScreen() {
   // take it back until it is marked.
   const marked = attempt.outcome !== null;
   const handedIn = attempt.submittedAt !== null;
-  const readOnly = marked || handedIn;
+  /*
+    THE MARKING PASS: the assessor on a handed-in, not-yet-marked attempt. The
+    server already narrowed `writableFieldIds` to the marking surface — the
+    per-question ✓/✗ boxes and the sign-off block — so the screen opens for
+    editing and the field gate below does the rest: the candidate's prose stays
+    disabled because it is no longer in the writable set. `party` is identity,
+    decided server-side, so a self-assessing candidate is `candidate` here and
+    keeps today's frozen view of their own handed-in paper.
+  */
+  const markingPass = attempt.party === 'assessor' && handedIn && !marked;
+  const readOnly = marked || (handedIn && attempt.party === 'candidate');
 
   /*
     Clamped on READ rather than reset on change: a question answered on the last
     page can make an earlier one visible or hidden, and snapping the candidate
     back to page one every time the list resized would lose their place.
   */
-  const page = pages[Math.min(pageIndex, Math.max(0, pages.length - 1))];
-  const answered = paged ? answeredPages(pages, answers) : 0;
+  /*
+    THE QUIZ WINDOW IS THE CANDIDATE'S. `pages` is built from `quizFields`,
+    which keeps only the writable set — right for a sitting, where marking's
+    print boxes must not render under the questions. But on the marking pass
+    `writableFieldIds` IS the narrow marking surface, so paging there would
+    hand the assessor screens of bare ✓/✗ boxes with no questions and no
+    guide. The marker always gets the full stacked surface instead.
+  */
+  const windowed = paged && !markingPass;
+  const page = windowed ? pages[Math.min(pageIndex, Math.max(0, pages.length - 1))] : undefined;
+  const answered = windowed ? answeredPages(pages, answers) : 0;
   const shown = page ? page.fields : rendered;
   /*
     Which fields this caller may change, as the server decided. A tool with no
@@ -247,8 +278,21 @@ export function CasePartFillScreen() {
 
   function onSave() {
     if (!attemptId || readOnly) return;
+    /*
+      ON THE MARKING PASS, SAVE ONLY WHAT IS OURS TO WRITE. The served values
+      include the keyed questions' PRE-MARKS, merged in for display at cells the
+      workflow keeps `auto` — not writable by anybody. The candidate flow PATCHes
+      its whole map back and the server tolerates unchanged echoes, but a
+      pre-mark is NOT in the stored map yet, so echoing it reads as writing a
+      foreign field and the whole save is refused. Filtering to the server's own
+      writable set sends exactly the marking surface; candidates keep today's
+      whole-map echo untouched.
+    */
+    const payload = markingPass
+      ? Object.fromEntries(Object.entries(values).filter(([id]) => writable.has(id)))
+      : values;
     save.mutate(
-      { attemptId, values },
+      { attemptId, values: payload },
       {
         onSuccess: () => {
           setDirty(false);
@@ -259,7 +303,10 @@ export function CasePartFillScreen() {
     );
   }
 
-  if (paged && !readOnly && pages.length > 0) {
+  // Never the quiz on a marking pass: the quiz is the CANDIDATE'S sitting
+  // presentation (check-answer, retry, hand-in) — the assessor gets the stacked
+  // marking surface with the model answers beside each written question.
+  if (paged && !readOnly && !markingPass && pages.length > 0) {
     return (
       <TheoryQuiz
         pages={pages}
@@ -398,7 +445,15 @@ export function CasePartFillScreen() {
         />
       )}
 
-      {handedIn && !marked && (
+      {/*
+        THE REOPEN BANNER IS THE CANDIDATE'S, BY PARTY. "You can still take it
+        back" is candidate-voiced, and the button beside it reopened the
+        attempt LIVE — on the assessor's marking pass that gesture un-hands-in
+        the paper they are mid-way through marking, which is the candidate's
+        act, never the marker's. The marking pass gets its own one-liner
+        instead, so the state is still named without offering the wrong verb.
+      */}
+      {handedIn && !marked && attempt.party === 'candidate' && (
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5">
           <p className="text-[13px] text-text-secondary">
             Handed in — your assessor will mark this. You can still take it back until they do.
@@ -424,7 +479,15 @@ export function CasePartFillScreen() {
         </div>
       )}
 
-      {paged && pages.length > 1 && (
+      {markingPass && (
+        <div className="mb-4 rounded-[10px] border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5">
+          <p className="text-[13px] text-text-secondary">
+            Marking — tick against the guide and save; the candidate's answers are frozen.
+          </p>
+        </div>
+      )}
+
+      {windowed && pages.length > 1 && (
         <div className="flex items-center gap-3">
           <span
             className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-sunken"
@@ -469,6 +532,24 @@ export function CasePartFillScreen() {
               disabled={readOnly || !writable.has(f.id)}
               onChange={(v) => setValue(f.id, v)}
             />
+            {/*
+              MODEL ANSWER — assessor guide. Rendered BESIDE the field rather
+              than inside it: `FieldInput` stays unforked, and the candidate
+              never has this block because the guide itself is absent from
+              their payload — there is nothing here to hide, only to render.
+              Whitespace-preserving because the answer key's prose arrives with
+              its own line breaks and losing them mangles multi-part answers.
+            */}
+            {modelAnswers.has(f.id) && (
+              <div className="mt-1.5 rounded-[10px] border border-warning bg-warning-soft p-[8px_10px]">
+                <p className="mb-1 text-[10.5px] font-semibold uppercase tracking-wide text-warning-text">
+                  Model answer — assessor guide
+                </p>
+                <p className="whitespace-pre-wrap text-[12.5px] leading-snug text-warning-text">
+                  {modelAnswers.get(f.id)}
+                </p>
+              </div>
+            )}
           </div>
         ))}
         {shown.length === 0 && (
@@ -478,7 +559,7 @@ export function CasePartFillScreen() {
         )}
       </div>
 
-      {paged && pages.length > 1 && (
+      {windowed && pages.length > 1 && (
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -524,6 +605,10 @@ export function CasePartFillScreen() {
           {/* A DECLARATION is not marked — signing it IS the act, so the button
               says what actually happens and nobody is told to wait for a
               marking that will never occur. */}
+          {/* NOT ON THE MARKING PASS: the attempt is already handed in — the
+              assessor saves ticks and records the outcome from the case screen;
+              a second "hand in" here would be an act with no meaning. */}
+          {!markingPass && (
           <Button
             leadingIcon="send"
             disabled={save.isPending || setSubmitted.isPending}
@@ -594,6 +679,7 @@ export function CasePartFillScreen() {
                 ? 'Sign and continue'
                 : 'Hand in for marking'}
           </Button>
+          )}
         </div>
       )}
     </div>

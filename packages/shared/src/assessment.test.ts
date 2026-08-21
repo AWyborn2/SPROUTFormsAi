@@ -558,6 +558,37 @@ describe('validateAnswerKeys', () => {
 
     expect(validateAnswerKeys([q, outcome]).some((p) => p.includes('empty answer key'))).toBe(true);
   });
+
+  it('FLAGS A MODEL ANSWER ON AN OPTIONS-BEARING FIELD — choice questions take keys, not prose', () => {
+    /*
+      The author-confusion case: a marking guide beside a question the machine
+      already marks (or should be keyed to mark) would never be read, and its
+      presence says the author reached for the wrong instrument.
+    */
+    const q = question('q1', { modelAnswer: 'radio channel 2, then wait for clearance' });
+
+    expect(validateAnswerKeys([q]).some((p) => p.includes('model answer'))).toBe(true);
+  });
+
+  it('accepts a written question with a model answer and no target — a guide alone is legitimate', () => {
+    const written = question('q1', { type: 'textarea', options: undefined, modelAnswer: 'the expected prose' });
+
+    expect(validateAnswerKeys([written])).toEqual([]);
+  });
+
+  it('accepts a written question with a model answer AND an outcome target — the assessor’s tick has a home', () => {
+    const outcome = { id: 'o1', type: 'check_cross', label: 'o1', required: false, source: 'imported' } as FormField;
+    const written = question('q1', {
+      type: 'text',
+      options: undefined,
+      modelAnswer: 'the expected prose',
+      outcomeTarget: { fieldId: 'o1' },
+    });
+
+    // No answerKey, so the key-implies-target chain never engages: an unkeyed
+    // target is the assessor's box, not a marking misconfiguration.
+    expect(validateAnswerKeys([written, outcome])).toEqual([]);
+  });
 });
 
 /**
