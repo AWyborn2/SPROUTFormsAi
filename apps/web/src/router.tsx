@@ -32,6 +32,7 @@ import { WorkingListScreen } from './screens/enterprise/WorkingListScreen.js';
 import { ProfileScreen } from './screens/enterprise/ProfileScreen.js';
 import { WorkforceImportScreen } from './screens/enterprise/WorkforceImportScreen.js';
 import { ComplianceScreen } from './screens/enterprise/ComplianceScreen.js';
+import { TrainingMatrixScreen } from './screens/enterprise/TrainingMatrixScreen.js';
 import { AssessmentCasesScreen } from './screens/assessments/AssessmentCasesScreen.js';
 import { AssessorQueueScreen } from './screens/assessments/AssessorQueueScreen.js';
 import { AssessmentCaseScreen } from './screens/assessments/AssessmentCaseScreen.js';
@@ -71,6 +72,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   'extraction-insights': <ExtractionInsightsScreen />,
   'working-list': <WorkingListScreen />,
   compliance: <ComplianceScreen />,
+  'training-matrix': <TrainingMatrixScreen />,
   profile: <ProfileScreen />,
   'workforce-import': <WorkforceImportScreen />,
   'my-profile': <ProfileScreen />,

@@ -82,6 +82,7 @@ import type {
   WorkingListItem,
   ComplianceReport,
   RetirementReview,
+  TrainingMatrix,
   TaxDepartment,
   TaxLocation,
   TaxRole,
@@ -1157,6 +1158,10 @@ export const store = {
   /** How the workforce stands — expired, never-held, unreachable (U20). */
   getComplianceReport(): Promise<ComplianceReport> {
     return apiClient.get<ComplianceReport>('/compliance');
+  },
+  /** The workforce × competency grid, one payload for the training matrix (U5). */
+  getTrainingMatrix(): Promise<TrainingMatrix> {
+    return apiClient.get<TrainingMatrix>('/training-matrix');
   },
   /** The caller's own expiry notices — a login delivery route (U21, R98). */
   listMyNotices(): Promise<ExpiryNotice[]> {

@@ -117,6 +117,8 @@ export const SCREENS: ScreenDef[] = [
   { key: 'roles', path: '/app/roles', group: 'Enterprise & org', label: 'Access levels', icon: 'shield', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
   { key: 'working-list', path: '/app/working-list', group: 'Enterprise & org', label: 'Working list', icon: 'list-checks', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' , requiresFeature: 'assessments' },
   { key: 'compliance', path: '/app/compliance', group: 'Enterprise & org', label: 'Compliance', icon: 'shield-check', shell: 'app', inNav: true, navGroup: 'training', minAccessLevel: 'admin' , requiresFeature: 'assessments' },
+  // The workforce × competency grid (U5) — who holds what, at a glance.
+  { key: 'training-matrix', path: '/app/training-matrix', group: 'Enterprise & org', label: 'Training matrix', icon: 'grid-3x3', shell: 'app', inNav: true, navGroup: 'training', minAccessLevel: 'admin' , requiresFeature: 'assessments' },
   // The member record (U38). SERVES EVERY MEMBER, not only candidates — an
   // assessor's and an administrator's record is this same screen. No
   // `minAccessLevel`: the `profiles` matrix category is the real gate, and a

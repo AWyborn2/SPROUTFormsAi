@@ -144,6 +144,13 @@ export const keys = {
   workingList: ['workingList'] as const,
   /** How the workforce stands, for compliance reporting (U20). */
   compliance: ['compliance'] as const,
+  /**
+   * The workforce × competency grid (U5). TOP-LEVEL on purpose — nesting it
+   * under `members`, `compliance`, or `competencies` would make it a prefix
+   * match of those invalidations and sweep this whole (large) payload on every
+   * roster or register write.
+   */
+  trainingMatrix: ['training-matrix'] as const,
   assessmentCases: ['assessmentCases'] as const,
   /**
    * The shared assessor queue (U13). A SIBLING of assessmentCases — it shares no
@@ -1639,6 +1646,14 @@ export function useComplianceReport(options?: { enabled?: boolean; staleTime?: n
     queryFn: () => store.getComplianceReport(),
     enabled: options?.enabled ?? true,
     ...(options?.staleTime !== undefined ? { staleTime: options.staleTime } : {}),
+  });
+}
+
+/** The workforce × competency grid — admin/owner + assessments feature (U5). */
+export function useTrainingMatrix() {
+  return useQuery({
+    queryKey: keys.trainingMatrix,
+    queryFn: () => store.getTrainingMatrix(),
   });
 }
 

@@ -1168,3 +1168,52 @@ export interface CorrectionCandidates {
   minCount: number;
   candidates: CorrectionCandidate[];
 }
+
+/** One column of the training matrix (U5) — the org's competencies, name-sorted by the API. */
+export interface TrainingMatrixCompetency {
+  id: string;
+  name: string;
+  code: string | null;
+  validForMonths: number | null;
+  gracePeriodDays: number | null;
+}
+
+/**
+ * One member × competency intersection. ABSENT (`null` in the row's `cells`)
+ * means nothing requires or recommends it and nothing is held. Present with a
+ * `standing` but no `status` (or `revoked`) means the tier asks for something
+ * the person does not hold — a GAP when required. `status` carries the dated
+ * state of a real grant; `expiresAt` rides along so the client can apply its
+ * own expiring window without re-deriving expiry.
+ */
+export interface TrainingMatrixCell {
+  standing: Standing;
+  status?: CompetencyStatus;
+  expiresAt?: string;
+  revoked?: true;
+  /** Where the grant came from, when one exists. */
+  evidence?: 'assessment' | 'licence' | 'import';
+  /** No bookable assessment awards this competency — evidence is the remedy. */
+  noAward?: true;
+}
+
+/** One person's row: identity, placements, and `cells[i]` aligned to `competencies[i]`. */
+export interface TrainingMatrixMember {
+  membershipId: string;
+  userId: string;
+  name: string;
+  /** Access level, as the roster displays it. */
+  role: string;
+  locations: Array<{ id: string; name: string }>;
+  departments: Array<{ id: string; name: string }>;
+  roles: Array<{ id: string; name: string }>;
+  /** The KTD4 marker — no location placement, so no case can be planned. */
+  noLocationPlacement: boolean;
+  cells: Array<TrainingMatrixCell | null>;
+}
+
+/** `GET /training-matrix` — the whole workforce × competency grid (U5). */
+export interface TrainingMatrix {
+  competencies: TrainingMatrixCompetency[];
+  members: TrainingMatrixMember[];
+}
