@@ -17,6 +17,8 @@ export * from './visibility.js';
 export * from './extraction.js';
 export * from './extraction-corrections.js';
 export * from './correction-shapes.js';
+export * from './placement-outcomes.js';
+export * from './placement-shapes.js';
 export * from './template.js';
 export * from './submission.js';
 export * from './submission-validation.js';
