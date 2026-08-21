@@ -44,6 +44,7 @@ import {
   deriveAcrossPages,
   deriveOptionCellsAcrossPages,
   evenGrid,
+  pageWindowOf,
   panelState,
   splitRowBand,
   subdivideBox,
@@ -198,8 +199,13 @@ export function GeometryInspector({ field, textPages, fields, activeDrawSlot = n
   const rowCount = field.fixedRows?.length ?? -1;
   const derived = useMemo(
     // Derive only when nothing is stored — a reviewer's adjustments must never
-    // be overwritten by a fresh derivation on the next render.
-    () => (proposal ? null : deriveAcrossPages(field, textPages)),
+    // be overwritten by a fresh derivation on the next render. The field's
+    // extraction window rides along (soft prior, R2/R9); it is stamped at
+    // seeding and never edited, so `field.id` already keys it in the deps.
+    () =>
+      proposal
+        ? null
+        : deriveAcrossPages(field, textPages, pageWindowOf(field.sourcePages, textPages.length)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [field.id, field.type, columnSig, rowCount, textPages, Boolean(proposal)],
   );
@@ -793,7 +799,12 @@ function OptionBoxesGeometry({
   // content search across the repo then skips it silently.
   const optionSig = options.join('\u0000');
   const derived = useMemo(
-    () => (anyPlaced ? null : deriveOptionCellsAcrossPages(field, textPages)),
+    // The extraction window rides along (soft prior, R2); stamped at seeding
+    // and never edited, so `field.id` already keys it in the deps.
+    () =>
+      anyPlaced
+        ? null
+        : deriveOptionCellsAcrossPages(field, textPages, pageWindowOf(field.sourcePages, textPages.length)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [field.id, field.label, optionSig, textPages, anyPlaced],
   );
