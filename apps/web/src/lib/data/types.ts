@@ -1168,3 +1168,57 @@ export interface CorrectionCandidates {
   minCount: number;
   candidates: CorrectionCandidate[];
 }
+
+/**
+ * The placement loop's read model — the auto-place hit-rate metric, the
+ * recurring content-free placement shapes (each with the engine seam it points
+ * at), and the weekly trend. Mirrors the API's `aggregatePlacementRows` output
+ * plus the per-shape suggestion the route folds in.
+ */
+export interface PlacementMethodMetric {
+  method: string;
+  attempted: number;
+  autoConfirmed: number;
+  hitRate: number;
+}
+
+export interface PlacementTypeMetric {
+  documentType: string;
+  sessions: number;
+  proposalsAttempted: number;
+  autoConfirmed: number;
+  acceptedAsIs: number;
+  adjusted: number;
+  rejected: number;
+  noMatch: number;
+  manualDraws: number;
+  retargets: number;
+  hitRate: number;
+  needsReviewRate: number;
+  noMatchRate: number;
+  adjustmentRate: number;
+  byMethod: PlacementMethodMetric[];
+}
+
+export interface PlacementShapeCluster {
+  documentType: string;
+  shape: string;
+  count: number;
+  suggestion: string;
+}
+
+export interface PlacementTrendPoint {
+  week: string;
+  sessions: number;
+  proposalsAttempted: number;
+  autoConfirmed: number;
+  hitRate: number;
+  adjusted: number;
+  adjustmentRate: number;
+}
+
+export interface PlacementInsights {
+  metrics: PlacementTypeMetric[];
+  shapes: PlacementShapeCluster[];
+  trend: PlacementTrendPoint[];
+}

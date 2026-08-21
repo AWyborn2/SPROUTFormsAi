@@ -132,7 +132,9 @@ export const SCREENS: ScreenDef[] = [
   // The learning loop's candidate-rules surface (2c). Admin-only nav hygiene;
   // the API endpoint is the real boundary. A read-only view — promotion happens
   // in code, never here.
-  { key: 'extraction-insights', path: '/app/settings/extraction-insights', group: 'Enterprise & org', label: 'Extraction insights', icon: 'flask-conical', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
+  // Label generalised to cover the placement loop too; key and path stay
+  // stable so bookmarks and the route survive.
+  { key: 'extraction-insights', path: '/app/settings/extraction-insights', group: 'Enterprise & org', label: 'Import insights', icon: 'flask-conical', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
   { key: 'billing', path: '/app/billing', group: 'Enterprise & org', label: 'Billing', icon: 'credit-card', shell: 'app', inNav: true, navGroup: 'settings', minAccessLevel: 'admin' },
   { key: 'competency', path: '/app/competency', group: 'Competency gating', label: 'Competency gating', icon: 'graduation-cap', shell: 'app', inNav: true, navGroup: 'training', minAccessLevel: 'assessor' , requiresFeature: 'competencyGating' },
 
