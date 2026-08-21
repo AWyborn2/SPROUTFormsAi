@@ -232,9 +232,11 @@ describe('AnswerKeyStep', () => {
   });
 
   it('says so rather than rendering an empty list when nothing is keyable', async () => {
+    // A text field is now a WRITTEN question (it takes a model answer), so
+    // this fixture uses only types that are neither choice nor written.
     const result = await draftOf([
       field({ id: 'sig', type: 'signature', options: undefined }),
-      field({ id: 'name', type: 'text', options: undefined }),
+      field({ id: 'when', type: 'date', options: undefined }),
     ]);
     renderStep(result);
 
@@ -370,14 +372,20 @@ describe('AnswerKeyStep — matching questions the extraction found', () => {
     expect(screen.queryByText('Not matching')).toBeNull();
   });
 
-  it('shows the keying controls once a field is flagged not-matching', async () => {
-    // Proof the flag defeats BOTH match signals: the extraction's two sides no
-    // longer force matching mode, so the type dropdown returns.
+  it('leaves matching mode once a field is flagged not-matching', async () => {
+    /*
+      Proof the flag defeats BOTH match signals: the extraction's two sides no
+      longer force matching mode. The field is still `text` here (the flag was
+      patched directly, without the button's retype), so it renders as a
+      WRITTEN question — the real recovery path is the "Not matching" button
+      above, which retypes to radio and restores the choice controls.
+    */
     const result = await draftOf([matchingField()]);
     act(() => result.current.fieldOps.patch('m1', { notMatching: true }));
     renderStep(result);
-    expect(screen.getByLabelText('Question type for Match each sign to its meaning')).toBeTruthy();
+    expect(screen.getByLabelText('Model answer for Match each sign to its meaning')).toBeTruthy();
     expect(screen.queryByText('Not matching')).toBeNull();
+    expect(screen.queryByText('Build pairs')).toBeNull();
   });
 });
 
@@ -483,6 +491,106 @@ describe('AnswerKeyStep — assessor verdicts', () => {
     );
     renderStep(result);
     expect(screen.getByLabelText('Question type for Assessment Result')).toBeTruthy();
+  });
+});
+
+/**
+ * WRITTEN questions — model answers authored where every other answer is.
+ *
+ * A written (`text`/`textarea`) question used to be invisible to this step:
+ * nowhere to record the expected answer, so the assessor marked against a
+ * JSON file kept outside the product. The card gives it exactly the controls
+ * that mean the same thing on both kinds — a model answer instead of a key,
+ * the same attestation, the same mark destination — and none of the ones that
+ * do not: no type dropdown, no quiz hint, no matching conversion.
+ */
+describe('AnswerKeyStep — written questions with model answers', () => {
+  const WRITTEN = field({
+    id: 'w1',
+    label: 'Explain the tip head exclusion zone',
+    type: 'textarea',
+    options: undefined,
+  });
+
+  it('LISTS A WRITTEN QUESTION and offers the model-answer textarea', async () => {
+    const result = await draftOf([WRITTEN]);
+    renderStep(result);
+
+    expect(screen.getByText('Explain the tip head exclusion zone')).toBeTruthy();
+    expect(
+      screen.getByLabelText('Model answer for Explain the tip head exclusion zone'),
+    ).toBeTruthy();
+  });
+
+  it('offers no type dropdown, no hint and no matching button on a written card', async () => {
+    // None of the three says anything true about prose: retyping is not an
+    // answer-key decision, hints belong to the quiz written questions never
+    // enter, and matching would invent options.
+    const result = await draftOf([WRITTEN]);
+    act(() => result.current.keyOps.setModelAnswer('w1', 'A model answer'));
+    renderStep(result);
+
+    expect(screen.queryByLabelText(/^Question type for/)).toBeNull();
+    expect(screen.queryByText('Make matching')).toBeNull();
+    expect(screen.queryByText(/Hint when incorrect/)).toBeNull();
+  });
+
+  it('typing into the textarea writes a written key row', async () => {
+    const result = await draftOf([WRITTEN]);
+    renderStep(result);
+
+    fireEvent.change(
+      screen.getByLabelText('Model answer for Explain the tip head exclusion zone'),
+      { target: { value: 'Nobody inside the zone while tipping.' } },
+    );
+
+    expect(result.current.keys[0]).toEqual({
+      fieldId: 'w1',
+      answerKey: [],
+      modelAnswer: 'Nobody inside the zone while tipping.',
+      source: 'manual',
+    });
+  });
+
+  it('offers the attestation once a model answer exists — a written key row is attestable', async () => {
+    const result = await draftOf([WRITTEN]);
+    act(() => result.current.keyOps.setModelAnswer('w1', 'A model answer'));
+    renderStep(result);
+
+    expect(screen.getByText('Verified by the training authority')).toBeTruthy();
+  });
+
+  it('offers the mark destination — the box the ASSESSOR ticks after judging', async () => {
+    const result = await draftOf([
+      WRITTEN,
+      field({ id: 'o1', label: 'Q1 outcome', type: 'check_cross', options: undefined }),
+    ]);
+    renderStep(result);
+
+    expect(
+      screen.getByLabelText('Outcome box for Explain the tip head exclusion zone'),
+    ).toBeTruthy();
+  });
+
+  it('NEVER ENTERS THE KEYED DENOMINATOR, and the guided count is its own clause', async () => {
+    // "N of M keyed" is what the machine marks. A written question in the
+    // denominator makes the counter incompletable on every paper with prose.
+    const result = await draftOf([field({ id: 'q1' }), WRITTEN]);
+    act(() => result.current.keyOps.setModelAnswer('w1', 'A model answer'));
+    renderStep(result);
+
+    expect(screen.getByText(/0 of 1 keyed/)).toBeTruthy();
+    expect(screen.getByText(/1 written question has model answers/)).toBeTruthy();
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuemax')).toBe('1');
+  });
+
+  it('counts a verified model answer in the verified total', async () => {
+    const result = await draftOf([field({ id: 'q1' }), WRITTEN]);
+    act(() => result.current.keyOps.setModelAnswer('w1', 'A model answer'));
+    act(() => result.current.keyOps.setVerified('w1', true, 'Training authority'));
+    renderStep(result);
+
+    expect(screen.getByText(/1 verified/)).toBeTruthy();
   });
 });
 

@@ -11,10 +11,12 @@ import {
 import { ApiError } from '../../lib/data/api-client.js';
 import {
   useAssessmentCase,
+  useAssessmentTools,
   useExportCasePdf,
   useOpenAttempt,
   useRecordOutcome,
   useSession,
+  useSetCaseLocation,
   useSignOffCase,
 } from '../../lib/data/hooks.js';
 import { caseExportFilename, caseExportProblem } from '../../lib/case-export-problem.js';
@@ -62,6 +64,8 @@ export function AssessmentCaseScreen() {
   const [signingOff, setSigningOff] = useState(false);
 
   const isCandidate = session?.role === 'candidate';
+  const tools = useAssessmentTools();
+  const setLocation = useSetCaseLocation(id ?? '');
 
   /**
    * Download the case as a filled copy of the original assessment.
@@ -129,9 +133,40 @@ export function AssessmentCaseScreen() {
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="font-heading text-[23px] font-bold">{c.toolName}</h1>
-          <p className="mt-1 text-[13.5px] text-text-tertiary">
-            {done} of {c.parts.length} parts satisfactory
-            {c.locationName ? ` · ${c.locationName}` : ''}
+          <p className="mt-1 flex flex-wrap items-center gap-1.5 text-[13.5px] text-text-tertiary">
+            <span>
+              {done} of {c.parts.length} parts satisfactory
+            </span>
+            {/*
+              WHERE THIS CASE IS ASSESSED decides what it requires — the
+              per-part Location rule, the assessor rule, the printed stream —
+              so staff can set it here on an OPEN case. A case opened before
+              the rule was enforced carries none and demands every part; its
+              fix is this select, not a new case.
+            */}
+            {!isCandidate && c.state === 'open' ? (
+              <select
+                aria-label="Where this case is assessed"
+                value={c.locationId ?? ''}
+                disabled={setLocation.isPending}
+                onChange={(e) =>
+                  setLocation.mutate(e.target.value || null, {
+                    onError: () =>
+                      toast({ variant: 'warning', message: "Couldn't move the case — try again." }),
+                  })
+                }
+                className="h-[24px] rounded-sm border border-border bg-surface-page px-1.5 text-[12px]"
+              >
+                <option value="">— no location —</option>
+                {(tools.data?.find((t) => t.id === c.toolId)?.locations ?? []).map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              c.locationName && <span>· {c.locationName}</span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2.5">

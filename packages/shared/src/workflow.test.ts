@@ -17,6 +17,8 @@
 import { describe, expect, it } from 'vitest';
 import type { AssessmentToolManifest } from './assessment.js';
 import {
+  assessorMarkBoxIds,
+  autoSourcesFor,
   canWrite,
   derivedWorkflow,
   effectiveAccess,
@@ -386,8 +388,12 @@ describe('derivedWorkflow — a derived cell is nobody’s to fill', () => {
     field('crit1'),
     field('verdict'),
   ];
+  // KEYED, as every published target is on the tools that predate written
+  // model answers: the auto-lock now turns on the key, because marking's loop
+  // does — an unkeyed question's declared cell is the assessor's to tick, and
+  // has its own suite below.
   const withOutcome: FormField[] = outcomeFields.map((f) =>
-    f.id === 'q1' ? { ...f, outcomeTarget: { fieldId: 'q1-out' } } : f,
+    f.id === 'q1' ? { ...f, answerKey: ['a'], outcomeTarget: { fieldId: 'q1-out' } } : f,
   );
 
   const marked: AssessmentToolManifest = {
@@ -460,5 +466,119 @@ describe('derivedWorkflow — a derived cell is nobody’s to fill', () => {
     expect(canWrite(s, 'q1-out', 'candidate')).toBe(true);
     // The manifest-declared ones are locked regardless.
     expect(canWrite(s, 'verdict', 'candidate')).toBe(false);
+  });
+});
+
+/**
+ * THE KEYED/UNKEYED LOCK SPLIT. "If marking will write it, nobody types it"
+ * stays literally true — and marking only writes KEYED questions' cells. An
+ * unkeyed written question's declared ✓/✗ box is one marking will never touch:
+ * locking it `auto` made it a box nobody could fill (not the machine — no key;
+ * not a person — `canWrite` refuses non-`entry`), a permanently blank cell on
+ * an evidence document. It is the ASSESSOR'S to tick after judging the answer
+ * against the model answer, and the candidate may see but never press it.
+ */
+describe('the keyed/unkeyed lock split — written questions’ cells belong to the assessor', () => {
+  const writtenQ = (id: string): FormField => ({
+    ...field(id),
+    type: 'textarea',
+    modelAnswer: `Model answer for ${id}`,
+    outcomeTarget: { fieldId: `${id}-out` },
+  });
+  const keyedQ = (id: string): FormField => ({
+    ...field(id),
+    type: 'radio',
+    options: ['a', 'b'],
+    answerKey: ['a'],
+    outcomeTarget: { fieldId: `${id}-out` },
+  });
+
+  // A mixed part in miniature: one written (unkeyed, targeted), one keyed.
+  const mixed: FormField[] = [
+    writtenQ('w1'),
+    { ...field('w1-out'), type: 'check_cross' },
+    keyedQ('k1'),
+    { ...field('k1-out'), type: 'check_cross' },
+  ];
+  const manifest: AssessmentToolManifest = {
+    parts: [
+      { key: 'p1', ordinal: 1, label: 'Part 1', kind: 'theory', pathways: ['new'], startFieldId: 'w1' },
+    ],
+  };
+  const part = manifest.parts[0]!;
+
+  it('autoSourcesFor locks the keyed cell and leaves the unkeyed one to a person', () => {
+    const sources = autoSourcesFor(manifest, part, mixed);
+
+    expect(sources['k1-out']).toBe('auto');
+    expect(sources['w1-out']).toBeUndefined();
+  });
+
+  it('assessorMarkBoxIds names exactly the unkeyed questions’ targets', () => {
+    expect(assessorMarkBoxIds(manifest, part, mixed)).toEqual(['w1-out']);
+  });
+
+  it('deduplicates a shared target — two written questions marking into one table', () => {
+    const shared: FormField[] = [
+      { ...writtenQ('w1'), outcomeTarget: { fieldId: 'table', rowKey: 'q1', columnKey: 'result' } },
+      { ...writtenQ('w2'), outcomeTarget: { fieldId: 'table', rowKey: 'q2', columnKey: 'result' } },
+      { ...field('table'), type: 'repeating_group' },
+    ];
+
+    expect(assessorMarkBoxIds(manifest, part, shared)).toEqual(['table']);
+  });
+
+  it('THE ASSESSOR MAY TICK THE WRITTEN QUESTION’S BOX; THE CANDIDATE MAY ONLY SEE IT', () => {
+    const s = derivedWorkflow(manifest, mixed).sections[0]!;
+
+    expect(canWrite(s, 'w1-out', 'assessor')).toBe(true);
+    expect(canWrite(s, 'w1-out', 'candidate')).toBe(false);
+    // Seen, not hidden: the candidate is entitled to see the standard being
+    // applied to them — view and hidden are different answers on purpose.
+    expect(effectiveAccess(s, 'w1-out', 'candidate')).toBe('view');
+    // The question itself stays the candidate's to answer.
+    expect(canWrite(s, 'w1', 'candidate')).toBe(true);
+  });
+
+  it('the keyed neighbour’s cell stays locked for everyone', () => {
+    const s = derivedWorkflow(manifest, mixed).sections[0]!;
+
+    expect(canWrite(s, 'k1-out', 'candidate')).toBe(false);
+    expect(canWrite(s, 'k1-out', 'assessor')).toBe(false);
+  });
+
+  it('A TOOL WITH NO UNKEYED TARGETS EMITS THE EXACT WORKFLOW IT ALWAYS DID', () => {
+    /*
+      The regression pin that makes the split safe to ship: every tool
+      published before written model answers keys every target, so its derived
+      workflow must not change by a byte — no `fieldAccess` key appearing, no
+      reordered sources. Deep-equal against the hand-written pre-change shape.
+    */
+    const allKeyed: FormField[] = [
+      keyedQ('k1'),
+      { ...field('k1-out'), type: 'check_cross' },
+      keyedQ('k2'),
+      { ...field('k2-out'), type: 'check_cross' },
+    ];
+    const keyedManifest: AssessmentToolManifest = {
+      parts: [
+        { key: 'p1', ordinal: 1, label: 'Part 1', kind: 'theory', pathways: ['new'], startFieldId: 'k1' },
+      ],
+    };
+
+    expect(derivedWorkflow(keyedManifest, allKeyed)).toEqual({
+      roles: ['candidate', 'assessor'],
+      sections: [
+        {
+          key: 'p1',
+          ordinal: 1,
+          label: 'Part 1',
+          partKey: 'p1',
+          access: { candidate: 'fill', assessor: 'fill' },
+          fieldSource: { 'k1-out': 'auto', 'k2-out': 'auto' },
+        },
+      ],
+    });
+    expect('fieldAccess' in derivedWorkflow(keyedManifest, allKeyed).sections[0]!).toBe(false);
   });
 });

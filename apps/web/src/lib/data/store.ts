@@ -83,6 +83,8 @@ import type {
   WorkingListItem,
   ComplianceReport,
   RetirementReview,
+  TrainingMatrix,
+  TrainingSummary,
   TaxDepartment,
   TaxLocation,
   TaxRole,
@@ -1163,6 +1165,27 @@ export const store = {
   /** How the workforce stands — expired, never-held, unreachable (U20). */
   getComplianceReport(): Promise<ComplianceReport> {
     return apiClient.get<ComplianceReport>('/compliance');
+  },
+  /** The workforce × competency grid, one payload for the training matrix (U5). */
+  getTrainingMatrix(): Promise<TrainingMatrix> {
+    return apiClient.get<TrainingMatrix>('/training-matrix');
+  },
+  /**
+   * The one-page KPI roll-up (U6). `location`/`department` narrow the scope
+   * (at most one — omitting both reads org-wide); `axis` picks the grouping
+   * of the compliance-by-group chart.
+   */
+  getTrainingSummary(params: {
+    location?: string;
+    department?: string;
+    axis?: 'location' | 'department' | 'role';
+  }): Promise<TrainingSummary> {
+    const search = new URLSearchParams();
+    if (params.location) search.set('location', params.location);
+    if (params.department) search.set('department', params.department);
+    if (params.axis) search.set('axis', params.axis);
+    const query = search.toString();
+    return apiClient.get<TrainingSummary>(`/training-summary${query ? `?${query}` : ''}`);
   },
   /** The caller's own expiry notices — a login delivery route (U21, R98). */
   listMyNotices(): Promise<ExpiryNotice[]> {

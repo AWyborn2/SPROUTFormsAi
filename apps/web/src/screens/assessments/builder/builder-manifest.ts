@@ -139,7 +139,14 @@ export function derivePartsFromStructure({
   keys,
   excluded,
 }: DeriveInput): DerivedPart[] {
-  const keyed = new Set(keys.map((k) => k.fieldId));
+  /*
+    KEYED means auto-marked. A written question's MODEL key (`answerKey: []`,
+    `modelAnswer` prose) is a row too, but marking never reads it — proposing
+    its question as mandatory would hand `validateManifest` a mandatory
+    question with no answer key the moment an author types a model answer,
+    turning a legitimate guide into a publish blocker.
+  */
+  const keyed = new Set(keys.filter((k) => k.answerKey.length > 0).map((k) => k.fieldId));
   const parts: DerivedPart[] = [];
   let ordinal = 0;
 

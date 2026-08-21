@@ -169,6 +169,30 @@ describe('matchGuideToQuestions', () => {
     expect(match.problems[0]!.reason).toContain('3 questions');
   });
 
+  it('A DUPLICATED QUESTION NUMBER refuses the section, naming the number', () => {
+    /*
+      Entries 1, 2, 2 count-match a three-question section while double-seeding
+      question 2 (the later entry silently winning) and never seeding question
+      3 — the same misalignment the count gate refuses, folded so the counts
+      agree. Same response: name it, seed nothing.
+    */
+    const match = matchGuideToQuestions(
+      [
+        { section: 'general', n: 1, answers: ['a'] },
+        { section: 'general', n: 2, answers: ['b'] },
+        { section: 'general', n: 2, answers: ['c'] },
+      ],
+      SECTIONS,
+      FIELDS,
+      NONE,
+    );
+
+    expect(match.keys).toEqual([]);
+    expect(match.seeded).toEqual([]);
+    expect(match.problems).toHaveLength(1);
+    expect(match.problems[0]!.reason).toContain('question 2 more than once');
+  });
+
   it('a mismatch in one section does not block a section that is correct', () => {
     // Per section rather than per document: an optional stream the author has
     // not finished typing should not hold up the two that are right.
@@ -369,6 +393,202 @@ describe('parseAnswerGuide — the entry-list shape', () => {
   });
 });
 
+/**
+ * WRITTEN questions in a guide — the two-pass count gate and match-time kinds.
+ *
+ * THE CASE THIS ROUND EXISTS FOR: the Tip Head Controller key is one section
+ * of 15 entries — 4 choice questions answered with letters, 11 written
+ * questions answered with prose. The old choice-only gate read that as "15
+ * answers, 4 questions" and silently seeded nothing. Pass 1 aligns against
+ * the FULL numbered list, so the file seeds 4 keys and 11 model answers; a
+ * shorter all-choice guide still seeds through the old gate verbatim.
+ */
+describe('matchGuideToQuestions — written questions and the two-pass gate', () => {
+  const WRITTEN_AT = new Set([1, 2, 3, 4, 5, 6, 9, 10, 13, 14, 15]);
+
+  function writtenQ(id: string, label: string): FormField {
+    return { id, label, type: 'textarea', required: false, source: 'imported' };
+  }
+
+  /** 15 questions in one printed section, choice at positions 7, 8, 11, 12. */
+  function tipHeadDocument(): { sections: StructureSection[]; fields: FormField[] } {
+    const fields: FormField[] = [];
+    for (let n = 1; n <= 15; n++) {
+      if (n === 11) {
+        fields.push({
+          id: `q${n}`,
+          label: `Question ${n}`,
+          type: 'checkbox_group',
+          required: false,
+          source: 'imported',
+          selectionType: 'multiple',
+          options: ['option a', 'option b', 'option c', 'option d'],
+        });
+      } else if (n === 12) {
+        fields.push(question(`q${n}`, ['True', 'False']));
+      } else if (n === 7 || n === 8) {
+        fields.push(question(`q${n}`, ['option a', 'option b', 'option c', 'option d']));
+      } else {
+        fields.push(writtenQ(`q${n}`, `Question ${n}`));
+      }
+    }
+    return {
+      sections: [section('Theory Questions', fields.map((f) => f.id))],
+      fields,
+    };
+  }
+
+  /** The reference guide: letters on the choice slots, prose on the rest. */
+  function tipHeadGuide(): { section: string; n: number; answers: string[] }[] {
+    return Array.from({ length: 15 }, (_, i) => {
+      const n = i + 1;
+      if (n === 7) return { section: 'theory', n, answers: ['b'] };
+      if (n === 8) return { section: 'theory', n, answers: ['a'] };
+      if (n === 11) return { section: 'theory', n, answers: ['a', 'b', 'c', 'd'] };
+      if (n === 12) return { section: 'theory', n, answers: ['True'] };
+      return { section: 'theory', n, answers: [`The expected prose for question ${n}.`] };
+    });
+  }
+
+  it('THE REFERENCE CASE: 15 mixed entries seed 4 keys and 11 model answers', () => {
+    const { sections, fields } = tipHeadDocument();
+    const match = matchGuideToQuestions(tipHeadGuide(), sections, fields, new Set());
+
+    expect(match.problems).toEqual([]);
+    expect(match.keys).toHaveLength(15);
+
+    const keyed = match.keys.filter((k) => k.answerKey.length > 0);
+    const models = match.keys.filter((k) => k.modelAnswer);
+    expect(keyed.map((k) => k.fieldId).sort()).toEqual(['q11', 'q12', 'q7', 'q8']);
+    expect(models).toHaveLength(11);
+
+    // The letters resolved positionally, the multi-select as an exact set,
+    // true/false by option text — all exactly as a choice guide resolves.
+    expect(keyed.find((k) => k.fieldId === 'q7')?.answerKey).toEqual(['option b']);
+    expect(keyed.find((k) => k.fieldId === 'q11')?.answerKey).toEqual([
+      'option a',
+      'option b',
+      'option c',
+      'option d',
+    ]);
+    expect(keyed.find((k) => k.fieldId === 'q12')?.answerKey).toEqual(['True']);
+
+    // Written entries land as prose, on the written questions only.
+    expect(models.every((k) => WRITTEN_AT.has(Number(k.fieldId.slice(1))))).toBe(true);
+    expect(models.find((k) => k.fieldId === 'q1')?.modelAnswer).toBe(
+      'The expected prose for question 1.',
+    );
+    expect(models.every((k) => k.answerKey.length === 0)).toBe(true);
+
+    // Seeded is never attested, whichever kind it is.
+    expect(match.keys.every((k) => k.source === 'guide_json')).toBe(true);
+    expect(match.keys.every((k) => k.verifiedAt === undefined && k.verifiedBy === undefined)).toBe(
+      true,
+    );
+    expect(match.seeded).toEqual([{ section: 'Theory Questions', count: 15 }]);
+  });
+
+  it('BACKWARD-COMPAT PIN: a 4-entry all-choice guide still seeds via the legacy pass', () => {
+    // The repo's own track-dozer key numbers only the choice questions. The
+    // full list is 15, the guide is 4 — pass 1 fails, pass 2 aligns against
+    // the choice questions alone, exactly as it always has.
+    const { sections, fields } = tipHeadDocument();
+    const match = matchGuideToQuestions(
+      [
+        { section: 'theory', n: 1, answers: ['b'] },
+        { section: 'theory', n: 2, answers: ['a'] },
+        { section: 'theory', n: 3, answers: ['a', 'b', 'c', 'd'] },
+        { section: 'theory', n: 4, answers: ['True'] },
+      ],
+      sections,
+      fields,
+      new Set(),
+    );
+
+    expect(match.problems).toEqual([]);
+    expect(match.keys.map((k) => k.fieldId)).toEqual(['q7', 'q8', 'q11', 'q12']);
+    expect(match.keys.every((k) => k.answerKey.length > 0)).toBe(true);
+    expect(match.keys.every((k) => k.modelAnswer === undefined)).toBe(true);
+  });
+
+  it('DOUBLE MISS: failing both passes reports BOTH counts and seeds nothing', () => {
+    const { sections, fields } = tipHeadDocument();
+    const match = matchGuideToQuestions(
+      Array.from({ length: 7 }, (_, i) => ({
+        section: 'theory',
+        n: i + 1,
+        answers: ['a'],
+      })),
+      sections,
+      fields,
+      new Set(),
+    );
+
+    expect(match.keys).toEqual([]);
+    expect(match.problems).toHaveLength(1);
+    expect(match.problems[0]!.reason).toContain('7 answers');
+    expect(match.problems[0]!.reason).toContain('15 questions');
+    expect(match.problems[0]!.reason).toContain('4 with options');
+  });
+
+  it('A LETTER ON A WRITTEN QUESTION is a reported problem, never a guess', () => {
+    // The guide and the document disagree about what kind of question sits at
+    // this position. "b" as a model answer would hand the assessor a
+    // one-letter marking guide that means nothing.
+    const { sections, fields } = tipHeadDocument();
+    const entries = tipHeadGuide();
+    entries[0] = { section: 'theory', n: 1, answers: ['b'] };
+
+    const match = matchGuideToQuestions(entries, sections, fields, new Set());
+
+    expect(match.keys.some((k) => k.fieldId === 'q1')).toBe(false);
+    expect(match.keys).toHaveLength(14);
+    expect(match.problems).toHaveLength(1);
+    expect(match.problems[0]!.reason).toContain('written question');
+    expect(match.problems[0]!.reason).toContain('"b"');
+  });
+
+  it('prose on a choice question that resolves to no option is still the existing problem', () => {
+    const { sections, fields } = tipHeadDocument();
+    const entries = tipHeadGuide();
+    entries[6] = { section: 'theory', n: 7, answers: ['Prose that names no option'] };
+
+    const match = matchGuideToQuestions(entries, sections, fields, new Set());
+
+    expect(match.keys.some((k) => k.fieldId === 'q7')).toBe(false);
+    expect(match.problems).toHaveLength(1);
+    expect(match.problems[0]!.reason).toContain('not one of its 4 options');
+  });
+});
+
+describe('parseAnswerGuide — written entries in the sectioned shape', () => {
+  it('reads a single prose string under "answers", "answer" or "model_answer"', () => {
+    // Real keys write a written answer three ways; all land in the same
+    // answers list, and the kind is decided at match time by the question.
+    const parsed = parseAnswerGuide({
+      sections: {
+        theory: {
+          questions: [
+            { n: 1, answers: 'Prose as a bare string' },
+            { n: 2, answer: 'Prose under answer' },
+            { n: 3, model_answer: 'Prose under model_answer' },
+            { n: 4, answers: ['b'] },
+          ],
+        },
+      },
+    });
+
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.entries).toEqual([
+      { section: 'theory', n: 1, answers: ['Prose as a bare string'] },
+      { section: 'theory', n: 2, answers: ['Prose under answer'] },
+      { section: 'theory', n: 3, answers: ['Prose under model_answer'] },
+      { section: 'theory', n: 4, answers: ['b'] },
+    ]);
+  });
+});
+
 describe('matchGuideToQuestions — a sectionless guide matches by text', () => {
   function q(id: string, label: string, options: string[]): FormField {
     return { id, type: 'radio', label, required: false, source: 'imported', options };
@@ -458,5 +678,65 @@ describe('matchGuideToQuestions — a sectionless guide matches by text', () => 
       new Set(),
     );
     expect(match.keys.map((k) => k.fieldId)).toEqual(['f1', 'f2']);
+  });
+
+  it('SEEDS A MODEL ANSWER when the matched question is written', () => {
+    // Written questions join the text-match pool: their labels are exactly as
+    // findable, and a guide quoting one is carrying its model answer.
+    const written: FormField = {
+      id: 'w1',
+      type: 'textarea',
+      label: 'Explain the exclusion zone at the tip head',
+      required: false,
+      source: 'imported',
+    };
+    const match = matchGuideToQuestions(
+      [
+        {
+          section: '',
+          n: 3,
+          answers: ['Nobody enters while tipping is in progress.'],
+          text: 'Explain the exclusion zone at the tip head',
+        },
+      ],
+      [{ key: 's1', label: 'S', cols: 1, fields: [{ id: 'w1' }] }],
+      [written],
+      new Set(),
+    );
+
+    expect(match.keys).toEqual([
+      {
+        fieldId: 'w1',
+        answerKey: [],
+        modelAnswer: 'Nobody enters while tipping is in progress.',
+        source: 'guide_json',
+      },
+    ]);
+  });
+
+  it('refuses an option letter on a text-matched written question', () => {
+    const written: FormField = {
+      id: 'w1',
+      type: 'textarea',
+      label: 'Explain the exclusion zone at the tip head',
+      required: false,
+      source: 'imported',
+    };
+    const match = matchGuideToQuestions(
+      [
+        {
+          section: '',
+          n: 3,
+          answers: ['b'],
+          text: 'Explain the exclusion zone at the tip head',
+        },
+      ],
+      [{ key: 's1', label: 'S', cols: 1, fields: [{ id: 'w1' }] }],
+      [written],
+      new Set(),
+    );
+
+    expect(match.keys).toHaveLength(0);
+    expect(match.problems[0]?.reason).toMatch(/written question/);
   });
 });

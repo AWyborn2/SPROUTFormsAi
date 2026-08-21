@@ -1,5 +1,5 @@
 {
-  "id": "26b6aec4-eb84-4f49-b24d-5937f480ac96",
+  "id": "3395edc9-2d35-4367-bf05-8e41b53dea2d",
   "prevId": "cc45f28d-9e47-4005-80d4-29128ea4f5ae",
   "version": "7",
   "dialect": "postgresql",
@@ -4271,199 +4271,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.placement_outcomes": {
-      "name": "placement_outcomes",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "org_id": {
-          "name": "org_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "form_id": {
-          "name": "form_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "version_id": {
-          "name": "version_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "document_type": {
-          "name": "document_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "context": {
-          "name": "context",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "outcomes": {
-          "name": "outcomes",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "proposals_attempted": {
-          "name": "proposals_attempted",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "auto_confirmed": {
-          "name": "auto_confirmed",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "accepted_as_is": {
-          "name": "accepted_as_is",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "adjusted": {
-          "name": "adjusted",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "rejected": {
-          "name": "rejected",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "no_match": {
-          "name": "no_match",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "manual_draws": {
-          "name": "manual_draws",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "retargets": {
-          "name": "retargets",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "field_count": {
-          "name": "field_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_by_user_id": {
-          "name": "created_by_user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "placement_outcomes_org_type_idx": {
-          "name": "placement_outcomes_org_type_idx",
-          "columns": [
-            {
-              "expression": "org_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "document_type",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "placement_outcomes_org_created_idx": {
-          "name": "placement_outcomes_org_created_idx",
-          "columns": [
-            {
-              "expression": "org_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "placement_outcomes_org_id_organizations_id_fk": {
-          "name": "placement_outcomes_org_id_organizations_id_fk",
-          "tableFrom": "placement_outcomes",
-          "tableTo": "organizations",
-          "columnsFrom": [
-            "org_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "placement_outcomes_created_by_user_id_users_id_fk": {
-          "name": "placement_outcomes_created_by_user_id_users_id_fk",
-          "tableFrom": "placement_outcomes",
-          "tableTo": "users",
-          "columnsFrom": [
-            "created_by_user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.assessment_tool_drafts": {
       "name": "assessment_tool_drafts",
       "schema": "",
@@ -6433,6 +6240,139 @@
         "form_brands_org_id_organizations_id_fk": {
           "name": "form_brands_org_id_organizations_id_fk",
           "tableFrom": "form_brands",
+          "tableTo": "organizations",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.compliance_snapshots": {
+      "name": "compliance_snapshots",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "captured_on": {
+          "name": "captured_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scope_type": {
+          "name": "scope_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "scope_id": {
+          "name": "scope_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "compliant_count": {
+          "name": "compliant_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "member_count": {
+          "name": "member_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "required_gap_count": {
+          "name": "required_gap_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "compliance_snapshots_org_day_uq": {
+          "name": "compliance_snapshots_org_day_uq",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "captured_on",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"compliance_snapshots\".\"scope_type\" IS NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "compliance_snapshots_scope_day_uq": {
+          "name": "compliance_snapshots_scope_day_uq",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "scope_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "scope_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "captured_on",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"compliance_snapshots\".\"scope_type\" IS NOT NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "compliance_snapshots_org_id_organizations_id_fk": {
+          "name": "compliance_snapshots_org_id_organizations_id_fk",
+          "tableFrom": "compliance_snapshots",
           "tableTo": "organizations",
           "columnsFrom": [
             "org_id"

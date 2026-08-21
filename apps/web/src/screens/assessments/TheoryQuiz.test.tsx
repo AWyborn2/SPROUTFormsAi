@@ -94,6 +94,22 @@ describe('TheoryQuiz — a page with no choice question', () => {
     });
     expect(button(/finish/i).disabled).toBe(false);
   });
+
+  it('finishes a written page without ever calling check-question (U7 pin)', async () => {
+    // A written question now carries a model answer server-side, but that is
+    // the ASSESSOR'S artefact: the candidate's quiz must keep treating an
+    // optionless page as unfeedbackable — straight to Finish, no check call,
+    // no entry into the retry loop.
+    const props = renderQuiz({
+      pages: [page([field({ id: 'w1', type: 'textarea', required: true })])],
+      writable: new Set(['w1']),
+      values: { w1: 'Stop tipping and call the spotter' },
+    });
+    fireEvent.click(button(/finish/i));
+    await waitFor(() => expect(props.onSubmit).toHaveBeenCalledTimes(1));
+    expect(props.onCheckQuestion).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: /try again/i })).toBeNull();
+  });
 });
 
 describe('TheoryQuiz — a choice-question page is unchanged', () => {

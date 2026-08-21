@@ -20,6 +20,7 @@ import {
   isSelfMarking,
   moreCoachingRequired,
   type AssessmentCaseState,
+  assessorMarkBoxIds,
   autoVerdictWrite,
   casePartKeys,
   type LocationPartKeys,
@@ -27,7 +28,10 @@ import {
   prerequisiteCompetencyIds,
   reducePrerequisiteClasses,
   logbookDurationRows,
+  markKeyedQuestions,
   markTheory,
+  markingCompositionWarnings,
+  SELF_ANSWERING_TYPES,
   ACCESS_LEVELS,
   VALUE_SOURCES,
   WORKFLOW_ROLES,
@@ -44,6 +48,7 @@ import {
   validateProfilePrefill,
   validatePrerequisiteChecks,
   validatePartCompletionMarks,
+  validatePartOutcomeMarks,
   validatePathwayMarks,
   validateSignOffMarks,
   type ProfilePrefillSource,
@@ -236,6 +241,61 @@ function unionPartFieldAccess(
 }
 
 /**
+ * The MARKING SURFACE of one part — what staff may still write on an attempt
+ * that is handed in but not yet marked.
+ *
+ * A submitted attempt's ANSWERS are frozen ("submitted" means the answers stop
+ * moving while the assessor reads them), but marking a mixed part IS writing:
+ * the assessor ticks each written question's ✓/✗ against its model answer,
+ * then signs the part. So the writable set narrows to exactly the marks:
+ *
+ * - the assessor-writable `entry` fields that are SELF-ANSWERING
+ *   (`check_cross` / `boolean_yes_no`) — the unkeyed ✓/✗ cells
+ *   `assessorMarkBoxIds` left `entry`, and any practical-style tick boxes.
+ *   Self-answering by TYPE is the fence: a textarea the workflow happens to
+ *   let the assessor fill is still the candidate's evidence once handed in.
+ *   AND NOT CANDIDATE-WRITABLE: a self-answering box the workflow lets the
+ *   CANDIDATE fill is one of their answers (an unkeyed yes/no question), not
+ *   a mark — leaving it here let staff flip a candidate's own recorded answer
+ *   on a frozen attempt. Assessor-only boxes stay, which is what the builder
+ *   emits for every unkeyed question's cell (`candidate: 'view'`).
+ * - the part's own declared furniture — assessor name, signed date, further
+ *   action — which is how the assessor signs what they just marked. Declared
+ *   ids only, same doctrine as `autoSourcesFor`; each still has to be
+ *   workflow-writable, because callers INTERSECT this with the party's
+ *   writable set rather than replacing it.
+ *
+ * Served by the fill route as `writableFieldIds` in that state and enforced by
+ * the PATCH gate, so the surface and the write rule cannot disagree.
+ */
+function markingSurfaceIds(
+  workflow: ReturnType<typeof workflowOf>,
+  part: AssessmentPart,
+  partFields: readonly FormField[],
+): Set<string> {
+  const assessorWritable = new Set(
+    partFieldAccess(workflow, part.key, partFields, 'assessor').writable,
+  );
+  const candidateWritable = new Set(
+    partFieldAccess(workflow, part.key, partFields, 'candidate').writable,
+  );
+  const out = new Set<string>();
+  for (const f of partFields) {
+    if (
+      assessorWritable.has(f.id) &&
+      !candidateWritable.has(f.id) &&
+      SELF_ANSWERING_TYPES.includes(f.type)
+    ) {
+      out.add(f.id);
+    }
+  }
+  for (const id of [part.assessorNameFieldId, part.signedDateFieldId, part.furtherActionFieldId]) {
+    if (id) out.add(id);
+  }
+  return out;
+}
+
+/**
  * What THIS case requires — the pathway's parts narrowed by the tool's
  * per-Location rule for the case's Location. The ONE derivation every
  * progress read shares (dashboard, case screen, fill view, marking,
@@ -353,7 +413,7 @@ async function carryForwardTheory(
   const fields = await fieldsForVersion(database, last.templateVersionId);
   if (!isSelfMarking(fields, input.manifest, input.part.key)) return undefined;
 
-  const { marks } = markTheory({ fields, values: last.values, part: input.part });
+  const { marks } = markTheory({ fields, values: last.values, part: input.part, manifest: input.manifest });
   const values: Record<string, SubmissionValue> = {};
   for (const mark of marks) {
     if (!mark.correct) continue;
@@ -783,6 +843,25 @@ const updateToolBody = z.object({
   signOff: signOffSchema.nullable().optional(),
   /** The pathway → printed-box map. Same tri-state as everything above. */
   pathwayMarks: pathwayMarksSchema.nullable().optional(),
+  /**
+   * The parts' printed verdict pairs — "The Candidate's responses were:
+   * Satisfactory / Not Satisfactory" — repointed per part. An entry replaces
+   * BOTH of the named part's marks (an absent half clears it); parts not
+   * named keep theirs; null clears every part's pair. The same pair mapped on
+   * several parts is the multi-theory paper's spelling: each applicable part
+   * writes it at its own marking, so whichever papers the case sits stamp
+   * the one printed box.
+   */
+  partOutcomeMarks: z
+    .array(
+      z.object({
+        partKey: z.string().min(1),
+        outcomeSatisfactory: declaredMarkSchema.optional(),
+        outcomeNotSatisfactory: declaredMarkSchema.optional(),
+      }),
+    )
+    .nullable()
+    .optional(),
 });
 
 const toolBody = z.object({
@@ -1799,6 +1878,18 @@ assessmentToolsRouter.get(
       return;
     }
     const tenant = req.tenant!;
+    /*
+      EDIT-GATED, LIKE THE PATCH BESIDE IT, because the response below is the
+      one tool read that serves UNSTRIPPED fields — answerKey and modelAnswer
+      included. The plan gate alone let any org member, a candidate-role login
+      included, fetch the complete key to an assessment they may later sit.
+      Its only consumers are authoring surfaces (the workflow builder, the
+      revision seed), and authoring is what `assessments.edit` means.
+    */
+    if (!(await hasPermission(tenant, 'assessments', 'edit'))) {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
     const tool = await loadTool(db, req.params.id!, tenant.orgId);
     if (!tool) {
       res.status(404).json({ error: 'not_found' });
@@ -1830,6 +1921,10 @@ assessmentToolsRouter.get(
       draws with.
     */
     warnings.push(...unplacedMarkDestinations(tool.manifest, fields));
+    // And the marking compositions that misbehave at runtime (auto-fail on
+    // hand-in, untickable table-cell marks) — same list the builder's publish
+    // step shows, so the two authoring surfaces cannot disagree.
+    warnings.push(...markingCompositionWarnings(tool.manifest, fields));
 
     res.json({
       id: tool.id,
@@ -1908,7 +2003,8 @@ assessmentToolsRouter.patch(
       parsed.data.fieldDefaults !== undefined ||
       parsed.data.partCompletionMarks !== undefined ||
       parsed.data.signOff !== undefined ||
-      parsed.data.pathwayMarks !== undefined;
+      parsed.data.pathwayMarks !== undefined ||
+      parsed.data.partOutcomeMarks !== undefined;
     let manifest: AssessmentToolManifest = tool.manifest;
     if (parsed.data.workflow) manifest = { ...manifest, workflow: parsed.data.workflow };
     if (parsed.data.profilePrefill !== undefined) {
@@ -1947,6 +2043,39 @@ assessmentToolsRouter.patch(
         ? { ...rest, pathwayMarks: parsed.data.pathwayMarks }
         : rest;
     }
+    const partOutcomeEntries = parsed.data.partOutcomeMarks;
+    if (partOutcomeEntries !== undefined) {
+      // An entry naming a part the tool does not have is a picker bug, not a
+      // mapping to silently drop.
+      const known = new Set(manifest.parts.map((p) => p.key));
+      const ghosts = (partOutcomeEntries ?? []).filter((e) => !known.has(e.partKey));
+      if (ghosts.length > 0) {
+        res.status(400).json({
+          error: 'invalid_workflow',
+          problems: ghosts.map((g) => `Verdict pair names part "${g.partKey}", which this tool has no part for.`),
+        });
+        return;
+      }
+      manifest = {
+        ...manifest,
+        parts: manifest.parts.map((p) => {
+          if (partOutcomeEntries === null) {
+            const { outcomeSatisfactory: _s, outcomeNotSatisfactory: _n, ...rest } = p;
+            return rest;
+          }
+          const entry = partOutcomeEntries.find((e) => e.partKey === p.key);
+          if (!entry) return p;
+          const { outcomeSatisfactory: _s, outcomeNotSatisfactory: _n, ...rest } = p;
+          return {
+            ...rest,
+            ...(entry.outcomeSatisfactory ? { outcomeSatisfactory: entry.outcomeSatisfactory } : {}),
+            ...(entry.outcomeNotSatisfactory
+              ? { outcomeNotSatisfactory: entry.outcomeNotSatisfactory }
+              : {}),
+          };
+        }),
+      };
+    }
 
     const template = await db.query.formTemplates.findFirst({
       where: and(
@@ -1972,6 +2101,7 @@ assessmentToolsRouter.patch(
       ...validatePartCompletionMarks(manifest.partCompletionMarks, manifest, fields),
       ...validatePathwayMarks(manifest.pathwayMarks, fields),
       ...validateSignOffMarks(manifest.signOff, fields),
+      ...validatePartOutcomeMarks(manifest, fields),
     ];
     if (problems.length > 0) {
       // Nothing written. A half-applied workflow is worse than a rejected one:
@@ -2322,6 +2452,80 @@ assessmentCasesRouter.post(
       prerequisiteWarnings: warnings,
       parts: requiredParts(tool.manifest, pathway).map((p) => p.key),
     });
+  }),
+);
+
+/**
+ * Set or change WHERE an open case is assessed (R77).
+ *
+ * Exists because the Location decides what the case requires — the per-part
+ * rule, the assessor requirement, the printed stream — and cases opened
+ * before the rule was enforced (or with the picker skipped) carry none: they
+ * demand every part and keep printing attempts the Location would exclude.
+ * The fix for such a case is its Location, not a new case.
+ *
+ * STAFF ONLY, and only while the case is OPEN. A candidate must not move
+ * their own assessment to an easier rule, and a resolved or signed case is a
+ * record — where it was assessed is part of what was signed.
+ */
+assessmentCasesRouter.patch(
+  '/:id/location',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'edit');
+    if (scope !== 'all') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = z
+      .object({ locationId: z.string().uuid().nullable() })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    if (row.state !== 'open') {
+      res.status(409).json({ error: 'case_not_open' });
+      return;
+    }
+    // Chosen from the org's list, never typed (R77) — same rule as create.
+    if (parsed.data.locationId) {
+      const location = await db.query.locations.findFirst({
+        where: and(
+          eq(schema.locations.id, parsed.data.locationId),
+          eq(schema.locations.orgId, tenant.orgId),
+          eq(schema.locations.status, 'active'),
+        ),
+      });
+      if (!location) {
+        res.status(400).json({ error: 'location_not_found', locationId: parsed.data.locationId });
+        return;
+      }
+    }
+
+    await db
+      .update(schema.assessmentCases)
+      .set({ locationId: parsed.data.locationId })
+      .where(eq(schema.assessmentCases.id, row.id));
+
+    await recordAudit(db, tenant, {
+      action: 'Moved assessment case',
+      target: `${row.id} → location ${parsed.data.locationId ?? 'none'}`,
+      category: 'submissions',
+      icon: 'map-pin',
+    });
+
+    res.json({ id: row.id, locationId: parsed.data.locationId });
   }),
 );
 
@@ -3241,6 +3445,38 @@ assessmentCasesRouter.get(
       }
     }
 
+    /*
+      THE MARKING PASS: the assessor opening an attempt that is handed in but
+      not yet marked. Decided by PARTY, never by permission — a self-assessing
+      candidate is `party === 'candidate'` by identity and gets none of this,
+      because whatever else they may fill, the marks on their own paper are not
+      theirs to see early or to tick.
+
+      Two things change in that state, and only in that state:
+      - `writableFieldIds` narrows to the marking surface (the same set the
+        PATCH gate enforces, so the screen and the write rule agree), and
+      - the keyed questions' ✓/✗ are PRE-MARKED into the served values —
+        display only, merged UNDER the stored map so nothing a person recorded
+        is shadowed; they persist when the outcome is recorded, not here.
+    */
+    /*
+      A MARKER, NOT JUST A VIEWER. `party === 'assessor'` is identity — anybody
+      on the staff side of the case, a view-only role included. The marking
+      guide and the pre-marks are marking material, so they attach only for a
+      caller who could actually record a mark: the same org-wide
+      `assessments.edit` the marking-pass PATCH enforces (a candidate's
+      own-scoped grant resolves false there too). A view-only role reading a
+      case gets the stripped fields and nothing else.
+    */
+    const canMark = party === 'assessor' && (await hasPermission(tenant, 'assessments', 'edit'));
+    // Truthiness, not `!== null` — an unsubmitted attempt reads as absence,
+    // whichever of null/undefined the row happens to carry.
+    const markingPass = canMark && !!attempt.submittedAt && attempt.outcome === null;
+    const markingSurface = markingPass ? markingSurfaceIds(workflow, part, partFields) : null;
+    // Over the UNSTRIPPED visible fields — marking must see answerKey — and the
+    // STORED values, so a pre-mark reflects what the candidate actually handed in.
+    const preMarks = markingPass ? markKeyedQuestions(visibleFields, attempt.values).derivedValues : null;
+
     res.json({
       id: attempt.id,
       partKey: attempt.partKey,
@@ -3263,6 +3499,28 @@ assessmentCasesRouter.get(
       outcome: attempt.outcome,
       submittedAt: attempt.submittedAt,
       templateVersionId: attempt.templateVersionId,
+      /*
+        Which side of the assessment this caller is on, so the screen can say
+        "marking" instead of "sitting" without re-deriving the identity rule.
+      */
+      party,
+      /*
+        THE ASSESSOR'S MARKING GUIDE — each written question's model answer,
+        served as a SEPARATE role-gated block rather than by un-stripping the
+        fields. `stripMarkingSecrets` stays unconditional above: one strip rule
+        with no branches is the property the leak tests pin, and the guide
+        travelling beside the fields means no candidate-shaped payload ever has
+        a shape that could carry a secret. Absent — not empty — for the
+        candidate, including a self-assessing one (`party` is identity), AND
+        for staff whose role cannot mark (`canMark` folds the permission in).
+      */
+      ...(canMark
+        ? {
+            markingGuide: visibleFields
+              .filter((f) => typeof f.modelAnswer === 'string' && f.modelAnswer.trim() !== '')
+              .map((f) => ({ fieldId: f.id, modelAnswer: f.modelAnswer as string })),
+          }
+        : {}),
       /** The step after this part — a "continue", or a wait on the other party. */
       nextStep,
       /**
@@ -3322,7 +3580,14 @@ assessmentCasesRouter.get(
         to lock the box twice.
       */
       writableFieldIds: access.writable.filter(
-        (id) => !hidden.has(id) && !prefillMap[id] && !prereqIds.has(id) && !completionIds.has(id),
+        (id) =>
+          !hidden.has(id) &&
+          !prefillMap[id] &&
+          !prereqIds.has(id) &&
+          !completionIds.has(id) &&
+          // On a marking pass only the marking surface stays writable — the
+          // candidate's answers are frozen the moment they handed in.
+          (!markingSurface || markingSurface.has(id)),
       ),
       /*
         Layering, least to most authoritative: tool DEFAULTS under everything —
@@ -3332,6 +3597,9 @@ assessmentCasesRouter.get(
       */
       values: {
         ...defaultsFor(manifest, visibleFields),
+        // Display pre-marks, assessor-only, submitted-unmarked only — UNDER the
+        // stored values, so a cell anybody actually recorded always wins.
+        ...(preMarks ?? {}),
         ...(attempt.values ?? {}),
         ...prefill,
         ...prereqValues,
@@ -3414,8 +3682,12 @@ async function setSubmitted(
     nobody judging it, so hand-in is the only gate there is — and the gate has
     to run before `submittedAt` is written, or an empty tap on Submit would
     leave a submitted, auto-satisfied attestation with a blank signature box.
+
+    The tool is loaded on BOTH paths now: hand-in needs it for the gates and
+    the self-marking below, reopen needs it to know which stored cells were
+    the marking pass's to write (and must therefore be cleared).
   */
-  const tool = submitting ? await loadTool(db, row.toolId, tenant.orgId) : null;
+  const tool = await loadTool(db, row.toolId, tenant.orgId);
   const part = tool ? orderedParts(tool.manifest).find((p) => p.key === attempt.partKey) : undefined;
   if (submitting && tool && part?.kind === 'declaration') {
     const fields = await fieldsForVersion(db, attempt.templateVersionId);
@@ -3431,9 +3703,52 @@ async function setSubmitted(
   }
 
   const submittedAt = submitting ? new Date() : null;
+
+  /*
+    REOPENING TAKES THE MARKING PASS'S WRITES BACK OUT.
+
+    A partial marking pass may already have ticked written questions' ✓/✗
+    cells and signed the part; the candidate taking the attempt back is about
+    to CHANGE the answers those judgments were made against, so leaving them
+    would hand the next marking pass a paper pre-labelled with verdicts on
+    prose nobody has read. Cleared, not kept: a re-mark re-ticks in minutes,
+    where a stale ✓ beside a rewritten answer is a finding nobody made.
+
+    Scoped to exactly what the marking pass owns:
+    - `assessorMarkBoxIds` — the unkeyed questions' declared ✓/✗ cells —
+      narrowed to SELF-ANSWERING fields, the same fence `markingSurfaceIds`
+      draws. A repeating-group target is skipped on purpose: the marking pass
+      cannot write tables, and deleting a shared table id would take the
+      candidate's own rows with it.
+    - the part's declared sign-off furniture (assessor name, signed date,
+      further action), which only means anything about a marked paper.
+    Practical criteria are untouched: they are plain Yes/No fields, never an
+    unkeyed question's outcomeTarget (`deriveChecklistOutcome` excludes
+    targets from its criteria for the same reason), so legitimate
+    pre-hand-in assessor ticks survive a reopen.
+  */
+  let reopenedValues: Record<string, SubmissionValue> | undefined;
+  if (!submitting && tool && part) {
+    const fields = await fieldsForVersion(db, attempt.templateVersionId);
+    const selfAnswering = new Set(
+      fields.filter((f) => SELF_ANSWERING_TYPES.includes(f.type)).map((f) => f.id),
+    );
+    const strip = new Set<string>(
+      assessorMarkBoxIds(tool.manifest, part, fields).filter((id) => selfAnswering.has(id)),
+    );
+    for (const id of [part.assessorNameFieldId, part.signedDateFieldId, part.furtherActionFieldId]) {
+      if (id) strip.add(id);
+    }
+    const stored = (attempt.values ?? {}) as Record<string, SubmissionValue>;
+    if ([...strip].some((id) => stored[id] !== undefined)) {
+      reopenedValues = { ...stored };
+      for (const id of strip) delete reopenedValues[id];
+    }
+  }
+
   await db
     .update(schema.assessmentPartAttempts)
-    .set({ submittedAt })
+    .set({ submittedAt, ...(reopenedValues ? { values: reopenedValues } : {}) })
     .where(eq(schema.assessmentPartAttempts.id, attempt.id));
 
   await recordAudit(db, tenant, {
@@ -3493,6 +3808,7 @@ async function setSubmitted(
           values: attempt.values,
           part,
           passPercent: tool.manifest.theoryPassPercent,
+          manifest: tool.manifest,
         });
         theoryScore = { correctCount: computed.correctCount, totalCount: computed.totalCount };
         /*
@@ -3728,10 +4044,20 @@ assessmentCasesRouter.patch(
       res.status(409).json({ error: 'attempt_resolved' });
       return;
     }
-    // Handed in, not yet marked. Refusing here is what makes "submitted" mean
-    // anything — otherwise the answers could keep moving while the assessor was
-    // reading them. The candidate can reopen it themselves; nothing is lost.
-    if (attempt.submittedAt) {
+    /*
+      Handed in, not yet marked. Refusing the CANDIDATE here is what makes
+      "submitted" mean anything — otherwise the answers could keep moving while
+      the assessor was reading them; they can reopen it themselves, nothing is
+      lost. STAFF are the exception, because on a mixed part marking IS writing:
+      the assessor ticks each written question's ✓/✗ and signs the part. Their
+      writable set narrows below to exactly that MARKING SURFACE, so the
+      candidate's frozen answers stay frozen either way. Party by identity, the
+      same rule as everywhere on this router — a self-assessing candidate is
+      the candidate, and still 409s.
+    */
+    const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
+    const markingPass = !!attempt.submittedAt;
+    if (markingPass && party === 'candidate') {
       res.status(409).json({ error: 'attempt_submitted' });
       return;
     }
@@ -3778,7 +4104,6 @@ assessmentCasesRouter.patch(
       fields, whose values come from the case record or from marking and must
       not be typed over.
     */
-    const party: WorkflowRole = row.candidateUserId === tenant.userId ? 'candidate' : 'assessor';
     /*
       Read ONCE and passed to both, because `workflowOf` needs the fields too:
       a question's ✓/✗ cell is declared on the question rather than in the
@@ -3786,20 +4111,43 @@ assessmentCasesRouter.patch(
       a candidate's typed outcome would be accepted here.
     */
     const versionFields = tool ? await fieldsForVersion(db, attempt.templateVersionId) : [];
+    // Derived ONCE and passed to both consumers — the union below and the
+    // marking-surface narrowing — the same pattern the attempt GET uses, so
+    // the two cannot be computed from different inputs.
+    const workflow = tool ? workflowOf(tool.manifest, versionFields) : null;
+    const partFields = tool ? fieldsInPart(versionFields, tool.manifest, attempt.partKey) : [];
     // The same union the attempt GET serves — a self-assessor must be able to
     // SAVE every field the surface showed them as writable.
     const selfAssessing = tool ? await isSelfAssessing(db, tenant, row.candidateUserId) : false;
     const labelled = tool ? await labelledSignoffAllowed(db, tenant.orgId) : false;
-    const allowed = tool
+    const allowed = workflow
       ? new Set(
           unionPartFieldAccess(
-            workflowOf(tool.manifest, versionFields),
+            workflow,
             attempt.partKey,
-            fieldsInPart(versionFields, tool.manifest, attempt.partKey),
+            partFields,
             fillParties({ party, selfAssessing, labelled }),
           ).writable,
         )
       : null;
+
+    /*
+      ON A MARKING PASS THE ALLOWED SET NARROWS TO THE MARKING SURFACE — the
+      same set the fill route served as `writableFieldIds`, so the screen and
+      this gate cannot disagree. Intersection, not replacement: a furniture id
+      the workflow does not let this party write stays refused. A submitted
+      attempt whose tool or part cannot be loaded has no computable surface, so
+      it keeps the flat refusal it always had rather than falling open to the
+      whole part.
+    */
+    if (markingPass) {
+      if (!workflow || !part || !allowed) {
+        res.status(409).json({ error: 'attempt_submitted' });
+        return;
+      }
+      const surface = markingSurfaceIds(workflow, part, partFields);
+      for (const id of [...allowed]) if (!surface.has(id)) allowed.delete(id);
+    }
 
     let values: Record<string, SubmissionValue> = { ...stored };
     if (allowed) {
@@ -4424,15 +4772,45 @@ assessmentCasesRouter.post(
         );
 
     if (computed) {
-      const marked = markTheory({ fields, values: attempt.values, part });
+      const marked = markTheory({ fields, values: attempt.values, part, manifest: tool.manifest });
       outcome = marked.outcome;
       derivedValues = marked.derivedValues;
     } else if (checklist) {
       outcome = checklist.outcome;
       derivedValues = checklist.derivedValues;
-    } else if (!outcome) {
-      res.status(400).json({ error: 'outcome_required' });
-      return;
+    } else {
+      if (!outcome) {
+        res.status(400).json({ error: 'outcome_required' });
+        return;
+      }
+      /*
+        MIXED MARKING (D4): a JUDGED part still pre-marks its KEYED SUBSET.
+
+        The verdict is the assessor's — nothing above changed — but the keyed
+        choice questions' ✓/✗ are arithmetic the machine already did on the
+        fill surface, and leaving them out of the stored values printed four
+        permanently blank boxes on every mixed paper. Same discipline as the
+        computed branch: `markKeyedQuestions` over the version's UNSTRIPPED
+        fields, visibility deciding which questions count. Merged UNDER the
+        stored values (the `withDerivedMarks` precedent): a cell any person
+        recorded — every written question's assessor-ticked box, or a keyed
+        cell someone overrode before these locked — is never rewritten.
+        Deliberately NO part verdict and NO auto-locked radio write
+        (`autoVerdictWrite` stays a self-marking-branch act, the #269 line):
+        the machine holds only some of this part's evidence.
+
+        SCOPED TO THE PART'S OWN SLICE, mirroring `withDerivedMarks` in
+        case-export.ts. Marking the WHOLE version here read every OTHER part's
+        keyed questions as unanswered and wrote their ✗ into THIS attempt's
+        stored values — and the export's per-part merge then let a later
+        judged attempt's foreign ✗ overwrite the keyed part's real ✓ on the
+        certified PDF.
+      */
+      const preMarked = markKeyedQuestions(
+        fieldsInPart(fields, tool.manifest, part.key),
+        attempt.values,
+      );
+      derivedValues = { ...preMarked.derivedValues, ...(attempt.values ?? {}) };
     }
 
     let disposition = parsed.data.disposition ?? null;

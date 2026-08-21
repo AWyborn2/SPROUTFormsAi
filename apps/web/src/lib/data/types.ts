@@ -1222,3 +1222,132 @@ export interface PlacementInsights {
   shapes: PlacementShapeCluster[];
   trend: PlacementTrendPoint[];
 }
+
+/** One column of the training matrix (U5) — the org's competencies, name-sorted by the API. */
+export interface TrainingMatrixCompetency {
+  id: string;
+  name: string;
+  code: string | null;
+  validForMonths: number | null;
+  gracePeriodDays: number | null;
+}
+
+/**
+ * One member × competency intersection. ABSENT (`null` in the row's `cells`)
+ * means nothing requires or recommends it and nothing is held. Present with a
+ * `standing` but no `status` (or `revoked`) means the tier asks for something
+ * the person does not hold — a GAP when required. `status` carries the dated
+ * state of a real grant; `expiresAt` rides along so the client can apply its
+ * own expiring window without re-deriving expiry.
+ */
+export interface TrainingMatrixCell {
+  standing: Standing;
+  status?: CompetencyStatus;
+  expiresAt?: string;
+  revoked?: true;
+  /** Where the grant came from, when one exists. */
+  evidence?: 'assessment' | 'licence' | 'import';
+  /** No bookable assessment awards this competency — evidence is the remedy. */
+  noAward?: true;
+}
+
+/** One person's row: identity, placements, and `cells[i]` aligned to `competencies[i]`. */
+export interface TrainingMatrixMember {
+  membershipId: string;
+  userId: string;
+  name: string;
+  /** Access level, as the roster displays it. */
+  role: string;
+  locations: Array<{ id: string; name: string }>;
+  departments: Array<{ id: string; name: string }>;
+  roles: Array<{ id: string; name: string }>;
+  /** The KTD4 marker — no location placement, so no case can be planned. */
+  noLocationPlacement: boolean;
+  cells: Array<TrainingMatrixCell | null>;
+}
+
+/** `GET /training-matrix` — the whole workforce × competency grid (U5). */
+export interface TrainingMatrix {
+  competencies: TrainingMatrixCompetency[];
+  members: TrainingMatrixMember[];
+}
+
+/* ── Training summary (U6) ────────────────────────────────────────────────── */
+
+/**
+ * What the summary was computed over. `org` is the default; a location or
+ * department scope narrows every number except the trend, which stays
+ * org-wide (snapshots are captured per org only).
+ */
+export type TrainingSummaryScope =
+  | { type: 'org' }
+  | { type: 'location' | 'department'; id: string; name: string };
+
+/** One competency's open-gap count — the API serves the top 6, count-desc. */
+export interface TrainingSummaryGapCompetency {
+  competencyId: string;
+  name: string;
+  count: number;
+}
+
+/** One group on the compliance-by-axis chart. % is client-derived. */
+export interface TrainingSummaryGroup {
+  id: string;
+  name: string;
+  memberCount: number;
+  compliantCount: number;
+}
+
+/** One ISO week's sign-off count; the last of the 8 is week-to-date. */
+export interface TrainingSummaryWeek {
+  weekStart: string;
+  count: number;
+  currentWeek?: boolean;
+}
+
+/** One daily standing snapshot on the compliance trend. */
+export interface TrainingSummaryTrendPoint {
+  capturedOn: string;
+  compliantCount: number;
+  memberCount: number;
+  requiredGapCount: number;
+}
+
+/**
+ * `GET /training-summary` — the one-page KPI roll-up (U6). Counts only; every
+ * percentage is client-derived so a 0-member scope renders 0%, never NaN.
+ */
+export interface TrainingSummary {
+  scope: TrainingSummaryScope;
+  /** People fully compliant for every role they hold, over the scope's members. */
+  compliance: { compliantCount: number; memberCount: number };
+  /** CUMULATIVE windows: in60 includes in30, in90 includes both. */
+  expiring: { in30: number; in60: number; in90: number };
+  gaps: {
+    total: number;
+    /** Gaps only external evidence can close — no assessment awards them. */
+    evidenceOnly: number;
+    byCompetency: TrainingSummaryGapCompetency[];
+  };
+  complianceByGroup: {
+    axis: 'location' | 'department' | 'role';
+    groups: TrainingSummaryGroup[];
+  };
+  /** 8 ISO weeks of sign-offs, oldest first; the last is week-to-date. */
+  signOffs: {
+    weeks: TrainingSummaryWeek[];
+    currentWeek: number;
+    priorFullWeek: number;
+  };
+  /**
+   * Daily org-wide standing snapshots (~185 days). MAY BE EMPTY — the feature
+   * accrues history from its ship date, and the screen must say so rather
+   * than draw a chart of nothing.
+   */
+  trend: {
+    scope: 'org';
+    points: TrainingSummaryTrendPoint[];
+    /** Required-gap movement vs ~30 days ago; null until a snapshot that old exists. */
+    gapDelta: number | null;
+  };
+}
