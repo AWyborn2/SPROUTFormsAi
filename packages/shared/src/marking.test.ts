@@ -880,3 +880,51 @@ describe('autoVerdictWrite', () => {
     ).toBeNull();
   });
 });
+
+/**
+ * One attempt marks ONE part. A paper with several theory parts (the Track
+ * Dozer's General + two location papers) used to have any one attempt write
+ * ✓/✗ into the OTHER parts' printed cells, and their unanswered questions
+ * dragged this part's whole-part gate to not-satisfactory.
+ */
+describe('markTheory — scoped to its own part', () => {
+  const fields: FormField[] = [
+    header('h1'),
+    q('g1', ['a']),
+    outcome('g1-out'),
+    header('h2'),
+    q('r1', ['a']),
+    outcome('r1-out'),
+  ];
+  const manifest: AssessmentToolManifest = {
+    parts: [
+      { key: 'general', ordinal: 1, label: 'General', kind: 'theory', pathways: ['new'], startFieldId: 'h1' },
+      { key: 'raw', ordinal: 2, label: 'Raw Materials', kind: 'theory', pathways: ['new'], startFieldId: 'h2' },
+    ],
+  };
+
+  it("never writes into another part's cells, and its gate ignores their questions", () => {
+    const out = markTheory({
+      fields,
+      values: { g1: ['a'] },
+      part: manifest.parts[0]!,
+      manifest,
+    });
+
+    // Only this part's question was marked…
+    expect(out.marks.map((m) => m.fieldId)).toEqual(['g1']);
+    expect(out.derivedValues['g1-out']).toBe(true);
+    // …the other part's cell is untouched, not crossed for a question the
+    // candidate never saw…
+    expect(out.derivedValues['r1-out']).toBeUndefined();
+    // …and the unanswered other-part question does not fail this part.
+    expect(out.outcome).toBe('satisfactory');
+  });
+
+  it('marks everything only when no manifest is given — the old single-part behaviour', () => {
+    const out = markTheory({ fields, values: { g1: ['a'] }, part: {} });
+
+    expect(out.marks.map((m) => m.fieldId)).toEqual(['g1', 'r1']);
+    expect(out.outcome).toBe('not_satisfactory');
+  });
+});

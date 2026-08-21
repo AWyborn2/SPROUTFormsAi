@@ -32,6 +32,7 @@ import { store } from './store.js';
 import {
   assessmentsApi,
   type CreateCaseInput,
+  type PartOutcomeMarkEntry,
   type RecordOutcomeInput,
 } from './assessments.js';
 import type {
@@ -1292,6 +1293,7 @@ export function useSaveWorkflow(toolId: string) {
       partCompletionMarks?: PartCompletionMark[] | null;
       signOff?: AssessmentToolManifest['signOff'] | null;
       pathwayMarks?: AssessmentToolManifest['pathwayMarks'] | null;
+      partOutcomeMarks?: PartOutcomeMarkEntry[] | null;
     }) =>
       assessmentsApi.saveWorkflow(
         toolId,
@@ -1302,6 +1304,7 @@ export function useSaveWorkflow(toolId: string) {
         input.partCompletionMarks,
         input.signOff,
         input.pathwayMarks,
+        input.partOutcomeMarks,
       ),
     onSuccess: () => {
       // Prefix invalidation, so the detail AND the list refresh: the list
@@ -1359,6 +1362,20 @@ export function useExportCasePdf() {
 /** Every case's progress in one read — the dashboard's only query. */
 export function useAssessmentProgress() {
   return useQuery({ queryKey: keys.assessmentProgress, queryFn: () => assessmentsApi.listProgress() });
+}
+
+/** Move an open case to a Location (staff only) — see the route's rules. */
+export function useSetCaseLocation(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (locationId: string | null) =>
+      assessmentsApi.setCaseLocation(caseId, locationId),
+    onSuccess: () => {
+      // The Location decides which parts the case requires, so everything
+      // derived from progress refreshes with it.
+      void qc.invalidateQueries({ queryKey: keys.assessmentCases });
+    },
+  });
 }
 
 export function useAssessmentCase(id: string | undefined) {

@@ -5498,3 +5498,137 @@ describe('location parts rule at case runtime', () => {
     }
   });
 });
+
+/**
+ * The parts' verdict pairs, repointed from the workflow editor — the fix for
+ * a printed "responses were" pair that publish's guess missed.
+ */
+describe('PATCH /assessment-tools/:id — part outcome marks', () => {
+  it('persists a pair onto its part, and a later save keeps it', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const res = await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({
+          partOutcomeMarks: [
+            {
+              partKey: 'p1',
+              outcomeSatisfactory: { fieldId: 'q-mining-out', value: true },
+              outcomeNotSatisfactory: { fieldId: 'q-raw-out', value: true },
+            },
+          ],
+        }),
+      });
+      expect(res.status).toBe(200);
+
+      await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ name: 'Renamed' }),
+      });
+
+      const m = rows(store, 'assessmentTools').find((r) => r.id === tool.id)?.manifest as {
+        parts: Array<{ key: string; outcomeSatisfactory?: { fieldId: string } }>;
+      };
+      expect(m?.parts.find((p) => p.key === 'p1')?.outcomeSatisfactory?.fieldId).toBe(
+        'q-mining-out',
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a pair naming a ghost part or a ghost box', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const ghostPart = await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({
+          partOutcomeMarks: [
+            { partKey: 'nope', outcomeSatisfactory: { fieldId: 'q-mining-out', value: true } },
+          ],
+        }),
+      });
+      expect(ghostPart.status).toBe(400);
+
+      const ghostBox = await fetch(`${base}/assessment-tools/${tool.id}`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({
+          partOutcomeMarks: [
+            { partKey: 'p1', outcomeSatisfactory: { fieldId: 'ghost-box', value: true } },
+          ],
+        }),
+      });
+      expect(ghostBox.status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * Moving an OPEN case to a Location — the fix for cases opened before the
+ * Location rule was enforced, which carry none and demand every part.
+ */
+describe('PATCH /assessment-cases/:id/location', () => {
+  it('sets the Location on an open case', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const c = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+        })
+      ).json()) as { id: string };
+
+      const res = await fetch(`${base}/assessment-cases/${c.id}/location`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ locationId: MINING }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(rows(store, 'assessmentCases').find((r) => r.id === c.id)?.locationId).toBe(MINING);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses a Location that is not one of the organisation’s', async () => {
+    mockDbValue = makeDb().db;
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const c = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: CANDIDATE, pathway: 'new' }),
+        })
+      ).json()) as { id: string };
+
+      const res = await fetch(`${base}/assessment-cases/${c.id}/location`, {
+        method: 'PATCH',
+        headers: auth(),
+        body: JSON.stringify({ locationId: '00000000-0000-4000-8000-0000000000bb' }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('location_not_found');
+    } finally {
+      server.close();
+    }
+  });
+});

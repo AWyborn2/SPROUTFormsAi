@@ -138,6 +138,22 @@ export function composeRevisionManifest(
     else delete merged.pathwayMarks;
   }
 
+  // The parts' verdict pairs, per part: a seeded mark whose box still exists
+  // beats the fresh label-guess, exactly like the sign-off block above.
+  merged.parts = merged.parts.map((p) => {
+    const seededPart = seeded.parts.find((sp) => sp.key === p.key);
+    if (!seededPart) return p;
+    const keep = (mark: AssessmentToolManifest['parts'][number]['outcomeSatisfactory']) =>
+      mark && byId.has(mark.fieldId) ? mark : undefined;
+    const yes = keep(seededPart.outcomeSatisfactory);
+    const no = keep(seededPart.outcomeNotSatisfactory);
+    return {
+      ...p,
+      ...(yes ? { outcomeSatisfactory: yes } : {}),
+      ...(no ? { outcomeNotSatisfactory: no } : {}),
+    };
+  });
+
   return merged;
 }
 
