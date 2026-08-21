@@ -16,7 +16,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { ExtractedField, ExtractionResult } from '@formai/shared';
-import { statsFor } from './use-builder-draft.js';
+import { seedFields, statsFor } from './use-builder-draft.js';
 
 function field(over: Partial<ExtractedField> & { id: string }): ExtractedField {
   return { label: over.id, type: 'text', confidence: 0.9, ...over };
@@ -136,5 +136,29 @@ describe('statsFor', () => {
     const stats = statsFor(extraction([], 18));
 
     expect(stats.pages).toBe(18);
+  });
+});
+
+/**
+ * The extraction-batch window must survive seeding (R1) — this exact mapping
+ * is where `questionRef` silently died, so the copy is asserted, not assumed.
+ * The placement step scopes detection by it; a dropped window is not an error
+ * anywhere, just detection that quietly stops telling repeated parts apart.
+ */
+describe('seedFields — sourcePages threading', () => {
+  it('copies a stamped window onto the builder field', () => {
+    const [seeded] = seedFields(
+      extraction([field({ id: 'f1', label: 'Wearing correct PPE', sourcePages: { from: 5, to: 8 } })]),
+    );
+
+    expect(seeded!.sourcePages).toEqual({ from: 5, to: 8 });
+  });
+
+  it('omits the key entirely when the extraction carried no window', () => {
+    // Absent, not undefined-valued: an AcroForm or legacy field must publish
+    // without the property so the engine takes its unscoped path (R6).
+    const [seeded] = seedFields(extraction([field({ id: 'f1' })]));
+
+    expect('sourcePages' in seeded!).toBe(false);
   });
 });

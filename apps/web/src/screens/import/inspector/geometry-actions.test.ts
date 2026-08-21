@@ -10,7 +10,12 @@ import { describe, expect, it } from 'vitest';
 import type { FormField, GroupOrdinal, PageBox } from '@formai/shared';
 import { markPlacement, resolveGeometry } from '@formai/shared';
 import type { FieldProposal, PositionedText, TableProposal, TextPage } from '../../../lib/pdf-geometry.js';
+import { proposeFieldOptionCells, proposeMatchAnchorCells } from '../../../lib/pdf-geometry.js';
 import {
+  pageWindowOf,
+  windowVerdict,
+  WINDOW_CONFIDENCE_CAP,
+  WINDOW_MARGIN_PAGES,
   NEAR_EQUAL_CONFIDENCE,
   NUDGE_POINTS,
   SNAP_RANGE,
@@ -1945,5 +1950,372 @@ describe('retargetPageChanges', () => {
     const fields = [placed('a', [11, 11])];
 
     expect(retargetPageChanges(fields, ['a'], 11)).toEqual([]);
+  });
+});
+
+/**
+ * The extraction window as a soft prior (sourcePages scoping).
+ *
+ * Every AI field carries the 1-based page range of the 4-page batch that
+ * produced it. These tests pin the whole discipline: the window softens
+ * exactly one refusal (ambiguous document-wide, unique in-window), never
+ * auto-confirms what it influenced, never vetoes the only candidate, and —
+ * asserted with deep-equality fixtures, not assumed — leaves a field without
+ * a window byte-identical to the pre-window behaviour (R6).
+ */
+describe('pageWindowOf (R7/KTD3)', () => {
+  it('converts 1-based to 0-based, dilates one page each side, and keeps the stamped range for notes', () => {
+    expect(pageWindowOf({ from: 5, to: 8 }, 18)).toEqual({ first: 3, last: 8, from: 5, to: 8 });
+  });
+
+  it('clamps the dilated bounds to the document', () => {
+    expect(pageWindowOf({ from: 1, to: 4 }, 18)).toEqual({ first: 0, last: 4, from: 1, to: 4 });
+    expect(pageWindowOf({ from: 15, to: 18 }, 18)).toEqual({ first: 13, last: 17, from: 15, to: 18 });
+  });
+
+  it('the margin is one page and the cap sits strictly below the auto-confirm boundary', () => {
+    // classifyProposalTier auto-confirms at confidence === 1 exactly; the cap
+    // must never reach it, or a window-guessed page could publish unreviewed.
+    expect(WINDOW_MARGIN_PAGES).toBe(1);
+    expect(WINDOW_CONFIDENCE_CAP).toBeLessThan(1);
+    expect(classifyProposalTier({ segments: [], confidence: WINDOW_CONFIDENCE_CAP, notes: [] })).toBe(
+      'needs-review',
+    );
+  });
+
+  it('treats every malformed shape as absent', () => {
+    expect(pageWindowOf(undefined, 18)).toBeNull();
+    expect(pageWindowOf({ from: 0, to: 2 }, 18)).toBeNull(); // 1-based, so 0 is malformed
+    expect(pageWindowOf({ from: 5, to: 4 }, 18)).toBeNull(); // inverted
+    expect(pageWindowOf({ from: 2.5, to: 3 }, 18)).toBeNull(); // not a page number
+    expect(pageWindowOf({ from: 1, to: 2 }, 0)).toBeNull(); // no document to scope
+  });
+
+  it('ignores a window wholly past the end of the document (shorter-PDF defense)', () => {
+    expect(pageWindowOf({ from: 19, to: 22 }, 18)).toBeNull();
+    // …but a window that still touches the document survives, clamped.
+    expect(pageWindowOf({ from: 18, to: 22 }, 18)).toEqual({ first: 16, last: 17, from: 18, to: 22 });
+  });
+});
+
+describe('windowVerdict (R2-R5 truth table)', () => {
+  // Stamped pages 6-8 of a 20-page document: dilated 0-based bounds 4..8.
+  const window = pageWindowOf({ from: 6, to: 8 }, 20)!;
+  const hits = (...pages: number[]) => pages.map((page) => ({ page }));
+
+  it('refuses when nothing matched anywhere', () => {
+    expect(windowVerdict([], window)).toEqual({ kind: 'refuse' });
+  });
+
+  it('places a unique in-window hit UNWINDOWED — the prior changed nothing and leaves no trace (AE4)', () => {
+    expect(windowVerdict(hits(6), window)).toEqual({ kind: 'place', page: 6, windowed: false });
+  });
+
+  it('dilation admits a hit one page before or after the stamped range (KTD3)', () => {
+    // Stamped 6-8 is 0-based 5..7; pages 4 and 8 are the one-page tolerance.
+    expect(windowVerdict(hits(4), window)).toEqual({ kind: 'place', page: 4, windowed: false });
+    expect(windowVerdict(hits(8), window)).toEqual({ kind: 'place', page: 8, windowed: false });
+  });
+
+  it('places the one in-window hit over document-wide rivals, naming the excluded pages (AE1/R5)', () => {
+    const verdict = windowVerdict(hits(6, 11, 16), window);
+
+    expect(verdict).toEqual({
+      kind: 'place',
+      page: 6,
+      windowed: true,
+      note: 'Matched on page 7; pages 12 and 17 excluded by the extraction window (pages 6–8).',
+    });
+  });
+
+  it('refuses two in-window hits — ambiguity INSIDE the window is a question the window cannot answer (AE2)', () => {
+    expect(windowVerdict(hits(5, 6), window)).toEqual({ kind: 'refuse' });
+    // Outsiders change nothing about that.
+    expect(windowVerdict(hits(5, 6, 15), window)).toEqual({ kind: 'refuse' });
+  });
+
+  it('places a unique OUT-of-window hit, flagged — the soft prior never vetoes the only candidate (AE5)', () => {
+    expect(windowVerdict(hits(15), window)).toEqual({
+      kind: 'place',
+      page: 15,
+      windowed: true,
+      note: 'Matched on page 16, outside the extraction window (pages 6–8) — check the page.',
+    });
+  });
+
+  it('refuses two out-of-window hits, exactly as the unwindowed scan would', () => {
+    expect(windowVerdict(hits(12, 15), window)).toEqual({ kind: 'refuse' });
+  });
+
+  it('names a one-page stamped window as a single page', () => {
+    const single = pageWindowOf({ from: 6, to: 6 }, 20)!;
+
+    const verdict = windowVerdict(hits(5, 11), single);
+    expect(verdict.kind).toBe('place');
+    if (verdict.kind === 'place' && verdict.windowed) {
+      expect(verdict.note).toBe(
+        'Matched on page 6; page 12 excluded by the extraction window (page 6).',
+      );
+    }
+  });
+});
+
+describe('deriveOptionCellsAcrossPages through the window (U4)', () => {
+  /** A minimal page carrying the dozer's measured tick / cross / N-A header. */
+  function questionPage(question: string): TextPage {
+    return {
+      width: 595,
+      height: 842,
+      items: [
+        { text: 'N/A', x: 539.9, y: 648.6, width: 13.3 },
+        { text: 'During the demonstration, did the candidate:', x: 37.5, y: 647.7, width: 192 },
+        { text: '', x: 502.6, y: 647.7, width: 7.1 },
+        { text: '/ ×', x: 512.1, y: 647.7, width: 10.3 },
+        { text: question, x: 37.5, y: 630.8, width: 258.1 },
+        { text: 'Wearing correct PPE', x: 37.5, y: 614, width: 84 },
+      ],
+    };
+  }
+
+  const LABEL = 'Receive and clarify the work instructions';
+  const OPTIONS = ['tick', 'cross', 'na'];
+  const q = questionPage(LABEL);
+  const other = questionPage('Something else entirely');
+
+  it('AE1: places the one in-window copy of a criterion three pages print, capped and noted', () => {
+    // Pages 1, 4 and 6 (as printed) all carry the criterion; the field's batch
+    // was page 4. Stamped {4,4} dilates to 0-based 2..4, so only page 4 is in.
+    const pages = [q, other, other, q, other, q];
+
+    const res = deriveOptionCellsAcrossPages(
+      { label: LABEL, options: OPTIONS },
+      pages,
+      pageWindowOf({ from: 4, to: 4 }, pages.length),
+    );
+
+    expect(res).not.toBeNull();
+    expect(res!.segments.every((s) => s.page === 3)).toBe(true);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(classifyProposalTier(res)).toBe('needs-review');
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 4; pages 1 and 6 excluded by the extraction window (page 4).',
+    );
+  });
+
+  it('AE2: two in-window copies still refuse — the window resolves nothing inside itself', () => {
+    const pages = [other, other, q, q];
+
+    expect(
+      deriveOptionCellsAcrossPages(
+        { label: LABEL, options: OPTIONS },
+        pages,
+        pageWindowOf({ from: 3, to: 4 }, pages.length),
+      ),
+    ).toBeNull();
+  });
+
+  it('AE3: no window is byte-identical to the pre-change scan — deep-equal on the single hit, null on two', () => {
+    const pages = [other, q];
+
+    // The across-pages wrapper adds nothing to the untouched per-page rule:
+    // its no-window output IS proposeFieldOptionCells' own proposal, verbatim.
+    const expected = proposeFieldOptionCells({
+      page: 1,
+      pageWidth: q.width,
+      pageHeight: q.height,
+      items: q.items,
+      label: LABEL,
+      options: OPTIONS,
+    });
+    expect(expected).not.toBeNull();
+    expect(deriveOptionCellsAcrossPages({ label: LABEL, options: OPTIONS }, pages)).toEqual(expected);
+    // An explicit null window is the same absent-window path.
+    expect(deriveOptionCellsAcrossPages({ label: LABEL, options: OPTIONS }, pages, null)).toEqual(
+      expected,
+    );
+
+    expect(deriveOptionCellsAcrossPages({ label: LABEL, options: OPTIONS }, [q, other, q])).toBeNull();
+  });
+
+  it('AE4: a window that was not needed leaves no fingerprints — same confidence, same notes', () => {
+    const pages = [other, q, other];
+
+    const unwindowed = deriveOptionCellsAcrossPages({ label: LABEL, options: OPTIONS }, pages);
+    const windowed = deriveOptionCellsAcrossPages(
+      { label: LABEL, options: OPTIONS },
+      pages,
+      pageWindowOf({ from: 1, to: 2 }, pages.length),
+    );
+
+    expect(windowed).toEqual(unwindowed);
+  });
+
+  it('AE5: a unique hit OUTSIDE the window still places, capped, with the check-the-page note', () => {
+    const pages = [other, other, other, other, other, other, q, other];
+
+    const res = deriveOptionCellsAcrossPages(
+      { label: LABEL, options: OPTIONS },
+      pages,
+      pageWindowOf({ from: 1, to: 2 }, pages.length),
+    );
+
+    expect(res).not.toBeNull();
+    expect(res!.segments.every((s) => s.page === 6)).toBe(true);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 7, outside the extraction window (pages 1–2) — check the page.',
+    );
+  });
+});
+
+describe('deriveMatchAnchorsAcrossPages through the window (U4)', () => {
+  const signItems: PositionedText[] = [
+    { text: 'Restricted area', x: 60, y: 700, width: 78 },
+    { text: 'Biosecurity sign', x: 380, y: 700, width: 80 },
+    { text: 'Permission to pass', x: 60, y: 670, width: 92 },
+    { text: 'Traffic hazard sign', x: 380, y: 670, width: 92 },
+  ];
+
+  const ANCHORS = [
+    { key: 'l0', side: 'l' as const, text: 'Restricted area' },
+    { key: 'l1', side: 'l' as const, text: 'Permission to pass' },
+    { key: 'r0', side: 'r' as const, text: 'Biosecurity sign' },
+    { key: 'r1', side: 'r' as const, text: 'Traffic hazard sign' },
+  ];
+
+  const blank: TextPage = { width: 595, height: 842, items: [] };
+  const signs: TextPage = { width: 595, height: 842, items: signItems };
+
+  it('places the one in-window copy of a question two pages claim, capped and noted', () => {
+    const pages = [signs, blank, blank, blank, blank, signs];
+
+    const res = deriveMatchAnchorsAcrossPages(
+      ANCHORS,
+      pages,
+      pageWindowOf({ from: 5, to: 6 }, pages.length),
+    );
+
+    expect(res).not.toBeNull();
+    expect(res!.segments.every((s) => s.page === 5)).toBe(true);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(classifyProposalTier(res)).toBe('needs-review');
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 6; page 1 excluded by the extraction window (pages 5–6).',
+    );
+  });
+
+  it('refuses two in-window claims exactly as today', () => {
+    const pages = [blank, blank, blank, blank, signs, signs];
+
+    expect(
+      deriveMatchAnchorsAcrossPages(ANCHORS, pages, pageWindowOf({ from: 5, to: 6 }, pages.length)),
+    ).toBeNull();
+  });
+
+  it('a window that was not needed leaves no fingerprints, and no window is the pre-change scan verbatim', () => {
+    const pages = [blank, blank, signs];
+
+    const expected = proposeMatchAnchorCells({
+      page: 2,
+      pageWidth: signs.width,
+      pageHeight: signs.height,
+      items: signs.items,
+      anchors: ANCHORS,
+    });
+    expect(expected).not.toBeNull();
+    expect(deriveMatchAnchorsAcrossPages(ANCHORS, pages)).toEqual(expected);
+    expect(
+      deriveMatchAnchorsAcrossPages(ANCHORS, pages, pageWindowOf({ from: 3, to: 3 }, pages.length)),
+    ).toEqual(expected);
+  });
+});
+
+describe('deriveAcrossPages through the window (U5/R9)', () => {
+  const blank = { items: [], width: A4.width, height: A4.height };
+  const withTable = { items: pageText(), width: A4.width, height: A4.height };
+
+  it('an identical table on two pages lands in the window instead of on the first page that fits', () => {
+    const pages = [blank, blank, withTable, blank, blank, withTable];
+
+    // The contrast case first: without a window, the earlier page wins — the
+    // exact first-page capture the section-move tool exists to clean up after.
+    expect(deriveAcrossPages(tableField(), pages)!.segment.page).toBe(2);
+
+    const res = deriveAcrossPages(tableField(), pages, pageWindowOf({ from: 6, to: 6 }, pages.length));
+
+    expect(res).not.toBeNull();
+    expect(res!.segment.page).toBe(5);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(classifyProposalTier(res)).toBe('needs-review');
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 6; page 3 excluded by the extraction window (page 6).',
+    );
+  });
+
+  it('two in-window candidates do NOT refuse — the existing tiebreak picks, capped because a page was excluded', () => {
+    // The table path never refused on ambiguity and does not start to (R9):
+    // pages 5 and 6 are both in the stamped {5,6} window, page 3 is excluded.
+    const pages = [blank, blank, withTable, blank, withTable, withTable];
+
+    const res = deriveAcrossPages(tableField(), pages, pageWindowOf({ from: 5, to: 6 }, pages.length));
+
+    expect(res).not.toBeNull();
+    // The existing tiebreak (earlier page on a full tie) runs over the
+    // in-window survivors only.
+    expect(res!.segment.page).toBe(4);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 5; page 3 excluded by the extraction window (pages 5–6).',
+    );
+  });
+
+  it('no in-window candidate: the existing best-pick runs over everything, capped with the outside note', () => {
+    const pages = [blank, blank, withTable, blank, blank, blank];
+
+    const res = deriveAcrossPages(tableField(), pages, pageWindowOf({ from: 5, to: 6 }, pages.length));
+
+    expect(res).not.toBeNull();
+    expect(res!.segment.page).toBe(2);
+    expect(res!.confidence).toBeLessThanOrEqual(WINDOW_CONFIDENCE_CAP);
+    expect(res!.notes[res!.notes.length - 1]).toBe(
+      'Matched on page 3, outside the extraction window (pages 5–6) — check the page.',
+    );
+  });
+
+  it('no window is byte-identical to the pre-change pick, and equals the untouched per-page derivation', () => {
+    const pages = [blank, blank, withTable, blank, blank, withTable];
+
+    // The across-pages combiner adds nothing to deriveForField's own pick.
+    const expected = deriveForField(tableField(), 2, withTable.items, A4.width, A4.height);
+    expect(expected).not.toBeNull();
+    expect(deriveAcrossPages(tableField(), pages)).toEqual(expected);
+    expect(deriveAcrossPages(tableField(), pages, null)).toEqual(expected);
+  });
+
+  it('every candidate in-window means the window changed nothing — deep-equal to the unwindowed pick', () => {
+    const pages = [blank, blank, withTable, withTable];
+
+    const unwindowed = deriveAcrossPages(tableField(), pages);
+    const windowed = deriveAcrossPages(
+      tableField(),
+      pages,
+      pageWindowOf({ from: 3, to: 4 }, pages.length),
+    );
+
+    expect(windowed).toEqual(unwindowed);
+    expect(windowed!.confidence).toBe(1); // untouched, still auto-confirmable
+  });
+
+  it('an ordinal field without a window keeps the pre-change path, null included', () => {
+    // No fixture in the suite can make a per-page ordinal pick succeed (the
+    // rightmost-cluster rule collapses side-by-side groups into one proposal,
+    // so stacked look-alikes refuse — the ADMN regression above). What must
+    // hold is that a window neither invents a pick where the unwindowed path
+    // refused everywhere, nor disturbs the refusal.
+    const field = tableField({ groupOrdinal: { index: 0, count: 3 }, fixedRows: undefined });
+    const pages = [blank, withTable];
+
+    expect(deriveAcrossPages(field, pages)).toBeNull();
+    expect(deriveAcrossPages(field, pages, pageWindowOf({ from: 1, to: 2 }, pages.length))).toBeNull();
   });
 });
