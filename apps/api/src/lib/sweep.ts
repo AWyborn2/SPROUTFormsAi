@@ -1,6 +1,6 @@
 /**
  * The expiry sweep (U21, KTD11, KTD12). Makes renewal happen because the product
- * noticed: two passes over an organisation, safe to run repeatedly.
+ * noticed: three passes over an organisation, safe to run repeatedly.
  *
  * PASS 1 — ASSIGNMENT. Expired REQUIRED competencies go back through the same
  * assignment engine every other trigger uses, which creates a case only where a
@@ -16,6 +16,14 @@
  * (R98) — a person with a login but no reachable email is still reached — and it
  * is the idempotence guard.
  *
+ * PASS 3 — SNAPSHOT CAPTURE (U4, KTD5). One `compliance_snapshots` row per org
+ * per UTC day, plus one per active location and department — the history the
+ * Training summary's trend reads, captured here because compliance is derived
+ * everywhere else and yesterday's number is unrecoverable once grants move.
+ * Isolated in its own error boundary: a snapshot failure is a missing trend
+ * point (the chart renders a gap), never a reason to mask the assignment and
+ * notification work the same run already completed.
+ *
  * One call sweeps EVERY organisation, each inside its own error boundary, so no
  * organisation has to be registered with the caller and a failing one does not
  * stop the rest — a newly onboarded organisation must not go silently unswept.
@@ -24,6 +32,15 @@ import { and, eq, inArray, isNull } from 'drizzle-orm';
 import { schema } from '@formai/db';
 import { expiryOf } from '@formai/shared';
 import { assignForMembership } from './assignment.js';
+import { requiredCompetencyIdsByUser } from './standing.js';
+import { runSnapshotted } from './requirement-links.js';
+import {
+  complianceCountsOf,
+  requiredStandingByMember,
+  usersByScopeId,
+  type MatrixCompetency,
+  type MatrixGrant,
+} from './training-matrix.js';
 import { sendExpiryNoticeEmail } from '../email/resend.js';
 import { db } from '../db.js';
 
@@ -34,6 +51,11 @@ export interface OrgSweepResult {
   orgId: string;
   casesCreated: number;
   noticesSent: number;
+  /** Snapshot rows written by pass 3 — org row plus one per active location/department. */
+  snapshotsWritten: number;
+  /** Set when pass 3 threw. The other passes' numbers above still stand —
+   * a lost trend point must not read as a lost sweep. */
+  snapshotFailed?: boolean;
   /** Set when this organisation's pass threw and was skipped, so one failure does not stop the rest. */
   failed?: boolean;
 }
@@ -43,7 +65,7 @@ export async function sweepOrganization(
   database: Database,
   org: typeof schema.organizations.$inferSelect,
   now: Date,
-): Promise<{ casesCreated: number; noticesSent: number }> {
+): Promise<Omit<OrgSweepResult, 'orgId'>> {
   // PASS 1 — assignment. Re-assign the requirements of every active member; the
   // engine's skip rule turns an expired required competency into a case and
   // leaves everything current alone (R46, KTD16).
@@ -57,6 +79,36 @@ export async function sweepOrganization(
   }
 
   // PASS 2 — notification.
+  const noticesSent = await runNotificationPass(database, org, now);
+
+  /*
+    PASS 3 — snapshot capture, in its OWN error boundary (U4). The first two
+    passes have already committed their work row by row; a snapshot failure
+    after them is a missing trend point, and throwing here would report the
+    whole sweep failed — masking cases created and notices sent that very much
+    happened. The flag surfaces the miss without un-counting the rest.
+  */
+  let snapshotsWritten = 0;
+  let snapshotFailed: true | undefined;
+  try {
+    snapshotsWritten = await captureComplianceSnapshots(database, org.id, now);
+  } catch {
+    snapshotFailed = true;
+  }
+
+  return snapshotFailed
+    ? { casesCreated, noticesSent, snapshotsWritten, snapshotFailed }
+    : { casesCreated, noticesSent, snapshotsWritten };
+}
+
+/** PASS 2 — the notification pass, verbatim from its inline form; extracted so
+ * pass 3 runs whether or not anybody holds anything (its zero-holder early
+ * return used to end the whole sweep). */
+async function runNotificationPass(
+  database: Database,
+  org: typeof schema.organizations.$inferSelect,
+  now: Date,
+): Promise<number> {
   const leadDays = org.notificationLeadDays ?? 30;
   const holders = await database.query.competencyHolders.findMany({
     where: and(
@@ -65,7 +117,7 @@ export async function sweepOrganization(
     ),
   });
   let noticesSent = 0;
-  if (holders.length === 0) return { casesCreated, noticesSent };
+  if (holders.length === 0) return noticesSent;
 
   const comps = await database.query.competencies.findMany({
     where: eq(schema.competencies.orgId, org.id),
@@ -173,7 +225,160 @@ export async function sweepOrganization(
     noticesSent++;
   }
 
-  return { casesCreated, noticesSent };
+  return noticesSent;
+}
+
+/**
+ * PASS 3 — capture today's compliance numbers as `compliance_snapshots` rows
+ * (U4, KTD5): the org row, plus one row per ACTIVE location and department.
+ * Scoped rows are captured from day one even though v1 UI reads only the org
+ * rows — a scoped trend asked for later cannot be backfilled. A retired scope
+ * stops getting new rows (its requirements stopped applying) but keeps its
+ * history.
+ *
+ * THE NUMBERS ARE THE ROUTE'S NUMBERS, by construction: one org-wide
+ * expansion (active memberships → required sets → grants), resolved by
+ * `requiredStandingByMember` and folded by `complianceCountsOf` — the exact
+ * helpers `GET /training-summary` derives its KPIs with — then sliced per
+ * scope from RAW placement rows intersected with the active member set. No
+ * second opinion of "compliant" or "gap" exists for a snapshot to disagree
+ * with the dashboard about. The awarding map is deliberately empty: no COUNT
+ * reads the `noAward` flag, and resolving tools here would be a read for
+ * nothing.
+ *
+ * IDEMPOTENT PER (org, UTC day) BY DELETE-THEN-INSERT inside one transaction,
+ * not an upsert: the two partial unique indexes (org rows vs scoped rows)
+ * would need two separate `onConflictDoUpdate` statements with per-index
+ * `targetWhere` clauses — and an upsert still leaves a STALE row behind when
+ * a scope retires between runs of the same day, claiming numbers for a scope
+ * the recompute no longer produces. Deleting the day's rows and inserting the
+ * recompute makes the day's snapshot exactly the recompute, every run. The
+ * partial unique indexes remain the concurrency backstop: two same-day runs
+ * racing serialize on them (one may abort; the caller's pass-3 try/catch
+ * absorbs it, and the surviving rows are a complete, correct capture).
+ *
+ * `capturedOn` is the UTC date of `now` — the sweep is externally triggered,
+ * and pinning to UTC keeps an irregular invocation time from double-filling
+ * or skipping a day.
+ */
+export async function captureComplianceSnapshots(
+  database: Database,
+  orgId: string,
+  now: Date,
+): Promise<number> {
+  return runSnapshotted(database, async (tx) => {
+    const memberships = await tx.query.memberships.findMany({
+      where: and(eq(schema.memberships.orgId, orgId), eq(schema.memberships.status, 'active')),
+    });
+    const membershipIds = memberships.map((m) => m.id);
+    const userIds = [...new Set(memberships.map((m) => m.userId))];
+    const userOfMembership = new Map(memberships.map((m) => [m.id, m.userId]));
+
+    /*
+      The standing loader opens its own repeatable-read transaction; on this
+      pass's handle it nests as a SAVEPOINT on the same snapshot
+      (`runSnapshotted`'s documented design). The cast is the one
+      `runSnapshotted` itself performs — a transaction handle carries
+      `.transaction` but not `$client`, so it does not satisfy `Db` nominally.
+    */
+    const requiredByUser = await requiredCompetencyIdsByUser(tx as Database, orgId, userIds);
+    const holders = userIds.length
+      ? await tx.query.competencyHolders.findMany({
+          where: and(
+            eq(schema.competencyHolders.orgId, orgId),
+            inArray(schema.competencyHolders.userId, userIds),
+          ),
+        })
+      : [];
+    const grantsByUser = new Map<string, MatrixGrant[]>();
+    for (const h of holders) {
+      const list = grantsByUser.get(h.userId) ?? [];
+      list.push(h);
+      grantsByUser.set(h.userId, list);
+    }
+    const relevantIds = new Set<string>();
+    for (const set of requiredByUser.values()) for (const id of set) relevantIds.add(id);
+    for (const h of holders) relevantIds.add(h.competencyId);
+    const competencies = relevantIds.size
+      ? await tx.query.competencies.findMany({
+          where: and(
+            eq(schema.competencies.orgId, orgId),
+            inArray(schema.competencies.id, [...relevantIds]),
+          ),
+        })
+      : [];
+    const competencyById = new Map<string, MatrixCompetency>(competencies.map((c) => [c.id, c]));
+
+    const standings = requiredStandingByMember({
+      userIds,
+      requiredByUser,
+      competencyById,
+      grantsByUser,
+      awardingToolByCompetency: new Map(), // counts never read `noAward` — see docblock
+      now,
+    });
+
+    // RAW placement rows, any value status — who stands WHERE is a placement
+    // question; only the ACTIVE-scope filter below decides which scopes get a
+    // row today.
+    const locationPlacements = membershipIds.length
+      ? await tx.query.membershipLocations.findMany({
+          where: inArray(schema.membershipLocations.membershipId, membershipIds),
+        })
+      : [];
+    const departmentPlacements = membershipIds.length
+      ? await tx.query.membershipDepartments.findMany({
+          where: inArray(schema.membershipDepartments.membershipId, membershipIds),
+        })
+      : [];
+    const activeLocations = await tx.query.locations.findMany({
+      where: and(eq(schema.locations.orgId, orgId), eq(schema.locations.status, 'active')),
+    });
+    const activeDepartments = await tx.query.departments.findMany({
+      where: and(eq(schema.departments.orgId, orgId), eq(schema.departments.status, 'active')),
+    });
+
+    const capturedOn = now.toISOString().slice(0, 10);
+    const rowFor = (
+      scopeType: 'location' | 'department' | null,
+      scopeId: string | null,
+      users: Iterable<string>,
+    ): typeof schema.complianceSnapshots.$inferInsert => {
+      const subset = [];
+      for (const userId of new Set(users)) {
+        const standing = standings.get(userId);
+        if (standing) subset.push(standing);
+      }
+      return { orgId, capturedOn, scopeType, scopeId, ...complianceCountsOf(subset) };
+    };
+    const byLocation = usersByScopeId(locationPlacements, (p) => p.locationId, userOfMembership);
+    const byDepartment = usersByScopeId(
+      departmentPlacements,
+      (p) => p.departmentId,
+      userOfMembership,
+    );
+    const noUsers: ReadonlySet<string> = new Set<string>();
+
+    const rows = [
+      rowFor(null, null, userIds),
+      ...activeLocations.map((l) => rowFor('location', l.id, byLocation.get(l.id) ?? noUsers)),
+      ...activeDepartments.map((d) =>
+        rowFor('department', d.id, byDepartment.get(d.id) ?? noUsers),
+      ),
+    ];
+
+    // Delete-then-insert per (org, day) — the idempotence rationale above.
+    await tx
+      .delete(schema.complianceSnapshots)
+      .where(
+        and(
+          eq(schema.complianceSnapshots.orgId, orgId),
+          eq(schema.complianceSnapshots.capturedOn, capturedOn),
+        ),
+      );
+    await tx.insert(schema.complianceSnapshots).values(rows);
+    return rows.length;
+  });
 }
 
 /** Sweep every organisation, each isolated so one failure cannot stop the rest (KTD11). */
@@ -188,7 +393,7 @@ export async function sweepAllOrganizations(
       const result = await sweepOrganization(database, org, now);
       results.push({ orgId: org.id, ...result });
     } catch {
-      results.push({ orgId: org.id, casesCreated: 0, noticesSent: 0, failed: true });
+      results.push({ orgId: org.id, casesCreated: 0, noticesSent: 0, snapshotsWritten: 0, failed: true });
     }
   }
   return results;

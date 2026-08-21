@@ -145,6 +145,20 @@ export const keys = {
   workingList: ['workingList'] as const,
   /** How the workforce stands, for compliance reporting (U20). */
   compliance: ['compliance'] as const,
+  /**
+   * The workforce × competency grid (U5). TOP-LEVEL on purpose — nesting it
+   * under `members`, `compliance`, or `competencies` would make it a prefix
+   * match of those invalidations and sweep this whole (large) payload on every
+   * roster or register write.
+   */
+  trainingMatrix: ['training-matrix'] as const,
+  /**
+   * The KPI roll-up (U6). TOP-LEVEL for the same reason as `trainingMatrix`,
+   * and a SIBLING of it — `['training-matrix', …]` would make every summary a
+   * prefix match of the grid's invalidation. Keyed by (scope, axis) because
+   * each combination is a distinct server computation.
+   */
+  trainingSummary: (scope: string, axis: string) => ['training-summary', scope, axis] as const,
   assessmentCases: ['assessmentCases'] as const,
   /**
    * The shared assessor queue (U13). A SIBLING of assessmentCases — it shares no
@@ -1201,6 +1215,10 @@ export function useApplyAwardLink() {
       qc.invalidateQueries({ queryKey: keys.assessorQueue });
       qc.invalidateQueries({ queryKey: keys.workingList });
       qc.invalidateQueries({ queryKey: keys.compliance });
+      // The training matrix and summary read the same standing the compliance
+      // report does; the bare summary prefix sweeps every (scope, axis) cache.
+      qc.invalidateQueries({ queryKey: keys.trainingMatrix });
+      qc.invalidateQueries({ queryKey: ['training-summary'] });
       qc.invalidateQueries({ queryKey: keys.auditLog });
     },
   });
@@ -1659,6 +1677,35 @@ export function useComplianceReport(options?: { enabled?: boolean; staleTime?: n
   });
 }
 
+/** The workforce × competency grid — admin/owner + assessments feature (U5). */
+export function useTrainingMatrix() {
+  return useQuery({
+    queryKey: keys.trainingMatrix,
+    queryFn: () => store.getTrainingMatrix(),
+  });
+}
+
+/**
+ * The one-page KPI roll-up — admin/owner + assessments feature (U6). At most
+ * one of `location`/`department` narrows the scope; neither means org-wide.
+ * The key serialises the scope so each (scope, axis) pairing caches apart.
+ */
+export function useTrainingSummary(params: {
+  location?: string;
+  department?: string;
+  axis: 'location' | 'department' | 'role';
+}) {
+  const scope = params.location
+    ? `location:${params.location}`
+    : params.department
+      ? `department:${params.department}`
+      : 'org';
+  return useQuery({
+    queryKey: keys.trainingSummary(scope, params.axis),
+    queryFn: () => store.getTrainingSummary(params),
+  });
+}
+
 /** The caller's own expiry notices — the login delivery route (U21, R98). */
 export function useMyNotices() {
   return useQuery({ queryKey: keys.myNotices, queryFn: () => store.listMyNotices() });
@@ -1773,6 +1820,10 @@ function useRequirementWriteInvalidation(ref: RequirementScopeRef) {
     void qc.invalidateQueries({ queryKey: keys.assessmentProgress });
     void qc.invalidateQueries({ queryKey: keys.myRecommended });
     void qc.invalidateQueries({ queryKey: keys.compliance });
+    // The training matrix and summary read the same standing the compliance
+    // report does; the bare summary prefix sweeps every (scope, axis) cache.
+    void qc.invalidateQueries({ queryKey: keys.trainingMatrix });
+    void qc.invalidateQueries({ queryKey: ['training-summary'] });
     void qc.invalidateQueries({ queryKey: keys.auditLog });
   };
 }
