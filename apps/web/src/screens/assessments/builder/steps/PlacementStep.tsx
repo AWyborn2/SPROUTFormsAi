@@ -311,6 +311,13 @@ export function PlacementStep({ draft }: PlacementStepProps) {
           versionId={versionId}
           embedded
           onSaved={setPlacedFields}
+          /*
+            The placement learning loop's metric slice (KTD6). The builder
+            only ever imports assessments — `use-builder-draft` hard-codes the
+            same — so this mount knows the document class where the standalone
+            route does not.
+          */
+          documentType="assessment"
         />
       </div>
     </div>

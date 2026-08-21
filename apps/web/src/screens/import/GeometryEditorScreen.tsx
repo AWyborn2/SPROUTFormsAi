@@ -1,6 +1,7 @@
 import {
   useCallback,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -9,17 +10,19 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Button, Icon, useToast } from '@formai/ui';
 import {
   geometrySegments,
-  isChoiceField,
-  isMatchingQuestion,
   matchAnchors,
   GLYPH_KINDS,
   GLYPH_LABELS,
+  type DocumentType,
   type FormField,
   type GlyphKind,
   type MatchAnchor,
   type PageBox,
+  type PlacementFieldClass,
 } from '@formai/shared';
 import { useFormVersion, usePublishFormVersion, useSaveVersionFields } from '../../lib/data/hooks.js';
+import { sendPlacementOutcomes } from '../../lib/data/placement-outcomes.js';
+import { createPlacementRecorder, type PlacementRecorder } from './inspector/placement-recorder.js';
 import type { FieldProposal, TableProposal, TextPage } from '../../lib/pdf-geometry.js';
 import {
   clearWholeFieldBoxOnPage,
@@ -42,6 +45,7 @@ import { PdfViewer } from './PdfViewer.js';
 import {
   applyFieldChanges,
   classifyProposalTier,
+  derivationMethodOf,
   deriveAcrossPages,
   deriveMatchAnchorsAcrossPages,
   deriveOptionCellsAcrossPages,
@@ -111,6 +115,16 @@ export interface GeometryEditorScreenProps {
    * say so.
    */
   onSaved?: (fields: FormField[]) => void;
+  /**
+   * What class of paper the host knows it is placing, for the placement
+   * learning loop's metric slices (KTD6). Forms carry no document type of
+   * their own, so this is the HOST's knowledge: the builder passes
+   * `'assessment'` (its whole flow is assessments), the standalone route
+   * passes nothing and the recorded outcomes bucket as `unspecified` — the
+   * same posture as `extraction_corrections.documentType`. Never affects
+   * placement itself.
+   */
+  documentType?: DocumentType;
 }
 
 export function GeometryEditorScreen({
@@ -119,6 +133,7 @@ export function GeometryEditorScreen({
   embedded = false,
   onDone,
   onSaved,
+  documentType,
 }: GeometryEditorScreenProps = {}) {
   const params = useParams<{ id: string; versionId: string }>();
   // Props win where given; the route is the fallback, so the standalone screen
@@ -190,6 +205,19 @@ export function GeometryEditorScreen({
 
   const fields = edited ?? version?.fields ?? [];
   const selected = fields.find((f) => f.id === selectedId) ?? null;
+
+  /**
+   * The placement session's outcome recorder (the learning loop's capture
+   * seam). A ref, never state — events must not drive a render — created
+   * lazily so one recorder spans the whole session across both mounts. Every
+   * placement action below feeds it one line; a successful Save drains it and
+   * sends, fire-and-forget (R4/KTD1). A NEW placement action must feed it too,
+   * or the hit-rate metric silently undercounts — see `derivationMethodOf`.
+   * Telemetry only: nothing here is ever load-bearing for the placement itself.
+   */
+  const recorderRef = useRef<PlacementRecorder | null>(null);
+  recorderRef.current ??= createPlacementRecorder();
+  const recorder = recorderRef.current;
 
   /*
     THE LIST IS GROUPED, COUNTED AND FILTERABLE (U15).
@@ -321,13 +349,19 @@ export function GeometryEditorScreen({
         : moveBand(overlay.box, handle.axis, adjustment.key, adjustment.edge, value);
     if (!next) return;
 
+    // The band-moved signal, RAW points in — the recorder buckets. Recorded
+    // only for edits that landed (a refused move taught the engine nothing).
+    const bandKind = handle.axis === 'column' ? 'column-band' : 'row-band';
+
     if (overlay.source.kind === 'preview') {
       const { fieldId } = overlay.source;
+      recorder.previewAdjusted(fieldId, bandKind, value - handle.at);
       setProposalPreviews((prev) =>
         prev.map((p) => (p.fieldId === fieldId && 'segment' in p.proposal ? { ...p, proposal: { ...p.proposal, segment: next } } : p)),
       );
       return;
     }
+    recorder.placedAdjusted(overlay.source.fieldId, bandKind, value - handle.at);
 
     const { fieldId, optionKey } = overlay.source;
     // Matched by page AS WELL AS optionKey: a table spanning a page break has
@@ -362,8 +396,13 @@ export function GeometryEditorScreen({
     // Clamped to nothing — the box is already against the page edge.
     if (next === overlay.box) return;
 
+    // The whole-box-moved signal: the dominant axis's raw delta, bucketed by
+    // the recorder. One finding per field per bucket, however many nudges.
+    const movedBy = Math.max(Math.abs(dx), Math.abs(dy));
+
     if (overlay.source.kind === 'preview') {
       const { fieldId } = overlay.source;
+      recorder.previewAdjusted(fieldId, 'box-moved', movedBy);
       setProposalPreviews((prev) =>
         prev.map((p) =>
           p.fieldId === fieldId && 'segment' in p.proposal
@@ -373,6 +412,7 @@ export function GeometryEditorScreen({
       );
       return;
     }
+    recorder.placedAdjusted(overlay.source.fieldId, 'box-moved', movedBy);
 
     const { fieldId, optionKey } = overlay.source;
     // Page-scoped, like `onBandEdge`: don't drag every page's box onto this one.
@@ -482,6 +522,15 @@ export function GeometryEditorScreen({
 
     const proposal = deriveProposal(field, textPages);
     const tier = classifyProposalTier(proposal);
+    /*
+      Record the engine's verdict — including a refusal, which is exactly the
+      per-document-class number a tuning round needs. Only once the text layer
+      exists: `deriveProposal` refuses on an empty one, and that null is "the
+      page hasn't loaded", not an engine no-match. A field with no derivation
+      family (method null) was never the engine's to answer.
+    */
+    const method = derivationMethodOf(field);
+    if (method && textPages.length > 0) recorder.proposed(field.id, method, tier);
     if (tier === 'no-match') return;
 
     if (tier === 'needs-review') {
@@ -498,6 +547,7 @@ export function GeometryEditorScreen({
     // a single `mutateMany` batch, not a loop of individual `mutate()` calls
     // — the exact bug U2 fixed for the "Place all N" button (KTD3).
     mutateMany(changesForProposal(field, proposal!));
+    recorder.accepted(field.id, 'auto');
   }
 
   /**
@@ -549,12 +599,17 @@ export function GeometryEditorScreen({
 
         const proposal = deriveProposal(field, scope);
         const tier = classifyProposalTier(proposal);
+        // Same recording rule as `selectField` — the recorder upserts, so a
+        // page-scoped re-run updates a field's tier rather than double-counting.
+        const method = derivationMethodOf(field);
+        if (method && textPages.length > 0) recorder.proposed(field.id, method, tier);
         if (tier === 'no-match') continue;
         if (tier === 'needs-review') {
           reviews.push({ fieldId: field.id, proposal: proposal! });
           continue;
         }
         changes.push(...changesForProposal(field, proposal!));
+        recorder.accepted(field.id, 'auto');
       }
 
       if (changes.length > 0) mutateMany(changes);
@@ -584,6 +639,12 @@ export function GeometryEditorScreen({
     if (changes.length === 0) {
       toast({ variant: 'warning', message: 'Nothing to move — no placed boxes on that selection.' });
       return;
+    }
+    // The retarget signal — gap #3's quantified case. Each moved field's delta
+    // is measured from its own first box's page, before the move lands.
+    for (const { fieldId } of changes) {
+      const from = fields.find((f) => f.id === fieldId)?.geometry?.segments?.[0]?.page;
+      if (from !== undefined) recorder.retargeted([fieldId], page - from);
     }
     mutateMany(changes);
     toast({
@@ -649,6 +710,7 @@ export function GeometryEditorScreen({
       const field = fields.find((f) => f.id === fieldId);
       if (!field) continue;
       changes.push(...changesForProposal(field, proposal));
+      recorder.accepted(fieldId, 'confirm-all');
     }
 
     mutateMany(changes);
@@ -667,6 +729,7 @@ export function GeometryEditorScreen({
     if (!field) return;
 
     mutateMany(changesForProposal(field, entry.proposal));
+    recorder.accepted(fieldId, 'confirm');
     setProposalPreviews((prev) => prev.filter((p) => p.fieldId !== fieldId));
   }
 
@@ -677,11 +740,15 @@ export function GeometryEditorScreen({
    * as draw-only, exactly like a `no-match` field — nothing else to build.
    */
   function rejectProposed(fieldId: string) {
+    recorder.rejected(fieldId);
     setProposalPreviews((prev) => prev.filter((p) => p.fieldId !== fieldId));
   }
 
   /** Replace one option's box, keyed by `optionKey`, leaving siblings alone. */
   function setOptionBox(fieldId: string, optionKey: string, box: PageBox | null) {
+    // A placed box (not a clear) is a hand draw. The recorder's own
+    // prior-refusal guard decides whether it counts as engine feedback.
+    if (box) recorder.manualDraw(fieldId, 'option');
     mutate(fieldId, (f) => {
       const others = (f.geometry?.segments ?? []).filter((s) => s.optionKey !== optionKey);
       // Placing an option box retires any whole-field box: the exporter reads
@@ -708,10 +775,12 @@ export function GeometryEditorScreen({
   function distributeOptions(field: FormField, box: PageBox) {
     const cells = distributeOptionCells(box, field.options ?? []);
     if (cells.length === 0) return;
+    recorder.manualDraw(field.id, 'option');
     mutate(field.id, (f) => ({ ...f, geometry: { segments: cells } }));
   }
 
   function setScalarBox(fieldId: string, box: PageBox | null) {
+    if (box) recorder.manualDraw(fieldId, 'scalar');
     mutate(fieldId, (f) => (box ? { ...f, geometry: { segments: [box] } } : stripGeometry(f)));
   }
 
@@ -809,6 +878,7 @@ export function GeometryEditorScreen({
     );
     // Merge by page, not replace: a box drawn on the continuation page must not
     // wipe the one already placed on the page the table starts on.
+    recorder.manualDraw(field.id, 'table');
     setTablePageBox(field.id, result.ok ? result.proposal.segment : box);
     // The page just drawn becomes the editable overlay.
     setActiveOverlayPage(box.page);
@@ -829,6 +899,7 @@ export function GeometryEditorScreen({
       result.ok ? null : { fieldId: field.id, title: 'Not placed', detail: result.detail },
     );
     if (!result.ok) return;
+    recorder.manualDraw(field.id, 'row');
     mutate(field.id, (f) => {
       const kept = (f.geometry?.segments ?? []).filter((s) => {
         const at = rowCellIndex(s);
@@ -1087,6 +1158,25 @@ export function GeometryEditorScreen({
                   // builder does — overwriting every box at publish.
                   onSaved?.(fields);
                   toast({ variant: 'success', message: 'Placement saved to the draft.' });
+                  /*
+                    The placement learning loop's emit — LAST, after the save
+                    is fully acknowledged, never awaited (R4/KTD1). Save is
+                    this surface's commit gate, so only now are the recorded
+                    outcomes ground truth. `drain()` empties the recorder, so
+                    a second save in the same session sends only its own new
+                    events; a session with nothing recorded sends nothing.
+                  */
+                  const events = recorder.drain();
+                  if (events.length > 0) {
+                    sendPlacementOutcomes({
+                      ...(documentType ? { documentType } : {}),
+                      ...(formId ? { formId } : {}),
+                      ...(versionId ? { versionId } : {}),
+                      context: embedded ? 'builder' : 'standalone',
+                      fieldCount: fields.length,
+                      events,
+                    });
+                  }
                 },
                 onError: () => toast({ variant: 'danger', message: "Couldn't save — try again." }),
               })
@@ -1447,13 +1537,14 @@ function sameTarget(a: DrawTarget | null, b: DrawTarget): boolean {
  * one per printed entry, n + m rather than n × m.
  */
 function isPerOptionField(field: FormField): boolean {
-  if (isMatchingQuestion(field.options)) return false;
-  return isChoiceField(field.type) && !field.printSelectedValue && (field.options?.length ?? 0) > 0;
+  // Delegated to the dispatcher's own predicate so this screen, the recorder
+  // and `deriveProposal` can never disagree about a field's derivation family.
+  return derivationMethodOf(field) === 'option-cells';
 }
 
 /** Whether this field is placed as matching anchors — see `isPerOptionField`. */
 function isMatchAnchorField(field: FormField): boolean {
-  return isChoiceField(field.type) && !field.printSelectedValue && isMatchingQuestion(field.options);
+  return derivationMethodOf(field) === 'match-anchor';
 }
 
 /**
@@ -1579,6 +1670,11 @@ function bandOverlayFor(
  * and the bulk "Auto-place remaining fields" pass (U4) both route through this
  * so they classify identically. Empty `textPages` (the text layer hasn't loaded
  * yet) refuses rather than deriving off nothing.
+ *
+ * EVERY CALLER MUST FEED THE PLACEMENT RECORDER with the tier it classifies
+ * (see `recorder` in the component): the derivation dispatch below mirrors
+ * `derivationMethodOf`, and a caller that derives without recording makes the
+ * hit-rate metric silently undercount its family.
  */
 function deriveProposal(
   field: FormField,

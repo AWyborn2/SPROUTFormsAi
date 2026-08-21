@@ -64,6 +64,20 @@ vi.mock('@formai/ui', async () => {
 });
 
 /**
+ * The placement learning loop's fire-and-forget sender (U6). Mocked so the
+ * suite can assert WHAT a successful save emits without a network; the
+ * sender's own contract (a rejected POST is swallowed, an empty slice sends
+ * nothing) is proven in `lib/data/placement-outcomes.test.ts` — this file
+ * only checks the wiring routes through the recorder into it.
+ */
+const { sendPlacementOutcomesMock } = vi.hoisted(() => ({
+  sendPlacementOutcomesMock: vi.fn(),
+}));
+vi.mock('../../lib/data/placement-outcomes.js', () => ({
+  sendPlacementOutcomes: sendPlacementOutcomesMock,
+}));
+
+/**
  * `PdfViewer` does real pdf.js canvas rendering — irrelevant here and
  * impractical to run under jsdom. Stubbed to a component that feeds
  * `onTextLayer` one page. Both `selectField` and the panel's own proposal
@@ -1299,5 +1313,199 @@ describe('GeometryEditorScreen — reaching an outcome box', () => {
 
     expect(screen.queryByText('Assessment Result outcome')).toBeNull();
     expect(screen.getByText('The Candidate’s responses were')).toBeDefined();
+  });
+});
+
+/*
+  THE PLACEMENT LEARNING LOOP'S EMIT (U6).
+
+  The session rules themselves — upsert-on-re-propose, drain-once, the
+  prior-refusal guard, bucket boundaries — are the pure recorder's regression
+  coverage (placement-recorder.test.ts). These tests are the
+  does-the-wiring-route-through-it check: every placement action feeds the
+  recorder, and ONLY a successful save drains it into `sendPlacementOutcomes`.
+*/
+describe('GeometryEditorScreen — placement outcomes emit on save (U6)', () => {
+  type SentPayload = {
+    documentType?: string;
+    formId?: string;
+    versionId?: string;
+    context: string;
+    fieldCount: number;
+    events: { kind: string; fieldId: string; [key: string]: unknown }[];
+  };
+
+  function lastSentPayload(): SentPayload {
+    return sendPlacementOutcomesMock.mock.calls.at(-1)![0] as SentPayload;
+  }
+
+  function saveSucceeds() {
+    saveMutate.mockImplementation((_fields: FormField[], opts: { onSuccess: () => void }) =>
+      opts.onSuccess(),
+    );
+  }
+
+  it('auto-place then save sends one payload carrying the proposed and accepted:auto events', async () => {
+    saveSucceeds();
+    renderWithField(choiceField('f1', 'Multi-option field', ['Yes', 'No', 'Maybe']));
+
+    await clickAutoPlace();
+    fireEvent.click(screen.getByText('Save placement'));
+
+    expect(sendPlacementOutcomesMock).toHaveBeenCalledTimes(1);
+    const payload = lastSentPayload();
+    expect(payload).toMatchObject({
+      context: 'standalone',
+      formId: 'form1',
+      versionId: 'v1',
+      fieldCount: 1,
+    });
+    // The standalone mount knows no document type — the key is absent, so the
+    // aggregator buckets it as `unspecified` (KTD6).
+    expect('documentType' in payload).toBe(false);
+    expect(payload.events).toContainEqual({
+      kind: 'proposed',
+      fieldId: 'f1',
+      method: 'option-cells',
+      tier: 'auto-confirm',
+    });
+    expect(payload.events).toContainEqual({
+      kind: 'accepted',
+      fieldId: 'f1',
+      method: 'option-cells',
+      via: 'auto',
+    });
+  });
+
+  it('confirm and reject from the review queue produce their events in the saved slice', async () => {
+    saveSucceeds();
+    renderWithFields([
+      choiceField('f1', 'Field A', ['Yes', 'No', 'Maybe']),
+      choiceField('f2', 'Field B', ['Yes', 'No', 'Maybe']),
+    ]);
+    deriveOptionCellsAcrossPagesMock.mockReturnValue(proposal(0.6));
+
+    await clickAutoPlace();
+    fireEvent.click(screen.getByLabelText('Confirm Field A'));
+    fireEvent.click(screen.getByLabelText('Reject Field B'));
+    fireEvent.click(screen.getByText('Save placement'));
+
+    const { events } = lastSentPayload();
+    expect(events).toContainEqual({ kind: 'proposed', fieldId: 'f1', method: 'option-cells', tier: 'needs-review' });
+    expect(events).toContainEqual({ kind: 'accepted', fieldId: 'f1', method: 'option-cells', via: 'confirm' });
+    expect(events).toContainEqual({ kind: 'rejected', fieldId: 'f2', method: 'option-cells' });
+  });
+
+  it('a save with no recorded events sends nothing', () => {
+    // A glyph pick dirties the draft without touching the engine: the field is
+    // already placed, so nothing was proposed, accepted or drawn.
+    saveSucceeds();
+    version.data = {
+      id: 'v1',
+      templateId: 'form1',
+      label: 'Draft v1',
+      state: 'draft',
+      isCurrent: false,
+      fields: [
+        {
+          id: 'sig',
+          type: 'text',
+          label: 'Assessor signature',
+          required: false,
+          source: 'imported',
+          geometry: {
+            segments: [
+              { page: 0, x: 10, y: 10, width: 80, height: 14, pageWidth: 595, pageHeight: 842 },
+            ],
+          },
+        },
+      ],
+      container: DEFAULT_CONTAINER,
+      sourcePdfAssetId: 'asset-1',
+    };
+    render(<GeometryEditorScreen />);
+    fireEvent.click(screen.getByText('Assessor signature'));
+    fireEvent.click(screen.getByLabelText('Print PASS'));
+    fireEvent.click(screen.getByText('Save placement'));
+
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'success' }));
+    expect(sendPlacementOutcomesMock).not.toHaveBeenCalled();
+  });
+
+  it('AE5: the save toast is already shown before the send is even attempted', async () => {
+    // The emit sits after the toast and is never awaited, so however the POST
+    // later fails, the save's acknowledgement cannot be blocked or undone.
+    // (That a rejected POST is swallowed is the sender's own tested contract.)
+    saveSucceeds();
+    renderWithField(choiceField('f1', 'Multi-option field', ['Yes', 'No', 'Maybe']));
+
+    await clickAutoPlace();
+    fireEvent.click(screen.getByText('Save placement'));
+
+    const toastOrder = toast.mock.invocationCallOrder[0]!;
+    const sendOrder = sendPlacementOutcomesMock.mock.invocationCallOrder[0]!;
+    expect(toastOrder).toBeLessThan(sendOrder);
+  });
+
+  it('a failed save sends nothing — an unsaved session is not ground truth (AE4)', async () => {
+    saveMutate.mockImplementation((_fields: FormField[], opts: { onError: () => void }) =>
+      opts.onError(),
+    );
+    renderWithField(choiceField('f1', 'Multi-option field', ['Yes', 'No', 'Maybe']));
+
+    await clickAutoPlace();
+    fireEvent.click(screen.getByText('Save placement'));
+
+    expect(sendPlacementOutcomesMock).not.toHaveBeenCalled();
+  });
+
+  it('a second save after more edits sends only the NEW events (drain-once)', async () => {
+    saveSucceeds();
+    renderWithFields([
+      choiceField('f1', 'Auto field', ['Yes', 'No', 'Maybe']),
+      choiceField('f2', 'Review field', ['Yes', 'No', 'Maybe']),
+    ]);
+    deriveOptionCellsAcrossPagesMock.mockImplementation((field: { label: string }) =>
+      field.label === 'Review field' ? proposal(0.6) : proposal(1),
+    );
+
+    await clickAutoPlace();
+    fireEvent.click(screen.getByText('Save placement'));
+    expect(sendPlacementOutcomesMock).toHaveBeenCalledTimes(1);
+    expect(lastSentPayload().events.length).toBeGreaterThan(1);
+
+    // The parked proposal is confirmed AFTER the first save; the second slice
+    // carries just that accept — with the method remembered across the drain.
+    fireEvent.click(screen.getByLabelText('Confirm Review field'));
+    fireEvent.click(screen.getByText('Save placement'));
+
+    expect(sendPlacementOutcomesMock).toHaveBeenCalledTimes(2);
+    expect(lastSentPayload().events).toEqual([
+      { kind: 'accepted', fieldId: 'f2', method: 'option-cells', via: 'confirm' },
+    ]);
+  });
+
+  it('the builder mount threads documentType and context into the payload (R9/KTD6)', () => {
+    saveSucceeds();
+    version.data = {
+      id: 'v1',
+      templateId: 'form1',
+      label: 'Draft v1',
+      state: 'draft',
+      isCurrent: false,
+      fields: [choiceField('q1', 'Question one', ['Yes', 'No'])],
+      container: DEFAULT_CONTAINER,
+      sourcePdfAssetId: 'asset-1',
+    };
+    render(<GeometryEditorScreen embedded documentType="assessment" />);
+
+    // Selecting the field auto-applies the confident default proposal.
+    fireEvent.click(screen.getByText('Question one'));
+    fireEvent.click(screen.getByText('Save placement'));
+
+    expect(lastSentPayload()).toMatchObject({
+      documentType: 'assessment',
+      context: 'builder',
+    });
   });
 });
