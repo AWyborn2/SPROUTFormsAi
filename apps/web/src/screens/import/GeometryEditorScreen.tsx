@@ -42,6 +42,7 @@ import { PdfViewer } from './PdfViewer.js';
 import {
   applyFieldChanges,
   classifyProposalTier,
+  columnEvidenceCaption,
   deriveAcrossPages,
   deriveMatchAnchorsAcrossPages,
   deriveOptionCellsAcrossPages,
@@ -1929,6 +1930,15 @@ function PlacementPanel({
         <div className="rounded-sm border border-border-subtle bg-surface-sunken p-[9px_10px]">
           <p className="text-[11.5px] leading-snug text-text-secondary">
             A grid was detected on page {tableProposal.segment.page + 1}.
+          </p>
+          {/*
+            Provenance, not a warning (R7): says whether the answer columns are
+            the measured extents of printed boxes or an inference from header
+            glyphs. Its absence is the tell if the rect extractor ever silently
+            regresses to zero again — the measured wording just stops appearing.
+          */}
+          <p className="mt-1 text-[11px] leading-snug text-text-tertiary">
+            {columnEvidenceCaption(tableProposal.columnEvidence)}
           </p>
           <Button
             variant="outline"

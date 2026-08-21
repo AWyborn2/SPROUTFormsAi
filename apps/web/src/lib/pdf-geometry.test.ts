@@ -521,6 +521,199 @@ describe('proposeTableSegments — band extent', () => {
 });
 
 /**
+ * Printed-square refinement (U3, R1/R4-R7) — the page's own checkbox
+ * rectangles snapping a text-derived grid onto the printed squares.
+ *
+ * The squares below are 9pt sides on the measured dozer baselines
+ * (630.8 / 614 / 597.1 / 580.3), placed so each square's centre sits beside
+ * its own row's text — where a printed checkbox actually is.
+ */
+import type { PrintedRect } from '../screens/import/inspector/geometry-actions.js';
+
+/** One 9pt square per table-1 row at a given x. */
+function table1Squares(x: number): PrintedRect[] {
+  return [630.8, 614, 597.1, 580.3].map((baseline) => ({
+    x,
+    y: baseline - 6,
+    width: 9,
+    height: 9,
+  }));
+}
+
+function proposeWithRects(
+  items: PositionedText[],
+  rects: readonly PrintedRect[] | undefined,
+  columns = tickCrossNaColumns(),
+) {
+  return proposeTableSegments({ page: 6, ...A4, items, columns, rects });
+}
+
+describe('proposeTableSegments — rect evidence degrades byte-identically (AE2/AE7, R1)', () => {
+  /**
+   * R1 as an executable property, over every module-scope fixture shape: with
+   * `rects: undefined` (never measured) and `rects: []` (the historic pdf.js
+   * silent-zero failure mode) the output is DEEP-EQUAL to the no-argument
+   * derivation — same segments, same bands, same confidence, same notes. This
+   * is what makes the rect evidence a pure bonus: if the extractor regresses
+   * to zero again, nothing about placement changes except the measured
+   * caption disappearing.
+   */
+  const fixtures: { name: string; items: PositionedText[] }[] = [
+    { name: 'dozer page 7, table 1', items: dozerPage7Table1() },
+    { name: 'dozer page 7, table 2 (wrapping rows, stray colon)', items: dozerPage7Table2Header() },
+    {
+      name: 'both page-7 tables (corroborated headers)',
+      items: [...dozerPage7Table1(), ...dozerPage7Table2Header()],
+    },
+    { name: 'repeated table 1', items: repeated(dozerPage7Table1()) },
+    { name: 'the Small Loader shape (tick missing), repeated', items: repeated(withoutTick()) },
+  ];
+
+  for (const { name, items } of fixtures) {
+    it(`is byte-identical for ${name}`, () => {
+      const base = propose(items);
+
+      expect(proposeWithRects(items, undefined)).toEqual(base);
+      expect(proposeWithRects(items, [])).toEqual(base);
+    });
+  }
+
+  it('is byte-identical for a standalone-header page too', () => {
+    // The second header shape: option glyphs on their own baseline.
+    const okNa: RepeatingColumn[] = [
+      { key: 'item', label: 'Item', type: 'text' },
+      { key: 'ok', label: 'OK', type: 'boolean_yes_no' },
+      { key: 'na', label: 'NA', type: 'boolean_yes_no' },
+    ];
+    const headerAt = (y: number): PositionedText[] => [
+      { text: 'OK', x: 345.7, y, width: 12.2 },
+      { text: 'NA', x: 371.1, y, width: 12.6 },
+      { text: 'OK', x: 512.6, y, width: 12.2 },
+      { text: 'NA', x: 540.7, y, width: 12.6 },
+    ];
+    const items: PositionedText[] = [
+      ...headerAt(306.2),
+      ...[0, 1, 2].map((r) => ({ text: `Check ${r}`, x: 42, y: 290 - r * 16, width: 60 })),
+      ...headerAt(180),
+      ...[0, 1].map((r) => ({ text: `Later ${r}`, x: 42, y: 164 - r * 16, width: 60 })),
+    ];
+    const base = proposeTableSegments({ page: 0, pageWidth: 595, pageHeight: 420, items, columns: okNa });
+
+    expect(
+      proposeTableSegments({ page: 0, pageWidth: 595, pageHeight: 420, items, columns: okNa, rects: [] }),
+    ).toEqual(base);
+    expect(base.length).toBeGreaterThan(0);
+    for (const p of base) expect(p.columnEvidence).toBe('header-text');
+  });
+
+  it('keeps the notes: [] contract on a clean text-only derivation', () => {
+    const [proposal] = proposeWithRects(
+      [...dozerPage7Table1(), ...dozerPage7Table2Header()],
+      [],
+    );
+
+    expect(proposal!.notes).toEqual([]);
+    expect(proposal!.confidence).toBe(1);
+    expect(proposal!.columnEvidence).toBe('header-text');
+  });
+});
+
+describe('proposeTableSegments — snapping bands to printed squares (U3, R4/R5/R7)', () => {
+  /** Both page-7 tables, so the headers corroborate and confidence starts at 1. */
+  const corroborated = () => [...dozerPage7Table1(), ...dozerPage7Table2Header()];
+
+  it('Covers AE3: each matched band snaps to its squares’ measured extent, confidence intact', () => {
+    // Squares under each option column of table 1: tick at x=502, cross at
+    // 513, N/A at 540 — inside the derived bands, and now the measurement.
+    const rects = [...table1Squares(502), ...table1Squares(513), ...table1Squares(540)];
+
+    const [first, second] = proposeWithRects(corroborated(), rects);
+
+    // Band start === square x, end === x + width: on the printed boxes, not
+    // where the header glyphs happened to sit.
+    expect(first!.segment.columnBands).toEqual([
+      { key: 'tick', start: 502, end: 511 },
+      { key: 'cross', start: 513, end: 522 },
+      { key: 'na', start: 540, end: 549 },
+    ]);
+    expect(first!.confidence).toBe(1);
+    // Provenance rides the field, not a note — a clean grid that merely
+    // snapped keeps the asserted notes: [] contract (KTD3).
+    expect(first!.notes).toEqual([]);
+    expect(first!.columnEvidence).toBe('printed-boxes');
+    // Table 2 has three rows; the four-square columns row-align with nothing
+    // of its shape, so it is untouched — and says so.
+    expect(second!.columnEvidence).toBe('header-text');
+  });
+
+  it('Covers AE4: measurement lifts the inferred-column penalty and its note', () => {
+    // The Small Loader shape: no Private-Use tick reaches the text layer, so
+    // the tick column is inferred from pitch at -0.3 — a guess. Printed
+    // squares confirming all three columns stop it being one. The inferred
+    // tick band spans [473.3, 502.6] (centre extended leftward on the 29.3pt
+    // pitch), so the tick square sits at x=493 with its centre inside it.
+    const rects = [...table1Squares(493), ...table1Squares(513), ...table1Squares(540)];
+
+    const [first] = proposeWithRects(repeated(withoutTick()), rects);
+
+    expect(first!.anchorsInferred).toBe(1);
+    expect(first!.confidence).toBe(1);
+    expect(first!.notes.join(' ')).not.toMatch(/inferred from pitch/);
+    expect(first!.notes.join(' ')).toMatch(/measured from printed checkbox squares/);
+    // The bands sit on the squares.
+    expect(first!.segment.columnBands![0]).toEqual({ key: 'tick', start: 493, end: 502 });
+    expect(first!.columnEvidence).toBe('printed-boxes');
+  });
+
+  it('Covers AE5: conflicting squares penalise and warn, never silently resolve', () => {
+    // Squares row-align with table 1's four rows but sit far left of the
+    // derived bands, and only two columns print for three declared. The text
+    // bands are kept, confidence drops 0.2, and the reviewer is told.
+    const rects = [...table1Squares(300), ...table1Squares(360)];
+    const base = propose(corroborated());
+
+    const [first] = proposeWithRects(corroborated(), rects);
+
+    expect(first!.segment.columnBands).toEqual(base[0]!.segment.columnBands);
+    expect(first!.confidence).toBe(0.8);
+    expect(first!.notes.join(' ')).toMatch(/do not line up/);
+    expect(first!.columnEvidence).toBe('header-text');
+  });
+
+  it('snaps to the checkbox, not the ruled cell contending for the same band', () => {
+    // A bordered answer column prints both. The smaller control wins the band
+    // — the cell is furniture around the control — so the band lands on the
+    // 9pt square, never centred on the whole cell.
+    const cells: PrintedRect[] = [630.8, 614, 597.1, 580.3].map((baseline) => ({
+      x: 498,
+      y: baseline - 8,
+      width: 16,
+      height: 16,
+    }));
+    const rects = [...cells, ...table1Squares(502), ...table1Squares(513), ...table1Squares(540)];
+
+    const [first] = proposeWithRects(corroborated(), rects);
+
+    expect(first!.segment.columnBands![0]).toEqual({ key: 'tick', start: 502, end: 511 });
+  });
+
+  it('grows the segment to hold a snapped band past the last text-derived edge (R15)', () => {
+    // The N/A squares end at x=559, past the old segment edge at 556.65. A
+    // box that no longer contains its own bands is silently dropped by the
+    // shipped validator, so the union must absorb the measured extents.
+    const rects = [...table1Squares(502), ...table1Squares(513), ...table1Squares(550)];
+
+    const [first] = proposeWithRects(corroborated(), rects);
+
+    expect(first).toBeDefined();
+    expect(first!.segment.columnBands![2]).toEqual({ key: 'na', start: 550, end: 559 });
+    const resolved = resolveGeometry({ geometry: { segments: [first!.segment] } }, 18);
+    expect(resolved.dropped).toEqual([]);
+    expect(first!.segment.x + first!.segment.width).toBeGreaterThanOrEqual(559);
+  });
+});
+
+/**
  * U8 — a header row that carries no label of its own (R17).
  *
  * Every fixture is measured from `ADMN-FRM-111 Light Vehicle Pre-start

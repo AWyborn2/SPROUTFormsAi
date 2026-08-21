@@ -87,6 +87,22 @@ export interface TableProposal {
   anchorsInferred: number;
   /** Why confidence was reduced, for the reviewer. */
   notes: string[];
+  /**
+   * What placed the COLUMN bands: rectangles the page prints, or header glyphs.
+   *
+   * PROVENANCE, not a warning — which is why it is a field and not a note.
+   * Notes exist to explain a confidence drop, and several tests assert
+   * `notes: []` on a clean derivation; a provenance sentence pushed onto every
+   * proposal would break that contract and bury real warnings in routine noise.
+   *
+   * The field also gives the historic pdf.js failure mode a visible tell: the
+   * rect extractor once silently returned zero rectangles on every document
+   * (the 6.x `constructPath` shape change), and nothing said so. If that
+   * regresses again, the reviewer-facing "measured from printed boxes" caption
+   * simply stops appearing — a wording change someone notices, instead of a
+   * silent slide back to inferred columns.
+   */
+  columnEvidence: 'printed-boxes' | 'header-text';
 }
 
 export interface ProposeInput {
@@ -95,6 +111,17 @@ export interface ProposeInput {
   pageHeight: number;
   items: PositionedText[];
   columns: RepeatingColumn[];
+  /**
+   * The rectangles printed on this page (`TextPage.rects`), for corroborating
+   * or anchoring the answer columns on the squares themselves.
+   *
+   * Optional with the `TextPage` convention: `undefined` means NOT MEASURED.
+   * Either way the evidence is a pure bonus — absent or empty rects, or rects
+   * that row-align with nothing, leave the output byte-identical to the
+   * text-only derivation. The extractor that produces these once silently
+   * returned zero on every document, so nothing here may DEPEND on them.
+   */
+  rects?: readonly PrintedRect[] | undefined;
 }
 
 /**
@@ -628,6 +655,14 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
   const headers = findHeaderRows(rows).sort((a, b) => b.row.y - a.row.y);
   const proposals: TableProposal[] = [];
 
+  // The page's candidate printed-square columns, measured once for every
+  // header. Split ON: page-wide there is no drawn box to keep two stacked
+  // checklists apart, so an x-run with an outlier baseline gap is two
+  // candidates (R3). `?? []` keeps the NOT MEASURED convention harmless here —
+  // rect evidence is a bonus, never a requirement, so unmeasured and empty
+  // both mean "no candidates" and the text-only path runs unchanged.
+  const rectColumns = findRectColumns(input.rects ?? [], { splitOnRowGap: true });
+
   for (const [index, header] of headers.entries()) {
     const rightmostText = Math.max(...header.row.items.map((i) => i.x + i.width));
     const resolved = reconcile(header.anchors, optionColumns.length, rightmostText);
@@ -648,31 +683,80 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
     const bands = rowBands(rows, header, floor);
     if (bands.length === 0) continue;
 
-    const columnBands = centresToBands(
+    let columnBands = centresToBands(
       resolved.centres,
       optionColumns.map((c) => c.key),
       header.labelRight,
       input.pageWidth,
     );
 
-    const left = header.labelLeft;
-    const right = Math.min(columnBands[columnBands.length - 1]!.end, input.pageWidth);
+    /*
+      MARRY THE GRID TO THE PRINTED SQUARES, where the page offers them (U2/U3,
+      R4-R6). Row alignment is the scoping: only a column whose squares pair
+      one-per-row with THIS table's rows is this table's evidence. On a full
+      bijection every option band snaps to its squares' own measured extent —
+      the module's admitted weakness is that a text-derived answer column sits
+      "wherever the longest label happened to end", and the squares are the
+      measurement of where it actually is. Anything short of a bijection with
+      at least one row-aligned column is a disagreement between the two
+      readings of the page, which is a signal for the reviewer, never a
+      tiebreak: the text bands are kept and confidence drops with a note.
+    */
+    const married = matchRectColumnsToGrid(rectColumns, bands, columnBands);
+    const snapped = married.matched.size > 0;
+    if (snapped) {
+      columnBands = columnBands.map((band) => {
+        const squares = married.matched.get(band.key)!;
+        return {
+          ...band,
+          start: Math.min(...squares.map((r) => r.x)),
+          end: Math.max(...squares.map((r) => r.x + r.width)),
+        };
+      });
+    }
+
+    // The segment is the union of the label column and every band it carries —
+    // a snapped band can now sit left of the header's clamp or short of the
+    // last text-derived edge, and a box that no longer contains its own bands
+    // is silently dropped by the validator (the same union `proposeRectGrid`
+    // builds, for the same reason). Without rects this reduces exactly to the
+    // old label-left / last-band-end box.
+    const left = Math.min(header.labelLeft, ...columnBands.map((b) => b.start));
+    const right = Math.min(Math.max(...columnBands.map((b) => b.end)), input.pageWidth);
     const bottom = Math.min(...bands.map((b) => b.start));
     const top = header.row.y;
 
     const notes: string[] = [];
     let confidence = 1;
+    /*
+      MEASURED EVIDENCE LIFTS EXACTLY THE PENALTIES IT ANSWERS (KTD4/R5). A
+      column inferred from pitch, and a header nothing corroborated, are both
+      claims about WHERE THE COLUMNS ARE — which the squares now confirm
+      independently, so those penalties and their warnings are lifted and
+      replaced with the measured note. The merge penalty stays: merging says
+      the header ITSELF may have been misread, and squares agreeing with the
+      merged result cannot vouch for how the merge was made.
+    */
+    let penaltyLifted = false;
     if (resolved.inferred > 0) {
-      confidence -= 0.3 * resolved.inferred;
-      notes.push(
-        `${resolved.inferred} of ${optionColumns.length} column positions inferred from pitch — the header glyphs were not in the text layer. Inference assumes the MISSING columns are the leftmost ones; check the rightmost located header really is the last printed column.`,
-      );
+      if (snapped) {
+        penaltyLifted = true;
+      } else {
+        confidence -= 0.3 * resolved.inferred;
+        notes.push(
+          `${resolved.inferred} of ${optionColumns.length} column positions inferred from pitch — the header glyphs were not in the text layer. Inference assumes the MISSING columns are the leftmost ones; check the rightmost located header really is the last printed column.`,
+        );
+      }
     }
     if (header.corroborated === false) {
-      confidence -= 0.2;
-      notes.push(
-        'No second table on this page confirms this header shape, so the grid could not be cross-checked — verify it is a real column header and not a running head or signature strip.',
-      );
+      if (snapped) {
+        penaltyLifted = true;
+      } else {
+        confidence -= 0.2;
+        notes.push(
+          'No second table on this page confirms this header shape, so the grid could not be cross-checked — verify it is a real column header and not a running head or signature strip.',
+        );
+      }
     }
     if (resolved.merged > 0) {
       // Merging is a guess, and reporting it as a clean locate inverted the one
@@ -682,6 +766,20 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
       confidence -= 0.3 * resolved.merged;
       notes.push(
         `${resolved.located + resolved.merged} anchors were found for ${optionColumns.length} columns and the closest were merged — the header may be over-segmented, or something that is not a column header was taken as one.`,
+      );
+    }
+    // Notes stay warnings-only: a clean grid that merely snapped keeps
+    // `notes: []` (the provenance rides `columnEvidence`), and the measured
+    // sentence appears only where it explains a confidence CHANGE.
+    if (penaltyLifted) {
+      notes.push(
+        'Answer columns measured from printed checkbox squares, which independently confirm the derived grid.',
+      );
+    }
+    if (married.conflicting) {
+      confidence -= 0.2;
+      notes.push(
+        'Printed checkbox squares row-align with this table but do not line up with the header-derived columns — check the bands against the printed squares before confirming.',
       );
     }
 
@@ -708,7 +806,133 @@ export function proposeTableSegments(input: ProposeInput): TableProposal[] {
       anchorsLocated: resolved.located,
       anchorsInferred: resolved.inferred,
       notes,
+      columnEvidence: snapped ? 'printed-boxes' : 'header-text',
     });
+  }
+
+  /*
+    RECT-ANCHORED PROPOSALS FOR HEADERLESS CHECKLISTS (U4, R8/R9). The Mine
+    Site SME cover prints five method labels and five 9pt squares — no header
+    glyphs, no anchors, so the loop above proposes nothing at all. The squares
+    themselves are the grid: one row band per square at the square's own
+    extent, the column band at the column's measured x — `proposeRectGrid`'s
+    quality, no hands. Only for a table with exactly ONE option column: keying
+    several printed columns to option keys without a header is a guess about
+    column order, which `proposeRectGrid` refuses for the same reason.
+
+    This path only ever ADDS proposals. Every pairing failure skips the
+    candidate silently — the page stays exactly as refusable as today — and a
+    candidate whose centre a previous proposal already covers is skipped too:
+    header evidence outranks, and one table never gets two proposals.
+  */
+  if (optionColumns.length === 1) {
+    for (const column of rectColumns) {
+      const colStart = Math.min(...column.map((r) => r.x));
+      const colEnd = Math.max(...column.map((r) => r.x + r.width));
+      const colBottom = Math.min(...column.map((r) => r.y));
+      const colTop = Math.max(...column.map((r) => r.y + r.height));
+      const centreX = (colStart + colEnd) / 2;
+      const centreY = (colBottom + colTop) / 2;
+      const claimed = proposals.some(
+        (p) =>
+          centreX >= p.segment.x &&
+          centreX <= p.segment.x + p.segment.width &&
+          centreY >= p.segment.y &&
+          centreY <= p.segment.y + p.segment.height,
+      );
+      if (claimed) continue;
+
+      /*
+        PAIR EACH SQUARE WITH ITS OWN LABEL ROW — the corroboration that
+        replaces the missing header. Each square's row is the one whose
+        baseline lies within the square's vertical extent padded by half a
+        square (a printed row's baseline sits beside its own checkbox); zero
+        rows there is a floating square, two is ambiguity, and both skip. The
+        pairing must be a bijection — a row claimed by two squares is not a
+        checklist this rule can read.
+      */
+      const paired: Row[] = [];
+      const used = new Set<Row>();
+      let pairs = true;
+      for (const rect of column) {
+        const pad = rect.height / 2;
+        const hits = rows.filter((r) => r.y >= rect.y - pad && r.y <= rect.y + rect.height + pad);
+        if (hits.length !== 1 || used.has(hits[0]!)) {
+          pairs = false;
+          break;
+        }
+        used.add(hits[0]!);
+        paired.push(hits[0]!);
+      }
+      if (!pairs) continue;
+
+      // The paired rows must share ONE left margin — the same discipline
+      // `rowBands` applies, because a checklist's item labels print from one x
+      // and a mixed bag of margins is prose that happens to sit beside squares.
+      const margins = paired.map((r) => r.items[0]!.x);
+      if (Math.max(...margins) - Math.min(...margins) > LABEL_MARGIN_TOLERANCE) continue;
+
+      // And every paired run must stop LEFT of the squares. A run crossing
+      // under the column is a heading, not an item label — the same geometric
+      // discriminator `rowBands` cuts tables on (OPTION_INTRUSION_TOLERANCE).
+      const intrusion = colStart - OPTION_INTRUSION_TOLERANCE;
+      if (paired.some((r) => r.items.some((i) => i.x + i.width >= intrusion))) continue;
+
+      // One band per square, at the square's own extent — measured, not
+      // inferred. Keys follow THIS function's convention (`r0…`, KTD6): these
+      // proposals flow through the same selection and exporters as every other
+      // table proposal, and `proposeRectGrid`'s `r1…` would offset every row.
+      const rectRowBands: GeometryBand[] = column.map((r, i) => ({
+        key: `r${i}`,
+        start: r.y,
+        end: r.y + r.height,
+      }));
+      const columnBand: GeometryBand = { key: optionColumns[0]!.key, start: colStart, end: colEnd };
+
+      // The segment is the union of the paired label rows and the bands, so
+      // the rows stay identifiable on screen and the box contains its own
+      // bands (the validator's requirement).
+      const runLefts = paired.flatMap((r) => r.items.map((i) => i.x));
+      const runRights = paired.flatMap((r) => r.items.map((i) => i.x + i.width));
+      const baselines = paired.map((r) => r.y);
+      const segment: PageBox = {
+        page: input.page,
+        x: Math.max(Math.min(...runLefts, colStart), 0),
+        y: Math.max(Math.min(...baselines, colBottom), 0),
+        width:
+          Math.min(Math.max(...runRights, colEnd), input.pageWidth) -
+          Math.max(Math.min(...runLefts, colStart), 0),
+        height:
+          Math.min(Math.max(...baselines, colTop), input.pageHeight) -
+          Math.max(Math.min(...baselines, colBottom), 0),
+        pageWidth: input.pageWidth,
+        pageHeight: input.pageHeight,
+        columnBands: [columnBand],
+        rowBands: rectRowBands,
+      };
+
+      // R15, exactly as the header path: refused geometry is refused HERE.
+      if (resolveGeometry({ geometry: { segments: [segment] } }).segments.length !== 1) continue;
+
+      proposals.push({
+        segment,
+        /*
+          0.95, DELIBERATELY BELOW AUTO-CONFIRM (KTD5/R9). Every coordinate is
+          measured, but the row PAIRING is a brand-new heuristic with no
+          printed header cross-checking it, and a new heuristic does not get
+          auto-confirm on day one — it ships human-gated at needs-review until
+          the corpus says otherwise. Note the 0.05 gap to a confidence-1 rival
+          sits inside NEAR_EQUAL_CONFIDENCE, so a same-row-count tie refuses.
+        */
+        confidence: 0.95,
+        anchorsLocated: column.length,
+        anchorsInferred: 0,
+        notes: [
+          'Grid measured from printed checkbox squares — no printed header row corroborates it, so review the row pairing before confirming.',
+        ],
+        columnEvidence: 'printed-boxes',
+      });
+    }
   }
 
   return proposals;
@@ -737,6 +961,218 @@ const RECT_SIZE_TOLERANCE = 2;
  * of points somewhere on a dense page. Three in a line is a printed column.
  */
 const RECT_COLUMN_MIN = 3;
+
+/**
+ * A baseline gap must jump by at least this ratio over its smaller neighbour
+ * (in the sorted gap list) before the run is read as TWO stacked columns.
+ *
+ * The same largest-ratio-jump technique `rowPitch` uses, on the same kind of
+ * measurement, so the two read a page's vertical rhythm consistently. The
+ * separation is comfortable on the measured corpus: one printed checklist's
+ * square pitch is uniform to well under a point (the Mine Site SME column is
+ * 28.4pt on every row, ratio 1.00), while a second checklist stacked below the
+ * first cannot start closer than its own heading and header rows — at least
+ * two pitches of clearance, ratio ≥ 2. A spurious split only ever REMOVES a
+ * candidate (each fragment is re-checked against the three-box minimum), which
+ * is the refusal direction this module always prefers.
+ */
+const RECT_ROW_GAP_SPLIT_RATIO = 1.4;
+
+/* ── Printed-square column evidence, shared by both derivers ──────────────── */
+
+/**
+ * Group rectangles into runs sharing a left edge, sorted left-to-right.
+ *
+ * THE ONE GROUPING BOTH DERIVERS TRUST. `proposeRectGrid` measured columns this
+ * way first (grouping on x, anchored to the run's head), and the page-wide
+ * refinement must measure them identically or the drawn-box recourse and the
+ * automatic path would disagree about what a column even is. Extracted verbatim
+ * rather than re-derived, so the drawn-box behaviour cannot drift.
+ */
+function groupRectsByX(rects: readonly PrintedRect[]): PrintedRect[][] {
+  const byX = [...rects].sort((a, b) => a.x - b.x);
+  const groups: PrintedRect[][] = [];
+  let run: PrintedRect[] = [];
+  for (const rect of byX) {
+    const head = run[0];
+    if (head && Math.abs(rect.x - head.x) <= RECT_COLUMN_X_TOLERANCE) {
+      run.push(rect);
+    } else {
+      if (run.length > 0) groups.push(run);
+      run = [rect];
+    }
+  }
+  if (run.length > 0) groups.push(run);
+  return groups;
+}
+
+/**
+ * One control repeated, not a column of different things — the size test
+ * `proposeRectGrid` has always applied, shared so the page-wide path applies
+ * the identical judgement. A checkbox and the cell it sits in can share a left
+ * edge on a tightly-set table; only their size tells them apart.
+ */
+function rectSizesUniform(group: readonly PrintedRect[]): boolean {
+  const widths = group.map((r) => r.width);
+  const heights = group.map((r) => r.height);
+  return (
+    Math.max(...widths) - Math.min(...widths) <= RECT_SIZE_TOLERANCE &&
+    Math.max(...heights) - Math.min(...heights) <= RECT_SIZE_TOLERANCE
+  );
+}
+
+/**
+ * Split one top-down run of rectangles wherever a baseline gap is an outlier —
+ * two stacked checklists sharing an x become two candidate columns.
+ *
+ * This is the page-wide substitute for the author's drawn box: `proposeRectGrid`
+ * scopes its measurement to the drag exactly so two structurally identical
+ * tables cannot bleed into each other, and with no drag the same scoping has to
+ * come off the page itself. The technique is `rowPitch`'s, unchanged: sort the
+ * gaps, find the largest ratio jump, and treat the larger side as
+ * between-table clearance — but only when the outliers are a MINORITY, because
+ * a run with as many jumps as pitches has no dominant rhythm to split against.
+ */
+function splitColumnAtGapOutliers(column: readonly PrintedRect[]): PrintedRect[][] {
+  const gaps = column.slice(1).map((r, i) => column[i]!.y - r.y);
+  if (gaps.length < 2) return [[...column]];
+
+  const sorted = [...gaps].sort((a, b) => a - b);
+  let splitAt = -1;
+  let widest = RECT_ROW_GAP_SPLIT_RATIO;
+  for (let i = 1; i < sorted.length; i++) {
+    const ratio = sorted[i]! / sorted[i - 1]!;
+    if (ratio >= widest) {
+      widest = ratio;
+      splitAt = i;
+    }
+  }
+  if (splitAt < 0) return [[...column]];
+
+  const jumps = sorted.slice(splitAt);
+  if (jumps.length >= splitAt) return [[...column]];
+
+  // Every gap at least as large as the smallest outlier starts a new column.
+  const threshold = jumps[0]!;
+  const fragments: PrintedRect[][] = [];
+  let current: PrintedRect[] = [column[0]!];
+  for (let i = 1; i < column.length; i++) {
+    if (column[i - 1]!.y - column[i]!.y >= threshold) {
+      fragments.push(current);
+      current = [];
+    }
+    current.push(column[i]!);
+  }
+  fragments.push(current);
+  return fragments;
+}
+
+/**
+ * The candidate printed-control columns on a page: runs of at least
+ * `RECT_COLUMN_MIN` uniform-size rectangles sharing a left edge, each returned
+ * top-down in printed row order.
+ *
+ * The column test `proposeRectGrid` already trusts, packaged for the page-wide
+ * path — same grouping, same size uniformity, same minimum. What is new is
+ * only `splitOnRowGap`: page-wide use has no drawn box to keep two stacked
+ * checklists apart, so an x-run whose baseline gaps contain an outlier jump is
+ * split into separate candidates first. The drawn-box path keeps the split OFF
+ * — the author's drag already scopes it, and its refusal wording counts the
+ * whole run.
+ *
+ * Groups that fail the size test or the minimum are simply not columns: they
+ * are dropped without a warning, because a pair of coincidentally-aligned
+ * rectangles exists on every dense page and warning about each would bury the
+ * signals that matter.
+ */
+export function findRectColumns(
+  rects: readonly PrintedRect[],
+  { splitOnRowGap = false }: { splitOnRowGap?: boolean } = {},
+): PrintedRect[][] {
+  const columns: PrintedRect[][] = [];
+  for (const group of groupRectsByX(rects)) {
+    // Top-down, the order a reader assigns rows in. PDF y grows upward.
+    const topDown = [...group].sort((a, b) => b.y - a.y);
+    for (const fragment of splitOnRowGap ? splitColumnAtGapOutliers(topDown) : [topDown]) {
+      if (fragment.length < RECT_COLUMN_MIN) continue;
+      if (!rectSizesUniform(fragment)) continue;
+      columns.push(fragment);
+    }
+  }
+  return columns;
+}
+
+/**
+ * Marry candidate printed-square columns to a text-derived grid, or report the
+ * marriage impossible.
+ *
+ * ROW ALIGNMENT IS THE SCOPING. `proposeRectGrid`'s drawn box exists to stop
+ * two structurally identical tables bleeding into each other; page-wide, the
+ * same scoping falls out of pairing — a rect column is THIS table's evidence
+ * only when its squares map one-per-row onto this table's row bands. A column
+ * of ten squares never corroborates a four-row table; it belongs to another
+ * table, or to furniture, and is ignored without comment.
+ *
+ * Qualifying columns are then assigned to option bands by centre-x
+ * containment. Two qualifying columns contending for one band resolve by area
+ * — the checkbox beats the ruled cell drawn around it, `proposeRectGrid`'s own
+ * tie-break — and the loser is furniture, not a conflict. What IS a conflict:
+ * a qualifying column that sits inside no band, or bands only partially
+ * covered. Partial snapping is refused outright, because half-measured columns
+ * would mix two evidence regimes inside one grid and the reviewer could not
+ * tell which bands to trust.
+ *
+ * Returns the full bijection (`matched`, band key → its squares), or
+ * `conflicting: true` with nothing matched, or — when no column row-aligns at
+ * all — neither: the page simply carries no evidence about this table.
+ */
+export function matchRectColumnsToGrid(
+  columns: readonly (readonly PrintedRect[])[],
+  rowBands: readonly GeometryBand[],
+  columnBands: readonly GeometryBand[],
+): { matched: Map<string, PrintedRect[]>; conflicting: boolean } {
+  const none = (conflicting: boolean) => ({ matched: new Map<string, PrintedRect[]>(), conflicting });
+
+  // Row alignment: one square per row band, every band hit exactly once.
+  const qualifying: PrintedRect[][] = [];
+  for (const column of columns) {
+    if (column.length !== rowBands.length) continue;
+    const hit = new Set<string>();
+    let aligned = true;
+    for (const rect of column) {
+      const centreY = rect.y + rect.height / 2;
+      const band = rowBands.find((b) => centreY >= b.start && centreY <= b.end);
+      if (!band || hit.has(band.key)) {
+        aligned = false;
+        break;
+      }
+      hit.add(band.key);
+    }
+    if (aligned) qualifying.push([...column]);
+  }
+  if (qualifying.length === 0) return none(false);
+
+  // Assignment by centre-x containment. The smaller control wins a contended
+  // band; a column inside no band is a disagreement the reviewer must see.
+  const area = (column: readonly PrintedRect[]) => column[0]!.width * column[0]!.height;
+  const matched = new Map<string, PrintedRect[]>();
+  let unassigned = false;
+  for (const column of qualifying) {
+    const start = Math.min(...column.map((r) => r.x));
+    const end = Math.max(...column.map((r) => r.x + r.width));
+    const centreX = (start + end) / 2;
+    const band = columnBands.find((b) => centreX >= b.start && centreX <= b.end);
+    if (!band) {
+      unassigned = true;
+      continue;
+    }
+    const incumbent = matched.get(band.key);
+    if (!incumbent || area(column) < area(incumbent)) matched.set(band.key, [...column]);
+  }
+
+  if (unassigned || matched.size !== columnBands.length) return none(true);
+  return { matched, conflicting: false };
+}
 
 /**
  * Why a grid could not be measured from the printed checkboxes.
@@ -890,20 +1326,17 @@ export function proposeRectGrid(input: RectGridProposeInput): RectGridOutcome {
     checkboxes AND, often, the ruled cell rectangles around each row. Those
     cells share no x with the checkboxes and are a different size, so grouping
     separates them and the size test below rejects the cell group outright.
+
+    The grouping itself is the shared `groupRectsByX` — the same one the
+    page-wide derivation measures with — but the selection and every refusal
+    below stay HERE, on the raw groups, so this path's refusal codes and their
+    counts read exactly as they always have. Notably the size test runs on the
+    SELECTED group rather than as a filter: a drag over a mixed run must say
+    "boxes differ in size", not pretend the run never lined up. No row-gap
+    split either — the author's drag already scopes the measurement to one
+    table, which is the split's whole job.
   */
-  const byX = [...inside].sort((a, b) => a.x - b.x);
-  const groups: PrintedRect[][] = [];
-  let run: PrintedRect[] = [];
-  for (const rect of byX) {
-    const head = run[0];
-    if (head && Math.abs(rect.x - head.x) <= RECT_COLUMN_X_TOLERANCE) {
-      run.push(rect);
-    } else {
-      if (run.length > 0) groups.push(run);
-      run = [rect];
-    }
-  }
-  if (run.length > 0) groups.push(run);
+  const groups = groupRectsByX(inside);
 
   /*
     LONGEST COLUMN, AND ON A TIE THE SMALLEST BOXES.
@@ -936,12 +1369,7 @@ export function proposeRectGrid(input: RectGridProposeInput): RectGridOutcome {
     test tells them apart, and mixing the two would put half the row bands on
     cells and half on squares.
   */
-  const widths = best.map((r) => r.width);
-  const heights = best.map((r) => r.height);
-  if (
-    Math.max(...widths) - Math.min(...widths) > RECT_SIZE_TOLERANCE ||
-    Math.max(...heights) - Math.min(...heights) > RECT_SIZE_TOLERANCE
-  ) {
+  if (!rectSizesUniform(best)) {
     return refuse(
       'boxes-differ-in-size',
       'The boxes that line up are not all the same size, so they are not one repeated control. A checkbox and the cell around it can share a left edge; only their size tells them apart.',
@@ -1017,6 +1445,7 @@ export function proposeRectGrid(input: RectGridProposeInput): RectGridOutcome {
       anchorsLocated: column.length,
       anchorsInferred: 0,
       notes: [],
+      columnEvidence: 'printed-boxes',
     },
   };
 }
