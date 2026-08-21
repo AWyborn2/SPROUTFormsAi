@@ -1,0 +1,153 @@
+/**
+ * The placement session's outcome accumulator — the pure, DOM-free seam
+ * between `GeometryEditorScreen`'s actions and the placement learning loop.
+ *
+ * The screen calls one narrow method per action; the recorder owns every
+ * session rule so the screen stays one line per call site and the rules are
+ * testable without React:
+ *
+ *  - RE-RUN UPSERT (KTD4): a field's `proposed` entry is replaced on
+ *    re-derive, so a page-scoped Scan re-run updates its tier rather than
+ *    double-counting the attempt.
+ *  - BUCKETS ARE COMPUTED HERE, and only here: callers pass raw point deltas
+ *    and page deltas; the recorder is the single place magnitudes become the
+ *    coarse content-free vocabulary (`magnitudeBucketOf`/`pageDeltaBucketOf`),
+ *    so no raw coordinate ever reaches an event.
+ *  - PRIOR-REFUSAL GUARD: a manual draw counts only on a field the engine
+ *    refused (latest tier no-match) or the reviewer rejected — a hand-draw on
+ *    a never-proposed field is not engine feedback.
+ *  - DRAIN-ONCE (R4): `drain()` returns the buffered events and clears them,
+ *    so repeated saves in one session each send only their own slice and every
+ *    event is stored exactly once.
+ *
+ * What survives a drain, deliberately: the per-field METHOD memory (so a
+ * proposal parked before one save can still stamp its method onto an accept or
+ * reject after it), the refusal/rejection memory (same reason, for manual
+ * draws), and the once-per-field dedupe sets — those are session facts, not
+ * slice facts. Only the event buffers drain.
+ */
+import {
+  magnitudeBucketOf,
+  pageDeltaBucketOf,
+  type AcceptVia,
+  type AdjustmentKind,
+  type DerivationMethod,
+  type PlacementEvent,
+  type PlacementFieldClass,
+  type PlacementProposalTier,
+} from '@formai/shared';
+
+export interface PlacementRecorder {
+  /** The engine derived (or refused) a proposal for a field — upserts on re-run. */
+  proposed(fieldId: string, method: DerivationMethod, tier: PlacementProposalTier): void;
+  /** A proposal reached the record — applied on sight, or confirmed from the queue. */
+  accepted(fieldId: string, via: AcceptVia): void;
+  /** A parked (not yet confirmed) proposal was fine-tuned. Raw points in; bucket out. */
+  previewAdjusted(fieldId: string, kind: AdjustmentKind, deltaPts: number): void;
+  /** An already-applied placement was fine-tuned. Raw points in; bucket out. */
+  placedAdjusted(fieldId: string, kind: AdjustmentKind, deltaPts: number): void;
+  /** A needs-review proposal was declined. */
+  rejected(fieldId: string): void;
+  /** A hand draw — counted only after a refusal or rejection (see module doc). */
+  manualDraw(fieldId: string, fieldTypeClass: PlacementFieldClass): void;
+  /** Fields re-stamped onto another page. Raw page delta in; bucket out. */
+  retargeted(fieldIds: readonly string[], pageDelta: number): void;
+  /** The buffered events, cleared on return — the send-once guarantee. */
+  drain(): PlacementEvent[];
+}
+
+export function createPlacementRecorder(): PlacementRecorder {
+  /** The current slice's `proposed` entry per field — upserted, drained. */
+  const proposedByField = new Map<string, Extract<PlacementEvent, { kind: 'proposed' }>>();
+  /** Every other event in the current slice, in arrival order — drained. */
+  let others: PlacementEvent[] = [];
+
+  /*
+    Session memory — survives drain. `methodByField` lets an accept or reject
+    that lands after a save still name the derivation family that produced the
+    proposal; `refused` is the manual-draw guard's evidence; the dedupe sets
+    keep once-per-shape facts from re-sending across slices.
+  */
+  const methodByField = new Map<string, DerivationMethod>();
+  const refused = new Set<string>();
+  const drawRecorded = new Set<string>();
+  const adjustRecorded = new Set<string>();
+
+  function adjusted(
+    fieldId: string,
+    kind: AdjustmentKind,
+    deltaPts: number,
+    phase: 'preview' | 'placed',
+  ): void {
+    if (!Number.isFinite(deltaPts) || deltaPts === 0) return;
+    const bucket = magnitudeBucketOf(deltaPts);
+    /*
+      One event per (field, kind, bucket, phase) for the session. A drag emits
+      a stream of edge moves and a nudge is pressed repeatedly; recording each
+      would make the shape clusters count gestures instead of findings. "This
+      field's column band needed a >4pt move" is one finding however many
+      steps it took. The '|' join is safe because kind, bucket and phase never
+      contain one, and a field id that did could at worst merge two dedupe
+      entries — telemetry, never load-bearing.
+    */
+    const dedupeKey = [fieldId, kind, bucket, phase].join('|');
+    if (adjustRecorded.has(dedupeKey)) return;
+    adjustRecorded.add(dedupeKey);
+    others.push({ kind: 'adjusted', fieldId, adjustment: kind, bucket, phase });
+  }
+
+  return {
+    proposed(fieldId, method, tier) {
+      methodByField.set(fieldId, method);
+      if (tier === 'no-match') refused.add(fieldId);
+      proposedByField.set(fieldId, { kind: 'proposed', fieldId, method, tier });
+    },
+
+    accepted(fieldId, via) {
+      // An accept can only follow a proposal; without a remembered method the
+      // call is not engine feedback (nothing was ever derived), so drop it.
+      const method = methodByField.get(fieldId);
+      if (!method) return;
+      others.push({ kind: 'accepted', fieldId, method, via });
+    },
+
+    previewAdjusted(fieldId, kind, deltaPts) {
+      adjusted(fieldId, kind, deltaPts, 'preview');
+    },
+
+    placedAdjusted(fieldId, kind, deltaPts) {
+      adjusted(fieldId, kind, deltaPts, 'placed');
+    },
+
+    rejected(fieldId) {
+      const method = methodByField.get(fieldId);
+      if (!method) return;
+      refused.add(fieldId);
+      others.push({ kind: 'rejected', fieldId, method });
+    },
+
+    manualDraw(fieldId, fieldTypeClass) {
+      // Only a field the engine refused or the reviewer rejected — and once
+      // per field: a per-option field is drawn one gesture per option, and six
+      // gestures are one finding ("the reviewer drew this one by hand").
+      if (!refused.has(fieldId) || drawRecorded.has(fieldId)) return;
+      drawRecorded.add(fieldId);
+      others.push({ kind: 'manual-draw', fieldId, fieldTypeClass });
+    },
+
+    retargeted(fieldIds, pageDelta) {
+      const bucket = pageDeltaBucketOf(pageDelta);
+      if (!bucket) return; // a move to the same page is not a move
+      for (const fieldId of fieldIds) {
+        others.push({ kind: 'retargeted', fieldId, pageDeltaBucket: bucket });
+      }
+    },
+
+    drain() {
+      const events = [...proposedByField.values(), ...others];
+      proposedByField.clear();
+      others = [];
+      return events;
+    },
+  };
+}

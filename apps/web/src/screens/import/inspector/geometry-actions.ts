@@ -7,8 +7,8 @@
  * grid and marks drawn onto a competency record. It belongs somewhere it can
  * be read and tested directly.
  */
-import type { FormField, GeometryBand, GroupOrdinal, PageBox, RepeatingColumn } from '@formai/shared';
-import { markPlacement, resolveGeometry } from '@formai/shared';
+import type { DerivationMethod, FormField, GeometryBand, GroupOrdinal, PageBox, RepeatingColumn } from '@formai/shared';
+import { isChoiceField, isMatchingQuestion, markPlacement, resolveGeometry } from '@formai/shared';
 import type {
   FieldProposal,
   MatchAnchorSpec,
@@ -1802,6 +1802,29 @@ export function panelState(
     reason:
       'The page did not give enough signal to place this table confidently, so nothing could be placed automatically. That is fine to leave — the form still publishes and exports its answers as data. To place it yourself, draw the table’s box on the PDF and lay out its grid inside it.',
   };
+}
+
+/**
+ * Which derivation family `deriveProposal` would dispatch a field to, or null
+ * for a field the engine has no derivation for (a scalar, a section header).
+ *
+ * THE PLACEMENT RECORDER'S METHOD SOURCE, kept beside the dispatch predicates
+ * it mirrors so the recorder and the screen cannot disagree with the
+ * dispatcher: `GeometryEditorScreen`'s `isMatchAnchorField` / `isPerOptionField`
+ * delegate to this, and `deriveProposal` branches on those. The order matters
+ * for the same reason it does there — a matching question IS a choice field,
+ * so it must be claimed before the option-cell test. A new derivation family
+ * (or a new placement action) must extend this AND feed the recorder, or the
+ * hit-rate metric silently undercounts it.
+ */
+export function derivationMethodOf(
+  field: Pick<FormField, 'type' | 'options' | 'printSelectedValue'>,
+): DerivationMethod | null {
+  if (isChoiceField(field.type) && !field.printSelectedValue && (field.options?.length ?? 0) > 0) {
+    return isMatchingQuestion(field.options) ? 'match-anchor' : 'option-cells';
+  }
+  if (field.type === 'repeating_group') return 'table';
+  return null;
 }
 
 /**

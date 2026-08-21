@@ -42,6 +42,7 @@ import type {
   SaveBuilderDraftInput,
   ApiKey,
   CorrectionCandidates,
+  PlacementInsights,
   AuditCategory,
   AuditEntry,
   CreatedApiKey,
@@ -936,6 +937,11 @@ export const store = {
   listCorrectionCandidates(minCount?: number): Promise<CorrectionCandidates> {
     const query = minCount ? `?minCount=${minCount}` : '';
     return apiClient.get<CorrectionCandidates>(`/pdf/corrections/candidates${query}`);
+  },
+
+  /** The auto-place hit-rate metric and recurring placement shapes (admin). */
+  getPlacementInsights(): Promise<PlacementInsights> {
+    return apiClient.get<PlacementInsights>('/pdf/placements/insights');
   },
 
   /**

@@ -858,3 +858,230 @@ describe('GET /pdf/corrections/candidates', () => {
     }
   });
 });
+
+/**
+ * The placement learning loop's store (U4). The geometry editor posts one
+ * session-slice of outcome events after a successful Save placement; the route
+ * validates at the boundary, recomputes the tallies server-side, and writes one
+ * org-scoped row.
+ */
+describe('POST /pdf/placements', () => {
+  /** A db surface for this route: just an insert. */
+  function fakePlacementsDb(opts: { insertedId?: string } = {}) {
+    const inserted: Record<string, unknown>[] = [];
+    const db = {
+      insert: vi.fn(() => ({
+        values: (row: Record<string, unknown>) => {
+          inserted.push(row);
+          return { returning: async () => [{ id: opts.insertedId ?? 'po-1' }] };
+        },
+      })),
+    };
+    return { db, inserted };
+  }
+
+  const WELL_FORMED = {
+    formId: 'form-1',
+    versionId: 'v-2',
+    documentType: 'assessment',
+    context: 'builder',
+    fieldCount: 12,
+    events: [
+      { kind: 'proposed', fieldId: 'f1', method: 'option-cells', tier: 'auto-confirm' },
+      { kind: 'accepted', fieldId: 'f1', method: 'option-cells', via: 'auto' },
+      { kind: 'proposed', fieldId: 'f2', method: 'table', tier: 'needs-review' },
+      { kind: 'adjusted', fieldId: 'f2', adjustment: 'column-band', bucket: '>4pt', phase: 'preview' },
+      { kind: 'accepted', fieldId: 'f2', method: 'table', via: 'confirm' },
+      { kind: 'proposed', fieldId: 'f3', method: 'match-anchor', tier: 'no-match' },
+      { kind: 'manual-draw', fieldId: 'f3', fieldTypeClass: 'option' },
+      { kind: 'retargeted', fieldId: 'f2', pageDeltaBucket: '+2..4' },
+    ],
+  };
+
+  function post(base: string, body: unknown) {
+    return fetch(`${base}/pdf/placements`, {
+      method: 'POST',
+      headers: { ...authHeader(), 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('503s when the database is unavailable', async () => {
+    mockDbValue = null;
+    const { server, base } = startApp();
+    try {
+      expect((await post(base, WELL_FORMED)).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes an org-scoped row, recomputing the tallies server-side from the events', async () => {
+    const { db, inserted } = fakePlacementsDb({ insertedId: 'po-42' });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await post(base, WELL_FORMED);
+      expect(res.status).toBe(201);
+      expect(await res.json()).toEqual({ id: 'po-42' });
+      expect(inserted).toHaveLength(1);
+      // The hand-computed tally for WELL_FORMED's events — the counters come
+      // from `tallyPlacementOutcomes` over the payload, never from the client.
+      expect(inserted[0]).toMatchObject({
+        orgId: 'org-1',
+        formId: 'form-1',
+        versionId: 'v-2',
+        documentType: 'assessment',
+        context: 'builder',
+        proposalsAttempted: 3,
+        autoConfirmed: 1,
+        acceptedAsIs: 1,
+        adjusted: 1,
+        rejected: 0,
+        noMatch: 1,
+        manualDraws: 1,
+        retargets: 1,
+        fieldCount: 12,
+        createdByUserId: 'u1',
+      });
+      expect((inserted[0]!.outcomes as { events: unknown[] }).events).toHaveLength(8);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stores missing optional ids as null', async () => {
+    const { db, inserted } = fakePlacementsDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const body = {
+        context: 'standalone',
+        fieldCount: 3,
+        events: [{ kind: 'proposed', fieldId: 'f1', method: 'table', tier: 'no-match' }],
+      };
+      expect((await post(base, body)).status).toBe(201);
+      expect(inserted[0]).toMatchObject({ formId: null, versionId: null, documentType: null });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s on a malformed event (an unknown kind)', async () => {
+    mockDbValue = fakePlacementsDb().db;
+    const { server, base } = startApp();
+    try {
+      const body = {
+        context: 'standalone',
+        fieldCount: 1,
+        events: [{ kind: 'not-a-real-kind', fieldId: 'f1' }],
+      };
+      expect((await post(base, body)).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s on an empty slice — the recorder never sends one, so nothing stores one', async () => {
+    mockDbValue = fakePlacementsDb().db;
+    const { server, base } = startApp();
+    try {
+      const body = { context: 'standalone', fieldCount: 1, events: [] };
+      expect((await post(base, body)).status).toBe(400);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/**
+ * The placement loop's read surface (U7): the hit-rate metric, the recurring
+ * shapes with their engine-seam suggestions, and the weekly trend. Admin-only,
+ * like the corrections candidates.
+ */
+describe('GET /pdf/placements/insights', () => {
+  function fakePlacementInsightsDb(rows: unknown[]) {
+    return { query: { placementOutcomes: { findMany: vi.fn().mockResolvedValue(rows) } } };
+  }
+
+  const ROWS = [
+    {
+      documentType: 'assessment',
+      createdAt: '2026-08-18T10:00:00Z',
+      outcomes: {
+        context: 'builder',
+        fieldCount: 10,
+        events: [
+          { kind: 'proposed', fieldId: 'f1', method: 'table', tier: 'needs-review' },
+          { kind: 'adjusted', fieldId: 'f1', adjustment: 'column-band', bucket: '>4pt', phase: 'preview' },
+          { kind: 'accepted', fieldId: 'f1', method: 'table', via: 'confirm' },
+          { kind: 'proposed', fieldId: 'f2', method: 'option-cells', tier: 'auto-confirm' },
+        ],
+      },
+      proposalsAttempted: 2,
+      autoConfirmed: 1,
+      acceptedAsIs: 1,
+      adjusted: 1,
+      rejected: 0,
+      noMatch: 0,
+      manualDraws: 0,
+      retargets: 0,
+    },
+  ];
+
+  function get(base: string, cookie: string) {
+    return fetch(`${base}/pdf/placements/insights`, { headers: { cookie } });
+  }
+
+  it('403s for a non-admin caller', async () => {
+    mockDbValue = fakePlacementInsightsDb(ROWS);
+    const candidateCookie = `fai_session=${sealSession({
+      userId: 'u1',
+      orgId: 'org-1',
+      role: 'candidate',
+    } as unknown as Parameters<typeof sealSession>[0])}`;
+    const { server, base } = startApp();
+    try {
+      expect((await get(base, candidateCookie)).status).toBe(403);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('503s when the database is unavailable', async () => {
+    mockDbValue = null;
+    const { server, base } = startApp();
+    try {
+      expect((await get(base, `fai_session=${sealSession(tenant)}`)).status).toBe(503);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('reports the rates, the shapes with suggestions, and the weekly trend', async () => {
+    mockDbValue = fakePlacementInsightsDb(ROWS);
+    const { server, base } = startApp();
+    try {
+      const res = await get(base, `fai_session=${sealSession(tenant)}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        metrics: { documentType: string; hitRate: number; adjustmentRate: number }[];
+        shapes: { shape: string; count: number; suggestion: string }[];
+        trend: { week: string; hitRate: number }[];
+      };
+
+      expect(body.metrics[0]).toMatchObject({ documentType: 'assessment', hitRate: 0.5 });
+      expect(body.metrics[0]!.adjustmentRate).toBe(0.5);
+
+      const bandMoved = body.shapes.find((s) => s.shape === 'adjusted:column-band:>4pt');
+      expect(bandMoved?.count).toBe(1);
+      expect(bandMoved?.suggestion).toContain('proposeTableSegments');
+
+      expect(body.trend).toEqual([
+        expect.objectContaining({ week: '2026-W34', hitRate: 0.5 }),
+      ]);
+    } finally {
+      server.close();
+    }
+  });
+});

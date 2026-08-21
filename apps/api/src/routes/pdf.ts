@@ -2,8 +2,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { schema } from '@formai/db';
-import { CORRECTION_KINDS, DOCUMENT_TYPES } from '@formai/shared';
-import type { FormField, SubmissionValue } from '@formai/shared';
+import { CORRECTION_KINDS, DOCUMENT_TYPES, PLACEMENT_EVENT_KINDS, tallyPlacementOutcomes } from '@formai/shared';
+import type { FormField, PlacementEvent, SubmissionValue } from '@formai/shared';
 import { db } from '../db.js';
 import { requireTenant } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
@@ -11,6 +11,7 @@ import { getAnthropic } from '../anthropic.js';
 import { auditForm, extractForm, roundTripExport } from '../pdf/index.js';
 import { captureExtraction } from '../pdf/capture.js';
 import { aggregateCorrectionRows, candidateRules } from '../pdf/correction-insights.js';
+import { aggregatePlacementRows, placementSuggestionFor } from '../pdf/placement-insights.js';
 import { getStorageClient } from '../storage/index.js';
 import { env } from '../env.js';
 
@@ -472,5 +473,131 @@ pdfRouter.get(
     });
     const { shapes } = aggregateCorrectionRows(rows);
     res.json({ minCount, candidates: candidateRules(shapes, minCount) });
+  }),
+);
+
+/*
+  One placement session-slice, validated at the boundary. The per-event payload
+  is passthrough — the store keeps the whole `PlacementOutcomes` verbatim and
+  the fine shape of each event belongs to `placement-outcomes.ts`, not to a
+  second copy of the union here — but `kind` and `fieldId` are checked so a
+  malformed body is a 400 at the edge rather than a bad row.
+*/
+const placementEventSchema = z
+  .object({ kind: z.enum(PLACEMENT_EVENT_KINDS), fieldId: z.string().min(1) })
+  .passthrough();
+
+const placementsBody = z.object({
+  /** Provenance of the placed version — plain ids, stored as such. */
+  formId: z.string().min(1).optional(),
+  versionId: z.string().min(1).optional(),
+  documentType: z.enum(DOCUMENT_TYPES).optional(),
+  context: z.enum(['standalone', 'builder']),
+  /** Fields on the version — the eligibility universe. */
+  fieldCount: z.number().int().nonnegative(),
+  /** The recorder never sends an empty slice; nor does this route store one. */
+  events: z.array(placementEventSchema).min(1),
+});
+
+/**
+ * Store one placement session-slice — the placement learning loop's training
+ * signal. Called by `GeometryEditorScreen` after a successful Save placement,
+ * fire-and-forget off the save's critical path; a failure here never blocks or
+ * slows a save.
+ *
+ * The denormalised tallies are computed SERVER-SIDE from the events, never
+ * read off the request — the jsonb and the counters must agree by
+ * construction, and a client counter is not evidence. Org-scoped throughout:
+ * the row is written under the caller's org.
+ */
+pdfRouter.post(
+  '/placements',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const parsed = placementsBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const tenant = req.tenant!;
+    const outcomes = parsed.data;
+    // The zod schema checks kind/fieldId and passes the rest through (the fine
+    // per-kind shape belongs to `placement-outcomes.ts`, not a second copy
+    // here), so the events are widened for the tally. The fold reads only
+    // fields it recognises; anything malformed simply does not count.
+    const tally = tallyPlacementOutcomes(outcomes.events as unknown as PlacementEvent[]);
+
+    const [row] = await db
+      .insert(schema.placementOutcomes)
+      .values({
+        orgId: tenant.orgId,
+        formId: outcomes.formId ?? null,
+        versionId: outcomes.versionId ?? null,
+        documentType: outcomes.documentType ?? null,
+        context: outcomes.context,
+        outcomes,
+        ...tally,
+        fieldCount: outcomes.fieldCount,
+        createdByUserId: tenant.userId,
+      })
+      .returning({ id: schema.placementOutcomes.id });
+
+    res.status(201).json({ id: row?.id });
+  }),
+);
+
+/**
+ * The auto-place hit-rate metric, the recurring placement shapes and the
+ * weekly trend — the placement loop's read surface (R7/R8).
+ *
+ * ADMIN-ONLY like `/corrections/candidates`, and for the same reason: acting
+ * on a shape means a maintainer changing an engine heuristic or constant in a
+ * reviewed PR — nothing here changes the engine, and the suggestion strings
+ * only ever name engine seams. Org-scoped rows; the shape keys are the
+ * cross-org-safe vocabulary should a platform view ever widen this.
+ */
+pdfRouter.get(
+  '/placements/insights',
+  requireTenant,
+  withErrorHandling(async (req, res) => {
+    const tenant = req.tenant!;
+    if (tenant.role !== 'admin' && tenant.role !== 'owner') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const rows = await db.query.placementOutcomes.findMany({
+      where: eq(schema.placementOutcomes.orgId, tenant.orgId),
+      columns: {
+        documentType: true,
+        createdAt: true,
+        outcomes: true,
+        proposalsAttempted: true,
+        autoConfirmed: true,
+        acceptedAsIs: true,
+        adjusted: true,
+        rejected: true,
+        noMatch: true,
+        manualDraws: true,
+        retargets: true,
+      },
+      // A cap, not a page: insights are an aggregate, and an org with more than
+      // this many saves has plenty of signal already. Paginate if it ever bites.
+      limit: 5000,
+    });
+
+    const { metrics, shapes, trend } = aggregatePlacementRows(rows);
+    res.json({
+      metrics,
+      shapes: shapes.map((s) => ({ ...s, suggestion: placementSuggestionFor(s.shape) })),
+      trend,
+    });
   }),
 );

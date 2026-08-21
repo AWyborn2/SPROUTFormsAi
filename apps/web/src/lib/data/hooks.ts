@@ -182,6 +182,7 @@ export const keys = {
   invite: (token: string) => ['invite', token] as const,
   apiKeys: ['apiKeys'] as const,
   correctionCandidates: (minCount: number) => ['correctionCandidates', minCount] as const,
+  placementInsights: ['placementInsights'] as const,
   taxonomy: ['taxonomy'] as const,
   formBrands: ['formBrands'] as const,
   memberPlacement: (id: string) => ['members', id, 'placement'] as const,
@@ -851,6 +852,14 @@ export function useCorrectionCandidates(minCount = 3) {
   return useQuery({
     queryKey: keys.correctionCandidates(minCount),
     queryFn: () => store.listCorrectionCandidates(minCount),
+  });
+}
+
+/** The auto-place hit-rate metric and recurring placement shapes (admin). */
+export function usePlacementInsights() {
+  return useQuery({
+    queryKey: keys.placementInsights,
+    queryFn: () => store.getPlacementInsights(),
   });
 }
 
