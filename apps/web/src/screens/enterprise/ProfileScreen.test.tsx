@@ -23,6 +23,9 @@ const state: {
   saved: Array<{ membershipId: string; values: Record<string, string> }>;
   seed: ProfileSeedResponse | undefined;
   role: string;
+  signature: string | null;
+  hasPassword: boolean;
+  signatureSaves: Array<string | null>;
   cases: Array<{ id: string; toolName: string; state: string; createdAt: string }>;
   /** The candidate's own recommended read (U7). Undefined keeps the card absent. */
   recommended: RecommendedCompetencies | undefined;
@@ -32,8 +35,11 @@ const state: {
   saved: [],
   seed: undefined,
   role: 'admin',
+  signature: null as string | null,
+  hasPassword: true,
   cases: [],
   recommended: undefined,
+  signatureSaves: [] as Array<string | null>,
 };
 const requestTraining = vi.fn();
 // Renewing invokes onSuccess so the control resets and toasts, the same shape
@@ -57,7 +63,19 @@ vi.mock('react-router-dom', () => ({
 vi.mock('../../lib/data/hooks.js', () => ({
   useProfile: () => state.profile,
   useMyProfileMembership: () => ({ data: { membershipId: 'm-1' }, isLoading: false }),
-  useSession: () => ({ data: { role: state.role } }),
+  useSession: () => ({
+    data: { role: state.role, signature: state.signature, hasPassword: state.hasPassword },
+  }),
+  useSaveSignature: () => ({
+    mutate: (
+      signature: string | null,
+      opts?: { onSuccess?: () => void; onError?: () => void },
+    ) => {
+      state.signatureSaves.push(signature);
+      opts?.onSuccess?.();
+    },
+    isPending: false,
+  }),
   useAssessmentCases: () => ({ data: state.cases }),
   useHeldCompetencies: () => ({ data: state.held }),
   useMemberPlacement: () => ({
@@ -164,6 +182,9 @@ afterEach(() => {
   state.role = 'admin';
   state.cases = [];
   state.recommended = undefined;
+  state.signature = null;
+  state.hasPassword = true;
+  state.signatureSaves = [];
   searchParams = new URLSearchParams();
 });
 
@@ -727,5 +748,34 @@ describe('ProfileScreen — the candidate-focused own view', () => {
     expect(screen.getByText('Placement')).toBeDefined();
     expect(screen.getByText('Documents')).toBeDefined();
     expect(screen.queryByText('Assessments due')).toBeNull();
+  });
+});
+
+describe('ProfileScreen — My signature (own record only)', () => {
+  it('renders the card on the caller’s own record', () => {
+    show({ isSubject: true });
+    expect(screen.getByText('My signature')).toBeDefined();
+  });
+
+  it('never renders on a member record an admin is viewing', () => {
+    show({ isSubject: false });
+    expect(screen.queryByText('My signature')).toBeNull();
+  });
+
+  it('shows the saved mark with Replace and Remove; Remove clears it', () => {
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    show({ isSubject: true });
+    expect(screen.getByAltText('Your saved signature')).toBeDefined();
+    fireEvent.click(screen.getByText('Remove'));
+    expect(state.signatureSaves).toEqual([null]);
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: 'success' }),
+    );
+  });
+
+  it('with nothing saved, offers the pad and disables Save until something is drawn', () => {
+    show({ isSubject: true });
+    const save = screen.getByText('Save signature').closest('button')!;
+    expect(save.hasAttribute('disabled')).toBe(true);
   });
 });
