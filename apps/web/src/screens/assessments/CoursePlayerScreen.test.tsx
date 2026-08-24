@@ -117,6 +117,18 @@ describe('CoursePlayerScreen', () => {
     expect(saveMutate).not.toHaveBeenCalled();
   });
 
+  it('the deck’s Start Assessment message navigates back to the case', () => {
+    courseResult.data = { course: deckCourse({ viewedCount: 3, completedAt: '2026-08-24T03:00:00Z' }) };
+    render(<CoursePlayerScreen />);
+    const frame = document.querySelector('iframe')!;
+    const event = new MessageEvent('message', { data: { type: 'course-start-assessment' } });
+    Object.defineProperty(event, 'source', { value: frame.contentWindow });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    expect(navigate).toHaveBeenCalledWith('/app/assessments/case-1');
+  });
+
   it('a message from any other window is ignored', () => {
     vi.useFakeTimers();
     courseResult.data = { course: deckCourse() };
