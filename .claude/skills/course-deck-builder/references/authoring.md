@@ -112,6 +112,61 @@ within 1080px).
 
 Optional: a `.chev` span inside an expander shows `+` → `−`/`✓` as it toggles.
 
+**Checkbox list** (turn a dot-point list into "tick every box to continue" —
+good for obligations, responsibilities, a pre-start checklist the reader must
+actively acknowledge). Each item is a `.checkitem` with its own `data-touch`;
+the slide's Next unlocks once all are ticked. Ticking is one-way (an
+acknowledgement), so the visual always matches the gate:
+```html
+<div style="display:flex; flex-direction:column; gap:20px;">
+  <div class="checkitem" data-touch="ck0"><span class="box"></span>
+    <span style="font-size:26px; line-height:1.4;">Provides hazardous substance information (SDS)</span></div>
+  <div class="checkitem" data-touch="ck1"><span class="box"></span>
+    <span style="font-size:26px; line-height:1.4;">Provides a register of hazardous substances</span></div>
+</div>
+```
+Use a checklist to make a required list active; keep it to a handful of items
+so the whole list stays on the 1080px slide.
+
+**Image hotspots** (numbered markers over a screenshot/diagram that open a
+detail popover — good for walking through a software screen, a piece of
+equipment, or a site photo). Wrap an image in `.hotspots`, place `.hotspot`
+markers with `left`/`top` percentages, and give each a matching
+`.hotspot-detail[data-for]`. Each marker is a `data-touch` card, so Next
+unlocks once every point has been explored; markers pulse until explored, then
+turn green. One detail shows at a time; a `.hotspot-close` button dismisses it.
+```html
+<section style="background:var(--ink); color:#fff; display:flex; flex-direction:column;
+  padding:56px var(--pad-x) 44px; gap:20px;">
+  <h1 style="font-size:var(--type-title); font-weight:800;">Finding a Substance in ChemAlert</h1>
+  <p style="font-size:var(--type-small); color:#bbb;">Click each numbered point to explore it.</p>
+  <div class="hotspots" style="flex:1;">
+    <img src="img/chemalert.png" style="width:100%; height:100%; object-fit:contain;">
+    <button class="hotspot" data-touch="hs0" style="left:53%; top:30%;">1</button>
+    <div class="hotspot-detail" data-for="hs0">
+      <button class="hotspot-close" aria-label="Close">×</button>
+      <h3>Properties</h3>
+      <p style="font-size:24px; line-height:1.5;">Physical &amp; chemical properties of the substance.</p>
+    </div>
+    <button class="hotspot" data-touch="hs1" style="left:62%; top:30%;">2</button>
+    <div class="hotspot-detail" data-for="hs1">
+      <button class="hotspot-close" aria-label="Close">×</button>
+      <h3>Modules</h3>
+      <p style="font-size:24px; line-height:1.5;">Stock register and inventory records.</p>
+    </div>
+  </div>
+</section>
+```
+A `.hotspot-detail` may contain an `<img>` too (e.g. a zoomed crop). Position
+markers as percentages so they track the image as the slide scales.
+
+## Mixing card types
+
+All three interactive types (flip, expander, checkbox, hotspot) share one gate
+— a slide's Next waits until every `data-touch` element on it is activated — so
+a slide can mix them, but keeping one interaction style per slide reads more
+clearly. Give every interactive element on a slide a unique `data-touch`.
+
 ## 5. deck.json
 
 ```json
