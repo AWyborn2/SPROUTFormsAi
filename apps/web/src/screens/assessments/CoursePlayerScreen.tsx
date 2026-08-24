@@ -77,7 +77,16 @@ export function CoursePlayerScreen() {
       // posting a matching shape is ignored.
       if (!frameRef.current || e.source !== frameRef.current.contentWindow) return;
       const d = e.data as { type?: unknown; index?: unknown };
-      if (!d || d.type !== 'course-slide' || typeof d.index !== 'number') return;
+      if (!d) return;
+      // The deck's own "Start Assessment" button at the end of the reading:
+      // the package can't navigate the app (it's sandboxed with no
+      // allow-top-navigation), so it asks us to. Send the reader back to the
+      // case, where the now-satisfied gate lets them open the first part.
+      if (d.type === 'course-start-assessment') {
+        navigate(`/app/assessments/${id}`);
+        return;
+      }
+      if (d.type !== 'course-slide' || typeof d.index !== 'number') return;
       if (seenRef.current.has(d.index)) return;
       seenRef.current.add(d.index);
       pendingRef.current.push(d.index);
@@ -88,7 +97,7 @@ export function CoursePlayerScreen() {
       window.removeEventListener('message', onMessage);
       if (timerRef.current !== null) clearTimeout(timerRef.current);
     };
-  }, [scheduleFlush]);
+  }, [scheduleFlush, navigate, id]);
 
   if (isLoading) {
     return (
