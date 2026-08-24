@@ -201,6 +201,18 @@ export function CoursePlayerScreen() {
           // Scripts yes — the deck is interactive — but an opaque origin, no
           // forms, no popups, no reach back into the app. See the header note.
           sandbox="allow-scripts"
+          // Seed the package with what the case already recorded, so a
+          // reopened deck resumes at its frontier instead of re-locking from
+          // slide zero. '*' is right here: the sandboxed frame's origin is
+          // opaque ("null"), so no origin string could match it, and the
+          // payload is the reader's own progress — nothing another listener
+          // could abuse.
+          onLoad={() => {
+            const win = frameRef.current?.contentWindow;
+            if (!win || course.visitedSlides.length === 0) return;
+            for (const n of course.visitedSlides) seenRef.current.add(n);
+            win.postMessage({ type: 'course-progress-seed', visited: course.visitedSlides }, '*');
+          }}
           className="min-h-0 w-full flex-1 rounded-md border border-border"
           style={{ background: '#1D1D1B' }}
         />

@@ -7067,9 +7067,12 @@ describe('course material', () => {
 
       const view = (await (
         await fetch(`${base}/assessment-cases/${c.id}/course`, { headers: auth() })
-      ).json()) as { course: { launchUrl: string; expiresAt: string } };
+      ).json()) as { course: { launchUrl: string; expiresAt: string; visitedSlides: number[] } };
       expect(view.course.launchUrl).toMatch(/^\/courses\/content\/.+\/index\.html$/);
       expect(new Date(view.course.expiresAt).getTime()).toBeGreaterThan(Date.now());
+      // The indexes themselves ride along, so the player can seed a reopened
+      // deck's reading gate back to the recorded frontier.
+      expect(view.course.visitedSlides).toEqual([0, 2]);
     } finally {
       server.close();
     }

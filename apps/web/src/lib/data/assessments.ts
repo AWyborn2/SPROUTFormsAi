@@ -169,6 +169,8 @@ export interface CaseCourseView extends CaseCourseState {
   /** API path the iframe loads — null when the course is missing. */
   launchUrl: string | null;
   expiresAt: string | null;
+  /** Slide indexes already recorded — seeded into a reopened deck to resume. */
+  visitedSlides: number[];
 }
 
 /** One uploaded course package, as the builder's picker lists them. */

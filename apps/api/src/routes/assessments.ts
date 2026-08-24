@@ -3180,6 +3180,7 @@ assessmentCasesRouter.get(
           kind: null,
           totalSlides: null,
           viewedCount: 0,
+          visitedSlides: [],
           completedAt: null,
           launchUrl: null,
           expiresAt: null,
@@ -3204,6 +3205,12 @@ assessmentCasesRouter.get(
         kind: courseRow.kind,
         totalSlides: courseRow.slideCount,
         viewedCount: reading?.visitedSlides.length ?? 0,
+        /**
+         * The indexes themselves, not just the count: the player seeds them
+         * into a reopened deck so its reading gate resumes at the frontier
+         * the server already recorded instead of re-locking from slide zero.
+         */
+        visitedSlides: reading?.visitedSlides ?? [],
         completedAt: reading?.completedAt ? reading.completedAt.toISOString() : null,
         launchUrl: `${prefix}/${encodedLaunch}`,
         expiresAt,
