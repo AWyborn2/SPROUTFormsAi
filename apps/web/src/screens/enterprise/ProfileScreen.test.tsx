@@ -26,6 +26,7 @@ const state: {
   signature: string | null;
   hasPassword: boolean;
   signatureSaves: Array<string | null>;
+  saveError: unknown;
   cases: Array<{ id: string; toolName: string; state: string; createdAt: string }>;
   /** The candidate's own recommended read (U7). Undefined keeps the card absent. */
   recommended: RecommendedCompetencies | undefined;
@@ -40,6 +41,7 @@ const state: {
   cases: [],
   recommended: undefined,
   signatureSaves: [] as Array<string | null>,
+  saveError: undefined as unknown,
 };
 const requestTraining = vi.fn();
 // Renewing invokes onSuccess so the control resets and toasts, the same shape
@@ -69,10 +71,11 @@ vi.mock('../../lib/data/hooks.js', () => ({
   useSaveSignature: () => ({
     mutate: (
       signature: string | null,
-      opts?: { onSuccess?: () => void; onError?: () => void },
+      opts?: { onSuccess?: () => void; onError?: (e: unknown) => void },
     ) => {
       state.signatureSaves.push(signature);
-      opts?.onSuccess?.();
+      if (state.saveError) opts?.onError?.(state.saveError);
+      else opts?.onSuccess?.();
     },
     isPending: false,
   }),
@@ -122,7 +125,15 @@ vi.mock('../../lib/data/hooks.js', () => ({
 const toast = vi.fn();
 vi.mock('@formai/ui', async () => {
   const actual = await vi.importActual<typeof import('@formai/ui')>('@formai/ui');
-  return { ...actual, useToast: () => ({ toast }) };
+  return {
+    ...actual,
+    useToast: () => ({ toast }),
+    // The real pad drags in canvas; the card's contract is only what it saves,
+    // so the stub exposes a deterministic "draw" that fires onChange.
+    SignaturePad: ({ onChange }: { onChange: (v: string) => void }) => (
+      <button data-testid="pad-draw" onClick={() => onChange('data:image/png;base64,iVBORw0KDRAWN=')} />
+    ),
+  };
 });
 
 const { ProfileScreen } = await import('./ProfileScreen.js');
@@ -185,6 +196,7 @@ afterEach(() => {
   state.signature = null;
   state.hasPassword = true;
   state.signatureSaves = [];
+  state.saveError = undefined;
   searchParams = new URLSearchParams();
 });
 
@@ -777,5 +789,26 @@ describe('ProfileScreen — My signature (own record only)', () => {
     show({ isSubject: true });
     const save = screen.getByText('Save signature').closest('button')!;
     expect(save.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('draws then saves, sending the drawn mark and toasting success (AE1)', () => {
+    show({ isSubject: true });
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    const save = screen.getByText('Save signature').closest('button')!;
+    expect(save.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(save);
+    expect(state.signatureSaves).toEqual(['data:image/png;base64,iVBORw0KDRAWN=']);
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'success' }));
+  });
+
+  it('an oversized-save error names the size, not the format', async () => {
+    const { ApiError } = await import('../../lib/data/api-client.js');
+    state.saveError = new ApiError(400, { error: 'too_large' });
+    show({ isSubject: true });
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    fireEvent.click(screen.getByText('Save signature'));
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: 'danger', message: expect.stringMatching(/too large/i) }),
+    );
   });
 });

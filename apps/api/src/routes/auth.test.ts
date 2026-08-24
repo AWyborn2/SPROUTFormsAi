@@ -433,10 +433,11 @@ describe('POST /auth/confirm-password', () => {
   });
   const tenant = { userId: 'u1', orgId: 'o1', role: 'assessor' as const };
 
-  function confirmDb(user: object | undefined) {
+  function confirmDb(user: object | undefined, membershipStatus = 'active') {
     return {
       query: {
         users: { findFirst: vi.fn().mockResolvedValue(user) },
+        memberships: { findFirst: vi.fn().mockResolvedValue({ status: membershipStatus, role: 'assessor' }) },
       },
       insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
     };
@@ -532,6 +533,36 @@ describe('POST /auth/confirm-password', () => {
       server.close();
     }
   });
+
+  it('401s a deactivated member holding a still-valid cookie (revalidateTenant)', async () => {
+    // The manual-unseal routes must run the same membership revalidation
+    // requireTenant does — a suspended member's 7-day cookie cannot confirm.
+    mockDbValue = confirmDb({ id: 'u1', name: 'Ash', passwordHash }, 'suspended');
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(base, { password: 'correct horse battery' }, sealSession(tenant));
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('unauthenticated');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a context id over the 64-char cap, so the audit log cannot be flooded', async () => {
+    mockDbValue = confirmDb({ id: 'u1', name: 'Ash', passwordHash });
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(
+        base,
+        { password: 'correct horse battery', context: { caseId: 'x'.repeat(65) } },
+        sealSession(tenant),
+      );
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('validation_error');
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe('PUT /auth/signature', () => {
@@ -551,6 +582,9 @@ describe('PUT /auth/signature', () => {
           },
           organizations: {
             findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme', planTier: 'business' }),
+          },
+          memberships: {
+            findFirst: vi.fn().mockResolvedValue({ status: 'active', role: 'assessor' }),
           },
         },
         update: vi.fn(() => ({ set })),

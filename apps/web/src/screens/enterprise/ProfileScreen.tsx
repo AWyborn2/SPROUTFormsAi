@@ -31,6 +31,7 @@ import {
   useSession,
   useTaxonomy,
 } from '../../lib/data/hooks.js';
+import { ApiError } from '../../lib/data/api-client.js';
 import { CaseStateBadge } from '../statusBadges.js';
 import { RecommendedTrainingList } from '../recommended-training.js';
 import { sourcesLine } from '../../lib/competency-sources.js';
@@ -293,8 +294,19 @@ function MySignatureCard() {
         setDraft('');
         toast({ variant: 'success', message: done });
       },
-      onError: () =>
-        toast({ variant: 'danger', message: 'That signature could not be saved. It must be a PNG image.' }),
+      // The route distinguishes too-large from wrong-format; a network/503
+      // failure is neither, so fall back to a connection message rather than
+      // wrongly blaming the image.
+      onError: (err) => {
+        const body = err instanceof ApiError ? (err.body as { error?: unknown } | null) : null;
+        const message =
+          body?.error === 'too_large'
+            ? 'That signature image is too large. Try a smaller one.'
+            : body?.error === 'not_png_data_url'
+              ? 'That signature could not be saved. It must be a PNG image.'
+              : 'That signature could not be saved. Check your connection and try again.';
+        toast({ variant: 'danger', message });
+      },
     });
   };
 

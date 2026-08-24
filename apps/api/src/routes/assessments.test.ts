@@ -6805,4 +6805,61 @@ describe('POST /assessment-cases/:id/sign-off — the stored mark is a digital I
       server.close();
     }
   });
+
+  it('still gates a whitespace-padded copy of the stored mark', async () => {
+    // A single inserted newline makes the raw string differ but exports
+    // byte-identical pixels — canonicalising before comparing keeps the
+    // password required. Without a password this must be refused.
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const padded = SIG.replace('base64,', 'base64,\n');
+      const res = await signOffWith(base, c.id, { assessorName: 'Admin', signature: padded });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('password_required');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes a security audit row when the stored mark is password-confirmed (R8)', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, {
+        assessorName: 'Admin',
+        signature: SIG,
+        password: 'correct horse battery',
+      });
+      expect(res.status).toBe(200);
+      const security = rows(store, 'auditLogEntries').find(
+        (e) => e.category === 'security' && e.action === 'Confirmed identity to apply saved signature',
+      );
+      expect(security).toBeDefined();
+      expect(security?.target).toBe(`case ${c.id}`);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes NO security row when a fresh drawing signs off', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      await signOffWith(base, c.id, { assessorName: 'Admin', signature: FRESH });
+      const security = rows(store, 'auditLogEntries').find((e) => e.category === 'security');
+      expect(security).toBeUndefined();
+    } finally {
+      server.close();
+    }
+  });
 });

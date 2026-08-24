@@ -2,6 +2,23 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { cn } from '../utils/cn.js';
 import { Icon } from './Icon.js';
 
+/**
+ * Refuse an upload whose transcoded PNG would exceed what a stored signature
+ * may be. The cap mirrors `MAX_SIGNATURE_BYTES` in `@formai/shared`, restated
+ * here rather than imported because this package is a leaf UI kit with no
+ * dependency on `@formai/shared`; the server revalidates against the shared
+ * constant regardless, so this is a friendlier-failure convenience, not the
+ * authority. `bytesInDataUrl` estimates the payload size without decoding.
+ */
+const MAX_SIGNATURE_BYTES = 200 * 1024;
+
+function bytesInDataUrl(value: string): number {
+  const comma = value.indexOf(',');
+  const payload = comma === -1 ? '' : value.slice(comma + 1);
+  const padding = payload.endsWith('==') ? 2 : payload.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((payload.length * 3) / 4) - padding);
+}
+
 export interface SignaturePadProps {
   /** Current value: a PNG data URL, or '' when empty. */
   value?: string;
@@ -214,7 +231,14 @@ export function SignaturePad({
       setTyped(false);
       setTypedName('');
       paintImage(img, true);
-      emit(c.toDataURL('image/png'));
+      const dataUrl = c.toDataURL('image/png');
+      // Refuse over the shared cap here, not only server-side, so a noisy photo
+      // fails with a clear message instead of a confusing save error later.
+      if (bytesInDataUrl(dataUrl) > MAX_SIGNATURE_BYTES) {
+        setUploadError('That image is too detailed to store. Try a clearer photo or a smaller crop.');
+        return;
+      }
+      emit(dataUrl);
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);

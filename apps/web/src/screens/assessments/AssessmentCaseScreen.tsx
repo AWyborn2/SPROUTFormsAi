@@ -270,6 +270,11 @@ const SIGN_OFF_ERRORS: Record<string, string> = {
   candidate_cannot_sign_off: 'A candidate cannot sign off their own assessment.',
   tool_missing: 'The assessment tool for this case no longer exists.',
   parts_incomplete: 'Not all required parts are satisfactory yet.',
+  // The password step-up on a stored-mark sign-off — a wrong password is now
+  // normal usage, so it gets a real message rather than a raw code.
+  invalid_credentials: 'That password is not right. Re-enter it, or redraw your signature to sign without one.',
+  password_required: 'Enter your password to apply your saved signature, or redraw it to sign without one.',
+  too_many_attempts: 'Too many password attempts. Wait a few minutes and try again.',
 };
 
 function signOffErrorMessage(body: Record<string, unknown>): string {

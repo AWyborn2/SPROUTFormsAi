@@ -6,12 +6,13 @@ import { PLAN_CONFIG, schema, type PlanTier } from '@formai/db';
 import { validateSavedSignature, type SessionInfo, type TenantContext } from '@formai/shared';
 import { db } from '../db.js';
 import { sealSession, unsealSession } from '../auth/replit-auth.js';
+import { revalidateTenant } from '../middleware/tenant.js';
 import { DeactivatedMemberError, provisionTenant } from '../auth/tenant-provisioning.js';
 import { BCRYPT_COST, comparePassword, verifyUserPassword } from '../auth/verify-password.js';
 import {
-  confirmAllowed,
   recordConfirmFailure,
   recordConfirmSuccess,
+  rejectIfLocked,
 } from '../auth/confirm-throttle.js';
 import { recordAudit } from '../audit/record.js';
 import { SESSION_COOKIE_NAME } from '../middleware/tenant.js';
@@ -68,6 +69,27 @@ const loginSchema = z
   });
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * The live tenant behind a session cookie, or null when there is no valid
+ * session OR the membership has since been deactivated.
+ *
+ * The manually-mounted `/auth` routes (`/me`, `/confirm-password`,
+ * `/signature`) unseal the cookie themselves rather than run `requireTenant`,
+ * so without this they would honour a deactivated member's still-valid 7-day
+ * cookie. `revalidateTenant` is the SAME check `requireTenant` runs on every
+ * other authed request — fail-open on a read blip (R62), null only on a
+ * `suspended` membership — and it returns the role-refreshed context so a
+ * demotion is honoured too, not just a deactivation.
+ */
+async function authedTenant(req: {
+  cookies?: Record<string, unknown>;
+}): Promise<TenantContext | null> {
+  const token = req.cookies?.[SESSION_COOKIE_NAME];
+  const sealed = typeof token === 'string' ? unsealSession<TenantContext>(token) : null;
+  if (!sealed) return null;
+  return revalidateTenant(sealed);
+}
 
 async function buildSessionInfo(tenant: TenantContext): Promise<SessionInfo> {
   if (!db) throw new Error('db_unavailable');
@@ -234,11 +256,15 @@ authRouter.post('/logout', (_req, res) => {
  */
 const confirmPasswordSchema = z.object({
   password: z.string().min(1),
+  /*
+    Ids, capped so a caller cannot flood the org's security audit log with
+    a near-2MB `target`. Real ids are UUIDs, so 64 is generous headroom.
+  */
   context: z
     .object({
-      caseId: z.string().optional(),
-      attemptId: z.string().optional(),
-      fieldId: z.string().optional(),
+      caseId: z.string().max(64).optional(),
+      attemptId: z.string().max(64).optional(),
+      fieldId: z.string().max(64).optional(),
     })
     .optional(),
 });
@@ -246,8 +272,7 @@ const confirmPasswordSchema = z.object({
 authRouter.post(
   '/confirm-password',
   withErrorHandling(async (req, res) => {
-    const token = req.cookies?.[SESSION_COOKIE_NAME];
-    const tenant = typeof token === 'string' ? unsealSession<TenantContext>(token) : null;
+    const tenant = await authedTenant(req);
     if (!tenant) {
       res.status(401).json({ error: 'unauthenticated' });
       return;
@@ -262,19 +287,18 @@ authRouter.post(
       return;
     }
 
-    const gate = confirmAllowed(tenant.userId);
-    if (!gate.allowed) {
-      res.status(429).json({
-        error: 'too_many_attempts',
-        message: 'Too many attempts. Try again later.',
-        retryAfterMs: gate.retryAfterMs,
-      });
-      return;
-    }
+    if (rejectIfLocked(res, tenant.userId)) return;
 
+    /*
+      RECORD THE ATTEMPT AT ADMISSION, before the awaited compare. Node yields
+      at the await, so recording only on failure afterwards let N concurrent
+      requests all clear `rejectIfLocked` before any of them counted — the
+      5-per-window bound became bcrypt throughput. Recorded here, a success
+      clears the slate below; a failure leaves this standing.
+    */
+    recordConfirmFailure(tenant.userId);
     const valid = await verifyUserPassword(db, tenant.userId, parsed.data.password);
     if (!valid) {
-      recordConfirmFailure(tenant.userId);
       // Login's exact body: an account with no password gets the same answer
       // as a wrong password — this endpoint is not an oracle for either.
       res
@@ -325,8 +349,7 @@ const saveSignatureSchema = z.object({ signature: z.string().nullable() });
 authRouter.put(
   '/signature',
   withErrorHandling(async (req, res) => {
-    const token = req.cookies?.[SESSION_COOKIE_NAME];
-    const tenant = typeof token === 'string' ? unsealSession<TenantContext>(token) : null;
+    const tenant = await authedTenant(req);
     if (!tenant) {
       res.status(401).json({ error: 'unauthenticated' });
       return;
@@ -370,8 +393,7 @@ authRouter.put(
 authRouter.get(
   '/me',
   withErrorHandling(async (req, res) => {
-    const token = req.cookies?.[SESSION_COOKIE_NAME];
-    const tenant = typeof token === 'string' ? unsealSession<TenantContext>(token) : null;
+    const tenant = await authedTenant(req);
 
     if (!tenant) {
       res.status(401).json({ error: 'unauthenticated' });

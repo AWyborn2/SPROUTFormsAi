@@ -328,4 +328,21 @@ describe('use saved signature (U5)', () => {
     expect(screen.getByRole('alert').textContent).toMatch(/not right/i);
     expect((screen.getByTestId('field-sig') as HTMLInputElement).value).toBe('');
   });
+
+  it('a 429 lockout shows the too-many-attempts message, not the wrong-password one', async () => {
+    const { ApiError } = await import('../../lib/data/api-client.js');
+    hookState.signature = SIG;
+    confirmMutate.mockImplementation(
+      (_input: unknown, opts?: { onError?: (e: unknown) => void }) =>
+        opts?.onError?.(new ApiError(429, { error: 'too_many_attempts' })),
+    );
+    renderScreen(signingAttempt());
+
+    fireEvent.click(screen.getByTestId('use-saved-sig'));
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'x' } });
+    fireEvent.click(screen.getByText('Confirm and sign'));
+
+    expect(screen.getByRole('alert').textContent).toMatch(/too many attempts/i);
+    expect((screen.getByTestId('field-sig') as HTMLInputElement).value).toBe('');
+  });
 });

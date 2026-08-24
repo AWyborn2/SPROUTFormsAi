@@ -80,9 +80,9 @@ import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
 import { comparePassword } from '../auth/verify-password.js';
 import {
-  confirmAllowed,
   recordConfirmFailure,
   recordConfirmSuccess,
+  rejectIfLocked,
 } from '../auth/confirm-throttle.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission, permissionScope } from '../lib/permissions.js';
@@ -5005,16 +5005,22 @@ assessmentCasesRouter.post(
     const signer = await db.query.users.findFirst({
       where: eq(schema.users.id, tenant.userId),
     });
-    if (signer?.signature && signer.passwordHash && parsed.data.signature === signer.signature) {
-      const gate = confirmAllowed(tenant.userId);
-      if (!gate.allowed) {
-        res.status(429).json({
-          error: 'too_many_attempts',
-          message: 'Too many attempts. Try again later.',
-          retryAfterMs: gate.retryAfterMs,
-        });
-        return;
-      }
+    /*
+      CANONICALISE BEFORE COMPARING. The body regex tolerates whitespace in the
+      base64 and the exporter strips it before decoding, so a space-padded copy
+      of the stored mark exports byte-identical pixels while a raw `===` reads
+      it as a different string. Comparing whitespace-stripped forms closes that
+      one-character bypass of the gate; a genuinely fresh drawing only matches
+      here if its bytes are identical, which is exactly the stored-mark case.
+    */
+    const submittedCanonical = parsed.data.signature.replace(/\s+/g, '');
+    const storedCanonical = signer?.signature?.replace(/\s+/g, '');
+    const applyingStoredMark = Boolean(
+      storedCanonical && signer?.passwordHash && submittedCanonical === storedCanonical,
+    );
+    let confirmedStoredMark = false;
+    if (applyingStoredMark) {
+      if (rejectIfLocked(res, tenant.userId)) return;
       if (!parsed.data.password) {
         // A UI state, not a guess — absence never counts toward the throttle.
         res.status(401).json({
@@ -5023,15 +5029,19 @@ assessmentCasesRouter.post(
         });
         return;
       }
-      const valid = await comparePassword(parsed.data.password, signer.passwordHash);
+      // Record the attempt at admission (before the awaited compare), so
+      // concurrent requests cannot all clear the throttle first — same fix as
+      // /auth/confirm-password. Success clears the slate below.
+      recordConfirmFailure(tenant.userId);
+      const valid = await comparePassword(parsed.data.password, signer!.passwordHash);
       if (!valid) {
-        recordConfirmFailure(tenant.userId);
         res
           .status(401)
           .json({ error: 'invalid_credentials', message: 'Invalid username or password.' });
         return;
       }
       recordConfirmSuccess(tenant.userId);
+      confirmedStoredMark = true;
     }
 
     /*
@@ -5190,6 +5200,26 @@ assessmentCasesRouter.post(
       category: 'submissions',
       icon: 'circle-check',
     });
+
+    /*
+      R8: when the certification applied the assessor's STORED mark, the
+      password confirmation that authorised it gets its own security-category
+      entry — mirroring /auth/confirm-password's — so the who/when of applying
+      a saved credential is recorded, not just the sign-off. Best-effort: a
+      failed log row never unwinds a recorded certification.
+    */
+    if (confirmedStoredMark) {
+      try {
+        await recordAudit(db, tenant, {
+          action: 'Confirmed identity to apply saved signature',
+          target: `case ${row.id}`,
+          category: 'security',
+          icon: 'pen-line',
+        });
+      } catch {
+        // The case is signed off regardless; the security note simply is not written.
+      }
+    }
 
     /*
       THE POINT OF THE WHOLE THING: passing the assessment puts the candidate on

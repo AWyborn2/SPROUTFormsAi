@@ -137,3 +137,39 @@ describe('SignaturePad clearing', () => {
     expect(onChange).toHaveBeenCalledWith('');
   });
 });
+
+describe('SignaturePad typed-signature fallback', () => {
+  it('renders a typed name to PNG via onChange, and clearing it emits empty', async () => {
+    const onChange = vi.fn();
+    render(<SignaturePad value="" onChange={onChange} />);
+    fireEvent.click(screen.getByText('Type instead'));
+    const input = screen.getByLabelText('Type your signature');
+    await act(async () => {
+      fireEvent.change(input, { target: { value: 'J. Bloggs' } });
+    });
+    expect(fakeContext.fillText).toHaveBeenCalled();
+    expect(onChange).toHaveBeenLastCalledWith(EMITTED);
+    await act(async () => {
+      fireEvent.change(input, { target: { value: '' } });
+    });
+    expect(onChange).toHaveBeenLastCalledWith('');
+  });
+});
+
+describe('SignaturePad upload byte cap', () => {
+  it('refuses a transcoded image over the cap and emits nothing', async () => {
+    // toDataURL returns a payload well over 200KB for this test only.
+    (HTMLCanvasElement.prototype.toDataURL as ReturnType<typeof vi.fn>).mockReturnValue(
+      `data:image/png;base64,iVBORw0K${'A'.repeat(300 * 1024)}`,
+    );
+    const onChange = vi.fn();
+    render(<SignaturePad value="" onChange={onChange} allowUpload />);
+    const input = screen.getByLabelText('Upload signature image');
+    const file = new File(['bytes'], 'huge.png', { type: 'image/png' });
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+    });
+    expect(screen.getByRole('alert').textContent).toMatch(/too detailed/i);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
