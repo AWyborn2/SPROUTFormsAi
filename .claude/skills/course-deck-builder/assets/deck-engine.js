@@ -78,8 +78,15 @@
 
   function reflectCards(sl) {
     var c = cardsOf(sl), d = 0; for (var i = 0; i < c.length; i++) if (c[i].classList.contains('viewed')) d++;
-    if (d >= c.length) { markComplete(current); becomeReady(current); }
-    else { tick(false); setMsg('Open all ' + c.length + ' cards to continue — ' + d + ' of ' + c.length + ' viewed'); setNext('Next →', false); }
+    if (d >= c.length) { markComplete(current); becomeReady(current); return; }
+    tick(false); setNext('Next →', false);
+    // Phrase the gate for the card type on this slide: a checklist "ticks
+    // boxes", hotspots "explore points", the flip/expander decks "open cards".
+    var msg;
+    if (sl.querySelector('.checkitem')) msg = 'Tick all ' + c.length + ' boxes to continue — ' + d + ' of ' + c.length + ' ticked';
+    else if (sl.querySelector('.hotspot')) msg = 'Explore all ' + c.length + ' points to continue — ' + d + ' of ' + c.length + ' explored';
+    else msg = 'Open all ' + c.length + ' cards to continue — ' + d + ' of ' + c.length + ' viewed';
+    setMsg(msg);
   }
   function menuBar() {
     crumb.textContent = 'Section Menu';
@@ -113,6 +120,17 @@
       if (card.hasAttribute('data-accordion')) Array.prototype.forEach.call(sl.querySelectorAll('.expander.open'), function (x) { x.classList.remove('open'); setExp(x, false); });
       card.classList.toggle('open', !was); card.classList.add('viewed'); setExp(card, !was);
     }
+    // checkbox: a one-way acknowledgement — ticking it is the "click to
+    // continue" the checklist gate waits on. Left checked so the visual always
+    // matches the gate (no half-done state to puzzle over).
+    else if (card.classList.contains('checkitem')) { card.classList.add('checked'); }
+    // hotspot: a numbered marker over an image; clicking opens its detail
+    // popover (one at a time) and counts the marker as explored.
+    else if (card.classList.contains('hotspot')) {
+      Array.prototype.forEach.call(sl.querySelectorAll('.hotspot-detail.open'), function (x) { x.classList.remove('open'); });
+      var det = sl.querySelector('.hotspot-detail[data-for="' + card.getAttribute('data-touch') + '"]');
+      if (det) det.classList.add('open');
+    }
     card.classList.add('viewed'); touched.add(card.getAttribute('data-touch')); reflectCards(sl); save();
   }
 
@@ -130,7 +148,7 @@
     if (p === 'done') { markComplete(i); becomeReady(i); return; }
     var c = cardsOf(sl);
     if (c.length) {
-      if (completed.has(i) || cardsDone(sl)) { Array.prototype.forEach.call(c, function (x) { x.classList.add('viewed'); if (x.classList.contains('expander')) setExp(x, false); }); markComplete(i); becomeReady(i); }
+      if (completed.has(i) || cardsDone(sl)) { Array.prototype.forEach.call(c, function (x) { x.classList.add('viewed'); if (x.classList.contains('expander')) setExp(x, false); if (x.classList.contains('checkitem')) x.classList.add('checked'); }); markComplete(i); becomeReady(i); }
       else { reflectCards(sl); }
     } else {
       if (completed.has(i)) { becomeReady(i); }
@@ -154,6 +172,10 @@
   function bind() {
     nextBtn.addEventListener('click', advance);
     canvas.addEventListener('click', function (e) {
+      // close a hotspot popover (X button or a click on the detail's own
+      // backdrop) without counting as a new interaction
+      var closer = e.target.closest('.hotspot-close');
+      if (closer) { Array.prototype.forEach.call(slides[current].querySelectorAll('.hotspot-detail.open'), function (x) { x.classList.remove('open'); }); return; }
       var card = e.target.closest('[data-touch]'); if (card && slides[current].contains(card)) { handleCard(card); return; }
       var pc = e.target.closest('.part-card'); if (pc && partOf(current) === 'menu') { var p = pc.getAttribute('data-part'); if (unlocked(p)) go(PARTS[p][0]); return; }
       var cta = e.target.closest('[data-action]'); if (cta) { var a = cta.getAttribute('data-action'); if (a === 'start') startAssessment(); else if (a === 'menu') go(menuIdx()); return; }

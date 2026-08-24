@@ -293,6 +293,19 @@ a{color:#3C4043;}
 .expander{cursor:pointer;transition:background .15s,box-shadow .15s;}
 .expander:hover{filter:brightness(0.97);}
 .expander.viewed{box-shadow:inset 4px 0 0 #1a7a2e;}
+.checkitem{cursor:pointer;display:flex;align-items:flex-start;gap:22px;}
+.checkitem .box{flex:none;width:38px;height:38px;border:3px solid var(--amber);border-radius:6px;background:var(--paper);position:relative;transition:background .15s;}
+.checkitem:hover .box{filter:brightness(0.96);}
+.checkitem.checked .box{background:var(--amber);}
+.checkitem.checked .box::after{content:'';position:absolute;left:11px;top:3px;width:9px;height:19px;border:solid var(--ink);border-width:0 4px 4px 0;transform:rotate(45deg);}
+.hotspots{position:relative;}
+.hotspot{position:absolute;transform:translate(-50%,-50%);width:54px;height:54px;border-radius:50%;border:4px solid var(--amber);background:rgba(20,20,24,.6);color:#fff;font-size:24px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:3;box-shadow:0 0 0 6px color-mix(in srgb, var(--amber) 30%, transparent);animation:hs-pulse 2s infinite;}
+@keyframes hs-pulse{0%,100%{box-shadow:0 0 0 6px color-mix(in srgb,var(--amber) 30%,transparent);}50%{box-shadow:0 0 0 13px color-mix(in srgb,var(--amber) 8%,transparent);}}
+.hotspot.viewed{border-color:#1a7a2e;background:#1a7a2e;animation:none;box-shadow:0 0 0 4px color-mix(in srgb,#1a7a2e 30%,transparent);}
+.hotspot-detail{display:none;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;width:min(720px,80%);max-height:80%;overflow:auto;background:var(--paper);color:var(--ink);border-radius:12px;box-shadow:0 24px 70px rgba(0,0,0,.45);padding:34px 40px;border-bottom:7px solid var(--amber);}
+.hotspot-detail.open{display:block;}
+.hotspot-detail h3{font-size:34px;font-weight:800;margin:0 0 16px;}
+.hotspot-close{position:absolute;top:12px;right:18px;background:none;border:0;font-size:30px;line-height:1;color:#999;cursor:pointer;}
 
 /* menu part cards */
 .part-card{transition:opacity .3s,box-shadow .2s;}
@@ -365,8 +378,12 @@ function nextLabel(i){ var p=partOf(i);
 function becomeReady(i){ stopFill(); tick(true); setMsg('Slide complete'); setNext(nextLabel(i), true); }
 
 function reflectCards(sl){ var c=cardsOf(sl), d=0; for(var i=0;i<c.length;i++) if(c[i].classList.contains('viewed')) d++;
- if(d>=c.length){ markComplete(current); becomeReady(current); }
- else { tick(false); setMsg('Open all '+c.length+' cards to continue — '+d+' of '+c.length+' viewed'); setNext('Next →', false); } }
+ if(d>=c.length){ markComplete(current); becomeReady(current); return; }
+ tick(false); setNext('Next →', false); var m;
+ if(sl.querySelector('.checkitem')) m='Tick all '+c.length+' boxes to continue — '+d+' of '+c.length+' ticked';
+ else if(sl.querySelector('.hotspot')) m='Explore all '+c.length+' points to continue — '+d+' of '+c.length+' explored';
+ else m='Open all '+c.length+' cards to continue — '+d+' of '+c.length+' viewed';
+ setMsg(m); }
 
 function menuBar(){ crumb.textContent='Section Menu';
  if(allDone()){ nextBtn.style.display=''; tick(true); setMsg('All sections complete'); setNext('Finish →', true); }
@@ -396,6 +413,11 @@ function handleCard(card){ var sl=slides[current];
   if(card.hasAttribute('data-accordion')) Array.prototype.forEach.call(sl.querySelectorAll('.expander.open'), function(x){ x.classList.remove('open'); setExp(x,false); });
   card.classList.toggle('open', !was); card.classList.add('viewed'); setExp(card, !was);
  }
+ else if(card.classList.contains('checkitem')){ card.classList.add('checked'); }
+ else if(card.classList.contains('hotspot')){
+  Array.prototype.forEach.call(sl.querySelectorAll('.hotspot-detail.open'), function(x){ x.classList.remove('open'); });
+  var det=sl.querySelector('.hotspot-detail[data-for="'+card.getAttribute('data-touch')+'"]'); if(det) det.classList.add('open');
+ }
  card.classList.add('viewed'); touched.add(card.getAttribute('data-touch')); reflectCards(sl); save(); }
 
 function enterSlide(i){ var sl=slides[i], p=partOf(i);
@@ -410,7 +432,7 @@ function enterSlide(i){ var sl=slides[i], p=partOf(i);
  if(p==='done'){ markComplete(i); becomeReady(i); return; }
  var c=cardsOf(sl);
  if(c.length){
-  if(completed.has(i)||cardsDone(sl)){ Array.prototype.forEach.call(c,function(x){x.classList.add('viewed'); if(x.classList.contains('expander')) setExp(x,false);}); markComplete(i); becomeReady(i); }
+  if(completed.has(i)||cardsDone(sl)){ Array.prototype.forEach.call(c,function(x){x.classList.add('viewed'); if(x.classList.contains('expander')) setExp(x,false); if(x.classList.contains('checkitem')) x.classList.add('checked');}); markComplete(i); becomeReady(i); }
   else { reflectCards(sl); }
  } else {
   if(completed.has(i)){ becomeReady(i); }
@@ -434,6 +456,7 @@ function back(){ if(current>0) go(current-1); }
 function bind(){
  nextBtn.addEventListener('click', advance);
  canvas.addEventListener('click', function(e){
+  var closer=e.target.closest('.hotspot-close'); if(closer){ Array.prototype.forEach.call(slides[current].querySelectorAll('.hotspot-detail.open'), function(x){ x.classList.remove('open'); }); return; }
   var card=e.target.closest('[data-touch]'); if(card && slides[current].contains(card)){ handleCard(card); return; }
   var pc=e.target.closest('.part-card'); if(pc && current===2){ var p=pc.getAttribute('data-part'); if(unlocked(p)) go(PARTS[p][0]); return; }
   var cta=e.target.closest('[data-action]'); if(cta){ var a=cta.getAttribute('data-action'); if(a==='start') startAssessment(); else if(a==='menu') go(2); return; }
