@@ -63,6 +63,25 @@ export function recordConfirmSuccess(userId: string): void {
   entries.delete(userId);
 }
 
+/**
+ * The lockout answer, shared by every route this throttle guards — one 429
+ * body, so /auth/confirm-password and the sign-off gate cannot drift apart.
+ * True means the response has been written and the caller must return.
+ */
+export function rejectIfLocked(
+  res: { status: (code: number) => { json: (body: unknown) => unknown } },
+  userId: string,
+): boolean {
+  const gate = confirmAllowed(userId);
+  if (gate.allowed) return false;
+  res.status(429).json({
+    error: 'too_many_attempts',
+    message: 'Too many attempts. Try again later.',
+    retryAfterMs: gate.retryAfterMs,
+  });
+  return true;
+}
+
 /** Test-only: forget everything. */
 export function resetConfirmThrottle(): void {
   entries.clear();
