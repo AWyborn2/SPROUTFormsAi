@@ -229,8 +229,8 @@ export function useSession() {
 export function useSaveSignature() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (signature: string | null) =>
-      apiClient.put<SessionInfo>('/auth/signature', { signature }),
+    mutationFn: (input: { signature: string | null; password?: string }) =>
+      apiClient.put<SessionInfo>('/auth/signature', input),
     onSuccess: (session) => qc.setQueryData(keys.session, session),
   });
 }

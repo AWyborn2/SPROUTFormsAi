@@ -569,7 +569,9 @@ describe('PUT /auth/signature', () => {
   const tenant = { userId: 'u1', orgId: 'o1', role: 'assessor' as const };
   const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAA=';
 
-  function signatureDb() {
+  function signatureDb(
+    user: Record<string, unknown> = { signature: PNG, passwordHash: 'h' },
+  ) {
     const where = vi.fn().mockResolvedValue(undefined);
     const set = vi.fn((_patch: Record<string, unknown>) => ({ where }));
     return {
@@ -578,7 +580,7 @@ describe('PUT /auth/signature', () => {
           users: {
             findFirst: vi
               .fn()
-              .mockResolvedValue({ id: 'u1', name: 'Ash', email: 'a@x.io', signature: PNG, passwordHash: 'h' }),
+              .mockResolvedValue({ id: 'u1', name: 'Ash', email: 'a@x.io', ...user }),
           },
           organizations: {
             findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme', planTier: 'business' }),
@@ -671,5 +673,91 @@ describe('PUT /auth/signature', () => {
     } finally {
       server.close();
     }
+  });
+
+  describe('changing an already-saved mark is password-gated (the disarm defence)', () => {
+    const pwHash = bcrypt.hashSync('correct horse battery', 4);
+    const savedUser = {
+      signature: PNG,
+      passwordHash: pwHash,
+      signatureSavedAt: new Date('2026-08-01T00:00:00Z'),
+    };
+
+    afterEach(async () => {
+      const { resetConfirmThrottle } = await import('../auth/confirm-throttle.js');
+      resetConfirmThrottle();
+    });
+
+    it('401s password_required when replacing without a password', async () => {
+      const { db, set } = signatureDb(savedUser);
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await putSignature(base, { signature: PNG }, 'yes');
+        expect(res.status).toBe(401);
+        expect(((await res.json()) as { error: string }).error).toBe('password_required');
+        expect(set).not.toHaveBeenCalled();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('401s password_required when REMOVING (null) without a password', async () => {
+      const { db, set } = signatureDb(savedUser);
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await putSignature(base, { signature: null }, 'yes');
+        expect(res.status).toBe(401);
+        expect(((await res.json()) as { error: string }).error).toBe('password_required');
+        expect(set).not.toHaveBeenCalled();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('saves with the correct password', async () => {
+      const { db, set } = signatureDb(savedUser);
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await putSignature(
+          base,
+          { signature: PNG, password: 'correct horse battery' },
+          'yes',
+        );
+        expect(res.status).toBe(200);
+        expect(set).toHaveBeenCalledTimes(1);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('401s invalid_credentials on a wrong password, writing nothing', async () => {
+      const { db, set } = signatureDb(savedUser);
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await putSignature(base, { signature: PNG, password: 'wrong' }, 'yes');
+        expect(res.status).toBe(401);
+        expect(((await res.json()) as { error: string }).error).toBe('invalid_credentials');
+        expect(set).not.toHaveBeenCalled();
+      } finally {
+        server.close();
+      }
+    });
+
+    it('leaves a no-password (invite) account ungated even with a saved mark', async () => {
+      const { db, set } = signatureDb({ ...savedUser, passwordHash: null });
+      mockDbValue = db;
+      const { server, base } = startApp();
+      try {
+        const res = await putSignature(base, { signature: null }, 'yes');
+        expect(res.status).toBe(200);
+        expect(set).toHaveBeenCalledTimes(1);
+      } finally {
+        server.close();
+      }
+    });
   });
 });
