@@ -1,0 +1,1249 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Archivo+Narrow:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root { --red:#3C4043; --ink:#3C4043; --paper:#FFFFFF; --grey:#F4F3F1; --amber:#EADA23; --type-title:64px; --type-subtitle:40px; --type-body:32px; --type-small:26px; --pad-x:110px; --pad-top:96px; --pad-bottom:84px; --gap-item:24px; }
+body { margin:0; font-family:'Archivo',sans-serif; background:var(--ink); }
+a { color:#3C4043; } a:hover { color:#000; }
+deck-stage section h1, deck-stage section h2, deck-stage section p, deck-stage section ul { margin:0; }
+.flipcard { perspective:1200px; cursor:pointer; }
+.flipinner { position:relative; width:100%; height:100%; transform-style:preserve-3d; transition:transform .5s; }
+.flipcard.flipped .flipinner { transform:rotateY(180deg); }
+.flipface { position:absolute; inset:0; backface-visibility:hidden; border-radius:8px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; }
+.flipback { transform:rotateY(180deg); }
+.expander { cursor:pointer; transition:background .15s; }
+.expander:hover { filter:brightness(0.97); }
+/* Slideshow feel: each slide's blocks rise in as it becomes active. Gated on
+   data-deck-active (never applied at print) and on the motion preference. */
+@media (prefers-reduced-motion: no-preference) {
+  deck-stage section[data-deck-active] > * { animation: course-rise .5s cubic-bezier(.2,.7,.25,1) both; }
+  deck-stage section[data-deck-active] > *:nth-child(2) { animation-delay: .08s; }
+  deck-stage section[data-deck-active] > *:nth-child(3) { animation-delay: .16s; }
+  deck-stage section[data-deck-active] > *:nth-child(n+4) { animation-delay: .22s; }
+  @keyframes course-rise { from { opacity:0; transform:translateY(26px); } to { opacity:1; transform:none; } }
+}
+</style>
+</helmet>
+<x-import component-from-global-scope="deck-stage" from="./deck-stage.js" width="1920" height="1080" hint-size="100%,100%">
+
+<section data-label="Title" data-screen-label="01 Title" style="background:var(--ink); color:#fff; display:flex; flex-direction:column; justify-content:space-between; padding:var(--pad-top) var(--pad-x) var(--pad-bottom);">
+  <img src="img/p20-passing.jpg" style="position:absolute; inset:0; width:100%; height:100%; object-fit:cover; opacity:.22;">
+  <div style="position:relative; display:flex; justify-content:space-between; align-items:flex-start;">
+    <div style="display:flex; align-items:center; gap:18px;">
+      <img src="img/p02-cover.png" style="height:170px;">
+    </div>
+    <span style="font-size:24px; color:#888; font-family:'Archivo Narrow';">Training Manual 00117938 · v18.0</span>
+  </div>
+  <div style="position:relative; display:flex; flex-direction:column; gap:28px;">
+    <div style="width:120px; height:10px; background:#EADA23;"></div>
+    <h1 style="font-size:120px; font-weight:900; line-height:1.02; letter-spacing:-3px;">Mine Site SME<br>Operating Manual</h1>
+    <p style="font-size:var(--type-subtitle); color:#ccc; font-weight:500;">Self-paced induction · Boddington Bauxite Mine</p>
+  </div>
+  <div style="position:relative; display:flex; justify-content:space-between; font-size:var(--type-small); color:#888; font-family:'Archivo Narrow';">
+    <span>Owner: Superintendent Safety &amp; Training</span>
+    <span>Deployed 18 Sep 2025 · Revalidate 18 Sep 2028</span>
+    <span>Press → or tap to begin</span>
+  </div>
+</section>
+
+<section data-label="How to use" data-screen-label="02 How to use" style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:var(--pad-top) var(--pad-x) var(--pad-bottom); gap:52px;">
+  <div style="display:flex; flex-direction:column; gap:18px;">
+    <span style="font-size:var(--type-small); font-weight:700; letter-spacing:3px; color:var(--red);">BEFORE YOU START</span>
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">How To Use This Induction</h1>
+  </div>
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:32px;">
+    <div style="background:var(--grey); padding:40px; display:flex; flex-direction:column; gap:14px;">
+      <span style="font-size:44px; font-weight:900; color:var(--red);">1</span>
+      <h2 style="font-size:var(--type-body); font-weight:700;">Work through every section</h2>
+      <p style="font-size:var(--type-small); line-height:1.45; color:#444;">Use the arrow keys or tap the screen edges to move. Parts unlock in order — finish one and the menu opens the next.</p>
+    </div>
+    <div style="background:var(--grey); padding:40px; display:flex; flex-direction:column; gap:14px;">
+      <span style="font-size:44px; font-weight:900; color:var(--red);">2</span>
+      <h2 style="font-size:var(--type-body); font-weight:700;">Click to reveal detail</h2>
+      <p style="font-size:var(--type-small); line-height:1.45; color:#444;">Cards marked + expand and flip cards turn over. Every card on a slide must be opened before the next slide unlocks.</p>
+    </div>
+    <div style="background:var(--grey); padding:40px; display:flex; flex-direction:column; gap:14px;">
+      <span style="font-size:44px; font-weight:900; color:var(--red);">3</span>
+      <h2 style="font-size:var(--type-body); font-weight:700;">Your progress is saved</h2>
+      <p style="font-size:var(--type-small); line-height:1.45; color:#444;">Completed parts are ticked on the menu, and your reading is recorded against the assessment — close the window any time and pick up where you left off.</p>
+    </div>
+    <div style="background:var(--ink); color:#fff; padding:40px; display:flex; flex-direction:column; gap:14px;">
+      <span style="font-size:44px; font-weight:900; color:var(--amber);">!</span>
+      <h2 style="font-size:var(--type-body); font-weight:700;">This deck is a training aid</h2>
+      <p style="font-size:var(--type-small); line-height:1.45; color:#ccc;">The controlled document is Training Manual 00117938. If in doubt, refer to the manual or ask your supervisor.</p>
+    </div>
+  </div>
+</section>
+
+<section data-label="Section menu" data-screen-label="03 Menu" style="background:var(--grey); color:var(--ink); display:flex; flex-direction:column; padding:72px var(--pad-x) 64px; gap:36px;">
+  <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Section Menu</h1>
+    <div style="display:flex; align-items:center; gap:16px;">
+      <span style="font-size:var(--type-small); color:#666;">{{ visitedCount }} of 6 parts complete</span>
+      <div style="width:220px; height:12px; background:#ddd; border-radius:6px; overflow:hidden;"><div style="height:100%; background:var(--red); width:{{ progressPct }}; transition:width .3s;"></div></div>
+    </div>
+  </div>
+  <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:24px; flex:1;">
+    <sc-for list="{{ menuParts }}" as="part" hint-placeholder-count="6">
+      <div onClick="{{ part.go }}" class="expander" style="background:#fff; padding:32px 36px; display:flex; flex-direction:column; gap:12px; border-top:6px solid {{ part.color }}; cursor:{{ part.cursor }}; opacity:{{ part.opacity }}; transition:opacity .3s;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-size:24px; font-weight:700; letter-spacing:2px; color:{{ part.color }};">{{ part.tag }}</span>
+          <span style="font-size:24px; font-weight:700; color:{{ part.tickColor }};">{{ part.tick }}</span>
+        </div>
+        <h2 style="font-size:30px; font-weight:800; line-height:1.1;">{{ part.title }}</h2>
+        <p style="font-size:24px; line-height:1.4; color:#666; font-family:'Archivo Narrow';">{{ part.contents }}</p>
+      </div>
+    </sc-for>
+  </div>
+  <p style="font-size:24px; color:#888; text-align:center;">Parts unlock in order — read every slide and open every card to unlock the next part</p>
+</section>
+
+<section data-label="Part A divider" data-screen-label="04 Part A" style="background:#EADA23; color:#3C4043; display:flex; flex-direction:column; justify-content:center; padding:0 var(--pad-x); gap:28px;">
+  <span style="font-size:var(--type-subtitle); font-weight:700; letter-spacing:6px; opacity:.85;">PART A</span>
+  <h1 style="font-size:100px; font-weight:900; line-height:1.02; letter-spacing:-2px;">Working Safely in the<br>Active Mine Area</h1>
+  <p style="font-size:var(--type-body); opacity:.9; max-width:1100px;">Safety focus areas · PPE · principal mining hazards · the 40-metre exclusion zone</p>
+</section>
+
+<section data-label="Safety focus" data-screen-label="05 Safety focus" style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:36px;">
+  <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Production Safety Focus Areas</h1>
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px 40px; flex:1; align-content:start;">
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Wear correct, correctly fitting PPE at all times</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">No mobile phones while walking, driving or working</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Use correct radio protocol and acknowledge all calls</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Communicate hazards to others in your work area</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Always follow the 40 m exclusion zone — no clean-up within 40 m of an SME workspace</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Prestart every SME and report faults to Pit Control</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Isolate with your hasp and personal lock before entering a machine footprint</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Operate machinery with doors and windows closed</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Never leave open faces — ensure a 1.5 m safety windrow</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Always park and chock correctly</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Three points of contact when accessing or egressing SME</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Seat belts correctly fitted and worn at all times</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:26px;">■</span><p style="font-size:26px; line-height:1.35;">Never store loose items on the floor of SME</p></div>
+  </div>
+</section>
+
+<section data-label="PPE" data-screen-label="06 PPE" style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:40px;">
+  <div style="display:flex; flex-direction:column; gap:14px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">PPE in the Active Mine Area</h1>
+    <p style="font-size:var(--type-small); color:#666;">Minimum requirements while in the active mining area</p>
+  </div>
+  <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:24px; flex:1; align-content:start;">
+    <div style="background:var(--grey); padding:36px; display:flex; flex-direction:column; gap:10px;"><h2 style="font-size:30px; font-weight:800;">High-visibility clothing</h2><p style="font-size:24px; color:#555; line-height:1.4;">Worn at all times in the active area</p></div>
+    <div style="background:var(--grey); padding:36px; display:flex; flex-direction:column; gap:10px;"><h2 style="font-size:30px; font-weight:800;">Steel cap boots</h2><p style="font-size:24px; color:#555; line-height:1.4;">Slip-on boots are not allowed</p></div>
+    <div style="background:var(--grey); padding:36px; display:flex; flex-direction:column; gap:10px;"><h2 style="font-size:30px; font-weight:800;">Safety glasses</h2><p style="font-size:24px; color:#555; line-height:1.4;">AS/NZS 1337 rated, or prescription glasses with side shields</p></div>
+    <div style="background:var(--grey); padding:36px; display:flex; flex-direction:column; gap:10px;"><h2 style="font-size:30px; font-weight:800;">Hard hat or bump cap</h2><p style="font-size:24px; color:#555; line-height:1.4;">Some restrictions apply on where bump caps can be worn</p></div>
+    <div style="background:var(--grey); padding:36px; display:flex; flex-direction:column; gap:10px;"><h2 style="font-size:30px; font-weight:800;">Gloves</h2><p style="font-size:24px; color:#555; line-height:1.4;">Worn for every manual task performed</p></div>
+    <div style="background:var(--grey); padding:36px; display:flex; flex-direction:column; gap:10px;"><h2 style="font-size:30px; font-weight:800;">Hearing protection</h2><p style="font-size:24px; color:#555; line-height:1.4;">May be required depending on the task</p></div>
+  </div>
+  <div style="display:flex; align-items:center; gap:18px; background:#E8F0FE; border:2px solid #1a56c4; padding:22px 32px;">
+    <img src="img/p04-ppe.png" style="height:120px; flex-shrink:0; border-radius:4px;">
+    <p style="font-size:var(--type-small); color:#1D1D1B;"><span style="font-weight:700;">Note:</span> blue signage on a white background denotes a mandatory requirement.</p>
+  </div>
+</section>
+
+<section data-label="PMH" data-screen-label="07 PMH" style="background:var(--ink); color:#fff; display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:32px;">
+  <div style="display:flex; flex-direction:column; gap:14px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Principal Mining Hazards</h1>
+    <p style="font-size:var(--type-small); color:#bbb; max-width:1500px; line-height:1.4;">South32 has identified 32 Principal Mining Hazards — activities or circumstances with reasonable potential to cause multiple deaths in a single incident or recurring incidents. Six apply to the BBM active mine area. Click each to see its critical controls.</p>
+    <p style="font-size:var(--type-small); font-weight:700; color:{{ pmhGateColor }};">{{ pmhGateText }}</p>
+  </div>
+  <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:20px; flex:1; align-content:start;">
+    <sc-for list="{{ pmhCards }}" as="pmh" hint-placeholder-count="6">
+      <div onClick="{{ pmh.toggle }}" class="expander" style="background:#4A4F53; border-top:5px solid #EADA23; padding:28px 32px; display:flex; flex-direction:column; gap:12px; cursor:pointer;">
+        <span style="font-size:24px; font-weight:700; letter-spacing:2px; color:#EADA23;">{{ pmh.code }}</span>
+        <h2 style="font-size:30px; font-weight:800; line-height:1.15;">{{ pmh.name }}</h2>
+        <sc-if value="{{ pmh.open }}" hint-placeholder-val="{{ false }}">
+          <p style="font-size:24px; line-height:1.45; color:#ccc; font-family:'Archivo Narrow';">{{ pmh.controls }}</p>
+        </sc-if>
+        <sc-if value="{{ pmh.closed }}" hint-placeholder-val="{{ true }}">
+          <span style="font-size:24px; color:#888;">{{ pmh.closedLabel }}</span>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</section>
+
+<section data-label="Exclusion zones" data-screen-label="08 Exclusion zones" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="display:flex; flex-direction:column; gap:32px; flex:1;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Exclusion Zones</h1>
+    <div style="display:flex; align-items:baseline; gap:20px;">
+      <span style="font-size:150px; font-weight:900; color:var(--red); letter-spacing:-6px; line-height:1;">40m</span>
+      <p style="font-size:var(--type-body); line-height:1.3; max-width:520px;">around all LVs, RGVs, SME and pedestrians — unless a specific SWI or JHA applies</p>
+    </div>
+    <div style="background:var(--grey); border-left:6px solid var(--red); padding:26px 32px;">
+      <p style="font-size:var(--type-small); line-height:1.45;"><span style="font-weight:800;">IMPORTANT:</span> authorisation must be gained from the Duty Supervisor if production will be impacted for an extended period.</p>
+    </div>
+    <img src="img/p05-exclusion.png" style="width:100%; max-width:720px; border-radius:6px;">
+  </div>
+  <div style="display:flex; flex-direction:column; gap:18px; flex:1; justify-content:center;">
+    <h2 style="font-size:var(--type-subtitle); font-weight:800;">To enter a 40 m work area</h2>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">1</span><p style="font-size:var(--type-small); line-height:1.35;">Stop outside the 40 m exclusion zone</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">2</span><p style="font-size:var(--type-small); line-height:1.35;">Request authorisation via positive two-way communication</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">3</span><p style="font-size:var(--type-small); line-height:1.35;">All equipment stopped, all G.E.T grounded</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">4</span><p style="font-size:var(--type-small); line-height:1.35;">On approval, proceed with caution</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">5</span><p style="font-size:var(--type-small); line-height:1.35;">Advise the operator when you are clear so work can recommence</p></div>
+  </div>
+</section>
+
+<section data-label="Part B divider" data-screen-label="09 Part B" style="background:#EADA23; color:#3C4043; display:flex; flex-direction:column; justify-content:center; padding:0 var(--pad-x); gap:28px;">
+  <span style="font-size:var(--type-subtitle); font-weight:700; letter-spacing:6px; opacity:.85;">PART B</span>
+  <h1 style="font-size:100px; font-weight:900; line-height:1.02; letter-spacing:-2px;">Communication</h1>
+  <p style="font-size:var(--type-body); opacity:.9; max-width:1100px;">Two-way radio · emergency response · radio channels · blasting protocol · positive communication</p>
+</section>
+
+<section data-label="Two-way radio" data-screen-label="10 Radio usage" style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:36px;">
+  <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Two-Way Radio Usage</h1>
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px 48px; align-content:start;">
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:28px;">■</span><p style="font-size:28px; line-height:1.4;">CB and two-way radios are not classified as mobile phones</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:28px;">■</span><p style="font-size:28px; line-height:1.4;">Only use two-way radio systems when it is safe to do so</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:28px;">■</span><p style="font-size:28px; line-height:1.4;">Offensive or inflammatory language will not be tolerated</p></div>
+    <div style="display:flex; gap:16px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:28px;">■</span><p style="font-size:28px; line-height:1.4;">If radio traffic is taking your focus off the road, tell the recipient you will call back once safely parked</p></div>
+  </div>
+  <div style="display:flex; gap:24px; flex:1; align-items:stretch;">
+    <div style="flex:1; background:var(--grey); padding:36px 40px; display:flex; flex-direction:column; gap:12px; border-top:6px solid var(--ink);">
+      <h2 style="font-size:30px; font-weight:800;">Saddleback</h2>
+      <p style="font-size:60px; font-weight:900; color:var(--red); letter-spacing:-1px;">SADDLE #1</p>
+      <p style="font-size:24px; color:#555; line-height:1.4;">Use while driving on the Saddleback mine site, unless a job coordinator sign specifies otherwise</p>
+    </div>
+    <div style="flex:1; background:var(--grey); padding:36px 40px; display:flex; flex-direction:column; gap:12px; border-top:6px solid var(--ink);">
+      <h2 style="font-size:30px; font-weight:800;">Marradong</h2>
+      <p style="font-size:60px; font-weight:900; color:var(--red); letter-spacing:-1px;">MARRA #1</p>
+      <p style="font-size:24px; color:#555; line-height:1.4;">Use while driving on the Marradong mine site, unless a job coordinator sign specifies otherwise</p>
+    </div>
+    <div style="flex:0.7; background:var(--grey); display:flex; align-items:center; justify-content:center; padding:20px; border-top:6px solid var(--ink);"><img src="img/p07-radio-vehicle.jpg" style="max-height:340px; max-width:100%;"></div>
+  </div>
+</section>
+
+<section data-label="Emergency response" data-screen-label="11 Emergency" style="background:var(--ink); color:#fff; display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:28px;">
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <span style="font-size:var(--type-small); font-weight:700; letter-spacing:3px; color:var(--amber);">MAKING THE CALL</span>
+      <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Emergency Response Procedure</h1>
+    </div>
+    <div style="display:flex; flex-direction:column; gap:16px;">
+      <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:#EADA23; color:#3C4043; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">1</span><p style="font-size:var(--type-small); line-height:1.35;">Press the <span style="color:var(--amber); font-weight:700;">orange emergency button</span> for 3–5 seconds — this gives you priority on the emergency channel</p></div>
+      <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:#EADA23; color:#3C4043; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">2</span><p style="font-size:var(--type-small); line-height:1.35;">Repeat: “Emergency, Emergency, Emergency”</p></div>
+      <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:#EADA23; color:#3C4043; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">3</span><p style="font-size:var(--type-small); line-height:1.35;">Identify yourself and state your location</p></div>
+      <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:#EADA23; color:#3C4043; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">4</span><p style="font-size:var(--type-small); line-height:1.35;">Identify the emergency and the assistance required</p></div>
+    </div>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:24px; justify-content:center;">
+    <img src="img/p07-radio-handheld.jpg" style="width:100%; height:230px; object-fit:cover; border-radius:6px;">
+    <div style="background:#4A4F53; padding:36px 40px; display:flex; flex-direction:column; gap:14px;">
+      <h2 style="font-size:30px; font-weight:800; color:var(--amber);">When you hear an emergency call</h2>
+      <p style="font-size:25px; line-height:1.5; color:#ddd;">Cease all activities · park up safely · monitor Channel #1 for your site · await further instructions or move to the nearest muster point as directed.</p>
+    </div>
+    <div style="background:#4A4F53; padding:36px 40px; display:flex; flex-direction:column; gap:14px;">
+      <h2 style="font-size:30px; font-weight:800; color:var(--amber);">Vehicle incident on site</h2>
+      <p style="font-size:25px; line-height:1.5; color:#ddd;">An Emergency must be called. DO NOT move any vehicle until your supervisor or the ESO advises it is OK to do so.</p>
+    </div>
+    <div style="background:#4A4F53; padding:36px 40px; display:flex; flex-direction:column; gap:14px;">
+      <h2 style="font-size:30px; font-weight:800; color:var(--amber);">Pressed the orange button by mistake?</h2>
+      <p style="font-size:25px; line-height:1.5; color:#ddd;">Immediately notify the ESO and/or Pit Control. There are no repercussions — but failing to notify triggers an emergency shutdown of the whole site.</p>
+    </div>
+  </div>
+</section>
+
+<section data-label="Radio channels" data-screen-label="12 Radio channels" style="background:var(--grey); color:var(--ink); display:flex; flex-direction:column; padding:72px var(--pad-x) 60px; gap:28px;">
+  <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Radio Channel Reference Guide</h1>
+    <p style="font-size:var(--type-small); font-weight:700; color:{{ radioGateColor }};">{{ radioGateText }}</p>
+  </div>
+  <div style="display:grid; grid-template-columns:repeat(5,1fr); grid-auto-rows:1fr; gap:18px; flex:1;">
+    <sc-for list="{{ radioCards }}" as="rc" hint-placeholder-count="10">
+      <div onClick="{{ rc.flip }}" class="flipcard {{ rc.flippedClass }}" style="min-height:180px;">
+        <div class="flipinner">
+          <div class="flipface" style="background:#fff; border:2px solid #ddd; padding:20px;">
+            <span style="font-size:32px; font-weight:900; color:var(--ink); text-align:center; letter-spacing:-0.5px;">{{ rc.name }}</span>
+            <span style="font-size:24px; color:#999;">{{ rc.hint }}</span>
+          </div>
+          <div class="flipface flipback" style="background:var(--ink); color:#fff; padding:20px 24px;">
+            <span style="font-size:24px; line-height:1.35; text-align:center; font-family:'Archivo Narrow';">{{ rc.meaning }}</span>
+          </div>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+</section>
+
+<section data-label="Blasting protocol" data-screen-label="13 Blasting" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:28px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Blasting Protocol</h1>
+    <p style="font-size:var(--type-body); line-height:1.4; max-width:700px;">A warning message is broadcast across <span style="font-weight:800;">all BBM channels ten minutes</span> before every blast.</p>
+    <div style="display:flex; align-items:baseline; gap:20px;">
+      <span style="font-size:130px; font-weight:900; color:var(--red); letter-spacing:-5px; line-height:1;">400m</span>
+      <p style="font-size:var(--type-small); line-height:1.35; color:#555; max-width:420px;">exclusion zone is set up around the blast area</p>
+    </div>
+    <img src="img/p11-sign-e.png" style="max-height:320px; align-self:flex-start; object-fit:contain; background:#fff; border:1px solid #ddd; border-radius:6px; padding:10px;">
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:20px; justify-content:center;">
+    <div style="background:var(--grey); padding:32px 36px; display:flex; flex-direction:column; gap:10px;">
+      <h2 style="font-size:28px; font-weight:800;">Blast guards move into position</h2>
+      <p style="font-size:24px; color:#555; line-height:1.4;">Blocking all haul roads and LV tracks to keep traffic and personnel out of the blast clearance area</p>
+    </div>
+    <div style="background:var(--grey); padding:32px 36px; display:flex; flex-direction:column; gap:10px;">
+      <h2 style="font-size:28px; font-weight:800;">Maintain radio silence on the BLAST channel</h2>
+      <p style="font-size:24px; color:#555; line-height:1.4;">Unless directly involved in the blasting procedure, until the ALL CLEAR is advised</p>
+    </div>
+    <div style="background:var(--grey); padding:32px 36px; display:flex; flex-direction:column; gap:10px;">
+      <h2 style="font-size:28px; font-weight:800;">Pit Controller announces the all clear</h2>
+      <p style="font-size:24px; color:#555; line-height:1.4;">Over all channels, when the blast is cleared and roadblocks are off the haul roads</p>
+    </div>
+    <p style="font-size:24px; color:#888;">For more information see the Blast Management Plan (01013284).</p>
+  </div>
+</section>
+
+<section data-label="Positive comms" data-screen-label="14 Positive comms" style="background:var(--ink); color:#fff; display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:40px;">
+  <div style="display:flex; flex-direction:column; gap:14px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Positive Communication</h1>
+    <p style="font-size:var(--type-small); color:#bbb; max-width:1400px; line-height:1.4;">A critical control against vehicle interaction at BBM. Set the radio to the correct channel for your area, call using the vehicle's asset ID, and receive positive communication before entering any 40 m exclusion zone.</p>
+  </div>
+  <div style="display:flex; gap:56px; flex:1; justify-content:center; align-items:center; max-width:1720px; align-self:center; width:100%;"><img src="img/p08-poscoms.png" style="height:400px; border-radius:8px;"><div style="display:flex; flex-direction:column; gap:24px; flex:1;">
+    <div style="display:flex; justify-content:flex-start;">
+      <div style="background:#4A4F53; border-left:6px solid var(--amber); padding:28px 36px; max-width:820px; display:flex; flex-direction:column; gap:8px;">
+        <span style="font-size:24px; font-weight:700; letter-spacing:2px; color:var(--amber);">CALLER</span>
+        <p style="font-size:34px; font-weight:600; line-height:1.3;">“HT222 to DZ985 — am I clear to pass on your right?”</p>
+      </div>
+    </div>
+    <div style="display:flex; justify-content:flex-end;">
+      <div style="background:#4A4F53; border-right:6px solid #93D5F3; padding:28px 36px; max-width:820px; display:flex; flex-direction:column; gap:8px; text-align:right;">
+        <span style="font-size:24px; font-weight:700; letter-spacing:2px; color:#93D5F3;">RESPONDER</span>
+        <p style="font-size:34px; font-weight:600; line-height:1.3;">“DZ985 to HT222 — clear to pass on the right-hand side.”</p>
+      </div>
+    </div>
+  </div></div>
+  <div style="background:#EADA23; color:#3C4043; padding:26px 36px;">
+    <p style="font-size:var(--type-small); font-weight:700; line-height:1.4;">Positive communication has NOT been achieved unless there has been a positive response.</p>
+  </div>
+</section>
+
+<section data-label="Part C divider" data-screen-label="15 Part C" style="background:#EADA23; color:#3C4043; display:flex; flex-direction:column; justify-content:center; padding:0 var(--pad-x); gap:28px;">
+  <span style="font-size:var(--type-subtitle); font-weight:700; letter-spacing:6px; opacity:.85;">PART C</span>
+  <h1 style="font-size:100px; font-weight:900; line-height:1.02; letter-spacing:-2px;">Access &amp; Traffic Rules</h1>
+  <p style="font-size:var(--type-body); opacity:.9; max-width:1100px;">Area access · pedestrians · collision avoidance · mobile phones · signage</p>
+</section>
+
+<section data-label="Area access" data-screen-label="16 Area access" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:26px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Active Mining Area Access</h1>
+    <p style="font-size:var(--type-body); line-height:1.45;">If you are not on an approved routine crew list, obtain <span style="font-weight:800;">verbal clearance from Pit Control</span> before entering the active mining area.</p>
+    <p style="font-size:var(--type-small); line-height:1.45; color:#555;">Notify Pit Control again when you leave the area. Personnel on an approved routine crew list are exempt.</p>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:18px; justify-content:center;">
+    <h2 style="font-size:var(--type-subtitle); font-weight:800;">Pit Control may ask for</h2>
+    <div style="background:var(--grey); padding:28px 36px; font-size:30px; font-weight:700;">Vehicle ID</div>
+    <div style="background:var(--grey); padding:28px 36px; font-size:30px; font-weight:700;">Number of passengers</div>
+    <div style="background:var(--grey); padding:28px 36px; font-size:30px; font-weight:700;">Destination</div>
+  </div>
+</section>
+
+<section data-label="Pedestrians" data-screen-label="17 Pedestrians" style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:34px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; gap:48px;"><div style="display:flex; flex-direction:column; gap:14px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Pedestrians on Haul Roads</h1>
+    <p style="font-size:var(--type-body); line-height:1.4;">Pedestrians are <span style="color:var(--red); font-weight:800;">NOT permitted</span> on haul roads without authorisation from the duty production supervisor.</p>
+  </div><img src="img/p09-pedestrians.png" style="height:220px; flex-shrink:0; border-radius:6px;"></div>
+  <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:20px; align-content:start;">
+    <div style="background:var(--grey); padding:28px 32px; display:flex; gap:16px; align-items:flex-start;"><span style="font-size:40px; font-weight:900; color:var(--red); line-height:1;">1</span><p style="font-size:24px; line-height:1.4;">Seek authorisation from the duty production supervisor</p></div>
+    <div style="background:var(--grey); padding:28px 32px; display:flex; gap:16px; align-items:flex-start;"><span style="font-size:40px; font-weight:900; color:var(--red); line-height:1;">2</span><p style="font-size:24px; line-height:1.4;">Advise mine control of location and times pedestrians will be on the road</p></div>
+    <div style="background:var(--grey); padding:28px 32px; display:flex; gap:16px; align-items:flex-start;"><span style="font-size:40px; font-weight:900; color:var(--red); line-height:1;">3</span><p style="font-size:24px; line-height:1.4;">Mine control broadcasts to all mine site traffic</p></div>
+    <div style="background:var(--grey); padding:28px 32px; display:flex; gap:16px; align-items:flex-start;"><span style="font-size:40px; font-weight:900; color:var(--red); line-height:1;">4</span><p style="font-size:24px; line-height:1.4;">Once affected SME is controlled, authorisation is given for pedestrians</p></div>
+    <div style="background:var(--grey); padding:28px 32px; display:flex; gap:16px; align-items:flex-start;"><span style="font-size:40px; font-weight:900; color:var(--red); line-height:1;">5</span><p style="font-size:24px; line-height:1.4;">Advise mine control when all pedestrians are clear</p></div>
+    <div style="background:var(--grey); padding:28px 32px; display:flex; gap:16px; align-items:flex-start;"><span style="font-size:40px; font-weight:900; color:var(--red); line-height:1;">6</span><p style="font-size:24px; line-height:1.4;">Mine control broadcasts the all-clear and hauling recommences</p></div>
+  </div>
+  <p style="font-size:24px; color:#666; line-height:1.4; max-width:1500px;">Exceptions: blast crew collecting delineation cones on roads already closed for blasting; sign technicians working under risk assessment; loading unit operators working under the relevant SWI.</p>
+</section>
+
+<section data-label="CAS" data-screen-label="18 CAS" style="background:var(--ink); color:#fff; display:flex; padding:80px var(--pad-x) 64px; gap:64px; align-items:center;">
+  <div style="flex:1.2; display:flex; flex-direction:column; gap:26px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Collision Avoidance System</h1>
+    <p style="font-size:var(--type-body); line-height:1.45; color:#ddd;">BBM runs both <span style="font-weight:800; color:#fff;">CAS 4</span> and <span style="font-weight:800; color:#fff;">CAS 10</span>. The system gives the operator a 360-degree view of surrounding vehicles and equipment, plus collision-avoidance based on path prediction, via a non-intrusive cabin display.</p>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:16px;">
+    <img src="img/p09-cas.png" style="width:100%; max-width:620px; border-radius:8px;">
+    <p style="font-size:24px; color:#bbb;">Protects all mining vehicles, assets and operators within 500 metres</p>
+  </div>
+</section>
+
+<section data-label="Mobile phones" data-screen-label="19 Phones" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:24px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Personal Mobile Phone Use</h1>
+    <p style="font-size:var(--type-body); line-height:1.4;">Phones, tablets, earphones and smart watches are <span style="color:var(--red); font-weight:800;">prohibited in SME at all times</span>.</p>
+    <p style="font-size:var(--type-small); line-height:1.45; color:#555;">Using a phone in control of any LV, RGV or SME may result in disciplinary action up to and including termination. In working areas, phone use is authorised only for WAPL business purposes — and you must remain stationary.</p>
+    <div style="background:var(--grey); padding:26px 32px; display:flex; flex-direction:column; gap:8px;">
+      <h2 style="font-size:26px; font-weight:800;">Urgent contact for your next of kin</h2>
+      <p style="font-size:25px; line-height:1.4;">Pit Control <span style="font-weight:800;">9734 8400</span> · or your supervisor's mobile</p>
+    </div>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:18px; justify-content:center;">
+    <h2 style="font-size:var(--type-subtitle); font-weight:800;">Carrying a device? Yondr pouch steps</h2>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--red); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">1</span><p style="font-size:var(--type-small); line-height:1.35;">Switch the phone completely off</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--red); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">2</span><p style="font-size:var(--type-small); line-height:1.35;">Place it inside the Yondr pouch</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--red); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">3</span><p style="font-size:var(--type-small); line-height:1.35;">Push the button to lock the pouch</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--red); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">4</span><p style="font-size:var(--type-small); line-height:1.35;">Store it in your crib bag — never on your person</p></div>
+    <p style="font-size:24px; color:#666; line-height:1.4;">Unlocking bases are at turnstiles, crib huts and the Go West bus — use them during breaks and at the end of the workday.</p>
+  </div>
+</section>
+
+<section data-label="Signage" data-screen-label="20 Signage" style="background:var(--grey); color:var(--ink); display:flex; flex-direction:column; padding:72px var(--pad-x) 60px; gap:28px;">
+  <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Signage</h1>
+    <p style="font-size:var(--type-small); font-weight:700; color:{{ signGateColor }};">{{ signGateText }}</p>
+  </div>
+  <div style="display:flex; flex-direction:column; gap:12px; flex:1;">
+    <sc-for list="{{ signRows }}" as="sign" hint-placeholder-count="5">
+      <div onClick="{{ sign.toggle }}" class="expander" style="background:#fff; display:flex; flex-direction:column; cursor:pointer;">
+        <div style="display:flex; align-items:center; gap:24px; padding:14px 28px;">
+          <img src="{{ sign.img }}" style="width:140px; height:84px; object-fit:contain; background:#fbfaf9; border:1px solid #eee; border-radius:8px; padding:6px; box-sizing:border-box; flex-shrink:0;">
+          <h2 style="font-size:32px; font-weight:800; flex:1;">{{ sign.name }}</h2>
+          <span style="font-size:26px; color:#999; font-family:'Archivo Narrow';">{{ sign.hint }}</span>
+          <span style="font-size:34px; font-weight:800; color:var(--red);">{{ sign.chev }}</span>
+        </div>
+        <sc-if value="{{ sign.open }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex; gap:28px; align-items:flex-start; padding:0 28px 16px 192px;">
+            <img src="{{ sign.img }}" style="width:230px; height:140px; object-fit:contain; background:#fbfaf9; border:1px solid #eee; border-radius:8px; padding:10px; box-sizing:border-box; flex-shrink:0;">
+            <p style="font-size:24px; line-height:1.5; color:#444; font-family:'Archivo Narrow'; flex:1;">{{ sign.detail }}</p>
+          </div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</section>
+
+<section data-label="Part D divider" data-screen-label="21 Part D" style="background:#EADA23; color:#3C4043; display:flex; flex-direction:column; justify-content:center; padding:0 var(--pad-x); gap:28px;">
+  <span style="font-size:var(--type-subtitle); font-weight:700; letter-spacing:6px; opacity:.85;">PART D</span>
+  <h1 style="font-size:100px; font-weight:900; line-height:1.02; letter-spacing:-2px;">Operating SME</h1>
+  <p style="font-size:var(--type-body); opacity:.9; max-width:1100px;">Footprint &amp; isolation · horn signals · authorisation · inspections · faults · blind spots</p>
+</section>
+
+<section data-label="Footprint & isolation" data-screen-label="22 Footprint" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:26px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">SME Footprint &amp; Isolation</h1>
+    <p style="font-size:var(--type-body); line-height:1.45;">The footprint is <span style="font-weight:800;">the area directly beneath the machine</span>. To enter it, you MUST isolate the equipment with your personal lock and hasp — isolator in the off position — then verify with a <span style="font-weight:800;">Try Test</span>.</p>
+    <p style="font-size:var(--type-small); line-height:1.45; color:#555;">Whenever leaving the machine, isolate via the red battery isolator so batteries are not drained.</p><img src="img/p12-footprint.jpg" style="width:320px; border-radius:6px;">
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:16px; justify-content:center;">
+    <h2 style="font-size:var(--type-subtitle); font-weight:800;">Exemptions — engine may stay running</h2>
+    <div style="background:var(--grey); padding:20px 30px; font-size:25px; line-height:1.35;">Life in danger due to fire or similar emergency</div>
+    <div style="background:var(--grey); padding:20px 30px; font-size:25px; line-height:1.35;">Float prime mover while loading equipment onto the float</div>
+    <div style="background:var(--grey); padding:20px 30px; font-size:25px; line-height:1.35;">Fuel truck during servicing operations</div>
+    <div style="background:var(--grey); padding:20px 30px; font-size:25px; line-height:1.35;">Blast truck during loading operations</div>
+    <div style="background:var(--grey); padding:20px 30px; font-size:25px; line-height:1.35;">Tandem powered scrapers while placing wheel chocks with rear motor running</div>
+    <div style="background:var(--grey); padding:20px 30px; font-size:25px; line-height:1.35;">T1255 Vermeer when using the remote to inspect drum G.E.T</div>
+  </div>
+</section>
+
+<section data-label="Horn signals" data-screen-label="23 Horn signals" style="background:var(--ink); color:#fff; display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:36px;">
+  <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Horn Signals</h1>
+    <p style="font-size:var(--type-small); font-weight:700; color:{{ hornGateColor }};">{{ hornGateText }}</p>
+  </div>
+  <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:28px; flex:1;">
+    <sc-for list="{{ hornCards }}" as="hc" hint-placeholder-count="3">
+      <div onClick="{{ hc.flip }}" class="flipcard {{ hc.flippedClass }}" style="min-height:380px;">
+        <div class="flipinner">
+          <div class="flipface" style="background:#4A4F53; border:2px solid #444;">
+            <span style="font-size:130px; font-weight:900; color:var(--amber); line-height:1;">{{ hc.count }}</span>
+            <span style="font-size:30px; font-weight:700;">{{ hc.label }}</span>
+            <span style="font-size:24px; color:#888;">{{ hc.hint }}</span>
+          </div>
+          <div class="flipface flipback" style="background:#EADA23; color:#3C4043;">
+            <span style="font-size:40px; font-weight:800; text-align:center; padding:0 30px; line-height:1.25;">{{ hc.meaning }}</span>
+          </div>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+  <div style="background:#4A4F53; padding:24px 34px;">
+    <p style="font-size:var(--type-small); line-height:1.4;"><span style="color:var(--amber); font-weight:800;">Always wait 5–10 seconds</span> after signalling your intention before carrying out the action.</p>
+  </div>
+</section>
+
+<section data-label="Authorised use + mounting" data-screen-label="24 Authorised use" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:24px;">
+    <h1 style="font-size:56px; font-weight:800; letter-spacing:-1px;">Authorised Use of SME</h1>
+    <p style="font-size:var(--type-small); line-height:1.5;">No person may operate any SME at BBM unless they are:</p>
+    <div style="display:flex; flex-direction:column; gap:14px;">
+      <div style="background:var(--grey); padding:22px 30px; font-size:26px; line-height:1.35;">Authorised for training with an instructor</div>
+      <div style="background:var(--grey); padding:22px 30px; font-size:26px; line-height:1.35;">Authorised under minimal supervision</div>
+      <div style="background:var(--grey); padding:22px 30px; font-size:26px; line-height:1.35;">Deemed competent for that equipment, task or situation</div>
+    </div>
+    <div style="background:#FFF4D6; border-left:6px solid var(--amber); padding:22px 30px;">
+      <p style="font-size:25px; line-height:1.4;"><span style="font-weight:800;">Qualification expired?</span> Do not operate — a refresher assessment must be completed.</p>
+    </div>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:24px;">
+    <h1 style="font-size:56px; font-weight:800; letter-spacing:-1px;">Mounting &amp; Dismounting</h1>
+    <p style="font-size:var(--type-small); line-height:1.5;"><span style="font-weight:800;">Three points of contact</span> — two hands and one foot, or one hand and two feet — at all times.</p>
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Face ladders at all times; only stairways may be used facing forward</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Clean grease or oil off access points first</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Never jump on or off — especially a moving machine</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Never use control levers as support getting in or out of the cab</p></div>
+    </div><img src="img/p13-mounting.png" style="width:330px; border-radius:6px;">
+  </div>
+</section>
+
+<section data-label="Inspections" data-screen-label="25 Inspections" style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:32px;">
+  <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Walkaround &amp; Pre-Start Inspections</h1>
+  <div style="display:flex; gap:28px; flex:1;">
+    <div style="flex:1; background:var(--grey); padding:36px 40px; display:flex; flex-direction:column; gap:16px;">
+      <span style="font-size:24px; font-weight:700; letter-spacing:2px; color:var(--red);">EVERY TIME</span>
+      <h2 style="font-size:34px; font-weight:800;">360° walkaround</h2>
+      <p style="font-size:25px; line-height:1.45; color:#444;">Before operating and after parking up. No lock and hasp needed — but you must not enter the footprint. Identifies faults or damage before the next operator arrives.</p>
+    </div>
+    <div style="flex:1; background:var(--grey); padding:36px 40px; display:flex; flex-direction:column; gap:16px;">
+      <span style="font-size:24px; font-weight:700; letter-spacing:2px; color:var(--red);">FIRST USE OF SHIFT</span>
+      <h2 style="font-size:34px; font-weight:800;">Full pre-start inspection</h2>
+      <p style="font-size:25px; line-height:1.45; color:#444;">Also after planned or breakdown maintenance, and before relocating a machine for the first time in a shift. Check for damage, fluid levels, leaks on the ground, mechanical faults. Ensure no one is in the cab.</p>
+    </div>
+    <div style="flex:1; background:var(--grey); padding:36px 40px; display:flex; flex-direction:column; gap:16px;">
+      <span style="font-size:24px; font-weight:700; letter-spacing:2px; color:var(--red);">LEGAL DOCUMENT</span>
+      <h2 style="font-size:34px; font-weight:800;">Pre-start checklist</h2>
+      <p style="font-size:25px; line-height:1.45; color:#444;">Filled in during warm-up. Anything documented must be called through to Pit Control. Sign and hand in the top (white) copy at end of shift.</p>
+    </div>
+  </div>
+  <div style="background:var(--ink); color:#fff; padding:24px 34px;">
+    <p style="font-size:var(--type-small); line-height:1.4;"><span style="color:var(--amber); font-weight:800;">Caution:</span> do not enter the footprint of any SME without a proved isolation.</p>
+  </div>
+</section>
+
+<section data-label="Start up" data-screen-label="26 Start up" style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:36px;">
+  <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Start Up, Mobility Test &amp; Hot Seating</h1>
+  <div style="display:flex; gap:28px; flex:1;">
+    <div style="flex:1; display:flex; flex-direction:column; gap:16px;">
+      <div style="display:flex; align-items:center; gap:16px;"><span style="width:64px; height:64px; background:var(--ink); color:var(--amber); display:flex; align-items:center; justify-content:center; font-weight:900; font-size:32px; border-radius:50%;">1×</span><h2 style="font-size:32px; font-weight:800;">Horn before starting</h2></div>
+      <p style="font-size:25px; line-height:1.45; color:#444;">Key on, check the monitoring system — all alert lights and buzzers operational. Sound the electric horn once, start per OEM procedure, warm up all systems to operating range.</p>
+    </div>
+    <div style="flex:1; display:flex; flex-direction:column; gap:16px;">
+      <div style="display:flex; align-items:center; gap:16px;"><span style="width:64px; height:64px; background:var(--ink); color:var(--amber); display:flex; align-items:center; justify-content:center; font-weight:900; font-size:32px; border-radius:50%;">2×</span><h2 style="font-size:32px; font-weight:800;">Horn before moving</h2></div>
+      <p style="font-size:25px; line-height:1.45; color:#444;">Test brakes, steering and hydraulics before the SME enters operational mode. Avoid the air horn except in emergencies — never in SME park-up areas.</p>
+    </div>
+    <div style="flex:1; display:flex; flex-direction:column; gap:16px;">
+      <div style="display:flex; align-items:center; gap:16px;"><span style="width:64px; height:64px; background:var(--red); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:900; font-size:26px; border-radius:50%;">HOT</span><h2 style="font-size:32px; font-weight:800;">Hot seat change out</h2></div>
+      <p style="font-size:25px; line-height:1.45; color:#444;">The only time equipment may be left running unattended. Never enter the footprint while hot seating. Haul trucks cannot be hot seated in-pit — only in constructed SME park-up bays.</p>
+    </div>
+  </div>
+</section>
+
+<section data-label="Faults" data-screen-label="27 Faults" style="background:var(--ink); color:#fff; display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:36px;">
+  <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Categorising Faults</h1>
+  <div style="display:flex; gap:28px; flex:1;">
+    <div style="flex:1; background:#EADA23; color:#3C4043; padding:44px 48px; display:flex; flex-direction:column; gap:18px;">
+      <span style="font-size:80px; font-weight:900; line-height:1;">A</span>
+      <h2 style="font-size:36px; font-weight:800;">Must not be operated</h2>
+      <p style="font-size:26px; line-height:1.5;">Unless rectified by an authorised repairer, or approved by the Maintenance Supervisor — with a confirming email to Pit Control and the Mine Production Supervisor stating the conditions of use.</p>
+      <p style="font-size:26px; line-height:1.5; font-weight:700;">Still not comfortable operating it? DO NOT OPERATE IT.</p>
+    </div>
+    <div style="flex:1; background:#4A4F53; padding:44px 48px; display:flex; flex-direction:column; gap:18px;">
+      <span style="font-size:80px; font-weight:900; line-height:1; color:var(--amber);">B</span>
+      <h2 style="font-size:36px; font-weight:800;">May be operated if safe</h2>
+      <p style="font-size:26px; line-height:1.5; color:#ddd;">The operator approves use by initialling the pre-start checklist. Report the fault to Pit Control so it can be scheduled for repair or a notification raised.</p>
+    </div>
+  </div>
+</section>
+
+<section data-label="Maintenance duties + blind spots" data-screen-label="28 Maintenance" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Operator Maintenance Duties</h1>
+    <p style="font-size:var(--type-small); line-height:1.5;">Operators may only do <span style="font-weight:800;">pre-start checks and windscreen water top-ups</span> unsupervised. Any other maintenance task only under the supervision of a Service Person or Maintenance Technician, at their request.</p>
+    <div style="background:var(--grey); border-left:6px solid var(--red); padding:24px 30px;">
+      <p style="font-size:25px; line-height:1.45;">Operators are NOT authorised to remove radiator or reservoir caps. If a sight glass or sensor shows a low level, call a Service Person or Maintenance Technician.</p>
+    </div>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Blind Spots &amp; Monitoring</h1>
+    <p style="font-size:var(--type-small); line-height:1.5;">A blind spot is ground around the machine the operator cannot see from the cab. SME size means vision is always compromised — assume operators cannot see you.</p>
+    <p style="font-size:var(--type-small); line-height:1.5;">OEM monitoring systems warn of conditions or impending faults and <span style="font-weight:800;">must be followed at all times</span> — serious machine damage can occur if ignored.</p><img src="img/p16-blindspot.png" style="width:100%; border-radius:6px;">
+  </div>
+</section>
+
+<section data-label="Part E divider" data-screen-label="29 Part E" style="background:#EADA23; color:#3C4043; display:flex; flex-direction:column; justify-content:center; padding:0 var(--pad-x); gap:28px;">
+  <span style="font-size:var(--type-subtitle); font-weight:700; letter-spacing:6px; opacity:.85;">PART E</span>
+  <h1 style="font-size:100px; font-weight:900; line-height:1.02; letter-spacing:-2px;">Vehicle Interaction</h1>
+  <p style="font-size:var(--type-body); opacity:.9; max-width:1200px;">LVs &amp; RGVs · change outs · parking · refuelling · passing · breakdowns · public roads · visibility</p>
+</section>
+
+<section data-label="LV/RGV entering" data-screen-label="30 LV RGV" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:24px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">LVs &amp; RGVs Entering the Active Mining Area</h1>
+    <p style="font-size:var(--type-small); line-height:1.5;">Before entering, make a general broadcast stating the pit and your vehicle: <span style="font-weight:700; font-style:italic;">“LV260 entering SW20 work area.”</span></p>
+    <p style="font-size:var(--type-small); line-height:1.5;">To pass equipment, gain authorisation via positive two-way communication. Equipment must be stationary with all GET grounded. The 40 m exclusion zone applies unless there is hard-barrier segregation.</p>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:18px;">
+    <h2 style="font-size:38px; font-weight:800;">In-Pit Operator Change Out</h2>
+    <div style="display:flex; gap:16px; align-items:flex-start;"><span style="width:44px; height:44px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:24px; flex-shrink:0; border-radius:50%;">1</span><p style="font-size:24px; line-height:1.4;">LV operator announces entry to the pit and intention to swap operators</p></div>
+    <div style="display:flex; gap:16px; align-items:flex-start;"><span style="width:44px; height:44px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:24px; flex-shrink:0; border-radius:50%;">2</span><p style="font-size:24px; line-height:1.4;">Pos-coms with the SME operator; all GET grounded before entering 40 m</p></div>
+    <div style="display:flex; gap:16px; align-items:flex-start;"><span style="width:44px; height:44px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:24px; flex-shrink:0; border-radius:50%;">3</span><p style="font-size:24px; line-height:1.4;">Pos-coms before passing any queued equipment</p></div>
+    <div style="display:flex; gap:16px; align-items:flex-start;"><span style="width:44px; height:44px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:24px; flex-shrink:0; border-radius:50%;">4</span><p style="font-size:24px; line-height:1.4;">Park the LV in clear view of the SME operator or behind a physical barrier</p></div>
+    <div style="display:flex; gap:16px; align-items:flex-start;"><span style="width:44px; height:44px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:24px; flex-shrink:0; border-radius:50%;">5</span><p style="font-size:24px; line-height:1.4;">Work recommences only once the LV is confirmed 40 m clear</p></div>
+    <p style="font-size:24px; color:#666; line-height:1.4;">Haul truck operators may only swap or exchange passengers in designated SME park-up bays.</p>
+  </div>
+</section>
+
+<section data-label="Park up" data-screen-label="31 Park up" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Park Up of SME</h1>
+    <h2 style="font-size:32px; font-weight:800;">Designated park-up areas provide</h2>
+    <div style="display:flex; flex-direction:column; gap:10px;">
+      <p style="font-size:25px; line-height:1.4;">· Physical separation of LVs and pedestrians from SME</p>
+      <p style="font-size:25px; line-height:1.4;">· Adequate lighting and defined parking bays</p>
+      <p style="font-size:25px; line-height:1.4;">· A purpose-built drain or berm to park in, on or against</p>
+      <p style="font-size:25px; line-height:1.4;">· Signage for speed, right of way and access</p>
+    </div>
+    <p style="font-size:24px; color:#666; line-height:1.45;">LV or RGV entering a park-up area for maintenance: gain supervisor authorisation, erect coordinator signage, and isolate any SME parked inside.</p>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:16px; justify-content:center;">
+    <h2 style="font-size:32px; font-weight:800;">Parking outside designated areas</h2>
+    <div style="background:var(--grey); padding:20px 30px; font-size:25px; line-height:1.4;">40 m separation from LVs or lighting towers, OR a physical barrier</div>
+    <div style="background:var(--grey); padding:20px 30px; font-size:25px; line-height:1.4;">Relocate to level ground where possible — ensure fundamental stability</div>
+    <div style="background:var(--grey); padding:20px 30px; font-size:25px; line-height:1.4;">Use wheel chocks where not fundamentally stable</div>
+    <div style="background:var(--grey); padding:20px 30px; font-size:25px; line-height:1.4;">Shut down and switch off an isolation switch before leaving unattended</div>
+    <div style="background:var(--grey); padding:20px 30px; font-size:25px; line-height:1.4;">Ground all G.E.T when parked</div>
+    <div style="background:#FFF4D6; border-left:6px solid var(--amber); padding:20px 30px; font-size:24px; line-height:1.4;">Never park with the bucket or blade dug into a face, stockpile or windrow, or anywhere the face condition risks people walking around the machine.</div>
+  </div>
+</section>
+
+<section data-label="Parking near + maintenance" data-screen-label="32 Parking near" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Parking Near SME</h1>
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Shut down; park fundamentally stable or use wheel chocks</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">40 m rule applies — pos-coms required before entering</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Park LVs and RGVs outside the 40 m zone or behind a physical barrier</p></div>
+    </div>
+    <div style="background:var(--grey); border-left:6px solid var(--red); padding:22px 30px;">
+      <p style="font-size:25px; line-height:1.4; font-weight:700;">RGVs and LVs always approach SME — never vice-versa.</p>
+    </div>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Maintenance Access In-Pit</h1>
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Where possible, relocate the equipment at least 40 m from any other operation</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">If occupied: pos-coms, GET grounded, and the SME operator out of the cab before entering 40 m</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Never park an LV or RGV behind SME unless it is parked correctly and locked out</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">If the SME must move, move the maintenance vehicle outside the 40 m zone first</p></div>
+    </div>
+  </div>
+</section>
+
+<section data-label="Unattended" data-screen-label="33 Unattended" style="background:var(--ink); color:#fff; display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:24px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Equipment Running While Unattended</h1>
+    <p style="font-size:var(--type-body); line-height:1.45; color:#ddd;">Unattended means the driver can no longer control the equipment — out of the cab, on the ground. Engines of all LVs, RGVs and SME must be <span style="font-weight:800; color:#fff;">shut off</span> whenever unattended.</p>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:16px; justify-content:center;">
+    <div style="background:#4A4F53; padding:24px 32px; display:flex; gap:16px; align-items:flex-start;"><span style="color:var(--amber); font-weight:900; font-size:26px;">1</span><p style="font-size:26px; line-height:1.4;">Ensure the engine has completely shut down before dismounting</p></div>
+    <div style="background:#4A4F53; padding:24px 32px; display:flex; gap:16px; align-items:flex-start;"><span style="color:var(--amber); font-weight:900; font-size:26px;">2</span><p style="font-size:26px; line-height:1.4;">Do not rely on a turbo timer to shut the engine down</p></div>
+    <div style="background:#4A4F53; padding:24px 32px; display:flex; gap:16px; align-items:flex-start;"><span style="color:var(--amber); font-weight:900; font-size:26px;">3</span><p style="font-size:26px; line-height:1.4;">Switch battery isolators off before leaving the immediate area</p></div>
+    <p style="font-size:24px; color:#999; line-height:1.4;">Exemptions (float prime mover, fuel truck, blast truck, tandem scrapers, T1255 Vermeer) are listed in the Isolation section of this manual.</p>
+  </div>
+</section>
+
+<section data-label="Pit control + service" data-screen-label="34 Pit control" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Pit Control</h1>
+    <p style="font-size:var(--type-small); line-height:1.5;">Located at the Marradong administration facilities. Two Duty Pit Controllers per 12-hour shift — one for Development, one for Production — tracking SME and active-area entries via the Fleet Management System and two-way comms.</p>
+    <div style="background:var(--grey); padding:26px 32px; display:flex; flex-direction:column; gap:8px;">
+      <h2 style="font-size:26px; font-weight:800;">Family needs to reach you?</h2>
+      <p style="font-size:26px; line-height:1.4;">They can call Pit Control on <span style="font-weight:800;">9734 8400</span> — a message will reach you via Pit Control or the Duty Supervisor.</p>
+    </div>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Service Bays &amp; In-Pit Refuelling</h1>
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Pit Control directs haul trucks to designated service bays for refuelling and servicing</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Other SME are refuelled in-pit — the lube truck always moves toward the machine, never vice-versa</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Operators dismount to ground level unless directly involved — and isolate personally before entering the footprint</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Any servicing delays — tell Pit Control so other SME are kept out</p></div>
+    </div>
+  </div>
+</section>
+
+<section data-label="Passing" data-screen-label="35 Passing" style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:32px;">
+  <div style="display:flex; flex-direction:column; gap:12px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Passing Procedures</h1>
+    <p style="font-size:var(--type-small); line-height:1.4; color:#555;"><span style="font-weight:800; color:var(--ink);">Overtaking</span> = going around a moving vehicle. <span style="font-weight:800; color:var(--ink);">Passing</span> = going around a stationary vehicle with attachments grounded. No one may overtake moving vehicles — the only exception is an emergency vehicle with lights and sirens active.</p>
+  </div>
+  <div style="display:flex; gap:28px; flex:1;">
+    <div style="flex:1; background:var(--grey); padding:34px 38px; display:flex; flex-direction:column; gap:14px;">
+      <h2 style="font-size:32px; font-weight:800;">Passing stationary equipment</h2>
+      <p style="font-size:24px; line-height:1.45;">· Maintain the 40 m exclusion zone before any manoeuvre</p>
+      <p style="font-size:24px; line-height:1.45;">· Gain approval via positive two-way communication</p>
+      <p style="font-size:24px; line-height:1.45;">· Equipment stationary, all GET grounded (drill masts in travel cradle or grounded)</p>
+      <p style="font-size:24px; line-height:1.45;">· Max <span style="font-weight:800;">40 kph</span> — or <span style="font-weight:800;">20 kph</span> past a float parked to load/unload</p>
+      <p style="font-size:24px; line-height:1.45;">· <span style="font-weight:800;">100 m clear vision</span> required</p>
+    </div>
+    <div style="flex:1; background:var(--grey); padding:34px 38px; display:flex; flex-direction:column; gap:14px;">
+      <h2 style="font-size:32px; font-weight:800;">Overtaking a working grader</h2>
+      <p style="font-size:24px; line-height:1.45;">· May be overtaken left or right depending on road position</p>
+      <p style="font-size:24px; line-height:1.45;">· Maintain the 40 m exclusion zone first</p>
+      <p style="font-size:24px; line-height:1.45;">· Some situations require pos-coms approval</p>
+      <p style="font-size:24px; line-height:1.45;">· Reduce speed to <span style="font-weight:800;">40 kph or less</span>; 100 m clear vision</p>
+      <p style="font-size:24px; line-height:1.45;">· Watch for hidden rocks — avoid travelling along the grader's windrow</p>
+    </div>
+  </div>
+  <p style="font-size:24px; color:#666;">At no stage may SME overtake a moving LV, or vice-versa.</p>
+</section>
+
+<section data-label="Mechanical failure" data-screen-label="36 Breakdown" style="background:var(--ink); color:#fff; display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:24px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Mechanical Failure on a Haul Road</h1>
+    <h2 style="font-size:30px; font-weight:800; color:var(--amber);">Notify, in this order</h2>
+    <div style="display:flex; flex-direction:column; gap:14px;">
+      <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:#EADA23; color:#3C4043; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; border-radius:50%; flex-shrink:0;">1</span><p style="font-size:30px; font-weight:600;">All other road users</p></div>
+      <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:#EADA23; color:#3C4043; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; border-radius:50%; flex-shrink:0;">2</span><p style="font-size:30px; font-weight:600;">Mine control</p></div>
+      <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:#EADA23; color:#3C4043; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; border-radius:50%; flex-shrink:0;">3</span><p style="font-size:30px; font-weight:600;">Duty production supervisor</p></div>
+    </div>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:16px; justify-content:center;">
+    <div style="background:#4A4F53; padding:28px 34px;"><p style="font-size:26px; line-height:1.45;">Park fundamentally stable, wheels facing into the windrow to prevent roll-aways</p></div>
+    <div style="background:#4A4F53; padding:28px 34px;"><p style="font-size:26px; line-height:1.45;">Remain inside to monitor the radio and give pos-coms to other road users, until Pit Control advises otherwise</p></div>
+    <div style="background:#EADA23; color:#3C4043; padding:28px 34px;"><p style="font-size:26px; line-height:1.45; font-weight:700;">Vehicles are never to be left unattended on a haul road</p></div>
+  </div>
+</section>
+
+<section data-label="Public roads" data-screen-label="37 Public roads" style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:64px var(--pad-x) 56px; gap:24px;">
+  <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Access Over Public Roads</h1>
+  <div style="display:flex; gap:28px; flex:1;">
+    <div style="flex:1; background:var(--grey); padding:32px 36px; display:flex; flex-direction:column; gap:14px;">
+      <span style="font-size:24px; font-weight:700; letter-spacing:2px; color:var(--red);">ACTIVE CROSSING</span>
+      <h2 style="font-size:30px; font-weight:800;">With a gate attendant</h2>
+      <p style="font-size:24px; line-height:1.45; color:#444;">A qualified gate attendant controls lights and gates. <span style="font-weight:800; color:#1a7a2e;">Green</span> = open to haul traffic. <span style="font-weight:800; color:var(--red);">Red</span> = closed. The 40 m zone applies on red and whenever the gate operator is on the ground.</p>
+    </div>
+    <div style="flex:1; background:var(--grey); padding:32px 36px; display:flex; flex-direction:column; gap:14px;">
+      <span style="font-size:24px; font-weight:700; letter-spacing:2px; color:var(--red);">INACTIVE — SME</span>
+      <h2 style="font-size:30px; font-weight:800;">Spotter operates the gates</h2>
+      <p style="font-size:24px; line-height:1.45; color:#444;">SME parks 40 m clear; spotter (with permit + radio) places flashing lights on signage, closes gates to the public, clears the intersection, then pos-coms the SME through. Gates re-closed after; lighting plant required at night.</p>
+    </div>
+    <div style="flex:1; background:var(--grey); padding:32px 36px; display:flex; flex-direction:column; gap:14px;">
+      <span style="font-size:24px; font-weight:700; letter-spacing:2px; color:var(--red);">INACTIVE — LV/RGV</span>
+      <h2 style="font-size:30px; font-weight:800;">Driver operates the gates</h2>
+      <p style="font-size:24px; line-height:1.45; color:#444;">Park at the gate, check the road is clear, unlock and swing both gates into the mine site, drive across when clear, park inside, then close and lock both gates behind you.</p>
+    </div>
+  </div>
+  <div style="display:flex; gap:24px; height:220px;"><img src="img/p22-crossing.png" style="flex:2; min-width:0; object-fit:cover; border-radius:6px;"><img src="img/p23-gates.jpg" style="flex:1.2; min-width:0; object-fit:contain; background:#fff; border:1px solid #ddd; border-radius:6px;"></div>
+  <div style="background:var(--ink); color:#fff; padding:24px 34px;">
+    <p style="font-size:25px; line-height:1.4;"><span style="color:var(--amber); font-weight:800;">If a public vehicle enters the mine site</span> during crossing activities, use the emergency procedure to stop all work and alert the ESO.</p>
+  </div>
+</section>
+
+<section data-label="Reduced visibility" data-screen-label="38 Visibility" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px; align-items:center;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:24px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Reduced Visibility</h1>
+    <p style="font-size:var(--type-body); line-height:1.45;">Dust, fog or inclement weather — every operator is <span style="font-weight:800;">empowered to report road hazards and stop</span> if conditions are unsafe.</p>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:14px;">
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">1</span><p style="font-size:26px; line-height:1.4;">Report to your supervisor and notify all other road users</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">2</span><p style="font-size:26px; line-height:1.4;">Travel speeds drop in increments of 20 kph</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--ink); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">3</span><p style="font-size:26px; line-height:1.4;">Speed reductions are broadcast over the two-way</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:var(--red); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">4</span><p style="font-size:26px; line-height:1.4;">If visibility is still compromised, the operation must cease</p></div>
+  </div>
+</section>
+
+<section data-label="Part F divider" data-screen-label="39 Part F" style="background:#EADA23; color:#3C4043; display:flex; flex-direction:column; justify-content:center; padding:0 var(--pad-x); gap:28px;">
+  <span style="font-size:var(--type-subtitle); font-weight:700; letter-spacing:6px; opacity:.85;">PART F</span>
+  <h1 style="font-size:100px; font-weight:900; line-height:1.02; letter-spacing:-2px;">Hazardous Events,<br>Ground &amp; Health</h1>
+  <p style="font-size:var(--type-body); opacity:.9; max-width:1200px;">Fires · lightning · powerlines · roads &amp; gradients · faces · vibration · fatigue</p>
+</section>
+
+<section data-label="Fires" data-screen-label="40 Fires" style="background:var(--ink); color:#fff; display:flex; padding:80px var(--pad-x) 64px; gap:56px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:20px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Equipment Fire</h1>
+    <p style="font-size:25px; line-height:1.45; color:#ddd;">Know the location of extinguishers (near the cab and at ground level) and suppression actuators (in-cab, some at ground level) before you operate.</p>
+    <div style="background:#4A4F53; padding:26px 32px; display:flex; flex-direction:column; gap:10px;">
+      <h2 style="font-size:28px; font-weight:800; color:var(--amber);">PASS method</h2>
+      <p style="font-size:25px; line-height:1.5;"><span style="font-weight:800;">P</span>ull the pin · <span style="font-weight:800;">A</span>im at the base · <span style="font-weight:800;">S</span>queeze the trigger · <span style="font-weight:800;">S</span>weep side to side</p>
+      <p style="font-size:24px; color:#999;">Only use an extinguisher if safe to do so. Suppression: pull the pin, depress the plunger. Then follow the Emergency Response Procedure.</p>
+    </div>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:20px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Tyre Fire</h1>
+    <div style="display:flex; flex-direction:column; gap:10px;">
+      <p style="font-size:25px; line-height:1.4;">· Park as safely as practicable, remote if possible, positioned so rescue can approach out of the line of fire</p>
+      <p style="font-size:25px; line-height:1.4;">· Initiate the emergency procedure and activate fire suppression</p>
+      <p style="font-size:25px; line-height:1.4;">· Exit via the ladder furthest from the affected tyre — never dismount or approach from the side</p>
+      <p style="font-size:25px; line-height:1.4;">· Never use a handheld extinguisher on a tyre</p>
+    </div>
+    <div style="background:#EADA23; color:#3C4043; padding:24px 32px;">
+      <p style="font-size:25px; line-height:1.45; font-weight:700;">Hot tyre = 500 m exclusion zone for 24 hours. Internal tyre fires carry a considerable risk of explosion.</p>
+    </div>
+  </div>
+</section>
+
+<section data-label="Lightning" data-screen-label="41 Lightning" style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:72px var(--pad-x) 60px; gap:28px;">
+  <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Lightning Strikes</h1>
+  <div style="display:flex; gap:24px;">
+    <div style="flex:1; border-top:8px solid #1a56c4; background:var(--grey); padding:28px 32px; display:flex; flex-direction:column; gap:10px;">
+      <h2 style="font-size:32px; font-weight:900; color:#1a56c4;">BLUE · 50 km</h2>
+      <p style="font-size:24px; line-height:1.45;">All mining, crushing and conveying activities continue.</p>
+    </div>
+    <div style="flex:1; border-top:8px solid var(--amber); background:var(--grey); padding:28px 32px; display:flex; flex-direction:column; gap:10px;">
+      <h2 style="font-size:32px; font-weight:900; color:#B8860B;">YELLOW · 30 km</h2>
+      <p style="font-size:24px; line-height:1.45;">Continue with restrictions: outdoor workers shelter in a vehicle or building, no fuelling, public crossings open to public traffic.</p>
+    </div>
+    <div style="flex:1; border-top:8px solid #E4002B; background:var(--grey); padding:28px 32px; display:flex; flex-direction:column; gap:10px;">
+      <h2 style="font-size:32px; font-weight:900; color:#E4002B;">RED · 10 km</h2>
+      <p style="font-size:24px; line-height:1.45;">All mining ceases. Park up safely, stay in the cab, lower drill masts where possible.</p>
+    </div>
+  </div>
+  <div style="display:flex; gap:24px; flex:1;">
+    <div style="flex:1; background:var(--ink); color:#fff; padding:28px 34px; display:flex; flex-direction:column; gap:10px;">
+      <h2 style="font-size:28px; font-weight:800; color:var(--amber);">Strike on rubber-tyred SME</h2>
+      <p style="font-size:24px; line-height:1.45; color:#ddd;">Park up, remain in the cab, avoid metal surfaces, initiate the emergency procedure, and wait for a rescue SME to pull to the front or rear — then step across to its bonnet or walkway. Afterwards: 500 m exclusion for 24 hours.</p>
+    </div>
+    <div style="flex:1; background:var(--ink); color:#fff; padding:28px 34px; display:flex; flex-direction:column; gap:10px;">
+      <h2 style="font-size:28px; font-weight:800; color:var(--amber);">Must escape? Jump clear</h2>
+      <p style="font-size:24px; line-height:1.45; color:#ddd;">Only exit if absolutely necessary (e.g. fire): jump with both feet together, never touching truck and ground at the same time, then hop or shuffle 8–10 m away. Track-type SME earths the strike — no residual hazard.</p>
+    </div>
+  </div>
+</section>
+
+<section data-label="Powerlines" data-screen-label="42 Powerlines" style="background:var(--ink); color:#fff; display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:24px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Contact With Overhead Powerlines</h1>
+    <p style="font-size:var(--type-body); line-height:1.45; color:#ddd;">The cab is your protective barrier against electric current. <span style="font-weight:800; color:#fff;">Stay inside it.</span></p>
+    <div style="background:#EADA23; color:#3C4043; padding:26px 34px;">
+      <p style="font-size:25px; line-height:1.45; font-weight:700;">No rescue approach until the power has been isolated — machines parked too close risk arcing.</p>
+    </div>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:14px; justify-content:center;">
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:#EADA23; color:#3C4043; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">1</span><p style="font-size:25px; line-height:1.4;">Stop immediately — do not move unless told by emergency services</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:#EADA23; color:#3C4043; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">2</span><p style="font-size:25px; line-height:1.4;">Stay in the cab; avoid touching metal parts</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:#EADA23; color:#3C4043; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">3</span><p style="font-size:25px; line-height:1.4;">Initiate the Emergency Response Procedure</p></div>
+    <div style="display:flex; gap:18px; align-items:center;"><span style="width:52px; height:52px; background:#EADA23; color:#3C4043; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:26px; flex-shrink:0; border-radius:50%;">4</span><p style="font-size:25px; line-height:1.4;">Once power is isolated and declared safe, step across to the stationary rescue SME</p></div>
+    <p style="font-size:24px; color:#999; line-height:1.4;">If you must escape: jump clear, both feet together, then hop or shuffle 8–10 m. Afterwards: 500 m exclusion zone for 24 hours.</p>
+  </div>
+</section>
+
+<section data-label="Escort + haul travel" data-screen-label="43 Escort travel" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Escorting SME</h1>
+    <p style="font-size:var(--type-small); line-height:1.5;">Escorting any LV, RGV or SME requires the <span style="font-weight:800;">Escort Vehicle Drivers Permit</span> qualification.</p>
+    <p style="font-size:var(--type-small); line-height:1.5;">SME on or near LV roads must be escorted. The escort discusses the route with the SME operator and notifies affected road users before starting and once clear.</p>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Travelling on Haul Roads</h1>
+    <div style="display:flex; gap:20px;">
+      <div style="flex:1; background:var(--grey); padding:24px 28px; display:flex; flex-direction:column; gap:6px;"><span style="font-size:56px; font-weight:900; color:var(--red);">100m</span><p style="font-size:24px; line-height:1.35;">minimum separation travelling in the same direction</p></div>
+      <div style="flex:1; background:var(--grey); padding:24px 28px; display:flex; flex-direction:column; gap:6px;"><span style="font-size:56px; font-weight:900; color:var(--red);">40m</span><p style="font-size:24px; line-height:1.35;">separation when queuing at an intersection</p></div>
+    </div>
+    <p style="font-size:25px; line-height:1.45;">Do not stop on haul roads except for an emergency, a breakdown, or relevant signage such as STOP signs. No U-turns on a trunk haul road without a JHA and coordinator signage at both ends.</p>
+  </div>
+</section>
+
+<section data-label="Hoppers" data-screen-label="44 Hoppers" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Saddleback &amp; Marradong Hoppers</h1>
+    <p style="font-size:var(--type-small); line-height:1.5;">Both hoppers are <span style="font-weight:800;">SME only</span>. LVs and RGVs need permission from the production supervisor before entry. The 40 m zone applies unless a physical barrier is in place.</p><img src="img/p27-hopper-a.png" style="width:300px; border-radius:6px;">
+  </div>
+  <div style="flex:1.6; display:flex; flex-direction:row; gap:24px;">
+    <div style="flex:1; background:var(--grey); padding:26px; display:flex; flex-direction:column; gap:12px;"><img src="img/p27-hopper-b.png" style="width:100%; height:380px; object-fit:cover; border-radius:6px;">
+      <h2 style="font-size:30px; font-weight:800;">Saddleback</h2>
+      <p style="font-size:24px; line-height:1.45; color:#444;">Prefer the ROM bypass road if not tipping. If travelling through the ROM area: broadcast your entry, pos-coms before entering the 40 m zone of any truck reversed in to tip, and notify traffic when clear.</p>
+    </div>
+    <div style="flex:1; background:var(--grey); padding:26px; display:flex; flex-direction:column; gap:12px;"><img src="img/p27-hopper-c.png" style="width:100%; height:380px; object-fit:cover; border-radius:6px;">
+      <h2 style="font-size:30px; font-weight:800;">Marradong</h2>
+      <p style="font-size:24px; line-height:1.45; color:#444;">No bypass road. Trucks reversed into the hopper or parked inside the bunded area are behind a physical barrier — no permission needed to pass behind them.</p>
+    </div>
+  </div>
+</section>
+
+<section data-label="Towing + single lane" data-screen-label="45 Towing" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Towing &amp; Recovery</h1>
+    <p style="font-size:var(--type-small); line-height:1.5;">Risk assessment first, and a JHA signed off by the Duty Supervisor. Consider:</p>
+    <div style="display:flex; flex-direction:column; gap:12px;">
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Spotters in the line of fire if slings or towing points break</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Fit-for-purpose recovery slings — never registered lifting chains</p></div>
+      <div style="display:flex; gap:14px; align-items:baseline;"><span style="color:var(--red); font-weight:900; font-size:24px;">■</span><p style="font-size:25px; line-height:1.4;">Uncontrolled vehicle movement during recovery</p></div>
+    </div>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:18px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Single Lane Roads</h1>
+    <p style="font-size:24px; line-height:1.45; color:#444;">Five controlled locations: North 1.5 crossing, Lower Hotham crossing (Saddle 1), and link road gates 1–2, 3–4, 5–6 (Marra 1). Stop at the sign, check clear, announce entry, max 20 kph through.</p>
+    <div style="background:var(--grey); padding:24px 30px; display:flex; flex-direction:column; gap:8px;">
+      <h2 style="font-size:26px; font-weight:800;">Right of way when two vehicles meet</h2>
+      <p style="font-size:25px; line-height:1.5;">1. Loaded trucks → 2. Empty trucks → 3. Other SME → 4. Light vehicles</p>
+    </div>
+    <p style="font-size:24px; color:#666; line-height:1.4;">Two vehicles enter at once? Stop where you are and call the Duty Supervisor to arrange a spotter before reversing out.</p><img src="img/p21-grader.jpg" style="width:100%; height:200px; object-fit:cover; border-radius:6px;">
+  </div>
+</section>
+
+<section data-label="Gradients" data-screen-label="46 Gradients" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:22px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Stable Surfaces &amp; Safe Gradients</h1>
+    <p style="font-size:var(--type-small); line-height:1.5;">Ground control is a PMH. Critical controls: 1.5 m windrows, supervisor inspections, minimum 2% incline on tip heads, natural rill before reinstating windrows, haul road sign-off, exclusion zones, training.</p>
+    <p style="font-size:var(--type-small); line-height:1.5;">Tracked SME near a bench edge: position tracks <span style="font-weight:800;">45°–90° to the face</span> to avoid overbalancing if it slumps. In-situ material is more stable than disturbed material.</p><img src="img/p29-gradients.png" style="width:100%; background:#fff; border:1px solid #ddd; border-radius:6px; padding:12px;">
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:14px; justify-content:center;">
+    <h2 style="font-size:32px; font-weight:800;">Normal operating gradients</h2>
+    <div style="display:flex; align-items:center; gap:20px; background:var(--grey); padding:18px 28px;"><span style="font-size:44px; font-weight:900; color:var(--red); width:130px;">10%</span><p style="font-size:25px;">haul road ramps</p></div>
+    <div style="display:flex; align-items:center; gap:20px; background:var(--grey); padding:18px 28px;"><span style="font-size:44px; font-weight:900; color:var(--red); width:130px;">12%</span><p style="font-size:25px;">in-pit ramps under 100 m</p></div>
+    <div style="display:flex; align-items:center; gap:20px; background:var(--grey); padding:18px 28px;"><span style="font-size:44px; font-weight:900; color:var(--red); width:130px;">14%</span><p style="font-size:25px;">in-pit ramps under 30 m</p></div>
+    <div style="display:flex; align-items:center; gap:20px; background:var(--grey); padding:18px 28px;"><span style="font-size:44px; font-weight:900; color:var(--red); width:130px;">&lt;5%</span><p style="font-size:25px;">loading operations across slope (loaders and excavators)</p></div>
+    <p style="font-size:24px; color:#666; line-height:1.4;">Floor inclines over 5%: inform the Duty Superintendent first. Excavator bench access: 2 m wider than track frames, firmly compacted, gradient no greater than 3:1.</p>
+  </div>
+</section>
+
+<section data-label="Face protection" data-screen-label="47 Faces" style="background:#fff; color:var(--ink); display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:30px;">
+  <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Face Protection</h1>
+  <div style="display:flex; gap:28px; flex:1;">
+    <div style="flex:1; background:var(--grey); padding:32px 36px; display:flex; flex-direction:column; gap:12px;">
+      <h2 style="font-size:30px; font-weight:800;">Open faces</h2>
+      <p style="font-size:24px; line-height:1.45; color:#444;">A catch berm must be built under any face 2 m or higher without a rill, to catch slumping or falling rocks when not in use. Orange cones may barricade an open face temporarily (shift change, crib breaks).</p>
+    </div>
+    <div style="flex:1; background:var(--grey); padding:32px 36px; display:flex; flex-direction:column; gap:12px;">
+      <h2 style="font-size:30px; font-weight:800;">Above in-pit faces</h2>
+      <p style="font-size:24px; line-height:1.45; color:#444;">Windrows must block all access to the top of an active bench. If the rill is disturbed or a straight face develops, build a safety windrow back from the edge equal to the face height. Double windrows before reclaiming ROM stockpiles.</p><img src="img/p30-face-d.png" style="width:100%; height:190px; object-fit:cover; border-radius:6px; margin-top:auto;">
+    </div>
+    <div style="flex:1; background:var(--grey); padding:32px 36px; display:flex; flex-direction:column; gap:12px;">
+      <h2 style="font-size:30px; font-weight:800;">Mining faces</h2>
+      <p style="font-size:24px; line-height:1.45; color:#444;">Windrow to protect from slumping and falling rock. Temporary cones placed 10 m from the face, no more than 50 m apart, when unattended. Park SME far enough out that cones don't block service vehicle access.</p>
+    </div>
+  </div>
+</section>
+
+<section data-label="Roadworks + workshop" data-screen-label="48 Roadworks" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:20px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Roadworks &amp; Graders</h1>
+    <p style="font-size:25px; line-height:1.5;">Roadworks run in a controlled environment behind coordinator or roadworks signage, with a job coordinator responsible for the work area. Pit Control makes site entrants aware of road hazards. Sign works in active areas happen behind job coordinator signs.</p>
+    <p style="font-size:25px; line-height:1.5;">Graders get prioritised tasks from the Duty Supervisor at shift start. Grading a park-up area needs a risk assessment first — restricted space, obstacles, high pedestrian traffic and peak usage times.</p>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:20px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Workshop Compound Access</h1>
+    <p style="font-size:25px; line-height:1.5;">Drop off and pick up SME at the designated area outside the workshop compound where possible.</p>
+    <p style="font-size:25px; line-height:1.5;">Working within the Saddleback workshop compound requires the <span style="font-weight:800;">Saddleback Workshop and Compound Access SWI</span> signed, plus a Maintenance Induction.</p>
+  </div>
+</section>
+
+<section data-label="Vibration" data-screen-label="49 Vibration" style="background:#fff; color:var(--ink); display:flex; padding:80px var(--pad-x) 64px; gap:64px;">
+  <div style="flex:1; display:flex; flex-direction:column; gap:20px;">
+    <h1 style="font-size:52px; font-weight:800; letter-spacing:-1px;">Whole Body Vibrations</h1>
+    <p style="font-size:25px; line-height:1.5;">Vibration transmits through seat, floor and controls. Prolonged exposure causes discomfort, fatigue and long-term musculoskeletal disorders.</p>
+    <div style="background:var(--grey); border-left:6px solid var(--red); padding:22px 30px;">
+      <p style="font-size:25px; line-height:1.45;"><span style="font-weight:800;">Faulty seat?</span> Park up immediately. A fitter checks it; if unrepairable, the seat is replaced before the machine returns to service. An acceptable seat has no sideways or forward rocking.</p>
+    </div>
+    <div style="background:var(--grey); padding:22px 30px;">
+      <p style="font-size:25px; line-height:1.45;"><span style="font-weight:800;">Dozer operators:</span> break every 2 hours of normal operation, after 30 minutes of continuous ripping over hard cap, and stand or stretch when possible.</p>
+    </div>
+  </div>
+  <div style="flex:1; display:flex; flex-direction:column; gap:16px;">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:24px;"><h2 style="font-size:32px; font-weight:800;">Correct posture checklist</h2><img src="img/p32-posture.jpg" style="height:220px; border-radius:6px; background:#fff;"></div>
+    <div style="display:flex; flex-direction:column; gap:10px;">
+      <p style="font-size:24px; line-height:1.4;">· Sit upright, feet flat, shoulder blades against the backrest</p>
+      <p style="font-size:24px; line-height:1.4;">· Seat belt worn and comfortably fitted at all times</p>
+      <p style="font-size:24px; line-height:1.4;">· Both hands on the wheel, elbows relaxed, during loading</p>
+      <p style="font-size:24px; line-height:1.4;">· Seat height so thighs are horizontal with the feet</p>
+      <p style="font-size:24px; line-height:1.4;">· Backrest inclined 10–15° behind vertical, lumbar supported</p>
+      <p style="font-size:24px; line-height:1.4;">· Full brake pedal travel while keeping back pressure on the seat</p>
+      <p style="font-size:24px; line-height:1.4;">· Reach wheel and controls without stretching away from the seat</p>
+      <p style="font-size:24px; line-height:1.4;">· Squelch control (if fitted) adjusted to your weight</p>
+    </div>
+  </div>
+</section>
+
+<section data-label="Fatigue" data-screen-label="50 Fatigue" style="background:var(--ink); color:#fff; display:flex; flex-direction:column; padding:80px var(--pad-x) 64px; gap:32px;">
+  <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Fatigue Management</h1>
+  <div style="display:flex; gap:28px; flex:1;">
+    <div style="flex:1; background:#4A4F53; padding:32px 36px; display:flex; flex-direction:column; gap:14px;">
+      <h2 style="font-size:30px; font-weight:800; color:var(--amber);">Causes</h2>
+      <p style="font-size:24px; line-height:1.5; color:#ddd;">Long shifts · night shift and rotating rosters · high physical or mental workload · monotonous tasks like long haul runs · poor sleep quality · excessive vibration exposure</p>
+    </div>
+    <div style="flex:1; background:#4A4F53; padding:32px 36px; display:flex; flex-direction:column; gap:14px;">
+      <h2 style="font-size:30px; font-weight:800; color:var(--amber);">Risks</h2>
+      <p style="font-size:24px; line-height:1.5; color:#ddd;">Slower reactions · reduced concentration and decision-making · microsleeps · more incidents, near misses and equipment damage · long-term health effects</p>
+    </div>
+    <div style="flex:1; background:#EADA23; color:#3C4043; padding:32px 36px; display:flex; flex-direction:column; gap:14px;">
+      <h2 style="font-size:30px; font-weight:800;">Feeling fatigued? Speak up early</h2>
+      <p style="font-size:24px; line-height:1.5;">Park up in a safe location ASAP. Notify your supervisor directly, or tell Pit Control and they will pass the message on.</p>
+      <p style="font-size:24px; line-height:1.4; opacity:.9;">Haul trucks carry a fatigue/distraction system — a critical fatigue event means Pit Control will direct you to park up.</p>
+    </div>
+  </div>
+</section>
+
+<section data-label="Definitions" data-screen-label="51 Definitions" style="background:var(--grey); color:var(--ink); display:flex; flex-direction:column; padding:72px var(--pad-x) 60px; gap:28px;">
+  <h1 style="font-size:var(--type-title); font-weight:800; letter-spacing:-1px;">Definitions &amp; Abbreviations</h1>
+  <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:16px; flex:1; align-content:start;">
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">SME</span><span style="font-size:24px; color:#444;">Surface Mobile Equipment</span></div>
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">PPE</span><span style="font-size:24px; color:#444;">Personal Protective Equipment</span></div>
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">CAS</span><span style="font-size:24px; color:#444;">Collision Avoidance System</span></div>
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">BBM</span><span style="font-size:24px; color:#444;">Boddington Bauxite Mine</span></div>
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">LV</span><span style="font-size:24px; color:#444;">Light Vehicle</span></div>
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">RGV</span><span style="font-size:24px; color:#444;">Road Going Vehicle</span></div>
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">GET</span><span style="font-size:24px; color:#444;">Ground Engaging Tool</span></div>
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">ESO</span><span style="font-size:24px; color:#444;">Emergency Services Officer</span></div>
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">SWI</span><span style="font-size:24px; color:#444;">Safe Work Instruction</span></div>
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">OEM</span><span style="font-size:24px; color:#444;">Original Equipment Manufacturer</span></div>
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">ROM</span><span style="font-size:24px; color:#444;">Run of Mine</span></div>
+    <div style="background:#fff; padding:24px 28px; display:flex; flex-direction:column; gap:4px;"><span style="font-size:34px; font-weight:900; color:var(--red);">JHA</span><span style="font-size:24px; color:#444;">Job Hazard Analysis</span></div>
+  </div>
+</section>
+
+<section data-label="Completion" data-screen-label="52 Completion" style="background:var(--ink); color:#fff; display:flex; flex-direction:column; justify-content:center; align-items:center; padding:0 var(--pad-x); gap:36px; text-align:center;">
+  <img src="img/p02-cover.png" style="height:160px;">
+  <h1 style="font-size:90px; font-weight:900; letter-spacing:-2px; line-height:1.05;">Induction Complete</h1>
+  <p style="font-size:var(--type-body); color:#ccc; max-width:1200px; line-height:1.45;">You have covered all six parts of the Mine Site SME Operating Manual. Revisit any section from the menu — your reading is recorded against the assessment.</p>
+  <div style="display:flex; gap:20px;">
+    <div onClick="{{ goMenu }}" class="expander" style="background:#EADA23; color:#3C4043; padding:22px 48px; font-size:28px; font-weight:800; cursor:pointer;">Back to Section Menu</div>
+  </div>
+  <p style="font-size:24px; color:#888; font-family:'Archivo Narrow';">Controlled document: Training Manual 00117938 v18.0 · References: Mine Site Drivers Permit Manual 00120014 · Service Road Driver Manual 01017029 · Blast Management Plan 01013284 · PMH Management Plan 200000839 · Vehicle &amp; Heavy Equipment Recovery 01020826 · Fatigue Risk Management 01016923</p>
+</section>
+
+</x-import>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  // done:   slide index -> fully read (arrived + every interactive touched)
+  // touched: interactive key -> ever activated (monotonic, unlike open/flipped)
+  state = { flipped: {}, open: {}, done: {}, touched: {}, current: 0 };
+
+  componentDidMount() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('sme-induction-gate') || 'null');
+      if (saved && typeof saved === 'object') {
+        this.setState({ done: saved.done || {}, touched: saved.touched || {} });
+        this._publish(saved.done || {});
+      } else {
+        this._publish({});
+      }
+    } catch (e) { this._publish({}); }
+    // The hosting player may seed slides already recorded server-side, so a
+    // reopened course resumes instead of re-locking from slide zero.
+    this._onSeed = () => this._applySeed();
+    window.addEventListener('course-seed', this._onSeed);
+    this._applySeed();
+    this._onSlide = (e) => this.arrive(e.detail.index);
+    this._bindStage = setInterval(() => {
+      const stage = document.querySelector('deck-stage');
+      if (!stage) return;
+      clearInterval(this._bindStage);
+      this._bindStage = null;
+      // Reading mode: the authoring rail would allow (and invite) skipping.
+      stage.setAttribute('no-rail', '');
+      stage.addEventListener('slidechange', this._onSlide);
+      // The initial slidechange may have fired before this listener bound.
+      this.arrive(typeof stage._index === 'number' ? stage._index : 0);
+    }, 300);
+  }
+  componentWillUnmount() {
+    if (this._bindStage) clearInterval(this._bindStage);
+    const stage = document.querySelector('deck-stage');
+    if (stage && this._onSlide) stage.removeEventListener('slidechange', this._onSlide);
+    if (this._onSeed) window.removeEventListener('course-seed', this._onSeed);
+  }
+
+  // Interactive elements that must all be activated before the slide counts
+  // as read. Keys match the state keys the click handlers record.
+  requirementsFor(i) {
+    if (i === 6) return ['pmh0','pmh1','pmh2','pmh3','pmh4','pmh5'];
+    if (i === 11) return ['rc0','rc1','rc2','rc3','rc4','rc5','rc6','rc7','rc8','rc9','rc10','rc11','rc12'];
+    if (i === 19) return ['sign0','sign1','sign2','sign3','sign4','sign5'];
+    if (i === 22) return ['hc0','hc1','hc2'];
+    return [];
+  }
+  // The furthest slide the reader may sit on: the first not-yet-done one.
+  allowedMax(done) {
+    const d = done || this.state.done;
+    for (let i = 0; i <= 51; i++) if (!d[i]) return i;
+    return 51;
+  }
+  // The bridge in index.html filters what it reports to the hosting player by
+  // this global, so a bounced (refused) navigation never counts as reading.
+  _publish(done) { try { window.__courseAllowedMax = this.allowedMax(done); } catch (e) {} }
+  _persist(done, touched) {
+    try { localStorage.setItem('sme-induction-gate', JSON.stringify({ done: done, touched: touched })); } catch (e) {}
+  }
+  _applySeed() {
+    const seed = typeof window !== 'undefined' ? window.__courseSeedVisited : null;
+    if (!Array.isArray(seed) || seed.length === 0) return;
+    const done = Object.assign({}, this.state.done);
+    let changed = false;
+    for (const n of seed) {
+      if (Number.isInteger(n) && n >= 0 && n <= 51 && !done[n]) { done[n] = true; changed = true; }
+    }
+    if (!changed) return;
+    this.setState({ done: done });
+    this._publish(done);
+    this._persist(done, this.state.touched);
+  }
+
+  arrive(i) {
+    const max = this.allowedMax();
+    if (i > max) { this.goTo(max); return; } // gate shut: bounce to the frontier
+    const patch = { current: i };
+    if (!this.state.done[i] && this.requirementsFor(i).every((k) => this.state.touched[k])) {
+      const done = Object.assign({}, this.state.done);
+      done[i] = true;
+      patch.done = done;
+      this._publish(done);
+      this._persist(done, this.state.touched);
+    }
+    this.setState(patch);
+  }
+  goTo(n) {
+    const stage = document.querySelector('deck-stage');
+    if (stage && stage.goTo) stage.goTo(n);
+  }
+  // Flip/expand + record the touch; completes the current slide when this was
+  // its last untouched interactive. exclusiveGroup makes a set behave as an
+  // accordion (signage), so one open row bounds the slide's height.
+  touch(kind, id, exclusiveGroup) {
+    const m = Object.assign({}, this.state[kind]);
+    if (exclusiveGroup) {
+      const wasOpen = !!m[id];
+      for (const k of Object.keys(m)) { if (k.indexOf(exclusiveGroup) === 0) delete m[k]; }
+      if (!wasOpen) m[id] = true;
+    } else {
+      m[id] = !m[id];
+    }
+    const touched = Object.assign({}, this.state.touched);
+    touched[id] = true;
+    const patch = {}; patch[kind] = m; patch.touched = touched;
+    const cur = this.state.current;
+    if (!this.state.done[cur] && this.requirementsFor(cur).every((k) => touched[k])) {
+      const done = Object.assign({}, this.state.done);
+      done[cur] = true;
+      patch.done = done;
+      this._publish(done);
+    }
+    this._persist(patch.done || this.state.done, touched);
+    this.setState(patch);
+  }
+  _gate(i, dark, verb, noun) {
+    const req = this.requirementsFor(i);
+    const got = req.filter((k) => this.state.touched[k]).length;
+    if (got >= req.length) {
+      return { text: '✓ All ' + req.length + ' viewed — press → to continue', color: dark ? '#7fd18f' : '#1a7a2e' };
+    }
+    return { text: verb + ' all ' + req.length + ' ' + noun + ' to continue — ' + got + ' viewed', color: dark ? '#EADA23' : '#B26A00' };
+  }
+
+  renderVals() {
+    const done = this.state.done;
+    const touched = this.state.touched;
+    const maxNow = this.allowedMax();
+    const partDefs = [
+      { tag:'PART A', first:3, last:7, title:'Working Safely in the Active Mine Area', contents:'Safety focus · PPE · principal hazards · exclusion zones' },
+      { tag:'PART B', first:8, last:13, title:'Communication', contents:'Two-way radio · emergency response · channels · blasting · pos-coms' },
+      { tag:'PART C', first:14, last:19, title:'Access & Traffic Rules', contents:'Area access · pedestrians · CAS · phones · signage' },
+      { tag:'PART D', first:20, last:27, title:'Operating SME', contents:'Isolation · horn signals · inspections · faults · blind spots' },
+      { tag:'PART E', first:28, last:37, title:'Vehicle Interaction', contents:'Change outs · parking · refuelling · passing · breakdowns · public roads' },
+      { tag:'PART F', first:38, last:50, title:'Hazardous Events, Ground & Health', contents:'Fires · lightning · powerlines · gradients · vibration · fatigue' },
+    ];
+    let completedParts = 0;
+    const self = this;
+    const menuParts = partDefs.map(function (p) {
+      let doneN = 0;
+      for (let i = p.first; i <= p.last; i++) if (done[i]) doneN++;
+      const total = p.last - p.first + 1;
+      const complete = doneN === total;
+      if (complete) completedParts++;
+      const unlocked = maxNow >= p.first;
+      return {
+        tag: p.tag, title: p.title, contents: p.contents,
+        color: complete ? '#1a7a2e' : unlocked ? '#3C4043' : '#c9c7c3',
+        tick: complete ? '✓ complete' : unlocked ? (doneN > 0 ? doneN + ' of ' + total + ' slides read' : 'up next') : 'locked',
+        tickColor: complete ? '#1a7a2e' : unlocked ? '#B26A00' : '#aaa',
+        opacity: unlocked ? '1' : '0.55',
+        cursor: unlocked ? 'pointer' : 'not-allowed',
+        go: function () { if (unlocked) self.goTo(p.first); },
+      };
+    });
+    const pmhData = [
+      { code:'PMH 14', name:'Dropped & Falling Objects', controls:'Good housekeeping · Exclusion zones' },
+      { code:'PMH 16', name:'Vehicle Accident BBM', controls:'Exclusion zones · Segregation · Positive communication · Training & qualifications · Vehicle inspections · CAS systems' },
+      { code:'PMH 19', name:'Explosive Detonation', controls:'Blasting exclusion zones · Clearance process · Restricted access · Training & qualification · Blasting Transport standard · Blast charging practices' },
+      { code:'PMH 20', name:'Falling from Height', controls:'Handrails & barricading · Training & qualifications · Safe systems of work' },
+      { code:'PMH 24', name:'Ground Movement', controls:'Exclusion zones · Tip head procedures · Training & qualification · Inspections' },
+      { code:'PMH 31', name:'Psychosocial Harm', controls:'Drug & alcohol testing · EAP programs · Code of Conduct training · Fatigue management' },
+    ];
+    const pmhCards = pmhData.map(function (p, i) {
+      return {
+        code: p.code, name: p.name, controls: p.controls,
+        open: !!self.state.open['pmh' + i], closed: !self.state.open['pmh' + i],
+        closedLabel: touched['pmh' + i] ? '✓ viewed — reopen' : '+ Critical controls',
+        toggle: function () { self.touch('open', 'pmh' + i); },
+      };
+    });
+    const radioData = [
+      ['PIT CONTROL','Communication to and from the Pit Controller'],
+      ['MARRA 1','Primary channel — haul roads and pit at Marradong'],
+      ['MARRA 2','Secondary channel at Marradong for long conversation'],
+      ['SADDLE 1','Primary channel — haul roads and pit at Saddleback'],
+      ['SADDLE 2','Secondary channel at Saddleback for long conversation'],
+      ['DEV 1 & 2','Development activities behind coordinator signs'],
+      ['DRILLING','Drilling activities behind coordinator signs'],
+      ['PLANT 1 & 2','BBM Fixed Plant and OBC; Plant 2 for long conversation'],
+      ['MAINT','Maintenance activities — crane use, spotting, etc.'],
+      ['ESO','Emergency services use, e.g. ERT training'],
+      ['BBM–EMER','Emergency channel — activated by the orange button'],
+      ['BLAST','Blasting activities — roadblocks, noise monitors'],
+      ['SURVEY','Survey activities — roads and pits'],
+    ];
+    const radioCards = radioData.map(function (r, i) {
+      return {
+        name: r[0], meaning: r[1],
+        hint: touched['rc' + i] ? '✓ viewed' : 'tap to reveal',
+        flippedClass: self.state.flipped['rc' + i] ? 'flipped' : '',
+        flip: function () { self.touch('flipped', 'rc' + i); },
+      };
+    });
+    const hornData = [
+      { count:'1', label:'One blast', meaning:'“I am starting the engine”' },
+      { count:'2', label:'Two blasts', meaning:'“I am moving forwards”' },
+      { count:'3', label:'Three blasts', meaning:'“I am moving backwards”' },
+    ];
+    const hornCards = hornData.map(function (h, i) {
+      return {
+        count: h.count, label: h.label, meaning: h.meaning,
+        hint: touched['hc' + i] ? '✓ viewed' : 'tap to reveal',
+        flippedClass: self.state.flipped['hc' + i] ? 'flipped' : '',
+        flip: function () { self.touch('flipped', 'hc' + i); },
+      };
+    });
+    const signData = [
+      { img:'img/p10-yondr.png', name:'Stop & Give Way', hint:'mandatory', detail:'A STOP sign means stop AND give way to other traffic in the intersection — simply pausing does not comply and can result in a catastrophic incident. Max site speed is 60 kph; lower limits are signposted. Traffic controls may change without warning and must always be obeyed.' },
+      { img:'img/p04-ppe.png', name:'Blue Mandatory Signs', hint:'must comply', detail:'Blue signage on a white background denotes a mandatory requirement, such as minimum PPE for the area.' },
+      { img:'img/p11-sign-a.png', name:'Yellow Caution Signs', hint:'proceed with caution', detail:'A hazard of some description is ahead — traffic hazard, detour, single-lane access. No permission needed; pass with caution at 30 kph or less.' },
+      { img:'img/p11-sign-b.png', name:'Red Job Coordinator Signs', hint:'permission required', detail:'Entry restricted. Stop at the sign, contact the equipment ID or area owner on the posted radio channel using positive communication, and do not proceed until pos-coms is made. Stay on the posted channel while inside; the 40 m zone still applies; notify the owner when you leave. No response after multiple attempts? DO NOT ENTER — notify the duty supervisor.' },
+      { img:'img/p11-sign-c.png', name:'Blast Signage & Barricades', hint:'shotfirer permission only', detail:'Blasting areas have restricted access via multiple signs and barricades. Never pass any of them without the shotfirer or delegate’s permission.' },
+      { img:'img/p12-isolation.jpg', name:'Disease Suspect Areas', hint:'hygiene rules', detail:'Forest disease suspect/confirmed areas have restricted access. Drivers must follow hygiene procedures — vehicles brushed down in summer and washed down in winter — to avoid spreading forest diseases.' },
+    ];
+    const signRows = signData.map(function (s, i) {
+      return {
+        img: s.img, name: s.name, hint: s.hint, detail: s.detail,
+        open: !!self.state.open['sign' + i],
+        chev: self.state.open['sign' + i] ? '−' : touched['sign' + i] ? '✓' : '+',
+        toggle: function () { self.touch('open', 'sign' + i, 'sign'); },
+      };
+    });
+    const pmhGate = this._gate(6, true, 'Open', 'hazards');
+    const radioGate = this._gate(11, false, 'Flip', 'channel cards');
+    const signGate = this._gate(19, false, 'Open', 'sign types');
+    const hornGate = this._gate(22, true, 'Flip', 'signal cards');
+    return {
+      menuParts,
+      visitedCount: String(completedParts),
+      progressPct: Math.round(completedParts / 6 * 100) + '%',
+      pmhCards, radioCards, hornCards, signRows,
+      pmhGateText: pmhGate.text, pmhGateColor: pmhGate.color,
+      radioGateText: radioGate.text, radioGateColor: radioGate.color,
+      signGateText: signGate.text, signGateColor: signGate.color,
+      hornGateText: hornGate.text, hornGateColor: hornGate.color,
+      goMenu: () => this.goTo(2),
+    };
+  }
+}
+</script>
+</body>
+</html>

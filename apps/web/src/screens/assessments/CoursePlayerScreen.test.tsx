@@ -50,6 +50,7 @@ function deckCourse(over: Partial<CaseCourseView> = {}): CaseCourseView {
     completedAt: null,
     launchUrl: '/courses/content/tok/index.html',
     expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    visitedSlides: [],
     ...over,
   };
 }
@@ -95,6 +96,25 @@ describe('CoursePlayerScreen', () => {
     });
     expect(saveMutate).toHaveBeenCalledTimes(1);
     expect(saveMutate.mock.calls[0]![0]).toEqual({ visitedSlides: [0, 1] });
+  });
+
+  it('seeds a reopened package with the recorded slides and never re-reports them', () => {
+    vi.useFakeTimers();
+    courseResult.data = { course: deckCourse({ viewedCount: 2, visitedSlides: [0, 1] }) };
+    render(<CoursePlayerScreen />);
+
+    const frame = document.querySelector('iframe')!;
+    const post = vi.spyOn(frame.contentWindow!, 'postMessage');
+    fireEvent.load(frame);
+    expect(post).toHaveBeenCalledWith({ type: 'course-progress-seed', visited: [0, 1] }, '*');
+
+    // The deck replays a seeded index as the reader resumes — already stored
+    // server-side, so it must not turn into a PATCH.
+    postSlide(1);
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(saveMutate).not.toHaveBeenCalled();
   });
 
   it('a message from any other window is ignored', () => {
