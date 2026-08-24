@@ -5,6 +5,7 @@ import {
   downloadPdf as downloadReplit,
   getReplitClient,
   uploadAttachment as uploadAttachmentReplit,
+  uploadCourseFile as uploadCourseFileReplit,
   uploadImage as uploadImageReplit,
   uploadPdf as uploadReplit,
 } from './replit.js';
@@ -14,6 +15,7 @@ import {
   downloadPdf as downloadSupabase,
   getSupabaseClient,
   uploadAttachment as uploadAttachmentSupabase,
+  uploadCourseFile as uploadCourseFileSupabase,
   uploadImage as uploadImageSupabase,
   uploadPdf as uploadSupabase,
 } from './supabase.js';
@@ -38,6 +40,20 @@ export interface StorageClient {
     bytes: Uint8Array,
     contentType: string,
     ext: string,
+  ): Promise<string>;
+  /**
+   * Stores one file of an unpacked course package at its zip-relative path,
+   * under the org's `course-{courseId}/` namespace, and returns the key.
+   * Unlike the flat namespaces above the path is CALLER-SUPPLIED, so the
+   * course import route validates it (no `..`, no leading slash, allowlisted
+   * extension) before any byte reaches here.
+   */
+  uploadCourseFile(
+    orgId: string,
+    courseId: string,
+    path: string,
+    bytes: Uint8Array,
+    contentType: string,
   ): Promise<string>;
   download(orgId: string, assetId: string): Promise<Buffer | null>;
   /** Deletes one object, scoped to the org's prefix — superseded-logo cleanup. */
@@ -65,6 +81,8 @@ export function getStorageClient(): StorageClient | null {
         uploadImageSupabase(client, orgId, bytes, contentType, ext),
       uploadAttachment: (orgId, bytes, contentType, ext) =>
         uploadAttachmentSupabase(client, orgId, bytes, contentType, ext),
+      uploadCourseFile: (orgId, courseId, path, bytes, contentType) =>
+        uploadCourseFileSupabase(client, orgId, courseId, path, bytes, contentType),
       download: (orgId, assetId) => downloadSupabase(client, orgId, assetId),
       deleteObject: (orgId, key) => deleteObjectSupabase(client, orgId, key),
       deletePrefix: (orgId) => deletePrefixSupabase(client, orgId),
@@ -78,6 +96,8 @@ export function getStorageClient(): StorageClient | null {
       uploadImageReplit(client, orgId, bytes, contentType, ext),
     uploadAttachment: (orgId, bytes, contentType, ext) =>
       uploadAttachmentReplit(client, orgId, bytes, contentType, ext),
+    uploadCourseFile: (orgId, courseId, path, bytes, contentType) =>
+      uploadCourseFileReplit(client, orgId, courseId, path, bytes, contentType),
     download: (orgId, assetId) => downloadReplit(client, orgId, assetId),
     deleteObject: (orgId, key) => deleteObjectReplit(client, orgId, key),
     deletePrefix: (orgId) => deletePrefixReplit(client, orgId),

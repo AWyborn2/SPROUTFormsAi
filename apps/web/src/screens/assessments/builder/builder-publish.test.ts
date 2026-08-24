@@ -786,4 +786,22 @@ describe('composeRevisionManifest — the summary wiring survives a revision', (
     // And a key the derivation never writes rides through from the seed.
     expect(merged.pathwayMarks).toEqual(seeded.pathwayMarks);
   });
+
+  it('carries the course link through a revision — it names no field, so it never falls', async () => {
+    const { composeRevisionManifest } = await import('./builder-publish.js');
+    const withCourse: AssessmentToolManifest = {
+      ...seeded,
+      course: { courseId: 'course-1', required: true },
+    };
+
+    // With or without field resolution, the link survives: a re-extracted
+    // paper renames boxes, not the manual the candidate reads first.
+    expect(composeRevisionManifest(withCourse, derived).course).toEqual({
+      courseId: 'course-1',
+      required: true,
+    });
+    expect(
+      composeRevisionManifest(withCourse, derived, [question('q1')]).course,
+    ).toEqual({ courseId: 'course-1', required: true });
+  });
 });

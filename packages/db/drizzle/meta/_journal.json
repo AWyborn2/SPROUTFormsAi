@@ -477,6 +477,13 @@
       "when": 1787535393393,
       "tag": "0067_tan_shard",
       "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1787543111763,
+      "tag": "0068_lowly_vivisector",
+      "breakpoints": true
     }
   ]
 }

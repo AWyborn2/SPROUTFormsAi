@@ -20,7 +20,92 @@ import {
   useSignOffCase,
 } from '../../lib/data/hooks.js';
 import { caseExportFilename, caseExportProblem } from '../../lib/case-export-problem.js';
-import type { CasePartView } from '../../lib/data/assessments.js';
+import type { CaseCourseState, CasePartView } from '../../lib/data/assessments.js';
+
+/**
+ * The course-material card: what the candidate reads before the parts below
+ * can start. State only — the reading itself happens on the player screen,
+ * which paces completion; this card shows where that has got to and, while
+ * the gate is shut, says so in words rather than letting the Start buttons
+ * fail mysteriously.
+ */
+function CourseCard({
+  caseId,
+  course,
+  caseOpen,
+}: {
+  caseId: string;
+  course: CaseCourseState;
+  caseOpen: boolean;
+}) {
+  if (course.missing) {
+    return (
+      <div
+        className="mt-4 rounded-md border p-[12px_14px]"
+        style={{ background: 'var(--warning-soft)', borderColor: 'var(--border-warning)' }}
+      >
+        <div className="flex items-center gap-2 text-[13px] font-semibold" style={{ color: 'var(--warning-text)' }}>
+          <Icon name="book-open" size={15} />
+          Course material unavailable
+        </div>
+        <p className="mt-1.5 text-[12.5px]" style={{ color: 'var(--warning-text)' }}>
+          The course package this assessment links to has been removed, so the reading
+          requirement is not being enforced. Relink one in the workflow editor.
+        </p>
+      </div>
+    );
+  }
+
+  const done = course.completedAt !== null;
+  const hasSlides = course.totalSlides !== null && course.totalSlides > 0;
+  return (
+    <div className="mt-4 rounded-md border border-border bg-surface-card p-[14px_16px]">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <Icon name="book-open" size={17} className="text-text-tertiary" />
+          <div>
+            <div className="text-[14px] font-semibold">{course.title ?? 'Course material'}</div>
+            <p className="mt-0.5 text-[12.5px] text-text-tertiary">
+              {done
+                ? `Read through${course.completedAt ? ` on ${new Date(course.completedAt).toLocaleDateString()}` : ''}.`
+                : hasSlides && course.viewedCount > 0
+                  ? `${course.viewedCount} of ${course.totalSlides} slides read.`
+                  : course.required
+                    ? 'Must be read through before the assessment can start.'
+                    : 'Recommended reading for this assessment.'}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2.5">
+          {done ? (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium"
+              style={{ background: 'var(--success-soft)', color: 'var(--success-text)' }}
+            >
+              <Icon name="circle-check" size={12} />
+              Complete
+            </span>
+          ) : (
+            course.required && (
+              <span
+                className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium"
+                style={{ background: 'var(--warning-soft)', color: 'var(--warning-text)' }}
+              >
+                <Icon name="lock" size={12} />
+                Required first
+              </span>
+            )
+          )}
+          <Link to={`/app/assessments/${caseId}/course`}>
+            <Button variant={done ? 'outline' : 'primary'} leadingIcon="book-open">
+              {done ? 'Reopen course' : caseOpen && course.viewedCount > 0 ? 'Continue reading' : 'Open course'}
+            </Button>
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /**
  * One assessment case: every part, its state, and the controls to resolve it.
@@ -200,6 +285,10 @@ export function AssessmentCaseScreen() {
         </div>
       </div>
 
+      {c.course && (
+        <CourseCard caseId={c.id} course={c.course} caseOpen={c.state === 'open'} />
+      )}
+
       {c.prerequisiteWarnings.length > 0 && (
         <div
           className="mt-4 rounded-md border p-[12px_14px]"
@@ -233,13 +322,24 @@ export function AssessmentCaseScreen() {
                 // The server authorises per workflow: a candidate may open the
                 // steps handed to THEM, and a part that is the assessor's says
                 // so instead of failing silently.
-                onError: () =>
+                onError: (err) => {
+                  const body =
+                    err instanceof ApiError ? (err.body as Record<string, unknown>) : {};
+                  if (body?.error === 'course_not_complete') {
+                    toast({
+                      variant: 'warning',
+                      message:
+                        'The course material must be read through before the assessment can start.',
+                    });
+                    return;
+                  }
                   toast({
                     variant: 'warning',
                     message: isCandidate
                       ? 'This step is opened by your assessor.'
                       : 'Couldn’t open an attempt for this part.',
-                  }),
+                  });
+                },
               })
             }
             opening={openAttempt.isPending}

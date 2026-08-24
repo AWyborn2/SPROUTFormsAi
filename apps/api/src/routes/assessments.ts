@@ -78,6 +78,7 @@ import {
 } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
+import { mintCourseContentPath } from './courses.js';
 import { comparePassword } from '../auth/verify-password.js';
 import {
   recordConfirmFailure,
@@ -601,6 +602,17 @@ const partCompletionMarkSchema = z.object({
 /** The case's pathway → the printed box that says so. Partial by design. */
 const pathwayMarksSchema = z.record(z.enum(ASSESSMENT_PATHWAYS), declaredMarkSchema);
 
+/**
+ * The manifest's pointer at a hosted course package (the pre-assessment
+ * reading). Whether the id names a real, active course is checked where the
+ * link is SET — the PATCH below — not here: schema-level existence checks
+ * cannot reach the database.
+ */
+const courseLinkSchema = z.object({
+  courseId: z.string().uuid(),
+  required: z.boolean(),
+});
+
 /*
   One printed box, answered by ANY of the listed classes. `competencyId` is the
   legacy single-class spelling and still accepted — a manifest saved before
@@ -868,6 +880,14 @@ const updateToolBody = z.object({
     )
     .nullable()
     .optional(),
+  /**
+   * The pre-assessment course link. Same tri-state as everything above —
+   * absent keeps, null clears, an object replaces — and setting one is
+   * validated against the org's actual courses below, because a link to a
+   * course that does not exist would read as "configured" in the builder
+   * while gating nothing at runtime.
+   */
+  course: courseLinkSchema.nullable().optional(),
 });
 
 const toolBody = z.object({
@@ -914,6 +934,10 @@ const toolBody = z.object({
     // The printed pathway tick, written from the case at export. Named for the
     // same reason as every optional above: unlisted means silently STRIPPED.
     pathwayMarks: pathwayMarksSchema.optional(),
+    // The pre-assessment course link. Named for the same reason as every
+    // optional above: unlisted means silently STRIPPED, and a republished
+    // revision would quietly stop requiring the manual be read.
+    course: courseLinkSchema.optional(),
   }),
   candidatePrerequisiteIds: z.array(z.string().uuid()).optional(),
   assessorCompetencyIds: z.array(z.string().uuid()).optional(),
@@ -2010,7 +2034,8 @@ assessmentToolsRouter.patch(
       parsed.data.partCompletionMarks !== undefined ||
       parsed.data.signOff !== undefined ||
       parsed.data.pathwayMarks !== undefined ||
-      parsed.data.partOutcomeMarks !== undefined;
+      parsed.data.partOutcomeMarks !== undefined ||
+      parsed.data.course !== undefined;
     let manifest: AssessmentToolManifest = tool.manifest;
     if (parsed.data.workflow) manifest = { ...manifest, workflow: parsed.data.workflow };
     if (parsed.data.profilePrefill !== undefined) {
@@ -2048,6 +2073,28 @@ assessmentToolsRouter.patch(
       manifest = parsed.data.pathwayMarks
         ? { ...rest, pathwayMarks: parsed.data.pathwayMarks }
         : rest;
+    }
+    if (parsed.data.course !== undefined) {
+      // Setting a link is validated against the org's actual courses: a
+      // dangling id would read as "configured" in the builder while the
+      // runtime, which degrades a missing course to unenforced, gated nothing.
+      if (parsed.data.course) {
+        const courseRow = await db.query.courses.findFirst({
+          where: and(
+            eq(schema.courses.id, parsed.data.course.courseId),
+            eq(schema.courses.orgId, tenant.orgId),
+          ),
+        });
+        if (!courseRow || courseRow.status !== 'active') {
+          res.status(400).json({
+            error: 'invalid_workflow',
+            problems: ['The selected course no longer exists — refresh and pick again.'],
+          });
+          return;
+        }
+      }
+      const { course: _dropped, ...rest } = manifest;
+      manifest = parsed.data.course ? { ...rest, course: parsed.data.course } : rest;
     }
     const partOutcomeEntries = parsed.data.partOutcomeMarks;
     if (partOutcomeEntries !== undefined) {
@@ -2988,6 +3035,47 @@ assessmentCasesRouter.get(
 
     const caseFields = await fieldsForVersion(db, row.currentVersionId);
 
+    // The case's reading state, when the tool links course material — enough
+    // for the case screen to show the course card and explain a gated part.
+    let courseBlock: {
+      courseId: string;
+      required: boolean;
+      missing: boolean;
+      title: string | null;
+      kind: string | null;
+      totalSlides: number | null;
+      viewedCount: number;
+      completedAt: string | null;
+    } | null = null;
+    const detailCourseLink = tool.manifest.course;
+    if (detailCourseLink) {
+      const courseRow = await db.query.courses.findFirst({
+        where: and(
+          eq(schema.courses.id, detailCourseLink.courseId),
+          eq(schema.courses.orgId, tenant.orgId),
+        ),
+      });
+      const active = courseRow && courseRow.status === 'active' ? courseRow : null;
+      const reading = active
+        ? await db.query.assessmentCaseCourseProgress.findFirst({
+            where: and(
+              eq(schema.assessmentCaseCourseProgress.caseId, row.id),
+              eq(schema.assessmentCaseCourseProgress.courseId, active.id),
+            ),
+          })
+        : null;
+      courseBlock = {
+        courseId: detailCourseLink.courseId,
+        required: detailCourseLink.required,
+        missing: !active,
+        title: active?.title ?? null,
+        kind: active?.kind ?? null,
+        totalSlides: active?.slideCount ?? null,
+        viewedCount: reading?.visitedSlides.length ?? 0,
+        completedAt: reading?.completedAt ? reading.completedAt.toISOString() : null,
+      };
+    }
+
     res.json({
       id: row.id,
       toolId: tool.id,
@@ -3005,6 +3093,7 @@ assessmentCasesRouter.get(
       currentVersionId: row.currentVersionId,
       prerequisiteWarnings: row.prerequisiteWarnings,
       appealOfCaseId: row.appealOfCaseId,
+      course: courseBlock,
       parts: progress.map((p) => ({
         key: p.part.key,
         label: p.part.label,
@@ -3033,6 +3122,231 @@ assessmentCasesRouter.get(
         /** Any assessor-eligibility shortfall recorded when a person marked it (U14). */
         markingEligibilityWarnings: a.markingEligibilityWarnings,
       })),
+    });
+  }),
+);
+
+/**
+ * The case's course material, with a freshly minted content link.
+ *
+ * Split from the case detail because THIS is the route that mints a
+ * capability: opening the player is when a time-boxed token should start
+ * its clock, not every case screen render. `launchUrl` is a PATH the web
+ * app prefixes with its API base, for the same proxy reason the induction
+ * document links are paths.
+ */
+assessmentCasesRouter.get(
+  '/:id/course',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'view');
+    if (scope === 'none') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    const tool = await loadTool(db, row.toolId, tenant.orgId);
+    if (!tool) {
+      res.status(409).json({ error: 'tool_missing' });
+      return;
+    }
+    const courseLink = tool.manifest.course;
+    if (!courseLink) {
+      res.json({ course: null });
+      return;
+    }
+    const courseRow = await db.query.courses.findFirst({
+      where: and(
+        eq(schema.courses.id, courseLink.courseId),
+        eq(schema.courses.orgId, tenant.orgId),
+      ),
+    });
+    if (!courseRow || courseRow.status !== 'active') {
+      res.json({
+        course: {
+          courseId: courseLink.courseId,
+          required: courseLink.required,
+          missing: true,
+          title: null,
+          kind: null,
+          totalSlides: null,
+          viewedCount: 0,
+          completedAt: null,
+          launchUrl: null,
+          expiresAt: null,
+        },
+      });
+      return;
+    }
+    const reading = await db.query.assessmentCaseCourseProgress.findFirst({
+      where: and(
+        eq(schema.assessmentCaseCourseProgress.caseId, row.id),
+        eq(schema.assessmentCaseCourseProgress.courseId, courseRow.id),
+      ),
+    });
+    const { prefix, expiresAt } = mintCourseContentPath(tenant.orgId, courseRow.id);
+    const encodedLaunch = courseRow.launchPath.split('/').map(encodeURIComponent).join('/');
+    res.json({
+      course: {
+        courseId: courseRow.id,
+        required: courseLink.required,
+        missing: false,
+        title: courseRow.title,
+        kind: courseRow.kind,
+        totalSlides: courseRow.slideCount,
+        viewedCount: reading?.visitedSlides.length ?? 0,
+        completedAt: reading?.completedAt ? reading.completedAt.toISOString() : null,
+        launchUrl: `${prefix}/${encodedLaunch}`,
+        expiresAt,
+      },
+    });
+  }),
+);
+
+const courseProgressBody = z.object({
+  /** Zero-based slide indexes the player saw since its last report. */
+  visitedSlides: z.array(z.number().int().min(0).max(4999)).max(1000).optional(),
+  /**
+   * The read-through confirmation, for packages with no slide stream (SCORM
+   * or plain HTML). Ignored for a deck — a deck completes by being paged
+   * through, and accepting the shortcut would let one click skip the manual.
+   */
+  confirmRead: z.boolean().optional(),
+});
+
+/**
+ * Records reading progress on the case's course.
+ *
+ * Monotonic by construction: reported slides UNION into what is stored, and
+ * `completedAt`, once earned, is never recomputed away. Completion itself is
+ * derived HERE from the course's own rule — never accepted from the client —
+ * so the gate on opening attempts cannot be satisfied by a crafted request
+ * claiming totals the reading never reached... beyond the honesty of the
+ * indexes themselves, which is the same trust every filled answer gets.
+ */
+assessmentCasesRouter.patch(
+  '/:id/course-progress',
+  ...GATE,
+  withErrorHandling(async (req, res) => {
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+    const tenant = req.tenant!;
+    const scope = await permissionScope(tenant, 'assessments', 'edit');
+    if (scope === 'none') {
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+    const parsed = courseProgressBody.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', detail: parsed.error.flatten() });
+      return;
+    }
+    const row = await loadCase(db, req.params.id!, tenant.orgId);
+    if (!row || (scope === 'own' && row.candidateUserId !== tenant.userId)) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+    // Reading is part of sitting the assessment, so it belongs to an OPEN
+    // case only — a resolved case's record is history, not a workbook.
+    if (row.state !== 'open') {
+      res.status(409).json({ error: 'case_not_open' });
+      return;
+    }
+    const tool = await loadTool(db, row.toolId, tenant.orgId);
+    if (!tool) {
+      res.status(409).json({ error: 'tool_missing' });
+      return;
+    }
+    const courseLink = tool.manifest.course;
+    if (!courseLink) {
+      res.status(404).json({ error: 'course_not_configured' });
+      return;
+    }
+    const courseRow = await db.query.courses.findFirst({
+      where: and(
+        eq(schema.courses.id, courseLink.courseId),
+        eq(schema.courses.orgId, tenant.orgId),
+      ),
+    });
+    if (!courseRow || courseRow.status !== 'active') {
+      res.status(404).json({ error: 'course_missing' });
+      return;
+    }
+
+    const existing = await db.query.assessmentCaseCourseProgress.findFirst({
+      where: and(
+        eq(schema.assessmentCaseCourseProgress.caseId, row.id),
+        eq(schema.assessmentCaseCourseProgress.courseId, courseRow.id),
+      ),
+    });
+
+    // Union, bounded by what the course actually has: an index past the deck
+    // is a player bug and must not be able to pad the count toward coverage.
+    const slideCount = courseRow.slideCount;
+    const visited = new Set<number>(existing?.visitedSlides ?? []);
+    if (slideCount !== null) {
+      for (const idx of parsed.data.visitedSlides ?? []) {
+        if (idx < slideCount) visited.add(idx);
+      }
+    }
+    const visitedList = [...visited].sort((a, b) => a - b);
+
+    const wasComplete = existing?.completedAt != null;
+    let complete = wasComplete;
+    if (!complete) {
+      if (courseRow.kind === 'deck' && slideCount !== null) {
+        complete = visitedList.length >= slideCount;
+      } else if (courseRow.kind !== 'deck') {
+        complete = parsed.data.confirmRead === true;
+      }
+    }
+    const completedAt = existing?.completedAt ?? (complete ? new Date() : null);
+
+    if (existing) {
+      await db
+        .update(schema.assessmentCaseCourseProgress)
+        .set({
+          visitedSlides: visitedList,
+          updatedAt: new Date(),
+          ...(complete && !wasComplete
+            ? { completedAt, completedByUserId: tenant.userId }
+            : {}),
+        })
+        .where(eq(schema.assessmentCaseCourseProgress.id, existing.id));
+    } else {
+      await db.insert(schema.assessmentCaseCourseProgress).values({
+        orgId: tenant.orgId,
+        caseId: row.id,
+        courseId: courseRow.id,
+        visitedSlides: visitedList,
+        ...(complete ? { completedAt, completedByUserId: tenant.userId } : {}),
+      });
+    }
+
+    if (complete && !wasComplete) {
+      await recordAudit(db, tenant, {
+        action: 'Completed course material',
+        target: courseRow.title,
+        category: 'submissions',
+        icon: 'book-open',
+      });
+    }
+
+    res.json({
+      viewedCount: visitedList.length,
+      totalSlides: slideCount,
+      completedAt: completedAt ? completedAt.toISOString() : null,
     });
   }),
 );
@@ -3174,6 +3488,43 @@ assessmentCasesRouter.post(
     if (open) {
       res.status(200).json({ id: open.id, attemptNumber: open.attemptNumber, reused: true });
       return;
+    }
+
+    /*
+      THE COURSE MATERIAL COMES BEFORE THE ASSESSMENT. A tool whose manifest
+      requires its course refuses to start ANY new attempt until this case's
+      reading record is complete — that is the whole meaning of "required".
+
+      Checked after the reuse return above, not before it: an attempt that was
+      already open when the requirement appeared (a mid-case workflow edit)
+      stays continuable, because refusing it would strand work in progress
+      rather than order it.
+
+      A link whose course has been archived or deleted degrades to UNENFORCED
+      rather than locking the assessment shut — a dangling pointer must never
+      be able to stop every case on the tool, and the case surface shows the
+      link as missing so someone fixes it.
+    */
+    const courseLink = tool.manifest.course;
+    if (courseLink?.required) {
+      const courseRow = await db.query.courses.findFirst({
+        where: and(
+          eq(schema.courses.id, courseLink.courseId),
+          eq(schema.courses.orgId, tenant.orgId),
+        ),
+      });
+      if (courseRow && courseRow.status === 'active') {
+        const reading = await db.query.assessmentCaseCourseProgress.findFirst({
+          where: and(
+            eq(schema.assessmentCaseCourseProgress.caseId, row.id),
+            eq(schema.assessmentCaseCourseProgress.courseId, courseRow.id),
+          ),
+        });
+        if (!reading?.completedAt) {
+          res.status(409).json({ error: 'course_not_complete', courseTitle: courseRow.title });
+          return;
+        }
+      }
     }
 
     /*

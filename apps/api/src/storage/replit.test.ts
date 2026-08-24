@@ -5,6 +5,7 @@ import {
   downloadPdf,
   getReplitClient,
   type ReplitStorageClient,
+  uploadCourseFile,
   uploadImage,
   uploadPdf,
 } from './replit.js';
@@ -174,5 +175,34 @@ describe('deletePrefix', () => {
     });
 
     await expect(deletePrefix(client, 'org-1')).rejects.toThrow('storage_delete_prefix_failed');
+  });
+});
+
+describe('uploadCourseFile', () => {
+  it('writes the caller-validated path under the org course namespace', async () => {
+    const uploadFromBytes = vi.fn().mockResolvedValue({ ok: true, value: null });
+    const client = mockClient({ uploadFromBytes });
+
+    const key = await uploadCourseFile(
+      client,
+      'org-1',
+      'course-uuid',
+      'img/cover.png',
+      new Uint8Array([1, 2, 3]),
+      'image/png',
+    );
+
+    // The `course-` infix keeps these objects out of the public logo door and
+    // the attachment route's `upload-` regex alike.
+    expect(key).toBe('org-1/course-course-uuid/img/cover.png');
+    expect(uploadFromBytes).toHaveBeenCalledWith(key, expect.any(Buffer));
+  });
+
+  it('throws when the upload errors', async () => {
+    const uploadFromBytes = vi.fn().mockResolvedValue({ ok: false, error: { message: 'quota' } });
+    const client = mockClient({ uploadFromBytes });
+    await expect(
+      uploadCourseFile(client, 'org-1', 'c1', 'index.html', new Uint8Array([1]), 'text/html'),
+    ).rejects.toThrow(/storage_upload_failed/);
   });
 });
