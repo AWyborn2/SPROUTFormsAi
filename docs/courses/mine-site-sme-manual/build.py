@@ -403,6 +403,11 @@ function enterSlide(i){ var sl=slides[i], p=partOf(i);
    : ('Part '+p+' · slide '+(i-PARTS[p][0]+1)+' of '+(PARTS[p][1]-PARTS[p][0]+1));
  tick(false); stopFill(); nextBtn.style.display='';
  if(p==='menu'){ renderMenu(); markComplete(i); menuBar(); return; }
+ // The final slide counts as read on ARRIVAL — reaching it required finishing
+ // every part, and its Start Assessment CTA is live at once. Without this a
+ // fast click navigates away before this last slide is reported, leaving the
+ // host one slide short of complete and the assessment gate shut.
+ if(p==='done'){ markComplete(i); becomeReady(i); return; }
  var c=cardsOf(sl);
  if(c.length){
   if(completed.has(i)||cardsDone(sl)){ Array.prototype.forEach.call(c,function(x){x.classList.add('viewed'); if(x.classList.contains('expander')) setExp(x,false);}); markComplete(i); becomeReady(i); }
