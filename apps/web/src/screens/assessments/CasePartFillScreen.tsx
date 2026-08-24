@@ -17,6 +17,7 @@ import {
 import { partVisibility } from '../../lib/assessment-fill.js';
 import { fillSpanClass, resolveFillSpan, visibleFillFields } from '../../lib/fill-layout.js';
 import { FieldInput } from '../fields/FieldRenderer.js';
+import { ConfirmSignatureDialog } from '../fields/ConfirmSignatureDialog.js';
 import { answeredPages, quizFields, theoryPages } from '../../lib/theory-pages.js';
 import { TheoryQuiz } from './TheoryQuiz.js';
 
@@ -52,6 +53,9 @@ export function CasePartFillScreen() {
 
   const [values, setValues] = useState<Record<string, SubmissionValue>>({});
   const [dirty, setDirty] = useState(false);
+  // The signature field awaiting a password confirmation, when the person
+  // chose "Use saved signature" — the dialog applies the mark only on a 204.
+  const [signatureField, setSignatureField] = useState<string | null>(null);
   /**
    * Seeded once PER ATTEMPT. Re-seeding on every fetch would discard whatever
    * the candidate had typed since — a background refetch mid-answer must not
@@ -531,6 +535,17 @@ export function CasePartFillScreen() {
               */
               disabled={readOnly || !writable.has(f.id)}
               onChange={(v) => setValue(f.id, v)}
+              /*
+                Offered only when the whole act can complete: a saved mark on
+                the session, a password to confirm it with (R6 hides it for
+                invite-created accounts that never set one), and a field this
+                party may write. The confirmation dialog below owns the rest.
+              */
+              onUseSavedSignature={
+                session?.signature && session.hasPassword && !readOnly && writable.has(f.id)
+                  ? (fieldId) => setSignatureField(fieldId)
+                  : undefined
+              }
             />
             {/*
               MODEL ANSWER — assessor guide. Rendered BESIDE the field rather
@@ -682,6 +697,19 @@ export function CasePartFillScreen() {
           )}
         </div>
       )}
+
+      <ConfirmSignatureDialog
+        open={signatureField !== null}
+        context={{ caseId, attemptId, fieldId: signatureField ?? undefined }}
+        onClose={() => setSignatureField(null)}
+        onConfirmed={() => {
+          // The 204 is the act; writing the mark is its result. Routed through
+          // setValue so the companion date-stamp fires exactly as it does for
+          // a drawn signature.
+          if (signatureField && session?.signature) setValue(signatureField, session.signature);
+          setSignatureField(null);
+        }}
+      />
     </div>
   );
 }

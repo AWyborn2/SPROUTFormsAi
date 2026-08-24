@@ -165,6 +165,14 @@ export const users = pgTable('users', {
    * have signed anything.
    */
   signature: text('signature'),
+  /**
+   * When the person DELIBERATELY saved their signature (My signature — drawn
+   * or uploaded), as opposed to the sign-off remember above. Null means every
+   * stored signature is only a remembered convenience, and the sign-off may
+   * keep refreshing it; set, the remember-write stands down so a deliberate
+   * choice is never silently clobbered by a one-off drawing.
+   */
+  signatureSavedAt: timestamp('signature_saved_at', { withTimezone: true }),
   createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
 });
 

@@ -1,6 +1,16 @@
 import { useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Avatar, Badge, Button, Card, Icon, Input, useToast, type BadgeVariant } from '@formai/ui';
+import {
+  Avatar,
+  Badge,
+  Button,
+  Card,
+  Icon,
+  Input,
+  SignaturePad,
+  useToast,
+  type BadgeVariant,
+} from '@formai/ui';
 import {
   PROFILE_FIELDS,
   isTerminalCaseState,
@@ -17,9 +27,11 @@ import {
   useProfileSeed,
   useRenewCompetency,
   useSaveProfile,
+  useSaveSignature,
   useSession,
   useTaxonomy,
 } from '../../lib/data/hooks.js';
+import { ApiError } from '../../lib/data/api-client.js';
 import { CaseStateBadge } from '../statusBadges.js';
 import { RecommendedTrainingList } from '../recommended-training.js';
 import { sourcesLine } from '../../lib/competency-sources.js';
@@ -157,6 +169,16 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
 
       {candidateSelf && <MyAssessmentsCard />}
 
+      {/*
+        OWN RECORD ONLY. The signature is a users-level value — one mark across
+        every organisation the person works for — shown here because "my
+        record" is where a person manages what is theirs. An admin viewing a
+        MEMBER record must not see or edit it: the profile permission matrix
+        governs org-scoped profile fields and is the wrong gate for a
+        product-wide personal mark.
+      */}
+      {access.isSubject && <MySignatureCard />}
+
       {access.canViewCompetencies ? (
         <CompetenciesCard
           userId={userId}
@@ -248,6 +270,99 @@ function MyAssessmentsCard() {
  * tells an Admin and stops — and where they were deactivated, asks, because
  * reactivation takes a seat and may buy a block (R78, R86).
  */
+/**
+ * The person's saved signature — their digital ID (U4).
+ *
+ * Draw or upload once here; signing surfaces offer to APPLY it, gated by a
+ * password confirmation at that moment. The preview shows exactly what will
+ * print on an exported record, because the stored value IS the PNG the
+ * exporter embeds. Editing replaces; Remove clears both the mark and the
+ * deliberate-save marker, returning the account to remember-on-sign-off.
+ */
+function MySignatureCard() {
+  const session = useSession();
+  const save = useSaveSignature();
+  const { toast } = useToast();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const saved = session.data?.signature ?? null;
+
+  const persist = (signature: string | null, done: string) => {
+    save.mutate(signature, {
+      onSuccess: () => {
+        setEditing(false);
+        setDraft('');
+        toast({ variant: 'success', message: done });
+      },
+      // The route distinguishes too-large from wrong-format; a network/503
+      // failure is neither, so fall back to a connection message rather than
+      // wrongly blaming the image.
+      onError: (err) => {
+        const body = err instanceof ApiError ? (err.body as { error?: unknown } | null) : null;
+        const message =
+          body?.error === 'too_large'
+            ? 'That signature image is too large. Try a smaller one.'
+            : body?.error === 'not_png_data_url'
+              ? 'That signature could not be saved. It must be a PNG image.'
+              : 'That signature could not be saved. Check your connection and try again.';
+        toast({ variant: 'danger', message });
+      },
+    });
+  };
+
+  return (
+    <Card className="p-5">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h3 className="font-heading text-[15px] font-bold">My signature</h3>
+          <p className="mt-0.5 text-[12.5px] text-text-tertiary">
+            Saved once, applied when you sign — you confirm with your password each time it is used.
+          </p>
+        </div>
+        {saved && !editing && (
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>
+              Replace
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={save.isPending}
+              onClick={() => persist(null, 'Saved signature removed.')}
+            >
+              Remove
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {saved && !editing ? (
+        <div className="mt-3 inline-block rounded-lg border border-border-strong bg-surface-card p-2">
+          <img src={saved} alt="Your saved signature" className="h-[75px] max-w-full" />
+        </div>
+      ) : (
+        <div className="mt-3 flex max-w-[460px] flex-col gap-2">
+          <SignaturePad value={draft} onChange={setDraft} allowUpload aria-label="Your signature" />
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              disabled={!draft || save.isPending}
+              onClick={() => persist(draft, 'Signature saved to your profile.')}
+            >
+              Save signature
+            </Button>
+            {editing && (
+              <Button size="sm" variant="ghost" onClick={() => { setEditing(false); setDraft(''); }}>
+                Cancel
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function SeedBanner({ submissionId }: { submissionId: string }) {
   const { data } = useProfileSeed(submissionId);
   if (!data) return null;

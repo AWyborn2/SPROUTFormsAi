@@ -78,6 +78,12 @@ import {
 } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
+import { comparePassword } from '../auth/verify-password.js';
+import {
+  recordConfirmFailure,
+  recordConfirmSuccess,
+  rejectIfLocked,
+} from '../auth/confirm-throttle.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission, permissionScope } from '../lib/permissions.js';
 import { assignmentCaseValues, heldCompetencyStates } from '../lib/assignment.js';
@@ -4920,6 +4926,11 @@ const signOffBody = z.object({
     empty signature box and nothing to explain it.
   */
   signature: z.string().regex(/^data:image\/png;base64,/),
+  /*
+    Required — and verified — only when `signature` is the signer's STORED
+    mark (see the gate in the route). A fresh drawing never carries one.
+  */
+  password: z.string().min(1).optional(),
 });
 
 /**
@@ -4978,6 +4989,59 @@ assessmentCasesRouter.post(
         alreadySignedOff: true,
       });
       return;
+    }
+
+    /*
+      THE STORED MARK IS A DIGITAL ID (KTD1). A submitted signature identical
+      to the signer's SAVED one is the application of a stored credential, not
+      a fresh drawing — so the request must prove its holder is at the
+      keyboard: the password, verified through the same primitive login uses
+      and throttled with /auth/confirm-password's counter. A fresh drawing
+      skips the gate entirely — drawing is itself the act. And an account with
+      no password (invite-created) cannot be asked for one it does not have,
+      so the gate stands down and the session + permission matrix remain the
+      unchanged authorization.
+    */
+    const signer = await db.query.users.findFirst({
+      where: eq(schema.users.id, tenant.userId),
+    });
+    /*
+      CANONICALISE BEFORE COMPARING. The body regex tolerates whitespace in the
+      base64 and the exporter strips it before decoding, so a space-padded copy
+      of the stored mark exports byte-identical pixels while a raw `===` reads
+      it as a different string. Comparing whitespace-stripped forms closes that
+      one-character bypass of the gate; a genuinely fresh drawing only matches
+      here if its bytes are identical, which is exactly the stored-mark case.
+    */
+    const submittedCanonical = parsed.data.signature.replace(/\s+/g, '');
+    const storedCanonical = signer?.signature?.replace(/\s+/g, '');
+    const applyingStoredMark = Boolean(
+      storedCanonical && signer?.passwordHash && submittedCanonical === storedCanonical,
+    );
+    let confirmedStoredMark = false;
+    if (applyingStoredMark) {
+      if (rejectIfLocked(res, tenant.userId)) return;
+      if (!parsed.data.password) {
+        // A UI state, not a guess — absence never counts toward the throttle.
+        res.status(401).json({
+          error: 'password_required',
+          message: 'Applying your saved signature needs your password.',
+        });
+        return;
+      }
+      // Record the attempt at admission (before the awaited compare), so
+      // concurrent requests cannot all clear the throttle first — same fix as
+      // /auth/confirm-password. Success clears the slate below.
+      recordConfirmFailure(tenant.userId);
+      const valid = await comparePassword(parsed.data.password, signer!.passwordHash);
+      if (!valid) {
+        res
+          .status(401)
+          .json({ error: 'invalid_credentials', message: 'Invalid username or password.' });
+        return;
+      }
+      recordConfirmSuccess(tenant.userId);
+      confirmedStoredMark = true;
     }
 
     /*
@@ -5098,12 +5162,17 @@ assessmentCasesRouter.post(
       part of the certification: it is wrapped so a failure to remember can never
       sink a sign-off that has already been recorded — the same doctrine the
       competency grant below follows.
+
+      STANDS DOWN FOR A DELIBERATE SAVE (`signature_saved_at`): a signature the
+      person chose on My signature is a decision, and a one-off drawing at this
+      sign-off must not silently replace it. Absent that marker, this remember
+      remains the only population path, exactly as before.
     */
     try {
       await db
         .update(schema.users)
         .set({ signature: parsed.data.signature })
-        .where(eq(schema.users.id, tenant.userId));
+        .where(and(eq(schema.users.id, tenant.userId), isNull(schema.users.signatureSavedAt)));
     } catch {
       // The case is signed off regardless; the signature simply is not remembered.
     }
@@ -5131,6 +5200,26 @@ assessmentCasesRouter.post(
       category: 'submissions',
       icon: 'circle-check',
     });
+
+    /*
+      R8: when the certification applied the assessor's STORED mark, the
+      password confirmation that authorised it gets its own security-category
+      entry — mirroring /auth/confirm-password's — so the who/when of applying
+      a saved credential is recorded, not just the sign-off. Best-effort: a
+      failed log row never unwinds a recorded certification.
+    */
+    if (confirmedStoredMark) {
+      try {
+        await recordAudit(db, tenant, {
+          action: 'Confirmed identity to apply saved signature',
+          target: `case ${row.id}`,
+          category: 'security',
+          icon: 'pen-line',
+        });
+      } catch {
+        // The case is signed off regardless; the security note simply is not written.
+      }
+    }
 
     /*
       THE POINT OF THE WHOLE THING: passing the assessment puts the candidate on

@@ -1,16 +1,29 @@
-import { randomBytes } from 'node:crypto';
 import { Router } from 'express';
 import { eq, or } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { PLAN_CONFIG, schema, type PlanTier } from '@formai/db';
-import type { SessionInfo, TenantContext } from '@formai/shared';
+import { validateSavedSignature, type SessionInfo, type TenantContext } from '@formai/shared';
 import { db } from '../db.js';
 import { sealSession, unsealSession } from '../auth/replit-auth.js';
+import { revalidateTenant } from '../middleware/tenant.js';
 import { DeactivatedMemberError, provisionTenant } from '../auth/tenant-provisioning.js';
+import { BCRYPT_COST, comparePassword, verifyUserPassword } from '../auth/verify-password.js';
+import {
+  recordConfirmFailure,
+  recordConfirmSuccess,
+  rejectIfLocked,
+} from '../auth/confirm-throttle.js';
+import { recordAudit } from '../audit/record.js';
 import { SESSION_COOKIE_NAME } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { insertUserWithUsername } from '../lib/username.js';
+
+// The hashing constants and the constant-time compare live in
+// `auth/verify-password.ts` so login, password confirmation and the sign-off
+// gate share one primitive. Re-exported here because the invite and
+// password-reset routes import them from this module.
+export { BCRYPT_COST, DUMMY_HASH } from '../auth/verify-password.js';
 
 export const SESSION_COOKIE_OPTIONS = {
   httpOnly: true,
@@ -18,21 +31,6 @@ export const SESSION_COOKIE_OPTIONS = {
   secure: process.env.NODE_ENV === 'production',
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
-
-/** Cost factor for every bcrypt hash the app mints (signup and the dummy hash below). */
-/** Cost factor for every bcrypt hash the app mints. Exported so the
- * invite-signup path cannot drift to a weaker cost than signup. */
-export const BCRYPT_COST = 12;
-
-/**
- * Structurally valid, full-cost bcrypt hash of a random string, minted once at
- * module load. When a login hits an unknown email we still run bcrypt.compare
- * against this hash so the request does the same full-cost work as a real
- * compare — a malformed constant would let bcrypt short-circuit and reopen the
- * email-enumeration timing oracle. It hashes random bytes, so no input can
- * ever match it. Exported for tests only.
- */
-export const DUMMY_HASH = bcrypt.hashSync(randomBytes(32).toString('hex'), BCRYPT_COST);
 
 export const authRouter: Router = Router();
 
@@ -72,6 +70,27 @@ const loginSchema = z
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+/**
+ * The live tenant behind a session cookie, or null when there is no valid
+ * session OR the membership has since been deactivated.
+ *
+ * The manually-mounted `/auth` routes (`/me`, `/confirm-password`,
+ * `/signature`) unseal the cookie themselves rather than run `requireTenant`,
+ * so without this they would honour a deactivated member's still-valid 7-day
+ * cookie. `revalidateTenant` is the SAME check `requireTenant` runs on every
+ * other authed request — fail-open on a read blip (R62), null only on a
+ * `suspended` membership — and it returns the role-refreshed context so a
+ * demotion is honoured too, not just a deactivation.
+ */
+async function authedTenant(req: {
+  cookies?: Record<string, unknown>;
+}): Promise<TenantContext | null> {
+  const token = req.cookies?.[SESSION_COOKIE_NAME];
+  const sealed = typeof token === 'string' ? unsealSession<TenantContext>(token) : null;
+  if (!sealed) return null;
+  return revalidateTenant(sealed);
+}
+
 async function buildSessionInfo(tenant: TenantContext): Promise<SessionInfo> {
   if (!db) throw new Error('db_unavailable');
   const [org, user] = await Promise.all([
@@ -85,6 +104,9 @@ async function buildSessionInfo(tenant: TenantContext): Promise<SessionInfo> {
     userEmail: user?.email ?? '',
     // The saved signature, so a sign-off prefills it and the assessor draws once.
     signature: user?.signature ?? null,
+    // Whether "confirm with your password" can ever succeed for this account —
+    // the client hides apply-stored affordances when it cannot (R6).
+    hasPassword: user?.passwordHash != null,
     accountKind: (org?.accountKind ?? 'team') as SessionInfo['accountKind'],
     branding: org?.branding ?? null,
     teamSize: org?.teamSize ?? null,
@@ -172,9 +194,9 @@ authRouter.post(
     });
 
     // Constant-time path even when no user is found — prevents enumeration via
-    // timing, on either credential.
-    const hashToVerify = user?.passwordHash ?? DUMMY_HASH;
-    const valid = await bcrypt.compare(password, hashToVerify);
+    // timing, on either credential. `comparePassword` runs the dummy compare
+    // when there is no hash, so the work is identical on every path.
+    const valid = await comparePassword(password, user?.passwordHash ?? null);
 
     if (!user || !valid) {
       res
@@ -217,13 +239,161 @@ authRouter.post('/logout', (_req, res) => {
   res.status(204).end();
 });
 
+// ── POST /auth/confirm-password ────────────────────────────────────────────
+
+/**
+ * The signing step-up: prove the session's owner is at the keyboard right now.
+ *
+ * Applying a STORED signature to a document is an act of attestation, and a
+ * session cookie on a shared site tablet is not proof of presence — whoever
+ * picks the device up holds it. This endpoint re-verifies the password at the
+ * moment of application; the client applies the saved mark only on a 204.
+ *
+ * Throttled BEFORE any hash work (a caller here already knows the target user
+ * id, which login's dummy-hash discipline alone does not defend), and the
+ * failure body is byte-identical to login's so nothing new is learnable from
+ * it. The optional context names what was being signed, for the audit row.
+ */
+const confirmPasswordSchema = z.object({
+  password: z.string().min(1),
+  /*
+    Ids, capped so a caller cannot flood the org's security audit log with
+    a near-2MB `target`. Real ids are UUIDs, so 64 is generous headroom.
+  */
+  context: z
+    .object({
+      caseId: z.string().max(64).optional(),
+      attemptId: z.string().max(64).optional(),
+      fieldId: z.string().max(64).optional(),
+    })
+    .optional(),
+});
+
+authRouter.post(
+  '/confirm-password',
+  withErrorHandling(async (req, res) => {
+    const tenant = await authedTenant(req);
+    if (!tenant) {
+      res.status(401).json({ error: 'unauthenticated' });
+      return;
+    }
+    const parsed = confirmPasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'validation_error', issues: parsed.error.issues });
+      return;
+    }
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+
+    if (rejectIfLocked(res, tenant.userId)) return;
+
+    /*
+      RECORD THE ATTEMPT AT ADMISSION, before the awaited compare. Node yields
+      at the await, so recording only on failure afterwards let N concurrent
+      requests all clear `rejectIfLocked` before any of them counted — the
+      5-per-window bound became bcrypt throughput. Recorded here, a success
+      clears the slate below; a failure leaves this standing.
+    */
+    recordConfirmFailure(tenant.userId);
+    const valid = await verifyUserPassword(db, tenant.userId, parsed.data.password);
+    if (!valid) {
+      // Login's exact body: an account with no password gets the same answer
+      // as a wrong password — this endpoint is not an oracle for either.
+      res
+        .status(401)
+        .json({ error: 'invalid_credentials', message: 'Invalid username or password.' });
+      return;
+    }
+
+    recordConfirmSuccess(tenant.userId);
+    const ctx = parsed.data.context;
+    const target =
+      [
+        ctx?.caseId && `case ${ctx.caseId}`,
+        ctx?.attemptId && `attempt ${ctx.attemptId}`,
+        ctx?.fieldId && `field ${ctx.fieldId}`,
+      ]
+        .filter(Boolean)
+        .join(', ') || 'signature application';
+    // Best-effort: the confirmation stands even if the audit insert fails.
+    try {
+      await recordAudit(db, tenant, {
+        action: 'Confirmed identity to apply saved signature',
+        target,
+        category: 'security',
+        icon: 'pen-line',
+      });
+    } catch {
+      // Never fail a verified confirmation over a log row.
+    }
+    res.status(204).end();
+  }),
+);
+
+// ── PUT /auth/signature ────────────────────────────────────────────────────
+
+/**
+ * Deliberately save (or clear) the person's signature — the My-signature
+ * write path, distinct from the sign-off's best-effort remember.
+ *
+ * Validation is the SHARED contract (`validateSavedSignature`): the exact
+ * shape the exporter can embed, magic-checked, size-capped — refused loud at
+ * save instead of exporting a silent blank box later. No password gate here:
+ * the mark is the caller's own, and the act that needs step-up is APPLYING it
+ * to a document, not keeping it.
+ */
+const saveSignatureSchema = z.object({ signature: z.string().nullable() });
+
+authRouter.put(
+  '/signature',
+  withErrorHandling(async (req, res) => {
+    const tenant = await authedTenant(req);
+    if (!tenant) {
+      res.status(401).json({ error: 'unauthenticated' });
+      return;
+    }
+    const parsed = saveSignatureSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'validation_error', issues: parsed.error.issues });
+      return;
+    }
+    const verdict = validateSavedSignature(parsed.data.signature);
+    if (!verdict.ok) {
+      res.status(400).json({
+        error: verdict.reason,
+        message:
+          verdict.reason === 'too_large'
+            ? 'That signature image is too large.'
+            : 'A signature must be a PNG image.',
+      });
+      return;
+    }
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+
+    await db
+      .update(schema.users)
+      .set({
+        signature: parsed.data.signature,
+        signatureSavedAt: parsed.data.signature === null ? null : new Date(),
+      })
+      .where(eq(schema.users.id, tenant.userId));
+
+    const session = await buildSessionInfo(tenant);
+    res.json(session);
+  }),
+);
+
 // ── GET /auth/me ───────────────────────────────────────────────────────────
 
 authRouter.get(
   '/me',
   withErrorHandling(async (req, res) => {
-    const token = req.cookies?.[SESSION_COOKIE_NAME];
-    const tenant = typeof token === 'string' ? unsealSession<TenantContext>(token) : null;
+    const tenant = await authedTenant(req);
 
     if (!tenant) {
       res.status(401).json({ error: 'unauthenticated' });

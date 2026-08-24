@@ -16,6 +16,8 @@
  */
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import bcrypt from 'bcryptjs';
+import { resetConfirmThrottle } from '../auth/confirm-throttle.js';
 import { schema, type Db } from '@formai/db';
 import { DEFAULT_ROLE_PERMISSIONS, type AssessmentToolManifest, type FormField } from '@formai/shared';
 
@@ -239,13 +241,14 @@ function stringValues(node: unknown, out: string[] = [], depth = 0): string[] {
  */
 function whereTerms(
   node: unknown,
-  acc: { all: string[]; anyOf: string[][]; notNull: string[] } = {
+  acc: { all: string[]; anyOf: string[][]; notNull: string[]; isNull: string[] } = {
     all: [],
     anyOf: [],
     notNull: [],
+    isNull: [],
   },
   depth = 0,
-): { all: string[]; anyOf: string[][]; notNull: string[] } {
+): { all: string[]; anyOf: string[][]; notNull: string[]; isNull: string[] } {
   if (!node || depth > 10) return acc;
   if (Array.isArray(node)) {
     for (const n of node) whereTerms(n, acc, depth + 1);
@@ -271,6 +274,15 @@ function whereTerms(
       }
       return acc;
     }
+    if (text.includes(' is null')) {
+      for (const c of chunks) {
+        const name = (c as { name?: unknown } | null)?.name;
+        if (typeof name === 'string') {
+          acc.isNull.push(name.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase()));
+        }
+      }
+      return acc;
+    }
     if (text.includes(' in ')) {
       const group = stringValues(chunks);
       if (group.length) acc.anyOf.push(group);
@@ -287,10 +299,11 @@ function whereTerms(
 
 function matchesWhere(row: Record<string, unknown>, where: unknown): boolean {
   if (!where) return true;
-  const { all, anyOf, notNull } = whereTerms(where);
+  const { all, anyOf, notNull, isNull } = whereTerms(where);
   const present = new Set(Object.values(row).filter((v) => typeof v === 'string'));
   if (![...new Set(all)].every((w) => present.has(w))) return false;
   if (!notNull.every((key) => row[key] !== null && row[key] !== undefined)) return false;
+  if (!isNull.every((key) => row[key] === null || row[key] === undefined)) return false;
   return anyOf.every((group) => group.some((w) => present.has(w)));
 }
 
@@ -3468,6 +3481,44 @@ describe('POST /assessment-cases/:id/sign-off', () => {
       body: JSON.stringify(body),
     });
 
+  it('remembers the drawn signature for a user with no deliberate save', async () => {
+    const { db, store } = makeDb();
+    rows(store, 'users').push({ id: ADMIN, name: 'Admin', email: 'a@x.io', signature: null, signatureSavedAt: null });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyCase(base);
+      const signed = await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
+      expect(signed.status).toBe(200);
+      expect(rows(store, 'users').find((u) => u.id === ADMIN)?.signature).toBe(SIG);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('never clobbers a deliberately saved signature with a one-off drawing (AE7)', async () => {
+    const SAVED = 'data:image/png;base64,iVBORw0KGgoSAVED=';
+    const { db, store } = makeDb();
+    rows(store, 'users').push({
+      id: ADMIN,
+      name: 'Admin',
+      email: 'a@x.io',
+      signature: SAVED,
+      signatureSavedAt: new Date('2026-08-01T00:00:00Z'),
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyCase(base);
+      const signed = await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
+      expect(signed.status).toBe(200);
+      // The sign-off recorded SIG on the case; the person's saved mark stands.
+      expect(rows(store, 'users').find((u) => u.id === ADMIN)?.signature).toBe(SAVED);
+    } finally {
+      server.close();
+    }
+  });
+
   /*
     THE AUDIT ROW READ "(assessor missing [object Object])".
 
@@ -6599,6 +6650,214 @@ describe('PATCH /assessment-cases/:id/location', () => {
 
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toBe('location_not_found');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('POST /assessment-cases/:id/sign-off — the stored mark is a digital ID (U6)', () => {
+  const SIG = 'data:image/png;base64,iVBORw0KGgo=';
+  const FRESH = 'data:image/png;base64,iVBORw0KGgoFRESHLYDRAWN=';
+  const passwordHash = bcrypt.hashSync('correct horse battery', 4);
+
+  afterEach(() => resetConfirmThrottle());
+
+  function seedSigner(
+    store: Record<string, Record<string, unknown>[]>,
+    over: Record<string, unknown> = {},
+  ) {
+    rows(store, 'users').push({
+      id: ADMIN,
+      name: 'Admin',
+      email: 'a@x.io',
+      signature: SIG,
+      signatureSavedAt: new Date('2026-08-01T00:00:00Z'),
+      passwordHash,
+      ...over,
+    });
+  }
+
+  async function readySigned(store: Record<string, Record<string, unknown>[]>, base: string) {
+    const c = (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          toolId: (await seedTool(base)).id,
+          candidateUserId: CANDIDATE,
+          pathway: 'experienced',
+        }),
+      })
+    ).json()) as { id: string };
+    const theory = (await (
+      await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, { method: 'POST', headers: auth() })
+    ).json()) as { id: string };
+    await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ values: { q1: ['a'] } }),
+    });
+    await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}/outcome`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({}),
+    });
+    const prac = (await (
+      await fetch(`${base}/assessment-cases/${c.id}/parts/p2/attempts`, { method: 'POST', headers: auth() })
+    ).json()) as { id: string };
+    await fetch(`${base}/assessment-cases/${c.id}/attempts/${prac.id}/outcome`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'A. Assessor' }),
+    });
+    return c;
+  }
+
+  const signOffWith = (base: string, id: string, body: unknown) =>
+    fetch(`${base}/assessment-cases/${id}/sign-off`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify(body),
+    });
+
+  it('refuses the stored mark without a password, changing nothing (AE4)', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, { assessorName: 'Admin', signature: SIG });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('password_required');
+      const row = rows(store, 'assessmentCases').find((r) => r.id === c.id);
+      expect(row?.signedOffAt ?? null).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('signs off with the stored mark plus a valid password (AE4)', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, {
+        assessorName: 'Admin',
+        signature: SIG,
+        password: 'correct horse battery',
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { state: string }).state).toBe('competent');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a freshly drawn signature needs no password (AE4)', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, { assessorName: 'Admin', signature: FRESH });
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a wrong password is refused and counts toward the shared throttle', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, {
+        assessorName: 'Admin',
+        signature: SIG,
+        password: 'wrong',
+      });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_credentials');
+      const row = rows(store, 'assessmentCases').find((r) => r.id === c.id);
+      expect(row?.signedOffAt ?? null).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stands the gate down for an account with no password (R6/AE6)', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store, { passwordHash: null });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, { assessorName: 'Admin', signature: SIG });
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('still gates a whitespace-padded copy of the stored mark', async () => {
+    // A single inserted newline makes the raw string differ but exports
+    // byte-identical pixels — canonicalising before comparing keeps the
+    // password required. Without a password this must be refused.
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const padded = SIG.replace('base64,', 'base64,\n');
+      const res = await signOffWith(base, c.id, { assessorName: 'Admin', signature: padded });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('password_required');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes a security audit row when the stored mark is password-confirmed (R8)', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, {
+        assessorName: 'Admin',
+        signature: SIG,
+        password: 'correct horse battery',
+      });
+      expect(res.status).toBe(200);
+      const security = rows(store, 'auditLogEntries').find(
+        (e) => e.category === 'security' && e.action === 'Confirmed identity to apply saved signature',
+      );
+      expect(security).toBeDefined();
+      expect(security?.target).toBe(`case ${c.id}`);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('writes NO security row when a fresh drawing signs off', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      await signOffWith(base, c.id, { assessorName: 'Admin', signature: FRESH });
+      const security = rows(store, 'auditLogEntries').find((e) => e.category === 'security');
+      expect(security).toBeUndefined();
     } finally {
       server.close();
     }

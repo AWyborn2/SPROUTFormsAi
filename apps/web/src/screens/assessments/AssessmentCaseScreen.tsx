@@ -270,6 +270,11 @@ const SIGN_OFF_ERRORS: Record<string, string> = {
   candidate_cannot_sign_off: 'A candidate cannot sign off their own assessment.',
   tool_missing: 'The assessment tool for this case no longer exists.',
   parts_incomplete: 'Not all required parts are satisfactory yet.',
+  // The password step-up on a stored-mark sign-off — a wrong password is now
+  // normal usage, so it gets a real message rather than a raw code.
+  invalid_credentials: 'That password is not right. Re-enter it, or redraw your signature to sign without one.',
+  password_required: 'Enter your password to apply your saved signature, or redraw it to sign without one.',
+  too_many_attempts: 'Too many password attempts. Wait a few minutes and try again.',
 };
 
 function signOffErrorMessage(body: Record<string, unknown>): string {
@@ -307,7 +312,19 @@ function SignOffDialog({
   */
   const [name, setName] = useState(session?.userName ?? '');
   const [signature, setSignature] = useState(session?.signature ?? '');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  /*
+    THE PREFILL IS A STORED CREDENTIAL. Submitting it unchanged applies the
+    saved mark, so the API demands the password in the same request (KTD1) —
+    shown here the moment the pad still holds the untouched prefill. Wiping
+    and redrawing is a fresh act and needs none; an account with no password
+    (invite-created) is never prompted, because the server stands its gate
+    down for it (R6).
+  */
+  const usingSaved =
+    !!signature && signature === (session?.signature ?? '') && !!session?.hasPassword;
 
   async function submit() {
     setError(null);
@@ -319,8 +336,16 @@ function SignOffDialog({
       setError('Draw or type your signature — it prints on the record.');
       return;
     }
+    if (usingSaved && !password) {
+      setError('Enter your password to apply your saved signature.');
+      return;
+    }
     try {
-      const res = await signOff.mutateAsync({ assessorName: name.trim(), signature });
+      const res = await signOff.mutateAsync({
+        assessorName: name.trim(),
+        signature,
+        ...(usingSaved ? { password } : {}),
+      });
       const granted = res.granted?.length
         ? ` Competency recorded: ${res.granted.join(', ')}.`
         : '';
@@ -373,6 +398,25 @@ function SignOffDialog({
         <div className="mt-1">
           <SignaturePad value={signature} onChange={setSignature} aria-label="Assessor signature" />
         </div>
+
+        {usingSaved && (
+          <>
+            <label
+              htmlFor="so-password"
+              className="mt-3.5 block text-[12.5px] font-semibold text-text-secondary"
+            >
+              Your password — this applies your saved signature
+            </label>
+            <input
+              id="so-password"
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              className="mt-1 w-full rounded-md border border-border bg-surface-card p-[9px_11px] text-[13.5px]"
+            />
+          </>
+        )}
 
         {error && (
           <p className="mt-3 text-[12.5px]" style={{ color: 'var(--danger)' }}>
