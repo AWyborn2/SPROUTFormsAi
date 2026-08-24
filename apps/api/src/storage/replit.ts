@@ -121,6 +121,30 @@ export async function uploadAttachment(
 }
 
 /**
+ * Stores one file of a course package at `{orgId}/course-{courseId}/{path}`.
+ *
+ * The only namespace here whose tail is caller-supplied — the import route
+ * has already validated the path shape, and the `course-` infix keeps these
+ * objects out of both the public `logo-` door and the attachment route's
+ * `upload-` regex, exactly as those two are kept out of each other.
+ */
+export async function uploadCourseFile(
+  client: ReplitStorageClient,
+  orgId: string,
+  courseId: string,
+  path: string,
+  bytes: Uint8Array,
+  _contentType: string,
+): Promise<string> {
+  const key = `${orgId}/course-${courseId}/${path}`;
+  const result = await client.uploadFromBytes(key, Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes));
+  if (!result.ok) {
+    throw new Error(`storage_upload_failed: ${describeStorageError(result.error)}`, { cause: result.error });
+  }
+  return key;
+}
+
+/**
  * Deletes a single object, scoped to `orgId` — used to reap a superseded
  * logo when branding changes. A key outside the org's prefix is ignored
  * rather than acted on, matching `downloadPdf`'s tenant check.

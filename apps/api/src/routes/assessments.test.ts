@@ -342,6 +342,10 @@ function makeDb(
     membershipLocations: [],
     assessmentCases: [],
     assessmentPartAttempts: [],
+    // Course packages and per-case reading records — empty by default, seeded
+    // by the course-material describe.
+    courses: [],
+    assessmentCaseCourseProgress: [],
     competencies: [{ id: COMPETENCY, orgId: ORG, name: 'Track Dozer Operator', code: 'TD-OP', holders: 0 }],
     competencyHolders: [],
     auditLogEntries: [],
@@ -6599,6 +6603,295 @@ describe('PATCH /assessment-cases/:id/location', () => {
 
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toBe('location_not_found');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+/*
+  Course material at case runtime (task #56): the manifest's `course` link, the
+  attempt-open gate it arms, the per-case reading record, and the tri-state
+  workflow PATCH that sets it. Server-derived completion is the property under
+  test everywhere — the client reports slide indexes, never "done".
+*/
+describe('course material', () => {
+  const COURSE = '00000000-0000-4000-8000-00000000c0c0';
+
+  function seedCourse(
+    store: Record<string, Record<string, unknown>[]>,
+    over: Record<string, unknown> = {},
+  ) {
+    rows(store, 'courses').push({
+      id: COURSE,
+      orgId: ORG,
+      title: 'Mine Site SME Operating Manual',
+      kind: 'deck',
+      launchPath: 'index.html',
+      slideCount: 3,
+      files: [{ path: 'index.html', size: 10, contentType: 'text/html; charset=utf-8' }],
+      totalBytes: 10,
+      status: 'active',
+      createdByUserId: ADMIN,
+      createdAt: new Date(),
+      ...over,
+    });
+  }
+
+  const courseManifest = (required = true): AssessmentToolManifest => ({
+    ...MANIFEST,
+    course: { courseId: COURSE, required },
+  });
+
+  const newCase = async (base: string, toolId: string) =>
+    (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ toolId, candidateUserId: CANDIDATE, pathway: 'new' }),
+      })
+    ).json()) as { id: string };
+
+  const openPart = (base: string, caseId: string, part = 'p1') =>
+    fetch(`${base}/assessment-cases/${caseId}/parts/${part}/attempts`, {
+      method: 'POST',
+      headers: auth(),
+    });
+
+  const progress = (base: string, caseId: string, body: unknown, t: Session = admin) =>
+    fetch(`${base}/assessment-cases/${caseId}/course-progress`, {
+      method: 'PATCH',
+      headers: auth(t),
+      body: JSON.stringify(body),
+    });
+
+  it('gates every part until the deck is fully read, then opens', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    seedCourse(store);
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base, courseManifest());
+      const c = await newCase(base, tool.id);
+
+      const shut = await openPart(base, c.id);
+      expect(shut.status).toBe(409);
+      expect(await shut.json()).toMatchObject({
+        error: 'course_not_complete',
+        courseTitle: 'Mine Site SME Operating Manual',
+      });
+
+      // Two of three slides read: still shut.
+      const partial = await progress(base, c.id, { visitedSlides: [0, 1] });
+      expect(partial.status).toBe(200);
+      expect(await partial.json()).toMatchObject({
+        viewedCount: 2,
+        totalSlides: 3,
+        completedAt: null,
+      });
+      expect((await openPart(base, c.id)).status).toBe(409);
+
+      // The last slide completes the record and the gate opens.
+      const done = await progress(base, c.id, { visitedSlides: [2] });
+      const doneBody = (await done.json()) as { completedAt: string | null };
+      expect(doneBody.completedAt).not.toBeNull();
+      expect((await openPart(base, c.id)).status).toBe(201);
+
+      // Completion also lands in the audit trail.
+      expect(
+        rows(store, 'auditLogEntries').some(
+          (e) => e.action === 'Completed course material',
+        ),
+      ).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('unions monotonically, ignores out-of-range indexes, and never uncompletes', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    seedCourse(store);
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base, courseManifest());
+      const c = await newCase(base, tool.id);
+
+      const first = await progress(base, c.id, { visitedSlides: [0, 0, 5, 4999] });
+      expect(await first.json()).toMatchObject({ viewedCount: 1, completedAt: null });
+
+      // Re-reporting old slides adds nothing; new ones accumulate.
+      const second = await progress(base, c.id, { visitedSlides: [0, 1, 2] });
+      const body = (await second.json()) as { viewedCount: number; completedAt: string | null };
+      expect(body.viewedCount).toBe(3);
+      expect(body.completedAt).not.toBeNull();
+
+      // A later empty report keeps the completion.
+      const third = await progress(base, c.id, { visitedSlides: [] });
+      expect(((await third.json()) as { completedAt: string | null }).completedAt).not.toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a deck refuses the confirmRead shortcut; a package without slides completes by it', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    seedCourse(store);
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base, courseManifest());
+      const c = await newCase(base, tool.id);
+
+      const shortcut = await progress(base, c.id, { confirmRead: true });
+      expect(((await shortcut.json()) as { completedAt: string | null }).completedAt).toBeNull();
+      expect((await openPart(base, c.id)).status).toBe(409);
+
+      // Swap the package for a SCORM module: confirmRead is the completion.
+      const course = rows(store, 'courses')[0]!;
+      course.kind = 'scorm';
+      course.slideCount = null;
+      const confirmed = await progress(base, c.id, { confirmRead: true });
+      expect(((await confirmed.json()) as { completedAt: string | null }).completedAt).not.toBeNull();
+      expect((await openPart(base, c.id)).status).toBe(201);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('an unrequired link informs but never blocks, and a dangling link degrades open', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    seedCourse(store, { status: 'archived' });
+    const { server, base } = startApp();
+    try {
+      // Required, but the course row is archived: the gate must NOT lock the
+      // assessment shut on a dangling pointer.
+      const tool = await seedTool(base, courseManifest());
+      const c = await newCase(base, tool.id);
+      expect((await openPart(base, c.id)).status).toBe(201);
+
+      const detail = (await (
+        await fetch(`${base}/assessment-cases/${c.id}`, { headers: auth() })
+      ).json()) as { course: { missing: boolean; required: boolean } };
+      expect(detail.course).toMatchObject({ missing: true, required: true });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('the case detail and course view carry the reading state and a content link', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    seedCourse(store);
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base, courseManifest(false));
+      const c = await newCase(base, tool.id);
+      await progress(base, c.id, { visitedSlides: [0, 2] });
+
+      const detail = (await (
+        await fetch(`${base}/assessment-cases/${c.id}`, { headers: auth() })
+      ).json()) as { course: Record<string, unknown> };
+      expect(detail.course).toMatchObject({
+        courseId: COURSE,
+        required: false,
+        missing: false,
+        title: 'Mine Site SME Operating Manual',
+        totalSlides: 3,
+        viewedCount: 2,
+        completedAt: null,
+      });
+
+      // required:false — the gate never arms.
+      expect((await openPart(base, c.id)).status).toBe(201);
+
+      const view = (await (
+        await fetch(`${base}/assessment-cases/${c.id}/course`, { headers: auth() })
+      ).json()) as { course: { launchUrl: string; expiresAt: string } };
+      expect(view.course.launchUrl).toMatch(/^\/courses\/content\/.+\/index\.html$/);
+      expect(new Date(view.course.expiresAt).getTime()).toBeGreaterThan(Date.now());
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a candidate reports progress on their own case and nobody else’s', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    seedCourse(store);
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base, courseManifest());
+      const mine = await newCase(base, tool.id);
+      const own = await progress(base, mine.id, { visitedSlides: [0] }, candidate);
+      expect(own.status).toBe(200);
+
+      const theirs = (await (
+        await fetch(`${base}/assessment-cases`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ toolId: tool.id, candidateUserId: OTHER_CANDIDATE, pathway: 'new' }),
+        })
+      ).json()) as { id: string };
+      const foreign = await progress(base, theirs.id, { visitedSlides: [0] }, candidate);
+      expect(foreign.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a closed case refuses further reading', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    seedCourse(store);
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base, courseManifest());
+      const c = await newCase(base, tool.id);
+      (rows(store, 'assessmentCases').find((r) => r.id === c.id) as { state: string }).state =
+        'not_yet_competent';
+      const res = await progress(base, c.id, { visitedSlides: [0] });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: string }).error).toBe('case_not_open');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('the workflow PATCH sets, keeps, validates and clears the link tri-state', async () => {
+    const { db, store } = makeDb();
+    mockDbValue = db;
+    seedCourse(store);
+    const { server, base } = startApp();
+    try {
+      const tool = await seedTool(base);
+      const patch = (body: unknown) =>
+        fetch(`${base}/assessment-tools/${tool.id}`, {
+          method: 'PATCH',
+          headers: auth(),
+          body: JSON.stringify(body),
+        });
+      const storedManifest = () =>
+        (rows(store, 'assessmentTools').find((t) => t.id === tool.id)!
+          .manifest as AssessmentToolManifest);
+
+      // A link to a course that does not exist is refused before anything writes.
+      const ghost = await patch({ course: { courseId: '00000000-0000-4000-8000-00000000dead', required: true } });
+      expect(ghost.status).toBe(400);
+      expect(((await ghost.json()) as { error: string }).error).toBe('invalid_workflow');
+      expect(storedManifest().course).toBeUndefined();
+
+      expect((await patch({ course: { courseId: COURSE, required: true } })).status).toBe(200);
+      expect(storedManifest().course).toEqual({ courseId: COURSE, required: true });
+
+      // Absent keeps — an unrelated save must not erase the link.
+      expect((await patch({ name: 'Renamed' })).status).toBe(200);
+      expect(storedManifest().course).toEqual({ courseId: COURSE, required: true });
+
+      // Null clears.
+      expect((await patch({ course: null })).status).toBe(200);
+      expect(storedManifest().course).toBeUndefined();
     } finally {
       server.close();
     }

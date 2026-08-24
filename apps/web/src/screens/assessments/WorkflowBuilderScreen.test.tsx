@@ -36,6 +36,17 @@ vi.mock('react-router-dom', () => ({
   Link: ({ children }: { children: React.ReactNode }) => <a href="#">{children}</a>,
 }));
 
+const uploadCourseMutate = vi.fn();
+const coursesResult: {
+  data: { courses: { id: string; title: string; slideCount: number | null; fileCount: number }[] } | undefined;
+} = {
+  data: {
+    courses: [
+      { id: 'course-1', title: 'Mine Site SME Operating Manual', slideCount: 52, fileCount: 33 },
+    ],
+  },
+};
+
 vi.mock('../../lib/data/hooks.js', () => ({
   useAssessmentTool: () => toolResult,
   useCompetencies: () => ({
@@ -44,11 +55,13 @@ vi.mock('../../lib/data/hooks.js', () => ({
       { id: 'comp-hr', name: 'Licence - Rigid (HR)' },
     ],
   }),
+  useCourses: () => coursesResult,
   useSaveWorkflow: () => ({ mutate: saveMutate, isPending: false }),
   useSetLocationParts: () => ({ mutate: setLocationPartsMutate, isPending: false }),
   useSession: () => sessionResult,
   useTaxonomy: () => taxonomyResult,
   useUpdateTaxonomySettings: () => ({ mutate: updateSettingsMutate, isPending: false }),
+  useUploadCourse: () => ({ mutate: uploadCourseMutate, isPending: false }),
 }));
 
 const toast = vi.fn();
@@ -821,5 +834,68 @@ describe('WorkflowBuilderScreen — part results', () => {
       },
       { partKey: 'p2' },
     ]);
+  });
+});
+
+/*
+  The Course material card (task #56): pick an org package, decide whether it
+  gates the assessment, and send the link tri-state beside the workflow — set,
+  keep-by-absence, clear.
+*/
+describe('WorkflowBuilderScreen — course material', () => {
+  it('selecting a package sends the link, required by default', () => {
+    toolResult.data = tool();
+    render(<WorkflowBuilderScreen />);
+
+    fireEvent.change(screen.getByLabelText('Course package'), {
+      target: { value: 'course-1' },
+    });
+    // What the import understood is echoed beside the picker.
+    expect(screen.getByText(/52 slides · 33 files/)).toBeDefined();
+
+    fireEvent.click(screen.getByText('Save workflow'));
+    expect(saveMutate.mock.calls[0]![0]).toMatchObject({
+      course: { courseId: 'course-1', required: true },
+    });
+  });
+
+  it('the requirement is the author’s call, and clearing sends null', () => {
+    toolResult.data = tool({
+      manifest: {
+        parts: [
+          { key: 'p1', ordinal: 1, label: 'Part 1 — Theory', kind: 'theory', pathways: ['new'], startFieldId: 'h1' },
+        ],
+        course: { courseId: 'course-1', required: true },
+      },
+    });
+    render(<WorkflowBuilderScreen />);
+
+    // The stored link renders selected with its gate ticked.
+    const required = screen.getByLabelText(
+      'Required before the assessment can start',
+    ) as HTMLInputElement;
+    expect(required.checked).toBe(true);
+
+    fireEvent.click(required);
+    fireEvent.click(screen.getByText('Save workflow'));
+    expect(saveMutate.mock.calls[0]![0]).toMatchObject({
+      course: { courseId: 'course-1', required: false },
+    });
+
+    saveMutate.mockClear();
+    fireEvent.change(screen.getByLabelText('Course package'), { target: { value: '' } });
+    fireEvent.click(screen.getByText('Save workflow'));
+    expect(saveMutate.mock.calls[0]![0]).toMatchObject({ course: null });
+  });
+
+  it('an untouched card sends no course key at all', () => {
+    toolResult.data = tool();
+    render(<WorkflowBuilderScreen />);
+
+    // Dirty the save through an unrelated card, leaving the course card alone.
+    fireEvent.click(screen.getByText('Add a prerequisite check'));
+    fireEvent.click(screen.getByText('Save workflow'));
+    expect(saveMutate).toHaveBeenCalled();
+    expect('course' in (saveMutate.mock.calls[0]![0] as Record<string, unknown>)).toBe(false);
   });
 });

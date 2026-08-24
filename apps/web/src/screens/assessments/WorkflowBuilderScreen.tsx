@@ -17,6 +17,7 @@ import {
   valueSource,
   workflowFromFields,
   type AccessLevel,
+  type AssessmentCourseLink,
   type AssessmentPathway,
   type AssessmentToolManifest,
   type AssessmentWorkflow,
@@ -34,12 +35,15 @@ import {
 import {
   useAssessmentTool,
   useCompetencies,
+  useCourses,
   useSaveWorkflow,
   useSetLocationParts,
   useSession,
   useTaxonomy,
   useUpdateTaxonomySettings,
+  useUploadCourse,
 } from '../../lib/data/hooks.js';
+import { ApiError } from '../../lib/data/api-client.js';
 import type { AssessmentToolDetail, PartOutcomeMarkEntry } from '../../lib/data/assessments.js';
 import { groupFieldsByHeading, totalFields } from './workflow-groups.js';
 
@@ -223,6 +227,13 @@ export function WorkflowBuilderScreen() {
   const [partMarksDraft, setPartMarksDraft] = useState<PartOutcomeMarkEntry[] | undefined>(
     undefined,
   );
+  /**
+   * The pre-assessment course link — `undefined` untouched, `null` cleared,
+   * an object set. Same tri-state as every draft above.
+   */
+  const [courseDraft, setCourseDraft] = useState<AssessmentCourseLink | null | undefined>(
+    undefined,
+  );
   const competencies = useCompetencies();
 
   // The parts rule is an Admin act (R73). Reads for everyone, edits for admins.
@@ -253,7 +264,8 @@ export function WorkflowBuilderScreen() {
     completionDraft !== undefined ||
     signOffDraft !== undefined ||
     pathwayDraft !== undefined ||
-    partMarksDraft !== undefined;
+    partMarksDraft !== undefined ||
+    courseDraft !== undefined;
 
   /** A part's fields, grouped by printed heading. Computed once per tool load. */
   const groupsForPart = useMemo(() => {
@@ -328,6 +340,7 @@ export function WorkflowBuilderScreen() {
         ...(signOffTouched ? { signOff } : {}),
         ...(pathwaysTouched ? { pathwayMarks: pathways } : {}),
         ...(partMarksTouched ? { partOutcomeMarks: partMarksDraft! } : {}),
+        ...(courseDraft !== undefined ? { course: courseDraft } : {}),
       },
       {
       onSuccess: (result) => {
@@ -339,6 +352,7 @@ export function WorkflowBuilderScreen() {
         setSignOffDraft(undefined);
         setPathwayDraft(undefined);
         setPartMarksDraft(undefined);
+        setCourseDraft(undefined);
         toast({
           variant: result.warnings.length > 0 ? 'warning' : 'success',
           message:
@@ -624,6 +638,11 @@ export function WorkflowBuilderScreen() {
           Add a prerequisite check
         </Button>
       </div>
+
+      <CourseMaterialCard
+        value={courseDraft === undefined ? (tool.manifest.course ?? null) : courseDraft}
+        onChange={setCourseDraft}
+      />
 
       <SummaryAutoFill
         tool={tool}
@@ -1173,6 +1192,149 @@ function partEntriesFrom(manifest: AssessmentToolManifest): PartOutcomeMarkEntry
     ...(p.outcomeSatisfactory ? { outcomeSatisfactory: p.outcomeSatisfactory } : {}),
     ...(p.outcomeNotSatisfactory ? { outcomeNotSatisfactory: p.outcomeNotSatisfactory } : {}),
   }));
+}
+
+/**
+ * The pre-assessment course material: which hosted package this tool's cases
+ * open with, and whether the parts stay shut until it has been read through.
+ *
+ * The packages themselves are org-wide — one uploaded manual serves every
+ * tool that points at it — so the card is a picker plus an uploader, not an
+ * editor. The upload accepts the packaged interactive deck, a SCORM 1.2 zip,
+ * or plain HTML content; what came back (slide count, file count) is echoed
+ * so the author can see the import understood the package.
+ */
+function CourseMaterialCard({
+  value,
+  onChange,
+}: {
+  value: AssessmentCourseLink | null;
+  onChange: (next: AssessmentCourseLink | null) => void;
+}) {
+  const courses = useCourses();
+  const upload = useUploadCourse();
+  const { toast } = useToast();
+  const [title, setTitle] = useState('');
+
+  const list = courses.data?.courses ?? [];
+  const selected = value ? list.find((c) => c.id === value.courseId) : undefined;
+
+  function onFile(file: File | null) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result ?? '');
+      const zipBase64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      const fallback = file.name.replace(/\.zip$/i, '').replace(/[-_]+/g, ' ').trim();
+      upload.mutate(
+        { title: title.trim() || fallback || 'Course', zipBase64 },
+        {
+          onSuccess: (course) => {
+            setTitle('');
+            // A fresh upload is picked immediately — uploading from this card
+            // states the intent, and the author can still unpick before saving.
+            onChange({ courseId: course.id, required: value?.required ?? true });
+            toast({
+              variant: 'success',
+              message: `Course "${course.title}" imported${
+                course.slideCount ? ` — ${course.slideCount} slides` : ''
+              }. Save the workflow to link it.`,
+            });
+          },
+          onError: (err) => {
+            const body = err instanceof ApiError ? (err.body as Record<string, unknown>) : {};
+            toast({
+              variant: 'danger',
+              message:
+                typeof body?.message === 'string'
+                  ? body.message
+                  : 'The package could not be imported.',
+            });
+          },
+        },
+      );
+    };
+    reader.readAsDataURL(file);
+  }
+
+  return (
+    <div className="rounded-md border border-border bg-surface-card p-[13px_15px]">
+      <span className="block text-[13px] font-semibold">Course material</span>
+      <p className="mt-0.5 mb-2 text-[11.5px] text-text-tertiary">
+        A hosted package each case opens with — reading progress is tracked on the case, and
+        while it is required no part can start until the material has been read through.
+      </p>
+      <div className="flex flex-wrap items-center gap-2.5">
+        <select
+          aria-label="Course package"
+          value={value?.courseId ?? ''}
+          onChange={(e) =>
+            onChange(
+              e.target.value
+                ? { courseId: e.target.value, required: value?.required ?? true }
+                : null,
+            )
+          }
+          className="h-[26px] min-w-[260px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+        >
+          <option value="">— no course —</option>
+          {list.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.title}
+            </option>
+          ))}
+          {/* A stored link to a course the list no longer offers stays visible
+              rather than silently reading as "no course". */}
+          {value && !selected && (
+            <option value={value.courseId}>Missing course ({value.courseId.slice(0, 8)}…)</option>
+          )}
+        </select>
+        {value && (
+          <label className="inline-flex items-center gap-1.5 text-[11.5px] text-text-secondary">
+            <input
+              type="checkbox"
+              checked={value.required}
+              onChange={(e) => onChange({ ...value, required: e.target.checked })}
+            />
+            Required before the assessment can start
+          </label>
+        )}
+        {selected && (
+          <span className="text-[11px] text-text-tertiary">
+            {selected.slideCount ? `${selected.slideCount} slides · ` : ''}
+            {selected.fileCount} files
+          </span>
+        )}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <input
+          aria-label="New course title"
+          placeholder="New course title (from the file name if blank)"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          className="h-[26px] w-[280px] rounded-sm border border-border bg-surface-page px-1.5 text-[11.5px]"
+        />
+        <label
+          className={`inline-flex h-[28px] items-center gap-1.5 rounded-md border border-border bg-surface-page px-2.5 text-[12px] font-medium ${
+            upload.isPending ? 'opacity-60' : 'cursor-pointer hover:bg-surface-sunken'
+          }`}
+        >
+          <Icon name="upload" size={13} />
+          {upload.isPending ? 'Importing…' : 'Upload package (.zip)'}
+          <input
+            type="file"
+            accept=".zip,application/zip,application/x-zip-compressed"
+            className="hidden"
+            disabled={upload.isPending}
+            onChange={(e) => {
+              onFile(e.target.files?.[0] ?? null);
+              e.target.value = '';
+            }}
+          />
+        </label>
+      </div>
+    </div>
+  );
 }
 
 /**

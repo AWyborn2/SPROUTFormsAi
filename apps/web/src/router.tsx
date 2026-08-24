@@ -41,6 +41,7 @@ import { AssessmentDashboard } from './screens/assessments/AssessmentDashboard.j
 import { WorkflowBuilderScreen } from './screens/assessments/WorkflowBuilderScreen.js';
 import { BuilderScreen as AssessmentBuilderScreen } from './screens/assessments/builder/BuilderScreen.js';
 import { CasePartFillScreen } from './screens/assessments/CasePartFillScreen.js';
+import { CoursePlayerScreen } from './screens/assessments/CoursePlayerScreen.js';
 import { MobileScreen } from './screens/mobile/MobileScreen.js';
 import { ChcIntakeScreen } from './screens/chc/ChcIntakeScreen.js';
 import { SCREENS, type ScreenDef } from './lib/screens.js';
@@ -85,6 +86,7 @@ const REAL_SCREENS: Record<string, React.ReactNode> = {
   'assessment-builder': <AssessmentBuilderScreen />,
   'assessment-builder-draft': <AssessmentBuilderScreen />,
   'assessment-case': <AssessmentCaseScreen />,
+  'assessment-case-course': <CoursePlayerScreen />,
   'assessment-part-fill': <CasePartFillScreen />,
   'geometry-editor': <GeometryEditorScreen />,
   'chc-intake': <ChcIntakeScreen />,

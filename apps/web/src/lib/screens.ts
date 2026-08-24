@@ -163,6 +163,9 @@ export const SCREENS: ScreenDef[] = [
   { key: 'assessment-builder', path: '/app/assessments/builder', group: 'Assessments', label: 'Assessment builder', icon: 'sparkles', shell: 'app' },
   { key: 'assessment-builder-draft', path: '/app/assessments/builder/:draftId', group: 'Assessments', label: 'Assessment builder', icon: 'sparkles', shell: 'app' },
   { key: 'assessment-case', path: '/app/assessments/:id', group: 'Assessments', label: 'Assessment case', icon: 'clipboard-list', shell: 'app' },
+  // The case's course material, read in place before the parts can start. A
+  // static segment, so it can never be mistaken for a case id by the route above.
+  { key: 'assessment-case-course', path: '/app/assessments/:id/course', group: 'Assessments', label: 'Course material', icon: 'book-open', shell: 'app' },
   // Filling one part of a case. Addressed by ATTEMPT id, not part key: a retry
   // is a distinct attempt row, and the URL has to say which one is being
   // answered or a resumed link would reopen the wrong one.

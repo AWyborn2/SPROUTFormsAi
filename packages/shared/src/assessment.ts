@@ -1053,6 +1053,39 @@ export interface AssessmentToolManifest {
    * which is the exporter's safe failure everywhere.
    */
   pathwayMarks?: Partial<Record<AssessmentPathway, DeclaredMark>>;
+  /**
+   * The course material a candidate reads BEFORE the assessment — an uploaded
+   * package (interactive deck, SCORM zip or plain HTML) hosted by the API and
+   * tracked per case.
+   *
+   * A link, not the content: the package lives in the `courses` table and
+   * object storage, so several tools can share one manual and re-uploading a
+   * revised deck never touches the tools pointing at it. `required` is what
+   * the runtime gates on — while true, no part attempt can be opened on a
+   * case until that case's reading record is complete. A link whose course
+   * has since been archived or deleted degrades to unenforced (the case
+   * surfaces the dangling link rather than locking the assessment shut).
+   */
+  course?: AssessmentCourseLink;
+}
+
+/** The manifest's pointer at a hosted course package. */
+export interface AssessmentCourseLink {
+  courseId: string;
+  /** Gate part attempts on the case's reading record being complete. */
+  required: boolean;
+}
+
+/**
+ * One file inside an uploaded course package, as stored alongside the course
+ * row. The list is the serving allowlist: a request for any path not on it is
+ * a 404 before storage is ever consulted.
+ */
+export interface CourseFileEntry {
+  /** Zip-relative path, forward slashes, no leading slash. */
+  path: string;
+  size: number;
+  contentType: string;
 }
 
 /**

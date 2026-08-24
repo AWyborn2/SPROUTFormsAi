@@ -13,6 +13,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import type {
+  AssessmentCourseLink,
   AssessmentPathway,
   PartCompletionMark,
   PrerequisiteCheck,
@@ -176,6 +177,15 @@ export const keys = {
   formVersion: (formId: string, versionId: string) => ['forms', formId, 'versions', versionId] as const,
   assessmentAttempt: (caseId: string, attemptId: string) =>
     ['assessmentCases', caseId, 'attempts', attemptId] as const,
+  /** The org's uploaded course packages (the builder's picker). */
+  courses: ['courses'] as const,
+  /**
+   * One case's course view. Under the case's prefix on purpose — but every
+   * progress-driven invalidation of the case detail passes `exact: true`,
+   * because refetching THIS key mints a new content token and reloads the
+   * player's iframe mid-read.
+   */
+  caseCourse: (caseId: string) => ['assessmentCases', caseId, 'course'] as const,
   competencyRules: ['competencyRules'] as const,
   fillForm: (token: string) => ['fillForm', token] as const,
   fillLinks: (formId: string) => ['fillLinks', formId] as const,
@@ -1321,6 +1331,7 @@ export function useSaveWorkflow(toolId: string) {
       signOff?: AssessmentToolManifest['signOff'] | null;
       pathwayMarks?: AssessmentToolManifest['pathwayMarks'] | null;
       partOutcomeMarks?: PartOutcomeMarkEntry[] | null;
+      course?: AssessmentCourseLink | null;
     }) =>
       assessmentsApi.saveWorkflow(
         toolId,
@@ -1332,6 +1343,7 @@ export function useSaveWorkflow(toolId: string) {
         input.signOff,
         input.pathwayMarks,
         input.partOutcomeMarks,
+        input.course,
       ),
     onSuccess: () => {
       // Prefix invalidation, so the detail AND the list refresh: the list
@@ -1339,6 +1351,62 @@ export function useSaveWorkflow(toolId: string) {
       // candidate is shown.
       qc.invalidateQueries({ queryKey: keys.assessmentTools });
       qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** The org's active course packages — the builder's picker. */
+export function useCourses() {
+  return useQuery({
+    queryKey: keys.courses,
+    queryFn: () => assessmentsApi.listCourses(),
+  });
+}
+
+/** Import a course package zip. Resolves with the created course's summary. */
+export function useUploadCourse() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { title: string; zipBase64: string }) =>
+      assessmentsApi.uploadCourse(input.title, input.zipBase64),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: keys.courses });
+      void qc.invalidateQueries({ queryKey: keys.auditLog });
+    },
+  });
+}
+
+/** One case's course material, with a freshly minted content link. */
+export function useCaseCourse(caseId: string) {
+  return useQuery({
+    queryKey: keys.caseCourse(caseId),
+    queryFn: () => assessmentsApi.getCaseCourse(caseId),
+    enabled: caseId !== '',
+    /*
+      The result embeds the iframe's content token: a routine background
+      refetch would mint a new URL and RELOAD the deck out from under the
+      reader, losing their place. The token far outlives any reading session,
+      so once fetched it stays.
+    */
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** Report reading progress on a case's course. */
+export function useSaveCourseProgress(caseId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { visitedSlides?: number[]; confirmRead?: boolean }) =>
+      assessmentsApi.saveCourseProgress(caseId, input),
+    onSuccess: (result) => {
+      // Only a COMPLETION is news the rest of the app needs: the case screen's
+      // course card flips and the part gate opens. `exact` keeps the player's
+      // own course query (and its iframe) out of the sweep — see keys.caseCourse.
+      if (result.completedAt) {
+        void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId), exact: true });
+        void qc.invalidateQueries({ queryKey: keys.auditLog });
+      }
     },
   });
 }

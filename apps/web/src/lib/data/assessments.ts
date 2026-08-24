@@ -18,6 +18,7 @@ import type {
   ProfilePrefillKey,
   TheoryRendering,
   TheoryRetryMode,
+  AssessmentCourseLink,
   AssessmentPathway,
   AssessmentToolManifest,
   AssessmentWorkflow,
@@ -143,8 +144,44 @@ export interface AssessmentCaseDetail {
   currentVersionId: string;
   prerequisiteWarnings: string[];
   appealOfCaseId: string | null;
+  /** The tool's course material and this case's reading state, or null. */
+  course: CaseCourseState | null;
   parts: CasePartView[];
   attempts: CaseAttemptView[];
+}
+
+/** The case's course-material state, as the case detail carries it. */
+export interface CaseCourseState {
+  courseId: string;
+  /** Whether part attempts stay shut until the reading record completes. */
+  required: boolean;
+  /** True when the linked course was archived or deleted — shown, not enforced. */
+  missing: boolean;
+  title: string | null;
+  kind: string | null;
+  totalSlides: number | null;
+  viewedCount: number;
+  completedAt: string | null;
+}
+
+/** The player's view: the state plus a freshly minted content link. */
+export interface CaseCourseView extends CaseCourseState {
+  /** API path the iframe loads — null when the course is missing. */
+  launchUrl: string | null;
+  expiresAt: string | null;
+}
+
+/** One uploaded course package, as the builder's picker lists them. */
+export interface CourseSummary {
+  id: string;
+  title: string;
+  kind: string;
+  launchPath: string;
+  slideCount: number | null;
+  fileCount: number;
+  totalBytes: number;
+  status: string;
+  createdAt: string;
 }
 
 /** One part of a case as the progress dashboard sees it. */
@@ -373,6 +410,7 @@ export const assessmentsApi = {
     signOff?: AssessmentToolManifest['signOff'] | null,
     pathwayMarks?: AssessmentToolManifest['pathwayMarks'] | null,
     partOutcomeMarks?: PartOutcomeMarkEntry[] | null,
+    course?: AssessmentCourseLink | null,
   ) =>
     apiClient.patch<{ id: string; workflow: AssessmentWorkflow; warnings: string[] }>(
       `/assessment-tools/${id}`,
@@ -387,6 +425,7 @@ export const assessmentsApi = {
         ...(signOff !== undefined ? { signOff } : {}),
         ...(pathwayMarks !== undefined ? { pathwayMarks } : {}),
         ...(partOutcomeMarks !== undefined ? { partOutcomeMarks } : {}),
+        ...(course !== undefined ? { course } : {}),
       },
     ),
 
@@ -408,6 +447,32 @@ export const assessmentsApi = {
     apiClient.patch<{ id: string; locationId: string | null }>(
       `/assessment-cases/${caseId}/location`,
       { locationId },
+    ),
+
+  /** The org's active course packages, newest first. */
+  listCourses: () => apiClient.get<{ courses: CourseSummary[] }>('/courses'),
+
+  /**
+   * Import a course package. A whole zipped manual rides in one request, so
+   * the default 30-second ceiling would abort a slow site connection mid-way.
+   */
+  uploadCourse: (title: string, zipBase64: string) =>
+    apiClient.post<CourseSummary>('/courses', { title, zipBase64 }, { timeoutMs: 180_000 }),
+
+  archiveCourse: (id: string) => apiClient.delete<{ ok: boolean }>(`/courses/${id}`),
+
+  /** The case's course material plus a freshly minted content link. */
+  getCaseCourse: (caseId: string) =>
+    apiClient.get<{ course: CaseCourseView | null }>(`/assessment-cases/${caseId}/course`),
+
+  /** Report reading progress; the server derives completion, never the client. */
+  saveCourseProgress: (
+    caseId: string,
+    input: { visitedSlides?: number[]; confirmRead?: boolean },
+  ) =>
+    apiClient.patch<{ viewedCount: number; totalSlides: number | null; completedAt: string | null }>(
+      `/assessment-cases/${caseId}/course-progress`,
+      input,
     ),
 
   setLocationParts: (id: string, locationPartKeys: Record<string, string[]>) =>
