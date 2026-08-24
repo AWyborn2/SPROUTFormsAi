@@ -78,6 +78,12 @@ import {
 } from '@formai/shared';
 import { requireTenant } from '../middleware/tenant.js';
 import { requirePlanFeature } from '../middleware/plan.js';
+import { comparePassword } from '../auth/verify-password.js';
+import {
+  confirmAllowed,
+  recordConfirmFailure,
+  recordConfirmSuccess,
+} from '../auth/confirm-throttle.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { hasPermission, permissionScope } from '../lib/permissions.js';
 import { assignmentCaseValues, heldCompetencyStates } from '../lib/assignment.js';
@@ -4920,6 +4926,11 @@ const signOffBody = z.object({
     empty signature box and nothing to explain it.
   */
   signature: z.string().regex(/^data:image\/png;base64,/),
+  /*
+    Required — and verified — only when `signature` is the signer's STORED
+    mark (see the gate in the route). A fresh drawing never carries one.
+  */
+  password: z.string().min(1).optional(),
 });
 
 /**
@@ -4978,6 +4989,49 @@ assessmentCasesRouter.post(
         alreadySignedOff: true,
       });
       return;
+    }
+
+    /*
+      THE STORED MARK IS A DIGITAL ID (KTD1). A submitted signature identical
+      to the signer's SAVED one is the application of a stored credential, not
+      a fresh drawing — so the request must prove its holder is at the
+      keyboard: the password, verified through the same primitive login uses
+      and throttled with /auth/confirm-password's counter. A fresh drawing
+      skips the gate entirely — drawing is itself the act. And an account with
+      no password (invite-created) cannot be asked for one it does not have,
+      so the gate stands down and the session + permission matrix remain the
+      unchanged authorization.
+    */
+    const signer = await db.query.users.findFirst({
+      where: eq(schema.users.id, tenant.userId),
+    });
+    if (signer?.signature && signer.passwordHash && parsed.data.signature === signer.signature) {
+      const gate = confirmAllowed(tenant.userId);
+      if (!gate.allowed) {
+        res.status(429).json({
+          error: 'too_many_attempts',
+          message: 'Too many attempts. Try again later.',
+          retryAfterMs: gate.retryAfterMs,
+        });
+        return;
+      }
+      if (!parsed.data.password) {
+        // A UI state, not a guess — absence never counts toward the throttle.
+        res.status(401).json({
+          error: 'password_required',
+          message: 'Applying your saved signature needs your password.',
+        });
+        return;
+      }
+      const valid = await comparePassword(parsed.data.password, signer.passwordHash);
+      if (!valid) {
+        recordConfirmFailure(tenant.userId);
+        res
+          .status(401)
+          .json({ error: 'invalid_credentials', message: 'Invalid username or password.' });
+        return;
+      }
+      recordConfirmSuccess(tenant.userId);
     }
 
     /*

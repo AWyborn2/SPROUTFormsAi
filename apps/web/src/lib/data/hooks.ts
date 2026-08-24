@@ -1527,7 +1527,7 @@ export function useRecordOutcome(caseId: string) {
 export function useSignOffCase(caseId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { assessorName: string; signature: string }) =>
+    mutationFn: (input: { assessorName: string; signature: string; password?: string }) =>
       assessmentsApi.signOffCase({ caseId, ...input }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });

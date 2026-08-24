@@ -16,6 +16,8 @@
  */
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import bcrypt from 'bcryptjs';
+import { resetConfirmThrottle } from '../auth/confirm-throttle.js';
 import { schema, type Db } from '@formai/db';
 import { DEFAULT_ROLE_PERMISSIONS, type AssessmentToolManifest, type FormField } from '@formai/shared';
 
@@ -6648,6 +6650,157 @@ describe('PATCH /assessment-cases/:id/location', () => {
 
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toBe('location_not_found');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('POST /assessment-cases/:id/sign-off — the stored mark is a digital ID (U6)', () => {
+  const SIG = 'data:image/png;base64,iVBORw0KGgo=';
+  const FRESH = 'data:image/png;base64,iVBORw0KGgoFRESHLYDRAWN=';
+  const passwordHash = bcrypt.hashSync('correct horse battery', 4);
+
+  afterEach(() => resetConfirmThrottle());
+
+  function seedSigner(
+    store: Record<string, Record<string, unknown>[]>,
+    over: Record<string, unknown> = {},
+  ) {
+    rows(store, 'users').push({
+      id: ADMIN,
+      name: 'Admin',
+      email: 'a@x.io',
+      signature: SIG,
+      signatureSavedAt: new Date('2026-08-01T00:00:00Z'),
+      passwordHash,
+      ...over,
+    });
+  }
+
+  async function readySigned(store: Record<string, Record<string, unknown>[]>, base: string) {
+    const c = (await (
+      await fetch(`${base}/assessment-cases`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({
+          toolId: (await seedTool(base)).id,
+          candidateUserId: CANDIDATE,
+          pathway: 'experienced',
+        }),
+      })
+    ).json()) as { id: string };
+    const theory = (await (
+      await fetch(`${base}/assessment-cases/${c.id}/parts/p1/attempts`, { method: 'POST', headers: auth() })
+    ).json()) as { id: string };
+    await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}`, {
+      method: 'PATCH',
+      headers: auth(),
+      body: JSON.stringify({ values: { q1: ['a'] } }),
+    });
+    await fetch(`${base}/assessment-cases/${c.id}/attempts/${theory.id}/outcome`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({}),
+    });
+    const prac = (await (
+      await fetch(`${base}/assessment-cases/${c.id}/parts/p2/attempts`, { method: 'POST', headers: auth() })
+    ).json()) as { id: string };
+    await fetch(`${base}/assessment-cases/${c.id}/attempts/${prac.id}/outcome`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify({ outcome: 'satisfactory', assessorName: 'A. Assessor' }),
+    });
+    return c;
+  }
+
+  const signOffWith = (base: string, id: string, body: unknown) =>
+    fetch(`${base}/assessment-cases/${id}/sign-off`, {
+      method: 'POST',
+      headers: auth(),
+      body: JSON.stringify(body),
+    });
+
+  it('refuses the stored mark without a password, changing nothing (AE4)', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, { assessorName: 'Admin', signature: SIG });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('password_required');
+      const row = rows(store, 'assessmentCases').find((r) => r.id === c.id);
+      expect(row?.signedOffAt ?? null).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('signs off with the stored mark plus a valid password (AE4)', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, {
+        assessorName: 'Admin',
+        signature: SIG,
+        password: 'correct horse battery',
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { state: string }).state).toBe('competent');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a freshly drawn signature needs no password (AE4)', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, { assessorName: 'Admin', signature: FRESH });
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a wrong password is refused and counts toward the shared throttle', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store);
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, {
+        assessorName: 'Admin',
+        signature: SIG,
+        password: 'wrong',
+      });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_credentials');
+      const row = rows(store, 'assessmentCases').find((r) => r.id === c.id);
+      expect(row?.signedOffAt ?? null).toBeNull();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('stands the gate down for an account with no password (R6/AE6)', async () => {
+    const { db, store } = makeDb();
+    seedSigner(store, { passwordHash: null });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readySigned(store, base);
+      const res = await signOffWith(base, c.id, { assessorName: 'Admin', signature: SIG });
+      expect(res.status).toBe(200);
     } finally {
       server.close();
     }

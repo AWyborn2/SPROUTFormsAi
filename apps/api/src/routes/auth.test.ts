@@ -540,7 +540,7 @@ describe('PUT /auth/signature', () => {
 
   function signatureDb() {
     const where = vi.fn().mockResolvedValue(undefined);
-    const set = vi.fn(() => ({ where }));
+    const set = vi.fn((_patch: Record<string, unknown>) => ({ where }));
     return {
       db: {
         query: {
@@ -577,7 +577,7 @@ describe('PUT /auth/signature', () => {
     try {
       const res = await putSignature(base, { signature: PNG }, 'yes');
       expect(res.status).toBe(200);
-      const patch = set.mock.calls[0]![0] as { signature: string; signatureSavedAt: Date };
+      const patch = set.mock.calls[0]![0] as unknown as { signature: string; signatureSavedAt: Date };
       expect(patch.signature).toBe(PNG);
       expect(patch.signatureSavedAt).toBeInstanceOf(Date);
       expect(((await res.json()) as { signature: string }).signature).toBe(PNG);
