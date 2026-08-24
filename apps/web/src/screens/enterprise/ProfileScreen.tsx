@@ -812,6 +812,8 @@ function CompetencyRegister({
                       onClick={() => {
                         if (role === 'admin' && membershipId) {
                           window.open(`/api/profiles/${membershipId}/export`, '_blank');
+                        } else {
+                          toast({ variant: 'info', message: 'Export is available to administrators.' });
                         }
                       }}
                     >
