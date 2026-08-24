@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Avatar, Badge, Button, Card, Icon } from '@formai/ui';
+import { Badge, Button, Card, Icon, useToast } from '@formai/ui';
 import {
   PROFILE_FIELDS,
   isTerminalCaseState,
@@ -19,60 +19,267 @@ import {
   useTaxonomy,
 } from '../../lib/data/hooks.js';
 import { CaseStateBadge } from '../statusBadges.js';
-import type { HeldCompetencyRow, MemberProfile, ProfileAccess } from '../../lib/data/types.js';
+import type { HeldCompetencyRow, MemberProfile, ProfileAccess, ProfileSeedResponse } from '../../lib/data/types.js';
 
-/**
- * A member's workforce record (U38).
- *
- * SERVES EVERY MEMBER, not only candidates — an assessor's and an
- * administrator's record is this one. The candidate's own view is this same
- * screen taking the fixed own-record path (R49), which is what keeps their read
- * demonstrably in full rather than a second, thinner surface that could quietly
- * diverge from it.
- *
- * RENDERS FROM THE SHARED INVENTORY rather than a hand-written field list, so a
- * field added there appears here with no second edit and the required, sensitive
- * and derived marks cannot drift between the two.
- *
- * READS RESOLVE PER SECTION (R44). `view` governs the fields, `view_competencies`
- * the competencies and the assessment history, `view_documents` the documents —
- * so an organisation that tightens fields but leaves documents open renders the
- * documents alone. A screen with only two states, everything or nothing, would
- * render that configuration as a blank page.
- */
+/* ── View-model types ─────────────────────────────────────────────────────── */
+
+type BadgeKind = 'earned' | 'expiring' | 'progress' | 'achievement' | 'locked';
+
+interface BadgeItem {
+  code: string;
+  name: string;
+  sub: string;
+  kind: BadgeKind;
+  pct?: number;
+}
+
+interface ActionItem {
+  mark: string;
+  markColor: string;
+  bg: string;
+  bd: string;
+  name: string;
+  sub: string;
+  subColor: string;
+  btnLabel: { candidate: string; other: string };
+  btnBg: string;
+  btnFg: string;
+}
+
+interface TimelineEvent {
+  title: string;
+  sub: string;
+  dotColor: string;
+  xp: string;
+}
+
+type RoleAction = 'edit' | 'download' | 'upload' | 'viewCrew' | 'nudge' | 'startCase' | 'assign';
+
+interface RoleActionBtn {
+  action: RoleAction;
+  label: string;
+  variant: 'secondary' | 'primary';
+}
+
+interface ProfileViewModel {
+  name: string;
+  meta: string;
+  heroAlert: string | null;
+  xp: { current: number; max: number; level: number; pct: number };
+  stats: Array<{ v: string; label: string }>;
+  badges: BadgeItem[];
+  earnedCount: number;
+  register: HeldCompetencyRow[];
+  gallery: Array<{ label: string; name: string; meta: string }>;
+  actions: ActionItem[];
+  timeline: TimelineEvent[];
+  roleActions: Record<string, RoleActionBtn[]>;
+  viewerNotes: Record<string, string>;
+  gallerySub: Record<string, string>;
+  nextBadgeLabel: { candidate: string; candidateRequested: string; other: string };
+}
+
+/* ── Placeholder constants (future gamification backend replaces these) ──── */
+
+const PLACEHOLDER_XP = { current: 0, max: 1000, level: 1, pct: 0 };
+
+const PLACEHOLDER_ACHIEVEMENTS: BadgeItem[] = [];
+
+const PLACEHOLDER_TIMELINE: TimelineEvent[] = [];
+
+const ROLE_ACTIONS: Record<string, RoleActionBtn[]> = {
+  candidate: [
+    { action: 'download', label: 'Download training record', variant: 'secondary' },
+    { action: 'upload', label: 'Upload training document', variant: 'primary' },
+  ],
+  supervisor: [
+    { action: 'viewCrew', label: 'View crew matrix', variant: 'secondary' },
+    { action: 'download', label: 'Download training record', variant: 'secondary' },
+    { action: 'nudge', label: 'Nudge renewal', variant: 'primary' },
+  ],
+  assessor: [
+    { action: 'download', label: 'Download training record', variant: 'secondary' },
+    { action: 'startCase', label: 'Start assessment case', variant: 'primary' },
+  ],
+  admin: [
+    { action: 'edit', label: 'Edit record', variant: 'secondary' },
+    { action: 'download', label: 'Download training record', variant: 'secondary' },
+    { action: 'assign', label: 'Assign assessment', variant: 'primary' },
+  ],
+};
+
+const VIEWER_NOTES: Record<string, string> = {
+  candidate: 'your own record — supervisors and assessors see the same badges',
+  supervisor: 'read-only crew view — renewals can be nudged, not edited',
+  assessor: 'assessment cases can be started and signed off from here',
+  admin: 'full record — grants, evidence and role links are editable',
+};
+
+const GALLERY_SUBS: Record<string, string> = {
+  candidate: 'View only',
+  supervisor: 'View only',
+  assessor: 'Drag photos to attach evidence',
+  admin: 'Drag photos to attach evidence',
+};
+
+/* ── View-model builder ───────────────────────────────────────────────────── */
+
+const URGENCY: Record<string, number> = { expired: 0, grace: 1, expiring: 2, held: 3, undated: 3 };
+
+const EMPTY_ROWS: HeldCompetencyRow[] = [];
+
+function daysUntil(iso: string): number {
+  return Math.max(0, Math.ceil((new Date(iso).getTime() - Date.now()) / 86400000));
+}
+
+function badgeCodeFromName(name: string): string {
+  const words = name.split(/\s+/).filter((w) => w.length > 1);
+  if (words.length >= 2) return words.map((w) => w[0]!.toUpperCase()).slice(0, 3).join('');
+  return name.slice(0, 2).toUpperCase();
+}
+
+function buildProfileViewModel(
+  profile: MemberProfile,
+  held: HeldCompetencyRow[],
+): ProfileViewModel {
+  const sorted = [...held].sort(
+    (a, b) =>
+      (URGENCY[a.status] ?? 4) - (URGENCY[b.status] ?? 4) || a.name.localeCompare(b.name),
+  );
+
+  const badges: BadgeItem[] = sorted.map((c) => {
+    const code = c.code || badgeCodeFromName(c.name);
+    if (c.status === 'held' || c.status === 'undated') {
+      const expiry = c.expiresAt
+        ? `Earned · expires ${new Date(c.expiresAt).toLocaleDateString()}`
+        : 'Earned';
+      return { code, name: c.name, sub: expiry, kind: 'earned' as BadgeKind };
+    }
+    if (c.status === 'expiring' || c.status === 'grace') {
+      const days = c.expiresAt ? daysUntil(c.expiresAt) : 0;
+      return {
+        code,
+        name: c.name,
+        sub: `Renewal due${c.expiresAt ? ` · ${days}d` : ''}`,
+        kind: 'expiring' as BadgeKind,
+      };
+    }
+    if (c.status === 'expired') {
+      return {
+        code,
+        name: c.name,
+        sub: 'Lapsed — renewal needed',
+        kind: 'expiring' as BadgeKind,
+      };
+    }
+    return {
+      code,
+      name: c.name,
+      sub: c.current ? 'In progress' : 'Not started',
+      kind: 'progress' as BadgeKind,
+      pct: c.current ? 40 : 0,
+    };
+  });
+
+  badges.push(...PLACEHOLDER_ACHIEVEMENTS);
+  const earnedCount = badges.filter((b) => b.kind === 'earned').length;
+
+  const expiringRows = sorted.filter((c) => c.status === 'expiring' || c.status === 'grace');
+  const expiredRows = sorted.filter((c) => c.status === 'expired');
+  const heroAlert =
+    expiringRows.length > 0
+      ? `${expiringRows.length} expiring — ${expiringRows[0]!.name}`
+      : expiredRows.length > 0
+        ? `${expiredRows.length} expired — ${expiredRows[0]!.name}`
+        : null;
+
+  const actions: ActionItem[] = [];
+  for (const c of expiredRows) {
+    actions.push({
+      mark: '!',
+      markColor: 'var(--danger-text)',
+      bg: 'var(--danger-soft)',
+      bd: 'var(--red-50)',
+      name: c.name,
+      sub: `Expired${c.expiresAt ? ` ${new Date(c.expiresAt).toLocaleDateString()}` : ''}`,
+      subColor: 'var(--danger-text)',
+      btnLabel: { candidate: 'Upload evidence', other: 'Request upload' },
+      btnBg: 'var(--danger)',
+      btnFg: '#fff',
+    });
+  }
+  for (const c of expiringRows) {
+    const days = c.expiresAt ? daysUntil(c.expiresAt) : 0;
+    actions.push({
+      mark: `${days}d`,
+      markColor: 'var(--warning-text)',
+      bg: 'var(--warning-soft)',
+      bd: 'var(--amber-50)',
+      name: c.name,
+      sub: `Expires${c.expiresAt ? ` ${new Date(c.expiresAt).toLocaleDateString()}` : ''} — renewal`,
+      subColor: 'var(--warning-text)',
+      btnLabel: { candidate: 'Book renewal', other: 'Assign renewal' },
+      btnBg: 'var(--accent)',
+      btnFg: '#fff',
+    });
+  }
+
+  const currentCount = held.filter((c) => c.current).length;
+
+  const meta = [profile.identifier, profile.inductionDate ? `Inducted ${profile.inductionDate}` : null]
+    .filter(Boolean)
+    .join(' · ');
+
+  return {
+    name: profile.displayName || 'Member record',
+    meta,
+    heroAlert,
+    xp: PLACEHOLDER_XP,
+    stats: [
+      { v: String(currentCount), label: 'Competencies held' },
+      { v: '0', label: 'XP earned' },
+      { v: '—', label: 'Zero-lapse streak' },
+      { v: '—', label: 'Site leaderboard' },
+    ],
+    badges,
+    earnedCount,
+    register: sorted,
+    gallery: [],
+    actions,
+    timeline: PLACEHOLDER_TIMELINE,
+    roleActions: ROLE_ACTIONS,
+    viewerNotes: VIEWER_NOTES,
+    gallerySub: GALLERY_SUBS,
+    nextBadgeLabel: {
+      candidate: 'Request this training',
+      candidateRequested: 'Requested — in the training queue ✓',
+      other: 'Assign the awarding assessment',
+    },
+  };
+}
+
+/* ── Main screen ──────────────────────────────────────────────────────────── */
+
 export function ProfileScreen({ membershipId }: { membershipId?: string }) {
-  /*
-    The route supplies the membership; the prop overrides it. Omitting both means
-    "my own record" — the candidate's fixed path (R49), which is the same screen
-    rather than a second, thinner one.
-  */
   const params = useParams<{ id: string }>();
   const mine = useMyProfileMembership();
   const session = useSession();
   const targetId = membershipId ?? params.id ?? mine.data?.membershipId;
 
   const { data, isLoading, isError, error } = useProfile(targetId);
-  /*
-    U40's entry point: `?seedFrom=<submissionId>` prefills this form from an
-    induction submission instead of an Admin typing it again. It reuses THIS
-    form rather than introducing a second one — a separate seeded-create screen
-    would need its own validation and its own option lists, and would drift.
-  */
   const seedFrom = useSearchParams()[0].get('seedFrom') ?? undefined;
   const seed = useProfileSeed(seedFrom);
   const [editing, setEditing] = useState(false);
 
   if (isLoading || (!membershipId && mine.isLoading)) {
-    return <Frame><div className="p-6 text-sm text-text-tertiary">Loading…</div></Frame>;
+    return (
+      <Frame>
+        <div className="p-6 text-sm text-text-tertiary">Loading…</div>
+      </Frame>
+    );
   }
 
   if (isError) {
-    /*
-      A 403 and a 404 read the same here on purpose. The API answers not-found
-      for a membership in another organisation so a probe cannot tell an existing
-      record elsewhere from one that is absent, and repeating that distinction on
-      screen would give it back.
-    */
     const forbidden = /403/.test(String(error ?? ''));
     return (
       <Frame>
@@ -85,95 +292,763 @@ export function ProfileScreen({ membershipId }: { membershipId?: string }) {
     );
   }
 
-  if (!data) return <Frame><div className="p-6 text-sm text-text-tertiary">Nothing to show.</div></Frame>;
+  if (!data)
+    return (
+      <Frame>
+        <div className="p-6 text-sm text-text-tertiary">Nothing to show.</div>
+      </Frame>
+    );
 
   const { profile, access, userId } = data;
+  const role = (session.data?.role ?? 'candidate') as string;
+  const candidateSelf = access.isSubject && role === 'candidate';
   const canEdit = access.editableFields.length > 0;
-  /*
-    A candidate on their OWN record gets the focused layout: their details, the
-    competencies they hold, and the assessments waiting on them. The placement
-    and documents machinery is the organisation's bookkeeping — rendering it to
-    the person it is about only buried the three answers they came for.
-  */
-  const candidateSelf = access.isSubject && session.data?.role === 'candidate';
 
   return (
-    <Frame>
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-center gap-4">
-          <Avatar name={profile.displayName || '?'} size="lg" />
-          <div>
-            <h2 className="font-heading text-xl font-bold">
-              {profile.displayName || 'Member record'}
-            </h2>
-            <p className="mt-0.5 flex items-center gap-2 text-sm text-text-tertiary">
-              {profile.identifier && (
-                <span className="font-mono text-[12px]">{profile.identifier}</span>
-              )}
-              <span>
-                {candidateSelf
-                  ? 'Your profile — your details, competencies and assessments.'
-                  : access.isSubject
-                    ? 'Your own workforce record.'
-                    : 'The organisation’s workforce record for this person.'}
-              </span>
-            </p>
-          </div>
-        </div>
-        {canEdit && !editing && (
-          <Button variant="secondary" onClick={() => setEditing(true)}>
-            Edit record
-          </Button>
-        )}
-      </div>
-
-      {profile.emailUnreachableAt && (
-        <Card className="flex items-start gap-2 border-warning-border bg-warning-surface p-4">
-          <Icon name="mail-x" size={16} className="mt-0.5 text-warning-text" />
-          <p className="text-[12.5px] text-warning-text">
-            This address has been marked as reaching nobody. The address is still on the record —
-            expiry notices need somebody to pass on in person.
-          </p>
-        </Card>
-      )}
-
-      {seedFrom && <SeedBanner submissionId={seedFrom} />}
-
-      {candidateSelf && <MyAssessmentsCard />}
-
-      {access.canViewCompetencies ? (
-        <CompetenciesCard userId={userId} ownRecord={access.isSubject} />
-      ) : (
-        <WithheldCard title="Competencies" />
-      )}
-
-      {editing && targetId ? (
-        <ProfileForm
-          membershipId={targetId}
-          profile={profile}
-          access={access}
-          seeded={seed.data?.disposition === 'create' ? seed.data.seed.fields : undefined}
-          onDone={() => setEditing(false)}
-        />
-      ) : (
-        <FieldsCard profile={profile} access={access} />
-      )}
-
-      {!candidateSelf && targetId && <PlacementCard membershipId={targetId} />}
-
-      {!candidateSelf &&
-        (access.canViewDocuments ? <DocumentsCard /> : <WithheldCard title="Documents" />)}
-    </Frame>
+    <ProfileContent
+      profile={profile}
+      access={access}
+      userId={userId}
+      membershipId={targetId}
+      role={role}
+      candidateSelf={candidateSelf}
+      canEdit={canEdit}
+      editing={editing}
+      setEditing={setEditing}
+      seedFrom={seedFrom}
+      seed={seed.data}
+    />
   );
 }
 
-/**
- * The assessments still waiting on the candidate, on their own record (their
- * "what do I owe" list). The API already scopes the case read to their own
- * cases, so this filters only for the ones still open. Errors render as the
- * empty state — a candidate whose plan or permissions carry no assessments has
- * nothing due by definition.
- */
+function ProfileContent({
+  profile,
+  access,
+  userId,
+  membershipId,
+  role,
+  candidateSelf,
+  canEdit,
+  editing,
+  setEditing,
+  seedFrom,
+  seed,
+}: {
+  profile: MemberProfile;
+  access: ProfileAccess;
+  userId: string;
+  membershipId: string | undefined;
+  role: string;
+  candidateSelf: boolean;
+  canEdit: boolean;
+  editing: boolean;
+  setEditing: (v: boolean) => void;
+  seedFrom: string | undefined;
+  seed: ProfileSeedResponse | undefined;
+}) {
+  const held = useHeldCompetencies(userId);
+  const rows = held.data ?? EMPTY_ROWS;
+  const vm = useMemo(() => buildProfileViewModel(profile, rows), [profile, rows]);
+  const { toast } = useToast();
+  const navigate = useNavigate();
+
+  const handleAction = (btn: RoleActionBtn) => {
+    switch (btn.action) {
+      case 'edit':
+        setEditing(true);
+        break;
+      case 'download':
+        if (role === 'admin' && membershipId) {
+          window.open(`/api/profiles/${membershipId}/export`, '_blank');
+        } else {
+          toast({ variant: 'info', message: 'Export is available to administrators.' });
+        }
+        break;
+      case 'startCase':
+        navigate(`/app/assessments/new?memberId=${userId}`);
+        break;
+      default:
+        toast({ variant: 'info', message: `${btn.label} — coming soon.` });
+    }
+  };
+
+  return (
+    <div className="fai-rise mx-auto max-w-[1180px] p-[24px_24px_48px]">
+      <div className="flex flex-col gap-4">
+        {seedFrom && <SeedBanner submissionId={seedFrom} />}
+
+        {profile.emailUnreachableAt && (
+          <Card className="flex items-start gap-2 border-warning-border bg-warning-surface p-4">
+            <Icon name="mail-x" size={16} className="mt-0.5 text-warning-text" />
+            <p className="text-[12.5px] text-warning-text">
+              This address has been marked as reaching nobody. The address is still on the
+              record &mdash; expiry notices need somebody to pass on in person.
+            </p>
+          </Card>
+        )}
+
+        <HeroCard vm={vm} role={role} canEdit={canEdit} onAction={handleAction} />
+
+        {access.canViewCompetencies && (
+          <BadgeWall badges={vm.badges} earnedCount={vm.earnedCount} />
+        )}
+
+        {editing && membershipId ? (
+          <ProfileForm
+            membershipId={membershipId}
+            profile={profile}
+            access={access}
+            seeded={seed?.disposition === 'create' ? seed.seed.fields : undefined}
+            onDone={() => setEditing(false)}
+          />
+        ) : (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.5fr_1fr]">
+            {/* Main column */}
+            <div className="flex flex-col gap-4">
+              {access.canViewCompetencies ? (
+                <CompetencyRegister
+                  rows={vm.register}
+                  membershipId={membershipId}
+                  role={role}
+                />
+              ) : (
+                <WithheldCard title="Competencies" />
+              )}
+
+              {access.canViewDocuments && (
+                <EvidenceGallery gallery={vm.gallery} role={role} gallerySub={vm.gallerySub} />
+              )}
+
+              {!candidateSelf && <FieldsCard profile={profile} access={access} />}
+              {!candidateSelf && membershipId && (
+                <PlacementCard membershipId={membershipId} />
+              )}
+              {!candidateSelf &&
+                (access.canViewDocuments ? (
+                  <DocumentsCard />
+                ) : (
+                  <WithheldCard title="Documents" />
+                ))}
+            </div>
+
+            {/* Sidebar column */}
+            <div className="flex flex-col gap-4">
+              {candidateSelf && <MyAssessmentsCard />}
+
+              <NextBadgeCard
+                badges={vm.badges}
+                role={role}
+                labels={vm.nextBadgeLabel}
+              />
+
+              <TrainingActions actions={vm.actions} role={role} />
+
+              <TrainingTimeline events={vm.timeline} />
+            </div>
+          </div>
+        )}
+
+        {/* Footer */}
+        <div className="flex items-center gap-2.5 px-1 text-[12px] text-text-tertiary">
+          <span>
+            Record view:{' '}
+            <span className="font-semibold text-text-secondary">
+              {vm.viewerNotes[role] ?? vm.viewerNotes.candidate}
+            </span>
+          </span>
+          <span className="flex-1" />
+          <span>
+            Powered by{' '}
+            <span className="font-semibold text-text-primary">
+              Form<span className="text-accent">AI</span>
+            </span>
+          </span>
+        </div>
+
+        {canEdit && !editing && (
+          <div className="flex justify-center">
+            <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
+              <Icon name="pencil" size={14} />
+              Edit details
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Hero card ────────────────────────────────────────────────────────────── */
+
+function HeroCard({
+  vm,
+  role,
+  canEdit,
+  onAction,
+}: {
+  vm: ProfileViewModel;
+  role: string;
+  canEdit: boolean;
+  onAction: (btn: RoleActionBtn) => void;
+}) {
+  const raw = vm.roleActions[role] ?? vm.roleActions.candidate!;
+  const buttons = canEdit ? raw : raw.filter((b) => b.action !== 'edit');
+
+  return (
+    <Card className="overflow-hidden">
+      {/* Teal banner */}
+      <div className="relative h-[88px] overflow-hidden rounded-t-lg bg-brand-slate">
+        <div
+          className="absolute inset-0"
+          style={{
+            background:
+              'radial-gradient(600px 88px at 20% 100%, rgba(110,199,146,.25), transparent)',
+          }}
+        />
+        {vm.heroAlert && (
+          <span className="absolute right-5 top-4 inline-flex items-center gap-1.5 rounded-pill border border-white/[.16] bg-white/10 px-3 py-0 text-[12px] font-semibold text-white">
+            <span
+              className="h-[7px] w-[7px] rounded-full"
+              style={{ background: 'var(--warning)' }}
+            />
+            {vm.heroAlert}
+          </span>
+        )}
+      </div>
+
+      {/* Hero body */}
+      <div className="flex flex-wrap items-end gap-6 px-7 pb-5">
+        {/* Avatar with XP ring */}
+        <div className="-mt-[52px] relative flex-none">
+          <div
+            className="h-[128px] w-[128px] rounded-full p-[5px]"
+            style={{
+              background: `conic-gradient(var(--accent) ${vm.xp.pct}%, var(--border-subtle) 0)`,
+            }}
+          >
+            <div className="flex h-full w-full items-center justify-center rounded-full bg-surface-card p-1">
+              <div className="flex h-[110px] w-[110px] flex-col items-center justify-center gap-1 rounded-full bg-surface-sunken text-[12px] text-text-tertiary">
+                <Icon name="image" size={28} className="opacity-50" />
+                <span>Drop photo</span>
+              </div>
+            </div>
+          </div>
+          <span className="absolute bottom-0.5 right-0.5 grid h-[34px] w-[34px] place-items-center rounded-full border-[3px] border-surface-card bg-brand-slate font-heading text-[13px] font-extrabold text-brand-green">
+            {vm.xp.level}
+          </span>
+        </div>
+
+        {/* Name, meta, XP */}
+        <div className="min-w-[280px] flex-1 pt-3.5">
+          <h2 className="font-heading text-[26px] font-bold">{vm.name}</h2>
+          {vm.meta && (
+            <p className="mt-0.5 text-[13.5px] text-text-secondary">{vm.meta}</p>
+          )}
+
+          {/* XP bar */}
+          <div className="mt-3 flex max-w-[460px] items-center gap-3">
+            <span className="whitespace-nowrap font-mono text-[11px] font-semibold text-accent">
+              LVL {vm.xp.level}
+            </span>
+            <div className="h-2 flex-1 overflow-hidden rounded-full bg-surface-sunken">
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${vm.xp.pct}%`,
+                  background: 'linear-gradient(90deg, var(--accent), var(--brand-green))',
+                }}
+              />
+            </div>
+            <span className="whitespace-nowrap font-mono text-[11px] text-text-tertiary">
+              {vm.xp.current.toLocaleString()} / {vm.xp.max.toLocaleString()} XP
+            </span>
+          </div>
+
+          {/* Chips */}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-pill bg-success-soft px-2.5 py-0 text-[12px] font-semibold text-success-text">
+              Zero-lapse streak
+            </span>
+            <span className="inline-flex items-center gap-1.5 rounded-pill bg-info-soft px-2.5 py-0 text-[12px] font-semibold text-info-text">
+              Leaderboard
+            </span>
+          </div>
+        </div>
+
+        {/* Role-specific action buttons */}
+        <div className="flex flex-wrap gap-2.5 pt-3.5">
+          {buttons.map((btn) => (
+            <Button
+              key={btn.action}
+              variant={btn.variant}
+              onClick={() => onAction(btn)}
+            >
+              {btn.label}
+            </Button>
+          ))}
+        </div>
+      </div>
+
+      {/* Stats row */}
+      <div className="grid grid-cols-4 border-t border-border-subtle max-md:grid-cols-2">
+        {vm.stats.map((s, i) => (
+          <div
+            key={s.label}
+            className={`px-6 py-3.5 ${i < vm.stats.length - 1 ? 'border-r border-border-subtle max-md:[&:nth-child(2)]:border-r-0' : ''}`}
+          >
+            <div className="font-heading text-[24px] font-bold tabular-nums">{s.v}</div>
+            <div className="mt-px text-[12px] text-text-tertiary">{s.label}</div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+/* ── Badge wall ───────────────────────────────────────────────────────────── */
+
+function badgeRing(b: BadgeItem): string {
+  const greenGrad = 'linear-gradient(135deg, var(--accent), var(--brand-green))';
+  switch (b.kind) {
+    case 'earned':
+      return greenGrad;
+    case 'expiring':
+      return 'conic-gradient(var(--warning) 92%, var(--warning-soft) 0)';
+    case 'progress':
+      return `conic-gradient(var(--accent) ${b.pct ?? 0}%, var(--border-subtle) 0)`;
+    case 'achievement':
+      return greenGrad;
+    case 'locked':
+      return 'var(--border-subtle)';
+    default:
+      return 'var(--border-subtle)';
+  }
+}
+
+function badgeInnerStyle(b: BadgeItem): React.CSSProperties {
+  if (b.kind === 'achievement') return { background: 'var(--brand-slate)' };
+  if (b.kind === 'locked')
+    return { background: 'var(--surface-hover)', border: '2px dashed var(--border-strong)' };
+  if (b.kind === 'earned') return { background: 'var(--success-soft)' };
+  if (b.kind === 'expiring') return { background: 'var(--warning-soft)' };
+  return { background: 'var(--surface-card)' };
+}
+
+function badgeCodeColor(b: BadgeItem): string {
+  if (b.kind === 'earned') return 'var(--accent)';
+  if (b.kind === 'expiring') return 'var(--warning-text)';
+  if (b.kind === 'achievement') return 'var(--brand-green)';
+  if (b.kind === 'locked') return 'var(--text-disabled)';
+  return 'var(--text-disabled)';
+}
+
+function BadgeWall({ badges, earnedCount }: { badges: BadgeItem[]; earnedCount: number }) {
+  if (badges.length === 0) return null;
+
+  return (
+    <Card className="px-7 py-5">
+      <div className="mb-4 flex items-baseline justify-between">
+        <div>
+          <h3 className="font-heading text-[17px] font-bold">Badge wall</h3>
+          <p className="mt-0.5 text-[12.5px] text-text-tertiary">
+            Competency badges, renewals and achievements
+          </p>
+        </div>
+        <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-accent">
+          {earnedCount} of {badges.length} earned
+        </span>
+      </div>
+      <div className="grid grid-cols-6 gap-4 max-md:grid-cols-4 max-sm:grid-cols-3">
+        {badges.map((b) => (
+          <div
+            key={`${b.code}-${b.name}`}
+            className="flex cursor-default flex-col items-center gap-2 rounded-xl p-3.5 text-center transition-colors hover:bg-surface-hover"
+          >
+            <div
+              className="h-[74px] w-[74px] rounded-full p-1"
+              style={{ background: badgeRing(b) }}
+            >
+              <div
+                className="flex h-full w-full items-center justify-center rounded-full"
+                style={badgeInnerStyle(b)}
+              >
+                <span
+                  className="font-heading font-extrabold"
+                  style={{ color: badgeCodeColor(b), fontSize: b.code.length > 3 ? '14px' : '20px' }}
+                >
+                  {b.code}
+                </span>
+              </div>
+            </div>
+            <span
+              className="text-[11.5px] font-semibold leading-tight"
+              style={{
+                color:
+                  b.kind === 'locked' ? 'var(--text-disabled)' : 'var(--text-primary)',
+              }}
+            >
+              {b.name}
+            </span>
+            <span
+              className="text-[10.5px] font-medium"
+              style={{
+                color:
+                  b.kind === 'expiring'
+                    ? 'var(--warning-text)'
+                    : b.kind === 'progress'
+                      ? 'var(--accent)'
+                      : 'var(--text-tertiary)',
+              }}
+            >
+              {b.sub}
+            </span>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+/* ── Competency register ──────────────────────────────────────────────────── */
+
+function statusDotColor(status: string): string {
+  if (status === 'held') return 'var(--success)';
+  if (status === 'expiring' || status === 'grace') return 'var(--warning)';
+  if (status === 'expired') return 'var(--danger)';
+  return 'var(--info)';
+}
+
+function statusTextColor(status: string): string {
+  if (status === 'held') return 'var(--success-text)';
+  if (status === 'expiring' || status === 'grace') return 'var(--warning-text)';
+  if (status === 'expired') return 'var(--danger-text)';
+  return 'var(--info-text)';
+}
+
+function CompetencyRegister({
+  rows,
+  membershipId,
+  role,
+}: {
+  rows: HeldCompetencyRow[];
+  membershipId: string | undefined;
+  role: string;
+}) {
+  if (rows.length === 0) {
+    return (
+      <Card className="p-5">
+        <h3 className="font-ui text-sm font-semibold">Competencies</h3>
+        <p className="mt-2 text-[12.5px] text-text-tertiary">No competencies held.</p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="px-7 py-5">
+      <h3 className="mb-3 font-heading text-[17px] font-bold">Competencies</h3>
+      <div className="overflow-x-auto">
+        <div
+          className="grid text-[13px]"
+          style={{ gridTemplateColumns: '2fr 1.15fr 1.35fr 1fr' }}
+        >
+          {/* Header */}
+          <div className="border-b border-border-default pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">
+            Competency
+          </div>
+          <div className="border-b border-border-default pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">
+            Status
+          </div>
+          <div className="border-b border-border-default pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">
+            Evidence
+          </div>
+          <div className="border-b border-border-default pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">
+            Record
+          </div>
+
+          {/* Rows */}
+          {rows.map((r) => {
+            const standingColor =
+              r.standing === 'required' ? 'var(--accent)' : 'var(--text-tertiary)';
+            const expiryWarn = r.status === 'expiring' || r.status === 'grace';
+            return (
+              <Fragment key={r.competencyId}>
+                <div className="border-b border-border-subtle py-2.5">
+                  <span className="font-semibold">{r.name}</span>{' '}
+                  <span className="font-medium text-text-tertiary"> &middot; </span>
+                  <span className="font-medium" style={{ color: standingColor }}>
+                    {r.standing}
+                  </span>
+                </div>
+                <div className="border-b border-border-subtle py-2.5">
+                  <span
+                    className="inline-flex items-center gap-1.5 font-semibold"
+                    style={{ color: statusTextColor(r.status) }}
+                  >
+                    <span
+                      className="h-[7px] w-[7px] flex-none rounded-full"
+                      style={{ background: statusDotColor(r.status) }}
+                    />
+                    {r.status}
+                  </span>
+                  {r.expiresAt && (
+                    <span
+                      className="block pl-[13px] text-[11px]"
+                      style={{
+                        fontWeight: expiryWarn ? 600 : 400,
+                        color: expiryWarn ? 'var(--warning-text)' : 'var(--text-tertiary)',
+                      }}
+                    >
+                      expires {new Date(r.expiresAt).toLocaleDateString()}
+                    </span>
+                  )}
+                </div>
+                <div className="border-b border-border-subtle py-2.5 text-text-secondary">
+                  {r.evidenceRef || '—'}
+                </div>
+                <div className="border-b border-border-subtle py-2">
+                  {r.evidenceRef ? (
+                    <button
+                      className="inline-flex items-center gap-1.5 rounded-pill border border-border-accent bg-surface-accent-soft px-2.5 py-0 text-[12px] font-semibold text-success-text transition-colors hover:bg-success-soft"
+                      onClick={() => {
+                        if (role === 'admin' && membershipId) {
+                          window.open(`/api/profiles/${membershipId}/export`, '_blank');
+                        }
+                      }}
+                    >
+                      <Icon name="download" size={13} />
+                      PDF
+                    </button>
+                  ) : (
+                    <span className="text-[12px] leading-7 text-text-disabled">&mdash;</span>
+                  )}
+                </div>
+              </Fragment>
+            );
+          })}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/* ── Evidence gallery ─────────────────────────────────────────────────────── */
+
+function EvidenceGallery({
+  gallery,
+  role,
+  gallerySub,
+}: {
+  gallery: Array<{ label: string; name: string; meta: string }>;
+  role: string;
+  gallerySub: Record<string, string>;
+}) {
+  const subtitle = gallerySub[role] ?? gallerySub.candidate;
+  const slots =
+    gallery.length > 0
+      ? gallery
+      : [
+          { label: 'No evidence yet', name: '', meta: '' },
+          { label: 'No evidence yet', name: '', meta: '' },
+          { label: 'No evidence yet', name: '', meta: '' },
+        ];
+
+  return (
+    <Card className="px-7 py-5">
+      <div className="mb-1 flex items-baseline justify-between">
+        <h3 className="font-heading text-[17px] font-bold">Evidence gallery</h3>
+        <span className="text-[12px] text-text-tertiary">{subtitle}</span>
+      </div>
+      <p className="mb-3.5 text-[12.5px] text-text-tertiary">
+        Photos attached to grants &mdash; licence scans, VOC photos, induction cards.
+      </p>
+      <div className="grid grid-cols-3 gap-3 max-sm:grid-cols-2">
+        {slots.map((g, i) => (
+          <div key={`${g.label}-${i}`}>
+            <div className="flex h-[150px] w-full flex-col items-center justify-center gap-1.5 rounded-md border-2 border-dashed border-border-default bg-surface-hover text-[12px] text-text-tertiary">
+              <Icon name="image" size={28} className="opacity-40" />
+              <span>{g.label}</span>
+            </div>
+            {g.name && (
+              <div className="mt-1.5 text-[11.5px] font-semibold">{g.name}</div>
+            )}
+            {g.meta && (
+              <div className="text-[10.5px] text-text-tertiary">{g.meta}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+/* ── Next badge card ──────────────────────────────────────────────────────── */
+
+function NextBadgeCard({
+  badges,
+  role,
+  labels,
+}: {
+  badges: BadgeItem[];
+  role: string;
+  labels: { candidate: string; candidateRequested: string; other: string };
+}) {
+  const isCandidate = role === 'candidate';
+  const canAssign = role === 'assessor' || role === 'admin';
+  const showCard = isCandidate || canAssign;
+  const nextBadge = badges.find((b) => b.kind === 'progress');
+  const [requested, setRequested] = useState(false);
+
+  if (!showCard || !nextBadge) return null;
+
+  const btnLabel = isCandidate
+    ? requested
+      ? labels.candidateRequested
+      : labels.candidate
+    : labels.other;
+
+  return (
+    <div className="rounded-lg border border-border-accent bg-surface-accent-soft p-5">
+      <div className="mb-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-accent">
+        Next badge
+      </div>
+      <div className="flex items-center gap-3.5">
+        <div
+          className="h-14 w-14 flex-none rounded-full p-[3px]"
+          style={{
+            background: `conic-gradient(var(--accent) ${nextBadge.pct ?? 0}%, var(--success-soft) 0)`,
+          }}
+        >
+          <div className="flex h-full w-full items-center justify-center rounded-full bg-surface-card">
+            <span className="font-heading text-[15px] font-extrabold text-accent">
+              {nextBadge.code}
+            </span>
+          </div>
+        </div>
+        <div>
+          <div className="font-heading text-[14px] font-bold">{nextBadge.name}</div>
+          <div className="mt-0.5 text-[12px] text-text-secondary">
+            {nextBadge.sub}
+          </div>
+        </div>
+      </div>
+      <button
+        className={`mt-3.5 w-full rounded-md py-2 text-[13px] font-semibold transition-colors ${
+          isCandidate && requested
+            ? 'border border-border-accent bg-surface-card text-accent'
+            : 'bg-accent text-white hover:bg-accent-hover'
+        }`}
+        onClick={() => {
+          if (isCandidate) setRequested((r) => !r);
+        }}
+      >
+        {btnLabel}
+      </button>
+    </div>
+  );
+}
+
+/* ── Training actions ─────────────────────────────────────────────────────── */
+
+function TrainingActions({
+  actions,
+  role,
+}: {
+  actions: ActionItem[];
+  role: string;
+}) {
+  const isCandidate = role === 'candidate';
+
+  return (
+    <Card className="px-6 py-5">
+      <h3 className="mb-3.5 font-heading text-[16px] font-bold">Training actions</h3>
+      {actions.length === 0 ? (
+        <p className="text-[12.5px] text-text-tertiary">
+          All up to date &mdash; no renewals within 90 days.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-2.5">
+          {actions.map((a) => (
+            <div
+              key={a.name}
+              className="flex items-center gap-3 rounded-md border p-2.5"
+              style={{ background: a.bg, borderColor: a.bd }}
+            >
+              <span
+                className="w-9 flex-none text-center font-heading text-[15px] font-extrabold leading-tight"
+                style={{ color: a.markColor }}
+              >
+                {a.mark}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-[13px] font-semibold">{a.name}</div>
+                <div className="text-[11.5px]" style={{ color: a.subColor }}>
+                  {a.sub}
+                </div>
+              </div>
+              <button
+                className="whitespace-nowrap rounded-md px-3 py-1.5 text-[12.5px] font-semibold transition-[filter] hover:brightness-[.94]"
+                style={{ background: a.btnBg, color: a.btnFg }}
+              >
+                {isCandidate ? a.btnLabel.candidate : a.btnLabel.other}
+              </button>
+            </div>
+          ))}
+          <p className="mt-3 text-[12px] text-text-tertiary">
+            No other renewals within 90 days.
+          </p>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/* ── Training timeline ────────────────────────────────────────────────────── */
+
+function TrainingTimeline({ events }: { events: TimelineEvent[] }) {
+  if (events.length === 0) {
+    return (
+      <Card className="px-6 py-5">
+        <h3 className="mb-3.5 font-heading text-[16px] font-bold">Training activity</h3>
+        <p className="text-[12.5px] text-text-tertiary">No activity recorded yet.</p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="px-6 py-5">
+      <h3 className="mb-3.5 font-heading text-[16px] font-bold">Training activity</h3>
+      <div className="flex flex-col">
+        {events.map((ev, i) => (
+          <div key={`${ev.title}-${i}`} className="flex gap-3">
+            <div className="flex flex-col items-center">
+              <span
+                className="mt-1 h-2.5 w-2.5 flex-none rounded-full"
+                style={{ background: ev.dotColor }}
+              />
+              {i < events.length - 1 && (
+                <span className="my-[3px] w-[1.5px] flex-1 bg-border-subtle" />
+              )}
+            </div>
+            <div className="pb-4">
+              <div className="text-[13px] font-semibold leading-tight">
+                {ev.title}
+                {ev.xp && (
+                  <span className="ml-1 font-mono text-[10.5px] font-semibold text-accent">
+                    {ev.xp}
+                  </span>
+                )}
+              </div>
+              <div className="mt-0.5 text-[11.5px] text-text-tertiary">{ev.sub}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+/* ── Preserved sub-components ─────────────────────────────────────────────── */
+
 function MyAssessmentsCard() {
   const navigate = useNavigate();
   const { data: cases } = useAssessmentCases();
@@ -187,7 +1062,7 @@ function MyAssessmentsCard() {
       </div>
       {due.length === 0 ? (
         <p className="mt-2 text-[12.5px] text-text-tertiary">
-          Nothing due — you&rsquo;re up to date.
+          Nothing due &mdash; you&rsquo;re up to date.
         </p>
       ) : (
         <ul className="mt-3 flex flex-col gap-1.5">
@@ -216,14 +1091,6 @@ function MyAssessmentsCard() {
   );
 }
 
-/**
- * What the induction submission says, and whether it may seed anything (U40).
- *
- * A REPEAT CREATES NOTHING (R89). Two records for one person is unrecoverable
- * without a merge, so a submission from somebody who already holds a record
- * tells an Admin and stops — and where they were deactivated, asks, because
- * reactivation takes a seat and may buy a block (R78, R86).
- */
 function SeedBanner({ submissionId }: { submissionId: string }) {
   const { data } = useProfileSeed(submissionId);
   if (!data) return null;
@@ -259,7 +1126,6 @@ function SeedBanner({ submissionId }: { submissionId: string }) {
               </li>
             ))}
           </ul>
-          {/* A suggestion, not a value — an Admin picks from the current lists (R94). */}
           <p className="mt-1 text-[11.5px] text-text-tertiary">Pick a current value for each.</p>
         </div>
       )}
@@ -268,16 +1134,13 @@ function SeedBanner({ submissionId }: { submissionId: string }) {
 }
 
 function Frame({ children }: { children: React.ReactNode }) {
-  return <div className="fai-rise mx-auto grid max-w-[860px] gap-5 p-[30px_28px_60px]">{children}</div>;
+  return (
+    <div className="fai-rise mx-auto grid max-w-[860px] gap-5 p-[30px_28px_60px]">
+      {children}
+    </div>
+  );
 }
 
-/**
- * A section this reader is not admitted to.
- *
- * Named rather than omitted, so somebody who cannot see the documents knows
- * there is a documents section rather than wondering whether the record has any.
- * The COUNT is not shown — that would leak the very thing the setting withholds.
- */
 function WithheldCard({ title }: { title: string }) {
   return (
     <Card className="flex items-center gap-2 p-5 text-sm text-text-tertiary">
@@ -287,7 +1150,8 @@ function WithheldCard({ title }: { title: string }) {
   );
 }
 
-/** Inventory entries the record itself renders — placement has its own card. */
+/* ── Fields card (read-only details) ──────────────────────────────────────── */
+
 const DISPLAY_FIELDS = PROFILE_FIELDS.filter(
   (f) => f.storedOn !== 'membership' && f.key !== 'profilePictureKey',
 );
@@ -298,14 +1162,13 @@ function FieldsCard({ profile, access }: { profile: MemberProfile; access: Profi
       <h3 className="font-ui text-sm font-semibold">Details</h3>
       <dl className="mt-3 grid gap-x-6 gap-y-2 sm:grid-cols-2">
         {DISPLAY_FIELDS.map((f) => (
-          <div key={f.key} className="flex items-baseline justify-between gap-3 border-b border-border-subtle py-1.5">
+          <div
+            key={f.key}
+            className="flex items-baseline justify-between gap-3 border-b border-border-subtle py-1.5"
+          >
             <dt className="flex items-center gap-1.5 text-[12px] text-text-tertiary">
               {f.label}
-              {f.presence === 'derived' && (
-                // Derived and stored nowhere (R3, R15, KTD19) — the form offers
-                // no way to enter it, and saying so here is why.
-                <Badge variant="neutral">derived</Badge>
-              )}
+              {f.presence === 'derived' && <Badge variant="neutral">derived</Badge>}
             </dt>
             <dd className="text-[12.5px] font-medium">{displayValue(profile, f) || '—'}</dd>
           </div>
@@ -333,18 +1196,8 @@ function displayValue(profile: MemberProfile, f: ProfileFieldSpec): string {
   return raw == null ? '' : String(raw);
 }
 
-/**
- * The Admin's entry form (F1).
- *
- * Renders from the SAME inventory the read does, marks its required fields from
- * it, and offers each closed field's own option list (R13, R14) — so the decline
- * values for gender and ethnicity are present because the inventory carries
- * them, not because this form remembered to add them.
- *
- * A candidate reaching this form gets the three fields R51 gives them and no
- * others, because `editableFields` is resolved by the API rather than by role
- * guesswork here.
- */
+/* ── Profile form (Admin entry / candidate self-edit) ─────────────────────── */
+
 function ProfileForm({
   membershipId,
   profile,
@@ -355,7 +1208,6 @@ function ProfileForm({
   membershipId: string;
   profile: MemberProfile;
   access: ProfileAccess;
-  /** Values an induction submission supplied (U40). Undefined on an ordinary edit. */
   seeded?: Record<string, string>;
   onDone: () => void;
 }) {
@@ -366,9 +1218,6 @@ function ProfileForm({
   );
   const [values, setValues] = useState<Record<string, string>>(() =>
     Object.fromEntries(
-      // A seeded value only fills a field the record has NOT already answered:
-      // a submission is older than any correction an Admin has since made, so
-      // letting it overwrite would undo their work.
       fields.map((f) => [f.key, displayValue(profile, f) || (seeded?.[f.key] ?? '')]),
     ),
   );
@@ -376,11 +1225,6 @@ function ProfileForm({
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    /*
-      Required-field validation runs here AND on the API. This copy exists so
-      the person is told which field is missing without a round trip; the API's
-      is the one that binds, because a form is not a place to enforce anything.
-    */
     const blank = fields
       .filter((f) => f.presence === 'required' && !values[f.key]?.trim())
       .map((f) => f.key);
@@ -397,7 +1241,11 @@ function ProfileForm({
           <label key={f.key} className="flex flex-col gap-1 text-[12px]">
             <span className="text-text-tertiary">
               {f.label}
-              {f.presence === 'required' && <span aria-hidden className="ml-0.5 text-danger-text">*</span>}
+              {f.presence === 'required' && (
+                <span aria-hidden className="ml-0.5 text-danger-text">
+                  *
+                </span>
+              )}
             </span>
             {f.options ? (
               <select
@@ -446,22 +1294,14 @@ function ProfileForm({
   );
 }
 
-/**
- * Where this person works, with retired and withdrawn values MARKED IN PLACE
- * (R109) rather than hidden.
- *
- * Hiding them would misreport the record: a retired Location a person still
- * holds is exactly what the working list asks an Admin to review, so a reader
- * has to be able to tell a value that still counts from one that does not.
- */
+/* ── Placement card ───────────────────────────────────────────────────────── */
+
 function PlacementCard({ membershipId }: { membershipId: string }) {
   const placement = useMemberPlacement(membershipId);
   const taxonomy = useTaxonomy();
 
   if (!placement.data || !taxonomy.data) return null;
   const { locations, departments } = taxonomy.data;
-  // Roles are offered BY a Department (R5), so the flat list the placement holds
-  // has to be resolved back through the Departments that own them.
   const roles = departments.flatMap((d) => d.roles);
   const name = (list: Array<{ id: string; name: string; status?: string }>, ids: string[]) =>
     ids.map((id) => {
@@ -483,7 +1323,9 @@ function PlacementCard({ membershipId }: { membershipId: string }) {
           <div key={g.title}>
             <p className="text-[12px] text-text-tertiary">{g.title}</p>
             <div className="mt-1 flex flex-wrap gap-1.5">
-              {g.items.length === 0 && <span className="text-[12.5px] text-text-tertiary">—</span>}
+              {g.items.length === 0 && (
+                <span className="text-[12.5px] text-text-tertiary">&mdash;</span>
+              )}
               {g.items.map((i) => (
                 <Badge key={i.id} variant={i.retired ? 'warning' : 'neutral'}>
                   {i.label}
@@ -496,105 +1338,6 @@ function PlacementCard({ membershipId }: { membershipId: string }) {
       </div>
     </Card>
   );
-}
-
-/**
- * Competencies, showing STANDING and CURRENCY as two facts side by side.
- *
- * They answer different questions — standing is obligation and follows the
- * person's Roles, currency is eligibility and follows the competency's own dates
- * — and a reader who cannot tell them apart reads an expired OPTIONAL competency
- * as a compliance failure, which it is not (R102, R104).
- *
- * Currency arrives already resolved on the reader's own audience window, so a
- * candidate sees the thirty-day warning and everyone else the assessor's ninety.
- */
-function CompetenciesCard({
-  userId,
-  ownRecord = false,
-}: {
-  userId: string | undefined;
-  /** Changes only the copy — "you hold" reads differently from "they hold". */
-  ownRecord?: boolean;
-}) {
-  // Keyed on the USER, not the membership: a grant is recorded against the
-  // person, and passing a membership id here validates as a UUID and then
-  // matches nothing.
-  const held = useHeldCompetencies(userId);
-  const rows = held.data ?? [];
-  /*
-    Sorted urgent-first: what has lapsed or is about to lapse is the reason
-    anyone opens this card, so it must not be buried under a long tail of
-    healthy tickets. Ties keep the name order so the list reads stably.
-  */
-  const URGENCY: Record<string, number> = { expired: 0, grace: 1, expiring: 2, held: 3 };
-  const sorted = [...rows].sort(
-    (a, b) => (URGENCY[a.status] ?? 4) - (URGENCY[b.status] ?? 4) || a.name.localeCompare(b.name),
-  );
-  const current = rows.filter((c) => c.current).length;
-  const attention = rows.filter((c) => c.status !== 'held').length;
-
-  return (
-    <Card className="p-5">
-      <div className="flex items-center justify-between gap-3">
-        <h3 className="font-ui text-sm font-semibold">Competencies</h3>
-        {rows.length > 0 && (
-          <span className="flex items-center gap-1.5">
-            <Badge variant="success">{current} current</Badge>
-            {attention > 0 && <Badge variant="warning">{attention} need attention</Badge>}
-          </span>
-        )}
-      </div>
-      {rows.length === 0 && (
-        <p className="mt-2 text-[12.5px] text-text-tertiary">
-          {ownRecord ? 'You hold no competencies yet.' : 'No competencies held.'}
-        </p>
-      )}
-      <ul className="mt-3 flex flex-col gap-1.5">
-        {sorted.map((c) => (
-          <li
-            key={c.competencyId}
-            className="flex items-center justify-between gap-3 rounded-md bg-surface-sunken px-3 py-2"
-          >
-            <span className="min-w-0">
-              <span className="flex items-center gap-2">
-                <span className="truncate text-[13px] font-semibold">{c.name}</span>
-                {c.code && (
-                  <span className="flex-none font-mono text-[10.5px] uppercase tracking-wide text-text-tertiary">
-                    {c.code}
-                  </span>
-                )}
-              </span>
-              <span className="block text-[11.5px] text-text-tertiary">
-                {competencySubline(c)}
-              </span>
-            </span>
-            <span className="flex flex-none items-center gap-1.5">
-              <Badge variant={c.standing === 'required' ? 'info' : 'neutral'}>{c.standing}</Badge>
-              <Badge variant={currencyTone(c.status)}>{c.status}</Badge>
-            </span>
-          </li>
-        ))}
-      </ul>
-    </Card>
-  );
-}
-
-/** The one-line story under a competency's name: its dates, or that it has none. */
-function competencySubline(c: HeldCompetencyRow): string {
-  if (c.note) return c.note;
-  if (c.expiresAt) {
-    const when = new Date(c.expiresAt).toLocaleDateString();
-    return c.status === 'expired' ? `Expired ${when}` : `Valid until ${when}`;
-  }
-  return 'No expiry';
-}
-
-function currencyTone(status: string): 'success' | 'warning' | 'danger' | 'neutral' {
-  if (status === 'held') return 'success';
-  if (status === 'expiring' || status === 'grace') return 'warning';
-  if (status === 'expired') return 'danger';
-  return 'neutral';
 }
 
 function DocumentsCard() {
