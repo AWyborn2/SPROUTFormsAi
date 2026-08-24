@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import { Router } from 'express';
 import { eq, or } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
@@ -8,9 +7,22 @@ import type { SessionInfo, TenantContext } from '@formai/shared';
 import { db } from '../db.js';
 import { sealSession, unsealSession } from '../auth/replit-auth.js';
 import { DeactivatedMemberError, provisionTenant } from '../auth/tenant-provisioning.js';
+import { BCRYPT_COST, comparePassword, verifyUserPassword } from '../auth/verify-password.js';
+import {
+  confirmAllowed,
+  recordConfirmFailure,
+  recordConfirmSuccess,
+} from '../auth/confirm-throttle.js';
+import { recordAudit } from '../audit/record.js';
 import { SESSION_COOKIE_NAME } from '../middleware/tenant.js';
 import { withErrorHandling } from '../lib/with-error-handling.js';
 import { insertUserWithUsername } from '../lib/username.js';
+
+// The hashing constants and the constant-time compare live in
+// `auth/verify-password.ts` so login, password confirmation and the sign-off
+// gate share one primitive. Re-exported here because the invite and
+// password-reset routes import them from this module.
+export { BCRYPT_COST, DUMMY_HASH } from '../auth/verify-password.js';
 
 export const SESSION_COOKIE_OPTIONS = {
   httpOnly: true,
@@ -18,21 +30,6 @@ export const SESSION_COOKIE_OPTIONS = {
   secure: process.env.NODE_ENV === 'production',
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
-
-/** Cost factor for every bcrypt hash the app mints (signup and the dummy hash below). */
-/** Cost factor for every bcrypt hash the app mints. Exported so the
- * invite-signup path cannot drift to a weaker cost than signup. */
-export const BCRYPT_COST = 12;
-
-/**
- * Structurally valid, full-cost bcrypt hash of a random string, minted once at
- * module load. When a login hits an unknown email we still run bcrypt.compare
- * against this hash so the request does the same full-cost work as a real
- * compare — a malformed constant would let bcrypt short-circuit and reopen the
- * email-enumeration timing oracle. It hashes random bytes, so no input can
- * ever match it. Exported for tests only.
- */
-export const DUMMY_HASH = bcrypt.hashSync(randomBytes(32).toString('hex'), BCRYPT_COST);
 
 export const authRouter: Router = Router();
 
@@ -172,9 +169,9 @@ authRouter.post(
     });
 
     // Constant-time path even when no user is found — prevents enumeration via
-    // timing, on either credential.
-    const hashToVerify = user?.passwordHash ?? DUMMY_HASH;
-    const valid = await bcrypt.compare(password, hashToVerify);
+    // timing, on either credential. `comparePassword` runs the dummy compare
+    // when there is no hash, so the work is identical on every path.
+    const valid = await comparePassword(password, user?.passwordHash ?? null);
 
     if (!user || !valid) {
       res
@@ -216,6 +213,97 @@ authRouter.post('/logout', (_req, res) => {
   res.clearCookie(SESSION_COOKIE_NAME, clearOptions);
   res.status(204).end();
 });
+
+// ── POST /auth/confirm-password ────────────────────────────────────────────
+
+/**
+ * The signing step-up: prove the session's owner is at the keyboard right now.
+ *
+ * Applying a STORED signature to a document is an act of attestation, and a
+ * session cookie on a shared site tablet is not proof of presence — whoever
+ * picks the device up holds it. This endpoint re-verifies the password at the
+ * moment of application; the client applies the saved mark only on a 204.
+ *
+ * Throttled BEFORE any hash work (a caller here already knows the target user
+ * id, which login's dummy-hash discipline alone does not defend), and the
+ * failure body is byte-identical to login's so nothing new is learnable from
+ * it. The optional context names what was being signed, for the audit row.
+ */
+const confirmPasswordSchema = z.object({
+  password: z.string().min(1),
+  context: z
+    .object({
+      caseId: z.string().optional(),
+      attemptId: z.string().optional(),
+      fieldId: z.string().optional(),
+    })
+    .optional(),
+});
+
+authRouter.post(
+  '/confirm-password',
+  withErrorHandling(async (req, res) => {
+    const token = req.cookies?.[SESSION_COOKIE_NAME];
+    const tenant = typeof token === 'string' ? unsealSession<TenantContext>(token) : null;
+    if (!tenant) {
+      res.status(401).json({ error: 'unauthenticated' });
+      return;
+    }
+    const parsed = confirmPasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'validation_error', issues: parsed.error.issues });
+      return;
+    }
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+
+    const gate = confirmAllowed(tenant.userId);
+    if (!gate.allowed) {
+      res.status(429).json({
+        error: 'too_many_attempts',
+        message: 'Too many attempts. Try again later.',
+        retryAfterMs: gate.retryAfterMs,
+      });
+      return;
+    }
+
+    const valid = await verifyUserPassword(db, tenant.userId, parsed.data.password);
+    if (!valid) {
+      recordConfirmFailure(tenant.userId);
+      // Login's exact body: an account with no password gets the same answer
+      // as a wrong password — this endpoint is not an oracle for either.
+      res
+        .status(401)
+        .json({ error: 'invalid_credentials', message: 'Invalid username or password.' });
+      return;
+    }
+
+    recordConfirmSuccess(tenant.userId);
+    const ctx = parsed.data.context;
+    const target =
+      [
+        ctx?.caseId && `case ${ctx.caseId}`,
+        ctx?.attemptId && `attempt ${ctx.attemptId}`,
+        ctx?.fieldId && `field ${ctx.fieldId}`,
+      ]
+        .filter(Boolean)
+        .join(', ') || 'signature application';
+    // Best-effort: the confirmation stands even if the audit insert fails.
+    try {
+      await recordAudit(db, tenant, {
+        action: 'Confirmed identity to apply saved signature',
+        target,
+        category: 'security',
+        icon: 'pen-line',
+      });
+    } catch {
+      // Never fail a verified confirmation over a log row.
+    }
+    res.status(204).end();
+  }),
+);
 
 // ── GET /auth/me ───────────────────────────────────────────────────────────
 

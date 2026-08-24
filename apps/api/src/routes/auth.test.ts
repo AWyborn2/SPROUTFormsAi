@@ -420,3 +420,113 @@ describe('GET /auth/me', () => {
     }
   });
 });
+
+describe('POST /auth/confirm-password', () => {
+  const passwordHash = bcrypt.hashSync('correct horse battery', 4);
+
+  afterEach(async () => {
+    const { resetConfirmThrottle } = await import('../auth/confirm-throttle.js');
+    resetConfirmThrottle();
+  });
+  const tenant = { userId: 'u1', orgId: 'o1', role: 'assessor' as const };
+
+  function confirmDb(user: object | undefined) {
+    return {
+      query: {
+        users: { findFirst: vi.fn().mockResolvedValue(user) },
+      },
+      insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
+    };
+  }
+
+  async function postConfirm(base: string, body: unknown, sealed?: string) {
+    return fetch(`${base}/auth/confirm-password`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(sealed ? { cookie: `fai_session=${sealed}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('204s on the correct password and writes an audit row naming the context', async () => {
+    const dbMock = confirmDb({ id: 'u1', name: 'Ash', passwordHash });
+    mockDbValue = dbMock;
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(
+        base,
+        { password: 'correct horse battery', context: { caseId: 'c9', fieldId: 'f2' } },
+        sealSession(tenant),
+      );
+      expect(res.status).toBe(204);
+      expect(dbMock.insert).toHaveBeenCalledTimes(1);
+      const values = dbMock.insert.mock.results[0]!.value.values as ReturnType<typeof vi.fn>;
+      const row = values.mock.calls[0]![0] as { category: string; target: string };
+      expect(row.category).toBe('security');
+      expect(row.target).toBe('case c9, field f2');
+    } finally {
+      server.close();
+    }
+  });
+
+  it("401s with login's exact body on a wrong password, counting the attempt", async () => {
+    mockDbValue = confirmDb({ id: 'u1', name: 'Ash', passwordHash });
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(base, { password: 'wrong' }, sealSession(tenant));
+      expect(res.status).toBe(401);
+      expect((await res.json()) as object).toEqual({
+        error: 'invalid_credentials',
+        message: 'Invalid username or password.',
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s identically for an account with no password — no oracle for its absence (R6)', async () => {
+    mockDbValue = confirmDb({ id: 'u1', name: 'Ash', passwordHash: null });
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(base, { password: 'anything at all' }, sealSession(tenant));
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('invalid_credentials');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('locks after repeated failures and refuses before any compare runs (AE5)', async () => {
+    const dbMock = confirmDb({ id: 'u1', name: 'Ash', passwordHash });
+    mockDbValue = dbMock;
+    const { server, base } = startApp();
+    try {
+      for (let i = 0; i < 5; i++) {
+        await postConfirm(base, { password: 'wrong' }, sealSession(tenant));
+      }
+      const findFirst = dbMock.query.users.findFirst;
+      const callsBefore = findFirst.mock.calls.length;
+      const res = await postConfirm(base, { password: 'correct horse battery' }, sealSession(tenant));
+      expect(res.status).toBe(429);
+      expect(((await res.json()) as { error: string }).error).toBe('too_many_attempts');
+      // Refused at the gate: no user lookup, so no bcrypt work either.
+      expect(findFirst.mock.calls.length).toBe(callsBefore);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s unauthenticated with no cookie', async () => {
+    mockDbValue = confirmDb({ id: 'u1', name: 'Ash', passwordHash });
+    const { server, base } = startApp();
+    try {
+      const res = await postConfirm(base, { password: 'whatever' });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { error: string }).error).toBe('unauthenticated');
+    } finally {
+      server.close();
+    }
+  });
+});
