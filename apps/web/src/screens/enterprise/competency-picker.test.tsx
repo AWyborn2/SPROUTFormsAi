@@ -179,3 +179,82 @@ describe('toggleSelection (KTD1)', () => {
     expect(removed.recommended.size).toBe(0);
   });
 });
+
+/**
+ * What the surrounding scopes already cover leaves the options list: an
+ * inherited-required entry applies here regardless, so re-picking it was pure
+ * noise — the complaint that drove this. Recommended-from-elsewhere stays,
+ * because requiring it here is a real upgrade.
+ */
+describe('inherited coverage', () => {
+  const inherited = new Map([
+    ['z1', { tier: 'required' as const, sources: ['Boddington Bauxite Mine'] }],
+    ['l1', { tier: 'recommended' as const, sources: ['org-wide'] }],
+  ]);
+
+  function InheritedHarness({ initial }: { initial?: TierSelection }) {
+    const [selection, setSelection] = useState<TierSelection>(
+      initial ?? { required: new Set(), recommended: new Set() },
+    );
+    return (
+      <CompetencyPicker
+        competencies={GROUPED}
+        selection={selection}
+        onToggle={(tier, id) => setSelection((prev) => toggleSelection(prev, tier, id))}
+        scopeName="Dozer Operator"
+        inherited={inherited}
+      />
+    );
+  }
+
+  it('drops an inherited-required entry from the options and says how many are hidden', () => {
+    render(<InheritedHarness />);
+
+    // Search auto-expands matches — the sibling shows, the covered one never does.
+    fireEvent.change(screen.getByLabelText('Search competencies for Dozer Operator'), {
+      target: { value: 'Widget' },
+    });
+    expect(screen.getByLabelText('Require Widget Rigging for Dozer Operator')).toBeDefined();
+    expect(screen.queryByLabelText('Require Widget Handling for Dozer Operator')).toBeNull();
+    expect(screen.getByText(/1 already required by inheritance is not listed/)).toBeDefined();
+  });
+
+  it('keeps an inherited-recommended entry, named to its source — the upgrade path', () => {
+    render(<InheritedHarness />);
+
+    fireEvent.change(screen.getByLabelText('Search competencies for Dozer Operator'), {
+      target: { value: 'Crane Ops' },
+    });
+    expect(requireBox('Crane Ops')).toBeDefined();
+    expect(screen.getByText(/already recommended from org-wide/)).toBeDefined();
+  });
+
+  it('keeps a redundant OWN pick visible so it can still be unticked', () => {
+    render(
+      <InheritedHarness
+        initial={{ required: new Set(['z1']), recommended: new Set() }}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText('Search competencies for Dozer Operator'), {
+      target: { value: 'Widget Handling' },
+    });
+    const box = requireBox('Widget Handling');
+    expect(box.checked).toBe(true);
+    fireEvent.click(box);
+    // Unticked, it is now covered by inheritance alone — and leaves the list.
+    expect(screen.queryByLabelText('Require Widget Handling for Dozer Operator')).toBeNull();
+  });
+
+  it('explains a search whose every match is hidden, instead of "no match"', () => {
+    render(<InheritedHarness />);
+
+    fireEvent.change(screen.getByLabelText('Search competencies for Dozer Operator'), {
+      target: { value: 'Widget Handling' },
+    });
+
+    expect(
+      screen.getByText('Every match is already required by inheritance — nothing to add here.'),
+    ).toBeDefined();
+  });
+});
