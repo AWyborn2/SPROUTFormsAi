@@ -58,12 +58,20 @@ export function familyOf(c: Pick<Competency, 'code' | 'name'>): string {
   return word.toUpperCase() || 'OTHER';
 }
 
+/** What the surrounding scopes already say about one competency. */
+export interface InheritedCoverage {
+  tier: RequirementTier;
+  /** The scope names that impose it — "Boddington Bauxite Mine", "org-wide". */
+  sources: string[];
+}
+
 export function CompetencyPicker({
   competencies,
   selection,
   onToggle,
   disabled,
   scopeName,
+  inherited,
 }: {
   /** The register plus anything inline-created that the cache has not caught up with. */
   competencies: Competency[];
@@ -73,6 +81,15 @@ export function CompetencyPicker({
   disabled?: boolean;
   /** The scope's display name, for the per-option aria labels. */
   scopeName: string;
+  /**
+   * The inherited context, by competency id. A competency already REQUIRED
+   * by a surrounding scope leaves the options list — it applies regardless,
+   * and nothing stronger can be added here (unless this scope's own selection
+   * duplicates it, which must stay visible to be unticked). One inherited as
+   * RECOMMENDED stays listed — requiring it here is a real upgrade — with the
+   * source named on the row.
+   */
+  inherited?: ReadonlyMap<string, InheritedCoverage>;
 }) {
   const [search, setSearch] = useState('');
   // Groups the admin opened by hand. Search does NOT write here: typing
@@ -84,7 +101,13 @@ export function CompetencyPicker({
   const matches = (c: Competency) =>
     q === '' || c.name.toLowerCase().includes(q) || (c.code ?? '').toLowerCase().includes(q);
 
-  const sorted = [...competencies].sort((a, b) => a.name.localeCompare(b.name));
+  const allSorted = [...competencies].sort((a, b) => a.name.localeCompare(b.name));
+  const coveredByInheritance = (c: Competency) =>
+    inherited?.get(c.id)?.tier === 'required' &&
+    !selection.required.has(c.id) &&
+    !selection.recommended.has(c.id);
+  const sorted = allSorted.filter((c) => !coveredByInheritance(c));
+  const hiddenCount = allSorted.length - sorted.length;
   const groups = new Map<string, Competency[]>();
   for (const c of sorted) {
     const key = familyOf(c);
@@ -117,6 +140,13 @@ export function CompetencyPicker({
         {c.code && (
           <span className="ml-1.5 font-mono text-[9.5px] uppercase text-text-tertiary">
             {c.code}
+          </span>
+        )}
+        {inherited?.get(c.id)?.tier === 'recommended' && (
+          // Requiring it here is a real upgrade; re-recommending would only
+          // restate what the named scope already says.
+          <span className="ml-1.5 text-[9.5px] text-text-tertiary">
+            already recommended from {inherited.get(c.id)!.sources.join(', ')}
           </span>
         )}
       </span>
@@ -175,9 +205,20 @@ export function CompetencyPicker({
         onChange={(e) => setSearch(e.target.value)}
       />
 
+      {/* Say what the list is NOT showing, or a search for an inherited
+          requirement reads as the register missing it. */}
+      {hiddenCount > 0 && (
+        <p className="text-[10.5px] text-text-tertiary">
+          {hiddenCount} already required by inheritance {hiddenCount === 1 ? 'is' : 'are'} not
+          listed — {hiddenCount === 1 ? 'it applies' : 'they apply'} here regardless.
+        </p>
+      )}
+
       {visible.length === 0 ? (
         <p className="text-[11.5px] text-text-tertiary">
-          No competencies match &ldquo;{search.trim()}&rdquo;.
+          {q !== '' && allSorted.some((c) => matches(c) && coveredByInheritance(c))
+            ? 'Every match is already required by inheritance — nothing to add here.'
+            : `No competencies match “${search.trim()}”.`}
         </p>
       ) : flat ? (
         // Degenerate data: a flat list with no headers (KTD10) — search alone

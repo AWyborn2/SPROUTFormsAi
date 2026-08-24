@@ -594,6 +594,17 @@ export function ScopeRequirements({
               onToggle={toggle}
               disabled={retired}
               scopeName={target.name}
+              /*
+                What the surrounding scopes already cover — with the location
+                lens set, that includes the site's list, so the options offer
+                only what this scope would genuinely ADD (an inherited-required
+                entry applies here regardless; re-picking it was pure noise).
+              */
+              inherited={
+                new Map(
+                  inherited.map((e) => [e.competencyId, { tier: e.tier, sources: e.sources }]),
+                )
+              }
             />
           )}
 
