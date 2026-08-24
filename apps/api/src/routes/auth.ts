@@ -335,16 +335,26 @@ authRouter.post(
 // ── PUT /auth/signature ────────────────────────────────────────────────────
 
 /**
- * Deliberately save (or clear) the person's signature — the My-signature
- * write path, distinct from the sign-off's best-effort remember.
+ * Deliberately save, replace, or clear the person's signature — the
+ * My-signature write path, distinct from the sign-off's best-effort remember.
  *
  * Validation is the SHARED contract (`validateSavedSignature`): the exact
  * shape the exporter can embed, magic-checked, size-capped — refused loud at
- * save instead of exporting a silent blank box later. No password gate here:
- * the mark is the caller's own, and the act that needs step-up is APPLYING it
- * to a document, not keeping it.
+ * save instead of exporting a silent blank box later.
+ *
+ * PASSWORD-GATED ONCE A DELIBERATE MARK EXISTS. The FIRST save is ungated —
+ * there is nothing yet to protect, and the mark is the caller's own. But
+ * changing or clearing an already-saved mark (`signatureSavedAt` set) is a
+ * step-up act, because clearing it is the one move that disarms the sign-off
+ * gate: null the stored mark, then sign off with the original bytes and the
+ * gate stands down. So a replace or remove re-verifies the password, behind
+ * the same throttle the sign-off gate uses. Accounts with no password
+ * (invite-created) stay ungated throughout — session-only, per R6.
  */
-const saveSignatureSchema = z.object({ signature: z.string().nullable() });
+const saveSignatureSchema = z.object({
+  signature: z.string().nullable(),
+  password: z.string().optional(),
+});
 
 authRouter.put(
   '/signature',
@@ -373,6 +383,29 @@ authRouter.put(
     if (!db) {
       res.status(503).json({ error: 'db_unavailable' });
       return;
+    }
+
+    const user = await db.query.users.findFirst({ where: eq(schema.users.id, tenant.userId) });
+    if (user?.signatureSavedAt && user.passwordHash) {
+      if (rejectIfLocked(res, tenant.userId)) return;
+      if (!parsed.data.password) {
+        res.status(401).json({
+          error: 'password_required',
+          message: 'Enter your password to change or remove your saved signature.',
+        });
+        return;
+      }
+      // Admission-recorded before the awaited compare — same throttle discipline
+      // as /auth/confirm-password; success clears the slate below.
+      recordConfirmFailure(tenant.userId);
+      const valid = await comparePassword(parsed.data.password, user.passwordHash);
+      if (!valid) {
+        res
+          .status(401)
+          .json({ error: 'invalid_credentials', message: 'Invalid username or password.' });
+        return;
+      }
+      recordConfirmSuccess(tenant.userId);
     }
 
     await db

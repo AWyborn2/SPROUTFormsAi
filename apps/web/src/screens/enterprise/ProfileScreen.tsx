@@ -284,31 +284,61 @@ function MySignatureCard() {
   const save = useSaveSignature();
   const { toast } = useToast();
   const [editing, setEditing] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const [draft, setDraft] = useState('');
+  const [password, setPassword] = useState('');
   const saved = session.data?.signature ?? null;
+  /*
+    Changing or clearing an EXISTING saved mark is a step-up act — clearing it
+    is the one move that would disarm the sign-off password gate — so it takes
+    the password. The first save, and accounts with no password, stay ungated
+    (the server enforces the same rule).
+  */
+  const needsPassword = Boolean(saved && session.data?.hasPassword);
+
+  const reset = () => {
+    setEditing(false);
+    setRemoving(false);
+    setDraft('');
+    setPassword('');
+  };
 
   const persist = (signature: string | null, done: string) => {
-    save.mutate(signature, {
-      onSuccess: () => {
-        setEditing(false);
-        setDraft('');
-        toast({ variant: 'success', message: done });
+    save.mutate(
+      { signature, ...(needsPassword ? { password } : {}) },
+      {
+        onSuccess: () => {
+          reset();
+          toast({ variant: 'success', message: done });
+        },
+        onError: (err) => {
+          const code = err instanceof ApiError ? (err.body as { error?: unknown } | null)?.error : null;
+          const message =
+            code === 'invalid_credentials'
+              ? 'That password is not right. Try again.'
+              : code === 'too_many_attempts'
+                ? 'Too many attempts. Wait a few minutes and try again.'
+                : code === 'too_large'
+                  ? 'That signature image is too large. Try a smaller one.'
+                  : code === 'not_png_data_url'
+                    ? 'That signature could not be saved. It must be a PNG image.'
+                    : 'That signature could not be saved. Check your connection and try again.';
+          toast({ variant: 'danger', message });
+        },
       },
-      // The route distinguishes too-large from wrong-format; a network/503
-      // failure is neither, so fall back to a connection message rather than
-      // wrongly blaming the image.
-      onError: (err) => {
-        const body = err instanceof ApiError ? (err.body as { error?: unknown } | null) : null;
-        const message =
-          body?.error === 'too_large'
-            ? 'That signature image is too large. Try a smaller one.'
-            : body?.error === 'not_png_data_url'
-              ? 'That signature could not be saved. It must be a PNG image.'
-              : 'That signature could not be saved. Check your connection and try again.';
-        toast({ variant: 'danger', message });
-      },
-    });
+    );
   };
+
+  const passwordField = needsPassword && (
+    <Input
+      type="password"
+      value={password}
+      onChange={(e) => setPassword(e.target.value)}
+      aria-label="Your password"
+      placeholder="Your password"
+      className="max-w-[240px]"
+    />
+  );
 
   return (
     <Card className="p-5">
@@ -319,7 +349,7 @@ function MySignatureCard() {
             Saved once, applied when you sign — you confirm with your password each time it is used.
           </p>
         </div>
-        {saved && !editing && (
+        {saved && !editing && !removing && (
           <div className="flex items-center gap-2">
             <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>
               Replace
@@ -328,7 +358,7 @@ function MySignatureCard() {
               size="sm"
               variant="ghost"
               disabled={save.isPending}
-              onClick={() => persist(null, 'Saved signature removed.')}
+              onClick={() => (needsPassword ? setRemoving(true) : persist(null, 'Saved signature removed.'))}
             >
               Remove
             </Button>
@@ -336,23 +366,44 @@ function MySignatureCard() {
         )}
       </div>
 
-      {saved && !editing ? (
+      {removing ? (
+        <div className="mt-3 flex max-w-[460px] flex-col gap-2">
+          <p className="text-[12.5px] text-text-secondary">
+            Enter your password to remove your saved signature.
+          </p>
+          {passwordField}
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={!password || save.isPending}
+              onClick={() => persist(null, 'Saved signature removed.')}
+            >
+              Remove signature
+            </Button>
+            <Button size="sm" variant="ghost" onClick={reset}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : saved && !editing ? (
         <div className="mt-3 inline-block rounded-lg border border-border-strong bg-surface-card p-2">
           <img src={saved} alt="Your saved signature" className="h-[75px] max-w-full" />
         </div>
       ) : (
         <div className="mt-3 flex max-w-[460px] flex-col gap-2">
           <SignaturePad value={draft} onChange={setDraft} allowUpload aria-label="Your signature" />
+          {editing && passwordField}
           <div className="flex items-center gap-2">
             <Button
               size="sm"
-              disabled={!draft || save.isPending}
+              disabled={!draft || (needsPassword && !password) || save.isPending}
               onClick={() => persist(draft, 'Signature saved to your profile.')}
             >
               Save signature
             </Button>
             {editing && (
-              <Button size="sm" variant="ghost" onClick={() => { setEditing(false); setDraft(''); }}>
+              <Button size="sm" variant="ghost" onClick={reset}>
                 Cancel
               </Button>
             )}

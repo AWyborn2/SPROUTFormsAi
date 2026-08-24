@@ -25,7 +25,7 @@ const state: {
   role: string;
   signature: string | null;
   hasPassword: boolean;
-  signatureSaves: Array<string | null>;
+  signatureSaves: Array<{ signature: string | null; password?: string }>;
   saveError: unknown;
   cases: Array<{ id: string; toolName: string; state: string; createdAt: string }>;
   /** The candidate's own recommended read (U7). Undefined keeps the card absent. */
@@ -40,7 +40,7 @@ const state: {
   hasPassword: true,
   cases: [],
   recommended: undefined,
-  signatureSaves: [] as Array<string | null>,
+  signatureSaves: [] as Array<{ signature: string | null; password?: string }>,
   saveError: undefined as unknown,
 };
 const requestTraining = vi.fn();
@@ -70,10 +70,10 @@ vi.mock('../../lib/data/hooks.js', () => ({
   }),
   useSaveSignature: () => ({
     mutate: (
-      signature: string | null,
+      input: { signature: string | null; password?: string },
       opts?: { onSuccess?: () => void; onError?: (e: unknown) => void },
     ) => {
-      state.signatureSaves.push(signature);
+      state.signatureSaves.push(input);
       if (state.saveError) opts?.onError?.(state.saveError);
       else opts?.onSuccess?.();
     },
@@ -774,15 +774,41 @@ describe('ProfileScreen — My signature (own record only)', () => {
     expect(screen.queryByText('My signature')).toBeNull();
   });
 
-  it('shows the saved mark with Replace and Remove; Remove clears it', () => {
+  it('removing a saved mark takes the password before it clears (disarm defence)', () => {
     state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
     show({ isSubject: true });
     expect(screen.getByAltText('Your saved signature')).toBeDefined();
     fireEvent.click(screen.getByText('Remove'));
-    expect(state.signatureSaves).toEqual([null]);
-    expect(toast).toHaveBeenCalledWith(
-      expect.objectContaining({ variant: 'success' }),
-    );
+    // Does NOT clear yet — a password panel appears instead.
+    expect(state.signatureSaves).toEqual([]);
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'pw' } });
+    fireEvent.click(screen.getByText('Remove signature'));
+    expect(state.signatureSaves).toEqual([{ signature: null, password: 'pw' }]);
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'success' }));
+  });
+
+  it('replacing a saved mark sends the drawn mark WITH the password', () => {
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    show({ isSubject: true });
+    fireEvent.click(screen.getByText('Replace'));
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    // Save stays disabled until the password is entered.
+    const save = screen.getByText('Save signature').closest('button')!;
+    expect(save.hasAttribute('disabled')).toBe(true);
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'pw' } });
+    expect(save.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(save);
+    expect(state.signatureSaves).toEqual([
+      { signature: 'data:image/png;base64,iVBORw0KDRAWN=', password: 'pw' },
+    ]);
+  });
+
+  it('a no-password account can remove its mark without a password prompt (R6)', () => {
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    state.hasPassword = false;
+    show({ isSubject: true });
+    fireEvent.click(screen.getByText('Remove'));
+    expect(state.signatureSaves).toEqual([{ signature: null }]);
   });
 
   it('with nothing saved, offers the pad and disables Save until something is drawn', () => {
@@ -791,13 +817,13 @@ describe('ProfileScreen — My signature (own record only)', () => {
     expect(save.hasAttribute('disabled')).toBe(true);
   });
 
-  it('draws then saves, sending the drawn mark and toasting success (AE1)', () => {
+  it('first save (nothing saved yet) sends the drawn mark with no password (AE1)', () => {
     show({ isSubject: true });
     fireEvent.click(screen.getByTestId('pad-draw'));
     const save = screen.getByText('Save signature').closest('button')!;
     expect(save.hasAttribute('disabled')).toBe(false);
     fireEvent.click(save);
-    expect(state.signatureSaves).toEqual(['data:image/png;base64,iVBORw0KDRAWN=']);
+    expect(state.signatureSaves).toEqual([{ signature: 'data:image/png;base64,iVBORw0KDRAWN=' }]);
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'success' }));
   });
 
@@ -809,6 +835,20 @@ describe('ProfileScreen — My signature (own record only)', () => {
     fireEvent.click(screen.getByText('Save signature'));
     expect(toast).toHaveBeenCalledWith(
       expect.objectContaining({ variant: 'danger', message: expect.stringMatching(/too large/i) }),
+    );
+  });
+
+  it('a wrong-password error on replace names the password, not the format', async () => {
+    const { ApiError } = await import('../../lib/data/api-client.js');
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    state.saveError = new ApiError(401, { error: 'invalid_credentials' });
+    show({ isSubject: true });
+    fireEvent.click(screen.getByText('Replace'));
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'wrong' } });
+    fireEvent.click(screen.getByText('Save signature'));
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: 'danger', message: expect.stringMatching(/password is not right/i) }),
     );
   });
 });
