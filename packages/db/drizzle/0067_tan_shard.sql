@@ -1,0 +1,1 @@
+ALTER TABLE "users" ADD COLUMN "signature_saved_at" timestamp with time zone;

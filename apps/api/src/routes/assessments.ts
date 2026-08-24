@@ -5098,12 +5098,17 @@ assessmentCasesRouter.post(
       part of the certification: it is wrapped so a failure to remember can never
       sink a sign-off that has already been recorded — the same doctrine the
       competency grant below follows.
+
+      STANDS DOWN FOR A DELIBERATE SAVE (`signature_saved_at`): a signature the
+      person chose on My signature is a decision, and a one-off drawing at this
+      sign-off must not silently replace it. Absent that marker, this remember
+      remains the only population path, exactly as before.
     */
     try {
       await db
         .update(schema.users)
         .set({ signature: parsed.data.signature })
-        .where(eq(schema.users.id, tenant.userId));
+        .where(and(eq(schema.users.id, tenant.userId), isNull(schema.users.signatureSavedAt)));
     } catch {
       // The case is signed off regardless; the signature simply is not remembered.
     }

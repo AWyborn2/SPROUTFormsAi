@@ -3,7 +3,7 @@ import { eq, or } from 'drizzle-orm';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { PLAN_CONFIG, schema, type PlanTier } from '@formai/db';
-import type { SessionInfo, TenantContext } from '@formai/shared';
+import { validateSavedSignature, type SessionInfo, type TenantContext } from '@formai/shared';
 import { db } from '../db.js';
 import { sealSession, unsealSession } from '../auth/replit-auth.js';
 import { DeactivatedMemberError, provisionTenant } from '../auth/tenant-provisioning.js';
@@ -82,6 +82,9 @@ async function buildSessionInfo(tenant: TenantContext): Promise<SessionInfo> {
     userEmail: user?.email ?? '',
     // The saved signature, so a sign-off prefills it and the assessor draws once.
     signature: user?.signature ?? null,
+    // Whether "confirm with your password" can ever succeed for this account —
+    // the client hides apply-stored affordances when it cannot (R6).
+    hasPassword: user?.passwordHash != null,
     accountKind: (org?.accountKind ?? 'team') as SessionInfo['accountKind'],
     branding: org?.branding ?? null,
     teamSize: org?.teamSize ?? null,
@@ -302,6 +305,63 @@ authRouter.post(
       // Never fail a verified confirmation over a log row.
     }
     res.status(204).end();
+  }),
+);
+
+// ── PUT /auth/signature ────────────────────────────────────────────────────
+
+/**
+ * Deliberately save (or clear) the person's signature — the My-signature
+ * write path, distinct from the sign-off's best-effort remember.
+ *
+ * Validation is the SHARED contract (`validateSavedSignature`): the exact
+ * shape the exporter can embed, magic-checked, size-capped — refused loud at
+ * save instead of exporting a silent blank box later. No password gate here:
+ * the mark is the caller's own, and the act that needs step-up is APPLYING it
+ * to a document, not keeping it.
+ */
+const saveSignatureSchema = z.object({ signature: z.string().nullable() });
+
+authRouter.put(
+  '/signature',
+  withErrorHandling(async (req, res) => {
+    const token = req.cookies?.[SESSION_COOKIE_NAME];
+    const tenant = typeof token === 'string' ? unsealSession<TenantContext>(token) : null;
+    if (!tenant) {
+      res.status(401).json({ error: 'unauthenticated' });
+      return;
+    }
+    const parsed = saveSignatureSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'validation_error', issues: parsed.error.issues });
+      return;
+    }
+    const verdict = validateSavedSignature(parsed.data.signature);
+    if (!verdict.ok) {
+      res.status(400).json({
+        error: verdict.reason,
+        message:
+          verdict.reason === 'too_large'
+            ? 'That signature image is too large.'
+            : 'A signature must be a PNG image.',
+      });
+      return;
+    }
+    if (!db) {
+      res.status(503).json({ error: 'db_unavailable' });
+      return;
+    }
+
+    await db
+      .update(schema.users)
+      .set({
+        signature: parsed.data.signature,
+        signatureSavedAt: parsed.data.signature === null ? null : new Date(),
+      })
+      .where(eq(schema.users.id, tenant.userId));
+
+    const session = await buildSessionInfo(tenant);
+    res.json(session);
   }),
 );
 

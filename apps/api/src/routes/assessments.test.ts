@@ -239,13 +239,14 @@ function stringValues(node: unknown, out: string[] = [], depth = 0): string[] {
  */
 function whereTerms(
   node: unknown,
-  acc: { all: string[]; anyOf: string[][]; notNull: string[] } = {
+  acc: { all: string[]; anyOf: string[][]; notNull: string[]; isNull: string[] } = {
     all: [],
     anyOf: [],
     notNull: [],
+    isNull: [],
   },
   depth = 0,
-): { all: string[]; anyOf: string[][]; notNull: string[] } {
+): { all: string[]; anyOf: string[][]; notNull: string[]; isNull: string[] } {
   if (!node || depth > 10) return acc;
   if (Array.isArray(node)) {
     for (const n of node) whereTerms(n, acc, depth + 1);
@@ -271,6 +272,15 @@ function whereTerms(
       }
       return acc;
     }
+    if (text.includes(' is null')) {
+      for (const c of chunks) {
+        const name = (c as { name?: unknown } | null)?.name;
+        if (typeof name === 'string') {
+          acc.isNull.push(name.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase()));
+        }
+      }
+      return acc;
+    }
     if (text.includes(' in ')) {
       const group = stringValues(chunks);
       if (group.length) acc.anyOf.push(group);
@@ -287,10 +297,11 @@ function whereTerms(
 
 function matchesWhere(row: Record<string, unknown>, where: unknown): boolean {
   if (!where) return true;
-  const { all, anyOf, notNull } = whereTerms(where);
+  const { all, anyOf, notNull, isNull } = whereTerms(where);
   const present = new Set(Object.values(row).filter((v) => typeof v === 'string'));
   if (![...new Set(all)].every((w) => present.has(w))) return false;
   if (!notNull.every((key) => row[key] !== null && row[key] !== undefined)) return false;
+  if (!isNull.every((key) => row[key] === null || row[key] === undefined)) return false;
   return anyOf.every((group) => group.some((w) => present.has(w)));
 }
 
@@ -3467,6 +3478,44 @@ describe('POST /assessment-cases/:id/sign-off', () => {
       headers: auth(),
       body: JSON.stringify(body),
     });
+
+  it('remembers the drawn signature for a user with no deliberate save', async () => {
+    const { db, store } = makeDb();
+    rows(store, 'users').push({ id: ADMIN, name: 'Admin', email: 'a@x.io', signature: null, signatureSavedAt: null });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyCase(base);
+      const signed = await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
+      expect(signed.status).toBe(200);
+      expect(rows(store, 'users').find((u) => u.id === ADMIN)?.signature).toBe(SIG);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('never clobbers a deliberately saved signature with a one-off drawing (AE7)', async () => {
+    const SAVED = 'data:image/png;base64,iVBORw0KGgoSAVED=';
+    const { db, store } = makeDb();
+    rows(store, 'users').push({
+      id: ADMIN,
+      name: 'Admin',
+      email: 'a@x.io',
+      signature: SAVED,
+      signatureSavedAt: new Date('2026-08-01T00:00:00Z'),
+    });
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const c = await readyCase(base);
+      const signed = await signOff(base, c.id, { assessorName: 'A. Assessor', signature: SIG });
+      expect(signed.status).toBe(200);
+      // The sign-off recorded SIG on the case; the person's saved mark stands.
+      expect(rows(store, 'users').find((u) => u.id === ADMIN)?.signature).toBe(SAVED);
+    } finally {
+      server.close();
+    }
+  });
 
   /*
     THE AUDIT ROW READ "(assessor missing [object Object])".

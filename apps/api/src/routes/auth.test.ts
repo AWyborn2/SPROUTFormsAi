@@ -238,6 +238,7 @@ describe('POST /auth/login', () => {
         userEmail: 'ash@x.io',
         // Null until the assessor draws one at a sign-off, which persists it.
         signature: null,
+        hasPassword: true,
         accountKind: 'team',
         branding: null,
         teamSize: null,
@@ -309,6 +310,8 @@ describe('GET /auth/me', () => {
         userEmail: 'ash@x.io',
         // Null until the assessor draws one at a sign-off, which persists it.
         signature: null,
+        // This fixture user row has no passwordHash, so the step-up can never succeed.
+        hasPassword: false,
         accountKind: 'team',
         branding: null,
         teamSize: null,
@@ -525,6 +528,112 @@ describe('POST /auth/confirm-password', () => {
       const res = await postConfirm(base, { password: 'whatever' });
       expect(res.status).toBe(401);
       expect(((await res.json()) as { error: string }).error).toBe('unauthenticated');
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('PUT /auth/signature', () => {
+  const tenant = { userId: 'u1', orgId: 'o1', role: 'assessor' as const };
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAA=';
+
+  function signatureDb() {
+    const where = vi.fn().mockResolvedValue(undefined);
+    const set = vi.fn(() => ({ where }));
+    return {
+      db: {
+        query: {
+          users: {
+            findFirst: vi
+              .fn()
+              .mockResolvedValue({ id: 'u1', name: 'Ash', email: 'a@x.io', signature: PNG, passwordHash: 'h' }),
+          },
+          organizations: {
+            findFirst: vi.fn().mockResolvedValue({ id: 'o1', name: 'Acme', planTier: 'business' }),
+          },
+        },
+        update: vi.fn(() => ({ set })),
+      },
+      set,
+    };
+  }
+
+  async function putSignature(base: string, body: unknown, sealed?: string) {
+    return fetch(`${base}/auth/signature`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        ...(sealed ? { cookie: `fai_session=${sealSession(tenant)}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('saves a valid PNG, stamping the deliberate-save marker, and returns the session', async () => {
+    const { db, set } = signatureDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await putSignature(base, { signature: PNG }, 'yes');
+      expect(res.status).toBe(200);
+      const patch = set.mock.calls[0]![0] as { signature: string; signatureSavedAt: Date };
+      expect(patch.signature).toBe(PNG);
+      expect(patch.signatureSavedAt).toBeInstanceOf(Date);
+      expect(((await res.json()) as { signature: string }).signature).toBe(PNG);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('clearing nulls both the signature and the marker', async () => {
+    const { db, set } = signatureDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await putSignature(base, { signature: null }, 'yes');
+      expect(res.status).toBe(200);
+      expect(set.mock.calls[0]![0]).toEqual({ signature: null, signatureSavedAt: null });
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s a JPEG data URL — the exporter would render it as a silent blank (R9)', async () => {
+    const { db, set } = signatureDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const res = await putSignature(base, { signature: 'data:image/jpeg;base64,/9j/AAA=' }, 'yes');
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('not_png_data_url');
+      expect(set).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('400s an oversized signature without writing', async () => {
+    const { db, set } = signatureDb();
+    mockDbValue = db;
+    const { server, base } = startApp();
+    try {
+      const big = `data:image/png;base64,iVBORw0K${'A'.repeat(280 * 1024)}`;
+      const res = await putSignature(base, { signature: big }, 'yes');
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('too_large');
+      expect(set).not.toHaveBeenCalled();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('401s with no session', async () => {
+    mockDbValue = signatureDb().db;
+    const { server, base } = startApp();
+    try {
+      const res = await putSignature(base, { signature: PNG });
+      expect(res.status).toBe(401);
     } finally {
       server.close();
     }
