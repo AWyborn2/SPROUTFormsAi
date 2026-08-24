@@ -28,6 +28,10 @@ pnpm-debug.log*
 .claude/*
 # launch.json is shareable project config (dev-server/preview), not local settings.
 !.claude/launch.json
+# Shared project skills are committed (course-deck-builder etc.); local
+# settings/state under .claude stay ignored.
+!.claude/skills
+!.claude/skills/**
 
 # design reference bundle (source of truth, not app source)
 High fidelity app prototype.zip
