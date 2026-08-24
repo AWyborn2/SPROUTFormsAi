@@ -23,6 +23,10 @@ const state: {
   saved: Array<{ membershipId: string; values: Record<string, string> }>;
   seed: ProfileSeedResponse | undefined;
   role: string;
+  signature: string | null;
+  hasPassword: boolean;
+  signatureSaves: Array<{ signature: string | null; password?: string }>;
+  saveError: unknown;
   cases: Array<{ id: string; toolName: string; state: string; createdAt: string }>;
   /** The candidate's own recommended read (U7). Undefined keeps the card absent. */
   recommended: RecommendedCompetencies | undefined;
@@ -32,8 +36,12 @@ const state: {
   saved: [],
   seed: undefined,
   role: 'admin',
+  signature: null as string | null,
+  hasPassword: true,
   cases: [],
   recommended: undefined,
+  signatureSaves: [] as Array<{ signature: string | null; password?: string }>,
+  saveError: undefined as unknown,
 };
 const requestTraining = vi.fn();
 // Renewing invokes onSuccess so the control resets and toasts, the same shape
@@ -57,7 +65,20 @@ vi.mock('react-router-dom', () => ({
 vi.mock('../../lib/data/hooks.js', () => ({
   useProfile: () => state.profile,
   useMyProfileMembership: () => ({ data: { membershipId: 'm-1' }, isLoading: false }),
-  useSession: () => ({ data: { role: state.role } }),
+  useSession: () => ({
+    data: { role: state.role, signature: state.signature, hasPassword: state.hasPassword },
+  }),
+  useSaveSignature: () => ({
+    mutate: (
+      input: { signature: string | null; password?: string },
+      opts?: { onSuccess?: () => void; onError?: (e: unknown) => void },
+    ) => {
+      state.signatureSaves.push(input);
+      if (state.saveError) opts?.onError?.(state.saveError);
+      else opts?.onSuccess?.();
+    },
+    isPending: false,
+  }),
   useAssessmentCases: () => ({ data: state.cases }),
   useHeldCompetencies: () => ({ data: state.held }),
   useMemberPlacement: () => ({
@@ -104,7 +125,15 @@ vi.mock('../../lib/data/hooks.js', () => ({
 const toast = vi.fn();
 vi.mock('@formai/ui', async () => {
   const actual = await vi.importActual<typeof import('@formai/ui')>('@formai/ui');
-  return { ...actual, useToast: () => ({ toast }) };
+  return {
+    ...actual,
+    useToast: () => ({ toast }),
+    // The real pad drags in canvas; the card's contract is only what it saves,
+    // so the stub exposes a deterministic "draw" that fires onChange.
+    SignaturePad: ({ onChange }: { onChange: (v: string) => void }) => (
+      <button data-testid="pad-draw" onClick={() => onChange('data:image/png;base64,iVBORw0KDRAWN=')} />
+    ),
+  };
 });
 
 const { ProfileScreen } = await import('./ProfileScreen.js');
@@ -164,6 +193,10 @@ afterEach(() => {
   state.role = 'admin';
   state.cases = [];
   state.recommended = undefined;
+  state.signature = null;
+  state.hasPassword = true;
+  state.signatureSaves = [];
+  state.saveError = undefined;
   searchParams = new URLSearchParams();
 });
 
@@ -727,5 +760,95 @@ describe('ProfileScreen — the candidate-focused own view', () => {
     expect(screen.getByText('Placement')).toBeDefined();
     expect(screen.getByText('Documents')).toBeDefined();
     expect(screen.queryByText('Assessments due')).toBeNull();
+  });
+});
+
+describe('ProfileScreen — My signature (own record only)', () => {
+  it('renders the card on the caller’s own record', () => {
+    show({ isSubject: true });
+    expect(screen.getByText('My signature')).toBeDefined();
+  });
+
+  it('never renders on a member record an admin is viewing', () => {
+    show({ isSubject: false });
+    expect(screen.queryByText('My signature')).toBeNull();
+  });
+
+  it('removing a saved mark takes the password before it clears (disarm defence)', () => {
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    show({ isSubject: true });
+    expect(screen.getByAltText('Your saved signature')).toBeDefined();
+    fireEvent.click(screen.getByText('Remove'));
+    // Does NOT clear yet — a password panel appears instead.
+    expect(state.signatureSaves).toEqual([]);
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'pw' } });
+    fireEvent.click(screen.getByText('Remove signature'));
+    expect(state.signatureSaves).toEqual([{ signature: null, password: 'pw' }]);
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'success' }));
+  });
+
+  it('replacing a saved mark sends the drawn mark WITH the password', () => {
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    show({ isSubject: true });
+    fireEvent.click(screen.getByText('Replace'));
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    // Save stays disabled until the password is entered.
+    const save = screen.getByText('Save signature').closest('button')!;
+    expect(save.hasAttribute('disabled')).toBe(true);
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'pw' } });
+    expect(save.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(save);
+    expect(state.signatureSaves).toEqual([
+      { signature: 'data:image/png;base64,iVBORw0KDRAWN=', password: 'pw' },
+    ]);
+  });
+
+  it('a no-password account can remove its mark without a password prompt (R6)', () => {
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    state.hasPassword = false;
+    show({ isSubject: true });
+    fireEvent.click(screen.getByText('Remove'));
+    expect(state.signatureSaves).toEqual([{ signature: null }]);
+  });
+
+  it('with nothing saved, offers the pad and disables Save until something is drawn', () => {
+    show({ isSubject: true });
+    const save = screen.getByText('Save signature').closest('button')!;
+    expect(save.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('first save (nothing saved yet) sends the drawn mark with no password (AE1)', () => {
+    show({ isSubject: true });
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    const save = screen.getByText('Save signature').closest('button')!;
+    expect(save.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(save);
+    expect(state.signatureSaves).toEqual([{ signature: 'data:image/png;base64,iVBORw0KDRAWN=' }]);
+    expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'success' }));
+  });
+
+  it('an oversized-save error names the size, not the format', async () => {
+    const { ApiError } = await import('../../lib/data/api-client.js');
+    state.saveError = new ApiError(400, { error: 'too_large' });
+    show({ isSubject: true });
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    fireEvent.click(screen.getByText('Save signature'));
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: 'danger', message: expect.stringMatching(/too large/i) }),
+    );
+  });
+
+  it('a wrong-password error on replace names the password, not the format', async () => {
+    const { ApiError } = await import('../../lib/data/api-client.js');
+    state.signature = 'data:image/png;base64,iVBORw0KSAVED=';
+    state.saveError = new ApiError(401, { error: 'invalid_credentials' });
+    show({ isSubject: true });
+    fireEvent.click(screen.getByText('Replace'));
+    fireEvent.click(screen.getByTestId('pad-draw'));
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'wrong' } });
+    fireEvent.click(screen.getByText('Save signature'));
+    expect(toast).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: 'danger', message: expect.stringMatching(/password is not right/i) }),
+    );
   });
 });

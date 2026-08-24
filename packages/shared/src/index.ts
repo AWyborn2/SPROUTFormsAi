@@ -23,6 +23,7 @@ export * from './template.js';
 export * from './submission.js';
 export * from './submission-validation.js';
 export * from './org.js';
+export * from './signature.js';
 export * from './competency.js';
 export * from './competency-expiry.js';
 export * from './standing.js';

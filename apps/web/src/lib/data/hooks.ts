@@ -230,6 +230,35 @@ export function useSession() {
   });
 }
 
+/**
+ * Deliberately save (or clear, with null) the caller's signature. The route
+ * returns the refreshed session, which replaces the cached one directly — so
+ * `session.signature` is current everywhere the moment the save lands, with
+ * no refetch round-trip.
+ */
+export function useSaveSignature() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { signature: string | null; password?: string }) =>
+      apiClient.put<SessionInfo>('/auth/signature', input),
+    onSuccess: (session) => qc.setQueryData(keys.session, session),
+  });
+}
+
+/**
+ * The signing step-up: verify the caller's password at the moment they apply
+ * their STORED signature to a document. 204 on success; the caller applies the
+ * mark only then. Context names what is being signed, for the audit row.
+ */
+export function useConfirmPassword() {
+  return useMutation({
+    mutationFn: (input: {
+      password: string;
+      context?: { caseId?: string; attemptId?: string; fieldId?: string };
+    }) => apiClient.post<void>('/auth/confirm-password', input),
+  });
+}
+
 /** Clears the server-side session cookie, then wipes all cached queries — the next screen is `/login`. */
 export function useLogout() {
   const qc = useQueryClient();
@@ -1566,7 +1595,7 @@ export function useRecordOutcome(caseId: string) {
 export function useSignOffCase(caseId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { assessorName: string; signature: string }) =>
+    mutationFn: (input: { assessorName: string; signature: string; password?: string }) =>
       assessmentsApi.signOffCase({ caseId, ...input }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: keys.assessmentCase(caseId) });

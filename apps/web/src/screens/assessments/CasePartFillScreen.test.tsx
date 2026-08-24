@@ -30,11 +30,13 @@ vi.mock('../fields/FieldRenderer.js', () => ({
     value,
     disabled,
     onChange,
+    onUseSavedSignature,
   }: {
     field: FormField;
     value: unknown;
     disabled: boolean;
     onChange: (v: unknown) => void;
+    onUseSavedSignature?: (fieldId: string) => void;
   }) => (
     <div>
       <input
@@ -46,6 +48,12 @@ vi.mock('../fields/FieldRenderer.js', () => ({
       {/* A deterministic way for a test to "tick" a box through the screen's
           own setValue path, dirty-tracking included. */}
       <button data-testid={`set-${field.id}`} onClick={() => onChange(true)} />
+      {onUseSavedSignature && (
+        <button
+          data-testid={`use-saved-${field.id}`}
+          onClick={() => onUseSavedSignature(field.id)}
+        />
+      )}
     </div>
   ),
 }));
@@ -66,14 +74,26 @@ vi.mock('@formai/ui', async (importOriginal) => ({
 }));
 
 const saveMutate = vi.fn();
-const hookState: { attempt: AttemptFillView | undefined } = { attempt: undefined };
+const confirmMutate = vi.fn();
+const hookState: {
+  attempt: AttemptFillView | undefined;
+  signature: string | null;
+  hasPassword: boolean;
+} = { attempt: undefined, signature: null, hasPassword: true };
 vi.mock('../../lib/data/hooks.js', () => ({
   useAssessmentAttempt: () => ({ data: hookState.attempt, isLoading: false }),
   useSaveAttempt: () => ({ mutate: saveMutate, isPending: false }),
   useSetAttemptSubmitted: () => ({ mutate: vi.fn(), isPending: false }),
   useOpenAttempt: () => ({ mutate: vi.fn(), isPending: false }),
   useCheckQuestion: () => ({ mutateAsync: vi.fn() }),
-  useSession: () => ({ data: { userName: 'Alex Assessor' } }),
+  useSession: () => ({
+    data: {
+      userName: 'Alex Assessor',
+      signature: hookState.signature,
+      hasPassword: hookState.hasPassword,
+    },
+  }),
+  useConfirmPassword: () => ({ mutate: confirmMutate, isPending: false }),
 }));
 
 const { CasePartFillScreen } = await import('./CasePartFillScreen.js');
@@ -128,6 +148,8 @@ const attempt = (over: Partial<AttemptFillView> = {}): AttemptFillView => ({
 afterEach(() => {
   vi.clearAllMocks();
   hookState.attempt = undefined;
+  hookState.signature = null;
+  hookState.hasPassword = true;
 });
 
 function renderScreen(a: AttemptFillView) {
@@ -238,5 +260,89 @@ describe('CasePartFillScreen — the candidate on the same handed-in attempt', (
     expect(screen.queryByRole('button', { name: /save answers/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /hand in for marking/i })).toBeNull();
     expect(screen.getByRole('button', { name: /take it back/i })).toBeDefined();
+  });
+});
+
+describe('use saved signature (U5)', () => {
+  const SIG = 'data:image/png;base64,iVBORw0KSAVED=';
+
+  const signingAttempt = () =>
+    attempt({
+      fields: [field({ id: 'sig', type: 'signature', label: 'Candidate signature' })],
+      writableFieldIds: ['sig'],
+      markingGuide: [],
+      submittedAt: null,
+      party: 'candidate',
+    });
+
+  it('offers the affordance only when a saved mark AND a password exist', () => {
+    hookState.signature = SIG;
+    hookState.hasPassword = true;
+    renderScreen(signingAttempt());
+    expect(screen.getByTestId('use-saved-sig')).toBeDefined();
+  });
+
+  it('hides it for an account with no password (R6/AE6)', () => {
+    hookState.signature = SIG;
+    hookState.hasPassword = false;
+    renderScreen(signingAttempt());
+    expect(screen.queryByTestId('use-saved-sig')).toBeNull();
+  });
+
+  it('hides it when nothing is saved', () => {
+    hookState.signature = null;
+    renderScreen(signingAttempt());
+    expect(screen.queryByTestId('use-saved-sig')).toBeNull();
+  });
+
+  it('applies the stored mark only after a confirmed password, with context (AE3)', () => {
+    hookState.signature = SIG;
+    confirmMutate.mockImplementation(
+      (_input: unknown, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.(),
+    );
+    renderScreen(signingAttempt());
+
+    fireEvent.click(screen.getByTestId('use-saved-sig'));
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'pw' } });
+    fireEvent.click(screen.getByText('Confirm and sign'));
+
+    expect(confirmMutate).toHaveBeenCalledWith(
+      { password: 'pw', context: { caseId: 'case-1', attemptId: 'att-1', fieldId: 'sig' } },
+      expect.anything(),
+    );
+    expect((screen.getByTestId('field-sig') as HTMLInputElement).value).toBe(SIG);
+  });
+
+  it('a refused password leaves the field untouched (AE3)', () => {
+    hookState.signature = SIG;
+    confirmMutate.mockImplementation(
+      (_input: unknown, opts?: { onError?: (e: Error) => void }) =>
+        opts?.onError?.(new Error('401')),
+    );
+    renderScreen(signingAttempt());
+
+    fireEvent.click(screen.getByTestId('use-saved-sig'));
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'wrong' } });
+    fireEvent.click(screen.getByText('Confirm and sign'));
+
+    expect(screen.getByRole('alert').textContent).toMatch(/not right/i);
+    expect((screen.getByTestId('field-sig') as HTMLInputElement).value).toBe('');
+  });
+
+  it('a 429 lockout shows the too-many-attempts message, not the wrong-password one', async () => {
+    const { ApiError } = await import('../../lib/data/api-client.js');
+    hookState.signature = SIG;
+    confirmMutate.mockImplementation(
+      (_input: unknown, opts?: { onError?: (e: unknown) => void }) =>
+        opts?.onError?.(new ApiError(429, { error: 'too_many_attempts' })),
+    );
+    renderScreen(signingAttempt());
+
+    fireEvent.click(screen.getByTestId('use-saved-sig'));
+    fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'x' } });
+    fireEvent.click(screen.getByText('Confirm and sign'));
+
+    expect(screen.getByRole('alert').textContent).toMatch(/too many attempts/i);
+    expect((screen.getByTestId('field-sig') as HTMLInputElement).value).toBe('');
   });
 });

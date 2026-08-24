@@ -22,6 +22,7 @@ import {
   markPlacement,
   matchAnchorsFor,
   matchSides,
+  PNG_DATA_URL_RE,
   resolveAnswerSets,
   selectedOption,
   visibleFields,
@@ -226,7 +227,11 @@ function verdictOf(value: SubmissionValue | undefined): boolean | undefined {
  */
 function pngDataUrlBytes(value: SubmissionValue | undefined): Uint8Array | null {
   if (typeof value !== 'string') return null;
-  const match = /^data:image\/png;base64,([A-Za-z0-9+/=\s]+)$/.exec(value);
+  // The SHARED shape (`PNG_DATA_URL_RE`) — the same contract the profile save
+  // validates against, so what a user can store and what this can draw cannot
+  // drift apart. The byte-level magic check below stays local because this
+  // function needs the decoded bytes anyway.
+  const match = PNG_DATA_URL_RE.exec(value);
   if (!match) return null;
   try {
     const bytes = Buffer.from(match[1]!.replace(/\s+/g, ''), 'base64');

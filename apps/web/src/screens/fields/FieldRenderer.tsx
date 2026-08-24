@@ -62,6 +62,18 @@ export interface FieldInputProps {
    */
   dictation?: boolean;
   /**
+   * Offer "Use saved signature" on signature fields.
+   *
+   * Opt-in for the same reason as `dictation`: only a surface that can
+   * actually complete the act — a session with a saved mark AND a password to
+   * confirm it with, plus a dialog to run that confirmation — should render
+   * the affordance. The builder's preview and the public token fill (no
+   * session) never pass it, so they never dangle a button that cannot work.
+   * The handler receives the field id; the CALLER owns the password dialog
+   * and, on a confirmed identity, writes the saved mark into the field.
+   */
+  onUseSavedSignature?: (fieldId: string) => void;
+  /**
    * Where a `file_upload` field POSTs its bytes.
    *
    * - omitted → `/uploads`, the authenticated door. Correct for every
@@ -127,6 +139,7 @@ export function FieldInput({
   incompleteRowIndexes,
   dictation = false,
   uploadPath,
+  onUseSavedSignature,
 }: FieldInputProps) {
   /*
     ABOVE THE SECTION-HEADER RETURN BELOW, because every hook must run on every
@@ -450,11 +463,23 @@ export function FieldInput({
       }
       case 'signature':
         return (
-          <SignaturePad
-            value={asString(value)}
-            onChange={(v) => onChange(v)}
-            aria-label={field.label}
-          />
+          <div className="flex flex-col gap-1.5">
+            <SignaturePad
+              value={asString(value)}
+              onChange={(v) => onChange(v)}
+              aria-label={field.label}
+            />
+            {onUseSavedSignature && (
+              <button
+                type="button"
+                onClick={() => onUseSavedSignature(field.id)}
+                className="inline-flex items-center gap-1.5 self-start text-[13px] font-semibold text-text-accent hover:underline"
+              >
+                <Icon name="pen-line" size={14} />
+                Use saved signature
+              </button>
+            )}
+          </div>
         );
       case 'file_upload':
         return (

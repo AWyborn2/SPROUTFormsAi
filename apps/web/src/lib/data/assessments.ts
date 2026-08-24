@@ -585,7 +585,16 @@ export const assessmentsApi = {
    * an assessor missing a competency of their own, or a grant that could not be
    * made. The date is server-stamped and is not sent.
    */
-  signOffCase: ({ caseId, ...body }: { caseId: string; assessorName: string; signature: string }) =>
+  signOffCase: ({
+    caseId,
+    ...body
+  }: {
+    caseId: string;
+    assessorName: string;
+    signature: string;
+    /** Required by the API when `signature` is the caller's STORED mark. */
+    password?: string;
+  }) =>
     apiClient.post<{
       state: AssessmentCaseState;
       signedOffAt: string;
