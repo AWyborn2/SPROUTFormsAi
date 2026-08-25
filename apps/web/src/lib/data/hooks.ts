@@ -2043,6 +2043,31 @@ export function useSaveProfile() {
   });
 }
 
+export function useUploadProfilePhoto() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { membershipId: string; fileBase64: string; mimeType: string; fileName: string }) =>
+      store.uploadProfilePhoto(input.membershipId, {
+        fileBase64: input.fileBase64,
+        mimeType: input.mimeType,
+        fileName: input.fileName,
+      }),
+    onSuccess: (_data, input) => {
+      void qc.invalidateQueries({ queryKey: keys.profile(input.membershipId) });
+    },
+  });
+}
+
+export function useDeleteProfilePhoto() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (membershipId: string) => store.deleteProfilePhoto(membershipId),
+    onSuccess: (_data, membershipId) => {
+      void qc.invalidateQueries({ queryKey: keys.profile(membershipId) });
+    },
+  });
+}
+
 /** One person's held competencies, with standing beside currency (U38, R37). */
 export function useHeldCompetencies(userId: string | undefined) {
   return useQuery({

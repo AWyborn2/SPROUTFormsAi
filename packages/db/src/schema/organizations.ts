@@ -272,6 +272,7 @@ export const memberships = pgTable(
       .references(() => organizations.id, { onDelete: 'cascade' }),
     role: roleEnum().notNull().default('viewer'),
     status: membershipStatusEnum().notNull().default('invited'),
+    photoKey: text('photo_key'),
     createdAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [

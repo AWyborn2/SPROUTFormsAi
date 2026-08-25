@@ -1,6 +1,7 @@
-import { Fragment, useMemo, useRef, useState } from 'react';
+import { Fragment, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Badge, Button, Card, Icon, Input, SignaturePad, useToast } from '@formai/ui';
+import { miningBadgeIcon } from './mining-badge-icons.js';
 import {
   PROFILE_FIELDS,
   isTerminalCaseState,
@@ -9,6 +10,7 @@ import {
 } from '@formai/shared';
 import {
   useAssessmentCases,
+  useDeleteProfilePhoto,
   useHeldCompetencies,
   useMemberPlacement,
   useMyProfileMembership,
@@ -19,6 +21,7 @@ import {
   useSaveSignature,
   useSession,
   useTaxonomy,
+  useUploadProfilePhoto,
 } from '../../lib/data/hooks.js';
 import { ApiError } from '../../lib/data/api-client.js';
 import { CaseStateBadge } from '../statusBadges.js';
@@ -418,7 +421,15 @@ function ProfileContent({
           </Card>
         )}
 
-        <HeroCard vm={vm} role={role} canEdit={canEdit} onAction={handleAction} />
+        <HeroCard
+          vm={vm}
+          role={role}
+          canEdit={canEdit}
+          onAction={handleAction}
+          photoUrl={profile.photoUrl}
+          membershipId={membershipId}
+          canUploadPhoto={access.isSubject || canEdit}
+        />
 
         {access.canViewCompetencies && (
           <BadgeWall badges={vm.badges} earnedCount={vm.earnedCount} />
@@ -524,14 +535,51 @@ function HeroCard({
   role,
   canEdit,
   onAction,
+  photoUrl,
+  membershipId,
+  canUploadPhoto,
 }: {
   vm: ProfileViewModel;
   role: string;
   canEdit: boolean;
   onAction: (btn: RoleActionBtn) => void;
+  photoUrl: string | null;
+  membershipId: string | undefined;
+  canUploadPhoto: boolean;
 }) {
   const raw = vm.roleActions[role] ?? vm.roleActions.candidate!;
   const buttons = canEdit ? raw : raw.filter((b) => b.action !== 'edit');
+  const photoInputRef = useRef<HTMLInputElement>(null);
+  const uploadPhoto = useUploadProfilePhoto();
+  const deletePhoto = useDeleteProfilePhoto();
+  const { toast } = useToast();
+
+  const handlePhotoSelect = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !membershipId) return;
+    if (!file.type.startsWith('image/')) {
+      toast({ variant: 'danger', message: 'Please select an image file.' });
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      toast({ variant: 'danger', message: 'Photo must be 10 MB or smaller.' });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl.split(',')[1]!;
+      uploadPhoto.mutate(
+        { membershipId, fileBase64: base64, mimeType: file.type, fileName: file.name },
+        {
+          onSuccess: () => toast({ variant: 'success', message: 'Photo updated.' }),
+          onError: () => toast({ variant: 'danger', message: 'Failed to upload photo.' }),
+        },
+      );
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
 
   return (
     <Card className="overflow-hidden">
@@ -559,6 +607,13 @@ function HeroCard({
       <div className="flex flex-wrap items-end gap-6 px-7 pb-5">
         {/* Avatar with XP ring */}
         <div className="-mt-[52px] relative flex-none">
+          <input
+            ref={photoInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            className="hidden"
+            onChange={handlePhotoSelect}
+          />
           <div
             className="h-[128px] w-[128px] rounded-full p-[5px]"
             style={{
@@ -566,12 +621,51 @@ function HeroCard({
             }}
           >
             <div className="flex h-full w-full items-center justify-center rounded-full bg-surface-card p-1">
-              <div className="flex h-[110px] w-[110px] flex-col items-center justify-center gap-1 rounded-full bg-surface-sunken text-[12px] text-text-tertiary">
-                <Icon name="image" size={28} className="opacity-50" />
-                <span>Drop photo</span>
-              </div>
+              {photoUrl ? (
+                <img
+                  src={`/api${photoUrl}`}
+                  alt={vm.name}
+                  className="h-[110px] w-[110px] rounded-full object-cover"
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="flex h-[110px] w-[110px] flex-col items-center justify-center gap-1 rounded-full bg-surface-sunken text-[12px] text-text-tertiary transition-colors hover:bg-surface-raised"
+                  onClick={() => canUploadPhoto && photoInputRef.current?.click()}
+                  disabled={!canUploadPhoto}
+                >
+                  <Icon name="image" size={28} className="opacity-50" />
+                  <span>{canUploadPhoto ? 'Add photo' : 'No photo'}</span>
+                </button>
+              )}
             </div>
           </div>
+          {photoUrl && canUploadPhoto && (
+            <button
+              type="button"
+              className="absolute right-0 top-0 grid h-[28px] w-[28px] place-items-center rounded-full border-2 border-surface-card bg-surface-raised text-text-secondary transition-colors hover:bg-error-surface hover:text-error-text"
+              title="Remove photo"
+              onClick={() => {
+                if (!membershipId) return;
+                deletePhoto.mutate(membershipId, {
+                  onSuccess: () => toast({ variant: 'success', message: 'Photo removed.' }),
+                  onError: () => toast({ variant: 'danger', message: 'Failed to remove photo.' }),
+                });
+              }}
+            >
+              <Icon name="x" size={14} />
+            </button>
+          )}
+          {photoUrl && canUploadPhoto && (
+            <button
+              type="button"
+              className="absolute bottom-8 right-0 grid h-[28px] w-[28px] place-items-center rounded-full border-2 border-surface-card bg-surface-raised text-text-secondary transition-colors hover:bg-accent-surface hover:text-accent"
+              title="Change photo"
+              onClick={() => photoInputRef.current?.click()}
+            >
+              <Icon name="camera" size={14} />
+            </button>
+          )}
           <span className="absolute bottom-0.5 right-0.5 grid h-[34px] w-[34px] place-items-center rounded-full border-[3px] border-surface-card bg-brand-slate font-heading text-[13px] font-extrabold text-brand-green">
             {vm.xp.level}
           </span>
@@ -711,12 +805,7 @@ function BadgeWall({ badges, earnedCount }: { badges: BadgeItem[]; earnedCount: 
                 className="flex h-full w-full items-center justify-center rounded-full"
                 style={badgeInnerStyle(b)}
               >
-                <span
-                  className="font-heading font-extrabold"
-                  style={{ color: badgeCodeColor(b), fontSize: b.code.length > 3 ? '14px' : '20px' }}
-                >
-                  {b.code}
-                </span>
+                {miningBadgeIcon(b.name, 32, badgeCodeColor(b))}
               </div>
             </div>
             <span

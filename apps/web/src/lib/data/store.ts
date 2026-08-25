@@ -1334,6 +1334,12 @@ export const store = {
   updateProfile(membershipId: string, values: Record<string, string>): Promise<{ membershipId: string }> {
     return apiClient.patch<{ membershipId: string }>(`/profiles/${membershipId}`, values);
   },
+  uploadProfilePhoto(membershipId: string, body: { fileBase64: string; mimeType: string; fileName: string }): Promise<{ photoUrl: string }> {
+    return apiClient.put<{ photoUrl: string }>(`/profiles/${membershipId}/photo`, body);
+  },
+  deleteProfilePhoto(membershipId: string): Promise<{ photoUrl: null }> {
+    return apiClient.delete<{ photoUrl: null }>(`/profiles/${membershipId}/photo`);
+  },
   getMemberPlacement(membershipId: string): Promise<MemberPlacement> {
     return apiClient.get<MemberPlacement>(`/team/members/${membershipId}/placement`);
   },

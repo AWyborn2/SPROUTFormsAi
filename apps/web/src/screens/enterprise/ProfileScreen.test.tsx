@@ -119,6 +119,8 @@ vi.mock('../../lib/data/hooks.js', () => ({
     isPending: false,
     isError: false,
   }),
+  useUploadProfilePhoto: () => ({ mutate: vi.fn(), isPending: false }),
+  useDeleteProfilePhoto: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 // The recommended card toasts on request outcomes; the provider is app chrome
@@ -162,6 +164,7 @@ const PROFILE: MemberProfile = {
   inductionDate: null,
   email: 'jane@x.io',
   emailUnreachableAt: null,
+  photoUrl: null,
 };
 
 const READ_ONLY: ProfileAccess = {

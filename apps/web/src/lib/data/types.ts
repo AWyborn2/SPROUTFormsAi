@@ -883,6 +883,8 @@ export interface MemberProfile {
   email: string | null;
   /** Set where an Admin flagged the address as reaching nobody (U36, R16). */
   emailUnreachableAt: string | null;
+  /** Authenticated URL to the member's profile photo, if one has been uploaded. */
+  photoUrl: string | null;
 }
 
 /**
